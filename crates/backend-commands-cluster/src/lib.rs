@@ -190,7 +190,7 @@ fn format_namedata(s: &str) -> String {
 /// `cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)`.
 pub fn cluster(
     mcx: Mcx<'_>,
-    pstate: &types_cluster::ParseState,
+    pstate: &types_cluster::ParseState<'_>,
     stmt: &types_cluster::ClusterStmt,
     isTopLevel: bool,
 ) -> PgResult<()> {

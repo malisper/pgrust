@@ -22,3 +22,5 @@ types-tuple = { path = "../types-tuple" }
 # F0': the owned relcache entry-store type family, so this seam crate can name
 # `RelationData` (+ companions) for the forthcoming cross-crate shared-Rc seam.
 types-relcache-entry = { path = "../types-relcache-entry" }
+# Hash AM's rd_amcache stores a HashMetaPageData; the relcache owns that slot.
+types-hash = { path = "../types-hash" }

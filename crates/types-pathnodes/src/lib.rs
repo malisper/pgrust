@@ -44,6 +44,7 @@ use types_core::primitive::{
 pub use types_core::primitive::Oid;
 pub use types_core::fmgr::FmgrInfo;
 pub use types_nodes::nodes::NodeTag;
+pub use types_nodes::primnodes::Expr;
 pub use types_hash::hsearch::HTAB;
 
 /* ==========================================================================
@@ -333,6 +334,13 @@ impl PhInfoId {
 }
 
 impl EmId {
+    #[inline]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl NodeId {
     #[inline]
     pub fn index(self) -> usize {
         self.0 as usize
@@ -2008,6 +2016,21 @@ pub struct PlannerInfo {
     pub em_arena: Vec<EquivalenceMember>,
     /// Backing store for every [`PlaceHolderInfo`]; a [`PhInfoId`] indexes here.
     pub ph_info_arena: Vec<PlaceHolderInfo>,
+    /// Backing store for every expression node carried by a [`NodeId`] — the
+    /// owned-tree analogue of the C `Node *` expression payloads the planner
+    /// interns (PathTarget `exprs`, RestrictInfo `clause`, index `indexprs`/
+    /// `indpred`, lateral-var lists, etc.). A [`NodeId`] indexes here.
+    ///
+    /// The payload is the **lifetime-free** [`Expr`] (its child `SubPlan`s pin
+    /// to `'static`), so the node store can be added without forcing an `'mcx`
+    /// lifetime onto [`PlannerInfo`]; this mirrors the rationale at
+    /// [`Expr`]'s definition and keeps the arena model identical to the
+    /// `rel_arena`/`path_arena`/`rinfo_arena`/`em_arena` siblings.
+    ///
+    /// Node-walking owners (var.c / clauses.c via their seams) resolve a
+    /// [`NodeId`] to `&Expr` through [`PlannerInfo::node`] and walk the tree;
+    /// the join-path enumerator still only forwards/compares the opaque handle.
+    pub node_arena: Vec<Expr>,
 }
 
 impl PlannerInfo {
@@ -2061,6 +2084,18 @@ impl PlannerInfo {
     pub fn em_mut(&mut self, id: EmId) -> &mut EquivalenceMember {
         &mut self.em_arena[id.index()]
     }
+    /// Resolve a [`NodeId`] to its expression [`Expr`] — the deref behind the
+    /// opaque `Node *` handle. Node-walking seam owners (var.c / clauses.c)
+    /// call this to obtain `&Expr` and recurse.
+    #[inline]
+    pub fn node(&self, id: NodeId) -> &Expr {
+        &self.node_arena[id.index()]
+    }
+    /// Resolve a [`NodeId`] for mutation.
+    #[inline]
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Expr {
+        &mut self.node_arena[id.index()]
+    }
 
     /// Push a [`RelOptInfo`] into the arena, returning its [`RelId`].
     #[inline]
@@ -2088,6 +2123,17 @@ impl PlannerInfo {
     pub fn alloc_em(&mut self, em: EquivalenceMember) -> EmId {
         let id = EmId(self.em_arena.len() as u32);
         self.em_arena.push(em);
+        id
+    }
+    /// Intern an [`Expr`] into the node store, returning its [`NodeId`] handle.
+    /// The producer path: the planner (and the optimizer leaves as they
+    /// construct PathTargets/RestrictInfos) call this to obtain the `NodeId`
+    /// stored in the W0''-added `exprs`/`clause`/… fields, giving every such
+    /// field a real backing node that the walking seams can dereference.
+    #[inline]
+    pub fn alloc_node(&mut self, node: Expr) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(node);
         id
     }
 }

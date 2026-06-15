@@ -44,7 +44,7 @@ seam!(
         handler: ExplainOptionHandler,
         es: &mut ExplainState<'mcx>,
         opt: &DefElem,
-        pstate: &mut ParseState,
+        pstate: &mut ParseState<'_>,
     ) -> PgResult<()>
 );
 
@@ -56,6 +56,6 @@ seam!(
         hook: ExplainValidateOptionsHook,
         es: &mut ExplainState<'mcx>,
         options: &[DefElem],
-        pstate: &mut ParseState,
+        pstate: &mut ParseState<'_>,
     ) -> PgResult<()>
 );

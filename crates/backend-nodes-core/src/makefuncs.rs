@@ -16,6 +16,32 @@
 //! * **raw-parser nodes** (`makeRangeVar`, `makeTypeName*`) build an owned
 //!   plain-Rust parse node (`types_tuple::RangeVar`, `types_parsenodes::*`); no
 //!   allocator.
+//! * **raw-grammar parse nodes** (`makeA_Expr`, `makeFromExpr`, `makeFuncCall`,
+//!   `makeColumnDef`, `makeAlias`, `makeGroupingSet`, `makeVarFromTargetEntry`,
+//!   `makeNullConst`, `makeDefElem`, `makeDefElemExtended`) — the K1-parsetree
+//!   raw vocabulary the parser's `parse_*` cluster needs. The list/child fields
+//!   are `types_nodes::NodePtr`/`PgVec` charged on `mcx` (exactly the C
+//!   `makeNode` palloc in the current context); `makeNullConst` reads the type's
+//!   storage props via the lsyscache `get_typlenbyval` seam, and
+//!   `makeVarFromTargetEntry` reads the TLE's `Expr` type/typmod/collation via
+//!   the nodefuncs accessors.
+//!
+//! ## Not yet portable (model gaps; not stubbed)
+//!
+//! `makeSimpleA_Expr`/`makeStringConst` need a `String`/value node carried as a
+//! `types_nodes::NodePtr` (the operator-name `list_make1(makeString(name))` and
+//! `A_Const.val.sval`). The value-node arms (`Node::Integer`/`Float`/`Boolean`/
+//! `String`/`BitString`, nodes/value.h) now exist in `types_nodes::Node` (added
+//! by the node-walker keystone), so these two constructors are unblocked and
+//! ready to fill by the parser cluster; only `makeWholeRowVar`'s
+//! function-RTE branches need a `Node`-level `exprType` over a
+//! `RangeTblFunction.funcexpr` `NodePtr` (the repo's `expr_type` works over the
+//! trimmed `Expr`, not `Node`). `makeNotNullConstraint`/`makeVacuumRelation`/
+//! `makeJsonKeyValue`/`makeJsonTablePath`/`makeJsonTablePathSpec` target node
+//! types (`Constraint`/`VacuumRelation`/`JsonKeyValue`/`JsonTablePath`/
+//! `JsonTablePathSpec`) are not yet in `types_nodes` — additive keystone types
+//! the owning DDL/JSON parser units introduce. They are absent here rather than
+//! stubbed (`mirror-pg-and-panic`: there is no faithful body to write yet).
 //!
 //! Owns the canonical `backend-nodes-makefuncs-seams`
 //! (`make_const_node`, `make_and_boolexpr`, `make_type_name_from_name_list`),
@@ -47,11 +73,18 @@ use types_nodes::primnodes::{
     OpExpr, RelabelType, TargetEntry, Var, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
 use types_nodes::execnodes::IndexInfo;
+use types_nodes::nodes::NodePtr;
+use types_nodes::rawnodes::{
+    A_Expr, A_Expr_Kind, Alias, ColumnDef, FromExpr, FuncCall, GroupingSet, GroupingSetKind,
+};
 use types_tuple::access::{RangeVar, RELPERSISTENCE_PERMANENT};
 
-use types_parsenodes::{Node as ParseNode, StringNode, TypeName};
+use types_parsenodes::{
+    DefElem, DefElemAction, Node as ParseNode, StringNode, TypeName, DEFELEM_UNSPEC,
+};
 
 use backend_access_common_detoast_seams as detoast_seam;
+use backend_utils_cache_lsyscache_seams as lsyscache;
 
 // ===========================================================================
 // Expression-node constructors (build an owned `Expr` subtree).
@@ -511,6 +544,223 @@ pub fn make_type_name_from_oid(type_oid: Oid, typmod: i32) -> TypeName {
         typemod: typmod,
         arrayBounds: Vec::new(),
         location: -1,
+    }
+}
+
+// ===========================================================================
+// Raw-grammar parse-node constructors (build owned `types_nodes` raw nodes).
+//
+// These build the K1-parsetree raw-grammar vocabulary the parser's `parse_*`
+// recursive cluster needs. Their list/child fields are `types_nodes::NodePtr`
+// (`PgBox<Node>`) / `PgVec`, charged on `mcx`, exactly like the C `palloc`s a
+// node in the current memory context. Field-for-field vs makefuncs.c.
+// ===========================================================================
+
+/// `makeA_Expr(kind, name, lexpr, rexpr, location)` (makefuncs.c) — an `A_Expr`
+/// node. The caller supplies the (possibly-qualified) operator `name` list and
+/// the two operand subtrees. `rexpr_list_start`/`rexpr_list_end` (also zeroed by
+/// `makeNode`) default to 0.
+pub fn make_a_expr<'mcx>(
+    kind: A_Expr_Kind,
+    name: PgVec<'mcx, NodePtr<'mcx>>,
+    lexpr: Option<NodePtr<'mcx>>,
+    rexpr: Option<NodePtr<'mcx>>,
+    location: i32,
+) -> A_Expr<'mcx> {
+    A_Expr {
+        kind,
+        name,
+        lexpr,
+        rexpr,
+        rexpr_list_start: 0,
+        rexpr_list_end: 0,
+        location,
+    }
+}
+
+/// `makeFromExpr(fromlist, quals)` (makefuncs.c) — a `FromExpr` node.
+pub fn make_from_expr<'mcx>(
+    fromlist: PgVec<'mcx, NodePtr<'mcx>>,
+    quals: Option<NodePtr<'mcx>>,
+) -> FromExpr<'mcx> {
+    FromExpr { fromlist, quals }
+}
+
+/// `makeFuncCall(name, args, funcformat, location)` (makefuncs.c) — initialize a
+/// `FuncCall` with the info every caller must supply; any non-default parameters
+/// are inserted by the caller afterwards. Mirrors the C defaults exactly:
+/// `agg_order = NIL`, `agg_filter = over = NULL`, all the agg/variadic flags
+/// false.
+pub fn make_func_call<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: PgVec<'mcx, NodePtr<'mcx>>,
+    args: PgVec<'mcx, NodePtr<'mcx>>,
+    funcformat: CoercionForm,
+    location: i32,
+) -> PgResult<FuncCall<'mcx>> {
+    Ok(FuncCall {
+        funcname: name,
+        args,
+        agg_order: mcx::vec_with_capacity_in(mcx, 0)?,
+        agg_filter: None,
+        over: None,
+        agg_within_group: false,
+        agg_star: false,
+        agg_distinct: false,
+        func_variadic: false,
+        funcformat,
+        location,
+    })
+}
+
+/// `makeColumnDef(colname, typeOid, typmod, collOid)` (makefuncs.c) — a simple
+/// `ColumnDef`. Type/collation are specified by OID; other properties start
+/// basic (`is_local = true`, the rest 0/NULL/NIL), exactly as the C sets them.
+pub fn make_column_def<'mcx>(
+    mcx: Mcx<'mcx>,
+    colname: &str,
+    type_oid: Oid,
+    typmod: i32,
+    coll_oid: Oid,
+) -> PgResult<ColumnDef<'mcx>> {
+    // makeTypeNameFromOid(typeOid, typmod) — the ColumnDef carries the
+    // raw-grammar `types_nodes::rawnodes::TypeName`, distinct from the
+    // `types_parsenodes::TypeName` the standalone `make_type_name_*` build. Its
+    // list fields are `mcx`-charged.
+    let type_name = types_nodes::rawnodes::TypeName {
+        names: mcx::vec_with_capacity_in(mcx, 0)?,
+        typeOid: type_oid,
+        setof: false,
+        pct_type: false,
+        typmods: mcx::vec_with_capacity_in(mcx, 0)?,
+        typemod: typmod,
+        arrayBounds: mcx::vec_with_capacity_in(mcx, 0)?,
+        location: -1,
+    };
+    Ok(ColumnDef {
+        colname: Some(PgString::from_str_in(colname, mcx)?),
+        typeName: Some(alloc_in(mcx, type_name)?),
+        compression: None,
+        inhcount: 0,
+        is_local: true,
+        is_not_null: false,
+        is_from_type: false,
+        storage: 0,
+        storage_name: None,
+        raw_default: None,
+        cooked_default: None,
+        identity: 0,
+        identitySequence: None,
+        generated: 0,
+        collClause: None,
+        collOid: coll_oid,
+        constraints: mcx::vec_with_capacity_in(mcx, 0)?,
+        fdwoptions: mcx::vec_with_capacity_in(mcx, 0)?,
+        location: -1,
+    })
+}
+
+/// `makeAlias(aliasname, colnames)` (makefuncs.c) — an `Alias` node. The given
+/// name is copied (C: `pstrdup`); the `colnames` list (if any) isn't.
+pub fn make_alias<'mcx>(
+    mcx: Mcx<'mcx>,
+    aliasname: &str,
+    colnames: PgVec<'mcx, NodePtr<'mcx>>,
+) -> PgResult<Alias<'mcx>> {
+    Ok(Alias {
+        aliasname: Some(PgString::from_str_in(aliasname, mcx)?),
+        colnames,
+    })
+}
+
+/// `makeGroupingSet(kind, content, location)` (makefuncs.c) — a `GroupingSet`.
+pub fn make_grouping_set<'mcx>(
+    kind: GroupingSetKind,
+    content: PgVec<'mcx, NodePtr<'mcx>>,
+    location: i32,
+) -> GroupingSet<'mcx> {
+    GroupingSet {
+        kind,
+        content,
+        location,
+    }
+}
+
+/// `makeVarFromTargetEntry(varno, tle)` (makefuncs.c) — a same-level `Var` from
+/// a `TargetEntry`: `makeVar(varno, tle->resno, exprType(tle->expr),
+/// exprTypmod(tle->expr), exprCollation(tle->expr), 0)`. The type/typmod/
+/// collation are read off the (trimmed) `Expr` subtree via the nodefuncs
+/// accessors, exactly as the C reads them off `(Node *) tle->expr`.
+pub fn make_var_from_target_entry(varno: i32, tle: &TargetEntry<'_>) -> PgResult<Var> {
+    let expr = tle.expr.as_deref();
+    Ok(make_var(
+        varno,
+        tle.resno,
+        super::nodefuncs::expr_type(expr)?,
+        super::nodefuncs::expr_typmod(expr)?,
+        super::nodefuncs::expr_collation(expr)?,
+        0,
+    ))
+}
+
+/// `makeNullConst(consttype, consttypmod, constcollid)` (makefuncs.c) — a
+/// `Const` representing a NULL of the given type/typmod. Saves a lookup of the
+/// type's storage properties (`get_typlenbyval`) and delegates to `makeConst`
+/// with a 0 datum, `constisnull = true`.
+pub fn make_null_const<'mcx>(
+    mcx: Mcx<'mcx>,
+    consttype: Oid,
+    consttypmod: i32,
+    constcollid: Oid,
+) -> PgResult<Const> {
+    // get_typlenbyval(consttype, &typLen, &typByVal);
+    let (typ_len, typ_byval) = lsyscache::get_typlenbyval::call(consttype)?;
+    make_const(
+        mcx,
+        consttype,
+        consttypmod,
+        constcollid,
+        typ_len as i32,
+        // (Datum) 0 — a null value's datum is never inspected.
+        Datum::ByVal(0),
+        true,
+        typ_byval,
+    )
+}
+
+// ===========================================================================
+// `nodes/parsenodes.h` constructors over the plain-Rust `types_parsenodes`
+// node universe (`DefElem` carries `types_parsenodes::Node` args).
+// ===========================================================================
+
+/// `makeDefElem(name, arg, location)` (makefuncs.c) — a `DefElem` for the
+/// typical case (unqualified option name, no special action). `defnamespace`
+/// NULL, `defaction = DEFELEM_UNSPEC`.
+pub fn make_def_elem(name: String, arg: Option<ParseNode>, location: i32) -> DefElem {
+    DefElem {
+        defnamespace: None,
+        defname: Some(name),
+        arg: arg.map(Box::new),
+        defaction: DEFELEM_UNSPEC,
+        location,
+    }
+}
+
+/// `makeDefElemExtended(nameSpace, name, arg, defaction, location)`
+/// (makefuncs.c) — a `DefElem` with all fields available to be specified.
+pub fn make_def_elem_extended(
+    name_space: Option<String>,
+    name: String,
+    arg: Option<ParseNode>,
+    defaction: DefElemAction,
+    location: i32,
+) -> DefElem {
+    DefElem {
+        defnamespace: name_space,
+        defname: Some(name),
+        arg: arg.map(Box::new),
+        defaction,
+        location,
     }
 }
 

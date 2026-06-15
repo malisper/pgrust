@@ -150,6 +150,22 @@ seam_core::seam!(
     ) -> PgResult<TransactionId>
 );
 
+seam_core::seam!(
+    /// `index_compute_xid_horizon_for_tuples(irel, hrel, ibuf, itemnos,
+    /// nitems)` (heapam.c): visit the heap tuples referenced by the index
+    /// line-pointers `itemnos` on index buffer `ibuf` and compute the latest
+    /// removed XID (`snapshotConflictHorizon`) for an index-page LP_DEAD
+    /// cleanup. Used by the hash AM's `_hash_vacuum_one_page`. `Err` carries the
+    /// buffer/heap `ereport(ERROR)` surface. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn index_compute_xid_horizon_for_tuples<'mcx>(
+        irel: &Relation<'mcx>,
+        hrel: &Relation<'mcx>,
+        ibuf: types_storage::storage::Buffer,
+        itemnos: &[types_core::primitive::OffsetNumber],
+    ) -> PgResult<TransactionId>
+);
+
 /// The result of [`heap_hot_search_buffer`] — mirrors C's by-pointer outputs
 /// (`*tid` updated in place, `*heapTuple` filled, `*all_dead` optionally set)
 /// plus the `bool` return value.

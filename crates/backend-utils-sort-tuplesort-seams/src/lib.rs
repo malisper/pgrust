@@ -16,7 +16,48 @@ use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_nodes::{TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+
+seam_core::seam!(
+    /// `tuplesort_begin_index_hash(heapRel, indexRel, high_mask, low_mask,
+    /// max_buckets, workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c):
+    /// begin a hash-index tuple sort keyed by bucket number (the masks feed
+    /// `_hash_hashkey2bucket`). Allocates the sort state in `mcx`, fallible on
+    /// OOM.
+    pub fn tuplesort_begin_index_hash<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &types_rel::Relation<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putindextuplevalues(state, rel, self, values, isnull)`
+    /// (tuplesortvariants.c): form an index tuple from `values`/`isnull` with
+    /// heap TID `self` and feed it into the sort. Can allocate, fallible.
+    pub fn tuplesort_putindextuplevalues<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        self_tid: ItemPointerData,
+        values: &[Datum<'mcx>],
+        isnull: &[bool],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getindextuple(state, forward=true)` (tuplesortvariants.c):
+    /// fetch the next sorted IndexTuple as its on-disk bytes; `None` at end of
+    /// sort. Can allocate, fallible.
+    pub fn tuplesort_getindextuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+    ) -> PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
 
 seam_core::seam!(
     /// `tuplesort_begin_heap(tupDesc, nkeys, attNums, sortOperators,

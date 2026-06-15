@@ -23,7 +23,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 // raw-fmgr-ABI dispatch seams (`FunctionCallN` / `Oid*FunctionCall`) whose owner
 // `backend-utils-fmgr-core` and all consumers have NOT yet migrated off the
 // shim word. Those seams carry the literal call-frame `Datum` word — a by-value
-// scalar or a `datum_ref_registry` pointer token decoded by the owner — an
+// scalar or a pointer token decoded by the owner — an
 // audited ABI/storage edge that must stay a bare word until its owner migrates.
 // Migrating the contract here ahead of the owner would diverge it from the
 // landed `types_datum::Datum`-typed `set()` closures and every consumer.
@@ -756,4 +756,15 @@ seam_core::seam!(
         collation: Oid,
         args: &[types_datum::NullableDatum],
     ) -> PgResult<(DatumWord, bool)>
+);
+
+seam_core::seam!(
+    /// `construct_array_builtin(datums, n, CSTRINGOID)` +
+    /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
+    /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to
+    /// the cstring array distilled from a `TypeName`'s typmod expressions,
+    /// returning the resolved typmod. `location` is the parse location used to
+    /// tag a failure (the C `setup_parser_errposition_callback` around the
+    /// call). `Err` carries whatever the `typmodin` function raises.
+    pub fn typmodin(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<i32>
 );

@@ -126,7 +126,7 @@ pub fn ExecMaterial<'mcx>(
             .tuplestorestate
             .as_deref_mut()
             .expect("ExecMaterial: reading with no tuplestore");
-        if tuplestore::tuplestore_gettupleslot::call(ts, forward, false, estate.slot_mut(slot))? {
+        if tuplestore::tuplestore_gettupleslot::call(ts, forward, false, slot, estate)? {
             return Ok(true);
         }
         if forward {
@@ -163,7 +163,7 @@ pub fn ExecMaterial<'mcx>(
         // the tuplestore is certainly in EOF state, its read position will
         // move forward over the added tuple. This is what we want.
         if let Some(ts) = node.tuplestorestate.as_deref_mut() {
-            tuplestore::tuplestore_puttupleslot::call(ts, estate.slot(outerslot))?;
+            tuplestore::tuplestore_puttupleslot::call(ts, outerslot, estate)?;
         }
 
         // ExecCopySlot(slot, outerslot); return slot;

@@ -12,3 +12,5 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 types-amvalidate = { path = "../types-amvalidate" }
 types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }

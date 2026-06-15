@@ -1271,7 +1271,7 @@ pub fn tts_minimal_copyslot<'mcx>(
 /// values-only source forms a fresh one (the in-place materialize C may perform
 /// is a behaviour-preserving cache of that same result, skipped here so the
 /// source can be borrowed `&`). The produced copy is byte-identical to C's.
-fn exec_copy_slot_minimal_tuple_ref<'mcx>(
+pub(crate) fn exec_copy_slot_minimal_tuple_ref<'mcx>(
     mcx: Mcx<'mcx>,
     src: &SlotData<'mcx>,
     extra: usize,

@@ -61,26 +61,34 @@ seam_core::seam!(
     /// fetch the next tuple into the given slot; returns `true` when a tuple
     /// was fetched.
     ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no payload), so this contract cannot yet move tuple data; re-sign it
-    /// when the slot payload model lands.
-    pub fn tuplestore_gettupleslot(
-        state: &mut types_nodes::Tuplestorestate<'_>,
+    /// Re-signed off the header-only provisional shape once the MinimalTuple
+    /// payload-bearing carrier + the EState slot pool landed: the slot is the
+    /// pool [`SlotId`], resolved against `estate` (the payload-bearing
+    /// `&mut SlotData` lives in `estate.es_tupleTable`). The owner stores the
+    /// fetched MinimalTuple via the `exec_store_minimal_tuple` /
+    /// `exec_clear_tuple_by_id` execTuples seams (which build the slot's carrier
+    /// in `estate.es_query_cxt`).
+    pub fn tuplestore_gettupleslot<'mcx>(
+        state: &mut types_nodes::Tuplestorestate<'mcx>,
         forward: bool,
         copy: bool,
-        slot: &mut types_nodes::TupleTableSlot,
+        slot: types_nodes::SlotId,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
     /// `tuplestore_puttupleslot(state, slot)` (tuplestore.c): append a copy of
-    /// the slot's tuple to the store.
-    ///
-    /// PROVISIONAL: see `tuplestore_gettupleslot` — re-sign when the slot
-    /// payload model lands.
-    pub fn tuplestore_puttupleslot(
-        state: &mut types_nodes::Tuplestorestate<'_>,
-        slot: &types_nodes::TupleTableSlot,
+    /// the slot's tuple to the store. Re-signed off the header-only provisional
+    /// shape once the MinimalTuple payload-bearing carrier + EState slot pool
+    /// landed: the slot is the pool [`SlotId`] resolved against `estate`; the
+    /// owner forms the MinimalTuple from the live slot via the
+    /// `exec_copy_slot_minimal_tuple` execTuples seam, then copies it into the
+    /// store's own context.
+    pub fn tuplestore_puttupleslot<'mcx>(
+        state: &mut types_nodes::Tuplestorestate<'mcx>,
+        slot: types_nodes::SlotId,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -180,22 +188,23 @@ seam_core::seam!(
 seam_core::seam!(
     /// `sts_parallel_scan_next(accessor, &hashvalue)` (sharedtuplestore.c):
     /// read the next tuple, returning it (copied into `mcx`, the caller's
-    /// current context) and its meta hash value, or `None` at end.
+    /// current context) and its meta hash value, or `None` at end. The tuple
+    /// crosses as its contiguous C `MinimalTuple` byte image (the flat blob,
+    /// `t_len` first), the form sharedtuplestore stores on disk.
     pub fn sts_parallel_scan_next<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
-    ) -> types_error::PgResult<
-        Option<(mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>, u32)>,
-    >
+    ) -> types_error::PgResult<Option<(mcx::PgVec<'mcx, u8>, u32)>>
 );
 
 seam_core::seam!(
     /// `sts_puttuple(accessor, &hashvalue, tuple)` (sharedtuplestore.c): write a
-    /// tuple (with its meta hash value) to the shared partition.
+    /// tuple (with its meta hash value) to the shared partition. The tuple is its
+    /// contiguous C `MinimalTuple` byte image (the flat blob, `t_len` first).
     pub fn sts_puttuple(
         accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
         hashvalue: u32,
-        tuple: &types_tuple::heaptuple::MinimalTupleData<'_>,
+        tuple: &[u8],
     ) -> types_error::PgResult<()>
 );
 
@@ -362,11 +371,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `sts_puttuple(accessor, meta_data, tuple)` (sharedtuplestore.c): write a
     /// tuple plus its fixed-size meta-data (the tuple's hash value, in parallel
-    /// hash) to this participant's partition.
+    /// hash) to this participant's partition. The tuple is its contiguous C
+    /// `MinimalTuple` byte image (the flat blob, `t_len` first).
     pub fn sts_puttuple_handle(
         accessor: types_execparallel::SharedTuplestoreAccessorHandle,
         meta_data: &[u8],
-        tuple: &types_tuple::heaptuple::MinimalTupleData<'_>,
+        tuple: &[u8],
     ) -> types_error::PgResult<()>
 );
 
@@ -382,10 +392,11 @@ seam_core::seam!(
     /// `sts_parallel_scan_next(accessor, meta_data)` (sharedtuplestore.c): fetch
     /// the next tuple from the cooperative scan, copying its meta-data into
     /// `meta_data`. Returns `None` at end of the whole store (C `NULL`). The
-    /// returned tuple is allocated in `mcx`.
+    /// returned tuple is its contiguous C `MinimalTuple` byte image (the flat
+    /// blob, `t_len` first), allocated in `mcx`.
     pub fn sts_parallel_scan_next_handle<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         accessor: types_execparallel::SharedTuplestoreAccessorHandle,
         meta_data: &mut [u8],
-    ) -> types_error::PgResult<Option<types_tuple::heaptuple::MinimalTupleData<'mcx>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
 );

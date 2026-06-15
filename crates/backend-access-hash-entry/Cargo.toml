@@ -1,0 +1,52 @@
+[package]
+name = "backend-access-hash-entry"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_hash_entry"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-amapi = { path = "../types-amapi" }
+types-hash = { path = "../types-hash" }
+types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-tidbitmap = { path = "../types-tidbitmap" }
+types-fmgr = { path = "../types-fmgr" }
+types-tableam = { path = "../types-tableam" }
+types-nodes = { path = "../types-nodes" }
+types-snapshot = { path = "../types-snapshot" }
+
+backend-storage-page = { path = "../backend-storage-page" }
+
+# Sibling hash-core (direct dep — acyclic).
+backend-access-hash-core = { path = "../backend-access-hash-core" }
+
+# Own seam crate (no-op installer).
+backend-access-hash-entry-seams = { path = "../backend-access-hash-entry-seams" }
+
+# Outward seam crates (substrate callees).
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-optimizer-util-plancat-seams = { path = "../backend-optimizer-util-plancat-seams" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

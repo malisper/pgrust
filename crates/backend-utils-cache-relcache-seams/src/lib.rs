@@ -555,3 +555,61 @@ seam_core::seam!(
         fdwroutine: types_nodes::FdwRoutine,
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Hash access-method consumers (hashutil.c / hashpage.c / hashsearch.c).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `RelationIsAccessibleInLogicalDecoding(rel)` (rel.h): `XLogLogicalInfoActive()
+    /// && RelationNeedsWAL(rel) && (IsCatalogRelation(rel) ||
+    /// RelationIsUsedAsCatalogTable(rel))`. Determines the `isCatalogRel` flag a
+    /// WAL deletion record carries for standby logical-decoding conflict
+    /// resolution. The wal-level GUC + relcache predicates are the relcache
+    /// owner's. `Err` only on a relcache miss.
+    pub fn relation_is_accessible_in_logical_decoding(
+        rel: &types_rel::Relation<'_>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `rel->rd_indcollation[attno - 1]` — the collation OID of the index
+    /// column `attno` (1-based, as in C). The hash AM reads `rd_indcollation[0]`
+    /// for its single-column hash. `Err` only on a relcache miss.
+    pub fn rd_indcollation(
+        index: &types_rel::Relation<'_>,
+        attno: types_core::primitive::AttrNumber,
+    ) -> types_error::PgResult<types_core::Oid>
+);
+
+seam_core::seam!(
+    /// `index_getprocid(irel, attnum, procnum)` (indexam.c) — the OID of the
+    /// support procedure `procnum` for index column `attnum` (1-based). Read off
+    /// `irel->rd_support`. Used by `_hash_init` for `HASHSTANDARD_PROC`.
+    pub fn index_getprocid(
+        index: &types_rel::Relation<'_>,
+        attnum: types_core::primitive::AttrNumber,
+        procnum: u16,
+    ) -> types_error::PgResult<types_core::primitive::RegProcedure>
+);
+
+seam_core::seam!(
+    /// `(HashMetaPage) rel->rd_amcache` (hashpage.c `_hash_getcachedmetap`) —
+    /// fetch the cached `HashMetaPageData` for this index, or `None` (the C
+    /// `rd_amcache == NULL`). The opaque `rd_amcache` slot lives on the relcache
+    /// entry, so the cache read/write is seamed onto the relcache owner.
+    pub fn rd_amcache_hashmeta(
+        index_oid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_hash::hashpage::HashMetaPageData>>
+);
+
+seam_core::seam!(
+    /// `rel->rd_amcache = MemoryContextAlloc(rel->rd_indexcxt,
+    /// sizeof(HashMetaPageData)); memcpy(rel->rd_amcache, ...)` (hashpage.c
+    /// `_hash_getcachedmetap`) — install/refresh the cached `HashMetaPageData`
+    /// on the relcache entry's `rd_amcache` slot.
+    pub fn set_rd_amcache_hashmeta(
+        index_oid: types_core::primitive::Oid,
+        metap: types_hash::hashpage::HashMetaPageData,
+    ) -> types_error::PgResult<()>
+);

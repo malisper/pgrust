@@ -178,6 +178,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `NLocBuffer` (localbuf.c): the number of local buffers allocated for
+    /// temp-relation access in this backend. Pure read of backend-local state.
+    pub fn nloc_buffer() -> i32
+);
+
+seam_core::seam!(
     /// `MyDatabaseId` (globals.c).
     pub fn my_database_id() -> types_core::Oid
 );

@@ -75,6 +75,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot)` (tuptable.h) resolving a pool [`SlotId`] to its
+    /// live payload-bearing slot first — the form the `tuplestore_gettupleslot`
+    /// "no tuple" path needs (the header-only [`exec_clear_tuple`] cannot reach
+    /// the payload).
+    pub fn exec_clear_tuple_by_id(
+        estate: &mut types_nodes::EStateData<'_>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecResetTupleTable`'s per-slot processing (execTuples.c): given one
     /// live `es_tupleTable` slot, `ExecClearTuple(slot)` then
     /// `slot->tts_ops->release(slot)` then `ReleaseTupleDesc` the slot's
@@ -141,12 +152,15 @@ seam_core::seam!(
     /// `ExecCopySlotMinimalTuple(slot)` (tuptable.h): produce a freshly-palloc'd
     /// `MinimalTuple` copy of the slot's current tuple (the C
     /// `slot->tts_ops->copy_minimal_tuple`), owned by the caller. The copy lands
-    /// in `mcx` (C: `CurrentMemoryContext`). Fallible on OOM.
+    /// in `mcx` (C: `CurrentMemoryContext`). Fallible on OOM. The owned model
+    /// returns the payload-bearing
+    /// [`FormedMinimalTuple`](types_tuple::backend_access_common_heaptuple::FormedMinimalTuple)
+    /// carrier (header + user-data area).
     pub fn exec_copy_slot_minimal_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         estate: &types_nodes::EStateData<'mcx>,
         slot: types_nodes::SlotId,
-    ) -> types_error::PgResult<types_tuple::heaptuple::MinimalTuple<'mcx>>
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>>
 );
 
 seam_core::seam!(
@@ -154,9 +168,11 @@ seam_core::seam!(
     /// store the `MinimalTuple` into the slot (forcing it through the slot's
     /// minimal-tuple ops), the C returning the same slot. `should_free` records
     /// whether the slot owns and should later free the tuple. Fallible on OOM.
+    /// The owned model carries the payload-bearing
+    /// [`FormedMinimalTuple`](types_tuple::backend_access_common_heaptuple::FormedMinimalTuple).
     pub fn exec_store_minimal_tuple<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
-        mtup: types_tuple::heaptuple::MinimalTuple<'mcx>,
+        mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         slot: types_nodes::SlotId,
         should_free: bool,
     ) -> types_error::PgResult<()>
@@ -458,7 +474,7 @@ seam_core::seam!(
     /// taking ownership when `should_free`. Fallible on OOM.
     pub fn exec_force_store_minimal_tuple<'mcx>(
         slot: types_nodes::SlotId,
-        mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         should_free: bool,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
@@ -494,12 +510,16 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): materialize
     /// the slot's contents as a `MinimalTuple` (copied into `mcx`), returning it
-    /// and whether the caller must free it. Fallible on OOM.
+    /// and whether the caller must free it. Fallible on OOM. The slot is
+    /// addressed by its EState-pool id (the owner reaches the payload-bearing
+    /// `SlotData`); the owned model returns the payload-bearing
+    /// [`FormedMinimalTuple`](types_tuple::backend_access_common_heaptuple::FormedMinimalTuple).
     pub fn exec_fetch_slot_minimal_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        slot: &mut types_nodes::TupleTableSlot,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
     ) -> types_error::PgResult<(
-        mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         bool,
     )>
 );
@@ -571,14 +591,17 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): the
     /// slot's contents as a `MinimalTuple` (`slot->tts_ops->get_minimal_tuple`
-    /// or `copy_minimal_tuple`). The owned model always returns a copy into
-    /// `mcx`, so the C `shouldFree` / `heap_free_minimal_tuple` bookkeeping is
-    /// internal to the owner and does not cross the seam. The materialize /
-    /// copy path allocates, so the call is fallible on OOM.
+    /// or `copy_minimal_tuple`). The owned model always returns a copy, so the C
+    /// `shouldFree` / `heap_free_minimal_tuple` bookkeeping is internal to the
+    /// owner and does not cross the seam. The slot is addressed by its
+    /// EState-pool id. This is the *boundary* form used by the shm_mq transport
+    /// (tqueue): it returns the `MinimalTuple`'s contiguous C byte image — the
+    /// flat blob (`t_len` first) `shm_mq_send` ships verbatim — allocated in
+    /// `mcx`. The materialize / copy / serialize path allocates, so the call is
+    /// fallible on OOM.
     pub fn exec_fetch_slot_minimal_tuple_copy<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        slot: &types_nodes::TupleTableSlot,
-    ) -> types_error::PgResult<
-        types_tuple::heaptuple::MinimalTupleData<'mcx>,
-    >
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );

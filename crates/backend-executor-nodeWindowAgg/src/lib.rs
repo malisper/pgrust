@@ -771,7 +771,7 @@ fn begin_partition<'mcx>(
 
     // Store the first tuple into the tuplestore.
     let buffer = winstate.buffer.as_deref_mut().unwrap();
-    tuplestore::tuplestore_puttupleslot::call(buffer, estate.slot(first_part_slot))?;
+    tuplestore::tuplestore_puttupleslot::call(buffer, first_part_slot, estate)?;
     winstate.spooled_rows += 1;
     Ok(())
 }
@@ -859,7 +859,7 @@ fn spool_tuples<'mcx>(
         // pass-through mode.
         if winstate.status != WINDOWAGG_PASSTHROUGH_STRICT {
             let buffer = winstate.buffer.as_deref_mut().unwrap();
-            tuplestore::tuplestore_puttupleslot::call(buffer, estate.slot(outerslot))?;
+            tuplestore::tuplestore_puttupleslot::call(buffer, outerslot, estate)?;
             winstate.spooled_rows += 1;
         }
     }
@@ -1028,7 +1028,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1044,7 +1045,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     break; // end of partition
                 }
@@ -1094,7 +1096,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1131,7 +1134,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     break;
                 }
@@ -1158,7 +1162,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1179,7 +1184,8 @@ fn update_frameheadpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(framehead_slot),
+                    framehead_slot,
+                    estate,
                 )? {
                     break;
                 }
@@ -1241,7 +1247,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1259,7 +1266,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     break;
                 }
@@ -1306,7 +1314,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1342,7 +1351,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     break;
                 }
@@ -1368,7 +1378,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     return Err(types_error::PgError::error("unexpected end of tuplestore"));
                 }
@@ -1389,7 +1400,8 @@ fn update_frametailpos<'mcx>(
                     winstate.buffer.as_deref_mut().unwrap(),
                     true,
                     true,
-                    estate.slot_mut(frametail_slot),
+                    frametail_slot,
+                    estate,
                 )? {
                     break;
                 }
@@ -1442,7 +1454,8 @@ fn update_grouptailpos<'mcx>(
             winstate.buffer.as_deref_mut().unwrap(),
             true,
             true,
-            estate.slot_mut(temp_slot_2),
+            temp_slot_2,
+            estate,
         )? {
             break; // end of partition
         }
@@ -1619,7 +1632,8 @@ pub fn ExecWindowAgg<'mcx>(
                 winstate.buffer.as_deref_mut().unwrap(),
                 true,
                 true,
-                estate.slot_mut(scan_slot),
+                scan_slot,
+                estate,
             )? {
                 return Err(types_error::PgError::error("unexpected end of tuplestore"));
             }
@@ -1633,7 +1647,8 @@ pub fn ExecWindowAgg<'mcx>(
             winstate.buffer.as_deref_mut().unwrap(),
             true,
             true,
-            estate.slot_mut(scan_slot),
+            scan_slot,
+            estate,
         )? {
             return Err(types_error::PgError::error("unexpected end of tuplestore"));
         }
@@ -2189,7 +2204,8 @@ fn window_gettupleslot_with<'mcx>(
             winstate.buffer.as_deref_mut().unwrap(),
             false,
             true,
-            estate.slot_mut(slot),
+            slot,
+            estate,
         )? {
             return Err(types_error::PgError::error("unexpected end of tuplestore"));
         }
@@ -2199,7 +2215,8 @@ fn window_gettupleslot_with<'mcx>(
             winstate.buffer.as_deref_mut().unwrap(),
             true,
             true,
-            estate.slot_mut(slot),
+            slot,
+            estate,
         )? {
             return Err(types_error::PgError::error("unexpected end of tuplestore"));
         }

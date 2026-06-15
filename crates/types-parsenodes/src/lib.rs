@@ -503,15 +503,14 @@ pub struct SecLabelStmt {
     pub label: Option<String>,
 }
 
-/// `typedef struct ParseState` (`parser/parse_node.h`), trimmed. user.c only
-/// passes the `ParseState *` through to `errorConflictingDefElem` /
-/// `parser_errposition` for error positioning; the parser (its owner) fills
-/// the source text. Kept opaque-but-real with the consumed field only.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ParseState {
-    /// `p_sourcetext` — the source text, used for error positioning.
-    pub p_sourcetext: Option<String>,
-}
+/// `typedef struct ParseState` (`parser/parse_node.h`). Unified (K1 phase 4)
+/// onto the single canonical full struct in [`types_nodes::parsestmt`]. user.c
+/// and parse-oper only pass the `ParseState *` through to
+/// `errorConflictingDefElem` / `parser_errposition` for error positioning (they
+/// read `p_sourcetext`); the parser (its owner) fills the rest. Re-exported for
+/// type identity — the struct now carries the full ~36-field set and an `'mcx`
+/// lifetime.
+pub use types_nodes::parsestmt::ParseState;
 
 // ---------------------------------------------------------------------------
 // The parse-tree Node enum (nodes/nodes.h `Node *` over the structs above)

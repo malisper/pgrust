@@ -57,14 +57,22 @@ fn make_tuple_table_slot_header(has_descriptor: bool, tts_ops: TupleSlotKind) ->
 /// `ExecAllocTableSlot(&estate->es_tupleTable, desc, tts_ops)` (execTuples.c):
 /// build a slot (`MakeTupleTableSlot`) and append it to the per-query tuple
 /// table, returning its pool id (the C pointer).
-fn exec_alloc_table_slot(
-    estate: &mut EStateData<'_>,
-    has_descriptor: bool,
+///
+/// The slot is the proper payload-bearing [`SlotData`] superstructure of the
+/// requested kind (`Virtual/Heap/Minimal/BufferHeap`), fixed to `desc` with its
+/// `tts_values`/`tts_isnull` arrays sized — exactly `MakeTupleTableSlot` — so
+/// the store/fetch/copy callbacks (e.g. the minimal-tuple ops) can downcast to
+/// the right variant. It allocates in the per-query context (`tts_mcxt`).
+fn exec_alloc_table_slot<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    desc: TupleDesc<'mcx>,
     tts_ops: TupleSlotKind,
 ) -> PgResult<SlotId> {
-    let slot = make_tuple_table_slot_header(has_descriptor, tts_ops);
+    let mcx = estate.es_query_cxt;
+    // TupleTableSlot *slot = MakeTupleTableSlot(desc, tts_ops);
+    let slot = crate::slot_payload_model::MakeTupleTableSlot(mcx, desc, tts_ops)?;
     // *tupleTable = lappend(*tupleTable, slot);
-    estate.make_slot(slot)
+    estate.push_slot_data(slot)
 }
 
 // ===========================================================================
@@ -124,13 +132,18 @@ fn seam_exec_init_result_tuple_slot_tl<'mcx>(
     seam_exec_init_result_slot(planstate, estate, tts_ops)
 }
 
-/// Seam `exec_clear_tuple` — `ExecClearTuple`.
-///
-/// PAYLOAD MODEL: the `clear` callback resets the slot's stored-tuple payload,
-/// which the trimmed pool header does not carry. Stays seam-and-panic until the
-/// slot payload model lands.
+/// Seam `exec_clear_tuple` — `ExecClearTuple`. The seam's `&mut TupleTableSlot`
+/// is the header-only projection; the live payload-bearing clear is reached via
+/// `exec_reset_one_slot` / the `SlotId` store seams, so this header-only seam
+/// stays a loud panic (no payload reachable from the header alone).
 fn seam_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
-    panic!("execTuples.c ExecClearTuple — needs the slot payload model (tts_ops->clear)")
+    panic!("execTuples.c ExecClearTuple — header-only slot view carries no payload to clear; use a SlotId-based path")
+}
+
+/// Seam `exec_clear_tuple_by_id` — `ExecClearTuple` resolving the pool `SlotId`
+/// to its live payload-bearing `&mut SlotData` first.
+fn seam_exec_clear_tuple_by_id<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(estate.slot_data_mut(slot))
 }
 
 /// Seam `exec_reset_one_slot` — `ExecResetTupleTable`'s per-slot processing.
@@ -161,7 +174,13 @@ fn seam_exec_init_result_slot<'mcx>(
     // slot = ExecAllocTableSlot(&planstate->state->es_tupleTable,
     //                           planstate->ps_ResultTupleDesc, tts_ops);
     let has_descriptor = planstate.ps_ResultTupleDesc.is_some();
-    let slot = exec_alloc_table_slot(estate, has_descriptor, tts_ops)?;
+    // C shares the descriptor pointer into the slot; the owned slot needs its
+    // own `'mcx` copy (the slot pins/holds the descriptor), so clone it.
+    let desc = match planstate.ps_ResultTupleDesc.as_deref() {
+        Some(d) => Some(mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?)?),
+        None => None,
+    };
+    let slot = exec_alloc_table_slot(estate, desc, tts_ops)?;
     // planstate->ps_ResultTupleSlot = slot;
     planstate.ps_ResultTupleSlot = Some(slot);
 
@@ -184,11 +203,10 @@ fn seam_exec_init_scan_tuple_slot<'mcx>(
     // scanstate->ss_ScanTupleSlot = ExecAllocTableSlot(&estate->es_tupleTable,
     //                                                  tupledesc, tts_ops);
     let has_descriptor = tupledesc.is_some();
-    let slot = exec_alloc_table_slot(estate, has_descriptor, tts_ops)?;
+    let slot = exec_alloc_table_slot(estate, tupledesc, tts_ops)?;
     scanstate.ss_ScanTupleSlot = Some(slot);
-    // scanstate->ps.scandesc = tupledesc; (payload-model: the descriptor moves
-    // into the slot at convergence; the trimmed scanstate carries no scandesc)
-    let _ = tupledesc;
+    // scanstate->ps.scandesc = tupledesc; (the descriptor now lives in the slot's
+    // payload; the trimmed scanstate carries no scandesc)
     // scanstate->ps.scanopsfixed = tupledesc != NULL;
     scanstate.ps.scanopsfixed = has_descriptor;
     // scanstate->ps.scanops = tts_ops;
@@ -205,7 +223,7 @@ fn seam_exec_init_extra_tuple_slot<'mcx>(
     tts_ops: TupleSlotKind,
 ) -> PgResult<SlotId> {
     // return ExecAllocTableSlot(&estate->es_tupleTable, tupledesc, tts_ops);
-    exec_alloc_table_slot(estate, tupledesc.is_some(), tts_ops)
+    exec_alloc_table_slot(estate, tupledesc, tts_ops)
 }
 
 /// Seam `exec_set_slot_descriptor` — `ExecSetSlotDescriptor`.
@@ -368,7 +386,85 @@ fn seam_exec_alloc_table_slot<'mcx>(
 ) -> PgResult<SlotId> {
     // TupleTableSlot *slot = MakeTupleTableSlot(desc, tts_ops);
     // *tupleTable = lappend(*tupleTable, slot); return slot;
-    exec_alloc_table_slot(estate, desc.is_some(), tts_ops)
+    exec_alloc_table_slot(estate, desc, tts_ops)
+}
+
+// ===========================================================================
+//  MinimalTuple slot store/fetch/copy seams — the payload-bearing carrier
+//  (`FormedMinimalTuple`) over the pool's `SlotData`. The bodies live in
+//  `crate::slot_store_fetch`; these adapters resolve the `SlotId` to the live
+//  `&mut SlotData` and thread `mcx`.
+// ===========================================================================
+
+/// Seam `exec_store_minimal_tuple` — `ExecStoreMinimalTuple`.
+fn seam_exec_store_minimal_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+    slot: SlotId,
+    should_free: bool,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecStoreMinimalTuple(mcx, mtup, estate.slot_data_mut(slot), should_free)
+}
+
+/// Seam `exec_force_store_minimal_tuple` — `ExecForceStoreMinimalTuple`.
+fn seam_exec_force_store_minimal_tuple<'mcx>(
+    slot: SlotId,
+    mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+    should_free: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecForceStoreMinimalTuple(
+        mcx,
+        mtup,
+        estate.slot_data_mut(slot),
+        should_free,
+    )
+}
+
+/// Seam `exec_copy_slot_minimal_tuple` — `ExecCopySlotMinimalTuple`.
+fn seam_exec_copy_slot_minimal_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>> {
+    // ExecCopySlotMinimalTuple over the (immutable) source slot.
+    crate::slot_ops_vtables::exec_copy_slot_minimal_tuple_ref(mcx, estate.slot_data(slot), 0)
+}
+
+/// Seam `exec_fetch_slot_minimal_tuple` — `ExecFetchSlotMinimalTuple`.
+fn seam_exec_fetch_slot_minimal_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<(
+    types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+    bool,
+)> {
+    crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, estate.slot_data_mut(slot))
+}
+
+/// Seam `exec_fetch_slot_minimal_tuple_copy` — `ExecFetchSlotMinimalTuple` as
+/// the boundary flat byte image (the shm_mq transport form). Materializes the
+/// slot's `MinimalTuple` and serializes it to its contiguous C image.
+fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);  /* C copies tuple->t_len bytes */
+    let (mtup, _should_free) =
+        crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, estate.slot_data_mut(slot))?;
+    // The flat blob is exactly the `tuple->t_len` bytes shm_mq ships. A fresh
+    // materialized minimal tuple is structurally well-formed, so the only
+    // possible failure is the allocation `ereport(ERROR)` (OOM).
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
+        Ok(blob) => Ok(blob),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_to_flat on a slot tuple failed: {other:?}"),
+    }
 }
 
 /// Install every seam this unit owns.
@@ -379,6 +475,7 @@ pub fn init_seams() {
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
     seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);
     seams::exec_clear_tuple::set(seam_exec_clear_tuple);
+    seams::exec_clear_tuple_by_id::set(seam_exec_clear_tuple_by_id);
     seams::exec_reset_one_slot::set(seam_exec_reset_one_slot);
     seams::exec_copy_slot::set(seam_exec_copy_slot);
     seams::exec_init_result_slot::set(seam_exec_init_result_slot);
@@ -392,6 +489,14 @@ pub fn init_seams() {
     seams::exec_init_null_tuple_slot::set(seam_exec_init_null_tuple_slot);
     seams::exec_get_result_type::set(seam_exec_get_result_type);
     seams::exec_get_result_slot_ops::set(seam_exec_get_result_slot_ops);
+    // MinimalTuple payload-bearing-carrier store/fetch/copy seams (the SlotData
+    // pool now carries the proper per-kind superstructure, so these resolve a
+    // SlotId to its live `&mut SlotData`).
+    seams::exec_store_minimal_tuple::set(seam_exec_store_minimal_tuple);
+    seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
+    seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
+    seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);
+    seams::exec_fetch_slot_minimal_tuple_copy::set(seam_exec_fetch_slot_minimal_tuple_copy);
     // ExecTypeFromTL is fully owned + implemented in this crate's
     // exectype_tupoutput family (no pool-payload / Plan-model dependency), so
     // its seam is installed here.

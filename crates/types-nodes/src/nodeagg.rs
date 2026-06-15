@@ -26,7 +26,8 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
-use types_tuple::heaptuple::{HeapTupleData, MinimalTuple, TupleDescData};
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
+use types_tuple::heaptuple::{HeapTupleData, TupleDescData};
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
@@ -223,8 +224,10 @@ pub struct LogicalTapeHandle(pub usize);
 /// than embedding it here, matching the C pointer-arithmetic layout.
 #[derive(Debug, Default)]
 pub struct TupleHashEntryData<'mcx> {
-    /// `MinimalTuple firstTuple` — copy of first tuple in this group.
-    pub firstTuple: MinimalTuple<'mcx>,
+    /// `MinimalTuple firstTuple` — copy of first tuple in this group. Carried as
+    /// the payload-bearing [`FormedMinimalTuple`] (header + user-data area);
+    /// `None` is the C `NULL` (a freshly-inserted / find-only entry).
+    pub firstTuple: Option<FormedMinimalTuple<'mcx>>,
     /// `uint32 status` — simplehash slot status.
     pub status: u32,
     /// `uint32 hash` — cached hash value.

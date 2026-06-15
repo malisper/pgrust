@@ -342,16 +342,79 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
     }
 
     match node {
-        // case T_Material (with T_SeqScan, T_TidScan, T_TidRangeScan,
-        // T_FunctionScan, T_ValuesScan, T_CteScan, T_Sort):
-        //   /* these don't evaluate tlist */ return true;
-        Node::Material(_) => Ok(true),
+        // case T_Result:
+        //   if (outerPlan(node) != NULL)
+        //       return ExecSupportsBackwardScan(outerPlan(node));
+        //   else
+        //       return false;
+        Node::Result(_) => {
+            match node.plan_head().lefttree.as_deref() {
+                Some(outer) => exec_supports_backward_scan(Some(outer)),
+                None => Ok(false),
+            }
+        }
 
-        // The remaining C arms (Result, Append, SampleScan, Gather,
-        // IndexScan/IndexOnlyScan via index_supports_backward_scan,
-        // SubqueryScan, CustomScan, IncrementalSort, LockRows, Limit) gain
-        // match arms as their plan-node variants are added to Node; until
-        // then the wildcard is the C default: return false.
+        // case T_Append:
+        //   /* With async, tuples may be interleaved, so can't back up. */
+        //   if (((Append *) node)->nasyncplans > 0) return false;
+        //   foreach(l, appendplans) if (!ExecSupportsBackwardScan(...)) return false;
+        //   /* need not check tlist because Append doesn't evaluate it */
+        //   return true;
+        Node::Append(append) => {
+            if append.nasyncplans > 0 {
+                return Ok(false);
+            }
+            for child in &append.appendplans {
+                if !exec_supports_backward_scan(Some(child))? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
+        // case T_Gather: return false;
+        Node::Gather(_) => Ok(false),
+
+        // case T_IndexScan:
+        //   return IndexSupportsBackwardScan(((IndexScan *) node)->indexid);
+        Node::IndexScan(iscan) => index_supports_backward_scan(iscan.indexid),
+
+        // case T_IndexOnlyScan:
+        //   return IndexSupportsBackwardScan(((IndexOnlyScan *) node)->indexid);
+        Node::IndexOnlyScan(ioscan) => index_supports_backward_scan(ioscan.indexid),
+
+        // case T_SubqueryScan:
+        //   return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
+        Node::SubqueryScan(sqscan) => {
+            exec_supports_backward_scan(sqscan.subplan.as_deref())
+        }
+
+        // case T_CustomScan:
+        //   if (flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN) return true;
+        //   return false;
+        Node::CustomScan(cscan) => Ok(
+            (cscan.flags & types_nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN) != 0,
+        ),
+
+        // case T_SeqScan / T_TidScan / T_TidRangeScan / T_FunctionScan /
+        //      T_ValuesScan / T_CteScan / T_Material / T_Sort:
+        //   /* these don't evaluate tlist */ return true;
+        // (T_TidScan and T_FunctionScan have no Node variant yet.)
+        Node::SeqScan(_)
+        | Node::TidRangeScan(_)
+        | Node::ValuesScan(_)
+        | Node::CteScan(_)
+        | Node::Material(_)
+        | Node::Sort(_) => Ok(true),
+
+        // case T_Limit: return ExecSupportsBackwardScan(outerPlan(node));
+        // (T_LockRows has no Node variant yet; T_IncrementalSort/T_SampleScan
+        // return false in C, the wildcard default below covers them.)
+        Node::Limit(_) => {
+            exec_supports_backward_scan(node.plan_head().lefttree.as_deref())
+        }
+
+        // default: return false;
         _ => Ok(false),
     }
 }
@@ -359,10 +422,8 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
 /// `IndexSupportsBackwardScan(indexid)` — an IndexScan or IndexOnlyScan node
 /// supports backward scan only if the index's AM does.
 ///
-/// Unreachable until the IndexScan/IndexOnlyScan plan-node variants land in
-/// `Node` (their `exec_supports_backward_scan` arms call this), hence
-/// `dead_code` outside tests.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Called from the IndexScan/IndexOnlyScan arms of
+/// [`exec_supports_backward_scan`].
 fn index_supports_backward_scan(indexid: Oid) -> PgResult<bool> {
     // Fetch the pg_class tuple of the index relation.
     //   ht_idxrel = SearchSysCache1(RELOID, ObjectIdGetDatum(indexid));

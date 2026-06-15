@@ -207,14 +207,12 @@ pub fn MultiExecPrivateHash<'mcx>(
                 //   ExecHashSkewTableInsert(hashtable, slot, hashvalue,
                 //                           bucketNumber);
                 //   hashtable->skewTuples += 1;
-                let slot = estate.slot(slot_id);
-                ExecHashSkewTableInsert(mcx, hashtable, slot, hashvalue, bucket_number)?;
+                ExecHashSkewTableInsert(mcx, hashtable, estate, slot_id, hashvalue, bucket_number)?;
                 hashtable.skewTuples += 1.0;
             } else {
                 // Not subject to skew optimization, so insert normally
                 //   ExecHashTableInsert(hashtable, slot, hashvalue);
-                let slot = estate.slot(slot_id);
-                ExecHashTableInsert(mcx, hashtable, slot, hashvalue)?;
+                ExecHashTableInsert(mcx, hashtable, estate, slot_id, hashvalue)?;
             }
             //   hashtable->totalTuples += 1;
             hashtable.totalTuples += 1.0;
@@ -368,8 +366,7 @@ pub fn MultiExecParallelHash<'mcx>(
             //   hashtable->partialTuples++;
             let hashtable = node.hashtable.as_deref_mut().unwrap();
             if !isnull {
-                let slot = estate.slot(slot_id);
-                ExecParallelHashTableInsert(mcx, hashtable, slot, hashvalue)?;
+                ExecParallelHashTableInsert(mcx, hashtable, estate, slot_id, hashvalue)?;
             }
             hashtable.partialTuples += 1.0;
         }
