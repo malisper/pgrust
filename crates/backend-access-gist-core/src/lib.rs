@@ -31,6 +31,7 @@ extern crate alloc;
 
 pub mod gist_insert;
 pub mod gist_page;
+pub mod gist_scan;
 pub mod gistsplit;
 pub mod gistutil;
 
@@ -39,7 +40,12 @@ pub use gist_page::{
     gist_page_flags, gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage,
     gistfillbuffer, gistinitpage, set_gist_page_flags, set_gist_page_rightlink, GISTInitBuffer,
     GiSTPageSize, GistClearFollowRight, GistClearPageHasGarbage, GistFollowRight, GistMarkFollowRight,
-    GistPageGetDeleteXid, GistPageHasGarbage, GistPageIsDeleted, GistPageIsLeaf,
+    GistMarkPageHasGarbage, GistPageGetDeleteXid, GistPageHasGarbage, GistPageIsDeleted,
+    GistPageIsLeaf,
+};
+pub use gist_scan::{
+    gistbeginscan, gistcanreturn, gistendscan, gistgetbitmap, gistgettuple, gisthandler,
+    gistrescan,
 };
 pub use gistsplit::gistSplitByKey;
 pub use gistutil::{
