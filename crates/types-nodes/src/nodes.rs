@@ -222,6 +222,8 @@ pub enum Node<'mcx> {
     Unique(crate::nodeunique::Unique<'mcx>),
     /// `T_Sort`.
     Sort(crate::nodesort::Sort<'mcx>),
+    /// `T_WindowAgg`.
+    WindowAgg(crate::nodewindowagg::WindowAgg<'mcx>),
     /// `T_TableFuncScan`.
     TableFuncScan(crate::nodetablefuncscan::TableFuncScan<'mcx>),
     /// `T_ValuesScan`.
@@ -388,6 +390,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(_) => T_Limit,
             Node::Unique(_) => crate::nodeunique::T_Unique,
             Node::Sort(_) => T_Sort,
+            Node::WindowAgg(_) => crate::nodewindowagg::T_WindowAgg,
             Node::TableFuncScan(_) => T_TableFuncScan,
             Node::ValuesScan(_) => T_ValuesScan,
             Node::CteScan(_) => crate::nodectescan::T_CteScan,
@@ -476,6 +479,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => &m.plan,
             Node::Unique(u) => &u.plan,
             Node::Sort(s) => &s.plan,
+            Node::WindowAgg(w) => &w.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
             Node::ValuesScan(v) => &v.scan.plan,
             Node::CteScan(c) => &c.scan.plan,
@@ -533,6 +537,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Unique(u) => Ok(Node::Unique(u.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
+            Node::WindowAgg(w) => Ok(Node::WindowAgg(w.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
             Node::ValuesScan(v) => Ok(Node::ValuesScan(v.clone_in(mcx)?)),
             Node::CteScan(c) => Ok(Node::CteScan(c.clone_in(mcx)?)),
