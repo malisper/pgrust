@@ -34,6 +34,7 @@ pub mod index_delete;
 pub mod inplace;
 pub mod insert;
 pub mod lock;
+pub mod scan;
 pub mod update;
 
 use mcx::Mcx;
