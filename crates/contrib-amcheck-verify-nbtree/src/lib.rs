@@ -93,7 +93,7 @@ pub struct BtreeCheckState<'mcx> {
 
     // --- Info for uniqueness checking (filled once per index check) ---
     /// `indexinfo` — index metadata used by the uniqueness check.
-    pub indexinfo: Option<IndexInfo>,
+    pub indexinfo: Option<IndexInfo<'mcx>>,
     /// `snapshot` — table-scan snapshot for heapallindexed / checkunique.
     pub snapshot: Snapshot,
 

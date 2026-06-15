@@ -485,13 +485,17 @@ pub fn make_index_info(
     nulls_not_distinct: bool,
     isready: bool,
     concurrent: bool,
-    _summarizing: bool,
-    _withoutoverlaps: bool,
-) -> IndexInfo {
+    summarizing: bool,
+    withoutoverlaps: bool,
+) -> IndexInfo<'static> {
     // Asserts mirrored from the C (ii_NumIndexKeyAttrs != 0,
     // ii_NumIndexKeyAttrs <= ii_NumIndexAttrs).
     debug_assert!(numkeyattrs != 0);
     debug_assert!(numkeyattrs <= numattrs);
+    // C `makeIndexInfo` sets ii_Summarizing/ii_WithoutOverlaps from its args
+    // and zeroes the rest (palloc0); the expression/predicate lists are not
+    // wired in this port (the callers pass `()` placeholders), so they stay the
+    // `None` (C `NIL`/`NULL`) the struct defaults to.
     IndexInfo {
         ii_NumIndexAttrs: numattrs,
         ii_NumIndexKeyAttrs: numkeyattrs,
@@ -502,9 +506,12 @@ pub fn make_index_info(
         ii_IndexUnchanged: false,
         ii_Concurrent: concurrent,
         ii_BrokenHotChain: false,
+        ii_Summarizing: summarizing,
+        ii_WithoutOverlaps: withoutoverlaps,
         ii_ParallelWorkers: 0,
         ii_Am: amoid,
         ii_IndexAttrNumbers: Default::default(),
+        ..Default::default()
     }
 }
 

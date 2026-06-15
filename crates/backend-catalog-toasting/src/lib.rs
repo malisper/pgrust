@@ -324,6 +324,7 @@ fn create_toast_table<'mcx>(
         ii_BrokenHotChain: false,
         ii_ParallelWorkers: 0,
         ii_Am: BTREE_AM_OID,
+        ..Default::default()
     };
 
     // collationIds[0] = collationIds[1] = InvalidOid;

@@ -277,12 +277,24 @@ impl Default for ParamExecData<'_> {
     }
 }
 
-/// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
+/// `IndexInfo` (execnodes.h) — full field set mirroring the C struct.
 ///
 /// `ii_IndexAttrNumbers` is the C `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]`,
-/// fixed-size here.
-#[derive(Clone, Copy, Debug)]
-pub struct IndexInfo {
+/// fixed-size here. The C struct's `NodeTag type` is the variant discriminant
+/// and is not carried as a field.
+///
+/// In the owned-tree model the C pointer-array members become owned `PgVec`s
+/// (or `None` for the C `NULL`); the expression/predicate `List *`s become
+/// `PgVec<Expr>` / `PgVec<ExprState>`; the single `ExprState *ii_PredicateState`
+/// becomes `Option<PgBox<ExprState>>`. The `void *ii_AmCache` (AM-private cache)
+/// becomes the [`Opaque`] downcast handle, and the `MemoryContext ii_Context`
+/// (the context holding this node) becomes an [`Mcx`] borrow (`None` until set).
+///
+/// Holding `ExprState` (which is not `Clone`/`Copy`) and `Opaque` (a
+/// `Box<dyn Any>`) means `IndexInfo` is neither `Clone` nor `Copy`, unlike the
+/// earlier trimmed shape; consumers borrow it (`&IndexInfo`).
+#[derive(Debug, Default)]
+pub struct IndexInfo<'mcx> {
     /// `int ii_NumIndexAttrs` — total number of columns in the index.
     pub ii_NumIndexAttrs: i32,
     /// `int ii_NumIndexKeyAttrs` — number of key columns in the index.
@@ -290,6 +302,33 @@ pub struct IndexInfo {
     /// `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]` — heap-attribute
     /// numbers of the index's columns (0 for an expression column).
     pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
+    /// `List *ii_Expressions` — expr trees for expression entries, or `None`
+    /// (the C `NIL`) if none.
+    pub ii_Expressions: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *ii_ExpressionsState` — exec state for expressions, or `None`
+    /// (the C `NIL`) if none.
+    pub ii_ExpressionsState: Option<PgVec<'mcx, ExprState<'mcx>>>,
+    /// `List *ii_Predicate` — partial-index predicate, or `None` (the C `NIL`)
+    /// if none.
+    pub ii_Predicate: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `ExprState *ii_PredicateState` — exec state for the predicate, or `None`
+    /// (the C `NULL`) if none.
+    pub ii_PredicateState: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// `Oid *ii_ExclusionOps` — per-column exclusion operators, or `None` (the
+    /// C `NULL`) if none.
+    pub ii_ExclusionOps: Option<PgVec<'mcx, Oid>>,
+    /// `Oid *ii_ExclusionProcs` — underlying function OIDs for
+    /// `ii_ExclusionOps`.
+    pub ii_ExclusionProcs: Option<PgVec<'mcx, Oid>>,
+    /// `uint16 *ii_ExclusionStrats` — opclass strategy numbers for
+    /// `ii_ExclusionOps`.
+    pub ii_ExclusionStrats: Option<PgVec<'mcx, u16>>,
+    /// `Oid *ii_UniqueOps` — like `ii_ExclusionOps`, but for unique indexes.
+    pub ii_UniqueOps: Option<PgVec<'mcx, Oid>>,
+    /// `Oid *ii_UniqueProcs` — underlying function OIDs for `ii_UniqueOps`.
+    pub ii_UniqueProcs: Option<PgVec<'mcx, Oid>>,
+    /// `uint16 *ii_UniqueStrats` — opclass strategy numbers for `ii_UniqueOps`.
+    pub ii_UniqueStrats: Option<PgVec<'mcx, u16>>,
     /// `bool ii_Unique` — is it a unique index?
     pub ii_Unique: bool,
     /// `bool ii_NullsNotDistinct` — does a unique index treat NULLs as not
@@ -307,29 +346,20 @@ pub struct IndexInfo {
     pub ii_Concurrent: bool,
     /// `bool ii_BrokenHotChain` — was a broken HOT chain seen during build?
     pub ii_BrokenHotChain: bool,
+    /// `bool ii_Summarizing` — is it a summarizing index?
+    pub ii_Summarizing: bool,
+    /// `bool ii_WithoutOverlaps` — is it a WITHOUT OVERLAPS index?
+    pub ii_WithoutOverlaps: bool,
     /// `int ii_ParallelWorkers` — number of parallel workers for the build.
     pub ii_ParallelWorkers: i32,
     /// `Oid ii_Am` — the index access method's OID.
     pub ii_Am: Oid,
-}
-
-impl Default for IndexInfo {
-    fn default() -> Self {
-        IndexInfo {
-            ii_NumIndexAttrs: 0,
-            ii_NumIndexKeyAttrs: 0,
-            ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
-            ii_Unique: false,
-            ii_NullsNotDistinct: false,
-            ii_ReadyForInserts: false,
-            ii_CheckedUnchanged: false,
-            ii_IndexUnchanged: false,
-            ii_Concurrent: false,
-            ii_BrokenHotChain: false,
-            ii_ParallelWorkers: 0,
-            ii_Am: Oid::default(),
-        }
-    }
+    /// `void *ii_AmCache` — private cache area for the index AM. `Opaque`
+    /// default is the C `NULL`.
+    pub ii_AmCache: Opaque,
+    /// `MemoryContext ii_Context` — the context holding this `IndexInfo`.
+    /// `None` until set (the C struct stores the owning context here).
+    pub ii_Context: Option<Mcx<'mcx>>,
 }
 
 /// `TriggerDesc` (utils/reltrigger.h) — the full per-relation trigger set
@@ -362,7 +392,7 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_IndexRelationDescs: Option<PgVec<'mcx, Option<types_rel::Relation<'mcx>>>>,
     /// `IndexInfo **ri_IndexRelationInfo` — per-index info, parallel to
     /// `ri_IndexRelationDescs`. `None` is the C NULL array.
-    pub ri_IndexRelationInfo: Option<PgVec<'mcx, IndexInfo>>,
+    pub ri_IndexRelationInfo: Option<PgVec<'mcx, IndexInfo<'mcx>>>,
     /// `List *ri_onConflictArbiterIndexes` — index OIDs that arbitrate
     /// ON CONFLICT / apply-conflict detection. `None` is the C NIL.
     pub ri_onConflictArbiterIndexes: Option<PgVec<'mcx, Oid>>,

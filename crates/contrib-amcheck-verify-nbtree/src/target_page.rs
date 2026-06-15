@@ -1109,7 +1109,7 @@ fn item_id_is_dead(_itemid: &(u32, u32)) -> bool {
 
 /// `IndexInfo->ii_Unique` for the unique-constraint checks. The trimmed
 /// `IndexInfo` carries this flag.
-fn index_info_is_unique(ii: &types_nodes::execnodes::IndexInfo) -> bool {
+fn index_info_is_unique(ii: &types_nodes::execnodes::IndexInfo<'_>) -> bool {
     ii.ii_Unique
 }
 
