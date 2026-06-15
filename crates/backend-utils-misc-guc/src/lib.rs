@@ -359,6 +359,9 @@ pub fn init_seams() {
     s::guc_array_add::set(|a, name, value| guc_array::GUCArrayAdd(a, &name, &value));
     s::guc_array_delete::set(|a, name| guc_array::GUCArrayDelete(a, &name));
     s::guc_array_reset::set(guc_array::GUCArrayReset);
+    // `ApplySetting` processes all options at PGC_SUSET (the right to insert was
+    // checked at insert time) with GUC_ACTION_SET — both baked into the seam.
+    s::process_guc_array::set(|a, source| guc_array::ProcessGUCArray(a, PGC_SUSET, source));
 
     // --- RestrictSearchPath (guc.c:2246; mis-homed seam re-homed here). ---
     s::restrict_search_path::set(restrict_search_path);

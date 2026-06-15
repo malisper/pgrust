@@ -3062,14 +3062,26 @@ dependencies = [
 name = "backend-catalog-pg-db-role-setting"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
  "backend-catalog-pg-db-role-setting-seams",
  "backend-utils-misc-guc-funcs-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-guc",
  "types-parsenodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3080,7 +3092,6 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
- "types-guc",
 ]
 
 [[package]]

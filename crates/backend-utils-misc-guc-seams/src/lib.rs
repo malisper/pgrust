@@ -240,6 +240,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ProcessGUCArray(array, PGC_SUSET, source, GUC_ACTION_SET)`
+    /// (utils/misc/guc.c) — apply each `"name=value"` entry of a
+    /// proconfig/setconfig `text[]` to the current session via
+    /// `set_config_option`. `pg_db_role_setting`'s `ApplySetting` processes all
+    /// options at `PGC_SUSET` with `GUC_ACTION_SET`, so those two are baked into
+    /// the seam contract; the caller supplies the array and its [`GucSource`].
+    /// `Err` carries the per-entry value-parse / permission error surface.
+    pub fn process_guc_array(
+        a: Vec<String>,
+        source: types_guc::guc::GucSource,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `RestrictSearchPath()` (guc.c:2246): outside bootstrap mode, set
     /// `search_path` to the safe value `"pg_catalog, pg_temp"` via
     /// `set_config_option(..., PGC_USERSET, PGC_S_SESSION, GUC_ACTION_SAVE,

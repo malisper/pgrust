@@ -603,3 +603,54 @@ seam_core::seam!(
         locktuple: bool,
     ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
 );
+
+/* ---- pg_db_role_setting catalog-tuple decode / mutators ------------------- *
+ *
+ * pg_db_role_setting.c's `setconfig text[]` column crosses as its decoded
+ * `Vec<String>` of `"name=value"` entries (the repo-wide GUC-array
+ * value-model). The relation crosses as the caller's open `&RelationData` and
+ * the addressed tuple as its heap TID, exactly as the pg_depend mutators above.
+ * Owned by the indexing/catalog-form layer (the array deconstruct/detoast and
+ * `heap_form_tuple`/`heap_modify_tuple`/`CatalogTuple*` live below this crate);
+ * declared-unset, so a call panics until that owner lands. */
+
+seam_core::seam!(
+    /// `heap_getattr(tuple, Anum_pg_db_role_setting_setconfig,
+    /// RelationGetDescr(rel), &isnull)` followed by
+    /// `DatumGetArrayTypeP(datum)` decode of the `setconfig text[]` column
+    /// (pg_db_role_setting.c). `None` is the C `isnull` (SQL NULL setconfig);
+    /// `Some(v)` is the array detoasted into a `Vec<String>` of `"name=value"`
+    /// entries. `Err` carries the detoast error surface.
+    pub fn decode_db_role_setting_setconfig<'mcx>(
+        rel: &RelationData<'mcx>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    ) -> PgResult<Option<Vec<String>>>
+);
+
+seam_core::seam!(
+    /// `heap_modify_tuple(tuple, RelationGetDescr(rel), repl_val, repl_null,
+    /// repl_repl)` replacing only `setconfig` with `new_array`, then
+    /// `CatalogTupleUpdate(rel, &tuple->t_self, newtuple)`
+    /// (pg_db_role_setting.c). The addressed row crosses as its heap TID; the
+    /// replacement `setconfig text[]` as its `Vec<String>` form. `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_db_role_setting(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        new_setconfig: Vec<String>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_form_tuple(RelationGetDescr(rel), values, nulls)` with
+    /// `setdatabase = databaseid`, `setrole = roleid`,
+    /// `setconfig = setconfig` (the `text[]` formed from the `Vec<String>`),
+    /// then `CatalogTupleInsert(rel, newtuple)` (pg_db_role_setting.c). `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_db_role_setting(
+        rel: &RelationData<'_>,
+        databaseid: Oid,
+        roleid: Oid,
+        setconfig: Vec<String>,
+    ) -> PgResult<()>
+);
