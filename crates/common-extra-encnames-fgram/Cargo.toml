@@ -1,0 +1,13 @@
+[package]
+name = "common-extra-encnames-fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_extra_encnames"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }

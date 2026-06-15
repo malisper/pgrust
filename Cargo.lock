@@ -6717,6 +6717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-list-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mmgr-fgram",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "backend-nodes-macros"
 version = "0.0.0"
 dependencies = [
@@ -6796,6 +6805,24 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-nodes-types-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mmgr-fgram",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
+name = "backend-nodes-value-fgram"
+version = "0.1.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mmgr-fgram",
+ "pgrust-pg-ffi-fgram",
 ]
 
 [[package]]
@@ -7416,11 +7443,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-driver-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scan-fgram",
+ "backend-parser-scansup-fgram",
+ "backend-utils-error-fgram",
+ "backend-utils-mb-fgram",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "backend-parser-driver-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-gram-core"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-types-fgram",
+ "backend-parser-gram-seams",
+ "backend-parser-scan-fgram",
+ "backend-parser-scan-seams",
+ "mcx",
+ "pgrust-gram-c2rust-fgram",
+ "pgrust-pg-ffi-fgram",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-opclass",
  "types-parsenodes",
 ]
 
@@ -7463,6 +7519,7 @@ dependencies = [
  "backend-parser-parse-expr-seams",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
+ "backend-parser-small1-seams",
  "backend-utils-adt-format-type",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
@@ -7588,12 +7645,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-scan-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scansup-fgram",
+ "backend-utils-adt-numutils-fgram",
+ "backend-utils-error-fgram",
+ "backend-utils-mb-fgram",
+ "backend-utils-mmgr-fgram",
+ "common-keywords-fgram",
+ "libc",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "backend-parser-scan-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-parser-scansup-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-fgram",
+ "backend-utils-mmgr-fgram",
+ "libc",
+ "pgrust-pg-ffi-fgram",
 ]
 
 [[package]]
@@ -7606,12 +7688,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-small1"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-nodes-core",
+ "backend-parser-analyze-seams",
+ "backend-parser-scansup-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-adt-numutils",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-queryenvironment",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-small1-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-cluster",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -10846,6 +10957,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-numutils-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+]
+
+[[package]]
 name = "backend-utils-adt-oid-seams"
 version = "0.0.0"
 dependencies = [
@@ -11836,6 +11954,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-error-fgram"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "backend-utils-error-seams"
 version = "0.0.0"
 dependencies = [
@@ -12196,6 +12322,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mb-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "common-extra-encnames-fgram",
+ "common-wchar-fgram",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "backend-utils-mb-mbutils-seams"
 version = "0.0.0"
 dependencies = [
@@ -12540,6 +12676,15 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-storage",
+]
+
+[[package]]
+name = "backend-utils-mmgr-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "libc",
+ "pgrust-pg-ffi-fgram",
 ]
 
 [[package]]
@@ -12908,6 +13053,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-extra-encnames-fgram"
+version = "0.0.0"
+dependencies = [
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "common-hashfn"
 version = "0.0.0"
 dependencies = [
@@ -12953,6 +13105,13 @@ name = "common-keywords"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "common-keywords-fgram"
+version = "0.0.0"
+dependencies = [
+ "pgrust-pg-ffi-fgram",
 ]
 
 [[package]]
@@ -13085,6 +13244,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-wchar-fgram"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
 name = "contrib-amcheck-verify-nbtree"
 version = "0.0.0"
 dependencies = [
@@ -13179,6 +13346,26 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg-prng"
 version = "0.0.0"
+
+[[package]]
+name = "pgrust-gram-c2rust-fgram"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-list-fgram",
+ "backend-nodes-types-fgram",
+ "backend-nodes-value-fgram",
+ "backend-parser-driver-fgram",
+ "backend-parser-scan-fgram",
+ "libc",
+ "pgrust-pg-ffi-fgram",
+]
+
+[[package]]
+name = "pgrust-pg-ffi-fgram"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "port-crc32c"
@@ -13487,9 +13674,11 @@ dependencies = [
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
+ "backend-parser-gram-core",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
+ "backend-parser-small1",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",

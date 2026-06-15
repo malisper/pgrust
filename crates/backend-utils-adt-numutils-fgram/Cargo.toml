@@ -1,0 +1,13 @@
+[package]
+name = "backend-utils-adt-numutils-fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_numutils"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-utils-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }

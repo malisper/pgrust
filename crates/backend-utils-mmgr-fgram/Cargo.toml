@@ -1,0 +1,20 @@
+[package]
+name = "backend-utils-mmgr-fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_mmgr"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+memory-context-checking = []
+clobber-freed-memory = []
+randomize-allocated-memory = []
+
+[dependencies]
+backend-utils-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }
+libc = { version = "0.2", default-features = false }
+pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }

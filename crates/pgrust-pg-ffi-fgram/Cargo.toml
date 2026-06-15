@@ -1,0 +1,13 @@
+[package]
+name = "pgrust-pg-ffi-fgram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrust_pg_ffi"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+libc = { version = "0.2", default-features = false }

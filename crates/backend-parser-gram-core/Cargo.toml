@@ -1,0 +1,30 @@
+[package]
+name = "backend-parser-gram-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_gram_core"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-opclass = { path = "../types-opclass" }
+
+# Inward seams this crate (the grammar + scanner owner) installs.
+backend-parser-gram-seams = { path = "../backend-parser-gram-seams" }
+backend-parser-scan-seams = { path = "../backend-parser-scan-seams" }
+
+# The contained, audited-unsafe c2rust grammar + scanner mechanism (see the
+# crate docs): produces the raw `*mut Node` parse graph this crate converts to
+# owned `types_nodes` values.
+pgrust-gram-c2rust = { package = "pgrust-gram-c2rust-fgram", path = "../pgrust-gram-c2rust-fgram" }
+pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }
+backend-nodes-types = { package = "backend-nodes-types-fgram", path = "../backend-nodes-types-fgram" }
+backend-parser-scan-mech = { package = "backend-parser-scan-fgram", path = "../backend-parser-scan-fgram" }

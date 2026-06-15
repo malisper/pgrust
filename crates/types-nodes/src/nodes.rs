@@ -4,7 +4,7 @@
 //! C's `Plan *` is a tagged pointer to any concrete plan node; the owned model
 //! is this enum. Variants are added as the nodes' executor units are ported.
 
-use mcx::{Mcx, PgBox};
+use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
 
 /// `NodeTag` (nodes/nodes.h) — the generated node-type enumeration. Node
@@ -388,6 +388,15 @@ pub enum Node<'mcx> {
     /// enum, this arm only makes an expression reachable where a `Node` is
     /// expected). Additive: the enum is `#[non_exhaustive]`.
     Expr(crate::primnodes::Expr),
+    /// `T_List` — a bare `List *` node carried as a `Node *`.
+    ///
+    /// PostgreSQL parse trees contain `List` nodes directly where a `Node *`
+    /// slot holds a list of nodes — most visibly the rows of `VALUES`
+    /// (`SelectStmt.valuesLists` is a `List` of `List *`, each sublist a `Node`)
+    /// and a few other list-of-lists fields. A `List` is itself a `Node`
+    /// (`nodeTag == T_List`), so it is an arm of the central `Node` enum,
+    /// holding the sublist's elements. Additive (`#[non_exhaustive]`).
+    List(PgVec<'mcx, NodePtr<'mcx>>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -629,6 +638,7 @@ impl<'mcx> Node<'mcx> {
             Node::String(_) => T_String,
             Node::BitString(_) => T_BitString,
             Node::Expr(e) => expr_tag(e),
+            Node::List(_) => T_List,
         }
     }
 
@@ -786,6 +796,15 @@ impl<'mcx> Node<'mcx> {
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.
             Node::Expr(e) => Ok(Node::Expr(e.clone())),
+            Node::List(l) => {
+                let mut out: PgVec<'b, NodePtr<'b>> =
+                    mcx::vec_with_capacity_in(mcx, l.len())?;
+                for item in l.iter() {
+                    let cloned = item.clone_in(mcx)?;
+                    out.push(mcx::alloc_in(mcx, cloned)?);
+                }
+                Ok(Node::List(out))
+            }
         }
     }
 }
