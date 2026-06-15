@@ -112,3 +112,24 @@ fn conv_setop_stmt<'mcx>(
         groupClauses: node_list(mcx, s.groupClauses)?,
     })
 }
+
+// --- PL/pgSQL raw-parse-mode statements ---
+
+fn conv_returnstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::ReturnStmt) -> PgResult<tdn::ReturnStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ReturnStmt { returnval: node_opt(mcx, s.returnval)? })
+}
+
+fn conv_plassignstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cs::PLAssignStmt,
+) -> PgResult<tdn::PLAssignStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::PLAssignStmt {
+        name: cstr_opt(mcx, s.name)?,
+        indirection: node_list(mcx, s.indirection)?,
+        nnames: s.nnames,
+        val: child_node_opt(mcx, s.val)?,
+        location: s.location,
+    })
+}
