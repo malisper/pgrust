@@ -1562,7 +1562,7 @@ fn provide_tbm_free(tbm: &mut types_tidbitmap::TIDBitmap) {
 /// Provider for `tbm_begin_iterate(tbm, dsa, dsp)` (`tidbitmap.c`): build the
 /// unified iterator — shared when `dsp` is valid, else private.
 fn provide_tbm_begin_iterate(
-    tbm: &mut types_tidbitmap::TIDBitmap,
+    tbm: Option<&mut types_tidbitmap::TIDBitmap>,
     dsa: Option<DsaAreaHandle>,
     dsp: types_tidbitmap::dsa_pointer,
 ) -> PgResult<types_tidbitmap::TBMIterator> {
@@ -1578,7 +1578,10 @@ fn provide_tbm_begin_iterate(
             shared_iterator: Some(Box::new(it)),
         })
     } else {
-        // Private: build the backend-local iterator.
+        // Private: build the backend-local iterator. C dereferences `tbm` here
+        // (`tbm_begin_private_iterate(tbm)`), so the private path always has a
+        // non-NULL bitmap.
+        let tbm = tbm.expect("tbm_begin_iterate: private iterate requires a non-NULL tbm");
         let inner = carrier_inner_mut(tbm)?;
         // C: `iterator->tbm = tbm` — the iterator keeps a back-pointer to the
         // (heap-stable) bitmap, which the executor owns for the whole scan

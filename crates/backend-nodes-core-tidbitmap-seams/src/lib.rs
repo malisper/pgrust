@@ -45,9 +45,11 @@ seam_core::seam!(
     /// `tbm_begin_iterate(tbm, dsa, dsp)` (tidbitmap.c): begin iterating the
     /// bitmap. With a valid `dsp` (parallel) it attaches the shared iterator in
     /// `dsa`; otherwise it builds a private iterator. Allocates, so fallible on
-    /// OOM.
+    /// OOM. `tbm` mirrors the C nullable `TIDBitmap *`: it is only dereferenced
+    /// on the private (`dsp` invalid) path, so a non-leader parallel worker that
+    /// never built a local bitmap passes `None`.
     pub fn tbm_begin_iterate(
-        tbm: &mut TIDBitmap,
+        tbm: Option<&mut TIDBitmap>,
         dsa: Option<DsaAreaHandle>,
         dsp: dsa_pointer,
     ) -> PgResult<TBMIterator>

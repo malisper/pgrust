@@ -127,8 +127,12 @@ fn BitmapTableScanSetup<'mcx>(
         Some(p) => p.tbmiterator(),
         None => types_tidbitmap::InvalidDsaPointer,
     };
-    let tbm = node.tbm.as_mut().expect("node->tbm");
-    let tbmiterator = tidbitmap::tbm_begin_iterate::call(tbm, dsa, dsp)?;
+    // C passes `node->tbm` directly, which is NULL for a non-leader parallel
+    // worker that did not observe BM_INITIAL (it never ran MultiExecProcNode);
+    // tbm_begin_iterate only dereferences it on the private path, so the shared
+    // path attaches from `dsp` and ignores the (None) bitmap.
+    let tbmiterator =
+        tidbitmap::tbm_begin_iterate::call(node.tbm.as_deref_mut(), dsa, dsp)?;
 
     // If this is the first scan of the underlying table, create the table scan
     // descriptor and begin the scan.
