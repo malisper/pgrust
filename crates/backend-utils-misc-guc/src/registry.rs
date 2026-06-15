@@ -691,15 +691,14 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
     }
 }
 
-/// Render a double the way C `snprintf("%g")` does.
+/// Render a double the way C `snprintf(buf, "%g", v)` does (the renderer
+/// `ShowGUCOption` uses for `PGC_REAL`). C `%g` uses precision `P = 6`
+/// significant digits by default: it formats with `%e` style when the decimal
+/// exponent `X` satisfies `X < -4` or `X >= P`, otherwise `%f` style, and then
+/// strips trailing zeros and a trailing decimal point. See
+/// [`crate::units::fmt_g`] for the shared implementation.
 fn fmt_g(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        let s = format!("{v:.6}");
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        trimmed.to_string()
-    }
+    crate::units::fmt_g(v)
 }
 
 /// `GetConfigOptionResetString`'s per-record core (guc.c): render a variable's

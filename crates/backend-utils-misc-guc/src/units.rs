@@ -374,3 +374,176 @@ pub fn parse_real(value: &str, flags: i32) -> ParseNum<f64> {
 
     ParseNum::Ok(val)
 }
+
+// ---------------------------------------------------------------------------
+// Real-value rendering, matching C `snprintf("%g", v)` / `snprintf("%.*e", p, v)`.
+//
+// `ShowGUCOption` renders `PGC_REAL` GUCs with `"%g%s"`; `serialize_variable`
+// uses `"%.*e"` with `REALTYPE_PRECISION = 17`. C's printf `%g` and `%e`
+// semantics are reproduced here so the rendered text is byte-identical to the C
+// backend's (this is the value SHOW / current_setting() / a parallel worker
+// reads back).
+// ---------------------------------------------------------------------------
+
+/// `snprintf(buf, "%g", v)` (C printf, default precision 6).
+///
+/// C `%g` with precision `P` (treated as 1 if 0) computes the value's decimal
+/// exponent `X` after rounding to `P` significant digits, then renders with
+/// `%e` style if `X < -4 || X >= P`, else `%f` style; in both cases trailing
+/// zeros (and a trailing `.`) are removed (the `#` flag is not used here).
+pub fn fmt_g(v: f64) -> String {
+    fmt_g_prec(v, 6)
+}
+
+/// `snprintf(buf, "%.*g", precision, v)`: C `%g` with an explicit precision.
+pub fn fmt_g_prec(v: f64, precision: usize) -> String {
+    // Non-finite values: C printf prints "inf"/"-inf"/"nan".
+    if v.is_nan() {
+        return "nan".to_string();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-inf".to_string() } else { "inf".to_string() };
+    }
+
+    // C: "if precision is 0, it is treated as 1".
+    let p = precision.max(1);
+
+    if v == 0.0 {
+        // %g of 0 is "0" (sign of -0.0 is preserved by C: "-0").
+        return if v.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+
+    // Determine X = the exponent that would be used with %e (i.e. after
+    // rounding the magnitude to `p` significant digits). Render with %e at
+    // precision p-1 and read the exponent back; this both rounds and tells us X.
+    let e_str = format!("{:.*e}", p - 1, v);
+    // Rust's {:e} format is like "1.23456e7" / "1.2e-3"; split mantissa/exp.
+    let exp: i32 = e_str
+        .rsplit('e')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let x = exp;
+
+    let out = if x < -4 || x >= p as i32 {
+        // %e style with precision p-1, then strip trailing zeros in the mantissa.
+        format_e_style(v, p - 1)
+    } else {
+        // %f style with precision (p - 1 - X), then strip trailing zeros.
+        let f_prec = (p as i32 - 1 - x).max(0) as usize;
+        let s = format!("{:.*}", f_prec, v);
+        strip_trailing_zeros(&s)
+    };
+    out
+}
+
+/// `snprintf(buf, "%.*e", precision, v)` (C printf `%e`): mantissa with exactly
+/// `precision` fractional digits, `e`, sign, and at least two exponent digits.
+/// Used by `serialize_variable` with `precision = REALTYPE_PRECISION (17)`.
+pub fn fmt_e(v: f64, precision: usize) -> String {
+    if v.is_nan() {
+        return "nan".to_string();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-inf".to_string() } else { "inf".to_string() };
+    }
+    let r = format!("{:.*e}", precision, v);
+    normalize_e(&r)
+}
+
+/// `%e`-style rendering at the given mantissa precision, with C's trailing-zero
+/// stripping (used by the `%g`/`%e` branch of `fmt_g`).
+fn format_e_style(v: f64, mantissa_prec: usize) -> String {
+    let r = format!("{:.*e}", mantissa_prec, v);
+    let normalized = normalize_e(&r);
+    strip_trailing_zeros_e(&normalized)
+}
+
+/// Convert Rust's `{:e}` ("1.5e-3", "1e7") to C printf `%e`
+/// ("1.500000e-03", "1.000000e+07"): force the `+`/`-` exponent sign and pad
+/// the exponent to at least two digits. The mantissa already carries the
+/// requested fractional digits from the format precision.
+fn normalize_e(rust_e: &str) -> String {
+    let (mantissa, exp) = match rust_e.split_once('e') {
+        Some((m, e)) => (m, e),
+        None => return rust_e.to_string(),
+    };
+    let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
+        ('-', rest)
+    } else if let Some(rest) = exp.strip_prefix('+') {
+        ('+', rest)
+    } else {
+        ('+', exp)
+    };
+    let padded = if digits.len() < 2 {
+        format!("{:0>2}", digits)
+    } else {
+        digits.to_string()
+    };
+    format!("{mantissa}e{sign}{padded}")
+}
+
+/// Strip trailing zeros (and a trailing `.`) from a plain `%f` rendering, the
+/// way C `%g` (without the `#` flag) does.
+fn strip_trailing_zeros(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    let trimmed = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    trimmed.to_string()
+}
+
+/// Strip trailing zeros from the mantissa of a `%e` rendering (C `%g`'s
+/// exponential branch), preserving the exponent suffix.
+fn strip_trailing_zeros_e(s: &str) -> String {
+    let (mantissa, exp) = match s.split_once('e') {
+        Some((m, e)) => (m, e),
+        None => return strip_trailing_zeros(s),
+    };
+    format!("{}e{}", strip_trailing_zeros(mantissa), exp)
+}
+
+#[cfg(test)]
+mod fmt_tests {
+    use super::*;
+
+    #[test]
+    fn fmt_g_matches_c_printf_g() {
+        // Integers and simple decimals.
+        assert_eq!(fmt_g(0.0), "0");
+        assert_eq!(fmt_g(1.0), "1");
+        assert_eq!(fmt_g(-1.0), "-1");
+        assert_eq!(fmt_g(1.5), "1.5");
+        assert_eq!(fmt_g(0.1), "0.1");
+        assert_eq!(fmt_g(100.0), "100");
+        // 6 significant digits, rounding.
+        assert_eq!(fmt_g(1.23456789), "1.23457");
+        assert_eq!(fmt_g(123456.0), "123456");
+        // X >= 6 -> exponential.
+        assert_eq!(fmt_g(1234567.0), "1.23457e+06");
+        assert_eq!(fmt_g(1e20), "1e+20");
+        assert_eq!(fmt_g(1.5e20), "1.5e+20");
+        // X < -4 -> exponential.
+        assert_eq!(fmt_g(0.0001), "0.0001");
+        assert_eq!(fmt_g(0.00001), "1e-05");
+        assert_eq!(fmt_g(1.5e-10), "1.5e-10");
+        // Common GUC reals.
+        assert_eq!(fmt_g(0.005), "0.005");
+        assert_eq!(fmt_g(1.1), "1.1");
+        assert_eq!(fmt_g(4.0), "4");
+    }
+
+    #[test]
+    fn fmt_e_matches_c_printf_e() {
+        // %.*e with REALTYPE_PRECISION-style fixed mantissa digits.
+        assert_eq!(fmt_e(1.0, 2), "1.00e+00");
+        assert_eq!(fmt_e(1.5, 2), "1.50e+00");
+        assert_eq!(fmt_e(0.0, 2), "0.00e+00");
+        assert_eq!(fmt_e(-3.5, 2), "-3.50e+00");
+        assert_eq!(fmt_e(1234.0, 2), "1.23e+03");
+        assert_eq!(fmt_e(0.001, 2), "1.00e-03");
+        // 17-digit precision (REALTYPE_PRECISION) round-trips exactly.
+        assert_eq!(fmt_e(1.0, 17), "1.00000000000000000e+00");
+    }
+}
