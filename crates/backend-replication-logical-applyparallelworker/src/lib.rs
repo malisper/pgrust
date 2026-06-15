@@ -1337,15 +1337,10 @@ pub fn pa_reset_subtrans() {
 // 28. pa_stream_abort (C 1422-1497)
 // ===========================================================================
 
-/// The `LogicalRepStreamAbortData` field set this function reads. The full
-/// parse of the abort message belongs to the apply-protocol code; this carries
-/// only the four fields `pa_stream_abort` touches.
-pub struct LogicalRepStreamAbortData {
-    pub xid: TransactionId,
-    pub subxid: TransactionId,
-    pub abort_lsn: XLogRecPtr,
-    pub abort_time: TimestampTz,
-}
+/// `LogicalRepStreamAbortData` (`replication/logicalproto.h`) — the abort
+/// message data `pa_stream_abort` reads. Canonically defined in the
+/// apply-protocol crate (`backend_replication_logical_proto`); re-exported here.
+pub use backend_replication_logical_proto::LogicalRepStreamAbortData;
 
 /// `void pa_stream_abort(LogicalRepStreamAbortData *abort_data)`.
 pub fn pa_stream_abort(abort_data: &LogicalRepStreamAbortData) -> PgResult<()> {

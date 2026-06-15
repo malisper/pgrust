@@ -147,21 +147,9 @@ pub use types_nodes::parsestmt::ParseState;
 
 /// `struct VacuumCutoffs` (`commands/vacuum.h`): the freeze/cutoff values
 /// `vacuum_get_cutoffs` computes and `cluster`/`copy_table_data` consume.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct VacuumCutoffs {
-    /// `TransactionId relfrozenxid` — existing pg_class value at start.
-    pub relfrozenxid: TransactionId,
-    /// `MultiXactId relminmxid` — existing pg_class value at start.
-    pub relminmxid: MultiXactId,
-    /// `TransactionId OldestXmin` — DEAD-cutoff xid.
-    pub OldestXmin: TransactionId,
-    /// `MultiXactId OldestMxact` — DEAD-cutoff mxid.
-    pub OldestMxact: MultiXactId,
-    /// `TransactionId FreezeLimit` — freeze cutoff xid.
-    pub FreezeLimit: TransactionId,
-    /// `MultiXactId MultiXactCutoff` — freeze cutoff mxid.
-    pub MultiXactCutoff: MultiXactId,
-}
+/// Canonically defined in `types_vacuum::vacuum`; re-exported here so existing
+/// `types_cluster::VacuumCutoffs` paths keep working.
+pub use types_vacuum::vacuum::VacuumCutoffs;
 
 /* ----------------------------------------------------------------
  * catalog/index.h: reindex_relation flag bits + ReindexParams

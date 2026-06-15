@@ -104,18 +104,10 @@ pub type dsm_handle = u32;
 /// subsystem via `invoke_entrypoint`).
 pub type ParallelWorkerMainFn = usize;
 
-/// `BgwHandleStatus` (`postmaster/bgworker.h`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BgwHandleStatus {
-    /// `BGWH_STARTED` — worker is running.
-    Started,
-    /// `BGWH_NOT_YET_STARTED` — worker hasn't been started yet.
-    NotYetStarted,
-    /// `BGWH_STOPPED` — worker has exited.
-    Stopped,
-    /// `BGWH_POSTMASTER_DIED` — postmaster died; worker status unclear.
-    PostmasterDied,
-}
+/// `BgwHandleStatus` (`postmaster/bgworker.h`) — canonically defined in
+/// `types_bgworker` (the `postmaster/bgworker.h` home); re-exported here so
+/// existing `types_parallel::BgwHandleStatus` paths keep working.
+pub use types_bgworker::BgwHandleStatus;
 
 /// `shm_mq_result` (`storage/shm_mq.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -14,24 +14,13 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::Oid;
-
 /// `FileSet` (`storage/fileset.h`) — a set of named temporary files. The
 /// parallel-apply shared header keeps a copy (`ParallelApplyWorkerShared.fileset`)
 /// so the leader can hand the serialized-changes fileset to the parallel apply
-/// worker and re-use it for the next streaming transaction.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C)]
-pub struct FileSet {
-    /// `pid_t creator_pid` — PID of the creating process.
-    pub creator_pid: i32,
-    /// `uint32 number` — per-PID identifier.
-    pub number: u32,
-    /// `int ntablespaces` — number of tablespaces to use.
-    pub ntablespaces: i32,
-    /// `Oid tablespaces[8]` — OIDs of tablespaces to use.
-    pub tablespaces: [Oid; 8],
-}
+/// worker and re-use it for the next streaming transaction. Canonically defined
+/// in `types_storage::fileset` (the `storage/fileset.h` home); re-exported here
+/// so existing `types_applyparallel::FileSet` paths keep working.
+pub use types_storage::fileset::FileSet;
 
 /// `shm_mq_result` (`storage/shm_mq.h`) — outcome of a non-blocking send/receive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

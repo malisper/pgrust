@@ -45,3 +45,14 @@ pub struct PgRUsage {
     /// `ru.ru_stime` — system-CPU time, from `getrusage(RUSAGE_SELF)`.
     pub ru_stime: Timeval,
 }
+
+impl PgRUsage {
+    /// Construct a `PgRUsage` from its three captured `timeval`s.
+    pub const fn from_parts(tv: Timeval, ru_utime: Timeval, ru_stime: Timeval) -> Self {
+        Self {
+            tv,
+            ru_utime,
+            ru_stime,
+        }
+    }
+}

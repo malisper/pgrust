@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-tableam = { path = "../types-tableam" }
 types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }

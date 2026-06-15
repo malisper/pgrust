@@ -25,48 +25,18 @@
 use std::mem::MaybeUninit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// One captured `struct timeval`: whole seconds plus microseconds-within-the-
-/// second. Stored as `i64` so 64-bit `time_t`/`suseconds_t` values are
-/// preserved exactly; differences are later narrowed to `int` as in C.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Timeval {
-    pub tv_sec: i64,
-    pub tv_usec: i64,
-}
+// `Timeval`/`PgRUsage` (`utils/pg_rusage.h`) are canonically defined in
+// `types_rusage` (the shared types layer cluster/clean-seams also consume);
+// re-exported here so existing paths keep working.
+pub use types_rusage::{PgRUsage, Timeval};
 
-impl Timeval {
-    pub const fn new(tv_sec: i64, tv_usec: i64) -> Self {
-        Self { tv_sec, tv_usec }
-    }
-}
-
-/// State structure for [`pg_rusage_init`] / [`pg_rusage_show`] — the analog
-/// of C's `PGRUsage` (`utils/pg_rusage.h`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PgRUsage {
-    /// Wall-clock time, from `gettimeofday()`.
-    pub tv: Timeval,
-    /// User-CPU time, from `getrusage(RUSAGE_SELF)`.
-    pub ru_utime: Timeval,
-    /// System-CPU time, from `getrusage(RUSAGE_SELF)`.
-    pub ru_stime: Timeval,
-}
-
-impl PgRUsage {
-    /// Capture a fresh snapshot; constructor form of [`pg_rusage_init`].
-    pub fn new() -> Self {
-        let mut ru0 = PgRUsage::default();
-        pg_rusage_init(&mut ru0);
-        ru0
-    }
-
-    pub const fn from_parts(tv: Timeval, ru_utime: Timeval, ru_stime: Timeval) -> Self {
-        Self {
-            tv,
-            ru_utime,
-            ru_stime,
-        }
-    }
+/// Capture a fresh snapshot; constructor form of [`pg_rusage_init`]
+/// (C `pg_rusage_init`). Free function rather than an inherent method because
+/// the type now lives in `types_rusage`.
+pub fn pg_rusage_new() -> PgRUsage {
+    let mut ru0 = PgRUsage::default();
+    pg_rusage_init(&mut ru0);
+    ru0
 }
 
 /// `gettimeofday(&tv, NULL)` -> `(tv_sec, tv_usec)`.
@@ -110,7 +80,7 @@ pub fn pg_rusage_init(ru0: &mut PgRUsage) {
 /// Compute elapsed time since `ru0` usage snapshot, and format into a
 /// displayable string.
 pub fn pg_rusage_show(ru0: &PgRUsage) -> String {
-    let ru1 = PgRUsage::new();
+    let ru1 = pg_rusage_new();
     pg_rusage_show_between(ru0, &ru1)
 }
 

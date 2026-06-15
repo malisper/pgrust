@@ -16,6 +16,7 @@ types-guc = { path = "../types-guc" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 types-applyparallel = { path = "../types-applyparallel" }
+backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 types-replication-applyparallel = { path = "../types-replication-applyparallel" }
 types-replication-launcher = { path = "../types-replication-launcher" }
 backend-utils-error = { path = "../backend-utils-error" }

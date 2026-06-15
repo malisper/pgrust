@@ -96,7 +96,7 @@ fn pg_rusage_init_populates_snapshot() {
 
 #[test]
 fn live_capture_and_show_runs() {
-    let start = PgRUsage::new();
+    let start = pg_rusage_new();
     let s = pg_rusage_show(&start);
     assert!(s.starts_with("CPU: user: "));
     assert!(s.ends_with(" s"));

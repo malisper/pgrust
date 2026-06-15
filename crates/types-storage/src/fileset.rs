@@ -9,7 +9,7 @@ use types_core::{uint32, Oid};
 
 /// `FileSet` (`storage/fileset.h`) — names a group of temporary files shared
 /// by a set of backends, keyed by the creating PID and a per-PID counter.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct FileSet {
     /// `pid_t creator_pid` — PID of the creating process.

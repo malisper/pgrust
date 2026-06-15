@@ -839,24 +839,10 @@ impl<'mcx> BTVacState<'mcx> {
 }
 
 /// `IndexBulkDeleteResult` (`access/genam.h`) — VACUUM statistics for an
-/// index, accumulated across `btbulkdelete`/`btvacuumcleanup`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IndexBulkDeleteResult {
-    /// `BlockNumber num_pages` — pages remaining in index.
-    pub num_pages: BlockNumber,
-    /// `bool estimated_count` — `num_index_tuples` is an estimate.
-    pub estimated_count: bool,
-    /// `double num_index_tuples` — tuples remaining.
-    pub num_index_tuples: f64,
-    /// `double tuples_removed` — number removed during vacuum operation.
-    pub tuples_removed: f64,
-    /// `BlockNumber pages_newly_deleted` — pages marked deleted by us.
-    pub pages_newly_deleted: BlockNumber,
-    /// `BlockNumber pages_deleted` — pages marked deleted (could be by us).
-    pub pages_deleted: BlockNumber,
-    /// `BlockNumber pages_free` — pages available for reuse.
-    pub pages_free: BlockNumber,
-}
+/// index, accumulated across `btbulkdelete`/`btvacuumcleanup`. Canonically
+/// defined in `types_tableam::genam` (the `access/genam.h` home); re-exported
+/// here so existing `types_nbtree::IndexBulkDeleteResult` paths keep working.
+pub use types_tableam::genam::IndexBulkDeleteResult;
 
 // ===========================================================================
 // Insertion / search scankey descriptor model (access/nbtree.h)

@@ -19,23 +19,10 @@ pub struct VacDeadItemsInfo {
 }
 
 /// `IndexBulkDeleteResult` (`access/genam.h`) — per-index vacuum statistics.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct IndexBulkDeleteResult {
-    /// `BlockNumber num_pages` — pages remaining in index.
-    pub num_pages: u32,
-    /// `bool estimated_count` — `num_index_tuples` is an estimate.
-    pub estimated_count: bool,
-    /// `double num_index_tuples` — tuples remaining.
-    pub num_index_tuples: f64,
-    /// `double tuples_removed` — number removed during vacuum operation.
-    pub tuples_removed: f64,
-    /// `BlockNumber pages_newly_deleted` — pages marked deleted by us.
-    pub pages_newly_deleted: u32,
-    /// `BlockNumber pages_deleted` — pages marked deleted (could be by us).
-    pub pages_deleted: u32,
-    /// `BlockNumber pages_free` — pages available for reuse.
-    pub pages_free: u32,
-}
+/// Canonically defined in `types_tableam::genam` (the `access/genam.h` home);
+/// re-exported here so existing
+/// `types_vacuum::vacuumparallel::IndexBulkDeleteResult` paths keep working.
+pub use types_tableam::genam::IndexBulkDeleteResult;
 
 /// `IndexVacuumInfo` (`access/genam.h`) — the per-call info struct handed to
 /// `ambulkdelete` / `amvacuumcleanup`.

@@ -8608,6 +8608,7 @@ dependencies = [
  "backend-replication-logical-applyparallelworker-seams",
  "backend-replication-logical-launcher-seams",
  "backend-replication-logical-origin-seams",
+ "backend-replication-logical-proto",
  "backend-replication-logical-tablesync-seams",
  "backend-replication-logical-worker-seams",
  "backend-storage-ipc-dsm-core-seams",
@@ -13011,6 +13012,7 @@ name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "types-rusage",
 ]
 
 [[package]]
@@ -14335,6 +14337,7 @@ name = "types-applyparallel"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-storage",
 ]
 
 [[package]]
@@ -14421,6 +14424,7 @@ dependencies = [
  "types-core",
  "types-nodes",
  "types-tuple",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -14660,6 +14664,7 @@ dependencies = [
  "types-core",
  "types-scan",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -14717,6 +14722,7 @@ dependencies = [
 name = "types-parallel"
 version = "0.0.0"
 dependencies = [
+ "types-bgworker",
  "types-core",
  "types-execparallel",
 ]
@@ -15056,6 +15062,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-storage",
+ "types-tableam",
 ]
 
 [[package]]
