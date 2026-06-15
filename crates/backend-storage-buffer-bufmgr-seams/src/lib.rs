@@ -360,10 +360,11 @@ seam_core::seam!(
 );
 
 // ---------------------------------------------------------------------------
-// Buffer-access strategy rings (freelist.c). The opaque
-// `BufferAccessStrategyData` ring lives in the buffer manager; consumers
-// (heapam bulk insert, COPY, VACUUM, ...) only thread the `BufferAccessStrategy`
-// handle. `id == 0` is the C NULL strategy.
+// Buffer-access strategy rings (freelist.c). The backend-private
+// `BufferAccessStrategyData` ring is built by `get_access_strategy` and handed
+// out BY POINTER (`BufferAccessStrategy` = `Rc<RefCell<BufferAccessStrategyData>>`
+// / `None`), mirroring C's palloc'd object; consumers (heapam bulk insert, COPY,
+// VACUUM, ...) thread that pointer. `None` is the C NULL strategy.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -413,7 +414,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, bstrategy)`
     /// (bufmgr.c) — pin a block with an explicit buffer-access strategy (the
-    /// VACUUM path: `_hash_getbuf_with_strategy`). A NULL (`id == 0`) strategy
+    /// VACUUM path: `_hash_getbuf_with_strategy`). A NULL (`None`) strategy
     /// behaves like the default. `Err` carries the smgr read `ereport(ERROR)`s.
     pub fn read_buffer_with_strategy<'mcx>(
         rel: &types_rel::Relation<'mcx>,
@@ -571,7 +572,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `FreeAccessStrategy(strategy)` (freelist.c): free a ring buffer
     /// previously obtained from `GetAccessStrategy`. The C path `pfree`s and
-    /// only `Assert`s, so the seam is infallible. A NULL (`id == 0`) strategy
+    /// only `Assert`s, so the seam is infallible. A NULL (`None`) strategy
     /// is a no-op in C; callers should not pass one.
     pub fn free_access_strategy(strategy: types_storage::buf::BufferAccessStrategy)
 );

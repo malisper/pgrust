@@ -123,7 +123,10 @@ pub fn FreeBulkInsertState(bistate: &mut BulkInsertState) {
     if bistate.current_buf != InvalidBuffer {
         bufmgr_seam::release_buffer::call(bistate.current_buf);
     }
-    bufmgr_seam::free_access_strategy::call(bistate.strategy);
+    // Hand the ring handle to FreeAccessStrategy (which drops it); `.take()`
+    // leaves the field `None`, matching the implicit invalidation as C `pfree`s
+    // the whole BulkInsertStateData.
+    bufmgr_seam::free_access_strategy::call(bistate.strategy.take());
     // C `pfree(bistate)`s the heap allocation; the repo carries the value, so
     // the storage is dropped by the caller.
 }
@@ -616,7 +619,7 @@ mod tests {
         // The carrier mirrors C's BulkInsertStateData defaults set in
         // GetBulkInsertState (sans the strategy ring, which needs the seam).
         let bistate = BulkInsertStateData {
-            strategy: types_storage::buf::BufferAccessStrategy::NONE,
+            strategy: None,
             current_buf: InvalidBuffer,
             next_free: InvalidBlockNumber,
             last_free: InvalidBlockNumber,

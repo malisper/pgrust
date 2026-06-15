@@ -18,7 +18,9 @@
 //! read through the bufmgr seams.
 
 use types_error::{PgError, PgResult};
-use types_storage::buf::{BufferAccessStrategyType, IOContext, Victim};
+use types_storage::buf::{
+    BufferAccessStrategyData, BufferAccessStrategyType, IOContext, Victim,
+};
 use types_core::{Buffer, BLCKSZ};
 use types_storage::InvalidBuffer;
 
@@ -30,42 +32,19 @@ use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
 /// a ring size in buffers (freelist.c).
 const BLCKSZ_KB: i32 = (BLCKSZ / 1024) as i32;
 
-/// `BufferAccessStrategyData` (freelist.c) — the ring of shared buffers a bulk
-/// operation re-uses. BACKEND-LOCAL (not shmem). In C the fixed fields and the
-/// flexible `buffers[]` array are `palloc0`'d together; here the array is a
-/// `Vec<Buffer>` of length `nbuffers`, all initialized to `InvalidBuffer` (0),
-/// which is the exact `palloc0` initial state.
+/// `GetAccessStrategy(btype)` — create a `BufferAccessStrategyData` ring for
+/// the given access type, choosing the ring size per buffer/README. Returns
+/// `Ok(None)` for `BAS_NORMAL` (the "default", no-ring strategy) and for any
+/// type whose computed ring size rounds down to zero buffers.
 ///
-/// `Buffer` numbers are 1-based (`InvalidBuffer == 0`); a slot value of
-/// `InvalidBuffer` means "not yet filled — allocate a fresh buffer via the
-/// normal clock sweep, then record it here with `add_buffer_to_ring`".
-#[derive(Clone, Debug)]
-pub struct BufferAccessStrategy {
-    /// `BufferAccessStrategyType btype` — overall strategy type.
+/// The cluster knobs (`GetPinLimit`, `io_combine_limit`,
+/// `effective_io_concurrency`) are read through their seams. The ring struct
+/// lives in `types-storage`, so this is a free constructor rather than an
+/// associated `new`.
+pub fn get_access_strategy_ring(
     btype: BufferAccessStrategyType,
-    /// `int nbuffers` — number of elements in `buffers`.
-    nbuffers: i32,
-    /// `int current` — index of the "current" slot, i.e. the one most recently
-    /// returned by `GetBufferFromRing`. `palloc0` starts it at 0, but the first
-    /// `GetBufferFromRing` pre-increments it (wrapping from `nbuffers - 1`), so
-    /// the first slot examined is index 1 ... then 0, exactly as C does.
-    current: i32,
-    /// `Buffer buffers[]` — ring slots; `InvalidBuffer` (0) = empty slot.
-    buffers: alloc::vec::Vec<Buffer>,
-}
-
-impl BufferAccessStrategy {
-    /// `GetAccessStrategy(btype)` — create a `BufferAccessStrategy` object for
-    /// the given access type, choosing the ring size per buffer/README. Returns
-    /// `Ok(None)` for `BAS_NORMAL` (the "default", no-ring strategy) and for any
-    /// type whose computed ring size rounds down to zero buffers.
-    ///
-    /// The cluster knobs (`GetPinLimit`, `io_combine_limit`,
-    /// `effective_io_concurrency`) are read through their seams.
-    pub fn GetAccessStrategy(
-        btype: BufferAccessStrategyType,
-        nbuffers_total: i32,
-    ) -> PgResult<Option<Self>> {
+    nbuffers_total: i32,
+) -> PgResult<Option<BufferAccessStrategyData>> {
         let ring_size_kb = match btype {
             // If someone asks for NORMAL, just give 'em a "default" object (None).
             BufferAccessStrategyType::BasNormal => return Ok(None),
@@ -99,19 +78,19 @@ impl BufferAccessStrategy {
             BufferAccessStrategyType::BasVacuum => 2048,
         };
 
-        Self::GetAccessStrategyWithSize(btype, ring_size_kb, nbuffers_total)
-    }
+        get_access_strategy_with_size_ring(btype, ring_size_kb, nbuffers_total)
+}
 
-    /// `GetAccessStrategyWithSize(btype, ring_size_kb)` — create a
-    /// `BufferAccessStrategy` whose ring holds `ring_size_kb / (BLCKSZ/1024)`
-    /// buffers, capped at 1/8 of the shared buffer pool. Returns `Ok(None)` when
-    /// `ring_size_kb` rounds down to zero buffers (0 means "unlimited"; no ring
-    /// needed). `ring_size_kb` must not be negative.
-    pub fn GetAccessStrategyWithSize(
-        btype: BufferAccessStrategyType,
-        ring_size_kb: i32,
-        nbuffers_total: i32,
-    ) -> PgResult<Option<Self>> {
+/// `GetAccessStrategyWithSize(btype, ring_size_kb)` — create a
+/// `BufferAccessStrategyData` whose ring holds `ring_size_kb / (BLCKSZ/1024)`
+/// buffers, capped at 1/8 of the shared buffer pool. Returns `Ok(None)` when
+/// `ring_size_kb` rounds down to zero buffers (0 means "unlimited"; no ring
+/// needed). `ring_size_kb` must not be negative.
+pub fn get_access_strategy_with_size_ring(
+    btype: BufferAccessStrategyType,
+    ring_size_kb: i32,
+    nbuffers_total: i32,
+) -> PgResult<Option<BufferAccessStrategyData>> {
         // Assert(ring_size_kb >= 0).
         if ring_size_kb < 0 {
             return Err(PgError::error(
@@ -142,18 +121,37 @@ impl BufferAccessStrategy {
             .map_err(|_| PgError::error("out of memory (buffer access strategy ring)"))?;
         buffers.resize(ring_buffers as usize, InvalidBuffer);
 
-        Ok(Some(Self {
+        Ok(Some(BufferAccessStrategyData {
             btype,
             nbuffers: ring_buffers,
             current: 0,
             buffers,
         }))
-    }
+}
 
+/// The `freelist.c` ring algorithms over a [`BufferAccessStrategyData`]. The
+/// struct itself lives in `types-storage` (the shared vocabulary crate the
+/// pointer-threading consumers reach), so the per-instance policy — which
+/// touches the bufmgr header/GUC seams this crate consumes — is an extension
+/// trait implemented here. `current` starts at 0 from the `palloc0`, but the
+/// first `get_buffer_from_ring` pre-increments it (wrapping from `nbuffers -
+/// 1`), so the first slot examined is index 1 ... then 0, exactly as C does.
+pub trait BufferAccessStrategyRing {
+    fn GetAccessStrategyBufferCount(&self) -> i32;
+    fn GetAccessStrategyPinLimit(&self) -> i32;
+    fn IOContextForStrategy(&self) -> PgResult<IOContext>;
+    fn get_buffer_from_ring(&mut self) -> PgResult<Option<Victim>>;
+    fn add_buffer_to_ring(&mut self, buf_id: i32);
+    fn reject_buffer(&mut self, buf_id: i32, from_ring: bool) -> bool;
+    fn btype(&self) -> BufferAccessStrategyType;
+    fn current(&self) -> i32;
+}
+
+impl BufferAccessStrategyRing for BufferAccessStrategyData {
     /// `GetAccessStrategyBufferCount(strategy)` — the number of buffers in the
     /// ring. The free-function form returns 0 on a NULL strategy; that NULL case
     /// is the caller's `Option::map_or(0, ...)`.
-    pub fn GetAccessStrategyBufferCount(&self) -> i32 {
+    fn GetAccessStrategyBufferCount(&self) -> i32 {
         self.nbuffers
     }
 
@@ -161,7 +159,7 @@ impl BufferAccessStrategy {
     /// caller should pin at once while looking ahead. `BAS_BULKREAD` may pin the
     /// whole ring (it uses `StrategyRejectBuffer`); the others pin at most half.
     /// The NULL-strategy case (return `NBuffers`) is the caller's, for a `None`.
-    pub fn GetAccessStrategyPinLimit(&self) -> i32 {
+    fn GetAccessStrategyPinLimit(&self) -> i32 {
         match self.btype {
             BufferAccessStrategyType::BasBulkread => self.nbuffers,
             _ => self.nbuffers / 2,
@@ -172,7 +170,7 @@ impl BufferAccessStrategy {
     /// reads/writes. The NULL-strategy case (`IOCONTEXT_NORMAL`) is the
     /// caller's. `BAS_NORMAL` is unreachable here because `GetAccessStrategy`
     /// never builds a ring for it (`pg_unreachable()`).
-    pub fn IOContextForStrategy(&self) -> PgResult<IOContext> {
+    fn IOContextForStrategy(&self) -> PgResult<IOContext> {
         match self.btype {
             BufferAccessStrategyType::BasNormal => Err(PgError::error(
                 "unrecognized BufferAccessStrategyType: BAS_NORMAL",
@@ -193,7 +191,7 @@ impl BufferAccessStrategy {
     ///  * `Ok(None)` — the slot was empty, or the buffer in it is pinned / too
     ///    hot to reuse; the caller should fall through to the clock sweep and
     ///    then record the fresh victim back here with `add_buffer_to_ring`.
-    pub fn get_buffer_from_ring(&mut self) -> PgResult<Option<Victim>> {
+    fn get_buffer_from_ring(&mut self) -> PgResult<Option<Victim>> {
         // Advance to next ring slot.
         self.current += 1;
         if self.current >= self.nbuffers {
@@ -231,7 +229,7 @@ impl BufferAccessStrategy {
     /// contract this is called WITH the buffer's header spinlock held and must
     /// be cheap — a single store. `buf_id` is the 0-based index
     /// (`BufferDescriptorGetBuffer(buf)` stores the 1-based `Buffer`).
-    pub fn add_buffer_to_ring(&mut self, buf_id: i32) {
+    fn add_buffer_to_ring(&mut self, buf_id: i32) {
         self.buffers[self.current as usize] = buf_id + 1;
     }
 
@@ -245,7 +243,7 @@ impl BufferAccessStrategy {
     /// `from_ring` AND is still the one in the current slot is rejected; on
     /// rejection the slot is cleared to `InvalidBuffer` so the ring can't loop
     /// forever on all-dirty members. `buf_id` is the 0-based index.
-    pub fn reject_buffer(&mut self, buf_id: i32, from_ring: bool) -> bool {
+    fn reject_buffer(&mut self, buf_id: i32, from_ring: bool) -> bool {
         // We only do this in bulkread mode.
         if self.btype != BufferAccessStrategyType::BasBulkread {
             return false;
@@ -263,21 +261,22 @@ impl BufferAccessStrategy {
     }
 
     /// The strategy's access type (`BufferAccessStrategyData.btype`).
-    pub fn btype(&self) -> BufferAccessStrategyType {
+    fn btype(&self) -> BufferAccessStrategyType {
         self.btype
     }
 
     /// `strategy->current` — the index of the current ring slot.
-    pub fn current(&self) -> i32 {
+    fn current(&self) -> i32 {
         self.current
     }
 }
 
 /// `FreeAccessStrategy(strategy)` — release a `BufferAccessStrategy` object. In
-/// C this is a guarded `pfree`; in Rust the `Vec` storage is freed when the
-/// value is dropped, so this consumes the strategy (the "don't crash on a
-/// default (NULL) strategy" guard is the caller's `Option`).
-pub fn FreeAccessStrategy(strategy: BufferAccessStrategy) {
+/// C this is a guarded `pfree`; in Rust the `Rc<RefCell<..>>` ring storage is
+/// freed when the last reference is dropped, so this consumes the handle (the
+/// "don't crash on a default (NULL) strategy" guard is the `Option` being
+/// `None`).
+pub fn FreeAccessStrategy(strategy: types_storage::buf::BufferAccessStrategy) {
     drop(strategy);
 }
 
@@ -299,7 +298,7 @@ mod tests {
     fn normal_strategy_is_none() {
         let _g = install_test_seams();
         let s =
-            BufferAccessStrategy::GetAccessStrategy(BufferAccessStrategyType::BasNormal, NBUFFERS)
+            get_access_strategy_ring(BufferAccessStrategyType::BasNormal, NBUFFERS)
                 .unwrap();
         assert!(s.is_none());
     }
@@ -307,7 +306,7 @@ mod tests {
     #[test]
     fn bulkwrite_ring_is_16mb_worth_of_buffers() {
         let _g = install_test_seams();
-        let s = BufferAccessStrategy::GetAccessStrategy(
+        let s = get_access_strategy_ring(
             BufferAccessStrategyType::BasBulkwrite,
             NBUFFERS,
         )
@@ -321,7 +320,7 @@ mod tests {
     #[test]
     fn vacuum_ring_is_2mb_worth_of_buffers() {
         let _g = install_test_seams();
-        let s = BufferAccessStrategy::GetAccessStrategy(BufferAccessStrategyType::BasVacuum, 8192)
+        let s = get_access_strategy_ring(BufferAccessStrategyType::BasVacuum, 8192)
             .unwrap()
             .unwrap();
         assert_eq!(s.GetAccessStrategyBufferCount(), 2048 / BLCKSZ_KB);
@@ -333,7 +332,7 @@ mod tests {
         TestHeaders::set_pin_limit(i32::MAX);
         TestHeaders::set_io_combine_limit(16);
         TestHeaders::set_effective_io_concurrency(10);
-        let s = BufferAccessStrategy::GetAccessStrategy(
+        let s = get_access_strategy_ring(
             BufferAccessStrategyType::BasBulkread,
             4096,
         )
@@ -349,7 +348,7 @@ mod tests {
         TestHeaders::set_pin_limit(1); // ring_max_kb = 1*8 = 8, clamped up to 256
         TestHeaders::set_io_combine_limit(16);
         TestHeaders::set_effective_io_concurrency(10);
-        let s = BufferAccessStrategy::GetAccessStrategy(
+        let s = get_access_strategy_ring(
             BufferAccessStrategyType::BasBulkread,
             4096,
         )
@@ -362,14 +361,14 @@ mod tests {
     #[test]
     fn zero_size_yields_no_strategy() {
         let _g = install_test_seams();
-        let s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             0,
             NBUFFERS,
         )
         .unwrap();
         assert!(s.is_none());
-        let s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             BLCKSZ_KB - 1,
             NBUFFERS,
@@ -381,7 +380,7 @@ mod tests {
     #[test]
     fn negative_size_errors() {
         let _g = install_test_seams();
-        let r = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let r = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             -1,
             NBUFFERS,
@@ -392,7 +391,7 @@ mod tests {
     #[test]
     fn ring_capped_to_one_eighth_of_pool() {
         let _g = install_test_seams();
-        let s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkwrite,
             16 * 1024,
             80, // NBuffers/8 == 10
@@ -405,7 +404,7 @@ mod tests {
     #[test]
     fn pin_limit_bulkread_is_whole_ring_others_half() {
         let _g = install_test_seams();
-        let read = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let read = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -416,7 +415,7 @@ mod tests {
             read.GetAccessStrategyPinLimit(),
             read.GetAccessStrategyBufferCount()
         );
-        let vac = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let vac = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             256,
             NBUFFERS,
@@ -432,7 +431,7 @@ mod tests {
     #[test]
     fn io_context_maps_each_type() {
         let _g = install_test_seams();
-        let read = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let read = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -443,7 +442,7 @@ mod tests {
             read.IOContextForStrategy().unwrap(),
             IOContext::IOCONTEXT_BULKREAD
         );
-        let write = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let write = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkwrite,
             16 * 1024,
             NBUFFERS,
@@ -454,7 +453,7 @@ mod tests {
             write.IOContextForStrategy().unwrap(),
             IOContext::IOCONTEXT_BULKWRITE
         );
-        let vac = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let vac = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             256,
             NBUFFERS,
@@ -471,7 +470,7 @@ mod tests {
     fn empty_slot_returns_none_and_advances() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -488,7 +487,7 @@ mod tests {
     fn add_then_get_reuses_buffer_with_lock_held() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -515,7 +514,7 @@ mod tests {
     fn pinned_ring_buffer_is_skipped() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -541,7 +540,7 @@ mod tests {
     fn hot_ring_buffer_is_skipped() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -564,7 +563,7 @@ mod tests {
     fn reject_buffer_only_bulkread_from_ring_current() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut read = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut read = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasBulkread,
             256,
             NBUFFERS,
@@ -582,7 +581,7 @@ mod tests {
     fn reject_buffer_noop_for_non_bulkread() {
         let _g = install_test_seams();
         TestHeaders::reset(8);
-        let mut vac = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let mut vac = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             256,
             NBUFFERS,
@@ -596,13 +595,17 @@ mod tests {
     #[test]
     fn free_access_strategy_consumes() {
         let _g = install_test_seams();
-        let s = BufferAccessStrategy::GetAccessStrategyWithSize(
+        let s = get_access_strategy_with_size_ring(
             BufferAccessStrategyType::BasVacuum,
             256,
             NBUFFERS,
         )
         .unwrap()
         .unwrap();
-        FreeAccessStrategy(s);
+        // Wrap the ring in the by-pointer handle (`Rc<RefCell<_>>`), as
+        // `GetAccessStrategy` does, then free it.
+        let handle: types_storage::buf::BufferAccessStrategy =
+            Some(alloc::rc::Rc::new(core::cell::RefCell::new(s)));
+        FreeAccessStrategy(handle);
     }
 }

@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult};
+use backend_storage_buffer_support::BufferAccessStrategyRing;
 use types_rel::Relation;
 use types_storage::buf::BufferAccessStrategy;
 use types_storage::storage::{BufferIsValid, InvalidBuffer};
@@ -746,6 +747,9 @@ fn read_stream_begin_impl<'mcx>(
 ) -> PgResult<Box<ReadStream<'mcx>>> {
     let _ = persistence;
 
+    // Whether a (non-NULL) buffer-access strategy ring was supplied.
+    let has_strategy = strategy.is_some();
+
     // Decide how many I/Os we will allow to run at the same time.
     let tablespace_id = spc_oid;
     let my_database_id = backend_utils_init_small_seams::my_database_id::call();
@@ -788,7 +792,7 @@ fn read_stream_begin_impl<'mcx>(
     );
 
     // Give the strategy a chance to limit the number of buffers we pin.
-    let strategy_pin_limit = bm_get_access_strategy_pin_limit(strategy);
+    let strategy_pin_limit = bm_get_access_strategy_pin_limit(&strategy);
     max_pinned_buffers = i64::min(strategy_pin_limit as i64, max_pinned_buffers);
 
     // Also limit to the maximum number of pins we could ever acquire.
@@ -870,7 +874,7 @@ fn read_stream_begin_impl<'mcx>(
         buffers: vec![InvalidBuffer; buffers_len],
         rel,
         forknum,
-        has_strategy: strategy.id != 0,
+        has_strategy,
     };
 
     Ok(Box::new(stream))
@@ -940,19 +944,17 @@ pub fn read_stream_end(mut stream: Box<ReadStream>) -> PgResult<()> {
 // === Helpers bridging the buffer-support pin-limit accessors ================
 
 /// `GetAccessStrategyPinLimit(strategy)` (freelist.c) — the per-strategy pin
-/// cap. A NULL strategy returns `NBuffers` (effectively unbounded; the real cap
-/// is `max_possible_buffer_limit` below). The non-NULL ring cap
+/// cap. A NULL (`None`) strategy returns `NBuffers` (effectively unbounded; the
+/// real cap is `max_possible_buffer_limit` below). The non-NULL ring cap
 /// (`BAS_BULKREAD` == ring size, others == ring/2) is the
-/// [`backend_storage_buffer_support::FreeAccessStrategy::GetAccessStrategyPinLimit`]
-/// method on the ring object; the current `BufferAccessStrategy{id}` handle
-/// model does not expose an id→ring lookup, so a non-NULL strategy also falls
-/// back to `NBuffers` here. This is behaviour-safe: not applying the ring's
-/// optional clamp only relaxes the look-ahead pin count, which is still bounded
-/// by `GetPinLimit()` (`max_possible_buffer_limit`) and the per-call
-/// `GetAdditionalPinLimit()`. (A strategy-ring pin-limit seam is the right
-/// reconciliation once the strategy ring registry lands.)
-fn bm_get_access_strategy_pin_limit(_strategy: BufferAccessStrategy) -> i32 {
-    backend_utils_init_small_seams::nbuffers::call()
+/// [`BufferAccessStrategyRing::GetAccessStrategyPinLimit`] method on the ring
+/// object, read here through the by-pointer handle (the ring is shared, so this
+/// borrows it).
+fn bm_get_access_strategy_pin_limit(strategy: &BufferAccessStrategy) -> i32 {
+    match strategy {
+        None => backend_utils_init_small_seams::nbuffers::call(),
+        Some(ring) => ring.borrow().GetAccessStrategyPinLimit(),
+    }
 }
 
 /// `GetAdditionalPinLimit()` (bufmgr.c) — how many more buffers this backend can

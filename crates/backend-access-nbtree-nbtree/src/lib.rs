@@ -1567,7 +1567,7 @@ fn btvacuumscan<'mcx>(
         readstream::READ_STREAM_MAINTENANCE
             | readstream::READ_STREAM_FULL
             | readstream::READ_STREAM_USE_BATCHING,
-        types_storage::buf::BufferAccessStrategy::NONE,
+        None,
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         readstream::block_range_read_stream_cb(p.clone()),

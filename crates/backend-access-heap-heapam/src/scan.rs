@@ -227,15 +227,17 @@ fn initscan(
 
     if allow_strat {
         // During a rescan, keep the previous strategy object.
-        if scan.rs_strategy == BufferAccessStrategy::NONE {
+        if scan.rs_strategy.is_none() {
             scan.rs_strategy =
                 bufmgr_seam::get_access_strategy::call(BufferAccessStrategyType::BasBulkread)?;
         }
     } else {
-        if scan.rs_strategy != BufferAccessStrategy::NONE {
-            bufmgr_seam::free_access_strategy::call(scan.rs_strategy);
+        if scan.rs_strategy.is_some() {
+            // Hand the ring to FreeAccessStrategy (drops it); `.take()` resets
+            // the field to the C `NULL` strategy.
+            bufmgr_seam::free_access_strategy::call(scan.rs_strategy.take());
         }
-        scan.rs_strategy = BufferAccessStrategy::NONE;
+        scan.rs_strategy = None;
     }
 
     if let Some(p) = parallel.as_ref() {
@@ -1030,7 +1032,7 @@ pub fn heap_beginscan<'mcx>(
         rs_coffset: 0,
         rs_cblock: InvalidBlockNumber,
         rs_cbuf: InvalidBuffer,
-        rs_strategy: BufferAccessStrategy::NONE, // set in initscan
+        rs_strategy: None, // set in initscan
         rs_ctup: None,
         rs_dir: ScanDirection::ForwardScanDirection,
         rs_prefetch_block: InvalidBlockNumber,
@@ -1177,8 +1179,11 @@ pub fn heap_endscan(mut sscan: std::boxed::Box<TableScanDescData<'_>>) -> PgResu
     // (The owned rs_key PgVec is freed when the descriptor drops; C's
     // pfree(rs_key) is implicit.)
 
-    let strategy = heap_scan(&mut sscan).rs_strategy;
-    if strategy != BufferAccessStrategy::NONE {
+    // Take the ring handle out of the descriptor (the descriptor is about to be
+    // dropped) and hand it to FreeAccessStrategy, which drops it. A `None`
+    // (default) strategy is a no-op in C.
+    let strategy = heap_scan(&mut sscan).rs_strategy.take();
+    if strategy.is_some() {
         bufmgr_seam::free_access_strategy::call(strategy);
     }
 

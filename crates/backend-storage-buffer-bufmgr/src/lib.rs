@@ -368,14 +368,14 @@ fn read_buffer_zero_and_lock<'mcx>(
 
 /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, bstrategy)` installed
 /// seam (bufmgr.c) — an explicit buffer-access strategy (VACUUM:
-/// `_hash_getbuf_with_strategy`). A NULL (`id == 0`) strategy behaves like the
+/// `_hash_getbuf_with_strategy`). A NULL (`None`) strategy behaves like the
 /// default.
 fn read_buffer_with_strategy<'mcx>(
     rel: &types_rel::Relation<'mcx>,
     blkno: types_core::primitive::BlockNumber,
     strategy: types_storage::buf::BufferAccessStrategy,
 ) -> types_error::PgResult<Buffer> {
-    let has_strategy = strategy.id != 0;
+    let has_strategy = strategy.is_some();
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
