@@ -7626,6 +7626,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-parse-target"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-commands-dbcommands-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-type",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-parse-type"
 version = "0.0.0"
 dependencies = [
@@ -11866,17 +11895,21 @@ name = "backend-utils-cache-syscache"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "mcx",
  "types-cache",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",
  "types-hash",
+ "types-nodes",
  "types-storage",
  "types-tuple",
 ]
@@ -11906,6 +11939,7 @@ dependencies = [
  "types-format-type",
  "types-hash",
  "types-namespace",
+ "types-nodes",
  "types-partition",
  "types-rel",
  "types-selfuncs",
