@@ -259,6 +259,30 @@ pub fn brinGetTupleForHeapBlock(
     }
 }
 
+/// Copy out the on-disk `BrinTuple` bytes located by [`brinGetTupleForHeapBlock`]
+/// from its (caller-locked) buffer page. In C, `brinGetTupleForHeapBlock`
+/// returns a `BrinTuple *` pointing straight into the locked page buffer, which
+/// `bringetbitmap` then hands to `brin_copy_tuple`; the owned model returns a
+/// `FoundTuple` locator instead, so this reads the `size`-byte item at `off`
+/// back out of the still-locked `buf`. `buf`/`off`/`size` are the
+/// [`FoundTuple`] fields.
+pub fn read_found_tuple_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    found: &FoundTuple,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let off = found.off;
+    let bytes = page_read(found.buf, |page: &[u8]| -> Option<alloc::vec::Vec<u8>> {
+        let pref = PageRef::new(page).ok()?;
+        let lp = PageGetItemId(&pref, off).ok()?;
+        let item = PageGetItem(&pref, &lp).ok()?;
+        Some(item.to_vec())
+    })?;
+    let bytes = bytes.expect("brinGetTupleForHeapBlock located a valid item");
+    let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    out.extend_from_slice(&bytes);
+    Ok(out)
+}
+
 /// `brinRevmapDesummarizeRange` (brin_revmap.c:323): delete an index tuple,
 /// marking a page range as unsummarized. Index must be locked in
 /// ShareUpdateExclusiveLock. Returns `false` if the caller should retry.

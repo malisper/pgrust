@@ -1552,6 +1552,12 @@ fn provide_tbm_add_tuples(
     carrier_inner_mut(tbm)?.add_tuples(tids, recheck)
 }
 
+/// Provider for `backend_nodes_core_seams::tbm_add_page`: mark the whole heap
+/// page `pageno` lossy in the bitmap `tbm` (`tbm_add_page(tbm, pageno)`).
+fn provide_tbm_add_page(tbm: &mut types_tidbitmap::TIDBitmap, pageno: BlockNumber) -> PgResult<()> {
+    tbm_add_page(tbm, pageno)
+}
+
 /// Provider for `tbm_free(tbm)` (`tidbitmap.c`): free the bitmap and any buffers
 /// it holds. Dropping the carrier's boxed [`TidBitmapInner`] is the C
 /// `pfree(pagetable)` / `pfree(spages/schunks)` / `pfree(tbm)`.
@@ -1859,6 +1865,7 @@ fn provide_tbm_union(
 pub fn init_seams() {
     backend_nodes_core_seams::tbm_add_tuple::set(provide_tbm_add_tuple);
     backend_nodes_core_seams::tbm_add_tuples::set(provide_tbm_add_tuples);
+    backend_nodes_core_seams::tbm_add_page::set(provide_tbm_add_page);
 
     backend_nodes_core_tidbitmap_seams::tbm_create::set(provide_tbm_create);
     backend_nodes_core_tidbitmap_seams::tbm_union::set(provide_tbm_union);

@@ -37,7 +37,11 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-brin",
+ "types-core",
  "types-error",
+ "types-rel",
+ "types-scan",
  "types-tuple",
 ]
 
@@ -61,6 +65,34 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-brin-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-brin-pageops",
+ "backend-access-brin-tuple",
+ "backend-access-table-table-seams",
+ "backend-catalog-index-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-amapi",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
+ "types-tuple",
 ]
 
 [[package]]
@@ -927,6 +959,7 @@ dependencies = [
 name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-scan",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
@@ -6833,6 +6866,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
@@ -14145,7 +14179,6 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
- "backend-access-brin-validate",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
