@@ -135,7 +135,7 @@ pub fn range_out<'mcx>(
 ) -> PgResult<Datum> {
     let range = getarg_range_p(mcx, fcinfo, 0)?;
     let cache = get_range_io_data(range_type_get_oid(range), IOFuncSelector::Output)?;
-    let output_str = range_out_kernel(&cache, range)?;
+    let output_str = range_out_kernel(mcx, &cache, range)?;
     // PG_RETURN_CSTRING(output_str): by-ref cstring result.
     fcinfo.set_ref_result(types_fmgr::RefPayload::Cstring(output_str));
     Ok(Datum::null())
@@ -167,7 +167,7 @@ pub fn range_send<'mcx>(
 ) -> PgResult<Datum> {
     let range = getarg_range_p(mcx, fcinfo, 0)?;
     let cache = get_range_io_data(range_type_get_oid(range), IOFuncSelector::Send)?;
-    let bytes = range_send_kernel(&cache, range)?;
+    let bytes = range_send_kernel(mcx, &cache, range)?;
     // PG_RETURN_BYTEA_P(...): by-ref bytea result.
     fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(bytes));
     Ok(Datum::null())
