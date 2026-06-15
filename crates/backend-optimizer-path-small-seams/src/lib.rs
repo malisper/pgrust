@@ -55,6 +55,20 @@ seam_core::seam!(
     ) -> PgResult<f64>
 );
 
+seam_core::seam!(
+    /// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)`
+    /// (clausesel.c): selectivity of a single `RestrictInfo`, identified by its
+    /// [`RinfoId`] handle. (orclauses.c estimates its extracted OR clause and the
+    /// original join OR clause through this.)
+    pub fn clause_selectivity(
+        root: &mut PlannerInfo,
+        clause: RinfoId,
+        var_relid: i32,
+        jointype: JoinType,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> PgResult<f64>
+);
+
 /* ======================================================================
  * statistics/extstats.c — extended-statistics estimator (unported owner).
  * ==================================================================== */

@@ -1361,6 +1361,16 @@ pub struct PlaceHolderVar {
     pub phlevelsup: u32,
 }
 
+/// Handle into the planner's `RestrictInfo` arena (`RinfoId` in
+/// `types-pathnodes`), as embedded inside an [`Expr`] tree. C casts a
+/// `RestrictInfo *` to `Expr *` so a RestrictInfo node can live as a child of a
+/// BoolExpr (the `orclause` produced by `make_sub_restrictinfos`); the
+/// owned-tree analogue carries the arena index, mirroring the
+/// `SlotId`/`EcxtId`/`ResultCellId` handle precedent. `types-pathnodes` converts
+/// between its `RinfoId` and this `RinfoRef`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct RinfoRef(pub u32);
+
 /// Expression-tree node (`Expr *` in C). The `NodeTag` is the enum
 /// discriminant (`IsA(node, Var)` is a match on the variant), so
 /// `ExecInitExprRec`'s switch over the node tag is a `match` over this enum.
@@ -1470,6 +1480,11 @@ pub enum Expr {
     /// in the contiguous executor `Expr` run, but it derives from `Expr` in C
     /// and the optimizer dispatches it via `IsA`/`match`.
     PlaceHolderVar(PlaceHolderVar),
+    /// `T_RestrictInfo` (nodes/pathnodes.h) — a planner RestrictInfo embedded in
+    /// an expression tree. C casts `RestrictInfo *` to `Expr *` to place it
+    /// inside the `orclause` BoolExpr built by `make_sub_restrictinfos`; carried
+    /// here as the [`RinfoRef`] arena handle.
+    RestrictInfo(RinfoRef),
 }
 
 impl Expr {

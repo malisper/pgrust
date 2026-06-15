@@ -356,6 +356,18 @@ impl RinfoId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+    /// Embed this RestrictInfo handle as a [`types_nodes::primnodes::RinfoRef`]
+    /// for placement inside an [`Expr`] tree (the C `(Expr *) restrictinfo`).
+    #[inline]
+    pub fn as_expr_ref(self) -> types_nodes::primnodes::RinfoRef {
+        types_nodes::primnodes::RinfoRef(self.0)
+    }
+}
+impl From<types_nodes::primnodes::RinfoRef> for RinfoId {
+    #[inline]
+    fn from(r: types_nodes::primnodes::RinfoRef) -> Self {
+        RinfoId(r.0)
+    }
 }
 impl EcId {
     #[inline]
@@ -1754,6 +1766,13 @@ pub struct SpecialJoinInfo {
 pub struct PlaceHolderInfo {
     /// `Index phid` — ID for the PH (unique within a planner run).
     pub phid: Index,
+    /// `PlaceHolderVar *ph_var` — the represented placeholder, with its
+    /// `phnullingrels` forced empty (placeholder.c convention). placeholder.c
+    /// reads `ph_var->phexpr`/`ph_var->phnullingrels` and copies the whole node
+    /// into base/join rel targetlists. The full node is carried here; the
+    /// `ph_var_phexpr`/`ph_var_phrels` handle/relids mirrors below are kept for
+    /// the existing join-path consumers (additive).
+    pub ph_var: types_nodes::primnodes::PlaceHolderVar,
     /// `ph_var->phexpr` — the represented expression (an expr `Node *`). The
     /// `ph_var` is a `PlaceHolderVar` tree; the join-path layer only reads its
     /// `phexpr`, so just that expr handle is carried.
@@ -2214,6 +2233,18 @@ impl PlannerInfo {
     #[inline]
     pub fn phinfo(&self, id: PhInfoId) -> &PlaceHolderInfo {
         &self.ph_info_arena[id.index()]
+    }
+    /// Resolve a [`PhInfoId`] for mutation.
+    #[inline]
+    pub fn phinfo_mut(&mut self, id: PhInfoId) -> &mut PlaceHolderInfo {
+        &mut self.ph_info_arena[id.index()]
+    }
+    /// Push a [`PlaceHolderInfo`] into the arena, returning its [`PhInfoId`].
+    #[inline]
+    pub fn alloc_phinfo(&mut self, phinfo: PlaceHolderInfo) -> PhInfoId {
+        let id = PhInfoId(self.ph_info_arena.len() as u32);
+        self.ph_info_arena.push(phinfo);
+        id
     }
     /// Resolve an [`EmId`] to its [`EquivalenceMember`].
     #[inline]
