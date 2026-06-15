@@ -35,8 +35,8 @@ pub fn init_all() {
     backend_access_hash_xlog::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
-    backend_access_transam_multixact::init_seams();
     backend_access_transam_generic_xlog::init_seams();
+    backend_access_transam_multixact::init_seams();
     backend_access_transam_parallel::init_seams();
     backend_access_transam_subtrans::init_seams();
     backend_access_transam_timeline::init_seams();
@@ -146,6 +146,7 @@ pub fn init_all() {
     backend_access_hash_core::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_util_pathnode::init_seams();
     backend_parser_parse_oper::init_seams();
     backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
@@ -705,7 +706,7 @@ mod recurrence_guard {
         // (table_beginscan / table_scan_getnextslot{,_direction} /
         // table_relation_set_new_filelocator retired: the COPY/seqscan scan model
         // was reconciled onto tableam.c's value-typed `TableScanDesc<'mcx>` and the
-        // owner now installs them — the scan-handle divergence is resolved.) Pay down
+        // owner now installs them — the ScanToken divergence is resolved.) Pay down
         // the rest by porting heapam_handler.c + tableamapi.c. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "get_table_am_routine"),
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
