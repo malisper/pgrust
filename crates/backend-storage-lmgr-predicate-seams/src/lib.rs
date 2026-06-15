@@ -176,3 +176,20 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn predicate_lock_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `PredicateLockTID(relation, tid, snapshot, tuple_xid)` (predicate.c):
+    /// the tuple-granularity SIREAD predicate lock a heap fetch / HOT-chain
+    /// search takes after finding a visible tuple, so a serializable
+    /// transaction registers the read for rw-conflict detection. The owner
+    /// short-circuits when `!SerializationNeededForRead(relation, snapshot)`,
+    /// so this is a no-op outside serializable transactions. Keyed by the
+    /// relation OID; `Err` carries the out-of-shared-memory `ereport(ERROR)`.
+    /// Owner unported; scaffolded slot (panics until predicate.c lands).
+    pub fn predicate_lock_tid(
+        relation_oid: types_core::primitive::Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        snapshot: &types_snapshot::SnapshotData,
+        tuple_xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);
