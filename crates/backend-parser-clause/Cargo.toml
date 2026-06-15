@@ -33,7 +33,16 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 types-samplescan = { path = "../types-samplescan" }
 
+# F3a (window-defs + on-conflict) direct sibling owners (cycle-free).
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+types-opclass = { path = "../types-opclass" }
+
 # Outward dependency seams (callees whose owners are not yet ported).
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-parser-target-seams = { path = "../backend-parser-target-seams" }
 backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }

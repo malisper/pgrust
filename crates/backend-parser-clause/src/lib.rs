@@ -230,7 +230,7 @@ pub fn transformLimitClause<'mcx>(
 // ===========================================================================
 
 /// Check that given expr has no Vars of the current query level.
-fn checkExprIsVarFree(
+pub(crate) fn checkExprIsVarFree(
     pstate: &mut ParseState<'_>,
     n: &Expr,
     constructName: &str,
@@ -1474,6 +1474,9 @@ mod from_clause;
 pub use from_clause::{
     setNamespaceLateralState, setTargetTable, transformFromClause,
 };
+
+mod window_conflict;
+pub use window_conflict::{transformOnConflictArbiter, transformWindowDefinitions};
 
 #[cfg(test)]
 mod tests;

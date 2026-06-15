@@ -158,6 +158,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheList2(AMPROCNUM, ObjectIdGetDatum(opfamilyoid),
+    /// ObjectIdGetDatum(lefttype))` member rows, projected and copied into
+    /// `mcx` (the partial-key list keyed by opfamily + amproclefttype).
+    pub fn search_amproc_list2<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamilyoid: Oid,
+        lefttype: Oid,
+    ) -> PgResult<PgVec<'mcx, AmprocRow>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid))` projected to
     /// `NameStr(Form_pg_type->typname)`, copied into `mcx`. `Ok(None)` on a
     /// cache miss (`!HeapTupleIsValid`); `Err` includes OOM from the copy.
