@@ -54,12 +54,9 @@
 //!   with `-1` contributes cursor 0. The collation logic is location-independent
 //!   except for error-message cursors, which collapse to "no cursor" — exactly
 //!   the documented fallback.
-//! * `TargetEntry` trims `ressortgroupref` (model-wide), so the C
-//!   `T_TargetEntry` "indeterminate collation for a sort/group target" eager
-//!   error cannot fire here (the gating field does not exist). The
-//!   COLLATE_CONFLICT state still bubbles up unchanged, so the conflict is still
-//!   detected at the next level that cares (or at runtime), matching the C
-//!   comment that this eager throw is only a better-diagnostic convenience.
+//! * The C `T_TargetEntry` "indeterminate collation for a sort/group target"
+//!   eager error fires here: `TargetEntry` carries `ressortgroupref`, so the
+//!   COLLATE_CONFLICT + `ressortgroupref != 0` throw is reproduced exactly.
 //!
 //! No `extern "C"`, no raw pointers; soft errors flow through `PgResult`.
 
@@ -402,7 +399,8 @@ fn assign_collations_walker(
             return assign_collations_walker_expr(e, context);
         }
 
-        Node::TargetEntry(_) => {
+        Node::TargetEntry(te) => {
+            let ressortgroupref = te.ressortgroupref;
             recurse_children(node, &mut loccontext)?;
 
             // TargetEntry can have only one child, and should bubble that state
@@ -411,12 +409,17 @@ fn assign_collations_walker(
             strength = loccontext.strength;
             location = loccontext.location;
 
-            // C throws here for an indeterminate collation on a sort/group
-            // TargetEntry (`ressortgroupref != 0`). The owned `TargetEntry`
-            // trims `ressortgroupref` (model-wide), so that eager-diagnostic
-            // throw cannot fire; the COLLATE_CONFLICT bubbles up unchanged and
-            // is still caught wherever a parent cares (or at runtime), matching
-            // the C note that this throw is only a convenience.
+            // Throw eagerly for an indeterminate collation on a sort/group
+            // target (`ressortgroupref != 0`): we prefer a syntax-error pointer
+            // now over a runtime comparison-function failure (parse_collate.c:471).
+            if strength == COLLATE_CONFLICT && ressortgroupref != 0 {
+                return Err(implicit_conflict_error(
+                    context.pstate,
+                    loccontext.collation,
+                    loccontext.collation2,
+                    loccontext.location2,
+                )?);
+            }
         }
         Node::RangeTblRef(_)
         | Node::JoinExpr(_)
@@ -428,7 +431,8 @@ fn assign_collations_walker(
             // When invoked on a query's jointree, recurse through join nodes to
             // process WHERE/ON expressions, then stop. Likewise for sort/group
             // lists. (C also lists T_InferenceElem here; it is an Expr in this
-            // model and reached via the Expr switch.)
+            // model and handled with the same recurse-then-return behavior in the
+            // Expr switch.)
             return Ok(());
         }
         Node::Query(q) => {
@@ -612,6 +616,15 @@ fn assign_collations_walker_expr(
                 strength = COLLATE_NONE;
             }
             location = expr_location(Some(expr))?;
+        }
+        Expr::InferenceElem(_) => {
+            // C groups T_InferenceElem with T_RangeTblRef/T_JoinExpr/etc
+            // (parse_collate.c:482): recurse through children to process any
+            // embedded expressions, then `return false` — never bubble collation
+            // state up to the parent. (InferenceElem is an Expr in this model, so
+            // it is reached here rather than in the Node-level switch.)
+            recurse_expr_children(expr, &mut loccontext)?;
+            return Ok(());
         }
         _ => {
             // General case for most expression nodes with children. First

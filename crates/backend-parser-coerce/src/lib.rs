@@ -332,9 +332,11 @@ pub fn coerce_type<'mcx>(
         if inputTypeId != UNKNOWNOID {
             let baseTypeId = lsyscache::get_base_type::call(inputTypeId)?;
             if baseTypeId != inputTypeId {
-                let r = make_relabel_type(node, baseTypeId, -1, InvalidOid, cformat);
-                // r->location = location; (location not modeled in RelabelType)
-                let _ = location;
+                let mut r = make_relabel_type(node, baseTypeId, -1, InvalidOid, cformat);
+                // r->location = location;
+                if let Expr::RelabelType(rt) = &mut r {
+                    rt.location = location;
+                }
                 return Ok(Some(r));
             }
             // Not a domain type, return as-is.
@@ -440,8 +442,11 @@ pub fn coerce_type<'mcx>(
                 false,
             )?;
             if exprs_identical(&result, &node) {
-                let r = make_relabel_type(result, targetTypeId, -1, InvalidOid, cformat);
-                let _ = location;
+                let mut r = make_relabel_type(result, targetTypeId, -1, InvalidOid, cformat);
+                // r->location = location;
+                if let Expr::RelabelType(rt) = &mut r {
+                    rt.location = location;
+                }
                 return Ok(Some(r));
             }
             return Ok(Some(result));
@@ -474,14 +479,17 @@ pub fn coerce_type<'mcx>(
         let baseTypeId = lsyscache::get_base_type::call(inputTypeId)?;
         let mut node = node;
         if baseTypeId != inputTypeId {
-            let rt = make_relabel_type(
+            let mut rt = make_relabel_type(
                 node,
                 baseTypeId,
                 -1,
                 InvalidOid,
                 COERCE_IMPLICIT_CAST,
             );
-            let _ = location;
+            // rt->location = location;
+            if let Expr::RelabelType(r) = &mut rt {
+                r.location = location;
+            }
             node = rt;
         }
         let r = ConvertRowtypeExpr {
@@ -855,9 +863,12 @@ fn build_coercion_expression<'mcx>(
                 args.push(Expr::Const(cons));
             }
 
-            let fexpr = make_func_expr(funcId, targetTypeId, args, InvalidOid, InvalidOid, cformat);
-            // fexpr->location = location (not modeled on FuncExpr).
-            let _ = location;
+            let mut fexpr =
+                make_func_expr(funcId, targetTypeId, args, InvalidOid, InvalidOid, cformat);
+            // fexpr->location = location;
+            if let Expr::FuncExpr(fe) = &mut fexpr {
+                fe.location = location;
+            }
             Ok(fexpr)
         }
         CoercionPathType::Arraycoerce => {
