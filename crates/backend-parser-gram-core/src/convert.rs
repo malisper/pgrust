@@ -34,6 +34,8 @@ use types_nodes::rawnodes as tn; // owned raw-grammar target types
 use types_nodes::rawexprnodes as tn_re; // owned raw-grammar Expr-deriving nodes
 use types_nodes::primnodes as tn_prim;
 use types_nodes::value as tn_val;
+use types_nodes::parsenodes as tn_pn; // owned ObjectType/RoleSpecType
+use types_nodes::partition as tn_part; // owned PartitionStrategy/RangeDatumKind
 
 // ===========================================================================
 // Uniform helpers.
@@ -136,6 +138,14 @@ fn child_opt<'mcx, C, O>(
     }
     let v = f(mcx, p)?;
     Ok(Some(mcx::alloc_in(mcx, v)?))
+}
+
+/// Convert a typed `*mut Child` (whose owned form is a [`Node`] arm) by
+/// reinterpreting it as a `*mut RawNode` and routing through [`convert_node`]
+/// (NULL → None). The child struct begins with a `NodeTag`, so this dispatches
+/// on the tag exactly as the C tree links these sub-nodes by `Node *`.
+fn child_node_opt<'mcx, C>(mcx: Mcx<'mcx>, p: *mut C) -> PgResult<Option<NodePtr<'mcx>>> {
+    node_opt(mcx, p.cast::<RawNode>())
 }
 
 /// A loud mirror-PG-and-panic for a parse node whose `types_nodes` type is not
@@ -278,7 +288,102 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         }
         tags::T_XmlExpr => Ok(Node::XmlExpr(conv_xmlexpr(mcx, n.cast())?)),
 
-        // --- anything else: the absent DDL/utility node families (F2+) ---
+        // --- DDL "CREATE" family (F2): supporting / helper nodes ---
+        tags::T_RoleSpec => Ok(Node::RoleSpec(conv_rolespec(mcx, n.cast())?)),
+        tags::T_DefElem => Ok(Node::DefElem(conv_defelem(mcx, n.cast())?)),
+        tags::T_Constraint => Ok(Node::Constraint(conv_constraint(mcx, n.cast())?)),
+        tags::T_TableLikeClause => {
+            Ok(Node::TableLikeClause(conv_tablelikeclause(mcx, n.cast())?))
+        }
+        tags::T_IndexElem => Ok(Node::IndexElem(conv_indexelem(mcx, n.cast())?)),
+        tags::T_FunctionParameter => {
+            Ok(Node::FunctionParameter(conv_functionparameter(mcx, n.cast())?))
+        }
+        tags::T_ObjectWithArgs => {
+            Ok(Node::ObjectWithArgs(conv_objectwithargs(mcx, n.cast())?))
+        }
+        tags::T_AccessPriv => Ok(Node::AccessPriv(conv_accesspriv(mcx, n.cast())?)),
+        tags::T_CreateOpClassItem => {
+            Ok(Node::CreateOpClassItem(conv_createopclassitem(mcx, n.cast())?))
+        }
+        tags::T_StatsElem => Ok(Node::StatsElem(conv_statselem(mcx, n.cast())?)),
+        tags::T_PartitionElem => {
+            Ok(Node::PartitionElem(conv_partitionelem(mcx, n.cast())?))
+        }
+        tags::T_PartitionSpec => {
+            Ok(Node::PartitionSpec(conv_partitionspec(mcx, n.cast())?))
+        }
+        tags::T_PartitionBoundSpec => {
+            Ok(Node::PartitionBoundSpec(conv_partitionboundspec(mcx, n.cast())?))
+        }
+        tags::T_PartitionRangeDatum => {
+            Ok(Node::PartitionRangeDatum(conv_partitionrangedatum(mcx, n.cast())?))
+        }
+        tags::T_IntoClause => Ok(Node::IntoClause(conv_intoclause(mcx, n.cast())?)),
+
+        // --- DDL "CREATE" family (F2): statements ---
+        tags::T_CreateStmt => Ok(Node::CreateStmt(conv_createstmt(mcx, n.cast())?)),
+        tags::T_IndexStmt => Ok(Node::IndexStmt(conv_indexstmt(mcx, n.cast())?)),
+        tags::T_CreateSeqStmt => {
+            Ok(Node::CreateSeqStmt(conv_createseqstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateStatsStmt => {
+            Ok(Node::CreateStatsStmt(conv_createstatsstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateFunctionStmt => {
+            Ok(Node::CreateFunctionStmt(conv_createfunctionstmt(mcx, n.cast())?))
+        }
+        tags::T_DefineStmt => Ok(Node::DefineStmt(conv_definestmt(mcx, n.cast())?)),
+        tags::T_CreateDomainStmt => {
+            Ok(Node::CreateDomainStmt(conv_createdomainstmt(mcx, n.cast())?))
+        }
+        tags::T_CompositeTypeStmt => {
+            Ok(Node::CompositeTypeStmt(conv_compositetypestmt(mcx, n.cast())?))
+        }
+        tags::T_CreateEnumStmt => {
+            Ok(Node::CreateEnumStmt(conv_createenumstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateRangeStmt => {
+            Ok(Node::CreateRangeStmt(conv_createrangestmt(mcx, n.cast())?))
+        }
+        tags::T_ViewStmt => Ok(Node::ViewStmt(conv_viewstmt(mcx, n.cast())?)),
+        tags::T_CreateTableAsStmt => {
+            Ok(Node::CreateTableAsStmt(conv_createtableasstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateSchemaStmt => {
+            Ok(Node::CreateSchemaStmt(conv_createschemastmt(mcx, n.cast())?))
+        }
+        tags::T_CreateExtensionStmt => {
+            Ok(Node::CreateExtensionStmt(conv_createextensionstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateTrigStmt => {
+            Ok(Node::CreateTrigStmt(conv_createtrigstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateRoleStmt => {
+            Ok(Node::CreateRoleStmt(conv_createrolestmt(mcx, n.cast())?))
+        }
+        tags::T_CreatedbStmt => Ok(Node::CreatedbStmt(conv_createdbstmt(mcx, n.cast())?)),
+        tags::T_CreateCastStmt => {
+            Ok(Node::CreateCastStmt(conv_createcaststmt(mcx, n.cast())?))
+        }
+        tags::T_CreateOpClassStmt => {
+            Ok(Node::CreateOpClassStmt(conv_createopclassstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateOpFamilyStmt => {
+            Ok(Node::CreateOpFamilyStmt(conv_createopfamilystmt(mcx, n.cast())?))
+        }
+        tags::T_CreatePLangStmt => {
+            Ok(Node::CreatePLangStmt(conv_createplangstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateTableSpaceStmt => {
+            Ok(Node::CreateTableSpaceStmt(conv_createtablespacestmt(mcx, n.cast())?))
+        }
+        tags::T_CreateConversionStmt => {
+            Ok(Node::CreateConversionStmt(conv_createconversionstmt(mcx, n.cast())?))
+        }
+        tags::T_CreateAmStmt => Ok(Node::CreateAmStmt(conv_createamstmt(mcx, n.cast())?)),
+
+        // --- anything else: the absent DDL/utility node families (F3/F4) ---
         other => unported(other, node_tag_name(other)),
     }
 }
@@ -286,3 +391,4 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
 include!("convert_stmts.rs");
 include!("convert_exprs.rs");
 include!("convert_misc.rs");
+include!("convert_ddl.rs");
