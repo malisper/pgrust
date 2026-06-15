@@ -23,14 +23,23 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-access-transam-xlogprefetcher-seams = { path = "../backend-access-transam-xlogprefetcher-seams" }
 backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+backend-access-transam-xlogreader = { path = "../backend-access-transam-xlogreader" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
+backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }
 backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
+backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
+backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
+backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 
 # Recovery-target GUC check/assign hooks (guc.rs): slot-name validation,
 # pg_lsn / timestamp parsing, and the GUC check-error reporting protocol.
