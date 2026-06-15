@@ -7671,6 +7671,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-prep-prepagg"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-prep-prepagg-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-parser-parse-agg-seams",
+ "backend-utils-cache-lsyscache",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-prepagg-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-prep-prepjointree"
 version = "0.0.0"
 dependencies = [
@@ -14860,6 +14894,7 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
  "backend-optimizer-plan-subselect-pullup",
+ "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
