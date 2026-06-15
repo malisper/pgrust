@@ -2587,6 +2587,24 @@ pub fn init_seams() {
         with_twophase_state(|state| end_prepare(state, slot, builder, repl))
     });
 
+    // `RegisterTwoPhaseRecord` — append an RM's 2PC record to the in-flight
+    // prepare builder StartPrepare stashed (C's file-scope `records`).
+    seams::register_two_phase_record::set(|rmid, info, data| {
+        PREPARE_BUILDER.with(|b| {
+            let mut slot = b.borrow_mut();
+            let builder = slot
+                .as_mut()
+                .expect("RegisterTwoPhaseRecord called without a matching StartPrepare builder");
+            register_two_phase_record(builder, rmid, info, data)
+        })
+    });
+
+    // `TwoPhaseGetDummyProcNumber` — the dummy PGPROC standing in for a
+    // prepared transaction's xid.
+    seams::two_phase_get_dummy_proc_number::set(|xid, lock_held| {
+        with_twophase_state(|state| two_phase_get_dummy_proc_number(state, xid, lock_held))
+    });
+
     // `PostPrepare_Twophase` / `AtAbort_Twophase` — void cleanup in C (no
     // ereport); the PgResult is from the lock seams / Assert-equivalent
     // RemoveGXact, surfaced as a panic on the impossible-error path.
