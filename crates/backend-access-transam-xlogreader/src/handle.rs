@@ -261,6 +261,13 @@ pub fn reader_EndRecPtr(handle: XLogReaderHandle) -> XLogRecPtr {
     with_reader(handle, |state| state.EndRecPtr)
 }
 
+/// `XLogRecGetFullXid(reader)` (xlogreader.c:2187) for the handle reader — the
+/// `FullTransactionId` of the reader's current record. Delegates to the
+/// value-typed [`crate::XLogRecGetFullXid`]; only safe during replay.
+pub fn XLogRecGetFullXid(handle: XLogReaderHandle) -> types_core::FullTransactionId {
+    with_reader(handle, |state| crate::XLogRecGetFullXid(state))
+}
+
 /// Install the five handle seams this unit owns.
 pub fn init_seams() {
     seam::XLogReaderAllocate::set(XLogReaderAllocate);
