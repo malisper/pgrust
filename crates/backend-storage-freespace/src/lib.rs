@@ -1191,4 +1191,18 @@ pub fn init_seams() {
     backend_storage_freespace_seams::index_free_space_map_vacuum::set(|rel| {
         IndexFreeSpaceMapVacuum(rel)
     });
+    backend_storage_freespace_seams::get_page_with_free_space::set(|rel, space_needed| {
+        GetPageWithFreeSpace(rel, space_needed)
+    });
+    backend_storage_freespace_seams::record_page_with_free_space::set(
+        |rel, heap_blk, space_avail| RecordPageWithFreeSpace(rel, heap_blk, space_avail),
+    );
+    backend_storage_freespace_seams::record_and_get_page_with_free_space::set(
+        |rel, old_page, old_space_avail, space_needed| {
+            RecordAndGetPageWithFreeSpace(rel, old_page, old_space_avail, space_needed)
+        },
+    );
+    backend_storage_freespace_seams::free_space_map_vacuum_range::set(|rel, start, end| {
+        FreeSpaceMapVacuumRange(rel, start, end)
+    });
 }

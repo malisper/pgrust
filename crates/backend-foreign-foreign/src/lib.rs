@@ -678,30 +678,178 @@ pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oi
 }
 
 /* ===========================================================================
- * GetExistingLocalJoinPath — prerequisite-blocked.
- *
- * The C function walks `joinrel->pathlist`, and for each unparameterized
- * MergeJoin/HashJoin/NestLoop path `makeNode`-copies the *subtype*
- * (`HashPath`/`NestPath`/`MergePath`, not a base `Path`), then downcasts each
- * child via `IsA(joinpath->outerjoinpath, ForeignPath)` to splice in
- * `fdw_outerpath`. The owned tree stores `RelOptInfo.pathlist` as the base
- * `Path` node only, with no enum/trait to recover the
- * `JoinPath`/`MergePath`/`HashPath`/`ForeignPath` subtype from a stored base
- * `Path`. Porting the walk would silently drop the subtype fields it
- * manipulates (a false-green stub), so it is blocked on the unified walkable
- * Node enum; it has no caller in the current tree and is not in the inward
- * seam contract. Calling it panics loudly rather than returning a wrong answer.
+ * GetExistingLocalJoinPath (foreign.c:742).
  * ======================================================================== */
 
-/// `GetExistingLocalJoinPath` — obtain an alternate local join path for EPQ.
-/// Prerequisite-blocked on path-subtype polymorphism (see module note above).
-pub fn GetExistingLocalJoinPath(_joinrel: &types_pathnodes::RelOptInfo) -> ! {
-    panic!(
-        "GetExistingLocalJoinPath: prerequisite-blocked — requires recovering \
-         MergePath/HashPath/NestPath/ForeignPath subtypes from a stored base Path, \
-         which the owned pathlist model cannot express until a unified walkable \
-         Node enum lands"
-    );
+/// `IS_JOIN_REL(rel)` (pathnodes.h) — true for `RELOPT_JOINREL` /
+/// `RELOPT_OTHER_JOINREL`.
+#[inline]
+fn is_join_rel(rel: &types_pathnodes::RelOptInfo) -> bool {
+    rel.reloptkind == types_pathnodes::RELOPT_JOINREL
+        || rel.reloptkind == types_pathnodes::RELOPT_OTHER_JOINREL
+}
+
+/// `GetExistingLocalJoinPath` — get a copy of an existing local path for a join
+/// relation, usually to obtain an alternate local path for EPQ checks.
+///
+/// Right now this only supports unparameterized foreign joins, so we only search
+/// for unparameterized MergeJoin/HashJoin/NestLoop paths in `joinrel`'s path
+/// list. If the inner or outer subpath of the chosen path is a `ForeignPath`
+/// corresponding to a pushed-down join, we replace it with its `fdw_outerpath`,
+/// so the returned path is built entirely of local join strategies. The result
+/// is a shallow copy of the original (no need to copy the substructure), so it
+/// is a freshly-allocated [`PathId`] into `root.path_arena`; returns `None` if
+/// no suitable path is found.
+///
+/// Mirrors `foreign.c:742`. In the owned tree paths live in
+/// `PlannerInfo::path_arena` and `RelOptInfo::pathlist` holds [`PathId`]
+/// handles, so the C `(Path *) subtype` up/down-casts and `makeNode`+`memcpy`
+/// copy become [`PathNode`] enum matches plus a clone pushed back into the
+/// arena.
+pub fn GetExistingLocalJoinPath(
+    root: &mut types_pathnodes::PlannerInfo,
+    joinrel: types_pathnodes::RelId,
+) -> Option<types_pathnodes::PathId> {
+    use types_nodes::nodehashjoin::T_HashJoin;
+    use types_nodes::nodemergejoin::T_MergeJoin;
+    use types_nodes::nodenestloop::T_NestLoop;
+    use types_pathnodes::PathNode;
+
+    // Assert(IS_JOIN_REL(joinrel));
+    debug_assert!(is_join_rel(root.rel(joinrel)));
+
+    // foreach(lc, joinrel->pathlist)
+    let pathlist = root.rel(joinrel).pathlist.clone();
+    for path_id in pathlist {
+        // Path *path = (Path *) lfirst(lc);
+        let path = root.path(path_id);
+
+        // Skip parameterized paths.
+        if path.base().param_info.is_some() {
+            continue;
+        }
+
+        // switch (path->pathtype): makeNode(subtype) + memcpy(.., path, ..)
+        // copies the *subtype* node. Recover it from the stored PathNode and
+        // clone it into a fresh `joinpath` candidate. Anything that is not a
+        // MergeJoin/HashJoin/NestLoop is skipped — we don't know if the
+        // corresponding plan would build the output row from whole-row
+        // references of base relations and execute the EPQ checks.
+        let pathtype = path.base().pathtype;
+        let mut joinpath: PathNode = if pathtype == T_HashJoin {
+            match path {
+                PathNode::HashPath(p) => PathNode::HashPath(p.clone()),
+                _ => continue,
+            }
+        } else if pathtype == T_NestLoop {
+            match path {
+                PathNode::NestPath(p) => PathNode::NestPath(p.clone()),
+                _ => continue,
+            }
+        } else if pathtype == T_MergeJoin {
+            match path {
+                PathNode::MergePath(p) => PathNode::MergePath(p.clone()),
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+
+        // The cloned subtype shares its JoinPath base regardless of variant;
+        // grab a &mut JoinPath view to manipulate outer/inner subpaths exactly
+        // as the C `(JoinPath *) hash_path/nest_path/merge_path` up-cast does.
+        let jpath: &mut types_pathnodes::JoinPath = match &mut joinpath {
+            PathNode::HashPath(p) => &mut p.jpath,
+            PathNode::NestPath(p) => &mut p.jpath,
+            PathNode::MergePath(p) => &mut p.jpath,
+            _ => unreachable!("joinpath is one of Hash/Nest/Merge by construction"),
+        };
+
+        // If either inner or outer path is a ForeignPath corresponding to a
+        // pushed-down join, replace it with the fdw_outerpath, so that we
+        // maintain a path for EPQ checks built entirely of local join
+        // strategies.
+
+        // if (IsA(joinpath->outerjoinpath, ForeignPath))
+        if let Some(outer_id) = jpath.outerjoinpath {
+            if let PathNode::ForeignPath(foreign_path) = root.path(outer_id) {
+                // if (IS_JOIN_REL(foreign_path->path.parent))
+                if is_join_rel(root.rel(foreign_path.path.parent)) {
+                    // joinpath->outerjoinpath = foreign_path->fdw_outerpath;
+                    let fdw_outerpath = foreign_path.fdw_outerpath;
+                    jpath.outerjoinpath = fdw_outerpath;
+
+                    // if (joinpath->path.pathtype == T_MergeJoin)
+                    if jpath.path.pathtype == T_MergeJoin {
+                        // If the new outer path is already well enough ordered
+                        // for the mergejoin, we can skip doing an explicit sort.
+                        let new_outer_pathkeys: Vec<types_pathnodes::PathKey> = fdw_outerpath
+                            .map(|id| root.path(id).base().pathkeys.clone())
+                            .unwrap_or_default();
+                        if let PathNode::MergePath(merge_path) = &mut joinpath {
+                            if !merge_path.outersortkeys.is_empty() {
+                                let (contained, n) =
+                                    backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+                                        &merge_path.outersortkeys,
+                                        &new_outer_pathkeys,
+                                    );
+                                merge_path.outer_presorted_keys = n;
+                                if contained {
+                                    merge_path.outersortkeys = Vec::new();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Re-borrow the JoinPath view for the inner side (the outer block above
+        // borrowed `root` immutably, which must end before we touch it again).
+        let jpath: &mut types_pathnodes::JoinPath = match &mut joinpath {
+            PathNode::HashPath(p) => &mut p.jpath,
+            PathNode::NestPath(p) => &mut p.jpath,
+            PathNode::MergePath(p) => &mut p.jpath,
+            _ => unreachable!("joinpath is one of Hash/Nest/Merge by construction"),
+        };
+
+        // if (IsA(joinpath->innerjoinpath, ForeignPath))
+        if let Some(inner_id) = jpath.innerjoinpath {
+            if let PathNode::ForeignPath(foreign_path) = root.path(inner_id) {
+                // if (IS_JOIN_REL(foreign_path->path.parent))
+                if is_join_rel(root.rel(foreign_path.path.parent)) {
+                    // joinpath->innerjoinpath = foreign_path->fdw_outerpath;
+                    let fdw_outerpath = foreign_path.fdw_outerpath;
+                    jpath.innerjoinpath = fdw_outerpath;
+
+                    // if (joinpath->path.pathtype == T_MergeJoin)
+                    if jpath.path.pathtype == T_MergeJoin {
+                        // If the new inner path is already well enough ordered
+                        // for the mergejoin, we can skip doing an explicit sort.
+                        let new_inner_pathkeys: Vec<types_pathnodes::PathKey> = fdw_outerpath
+                            .map(|id| root.path(id).base().pathkeys.clone())
+                            .unwrap_or_default();
+                        if let PathNode::MergePath(merge_path) = &mut joinpath {
+                            if !merge_path.innersortkeys.is_empty()
+                                && backend_optimizer_path_pathkeys::pathkeys_contained_in(
+                                    &merge_path.innersortkeys,
+                                    &new_inner_pathkeys,
+                                )
+                            {
+                                merge_path.innersortkeys = Vec::new();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // return (Path *) joinpath; — materialize the shallow copy in the arena
+        // and hand back its handle.
+        return Some(root.alloc_path(joinpath));
+    }
+    // return NULL;
+    None
 }
 
 /* ===========================================================================

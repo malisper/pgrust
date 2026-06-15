@@ -19,6 +19,7 @@ types-tuple = { path = "../types-tuple" }
 types-foreigncmds = { path = "../types-foreigncmds" }
 types-rel = { path = "../types-rel" }
 types-pathnodes = { path = "../types-pathnodes" }
+backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 
 backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
 backend-foreign-fdwapi-seams = { path = "../backend-foreign-fdwapi-seams" }

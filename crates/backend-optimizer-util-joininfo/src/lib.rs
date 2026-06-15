@@ -46,6 +46,7 @@ use backend_optimizer_path_costsize_seams as costsize_seam;
 use backend_optimizer_path_equivclass_ext_seams as ec_ext_seam;
 use backend_optimizer_path_joinpath_seams as joinpath_seam;
 use backend_optimizer_path_small_seams as small_seam;
+use backend_optimizer_util_placeholder_seams as placeholder_seam;
 pub(crate) use backend_optimizer_util_joininfo_ext_seams as ext_seam;
 use types_nodes::primnodes::Expr;
 
@@ -116,6 +117,18 @@ pub fn init_seams() {
             _ => panic!("find_placeholder_info: node is not a PlaceHolderVar"),
         };
         find_placeholder_info(root, &phv).expect("find_placeholder_info failed")
+    });
+
+    // placeholder.c — placeholder-seams (consumed by the parse-tree-aware
+    // planner driver; prepjointree.c's pull-up code calls make_placeholder_expr,
+    // and find_placeholder_info over the owned PlaceHolderVar). These take/return
+    // real node VALUES over the lifetime-free PlannerInfo, unlike the joinpath
+    // NodeId-handle dispatch form above.
+    placeholder_seam::make_placeholder_expr::set(|root, expr, phrels| {
+        make_placeholder_expr(root, expr, phrels)
+    });
+    placeholder_seam::find_placeholder_info::set(|root, phv| {
+        find_placeholder_info(root, phv)
     });
 
     // joininfo.c — geqo-all-seams (consumed by geqo + joinrels).

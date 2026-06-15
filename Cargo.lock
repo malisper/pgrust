@@ -42,6 +42,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-pageops"
+version = "0.1.0"
+dependencies = [
+ "backend-access-brin-tuple",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-brin-tuple"
 version = "0.0.0"
 dependencies = [
@@ -6369,6 +6391,7 @@ dependencies = [
  "backend-catalog-pg-depend-seams",
  "backend-foreign-fdwapi-seams",
  "backend-foreign-foreign-seams",
+ "backend-optimizer-path-pathkeys",
  "backend-utils-adt-varlena",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
@@ -7366,6 +7389,7 @@ dependencies = [
  "backend-optimizer-path-small-seams",
  "backend-optimizer-util-joininfo-ext-seams",
  "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-cache-lsyscache-seams",
  "mcx",
@@ -7420,6 +7444,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-placeholder-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -14124,7 +14158,6 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
- "backend-access-brin-validate",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
