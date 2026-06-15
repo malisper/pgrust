@@ -395,6 +395,8 @@ fn transformAExprOp<'mcx>(
             arg: new_arg.map(Box::new),
             nulltesttype: NullTestType::IS_NULL,
             argisrow: false,
+            // n->location = a->location;
+            location,
         }));
     }
 
@@ -681,6 +683,7 @@ fn transformCoalesceExpr<'mcx>(
     c: CoalesceExpr,
 ) -> PgResult<Expr> {
     let last_srf = clone_last_srf(pstate);
+    let location = c.location;
 
     let mut newargs: Vec<Expr> = Vec::with_capacity(c.args.len());
     for e in c.args {
@@ -703,6 +706,8 @@ fn transformCoalesceExpr<'mcx>(
         coalescetype,
         coalescecollid: InvalidOid,
         args: newcoercedargs,
+        // newc->location = c->location;
+        location,
     }))
 }
 
@@ -715,6 +720,7 @@ fn transformMinMaxExpr<'mcx>(
     } else {
         "LEAST"
     };
+    let location = m.location;
 
     let mut newargs: Vec<Expr> = Vec::with_capacity(m.args.len());
     for e in m.args {
@@ -737,6 +743,8 @@ fn transformMinMaxExpr<'mcx>(
         inputcollid: InvalidOid,
         op: m.op,
         args: newcoercedargs,
+        // newm->location = m->location;
+        location,
     }))
 }
 
@@ -941,6 +949,8 @@ fn transformCollateClause<'mcx>(
     Ok(Expr::CollateExpr(CollateExpr {
         arg: new_arg.map(Box::new),
         collOid: coll_oid,
+        // newc->location = c->location;
+        location,
     }))
 }
 
@@ -954,6 +964,7 @@ fn transformCaseExpr<'mcx>(
     c: CaseExpr,
 ) -> PgResult<Expr> {
     let last_srf = clone_last_srf(pstate);
+    let case_location = c.location;
 
     // Transform the test expression, if any.
     let arg = c.arg.map(|b| expr_to_node(*b));
@@ -981,6 +992,7 @@ fn transformCaseExpr<'mcx>(
     let mut newargs: Vec<CaseWhen> = Vec::with_capacity(c.args.len());
     let mut resultexprs: Vec<Expr> = Vec::new();
     for w in c.args {
+        let when_location = w.location;
         // Optional CASE shorthand (form 2): expand `placeholder = warg`.
         // The C builds `makeSimpleA_Expr(AEXPR_OP, "=", placeholder, warg)` then
         // recurses — which transforms `warg` (the `placeholder` `CaseTestExpr`
@@ -999,7 +1011,8 @@ fn transformCaseExpr<'mcx>(
                 Some(Expr::CaseTestExpr(ph.clone())),
                 warg_t,
                 last_srf.as_ref(),
-                -1, // CaseWhen trims `location` (docs/types.md rule 3).
+                // makeSimpleA_Expr(..., w->location).
+                when_location,
             )?;
             res
         } else {
@@ -1017,6 +1030,8 @@ fn transformCaseExpr<'mcx>(
         newargs.push(CaseWhen {
             expr: Some(Box::new(cond)),
             result: Some(Box::new(wresult)),
+            // neww->location = w->location;
+            location: when_location,
         });
     }
 
@@ -1064,6 +1079,8 @@ fn transformCaseExpr<'mcx>(
         arg: arg.map(Box::new),
         args: coerced_args,
         defresult: Some(Box::new(defresult)),
+        // newc->location = c->location;
+        location: case_location,
     }))
 }
 
@@ -1324,7 +1341,7 @@ fn make_nulltest_from_distinct<'mcx>(
     pstate: &mut ParseState<'mcx>,
     kind: A_Expr_Kind,
     arg: Option<Node<'mcx>>,
-    _location: i32,
+    location: i32,
 ) -> PgResult<Expr> {
     let new_arg = transformExprRecurse(pstate, arg)?;
     let nulltesttype = if kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
@@ -1337,6 +1354,8 @@ fn make_nulltest_from_distinct<'mcx>(
         nulltesttype,
         // argisrow = false is correct whether or not arg is composite.
         argisrow: false,
+        // nt->location = distincta->location;
+        location,
     }))
 }
 
@@ -1637,6 +1656,8 @@ fn transformArrayExpr<'mcx>(
         element_typeid: element_type,
         elements: newcoercedelems,
         multidims,
+        // newa->location = a->location;
+        location,
     }))
 }
 
@@ -2042,6 +2063,7 @@ fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
 pub fn init_seams() {
     me::analyze_one_exec_param::set(analyze_one_exec_param_impl);
     me::parser_errposition::set(parser_errposition_impl);
+    me::transformExpr::set(transformExpr);
 }
 
 #[cfg(test)]

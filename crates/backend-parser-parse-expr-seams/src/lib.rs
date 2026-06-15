@@ -10,7 +10,22 @@ use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
+use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::Expr;
+
+seam_core::seam!(
+    /// `transformExpr(pstate, expr, exprKind)` (parse_expr.c) — analyze and
+    /// transform a raw-grammar expression node into a fully-typed [`Expr`].
+    /// `expr` is the (untransformed) raw `Node`; `None` for a NULL input yields
+    /// `None`. Saves/restores `pstate->p_expr_kind`. Allocates / can
+    /// `ereport(ERROR)`. Owned by `backend-parser-parse-expr`; consumed by
+    /// `parse_target.c` to avoid the parse_target ⇆ parse_expr crate cycle.
+    pub fn transformExpr<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        expr: Option<Node<'mcx>>,
+        expr_kind: ParseExprKind,
+    ) -> PgResult<Option<Expr>>
+);
 
 /// Result of [`analyze_one_exec_param`] — mirrors the per-parameter body of
 /// `EvaluateParams`: `transformExpr(EXPR_KIND_EXECUTE_PARAMETER)`,

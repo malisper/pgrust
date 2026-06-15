@@ -5,8 +5,16 @@
 //! executable-expression node type, so `ExecInitExprRec`'s ~40-arm switch over
 //! the node tag can be written directly as a `match` over this enum. Each
 //! struct mirrors the C node (`nodes/primnodes.h`, PostgreSQL 18) field-for-
-//! field, trimmed of the purely-planner / query-jumble-only / `location`
-//! fields no executor reader consumes (docs/types.md rule 3).
+//! field, trimmed of the purely-planner / query-jumble-only fields no reader
+//! consumes (docs/types.md rule 3).
+//!
+//! `ParseLoc location` is carried field-for-field on every C node that has it:
+//! the parser (`parse_func`/`parse_oper`/`parse_expr`/`parse_target`/
+//! `parse_clause`) records the source token position in `location` on every
+//! node it builds, and `parser_errposition`/`exprLocation` (nodeFuncs.c) read it
+//! back to point error messages at the offending token. Dropping it would
+//! diverge from C error output, so the earlier "trim location" exception
+//! (docs/types.md rule 3) is reversed for these nodes.
 //!
 //! The `Expr` tree is the read-only parse/plan tree the executor walks at
 //! `ExecInit` time; in C it lives in a memory context and is never mutated
@@ -21,7 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid};
+use types_core::primitive::{AttrNumber, Index, Oid, ParseLoc};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 
@@ -362,6 +370,10 @@ pub struct Const {
     pub constvalue: Datum<'static>,
     /// `bool constisnull` — whether the constant is null.
     pub constisnull: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown. Set by the
+    /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
+    /// primnodes.h.
+    pub location: ParseLoc,
 }
 
 impl Default for Const {
@@ -372,6 +384,7 @@ impl Default for Const {
             constcollid: Default::default(),
             constvalue: Datum::null(),
             constisnull: false,
+            location: -1,
         }
     }
 }
@@ -515,6 +528,8 @@ pub struct BoolExpr {
     pub boolop: BoolExprType,
     /// `List *args` — arguments (exactly one for NOT, two-or-more for AND/OR).
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CompareType` (nodes/cmptype.h) — abstract comparison kind requested of a
@@ -662,7 +677,8 @@ pub enum BoolTestType {
 // ===========================================================================
 // Expr-derived node structs (nodes/primnodes.h). Each has `Expr xpr;` first
 // in C; here the discriminant is the `Expr` enum variant. Purely-planner /
-// query-jumble-only / `location` fields are trimmed (docs/types.md rule 3).
+// query-jumble-only fields are trimmed (docs/types.md rule 3); `location` is
+// carried field-for-field (the parser sets it for error positions).
 // ===========================================================================
 
 /// `Param` (nodes/primnodes.h).
@@ -678,6 +694,8 @@ pub struct Param {
     pub paramtypmod: i32,
     /// `Oid paramcollid`.
     pub paramcollid: Oid,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `Aggref` (nodes/primnodes.h). The aggregate's `args` is a targetlist (list
@@ -715,6 +733,10 @@ pub struct Aggref {
     pub aggvariadic: bool,
     /// `char aggkind` — aggregate kind (see pg_aggregate.h).
     pub aggkind: i8,
+    /// `bool aggpresorted` — aggregate input already sorted. Set by the query
+    /// planner for ORDER BY / DISTINCT aggregates whose input arrives presorted.
+    /// Added field-for-field vs primnodes.h.
+    pub aggpresorted: bool,
     /// `Index agglevelsup`.
     pub agglevelsup: Index,
     /// `AggSplit aggsplit` — expected agg-splitting mode of parent Agg.
@@ -723,6 +745,10 @@ pub struct Aggref {
     pub aggno: i32,
     /// `int aggtransno` — unique ID of transition state in the Agg.
     pub aggtransno: i32,
+    /// `ParseLoc location` — token location, or -1 if unknown. Set by the
+    /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
+    /// primnodes.h.
+    pub location: ParseLoc,
 }
 
 impl Clone for Aggref {
@@ -745,6 +771,8 @@ pub struct GroupingFunc {
     pub cols: Vec<i32>,
     /// `Index agglevelsup`.
     pub agglevelsup: Index,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `WindowFunc` (nodes/primnodes.h).
@@ -770,6 +798,10 @@ pub struct WindowFunc {
     pub winstar: bool,
     /// `bool winagg`.
     pub winagg: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown. Set by the
+    /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
+    /// primnodes.h.
+    pub location: ParseLoc,
 }
 
 /// `MergeSupportFunc` (nodes/primnodes.h) — `MERGE_ACTION()`.
@@ -779,6 +811,8 @@ pub struct MergeSupportFunc {
     pub msftype: Oid,
     /// `Oid msfcollid`.
     pub msfcollid: Oid,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `SubscriptingRef` (nodes/primnodes.h) — a subscripting operation over a
@@ -826,6 +860,10 @@ pub struct FuncExpr {
     pub inputcollid: Oid,
     /// `List *args`.
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown. Set by the
+    /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
+    /// primnodes.h.
+    pub location: ParseLoc,
 }
 
 /// `NamedArgExpr` (nodes/primnodes.h) — a named function argument. The planner
@@ -838,6 +876,8 @@ pub struct NamedArgExpr {
     pub name: Option<String>,
     /// `int argnumber`.
     pub argnumber: i32,
+    /// `ParseLoc location` — argument name location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `SubLink` (nodes/primnodes.h) — a subselect in an expression. The planner
@@ -855,6 +895,8 @@ pub struct SubLink {
     /// as the node address (mirrors the opaque-address precedent in
     /// `execexpr.rs`, e.g. `ExprState::ext_params`). 0 means NULL.
     pub subselect: usize,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `AlternativeSubPlan` (nodes/primnodes.h) — a choice among SubPlans
@@ -916,6 +958,8 @@ pub struct RelabelType {
     pub resultcollid: Oid,
     /// `CoercionForm relabelformat`.
     pub relabelformat: CoercionForm,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CoerceViaIO` (nodes/primnodes.h) — coercion via the source typoutput then
@@ -930,6 +974,8 @@ pub struct CoerceViaIO {
     pub resultcollid: Oid,
     /// `CoercionForm coerceformat`.
     pub coerceformat: CoercionForm,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `ArrayCoerceExpr` (nodes/primnodes.h) — array-type coercion applying a
@@ -948,6 +994,8 @@ pub struct ArrayCoerceExpr {
     pub resultcollid: Oid,
     /// `CoercionForm coerceformat`.
     pub coerceformat: CoercionForm,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `ConvertRowtypeExpr` (nodes/primnodes.h) — composite-to-composite coercion.
@@ -959,6 +1007,8 @@ pub struct ConvertRowtypeExpr {
     pub resulttype: Oid,
     /// `CoercionForm convertformat`.
     pub convertformat: CoercionForm,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CollateExpr` (nodes/primnodes.h) — COLLATE; planner replaces with
@@ -969,6 +1019,8 @@ pub struct CollateExpr {
     pub arg: Option<Box<Expr>>,
     /// `Oid collOid`.
     pub collOid: Oid,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CaseExpr` (nodes/primnodes.h) — a CASE expression.
@@ -984,6 +1036,8 @@ pub struct CaseExpr {
     pub args: Vec<CaseWhen>,
     /// `Expr *defresult` — the ELSE result.
     pub defresult: Option<Box<Expr>>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CaseWhen` (nodes/primnodes.h) — one arm of a CASE expression. (Not itself
@@ -994,6 +1048,8 @@ pub struct CaseWhen {
     pub expr: Option<Box<Expr>>,
     /// `Expr *result` — substitution result.
     pub result: Option<Box<Expr>>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CaseTestExpr` (nodes/primnodes.h) — placeholder for the CASE test value.
@@ -1020,6 +1076,8 @@ pub struct ArrayExpr {
     pub elements: Vec<Expr>,
     /// `bool multidims` — true if elements are sub-arrays.
     pub multidims: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `RowExpr` (nodes/primnodes.h) — a `ROW()` expression.
@@ -1033,6 +1091,8 @@ pub struct RowExpr {
     pub row_format: CoercionForm,
     /// `List *colnames` — list of String, or empty.
     pub colnames: Vec<String>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `RowCompareExpr` (nodes/primnodes.h) — a row-wise comparison.
@@ -1061,6 +1121,8 @@ pub struct CoalesceExpr {
     pub coalescecollid: Oid,
     /// `List *args`.
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `MinMaxExpr` (nodes/primnodes.h) — a GREATEST or LEAST function.
@@ -1076,6 +1138,8 @@ pub struct MinMaxExpr {
     pub op: MinMaxOp,
     /// `List *args`.
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `SQLValueFunction` (nodes/primnodes.h) — a parameterless SQL value function.
@@ -1087,6 +1151,8 @@ pub struct SQLValueFunction {
     pub r#type: Oid,
     /// `int32 typmod`.
     pub typmod: i32,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `XmlExpr` (nodes/primnodes.h) — a SQL/XML function.
@@ -1110,6 +1176,8 @@ pub struct XmlExpr {
     pub r#type: Oid,
     /// `int32 typmod`.
     pub typmod: i32,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `JsonFormatType` (nodes/primnodes.h) — JSON FORMAT clause kind.
@@ -1138,6 +1206,8 @@ pub struct JsonFormat {
     pub format_type: JsonFormatType,
     /// `JsonEncoding encoding`.
     pub encoding: JsonEncoding,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `JsonReturning` (nodes/primnodes.h) — transformed JSON RETURNING clause.
@@ -1182,6 +1252,8 @@ pub struct JsonConstructorExpr {
     pub absent_on_null: bool,
     /// `bool unique`.
     pub unique: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `JsonIsPredicate` (nodes/primnodes.h) — an IS JSON predicate.
@@ -1195,6 +1267,8 @@ pub struct JsonIsPredicate {
     pub item_type: JsonValueType,
     /// `bool unique_keys`.
     pub unique_keys: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `JsonBehaviorType` (nodes/primnodes.h) — ON ERROR / ON EMPTY behavior kind.
@@ -1221,6 +1295,8 @@ pub struct JsonBehavior {
     pub expr: Option<Box<Expr>>,
     /// `bool coerce`.
     pub coerce: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `JsonExpr` (nodes/primnodes.h) — transformed JSON_VALUE/JSON_QUERY/
@@ -1257,6 +1333,8 @@ pub struct JsonExpr {
     pub omit_quotes: bool,
     /// `Oid collation`.
     pub collation: Oid,
+    /// `ParseLoc location` — original JsonFuncExpr's location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `NullTest` (nodes/primnodes.h) — IS [NOT] NULL test.
@@ -1268,6 +1346,8 @@ pub struct NullTest {
     pub nulltesttype: NullTestType,
     /// `bool argisrow` — true to perform field-by-field null checks.
     pub argisrow: bool,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `BooleanTest` (nodes/primnodes.h) — IS [NOT] TRUE/FALSE/UNKNOWN.
@@ -1277,6 +1357,8 @@ pub struct BooleanTest {
     pub arg: Option<Box<Expr>>,
     /// `BoolTestType booltesttype`.
     pub booltesttype: BoolTestType,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CoerceToDomain` (nodes/primnodes.h) — coerce a value to a domain type.
@@ -1292,6 +1374,8 @@ pub struct CoerceToDomain {
     pub resultcollid: Oid,
     /// `CoercionForm coercionformat`.
     pub coercionformat: CoercionForm,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `CoerceToDomainValue` (nodes/primnodes.h) — placeholder for the value a
@@ -1304,6 +1388,8 @@ pub struct CoerceToDomainValue {
     pub typeMod: i32,
     /// `Oid collation`.
     pub collation: Oid,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `SetToDefault` (nodes/primnodes.h) — DEFAULT marker in INSERT/UPDATE.
@@ -1316,6 +1402,8 @@ pub struct SetToDefault {
     pub typeMod: i32,
     /// `Oid collation`.
     pub collation: Oid,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 /// `NextValueExpr` (nodes/primnodes.h) — get next value from a sequence.

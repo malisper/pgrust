@@ -144,6 +144,7 @@ fn node_param_projection() {
         paramtype: INT4OID,
         paramtypmod: -1,
         paramcollid: InvalidOid,
+        location: -1,
     }));
     assert!(query_contains_extern_params_walker(&extern_param));
 
@@ -153,6 +154,7 @@ fn node_param_projection() {
         paramtype: INT4OID,
         paramtypmod: -1,
         paramcollid: InvalidOid,
+        location: -1,
     }));
     assert!(!query_contains_extern_params_walker(&exec_param));
 }

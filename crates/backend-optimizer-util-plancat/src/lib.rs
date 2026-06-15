@@ -958,6 +958,8 @@ fn get_relation_constraints(
                 arg: Some(alloc::boxed::Box::new(var)),
                 nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
                 argisrow: false,
+                // get_relation_constraints sets ntest->location = -1.
+                location: -1,
             });
             let nid = root.alloc_node(ntest);
             result.push(nid);
