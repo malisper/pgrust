@@ -36,7 +36,7 @@ use types_tuple::heaptuple::TupleDesc;
 use crate::nodeindexscan::Plan;
 use crate::nodes::NodeTag;
 use crate::primnodes::Expr;
-use types_tuple::heaptuple::MinimalTupleData;
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 // `Expr` is not lifetime-generic in this crate.
 
@@ -224,7 +224,7 @@ pub struct SharedMemoizeInfo {
 pub struct CachedTuple<'mcx> {
     /// `MinimalTuple mintuple` — the cached tuple's owned payload (palloc'd into
     /// the cache's `tableContext` in C).
-    pub mintuple: MinimalTupleData<'mcx>,
+    pub mintuple: FormedMinimalTuple<'mcx>,
 }
 
 /// One cache entry — the merge of the C `MemoizeEntry` (the simplehash element)
@@ -247,7 +247,7 @@ pub struct CachedTuple<'mcx> {
 #[derive(Debug)]
 pub struct CacheEntry<'mcx> {
     /// `key->params` — the cached parameter values that identify this entry.
-    pub params: MinimalTupleData<'mcx>,
+    pub params: FormedMinimalTuple<'mcx>,
     /// `tuplehead` chain — the cached result tuples for these parameters, in
     /// scan order.
     pub tuples: Vec<CachedTuple<'mcx>>,

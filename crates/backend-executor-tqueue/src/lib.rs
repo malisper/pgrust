@@ -181,7 +181,8 @@ mod registry {
 /// detached.
 pub fn tqueueReceiveSlot<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    slot: &types_nodes::TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
     self_: &mut TQueueDestReceiver,
 ) -> PgResult<bool> {
     // Send the tuple itself.
@@ -189,16 +190,17 @@ pub fn tqueueReceiveSlot<'mcx>(
     //   result = shm_mq_send(tqueue->queue, tuple->t_len, tuple, false, false);
     //   if (should_free)
     //       pfree(tuple);
-    // The owned fetch always returns a copy into `mcx`; the C `should_free` /
-    // `pfree(tuple)` bookkeeping is internal to the execTuples owner. The
-    // `tuple->t_len` bytes C hands to `shm_mq_send` are the minimal tuple's
-    // on-wire byte image.
-    let tuple = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
-        mcx, slot,
+    // The owned fetch returns a copy of the slot's contents as the minimal
+    // tuple's contiguous C byte image (the flat blob, `tuple->t_len` bytes —
+    // exactly what C hands `shm_mq_send`); the C `should_free` / `pfree(tuple)`
+    // bookkeeping is internal to the execTuples owner.
+    let data = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
+        mcx, estate, slot,
     )?;
-    let data = tuple.to_minimal_bytes();
 
     let queue = self_.queue.expect("tqueueReceiveSlot: queue is NULL");
+    // shm_mq_send takes an owned global-heap Vec; copy the flat blob out of mcx.
+    let data: alloc::vec::Vec<u8> = data.iter().copied().collect();
     let result = shmmq::shm_mq_send::call(queue, data, false, false)?;
 
     // Check for failure.

@@ -3583,6 +3583,7 @@ dependencies = [
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-catalog",
@@ -4795,6 +4796,7 @@ dependencies = [
 name = "backend-executor-nodeGather"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4822,6 +4824,7 @@ dependencies = [
 name = "backend-executor-nodeGatherMerge"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4866,6 +4869,7 @@ dependencies = [
 name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4923,6 +4927,7 @@ dependencies = [
 name = "backend-executor-nodeHashjoin"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",

@@ -660,7 +660,9 @@ fn setop_retrieve_hash_table<'mcx>(
         // The entry's firstTuple is stored into the result slot by the owner of
         // ScanTupleHashTable; we capture the per-group counts here, then run
         // set_output_count and the store below.
-        let mut entry_tuple: Option<types_tuple::heaptuple::MinimalTuple<'mcx>> = None;
+        let mut entry_tuple: Option<
+            types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+        > = None;
         let found = {
             let mcx = estate.es_query_cxt;
             let mut hashiter = setopstate.hashiter;
@@ -678,7 +680,7 @@ fn setop_retrieve_hash_table<'mcx>(
                     // which set_output_count's emit path stores into the result
                     // slot. We capture an owned copy to store below; the entry's
                     // firstTuple lives in the table's tablecxt.
-                    entry_tuple = Some(copy_minimal_tuple(&entry.firstTuple, mcx));
+                    entry_tuple = copy_minimal_tuple(&entry.firstTuple, mcx);
                 },
             )?;
             setopstate.hashiter = hashiter;
@@ -1154,18 +1156,13 @@ fn write_pergroup(additional: &mut [u8], pergroup: &SetOpStatePerGroupData) {
 /// Copy a hash entry's stored `firstTuple` (`TupleHashEntryGetTuple`) into a new
 /// owned `MinimalTuple` in `mcx` for storing into the result slot.
 fn copy_minimal_tuple<'mcx>(
-    src: &types_tuple::heaptuple::MinimalTuple<'mcx>,
+    src: &Option<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>>,
     mcx: Mcx<'mcx>,
-) -> types_tuple::heaptuple::MinimalTuple<'mcx> {
-    match src {
-        Some(m) => {
-            let copied = m
-                .clone_in(mcx)
-                .expect("copy_minimal_tuple: cloning the hash entry tuple");
-            Some(mcx::alloc_in(mcx, copied).expect("copy_minimal_tuple: boxing the clone"))
-        }
-        None => None,
-    }
+) -> Option<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>> {
+    src.as_ref().map(|m| {
+        m.clone_in(mcx)
+            .expect("copy_minimal_tuple: cloning the hash entry tuple")
+    })
 }
 
 /// `elog(ERROR, fmt, ...)` — formatted internal-error text.

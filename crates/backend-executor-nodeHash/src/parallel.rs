@@ -742,7 +742,9 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
         let mut meta = [0u8; 4];
         while let Some(tuple) = sts::sts_parallel_scan_next_handle::call(mcx, accessor, &mut meta)? {
             let hashvalue = u32::from_ne_bytes(meta);
-            let t_len = tuple.t_len as usize;
+            // `tuple` is the flat C MinimalTuple image; its t_len is the blob len
+            // (== the leading u32).
+            let t_len = tuple.len();
             let tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + t_len);
 
             let bb = exec_hash_get_bucket_and_batch(hashtable, hashvalue);
@@ -810,19 +812,21 @@ pub fn ExecParallelHashMergeCounters<'mcx>(hashtable: &mut HashJoinTableData<'mc
 pub fn ExecParallelHashTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    slot: &types_nodes::TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
     // bool shouldFree;
     // MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
-    // The execTuples seam copies the slot's tuple into mcx; the owned model
-    // never frees explicitly (the copy is dropped with the context). We stage
-    // its flat byte image so the DSA copy below sees the real tuple bytes.
-    let tuple =
-        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
-    let image = tuple.to_minimal_bytes();
+    // The execTuples seam copies the slot's tuple into mcx as the contiguous C
+    // `MinimalTuple` byte image (the flat blob, `t_len` bytes); the owned model
+    // never frees explicitly (the copy is dropped with the context). The DSA copy
+    // below memcpy's exactly those `t_len` bytes, as C does.
+    let image = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
+        mcx, estate, slot,
+    )?;
     let mintuple_addr = image.as_ptr() as usize;
-    let t_len = tuple.t_len as usize;
+    let t_len = image.len();
 
     loop {
         let bb = exec_hash_get_bucket_and_batch(hashtable, hashvalue);
@@ -873,14 +877,15 @@ pub fn ExecParallelHashTableInsert<'mcx>(
 pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    slot: &types_nodes::TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
-    let tuple =
-        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
-    let image = tuple.to_minimal_bytes();
+    let image = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
+        mcx, estate, slot,
+    )?;
     let mintuple_addr = image.as_ptr() as usize;
-    let t_len = tuple.t_len as usize;
+    let t_len = image.len();
 
     let bb = exec_hash_get_bucket_and_batch(hashtable, hashvalue);
     debug_assert_eq!(bb.batchno, hashtable.curbatch);
@@ -949,7 +954,6 @@ pub fn ExecParallelScanHashBucket<'mcx>(
             // The shared tuple is a flat MinimalTuple byte image in DSA;
             // reconstruct it into mcx and force-store into the hash-tuple slot.
             let mtup = mintuple_from_dsa(mcx, hjtuple_mintuple_addr(ht.0))?;
-            let mtup = mcx::alloc_in(mcx, mtup)?;
             backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
                 hash_tuple_slot,
                 mtup,
@@ -1104,7 +1108,6 @@ pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
                 //                                    hj_HashTupleSlot, false);
                 //   econtext->ecxt_innertuple = inntuple;  ResetExprContext(econtext);
                 let mtup = mintuple_from_dsa(mcx, mintuple_addr)?;
-                let mtup = mcx::alloc_in(mcx, mtup)?;
                 backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
                     hash_tuple_slot,
                     mtup,
@@ -1904,19 +1907,18 @@ fn current_proc_number() -> types_core::ProcNumber {
 }
 
 /// `sts_puttuple(accessor, &hashvalue, tuple)` over an on-DSA MinimalTuple at
-/// `mintuple_addr`. The sts seam takes a real `MinimalTupleData`, so we view
-/// the DSA bytes as one.
+/// `mintuple_addr`. The DSA holds the tuple's contiguous C `MinimalTuple` byte
+/// image (the flat blob, `t_len` bytes), which is exactly the form the sts seam
+/// carries, so we hand it the byte slice directly.
 #[inline]
 fn sts_puttuple_raw(
     accessor: types_execparallel::SharedTuplestoreAccessorHandle,
     hashvalue: uint32,
     mintuple_addr: usize,
-    _t_len: usize,
+    t_len: usize,
 ) -> PgResult<()> {
     let meta = hashvalue.to_ne_bytes();
-    let tuple = unsafe {
-        &*(mintuple_addr as *const types_tuple::heaptuple::MinimalTupleData<'_>)
-    };
+    let tuple = unsafe { core::slice::from_raw_parts(mintuple_addr as *const u8, t_len) };
     sts::sts_puttuple_handle::call(accessor, &meta, tuple)
 }
 
@@ -2019,28 +2021,25 @@ fn dsa_pointer_atomic_write(buckets_addr: usize, i: i32, val: DsaPointer) {
 // slot<->MinimalTuple transfer is owned by execTuples. Per-backend scratch
 // holds the flat image for the duration of one insert/scan step.
 
-/// Reconstruct a `MinimalTupleData` (into `mcx`) from the flat MinimalTuple
-/// byte image at a DSA address. The image is the `to_minimal_bytes()` layout
-/// the insert path wrote: leading `t_len` word then the body. C reads the same
-/// bytes directly as a `MinimalTuple *`; the owned model rebuilds the struct.
+/// Reconstruct a [`FormedMinimalTuple`] (into `mcx`) from the flat MinimalTuple
+/// byte image at a DSA address. The image is the contiguous C `MinimalTuple`
+/// (the flat blob the insert path wrote via `minimal_tuple_to_flat`): `t_len`
+/// is the leading word and bounds the whole image. C reads the same bytes
+/// directly as a `MinimalTuple *`; the owned model decodes the struct + data.
 #[inline]
 fn mintuple_from_dsa<'mcx>(
     mcx: Mcx<'mcx>,
     mintuple_addr: usize,
-) -> PgResult<types_tuple::heaptuple::MinimalTupleData<'mcx>> {
-    // First word is t_len; the body length is implied by the staged image. Read
-    // t_len, then the body bytes that follow (the to_minimal_bytes layout writes
-    // exactly t_len does not bound the image, so derive the body from t_bits len).
-    let t_len = unsafe { core::ptr::read_unaligned(mintuple_addr as *const u32) };
-    // The staged image is: t_len(4) mt_padding(6) t_infomask2(2) t_infomask(2)
-    // t_hoff(1) t_bits_len(4) t_bits[t_bits_len]. Read t_bits_len to size body.
-    let bits_len = unsafe {
-        core::ptr::read_unaligned((mintuple_addr + 4 + 6 + 2 + 2 + 1) as *const u32)
-    } as usize;
-    let body_len = 6 + 2 + 2 + 1 + 4 + bits_len;
-    let body =
-        unsafe { core::slice::from_raw_parts((mintuple_addr + 4) as *const u8, body_len) };
-    types_tuple::heaptuple::MinimalTupleData::from_minimal_parts(mcx, t_len, body)
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>> {
+    // First word is t_len, which bounds the whole flat image.
+    let t_len = unsafe { core::ptr::read_unaligned(mintuple_addr as *const u32) } as usize;
+    let blob = unsafe { core::slice::from_raw_parts(mintuple_addr as *const u8, t_len) };
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+        Ok(mtup) => Ok(mtup),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_from_flat on a DSA image failed: {other:?}"),
+    }
 }
 
 /// `work_mem` / `hash_mem_multiplier` GUCs (`utils/guc.c`). C per-backend

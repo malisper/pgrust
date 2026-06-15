@@ -251,7 +251,8 @@ pub fn ExecHashGetSkewBucket<'mcx>(hashtable: &HashJoinTableData<'mcx>, hashvalu
 pub fn ExecHashSkewTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    slot: &types_nodes::TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
     hashvalue: uint32,
     bucketNumber: i32,
 ) -> PgResult<()> {
@@ -260,8 +261,8 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     //
     // The owned model always copies into mcx, so the C shouldFree /
     // heap_free_minimal_tuple bookkeeping is internal to the owner.
-    let mut tuple =
-        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
+    let (mut tuple, _should_free) =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot)?;
 
     // Create the HashJoinTuple.
     //   hashTupleSize = HJTUPLE_OVERHEAD + tuple->t_len;
@@ -269,9 +270,9 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     //   hashTuple->hashvalue = hashvalue;
     //   memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
     //   HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
-    let hashTupleSize: Size = HJTUPLE_OVERHEAD + tuple.t_len as usize;
+    let hashTupleSize: Size = HJTUPLE_OVERHEAD + tuple.tuple.t_len as usize;
     // HeapTupleHeaderClearMatch: tup->t_infomask2 &= ~HEAP_TUPLE_HAS_MATCH.
-    tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+    tuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
     let hashTuple = HashJoinTupleData {
         next: HashJoinTupleLink::Unshared(None),
         hashvalue,
@@ -354,7 +355,7 @@ pub fn ExecHashRemoveNextSkewBucket<'mcx>(
                 unreachable!("skew bucket tuple has shared link (nodeHash.c:2647)")
             }
         };
-        let tuple_t_len = hashtable.tuples[cur.0].mintuple.t_len as usize;
+        let tuple_t_len = hashtable.tuples[cur.0].mintuple.tuple.t_len as usize;
         let tupleSize: Size = HJTUPLE_OVERHEAD + tuple_t_len;
 
         // Decide whether to put the tuple in the hash table or a temp file.
@@ -398,10 +399,13 @@ pub fn ExecHashRemoveNextSkewBucket<'mcx>(
         } else {
             // Put the tuple into a temp file for later batches.
             debug_assert!(batchno > hashtable.curbatch);
-            let mintuple = hashtable.tuples[cur.0].mintuple.clone_in(mcx)?;
+            let blob = crate::hash_table::mintuple_to_flat(
+                mcx,
+                &hashtable.tuples[cur.0].mintuple,
+            )?;
             let file = &mut hashtable.innerBatchFile[batchno as usize];
             backend_executor_nodeHashjoin_seams::ExecHashJoinSaveTuple::call(
-                mcx, &mintuple, hashvalue, file,
+                mcx, &blob, hashvalue, file,
             )?;
             // pfree(hashTuple): see note above.
             hashtable.spaceUsed -= tupleSize;
