@@ -218,18 +218,59 @@ pub struct ExprContext<'mcx> {
     pub ecxt_callbacks: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
 }
 
-/// `ParamExecData` (execnodes.h), trimmed: the `execPlan` link to a
-/// not-yet-evaluated subplan arrives with the subplan unit.
+/// `ParamExecData` (params.h):
+///
+/// ```c
+/// typedef struct ParamExecData {
+///     void   *execPlan;   /* should be "SubPlanState *" */
+///     Datum   value;
+///     bool    isnull;
+/// } ParamExecData;
+/// ```
+///
+/// `execPlan` is the C `void *` (documented "should be `SubPlanState *`") link to
+/// a not-yet-evaluated subplan: when non-`NULL` it points at the `SubPlanState`
+/// that must run to lazily produce this PARAM_EXEC's value (the InitPlan /
+/// correlated-SubPlan lazy-evaluation mechanism). In the owned model the
+/// `SubPlanState` is not reachable by a stored raw pointer or a `&mut` alias —
+/// the InitPlan `SubPlanState`s are owned by the parent plan-state's `initPlan`
+/// list and the subselect plan-state trees live in `EState.es_subplanstates`
+/// (one per `SubPlan`, addressed by the subplan's 1-based `plan_id`). So the
+/// `void *execPlan` alias is rendered here as the subplan's stable identity:
+/// [`ExecPlanLink`], a 1-based `plan_id` index into `es_subplanstates` (the same
+/// index the C `sstate->planstate = list_nth(es_subplanstates, plan_id - 1)`
+/// uses). `None` is the C `NULL` ("value is valid, no evaluation pending"); the
+/// executor resolves the identity back to its `SubPlanState` when it must run the
+/// subplan (`ExecSetParamPlan`). This is an index, not a side-table registry.
 #[derive(Clone, Debug)]
 pub struct ParamExecData<'mcx> {
+    /// `void *execPlan` — `Some(link)` while this param awaits lazy evaluation by
+    /// the linked subplan; `None` (the C `NULL`) once the value is valid.
+    pub execPlan: Option<ExecPlanLink>,
     pub value: Datum<'mcx>,
     pub isnull: bool,
 }
 
+/// The owned-model rendering of `ParamExecData.execPlan`'s `void *` ("should be
+/// `SubPlanState *`"): the stable identity of the subplan that must run to
+/// produce a not-yet-evaluated PARAM_EXEC value. It is the subplan's 1-based
+/// `plan_id`, i.e. the index identity into [`EStateData::es_subplanstates`] (and
+/// the parent plan-state's `initPlan` list) — the same identity the C uses to
+/// reach `sstate->planstate` via `list_nth(es_subplanstates, plan_id - 1)`. The
+/// executor resolves this back to the `SubPlanState` to lazily evaluate the
+/// initplan. Not a registry: it carries no side state, only the C pointer's
+/// referent identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecPlanLink {
+    /// `SubPlan.plan_id` — 1-based; `plan_id - 1` indexes `es_subplanstates`.
+    pub plan_id: i32,
+}
+
 impl Default for ParamExecData<'_> {
     fn default() -> Self {
-        // C `palloc0` zero-init: NULL value, isnull cleared.
+        // C `palloc0` zero-init: NULL execPlan, NULL value, isnull cleared.
         ParamExecData {
+            execPlan: None,
             value: Datum::null(),
             isnull: false,
         }

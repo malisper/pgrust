@@ -951,4 +951,66 @@ pub fn init_seams() {
     seams::executor_end::set(ExecutorEnd);
     seams::free_query_desc::set(FreeQueryDesc);
     seams::create_query_desc_and_start_explain::set(CreateQueryDescAndStartExplain);
+
+    // PARAM_EXEC `execPlan` link plumbing. nodeSubplan parked these executor
+    // PARAM_EXEC / `es_subplanstates` seams in the execProcnode-seams crate, but
+    // they are not `execProcnode.c` functions: they operate on the EState's param
+    // array (`es_param_exec_vals[paramid].execPlan`), which is executor
+    // (execMain) machinery. Now that `ParamExecData.execPlan` is modeled (an
+    // `ExecPlanLink` identity into `es_subplanstates`), the field-level operations
+    // — mark/clear/pending-test — have a real home here.
+    seams::mark_param_execplan_pending::set(mark_param_execplan_pending);
+    seams::clear_param_execplan::set(clear_param_execplan);
+    seams::param_execplan_pending::set(param_execplan_pending);
+}
+
+// ===========================================================================
+// PARAM_EXEC `execPlan` link plumbing (execMain owns `es_param_exec_vals`).
+// ===========================================================================
+
+/// `&estate->es_param_exec_vals[paramid]`, mutably. The C indexes
+/// unconditionally; an out-of-range id is a planner/caller bug, so it surfaces
+/// the executor's internal error rather than panicking.
+#[inline]
+fn exec_param_mut<'a, 'mcx>(
+    estate: &'a mut types_nodes::EStateData<'mcx>,
+    paramid: i32,
+) -> PgResult<&'a mut types_nodes::ParamExecData<'mcx>> {
+    estate
+        .es_param_exec_vals
+        .get_mut(paramid as usize)
+        .ok_or_else(|| types_error::PgError::error("PARAM_EXEC id out of range").with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR))
+}
+
+/// `prm = &(estate->es_param_exec_vals[paramid]); prm->execPlan = sstate;` —
+/// mark the PARAM_EXEC slot as needing lazy evaluation by the subplan whose
+/// stable identity is `plan_id` (the 1-based index into `es_subplanstates`).
+/// Mirrors nodeSubplan.c `ExecInitSubPlan` / `ExecReScanSetParamPlan`.
+fn mark_param_execplan_pending<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    paramid: i32,
+    plan_id: i32,
+) -> PgResult<()> {
+    let prm = exec_param_mut(estate, paramid)?;
+    prm.execPlan = Some(types_nodes::ExecPlanLink { plan_id });
+    Ok(())
+}
+
+/// `prm->execPlan = NULL;` — clear the PARAM_EXEC `execPlan` link after the
+/// initplan output has been set (nodeSubplan.c `ExecSetParamPlan`).
+fn clear_param_execplan<'mcx>(estate: &mut types_nodes::EStateData<'mcx>, paramid: i32) -> PgResult<()> {
+    let prm = exec_param_mut(estate, paramid)?;
+    prm.execPlan = None;
+    Ok(())
+}
+
+/// `econtext->ecxt_param_exec_vals[paramid].execPlan != NULL` — is this param
+/// not yet evaluated? (`ExecSetParamPlanMulti`). Reads the `execPlan` link. The C
+/// indexes unconditionally; out of range maps to "not pending" (the C would
+/// dereference, but the planner never produces an out-of-range PARAM_EXEC id).
+fn param_execplan_pending(estate: &types_nodes::EStateData<'_>, paramid: i32) -> bool {
+    estate
+        .es_param_exec_vals
+        .get(paramid as usize)
+        .is_some_and(|prm| prm.execPlan.is_some())
 }
