@@ -54,6 +54,10 @@ pub fn init_seams() {
         srf_support::materialized_srf_putvalues,
     );
     backend_utils_fmgr_funcapi_seams::get_func_arg_info::set(proc_info::get_func_arg_info_seam);
+    // The composite/record-Datum carrier bridge (task #161) is now buildable:
+    // record_from_values forms a tuple and crosses it as a composite record
+    // Datum via `backend_access_common_heaptuple::HeapTupleGetDatum`.
+    backend_utils_fmgr_funcapi_seams::record_from_values::set(tupledesc::record_from_values);
     backend_utils_fmgr_funcapi_seams::srf_arg0_oid::set(srf_support::srf_arg0_oid);
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
