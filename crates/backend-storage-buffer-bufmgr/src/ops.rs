@@ -285,13 +285,7 @@ mod tests {
     /// read each test's own `BufferManager` instance, so they don't race across
     /// the parallel test harness.
     fn install_resowner_stubs() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            sb::remember_buffer::set(|_b| {});
-            sb::forget_buffer::set(|_b| {});
-            sb::resowner_enlarge::set(|| Ok(()));
-        });
+        crate::mgr::test_seams::install();
     }
 
     /// `BufferManagerShmemInit` with a small pool; the descriptor states start
