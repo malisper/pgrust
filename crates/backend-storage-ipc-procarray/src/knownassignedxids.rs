@@ -1097,4 +1097,7 @@ pub fn init_seams() {
     seams::proc_array_apply_xid_assignment::set(ProcArrayApplyXidAssignment);
     seams::record_known_assigned_transaction_ids::set(RecordKnownAssignedTransactionIds);
     seams::expire_tree_known_assigned_transaction_ids::set(ExpireTreeKnownAssignedTransactionIds);
+    seams::known_assigned_transaction_ids_idle_maintenance::set(
+        KnownAssignedTransactionIdsIdleMaintenance,
+    );
 }

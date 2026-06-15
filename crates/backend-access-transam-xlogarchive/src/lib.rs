@@ -744,6 +744,31 @@ fn restore_archived_history_file<'mcx>(
     }
 }
 
+/// `restore_archived_file(mcx, xlogfname, recovername, expected_size,
+/// cleanup_enabled)` inward seam — the general `RestoreArchivedFile` call used
+/// by the recovery page-read driver (xlogrecovery.c XLogFileRead).
+fn restore_archived_file<'mcx>(
+    mcx: Mcx<'mcx>,
+    xlogfname: &str,
+    recovername: &str,
+    expected_size: i64,
+    cleanup_enabled: bool,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let mut path: Option<PgString<'mcx>> = None;
+    if RestoreArchivedFile(
+        mcx,
+        &mut path,
+        xlogfname,
+        recovername,
+        expected_size,
+        cleanup_enabled,
+    )? {
+        Ok(path)
+    } else {
+        Ok(None)
+    }
+}
+
 /// `keep_file_restored_from_archive(path, xlogfname)` inward seam.
 fn keep_file_restored_from_archive(path: &str, xlogfname: &str) -> PgResult<()> {
     KeepFileRestoredFromArchive(path, xlogfname)
@@ -762,6 +787,7 @@ fn xlog_archive_notify(fname: String) -> PgResult<()> {
 /// Install this crate's inward seams. Wired into `seams-init::init_all`.
 pub fn init_seams() {
     inward::restore_archived_history_file::set(restore_archived_history_file);
+    inward::restore_archived_file::set(restore_archived_file);
     inward::keep_file_restored_from_archive::set(keep_file_restored_from_archive);
     inward::xlog_archive_force_done::set(xlog_archive_force_done);
     inward::xlog_archive_notify::set(xlog_archive_notify);
