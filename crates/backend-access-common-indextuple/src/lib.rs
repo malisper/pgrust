@@ -391,13 +391,26 @@ pub fn nocache_index_getattr<'mcx>(
     attnum: i32,
     tuple_desc: &TupleDescData<'_>,
 ) -> PgResult<IndexColumn<'mcx>> {
+    nocache_index_getattr_internal(mcx, attnum, tuple_desc, tup.data.as_slice(), tup.null_bitmap())
+}
+
+/// `nocache_index_getattr` working directly on the data-area slice `tp` and the
+/// optional null bitmap `bp` (the `(tp, bp)` pair `index_deform_tuple_internal`
+/// also consumes), so callers that carry the on-disk byte image — rather than a
+/// `FormedIndexTuple` — can reuse the exact same single-attribute walk.
+pub fn nocache_index_getattr_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    attnum: i32,
+    tuple_desc: &TupleDescData<'_>,
+    tp: &[u8],
+    bp: Option<&[bits8]>,
+) -> PgResult<IndexColumn<'mcx>> {
     // C: attnum-- (1-based to 0-based); Assert(attnum > 0).
     if attnum < 1 || attnum > tuple_desc.natts {
         return Err(PgError::error(format!("invalid index attnum: {attnum}")));
     }
 
     let index = (attnum - 1) as usize;
-    let bp = tup.null_bitmap();
 
     // C uses IndexTupleHasNulls + att_isnull; a 0 bit means NULL.  When the
     // target itself is null, fetchatt is never called in C (index_getattr's
@@ -409,7 +422,6 @@ pub fn nocache_index_getattr<'mcx>(
     }
 
     // tp = (char *) tup + IndexInfoFindDataOffset(tup->t_info);
-    let tp = tup.data.as_slice();
     let mut off = 0usize;
     let mut slow = false;
 
@@ -656,11 +668,42 @@ pub fn index_deform_tuple_seam<'mcx>(
     index_deform_tuple_internal(mcx, itupdesc, tp, bp)
 }
 
+/// Body for the `nocache_index_getattr` seam consumed by nbtree
+/// (`_bt_compare` / scankey value extraction): fetch a single (1-based)
+/// attribute out of the on-disk index-tuple byte image `itup` against
+/// `itupdesc`.
+///
+/// `itup` is laid out exactly as `index_deform_tuple_seam` expects (header /
+/// null bitmap / `MAXALIGN`-padded data); we read `t_info`, slice the data
+/// area and (when present) the bitmap, and hand them to
+/// [`nocache_index_getattr_internal`].
+pub fn nocache_index_getattr_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    itup: &[u8],
+    attnum: i32,
+    itupdesc: &TupleDescData<'_>,
+) -> PgResult<IndexColumn<'mcx>> {
+    // itup->t_info is the 2-byte field at offset 6 of IndexTupleData.
+    let t_info = u16::from_ne_bytes([itup[6], itup[7]]);
+    let hasnulls = (t_info & INDEX_NULL_MASK) != 0;
+    // tp = (char *) itup + IndexInfoFindDataOffset(itup->t_info);
+    let data_off = index_info_find_data_offset(t_info);
+    let tp = &itup[data_off..];
+    // bp = (bits8 *) itup + sizeof(IndexTupleData); only consulted when hasnulls.
+    let bp = if hasnulls {
+        Some(&itup[SIZEOF_INDEX_TUPLE_DATA..])
+    } else {
+        None
+    };
+    nocache_index_getattr_internal(mcx, attnum, itupdesc, tp, bp)
+}
+
 /// Wire this crate's seams (declared in
 /// `backend-access-common-indextuple-seams`) to their real bodies.
 pub fn init_seams() {
     backend_access_common_indextuple_seams::index_form_tuple::set(index_form_tuple_seam);
     backend_access_common_indextuple_seams::index_deform_tuple::set(index_deform_tuple_seam);
+    backend_access_common_indextuple_seams::nocache_index_getattr::set(nocache_index_getattr_seam);
 }
 
 // ---------------------------------------------------------------------------
