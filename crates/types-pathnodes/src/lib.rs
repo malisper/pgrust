@@ -276,10 +276,11 @@ pub type PartitionScheme = Option<Box<PartitionSchemeData>>;
 pub struct PartitionBoundInfoData {}
 
 /// `struct FdwRoutine` (foreign/fdwapi.h) — the FDW callback hook table for a
-/// foreign table/join. Opaque here (the hooks are function pointers owned by the
-/// FDW unit); presence in `RelOptInfo::fdwroutine` is what the planner tests.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FdwRoutine {}
+/// foreign table/join. This is the *same* C struct the executor/relcache model;
+/// rather than a parallel placeholder, the planner vocabulary re-exports the
+/// canonical [`types_nodes::FdwRoutine`] (the callback-presence table). Presence
+/// in `RelOptInfo::fdwroutine` is what the planner tests.
+pub use types_nodes::FdwRoutine;
 
 /* ==========================================================================
  * Arena handles for the four aliasing planner graph types.
