@@ -45,19 +45,20 @@ pub(crate) fn recovery_apply_delay(_st: &mut XLogRecoveryState, _record: RecordR
     panic!("decomp: xlogrecovery::stop::recovery_apply_delay not yet filled")
 }
 
-/// `RecoveryPauseState GetRecoveryPauseState(void)` (xlogrecovery.c:3127) — the
-/// startup process's view of the pause state.
+/// `RecoveryPauseState GetRecoveryPauseState(void)` (xlogrecovery.c:3091) — the
+/// startup process's view of the pause state. Reads `XLogRecoveryCtl` under
+/// `info_lck` (the shared-region accessor).
 pub fn get_recovery_pause_state(_st: &XLogRecoveryState) -> RecoveryPauseState {
-    panic!("decomp: xlogrecovery::stop::get_recovery_pause_state not yet filled")
+    crate::shmem::get_recovery_pause_state()
 }
 
-/// `void SetRecoveryPause(bool recoveryPause)` (xlogrecovery.c:3094)
-pub fn set_recovery_pause(_st: &mut XLogRecoveryState, _recovery_pause: bool) {
-    panic!("decomp: xlogrecovery::stop::set_recovery_pause not yet filled")
+/// `void SetRecoveryPause(bool recoveryPause)` (xlogrecovery.c:3111)
+pub fn set_recovery_pause(_st: &mut XLogRecoveryState, recovery_pause: bool) {
+    crate::shmem::set_recovery_pause(recovery_pause);
 }
 
-/// `static void ConfirmRecoveryPaused(void)` (xlogrecovery.c) — transition
+/// `static void ConfirmRecoveryPaused(void)` (xlogrecovery.c:3131) — transition
 /// `PauseRequested` -> `Paused` once the redo loop notices the request.
 pub(crate) fn confirm_recovery_paused(_st: &mut XLogRecoveryState) {
-    panic!("decomp: xlogrecovery::stop::confirm_recovery_paused not yet filled")
+    crate::shmem::confirm_recovery_paused();
 }

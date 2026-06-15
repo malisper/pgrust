@@ -59,9 +59,12 @@ pub mod stop;
 mod shmem_tests;
 
 pub use shmem::{
-    get_current_chunk_replay_start_time, get_latest_xtime, get_recovery_pause_state,
-    get_xlog_replay_rec_ptr, recovery_wakeup_latch_handle, set_recovery_pause, XLogRecoveryShared,
-    XLogRecoveryShmemInit, XLogRecoveryShmemSize,
+    check_promote_signal, get_current_chunk_replay_start_time, get_current_replay_rec_ptr,
+    get_latest_xtime, get_recovery_pause_state, get_xlog_receipt_time, get_xlog_replay_rec_ptr,
+    hot_standby_active, promote_is_triggered, recovery_wakeup_latch_handle,
+    remove_promote_signal_files, set_recovery_pause, startup_request_wal_receiver_restart,
+    wakeup_recovery, xlog_request_wal_receiver_reply, XLogRecoveryShared, XLogRecoveryShmemInit,
+    XLogRecoveryShmemSize,
 };
 
 pub use core::{RecordRef, XLogPageReadResult, XLogRecoveryState, XLogSource};
@@ -84,8 +87,25 @@ pub fn init_seams() {
     // Spinlock-protected shmem-state accessors (faithful `info_lck` reads/
     // writes of the `XLogRecoveryCtl` shared struct).
     seams::get_xlog_replay_rec_ptr::set(shmem::get_xlog_replay_rec_ptr);
+    seams::get_xlog_replay_rec_ptr_tli::set(shmem::get_xlog_replay_rec_ptr);
+    seams::get_xlog_replay_recptr::set(shmem::get_xlog_replay_recptr_only);
     seams::get_current_chunk_replay_start_time::set(shmem::get_current_chunk_replay_start_time);
     seams::get_latest_x_time::set(shmem::get_latest_xtime);
     seams::get_recovery_pause_state::set(shmem::get_recovery_pause_state);
     seams::set_recovery_pause::set(shmem::set_recovery_pause);
+
+    // F2: recovery pause / promotion controls + hot-standby + receipt-time
+    // accessors. Most are callable from any backend connected to shared memory
+    // (they read `XLogRecoveryCtl` under `info_lck` and the per-backend
+    // `Local*` caches), so they take no `XLogRecoveryState`.
+    seams::get_xlog_receipt_time::set(shmem::get_xlog_receipt_time);
+    seams::wakeup_recovery::set(shmem::wakeup_recovery);
+    seams::promote_is_triggered::set(shmem::promote_is_triggered);
+    seams::hot_standby_active::set(shmem::hot_standby_active);
+    seams::startup_request_wal_receiver_restart::set(shmem::startup_request_wal_receiver_restart);
+
+    // `XLogRequestWalReceiverReply()` is owned by xlogrecovery.c; its seam now
+    // lives in this unit's own -seams crate (moved off walreceiverfuncs-seams,
+    // where it had been parked as a layering convenience + allowlist debt).
+    seams::xlog_request_wal_receiver_reply::set(shmem::xlog_request_wal_receiver_reply);
 }

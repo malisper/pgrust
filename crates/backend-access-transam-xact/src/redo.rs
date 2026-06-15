@@ -23,7 +23,7 @@ use backend_access_transam_transam_seams as transam_seams;
 use backend_access_transam_twophase_seams as twophase_seams;
 use backend_access_transam_xlogutils_seams as xlogutils_seams;
 use backend_replication_logical_origin_seams as origin_seams;
-use backend_replication_walreceiverfuncs_seams as walrcv_seams;
+use backend_access_transam_xlogrecovery_seams as xlogrecovery_seams;
 use backend_storage_ipc_procarray_seams as procarray_seams;
 use backend_storage_ipc_standby_seams as standby_seams;
 use backend_storage_smgr_seams as smgr_seams;
@@ -383,7 +383,7 @@ fn xact_redo_commit(
     // If asked by the primary (synchronous_commit = remote_apply), ask
     // walreceiver to send a reply immediately.
     if xact_completion_apply_feedback(parsed.xinfo) {
-        walrcv_seams::xlog_request_wal_receiver_reply::call();
+        xlogrecovery_seams::xlog_request_wal_receiver_reply::call();
     }
 
     Ok(())
