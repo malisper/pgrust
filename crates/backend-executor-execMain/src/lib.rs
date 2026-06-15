@@ -523,7 +523,7 @@ fn ExecutePlan(
             //   if (!dest->receiveSlot(slot, dest)) break;
             if send_tuples {
                 let cont = {
-                    let slot_data = estate.slot_data(out_slot);
+                    let slot_data = estate.slot_data_mut(out_slot);
                     dest::dest_receive_slot::call(slot_data, dest_handle)?
                 };
                 if !cont {
