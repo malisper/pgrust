@@ -83,7 +83,7 @@ fn change_var_nodes_remaps_varno() {
 #[test]
 fn increment_var_sublevels_up_bumps() {
     let mut n = var(1, 0);
-    crate::increment::IncrementVarSublevelsUp(&mut n, 2, 0);
+    crate::increment::IncrementVarSublevelsUp(&mut n, 2, 0).unwrap();
     if let Node::Expr(Expr::Var(v)) = &n {
         assert_eq!(v.varlevelsup, 2);
     } else {

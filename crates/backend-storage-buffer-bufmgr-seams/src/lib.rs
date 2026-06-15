@@ -429,6 +429,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ConditionalLockBuffer(buffer)` (bufmgr.c) — try to acquire the buffer's
+    /// exclusive content lock without blocking; returns whether it was acquired.
+    /// `Err` carries the lock-manager `ereport(ERROR)`s.
+    pub fn conditional_lock_buffer(
+        buffer: types_storage::Buffer,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `IsBufferCleanupOK(buffer)` (bufmgr.c) — does the caller already hold a
     /// cleanup-strength lock on the buffer (exclusive content lock + single
     /// pin)? `Err` carries the `Assert`-promoted error surface.
