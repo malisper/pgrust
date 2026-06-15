@@ -918,14 +918,22 @@ dependencies = [
 name = "backend-access-gist-core"
 version = "0.1.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
  "backend-access-common-indextuple-seams",
  "backend-access-common-tupdesc",
+ "backend-access-gist-core-seams",
  "backend-access-gist-dispatch-seams",
  "backend-access-index-indexam-seams",
+ "backend-access-transam-xlog-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-ipc-procarray-seams",
  "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "mcx",
+ "pg-prng",
  "types-core",
  "types-error",
  "types-gist",
@@ -942,6 +950,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-wal",
 ]
 
@@ -14966,10 +14975,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
- "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
- "backend-access-gin-ginvacuum",
+ "backend-access-gist-core",
  "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",

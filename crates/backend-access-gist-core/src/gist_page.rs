@@ -21,15 +21,17 @@
 //! / `PageXLogRecPtrSet` in bufpage.h.
 
 use backend_storage_page::{
-    PageAddItemExtended, PageGetMaxOffsetNumber, PageGetSpecialPointer, PageGetSpecialSize,
-    PageInit, PageIsEmpty, PageIsNew, PageMut, PageRef,
+    PageAddItemExtended, PageGetContents, PageGetMaxOffsetNumber, PageGetSpecialPointer,
+    PageGetSpecialSize, PageInit, PageIsEmpty, PageIsNew, PageMut, PageRef,
 };
+use types_storage::bufpage::SizeOfPageHeaderData;
 use alloc::format;
 use alloc::vec::Vec;
 use backend_storage_buffer_bufmgr_seams::{buffer_get_block_number, with_buffer_page};
 use backend_utils_error::{ereport, PgResult};
 use types_error::error::ERROR;
 use types_core::primitive::{BlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ};
+use types_core::xact::{FirstNormalTransactionId, FullTransactionId};
 use types_error::error::ERRCODE_INDEX_CORRUPTED;
 use types_gist::{GistNSN, GIST_PAGE_ID};
 use types_storage::Buffer;
@@ -42,6 +44,14 @@ pub const fn maxalign(x: usize) -> usize {
 
 /// `sizeof(GISTPageOpaqueData)` (gist.h) — 16 bytes, see module docs.
 pub const SIZEOF_GIST_PAGE_OPAQUE_DATA: usize = 16;
+
+/// `sizeof(FullTransactionId)` (access/transam.h) — a 64-bit value.
+const SIZEOF_FULL_TRANSACTION_ID: usize = 8;
+
+/// `GiSTPageSize` (gist_private.h:476): the usable bytes on a GiST page,
+/// `BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(GISTPageOpaqueData))`.
+pub const GiSTPageSize: usize =
+    BLCKSZ as usize - SizeOfPageHeaderData - maxalign(SIZEOF_GIST_PAGE_OPAQUE_DATA);
 
 // Byte offsets of the special-area fields, relative to the start of the
 // MAXALIGN'd special area (the area is exactly 16 bytes so no MAXALIGN slack).
@@ -217,6 +227,65 @@ pub fn set_gist_page_flags(page: &mut [u8], flags: u16) -> PgResult<()> {
 /// `GistPageGetOpaque(page)->gist_page_id = id`.
 pub fn set_gist_page_id(page: &mut [u8], id: u16) -> PgResult<()> {
     write_special(page, OPQ_OFF_GIST_PAGE_ID, &id.to_ne_bytes())
+}
+
+// ===========================================================================
+// gist.h page-flag predicates and the follow-right / deleted accessors.
+// ===========================================================================
+
+/// `GistPageIsLeaf(page)` (gist.h:172): `GistPageGetOpaque(page)->flags & F_LEAF`.
+pub fn GistPageIsLeaf(page: &[u8]) -> PgResult<bool> {
+    Ok((gist_page_flags(page)? & types_gist::F_LEAF) != 0)
+}
+
+/// `GistPageIsDeleted(page)` (gist.h:175): `flags & F_DELETED`.
+pub fn GistPageIsDeleted(page: &[u8]) -> PgResult<bool> {
+    Ok((gist_page_flags(page)? & types_gist::F_DELETED) != 0)
+}
+
+/// `GistFollowRight(page)` (gist.h:185): `flags & F_FOLLOW_RIGHT`.
+pub fn GistFollowRight(page: &[u8]) -> PgResult<bool> {
+    Ok((gist_page_flags(page)? & types_gist::F_FOLLOW_RIGHT) != 0)
+}
+
+/// `GistMarkFollowRight(page)` (gist.h:186): `flags |= F_FOLLOW_RIGHT`.
+pub fn GistMarkFollowRight(page: &mut [u8]) -> PgResult<()> {
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f | types_gist::F_FOLLOW_RIGHT)
+}
+
+/// `GistClearFollowRight(page)` (gist.h:187): `flags &= ~F_FOLLOW_RIGHT`.
+pub fn GistClearFollowRight(page: &mut [u8]) -> PgResult<()> {
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f & !types_gist::F_FOLLOW_RIGHT)
+}
+
+/// `GistPageGetDeleteXid(page)` (gist.h:217): the `deleteXid` stored in the
+/// `GISTDeletedPageContents` after the page header (only valid when the page is
+/// `F_DELETED`). When the field isn't present (an old-format deleted page, with
+/// `pd_lower` short of the field) the historical fallback
+/// `FullTransactionIdFromEpochAndXid(0, FirstNormalTransactionId)` is returned.
+pub fn GistPageGetDeleteXid(page: &[u8]) -> PgResult<FullTransactionId> {
+    let pref = PageRef::new(page)?;
+    // if (pd_lower >= MAXALIGN(SizeOfPageHeaderData)
+    //                 + offsetof(GISTDeletedPageContents, deleteXid)
+    //                 + sizeof(FullTransactionId))   [deleteXid is at offset 0]
+    let pd_lower = pref.pd_lower() as usize;
+    let need = maxalign(SizeOfPageHeaderData) + SIZEOF_FULL_TRANSACTION_ID;
+    if pd_lower >= need {
+        // ((GISTDeletedPageContents *) PageGetContents(page))->deleteXid
+        let contents = PageGetContents(&pref)?;
+        let value = u64::from_ne_bytes([
+            contents[0], contents[1], contents[2], contents[3], contents[4], contents[5],
+            contents[6], contents[7],
+        ]);
+        Ok(FullTransactionId::from_u64(value))
+    } else {
+        Ok(FullTransactionId::from_epoch_and_xid(
+            0,
+            FirstNormalTransactionId,
+        ))
+    }
 }
 
 // ===========================================================================

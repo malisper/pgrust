@@ -35,9 +35,14 @@ pub mod gistutil;
 pub use gist_page::{
     gist_page_flags, gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage,
     gistfillbuffer, gistinitpage, set_gist_page_flags, set_gist_page_rightlink, GISTInitBuffer,
+    GiSTPageSize, GistClearFollowRight, GistFollowRight, GistMarkFollowRight, GistPageGetDeleteXid,
+    GistPageIsDeleted, GistPageIsLeaf,
 };
 pub use gistutil::{
-    gistCompressValues, gistFormTuple, gistdentryinit, initGISTstate,
+    gistCompressValues, gistDeCompressAtt, gistFetchTuple, gistFormTuple, gistKeyIsEQ,
+    gistMakeUnionItVec, gistMakeUnionKey, gistNewBuffer, gist_page_recyclable, gistchoose,
+    gistdentryinit, gistextractpage, gistfitpage, gistgetadjusted, gistnospace, gistpenalty,
+    gistunion, initGISTstate,
 };
 
 /// Install this crate's inward seams. The GiST core's *outward*-facing utility
