@@ -1174,6 +1174,32 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
+        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable, now ported
+        // into backend-access-transam-xlogrecovery::pageread) reaches these
+        // still-unported owners on its streaming-source and stats legs:
+        //   * prefetcher_compute_stats — XLogPrefetcherComputeStats(prefetcher)
+        //     operates on the LIVE prefetcher instance the startup process owns;
+        //     that instance + InitWalRecovery allocation is the page-read holder
+        //     keystone (not yet landed), so the merged xlogprefetcher (stats-shmem
+        //     only) cannot install it without the held reader/prefetcher. Reached
+        //     only on the XLOG_FROM_STREAM no-data sleep path.
+        //   * walreceiverfuncs streaming control (wal_rcv_streaming /
+        //     xlog_shutdown_wal_rcv / request_xlog_streaming /
+        //     set+reset_install_xlog_file_segment_active /
+        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is unported
+        //     (the merged walreceiver bundle covers only walreceiver.c); these are
+        //     the sanctioned walreceiver-fetch panic legs of the standby state
+        //     machine, reachable only once recovery actually streams.
+        // All become real installs when walreceiverfuncs.c lands and the
+        // reader/prefetcher holder keystone is built. See DESIGN_DEBT.md.
+        ("backend_access_transam_xlogprefetcher", "prefetcher_compute_stats"),
+        ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
+        ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
+        ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),
+        ("backend_replication_walreceiverfuncs", "set_install_xlog_file_segment_active"),
+        ("backend_replication_walreceiverfuncs", "reset_install_xlog_file_segment_active"),
+        ("backend_replication_walreceiverfuncs", "get_wal_rcv_flush_rec_ptr_full"),
         // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
         // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
         // and extracts the single `TypeName` node. The owner of `raw_parser`
