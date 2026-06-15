@@ -58,13 +58,14 @@ use crate::transition::{process_ordered_aggregate_multi, process_ordered_aggrega
 /// The whole body is the fmgr call frame: building a `LOCAL_FCINFO`, the
 /// `ExecEvalExpr` of the direct arguments, `InitFunctionCallInfoData` +
 /// `FunctionCallInvoke` of the finalfn, and the `MakeExpandedObjectReadOnly`
-/// wrap of every state/result `Datum`. None of those have landed: the trimmed
-/// `FunctionCallInfoBaseData`/`FmgrInfo` carry none of the consumed fields
-/// (`args`/`isnull`/`flinfo`/`fn_strict`), `backend-utils-fmgr-fmgr-seams`
-/// declares no `FunctionCallInvoke`/`InitFunctionCallInfoData` slot, and
-/// `MakeExpandedObjectReadOnly` (`utils/expandeddatum`) is unported with no
-/// seam. The body therefore stands behind a loud panic until those land, per
-/// the seam-and-panic discipline.
+/// wrap of every state/result `Datum`. `FunctionCallInvoke` +
+/// `InitFunctionCallInfoData` ARE ported (fmgr-core, #52). The genuine blocker
+/// is the per-agg fcinfo *carrier*: the trimmed `FunctionCallInfoBaseData`/
+/// `FmgrInfo` here carry none of the consumed fields (`args`/`isnull`/`flinfo`/
+/// `fn_strict`), so there is no built call frame to feed the finalfn, and the
+/// direct-argument `ExecEvalExpr` is owned by the not-yet-ported execExpr unit.
+/// The body therefore stands behind a loud panic until that fcinfo carrier +
+/// execExpr boundary land, per the seam-and-panic discipline.
 pub fn finalize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
@@ -324,14 +325,16 @@ fn finalfn_is_strict(_peragg: &AggStatePerAggData<'_>) -> bool {
 }
 
 /// `FunctionCallInvoke(fcinfo)` for the finalfn; returns `(result, fcinfo->isnull)`.
-/// The fmgr call dispatch is owned by the not-yet-ported fmgr unit.
+/// `FunctionCallInvoke` is ported (fmgr-core #52); the block is the per-agg
+/// fcinfo carrier (the trimmed call frame carries no args/flinfo to invoke).
 fn invoke_finalfn<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _peragg: &AggStatePerAggData<'mcx>,
 ) -> (Datum<'mcx>, bool) {
     panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: FunctionCallInvoke of the finalfn is \
-         owned by the not-yet-ported fmgr unit; no seam yet"
+        "backend-executor-nodeAgg::finalize_aggregate: blocked on the per-agg finalfn fcinfo \
+         carrier (the trimmed FunctionCallInfoBaseData carries no args/flinfo); \
+         FunctionCallInvoke itself is ported (fmgr-core #52)"
     );
 }
 
@@ -362,12 +365,13 @@ fn set_serialfn_arg0<'mcx>(
 }
 
 /// `FunctionCallInvoke(pertrans->serialfn_fcinfo)`; returns `(result,
-/// fcinfo->isnull)`. The fmgr call dispatch is owned by the not-yet-ported fmgr
-/// unit.
+/// fcinfo->isnull)`. `FunctionCallInvoke` is ported (fmgr-core #52); the block
+/// is the per-trans serialfn_fcinfo carrier (trimmed call frame, no args/flinfo).
 fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum<'mcx>, bool) {
     panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: FunctionCallInvoke of the serialfn \
-         is owned by the not-yet-ported fmgr unit; no seam yet"
+        "backend-executor-nodeAgg::finalize_partialaggregate: blocked on the per-trans \
+         serialfn_fcinfo carrier (the trimmed FunctionCallInfoBaseData carries no args/flinfo); \
+         FunctionCallInvoke itself is ported (fmgr-core #52)"
     );
 }
 

@@ -86,6 +86,21 @@ pub const FLOAT8OID: u32 = 701;
 /// `VOIDOID` (pg_type_d.h).
 pub const VOIDOID: u32 = 2278;
 
+// Support-procedure OIDs of the k-d-tree point opclass (pg_proc.dat). The
+// sibling `backend-access-spg-quadtree` crate is the single installer of the
+// SP-GiST core dispatch seams (mirroring brin-minmax's single-crate dispatcher)
+// and routes these OIDs to the bodies below. The k-d-tree `leaf_consistent`
+// slot is registered to `spg_quad_leaf_consistent` (OID 4022, in the quadtree
+// crate), so there is no `F_SPG_KD_LEAF_CONSISTENT`.
+/// `F_SPG_KD_CONFIG` — `spg_kd_config` (pg_proc.dat oid 4023).
+pub const F_SPG_KD_CONFIG: types_core::primitive::Oid = 4023;
+/// `F_SPG_KD_CHOOSE` — `spg_kd_choose` (pg_proc.dat oid 4024).
+pub const F_SPG_KD_CHOOSE: types_core::primitive::Oid = 4024;
+/// `F_SPG_KD_PICKSPLIT` — `spg_kd_picksplit` (pg_proc.dat oid 4025).
+pub const F_SPG_KD_PICKSPLIT: types_core::primitive::Oid = 4025;
+/// `F_SPG_KD_INNER_CONSISTENT` — `spg_kd_inner_consistent` (pg_proc.dat oid 4026).
+pub const F_SPG_KD_INNER_CONSISTENT: types_core::primitive::Oid = 4026;
+
 // ===========================================================================
 // Working in/out structs (idiomatic mirrors of the spgist.h ABI structs).
 // ===========================================================================

@@ -763,4 +763,10 @@ pub fn init_seams() {
     backend_optimizer_prep_prepjointree_seams::flatten_simple_union_all::set(
         pullup::flatten_simple_union_all,
     );
+    backend_optimizer_prep_prepjointree_seams::preprocess_function_rtes::set(
+        pullup::preprocess_function_rtes,
+    );
+    backend_optimizer_prep_prepjointree_seams::expand_virtual_generated_columns::set(
+        pullup::expand_virtual_generated_columns,
+    );
 }

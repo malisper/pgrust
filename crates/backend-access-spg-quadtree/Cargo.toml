@@ -11,5 +11,11 @@ path = "src/lib.rs"
 [dependencies]
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+types-spgist = { path = "../types-spgist" }
+types-scan = { path = "../types-scan" }
+mcx = { path = "../mcx" }
 backend-utils-adt-geo-ops-seams = { path = "../backend-utils-adt-geo-ops-seams" }
 backend-access-spg-proc-seams = { path = "../backend-access-spg-proc-seams" }
+backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
+backend-access-spg-kdtree = { path = "../backend-access-spg-kdtree" }

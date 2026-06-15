@@ -1902,6 +1902,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-spg-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-spgist",
+]
+
+[[package]]
 name = "backend-access-spg-kdtree"
 version = "0.0.0"
 dependencies = [
@@ -1934,10 +1945,16 @@ dependencies = [
 name = "backend-access-spg-quadtree"
 version = "0.0.0"
 dependencies = [
+ "backend-access-spg-core-seams",
+ "backend-access-spg-kdtree",
  "backend-access-spg-proc-seams",
  "backend-utils-adt-geo-ops-seams",
+ "mcx",
  "types-core",
  "types-error",
+ "types-scan",
+ "types-spgist",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7663,11 +7680,13 @@ dependencies = [
  "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-fmgr-funcapi",
  "mcx",
  "seam-core",
  "types-core",
@@ -7682,6 +7701,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -7753,10 +7773,12 @@ dependencies = [
 name = "backend-optimizer-util-clauses-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-tuple",
 ]
 
@@ -12903,6 +12925,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-hash",
  "types-nodes",
  "types-storage",
@@ -14639,6 +14662,7 @@ dependencies = [
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-spg-proc",
+ "backend-access-spg-quadtree",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
