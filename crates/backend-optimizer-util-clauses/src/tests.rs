@@ -112,7 +112,7 @@ fn contain_subplans_finds_sublink() {
         subLinkType: types_nodes::primnodes::SubLinkType::Exists,
         subLinkId: 0,
         testexpr: None,
-        subselect: 0,
+        subselect: None,
         location: -1,
     });
     let exprs2 = [bool_const(true), sublink];
