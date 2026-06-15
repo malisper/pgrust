@@ -2793,7 +2793,31 @@ fn pg_nextpower2_32(num: u32) -> u32 {
 
 /// Install every seam this crate owns (the inward seams other crates call
 /// across a cycle).
+/// `get_sort_group_operators` (parse_oper.c) typcache leg: run
+/// `lookup_type_cache(argtype, TYPECACHE_LT_OPR | TYPECACHE_EQ_OPR |
+/// TYPECACHE_GT_OPR [| TYPECACHE_HASH_PROC])` and read back the resolved
+/// default sort/group operators. The trimmed copy-out [`TypeCacheEntry`]
+/// does not carry these fields, so the seam encapsulates the lookup + the
+/// cached-field reads on the owner.
+fn sort_group_operators(argtype: Oid, want_hashable: bool) -> PgResult<(Oid, Oid, Oid, bool)> {
+    let cache_flags = if want_hashable {
+        TYPECACHE_LT_OPR | TYPECACHE_EQ_OPR | TYPECACHE_GT_OPR | TYPECACHE_HASH_PROC
+    } else {
+        TYPECACHE_LT_OPR | TYPECACHE_EQ_OPR | TYPECACHE_GT_OPR
+    };
+
+    lookup_type_cache(argtype, cache_flags)?;
+
+    let lt_opr = type_cache_lt_opr(argtype);
+    let eq_opr = type_cache_eq_opr(argtype);
+    let gt_opr = type_cache_gt_opr(argtype);
+    let hashable = want_hashable && type_cache_hash_proc(argtype) != INVALID_OID;
+
+    Ok((lt_opr, eq_opr, gt_opr, hashable))
+}
+
 pub fn init_seams() {
+    backend_utils_cache_typcache_seams::sort_group_operators::set(sort_group_operators);
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(lookup_rowtype_tupdesc);
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     backend_utils_cache_typcache_seams::at_eoxact_type_cache::set(at_eoxact_type_cache);
