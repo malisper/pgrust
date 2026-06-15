@@ -24,6 +24,13 @@ backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-
 backend-access-transam-xlogprefetcher-seams = { path = "../backend-access-transam-xlogprefetcher-seams" }
 backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
 backend-access-transam-xlogreader = { path = "../backend-access-transam-xlogreader" }
+# The recovery reader/prefetcher holder (walrecovery.rs) owns a live
+# XLogPrefetcher wrapping the reader and drives it on the ReadRecord loop.
+backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
+# XLogPrefetcherReadRecord reads maintenance_io_concurrency (bufmgr GUC) and
+# io_direct_flags (fd global); sourced off those owners.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
 backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }

@@ -704,7 +704,7 @@ fn terminate_brin_buildstate<'mcx>(
 /// insert/update concurrency dance around it is fully ported.
 fn summarize_range<'mcx>(
     mcx: Mcx<'mcx>,
-    index_info: &mut types_nodes::execnodes::IndexInfo,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
     state: &mut BrinBuildState<'mcx>,
     heap_rel: &Relation<'mcx>,
     heap_blk: BlockNumber,
@@ -872,7 +872,7 @@ fn brinsummarize<'mcx>(
     // Scan the revmap to find unsummarized items.
     let mut buf = InvalidBuffer;
     let mut state: Option<BrinBuildState<'mcx>> = None;
-    let mut index_info: Option<types_nodes::execnodes::IndexInfo> = None;
+    let mut index_info: Option<types_nodes::execnodes::IndexInfo<'mcx>> = None;
 
     while start_blk < heap_num_blocks {
         // Unless requested to summarize even a partial range, stop if the next
