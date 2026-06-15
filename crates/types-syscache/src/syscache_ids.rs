@@ -4,6 +4,8 @@
 /// `CacheRegisterSyscacheCallback`.
 pub type SysCacheIdentifier = i32;
 
+/// `AMOPOPID`
+pub const AMOPOPID: SysCacheIdentifier = 3;
 /// `AUTHMEMROLEMEM`
 pub const AUTHMEMROLEMEM: SysCacheIdentifier = 9;
 /// `AUTHOID`
