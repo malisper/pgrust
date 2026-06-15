@@ -23,15 +23,21 @@
 //!
 //! # Genuine remaining gaps (NOT stubbed)
 //!
-//! The rule-rewriter helpers `getInsertSelectQuery`, `AddQual`,
-//! `AddInvertedQual` and `CombineRangeTables` also live in rewriteManip.c but
-//! belong to the rule-action rewrite path (`rewriteHandler.c`, the sibling
-//! `backend-rewrite-core` files which are still `todo`). They have no consumer
-//! in the parser / `prepjointree` / `subselect` Var-manipulation path this unit
-//! serves, and `getInsertSelectQuery`'s C signature returns both a borrow of the
-//! sub-Query and a mutable link to it (`Query ***subquery_ptr`), which has no
-//! caller here. They are intentionally not defined (no own-logic stubs); they
-//! land with the rewriteHandler rule engine.
+//! The rule-rewriter helpers `getInsertSelectQuery`, `AddQual` and
+//! `AddInvertedQual` also live in rewriteManip.c but belong to the rule-action
+//! rewrite path (`rewriteHandler.c`, the sibling `backend-rewrite-core` files
+//! which are still `todo`). They have no consumer in the parser / `prepjointree`
+//! / `subselect` Var-manipulation path this unit serves, and
+//! `getInsertSelectQuery`'s C signature returns both a borrow of the sub-Query
+//! and a mutable link to it (`Query ***subquery_ptr`), which has no caller here.
+//! They are intentionally not defined (no own-logic stubs); they land with the
+//! rewriteHandler rule engine.
+//!
+//! `CombineRangeTables` (rewriteManip.c:347) is the faithful home for the
+//! range-table merge helper. It DOES have a consumer in the ported tree
+//! (`backend-optimizer-plan-subselect-pullup`, which currently carries a private
+//! `combine_range_tables` copy); relocating it here is a follow-up that touches
+//! that audited sibling crate, so it is left as a documented gap for now.
 //!
 //! # The C "cheat and modify in-place" mutators
 //!
