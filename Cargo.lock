@@ -9710,6 +9710,7 @@ name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
  "backend-replication-logical-reorderbuffer-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -14966,10 +14967,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
- "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
- "backend-access-gin-ginvacuum",
+ "backend-access-gist-core",
  "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",

@@ -17,5 +17,8 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 
+# cross-crate seams the snapshot-management family consumes
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
