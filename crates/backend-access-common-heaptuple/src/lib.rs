@@ -1629,7 +1629,7 @@ pub fn heap_getsysattr<'mcx>(
 /// The little-endian on-disk bytes of an `ItemPointerData` (4 bytes blockid + 2
 /// bytes posid), as `PointerGetDatum(&t_self)` would expose them.
 #[inline]
-fn item_pointer_bytes<'mcx>(mcx: Mcx<'mcx>, ip: &ItemPointerData) -> PgResult<PgVec<'mcx, u8>> {
+pub fn item_pointer_bytes<'mcx>(mcx: Mcx<'mcx>, ip: &ItemPointerData) -> PgResult<PgVec<'mcx, u8>> {
     let mut out = vec_with_capacity_in(mcx, 6)?;
     out.extend_from_slice(&ip.ip_blkid.bi_hi.to_ne_bytes());
     out.extend_from_slice(&ip.ip_blkid.bi_lo.to_ne_bytes());

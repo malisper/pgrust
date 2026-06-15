@@ -226,30 +226,25 @@ fn seam_exec_init_extra_tuple_slot<'mcx>(
     exec_alloc_table_slot(estate, tupledesc, tts_ops)
 }
 
-/// Seam `exec_set_slot_descriptor` — `ExecSetSlotDescriptor`.
-///
-/// PAYLOAD MODEL: installing a descriptor allocates the slot's per-column
-/// `tts_values`/`tts_isnull` arrays and pins the descriptor, both payload-model
-/// state the trimmed pool header lacks. Stays seam-and-panic until the slot
-/// payload model lands.
+/// Seam `exec_set_slot_descriptor` — `ExecSetSlotDescriptor`. Resolves the pool
+/// `SlotId` to its live `SlotData` and installs the descriptor.
 fn seam_exec_set_slot_descriptor<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _slot: SlotId,
-    _tupdesc: TupleDesc<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    tupdesc: TupleDesc<'mcx>,
 ) -> PgResult<()> {
-    panic!("execTuples.c ExecSetSlotDescriptor — needs the slot payload model (tts_values/tts_isnull)")
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecSetSlotDescriptor(mcx, estate.slot_data_mut(slot), tupdesc)
 }
 
-/// Seam `exec_store_all_null_tuple` — `ExecStoreAllNullTuple`.
-///
-/// PAYLOAD MODEL: filling every column with NULL writes the slot's
-/// `tts_values`/`tts_isnull` arrays then `ExecStoreVirtualTuple`. Stays
-/// seam-and-panic until the slot payload model lands.
+/// Seam `exec_store_all_null_tuple` — `ExecStoreAllNullTuple`. Resolves the pool
+/// `SlotId` to its live `SlotData` and fills every column NULL.
 fn seam_exec_store_all_null_tuple<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _slot: SlotId,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
 ) -> PgResult<()> {
-    panic!("execTuples.c ExecStoreAllNullTuple — needs the slot payload model (tts_values/tts_isnull)")
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecStoreAllNullTuple(mcx, estate.slot_data_mut(slot))
 }
 
 /// Seam `make_single_tuple_table_slot` — `MakeSingleTupleTableSlot`.

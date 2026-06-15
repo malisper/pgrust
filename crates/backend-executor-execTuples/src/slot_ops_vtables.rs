@@ -1766,12 +1766,47 @@ pub fn slot_ops_getsomeattrs<'mcx>(
     }
 }
 
-/// `slot->tts_ops->getsysattr(slot, attnum, &isnull)` dispatch.
+/// `slot_getsysattr(slot, attnum, &isnull)` (tuptable.h).
+///
+/// ```c
+/// Assert(attnum < 0);          /* caller error */
+/// if (attnum == TableOidAttributeNumber) {
+///     *isnull = false; return ObjectIdGetDatum(slot->tts_tableOid);
+/// } else if (attnum == SelfItemPointerAttributeNumber) {
+///     *isnull = false; return PointerGetDatum(&slot->tts_tid);
+/// }
+/// /* Fetch the system attribute from the underlying tuple. */
+/// return slot->tts_ops->getsysattr(slot, attnum, isnull);
+/// ```
+///
+/// `tts_tableOid` and `tts_tid` are slot-header fields handled *before* the
+/// per-kind callback dispatch; only the remaining system attributes route to
+/// `tts_ops->getsysattr`.
 pub fn slot_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &SlotData<'mcx>,
     attnum: AttrNumber,
 ) -> PgResult<(Datum<'mcx>, bool)> {
+    // Assert(attnum < 0); /* caller error */
+    debug_assert!(attnum < 0);
+
+    // if (attnum == TableOidAttributeNumber) { *isnull = false;
+    //     return ObjectIdGetDatum(slot->tts_tableOid); }
+    if attnum == types_tuple::heaptuple::TableOidAttributeNumber {
+        return Ok((Datum::from_oid(slot.base().header.tts_tableOid), false));
+    }
+    // else if (attnum == SelfItemPointerAttributeNumber) { *isnull = false;
+    //     return PointerGetDatum(&slot->tts_tid); }
+    if attnum == types_tuple::heaptuple::SelfItemPointerAttributeNumber {
+        let bytes = backend_access_common_heaptuple::item_pointer_bytes(
+            mcx,
+            &slot.base().header.tts_tid,
+        )?;
+        return Ok((Datum::ByRef(bytes), false));
+    }
+
+    // Fetch the system attribute from the underlying tuple
+    // (slot->tts_ops->getsysattr).
     match slot {
         SlotData::Virtual(s) => tts_virtual_getsysattr(s, attnum as i32),
         SlotData::Heap(s) => tts_heap_getsysattr(mcx, s, attnum as i32),
