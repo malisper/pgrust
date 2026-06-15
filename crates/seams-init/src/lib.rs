@@ -139,6 +139,8 @@ pub fn init_all() {
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
+    backend_access_hash_core::init_seams();
+    backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
     backend_parser_parse_oper::init_seams();
     backend_parser_parse_type::init_seams();
@@ -704,6 +706,12 @@ mod recurrence_guard {
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
         ("backend_access_table_tableam", "table_relation_needs_toast_table"),
         ("backend_access_table_tableam", "table_relation_toast_am"),
+        // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
+        // `table_index_build_scan` (tableam.h) dispatches to the heap AM's
+        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`).
+        // hashbuild / hashbuildempty call it; it becomes a real install once
+        // heapam_handler.c lands. See DESIGN_DEBT.md.
+        ("backend_access_table_tableam", "table_index_build_scan"),
         // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
         // is `common/relpath.c`'s function, not catalog.c's — the seam was
         // mis-homed onto backend-catalog-catalog-seams (this owner's stable

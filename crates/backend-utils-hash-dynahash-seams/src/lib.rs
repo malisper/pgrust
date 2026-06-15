@@ -40,6 +40,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `hash_destroy(hashp)` (dynahash.c) — free a local hash table by deleting
+    /// its private memory context. Infallible.
+    pub fn hash_destroy(hashp: *mut HTAB) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `hash_get_shared_size(info, flags)` (dynahash.c) — bytes of shared
     /// memory the table's fixed structures require. Infallible.
     pub fn hash_get_shared_size(info: &HASHCTL, flags: i32) -> usize

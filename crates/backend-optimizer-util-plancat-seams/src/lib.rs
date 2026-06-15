@@ -5,6 +5,18 @@
 //! until then a call panics loudly. Open relations cross as their `Oid`.
 
 seam_core::seam!(
+    /// `estimate_rel_size(rel, attr_widths=NULL, &pages, &tuples, &allvisfrac)`
+    /// (plancat.c): estimate the number of pages, live tuples, and
+    /// all-visible fraction currently present in a relation. Returns
+    /// `(relpages, reltuples, allvisfrac)`. The hash index build only consumes
+    /// `reltuples`. `Err` carries the `RelationGetNumberOfBlocks` / syscache
+    /// `ereport(ERROR)`s.
+    pub fn estimate_rel_size<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<(types_core::primitive::BlockNumber, f64, f64)>
+);
+
+seam_core::seam!(
     /// `get_rel_data_width(rel, attr_widths)` (plancat.c): estimate the
     /// average width of (the data part of) the relation's tuples. When
     /// `attr_widths` is supplied (the C non-NULL pointer to a

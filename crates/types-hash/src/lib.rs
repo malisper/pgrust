@@ -7,9 +7,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 pub mod backend_access_hash_hashvalidate;
 pub mod hash;
+pub mod hashpage;
 pub mod hsearch;
 
 pub use backend_access_hash_hashvalidate::*;
 pub use hash::*;
+pub use hashpage::*;

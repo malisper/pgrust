@@ -357,6 +357,104 @@ seam_core::seam!(
 // handle. `id == 0` is the C NULL strategy.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Additional buffer primitives consumed by the hash access method (hashpage.c /
+// hashovfl.c / hashsearch.c / hashinsert.c). The hash AM threads `Relation`
+// values and `Buffer` ids; the buffer manager owns the shared pages.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ReadBuffer(rel, blkno)` (bufmgr.c) — pin (reading in if needed) the
+    /// given block of the relation's MAIN_FORKNUM with the default RBM_NORMAL
+    /// mode and no buffer-access strategy. `Err` carries the smgr read
+    /// `ereport(ERROR)`s.
+    pub fn read_buffer<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, forkNum, blkno, RBM_ZERO_AND_LOCK, NULL)`
+    /// (bufmgr.c) — pin a block, zeroing it and acquiring the exclusive content
+    /// lock (used by `_hash_getinitbuf` / the existing-block branch of
+    /// `_hash_getnewbuf`). `Err` carries the smgr read `ereport(ERROR)`s.
+    pub fn read_buffer_zero_and_lock<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        fork_num: types_core::primitive::ForkNumber,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, bstrategy)`
+    /// (bufmgr.c) — pin a block with an explicit buffer-access strategy (the
+    /// VACUUM path: `_hash_getbuf_with_strategy`). A NULL (`id == 0`) strategy
+    /// behaves like the default. `Err` carries the smgr read `ereport(ERROR)`s.
+    pub fn read_buffer_with_strategy<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+        strategy: types_storage::buf::BufferAccessStrategy,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRel(BMR_REL(rel), forkNum, NULL, EB_LOCK_FIRST |
+    /// EB_SKIP_EXTENSION_LOCK)` (bufmgr.c) — extend the relation fork by one
+    /// block, returning the new write-locked, pinned buffer (the
+    /// extend-the-EOF branch of `_hash_getnewbuf`). `Err` carries the extension
+    /// `ereport(ERROR)`s.
+    pub fn extend_buffered_rel<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        fork_num: types_core::primitive::ForkNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ConditionalLockBufferForCleanup(buffer)` (bufmgr.c) — try to acquire a
+    /// cleanup (super-exclusive) lock without blocking; returns whether it was
+    /// acquired. `Err` carries the lock-manager `ereport(ERROR)`s.
+    pub fn conditional_lock_buffer_for_cleanup(
+        buffer: types_storage::Buffer,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `IsBufferCleanupOK(buffer)` (bufmgr.c) — does the caller already hold a
+    /// cleanup-strength lock on the buffer (exclusive content lock + single
+    /// pin)? `Err` carries the `Assert`-promoted error surface.
+    pub fn is_buffer_cleanup_ok(buffer: types_storage::Buffer) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `log_newpage(&rel->rd_locator, forkNum, blkno, page, page_std)`
+    /// (xloginsert.c) — emit an `XLOG_FPI` record for a freshly-initialized
+    /// page image. Used by `_hash_init` (per-bucket) and `_hash_alloc_buckets`.
+    /// The page image crosses as bytes (`BLCKSZ`). Returns the record's LSN.
+    pub fn log_newpage(
+        rlocator: types_storage::RelFileLocator,
+        fork_num: types_core::primitive::ForkNumber,
+        blkno: types_core::primitive::BlockNumber,
+        page: &[u8],
+        page_std: bool,
+    ) -> types_error::PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `PageSetChecksumInplace(page, blkno); smgrextend(RelationGetSmgr(rel),
+    /// MAIN_FORKNUM, blkno, page, skipFsync)` (bufmgr/smgr) — the
+    /// `_hash_alloc_buckets` tail that stamps a checksum into the in-memory
+    /// page image and writes it past the current EOF to keep smgr's idea of the
+    /// relation length in sync. The page image crosses as bytes (`BLCKSZ`).
+    pub fn smgr_extend_page(
+        rlocator: types_storage::RelFileLocator,
+        fork_num: types_core::primitive::ForkNumber,
+        blkno: types_core::primitive::BlockNumber,
+        page: &mut [u8],
+        skip_fsync: bool,
+    ) -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `GetAccessStrategy(btype)` (freelist.c): allocate a ring buffer of the
     /// kind appropriate for `btype` and return its handle. `Err` carries the

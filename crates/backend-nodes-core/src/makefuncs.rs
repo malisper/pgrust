@@ -30,8 +30,10 @@
 //!
 //! `makeSimpleA_Expr`/`makeStringConst` need a `String`/value node carried as a
 //! `types_nodes::NodePtr` (the operator-name `list_make1(makeString(name))` and
-//! `A_Const.val.sval`), but `types_nodes::Node` carries no value-node arm — that
-//! is a parser-owned keystone type addition, not a fill. `makeWholeRowVar`'s
+//! `A_Const.val.sval`). The value-node arms (`Node::Integer`/`Float`/`Boolean`/
+//! `String`/`BitString`, nodes/value.h) now exist in `types_nodes::Node` (added
+//! by the node-walker keystone), so these two constructors are unblocked and
+//! ready to fill by the parser cluster; only `makeWholeRowVar`'s
 //! function-RTE branches need a `Node`-level `exprType` over a
 //! `RangeTblFunction.funcexpr` `NodePtr` (the repo's `expr_type` works over the
 //! trimmed `Expr`, not `Node`). `makeNotNullConstraint`/`makeVacuumRelation`/
