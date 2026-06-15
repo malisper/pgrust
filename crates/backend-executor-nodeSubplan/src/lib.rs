@@ -39,6 +39,10 @@ use backend_executor_execAmi_seams as exec_ami;
 use backend_executor_execExpr_seams as exec_expr;
 use backend_executor_execGrouping_seams as exec_grouping;
 use backend_executor_execProcnode_seams as exec_procnode;
+// The PARAM_EXEC `execPlan`-link plumbing seams live under their real owner
+// (execMain): they operate on the executor-owned `es_param_exec_vals` /
+// `es_subplanstates`, not on any execProcnode.c function.
+use backend_executor_execMain_seams as exec_main;
 use backend_executor_execTuples_seams as exec_tuples;
 use backend_executor_execUtils_seams as executils;
 use backend_access_common_tupdesc_seams as tupdesc;
@@ -843,7 +847,7 @@ pub fn ExecInitSubPlan<'mcx>(
     // Link the SubPlanState to the already-initialized subplan state tree
     // (es_subplanstates[plan_id - 1]) and check it is non-NULL; the executor
     // owns that list, so it installs the link.
-    exec_procnode::link_subplan_planstate::call(&mut sstate, estate, plan_id)?;
+    exec_main::link_subplan_planstate::call(&mut sstate, estate, plan_id)?;
 
     // sstate->testexpr = ExecInitExpr((Expr *) subplan->testexpr, parent);
     exec_expr::sub_init_testexpr::call(&mut sstate, estate)?;
@@ -860,7 +864,9 @@ pub fn ExecInitSubPlan<'mcx>(
     if has_setparam && no_parparam && subLinkType != SubLinkType::Cte {
         for &paramid in setParam.iter() {
             // prm = &(estate->es_param_exec_vals[paramid]);  prm->execPlan = sstate;
-            mark_exec_param_needs_eval(estate, paramid)?;
+            // The `sstate` is this subplan's state; its stable identity is the
+            // subplan's 1-based `plan_id` (the index into es_subplanstates).
+            mark_exec_param_needs_eval(estate, paramid, plan_id)?;
         }
     }
 
@@ -1155,7 +1161,7 @@ pub fn ExecSetParamPlanMulti<'mcx>(
         }
         if exec_param_execplan_pending(estate, paramid) {
             // Parameter not evaluated yet, so go do it.
-            exec_procnode::exec_set_param_plan_for_pending::call(econtext, paramid, estate)?;
+            exec_main::exec_set_param_plan_for_pending::call(econtext, paramid, estate)?;
             // ExecSetParamPlan should have processed this param...
             debug_assert!(!exec_param_execplan_pending(estate, paramid));
         }
@@ -1197,11 +1203,12 @@ pub fn ExecReScanSetParamPlan<'mcx>(
     // output dirty, but do set the chgParam bit so dependent nodes rescan.
     let mark_dirty = !is_cte;
     let per_query = estate.es_query_cxt;
+    let plan_id = subplan_ref(node)?.plan_id;
     let setParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.setParam)?;
     for paramid in setParam {
         if mark_dirty {
             // prm->execPlan = node;
-            mark_exec_param_needs_eval(estate, paramid)?;
+            mark_exec_param_needs_eval(estate, paramid, plan_id)?;
         }
         // parent->chgParam = bms_add_member(parent->chgParam, paramid);
         let old = parent_chg_param.take();
@@ -1374,17 +1381,21 @@ fn set_exec_param_clear_execplan<'mcx>(
     prm.isnull = isnull;
     // prm->execPlan = NULL; — the execPlan link is modeled by the executor's
     // param-pending seam below; the value/isnull writes above are the data.
-    exec_procnode::clear_param_execplan::call(estate, paramid)?;
+    exec_main::clear_param_execplan::call(estate, paramid)?;
     Ok(())
 }
 
 /// `prm->execPlan = sstate` — mark a PARAM_EXEC as needing evaluation by this
-/// subplan. The `execPlan` link to a `SubPlanState` is owned by the executor's
-/// param array (not carried by the trimmed `ParamExecData`), so installing it
-/// goes through a seam.
+/// subplan. The `execPlan` link is modeled on `ParamExecData` as the subplan's
+/// identity (`plan_id`, the index into `es_subplanstates`); the executor owns the
+/// param array, so installing the link goes through a seam.
 #[inline]
-fn mark_exec_param_needs_eval(estate: &mut EStateData<'_>, paramid: i32) -> PgResult<()> {
-    exec_procnode::mark_param_execplan_pending::call(estate, paramid)
+fn mark_exec_param_needs_eval(
+    estate: &mut EStateData<'_>,
+    paramid: i32,
+    plan_id: i32,
+) -> PgResult<()> {
+    exec_main::mark_param_execplan_pending::call(estate, paramid, plan_id)
 }
 
 /// `econtext->ecxt_param_exec_vals[paramid].execPlan != NULL` — is the param
@@ -1392,7 +1403,7 @@ fn mark_exec_param_needs_eval(estate: &mut EStateData<'_>, paramid: i32) -> PgRe
 /// through a seam.
 #[inline]
 fn exec_param_execplan_pending(estate: &EStateData<'_>, paramid: i32) -> bool {
-    exec_procnode::param_execplan_pending::call(estate, paramid)
+    exec_main::param_execplan_pending::call(estate, paramid)
 }
 
 /// `&estate->es_param_exec_vals[paramid]` — the param slot, mutably. The C

@@ -101,8 +101,8 @@ pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
     CurrentOfTid, EPQState, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
-    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, JunkFilter, Opaque,
-    ParamExecData,
+    ExecPlanLink, ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, JunkFilter,
+    Opaque, ParamExecData,
     PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
     ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, SubqueryScanState,
     T_MaterialState,
