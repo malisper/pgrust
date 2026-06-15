@@ -815,6 +815,7 @@ pub fn init_seams() {
     });
     s::set_processing_mode_normal::set(|| SetProcessingMode(ProcessingMode::NormalProcessing));
     s::set_ignore_system_indexes::set(SetIgnoreSystemIndexes);
+    s::get_ignore_system_indexes::set(IgnoreSystemIndexes);
     // MyBackendType lives in globals.c, but miscinit owns the accessor used by
     // the C macro; install the in-crate getter.
     s::my_backend_type::set(GetMyBackendType);

@@ -920,6 +920,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-index-genam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam",
+ "backend-access-table-tableam",
+ "backend-catalog-index-seams",
+ "backend-executor-execTuples-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-index-genam-seams"
 version = "0.0.0"
 dependencies = [
@@ -13939,6 +13965,7 @@ dependencies = [
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-amapi",
+ "backend-access-index-genam",
  "backend-access-index-indexam",
  "backend-access-nbt-compare",
  "backend-access-nbt-dedup",
@@ -14843,6 +14870,7 @@ dependencies = [
 name = "types-scan"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-snapshot",
  "types-tuple",

@@ -24,6 +24,7 @@ pub fn init_all() {
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_amapi::init_seams();
+    backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
