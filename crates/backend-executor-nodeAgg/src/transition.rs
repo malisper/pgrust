@@ -280,11 +280,14 @@ pub fn advance_transition_function<'mcx>(
     //   newVal = FunctionCallInvoke(fcinfo);
     //   aggstate->curpertrans = NULL;
     //
-    // The fmgr call frame's args/isnull payload and the call dispatch
-    // (FunctionCallInvoke) plus the pass-by-ref reparent/copy
-    // (ExecAggCopyTransValue) are owned by the not-yet-ported fmgr/execExpr
-    // units; there is no seam for the transfn invocation yet, so this path
-    // panics loudly until that owner lands (mirror-PG-and-panic).
+    // FunctionCallInvoke + InitFunctionCallInfoData ARE ported (fmgr-core, #52)
+    // and a fastpath invoke seam exists. The genuine blocker is the per-trans
+    // fcinfo *carrier*: `AggStatePerTransData.transfn_fcinfo` (the args[]/isnull
+    // payload + the fcinfo->context back-reference to the AggState) is not yet
+    // modeled in types-nodes, and `ExecAggCopyTransValue` (the by-ref transValue
+    // reparent/copy) is owned by the not-yet-ported execExpr by-ref path. Until
+    // that fcinfo carrier + ExecAggCopyTransValue land, this path panics loudly
+    // (mirror-PG-and-panic).
     //
     //   if (!pertrans->transtypeByVal &&
     //       DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
@@ -295,10 +298,11 @@ pub fn advance_transition_function<'mcx>(
     //   pergroupstate->transValue = newVal;
     //   pergroupstate->transValueIsNull = fcinfo->isnull;
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: \
-         transfn invocation (FunctionCallInvoke/ExecAggCopyTransValue) is owned \
-         by the not-yet-ported fmgr/execExpr units; no transfn-invoke seam exists \
-         yet (transtypeByVal={})",
+        "backend-executor-nodeAgg::advance_transition_function: blocked on the \
+         per-trans fcinfo carrier (AggStatePerTransData.transfn_fcinfo args/isnull \
+         payload + fcinfo->context back-reference) and ExecAggCopyTransValue \
+         (execExpr by-ref reparent); FunctionCallInvoke itself is ported (fmgr-core \
+         #52) (transtypeByVal={})",
         pertrans.transtype_by_val
     );
 }
