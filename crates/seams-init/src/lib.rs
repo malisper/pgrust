@@ -17,6 +17,7 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginfast::init_seams();
     backend_access_gin_ginget::init_seams();
     backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
@@ -192,6 +193,7 @@ pub fn init_all() {
     backend_optimizer_prep_prepjointree::init_seams();
     backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_prep_prepagg::init_seams();
+    backend_optimizer_plan_analyzejoins::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
@@ -1254,6 +1256,20 @@ mod recurrence_guard {
         ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
         ("backend_storage_buffer_bufmgr", "io_method_sync"),
         ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
+        // DESIGN_DEBT (TD-GIN-OPTIONS-RELCACHE): `gin_get_use_fast_update` and
+        // `gin_get_pending_list_cleanup_size` are declared in
+        // `backend-access-gin-ginutil-seams` (ginutil owns `GinOptions`) and
+        // `::call`ed from `backend-access-gin-ginfast` (the fast-update pending
+        // list: GinGetUseFastUpdate / GinGetPendingListCleanupSize reloption
+        // reads). Their bodies read the GIN `GinOptions` bytea off the index
+        // relcache entry (`rd_options`), but the GinOptions relcache keystone is
+        // unported — the COMPLETE/audited `backend-access-gin-ginutil` owner has
+        // no body and never `::set`s them, so they loud-panic
+        // (mirror-pg-and-panic). DELETE these entries once the GinOptions relcache
+        // path lands and ginutil can install both reloption getters. See
+        // DESIGN_DEBT.md.
+        ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
+        ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
