@@ -296,10 +296,13 @@ fn vardata_short(b: &[u8]) -> &[u8] {
     &b[VARHDRSZ_SHORT..]
 }
 
-/// `(char *) value + VARHDRSZ_COMPRESSED`: the raw compressed payload.
+/// `(char *) value + VARHDRSZ_COMPRESSED`, length `VARSIZE(value) -
+/// VARHDRSZ_COMPRESSED`: the raw compressed payload. Compressed datums use the
+/// 4-byte (`SET_VARSIZE_COMPRESSED`) header form, so `VARSIZE` == `VARSIZE_4B`.
 fn compressed_payload(value: &[u8]) -> PgResult<&[u8]> {
+    let varsize = varsize_4b(value) as usize;
     value
-        .get(VARHDRSZ_COMPRESSED..)
+        .get(VARHDRSZ_COMPRESSED..varsize)
         .ok_or_else(|| PgError::error("truncated compressed datum"))
 }
 
