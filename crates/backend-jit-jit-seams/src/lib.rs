@@ -4,6 +4,13 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `jit_reset_after_error(void)` (jit.c): reset the JIT provider's
+    /// error-handling state after an error unwinds and the main loop regains
+    /// control (`postgres.c`). A no-op unless a provider is loaded.
+    pub fn jit_reset_after_error()
+);
+
+seam_core::seam!(
     /// `jit_release_context(context)` (jit.c): release a JIT context (frees
     /// the emitted functions' resources). The context crosses as the
     /// type-erased payload of the executor's `es_jit` `Opaque` handle; the

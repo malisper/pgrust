@@ -110,6 +110,7 @@ backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }
+backend-jit-jit = { path = "../backend-jit-jit" }
 backend-executor-nodeGather = { path = "../backend-executor-nodeGather" }
 backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
 backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
