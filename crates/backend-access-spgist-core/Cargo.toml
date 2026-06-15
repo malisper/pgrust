@@ -67,4 +67,32 @@ backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 # from init_seams() and consumed downstream by spgdoinsert / spgscan / spgvacuum.
 backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 
+# --- spgdoinsert.c WAL-emit + dispatch deps ---
+
+# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert.
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# REGBUF_* flag constants + spgxlog record write-side serializers.
+types-wal = { path = "../types-wal" }
+types-xlog-records = { path = "../types-xlog-records" }
+
+# Critical-section + PageSetLSN (miscinit / bufmgr already deps).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+
+# Interrupt globals (globals.c): InterruptPending read for the descent loop.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# CHECK_FOR_INTERRUPTS / INTERRUPTS_CAN_BE_PROCESSED.
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+
+# pg_prng_uint64_range(&pg_global_prng_state, ...) for allTheSame random node.
+pg-prng = { path = "../pg-prng" }
+
+# fmgr (fmgr.c): FunctionCall1Coll for the opclass compress support proc.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+
+# detoast (detoast.c): PG_DETOAST_DATUM on varlena key/include columns.
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+
+# Datum vocabulary for canonical per-attribute values.
+types-datum = { path = "../types-datum" }
+
 [dev-dependencies]

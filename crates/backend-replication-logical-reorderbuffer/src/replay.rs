@@ -1,0 +1,754 @@
+//! Change-replay family of `replication/logical/reorderbuffer.c`.
+//!
+//! This is the spine that drives a decoded transaction out to the output
+//! plugin: the parent/child association and snapshot transfer
+//! (`ReorderBufferAssignChild` / `ReorderBufferTransferSnapToParent` /
+//! `ReorderBufferCommitChild`), the k-way LSN merge over the top transaction's
+//! and its subtransactions' in-memory change queues
+//! (`ReorderBufferIterTXNInit` / `Next` / `Finish`), the per-change action
+//! dispatch (`ReorderBufferProcessTXN`) including the now-landed historic
+//! tuplecid activation (`set_active_tuplecid_hash`), the apply callbacks
+//! (`ReorderBufferApplyChange` / `ApplyTruncate` / `ApplyMessage`), the local
+//! execution of accumulated invalidations
+//! (`ReorderBufferExecuteInvalidations`), the commit-time cleanup
+//! (`ReorderBufferCleanupTXN` / `ReorderBufferTruncateTXN` /
+//! `ReorderBufferResetTXN`), the per-record frees (`ReorderBufferFreeChange` /
+//! `ReorderBufferFreeTXN`), and the public commit entry
+//! (`ReorderBufferReplay` / `ReorderBufferCommit`).
+//!
+//! Several interior steps of `ReorderBufferProcessTXN` reach subsystems whose
+//! model this repo has not built yet; each is a loud mirror-PG-and-panic, never
+//! a silent stub:
+//!
+//! * the decoded-tuple INSERT/UPDATE/DELETE/SPEC apply path needs the decoded
+//!   `HeapTuple` carrier on `ReorderBufferChangeData::Tp` (not yet modeled), the
+//!   relfilenumber→oid map (`RelidByRelfilenumber`), `RelationIdGetRelation`,
+//!   `IsToastRelation` / `RelationIsLogicallyLogged`, and TOAST reassembly;
+//! * the output-plugin callbacks (`rb->begin` / `apply_change` / `commit` / …)
+//!   are owned by `logical.c` and reached through its
+//!   `dispatch_reorderbuffer_callback` inward seam, which itself needs the
+//!   reorderbuffer owner to hold the live `LogicalDecodingContext`
+//!   (`rb->private_data`) and to produce the `RelationHandle` / `ChangeHandle`
+//!   the wrappers read — neither modeled yet;
+//! * the historic-snapshot setup/teardown (`SetupHistoricSnapshot` /
+//!   `TeardownHistoricSnapshot`) signature in `snapmgr` is still the C
+//!   `Snapshot` / `*mut HTAB` ABI, not this crate's owned value model;
+//! * the surrounding transaction machinery
+//!   (`BeginInternalSubTransaction` / `StartTransactionCommand` /
+//!   `AbortCurrentTransaction` / `RollbackAndReleaseCurrentSubTransaction`) is
+//!   unported.
+//!
+//! Everything that does not cross one of those boundaries is ported faithfully.
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+use types_core::primitive::{TimestampTz, TransactionId, XLogRecPtr};
+use types_core::xact::{CommandId, FirstCommandId, InvalidTransactionId, InvalidXLogRecPtr};
+use types_core::primitive::RepOriginId;
+
+use crate::{
+    ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
+    RBTXN_IS_SERIALIZED, RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED, RBTXN_IS_SUBXACT,
+};
+
+/// `CHANGES_THRESHOLD` (reorderbuffer.c) — emit a keepalive
+/// (`update_progress_txn`) after this many changes.
+const CHANGES_THRESHOLD: i32 = 100;
+
+// ---------------------------------------------------------------------------
+// Iterator state (file-local C structs ReorderBufferIterTXNState / *Entry)
+// ---------------------------------------------------------------------------
+
+/// One entry of the k-way merge: the next pending change of one (sub)txn, keyed
+/// for the binary heap by its `lsn`. Mirrors `ReorderBufferIterTXNEntry`; the
+/// on-disk `file`/`segno` fields belong to the spill family (serialized restore
+/// is reached through [`ReorderBuffer::restore_changes`]).
+struct IterEntry {
+    /// `XLogRecPtr lsn` — LSN of `change` (the current change of this txn).
+    lsn: XLogRecPtr,
+    /// The owning (sub)transaction's xid.
+    txn_xid: TransactionId,
+    /// Index of the next change to yield from that txn's `changes` Vec.
+    next_idx: usize,
+}
+
+/// The binary-heap node: `(lsn, entry-index)`. The C heap stores the int32
+/// entry index and reads `state->entries[off].lsn` in the comparator via the
+/// heap's `arg`; carrying the LSN in the node itself is the faithful equivalent
+/// with no shared state, and keeps the `entry-index` as the secondary tag so
+/// `replace_first`/`remove_first` address the right entry.
+type IterNode = (XLogRecPtr, i32);
+
+/// `ReorderBufferIterTXNState` — the binary heap plus the owned entry array. The
+/// C `old_change` deferred-free slot is unnecessary: our changes are owned in
+/// the txn `changes` Vec and freed when the txn is cleaned up, not reused across
+/// `Next` calls.
+pub(crate) struct IterTxnState {
+    /// `entries[]` — one per (sub)txn that contains changes.
+    entries: Vec<IterEntry>,
+    /// `binaryheap *heap` of `(lsn, off)`, min-ordered on `lsn`.
+    heap: backend_lib_binaryheap::BinaryHeap<IterNode, IterCompare>,
+}
+
+/// `ReorderBufferIterCompare` — order the heap so the smallest `lsn` comes
+/// first. The C returns the inverted sign (a max-heap API used as a min-heap);
+/// our [`backend_lib_binaryheap`] is a faithful port of the same API, so we
+/// mirror the sign exactly.
+type IterCompare = fn(&IterNode, &IterNode) -> i32;
+
+impl ReorderBuffer {
+    // -----------------------------------------------------------------------
+    // ReorderBufferAssignChild / TransferSnapToParent / CommitChild
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferAssignChild(rb, xid, subxid, lsn)` — record that `subxid`
+    /// is a subtransaction of `xid`, as of `lsn`.
+    pub fn assign_child(&mut self, xid: TransactionId, subxid: TransactionId, lsn: XLogRecPtr) {
+        let mut new_top = None;
+        let txn_xid = self
+            .txn_by_xid_pub(xid, true, &mut new_top, lsn, true)
+            .expect("create == true yields a txn");
+        let mut new_sub = None;
+        let subtxn_xid = self
+            .txn_by_xid_pub(subxid, true, &mut new_sub, lsn, false)
+            .expect("create == true yields a txn");
+
+        if new_sub != Some(true) {
+            if self.with_txn_pub(subtxn_xid, |t| t.is_known_subxact()) {
+                // already associated, nothing to do.
+                return;
+            }
+            // Seen before but as a top-level txn; now we know it isn't.
+            self.toplevel_by_lsn_remove(subtxn_xid);
+        }
+
+        self.with_txn_pub(subtxn_xid, |t| {
+            t.txn_flags |= RBTXN_IS_SUBXACT;
+            t.toplevel_xid = xid;
+            debug_assert!(t.nsubtxns == 0);
+        });
+
+        // add to subtransaction list
+        self.with_txn_pub(txn_xid, |t| {
+            t.subtxns.push(subtxn_xid);
+            t.nsubtxns += 1;
+        });
+
+        // Possibly transfer the subtxn's snapshot to its top-level txn.
+        self.transfer_snap_to_parent(txn_xid, subtxn_xid);
+
+        self.assert_txn_lsn_order_pub();
+    }
+
+    /// `ReorderBufferTransferSnapToParent(txn, subtxn)` — move the subxact's
+    /// base snapshot up to its top-level txn when the top has none or a later
+    /// one. The subtransaction's snapshot is cleared either way.
+    fn transfer_snap_to_parent(&mut self, txn_xid: TransactionId, subtxn_xid: TransactionId) {
+        debug_assert!(self.with_txn_pub(subtxn_xid, |t| t.toplevel_xid) == txn_xid);
+
+        let (sub_has_snap, sub_lsn) =
+            self.with_txn_pub(subtxn_xid, |t| (t.base_snapshot.is_some(), t.base_snapshot_lsn));
+        if !sub_has_snap {
+            return;
+        }
+
+        let (top_has_snap, top_lsn) =
+            self.with_txn_pub(txn_xid, |t| (t.base_snapshot.is_some(), t.base_snapshot_lsn));
+
+        if !top_has_snap || sub_lsn < top_lsn {
+            // If the toplevel already has a base snapshot but it's newer than
+            // the subxact's, purge it.
+            if top_has_snap {
+                self.base_snapshot_dec_refcount(txn_xid);
+                self.txns_by_base_snapshot_lsn_remove(txn_xid);
+            }
+
+            // The snapshot is now the top transaction's; transfer it, and move
+            // the top txn into the subxact's position in the LSN-ordered list.
+            let (snap, snap_lsn) =
+                self.with_txn_pub(subtxn_xid, |t| (t.base_snapshot.take(), t.base_snapshot_lsn));
+            self.with_txn_pub(txn_xid, |t| {
+                t.base_snapshot = snap;
+                t.base_snapshot_lsn = snap_lsn;
+            });
+            self.txns_by_base_snapshot_lsn_insert_before(subtxn_xid, txn_xid);
+
+            // The subtransaction doesn't have a snapshot anymore.
+            self.with_txn_pub(subtxn_xid, |t| {
+                t.base_snapshot = None;
+                t.base_snapshot_lsn = InvalidXLogRecPtr;
+            });
+            self.txns_by_base_snapshot_lsn_remove(subtxn_xid);
+        } else {
+            // Base snap of toplevel is fine, so the subxact's is not needed.
+            self.base_snapshot_dec_refcount(subtxn_xid);
+            self.txns_by_base_snapshot_lsn_remove(subtxn_xid);
+            self.with_txn_pub(subtxn_xid, |t| {
+                t.base_snapshot = None;
+                t.base_snapshot_lsn = InvalidXLogRecPtr;
+            });
+        }
+    }
+
+    /// `ReorderBufferCommitChild(rb, xid, subxid, commit_lsn, end_lsn)`.
+    pub fn commit_child(
+        &mut self,
+        xid: TransactionId,
+        subxid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+    ) {
+        let subtxn_xid =
+            match self.txn_by_xid_pub(subxid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return, // no changes in subxact -> nothing to do
+                Some(x) => x,
+            };
+
+        self.with_txn_pub(subtxn_xid, |t| {
+            t.final_lsn = commit_lsn;
+            t.end_lsn = end_lsn;
+        });
+
+        self.assign_child(xid, subxid, InvalidXLogRecPtr);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferIterTXNInit / Next / Finish (k-way merge)
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferIterTXNInit(rb, txn, &iterstate)` — assemble the binary
+    /// heap with one entry per (sub)txn that has in-memory changes.
+    ///
+    /// Serialized (spilled) txns require `ReorderBufferSerializeTXN` +
+    /// `ReorderBufferRestoreChanges` to page their changes back in; that is the
+    /// spill family and is reached through [`ReorderBuffer::restore_changes`].
+    fn iter_txn_init(&mut self, txn_xid: TransactionId) -> IterTxnState {
+        self.assert_change_lsn_order(txn_xid);
+
+        // Collect the (sub)txns that contain changes: the toplevel txn plus its
+        // subtxns (one heap element each).
+        let mut member_xids: Vec<TransactionId> = Vec::new();
+        if self.with_txn_pub(txn_xid, |t| t.nentries) > 0 {
+            member_xids.push(txn_xid);
+        }
+        let subtxns = self.with_txn_pub(txn_xid, |t| t.subtxns.clone());
+        for sub_xid in subtxns {
+            self.assert_change_lsn_order(sub_xid);
+            if self.with_txn_pub(sub_xid, |t| t.nentries) > 0 {
+                member_xids.push(sub_xid);
+            }
+        }
+
+        let nr_txns = member_xids.len();
+        let mut entries: Vec<IterEntry> = Vec::with_capacity(nr_txns);
+
+        for &m_xid in &member_xids {
+            if self.with_txn_pub(m_xid, |t| t.is_serialized()) {
+                // serialize remaining changes, then restore the first segment.
+                self.serialize_txn(m_xid);
+                self.restore_changes(m_xid);
+            }
+            let lsn = self.with_txn_pub(m_xid, |t| t.changes[0].lsn);
+            entries.push(IterEntry {
+                lsn,
+                txn_xid: m_xid,
+                next_idx: 1,
+            });
+        }
+
+        let cmp: IterCompare = iter_compare;
+        let mut heap = backend_lib_binaryheap::BinaryHeap::allocate(nr_txns as i32, cmp)
+            .expect("binaryheap_allocate");
+        // Insert items unordered, then a single build step (more efficient).
+        for off in 0..nr_txns {
+            heap.add_unordered((entries[off].lsn, off as i32))
+                .expect("binaryheap_add_unordered");
+        }
+        heap.build();
+
+        IterTxnState { entries, heap }
+    }
+
+    /// `ReorderBufferIterTXNNext(rb, state)` — yield the next change in LSN
+    /// order across all (sub)txns, or `None` when exhausted.
+    fn iter_txn_next(&mut self, state: &mut IterTxnState) -> Option<ReorderBufferChange> {
+        if state.heap.is_empty() {
+            return None;
+        }
+
+        let (_, off) = *state.heap.first();
+        let entry = &state.entries[off as usize];
+        let entry_xid = entry.txn_xid;
+        let idx = entry.next_idx - 1;
+
+        // The C yields a borrowed change and advances; our changes are owned in
+        // the txn Vec. We clone the change to hand out (the apply callbacks read
+        // it; the original is freed when the txn is cleaned/truncated). Cloning
+        // preserves the exact yielded value without disturbing list ownership.
+        let change = self.with_txn_pub(entry_xid, |t| t.changes[idx].shallow_clone());
+
+        let (nentries, nentries_mem) =
+            self.with_txn_pub(entry_xid, |t| (t.nentries, t.nentries_mem));
+        let has_next_mem = state.entries[off as usize].next_idx
+            < self.with_txn_pub(entry_xid, |t| t.changes.len());
+
+        if has_next_mem {
+            // there are more in-memory changes for this txn.
+            let next_idx = state.entries[off as usize].next_idx;
+            let next_lsn = self.with_txn_pub(entry_xid, |t| t.changes[next_idx].lsn);
+            state.entries[off as usize].lsn = next_lsn;
+            state.entries[off as usize].next_idx = next_idx + 1;
+            state.heap.replace_first((next_lsn, off));
+            return Some(change);
+        }
+
+        // try to load changes from disk (spill family).
+        if nentries != nentries_mem {
+            let txn_size = self.with_txn_pub(entry_xid, |t| t.size) as i64;
+            self.totalbytes_add(txn_size);
+            if self.restore_changes(entry_xid) {
+                let next_lsn = self.with_txn_pub(entry_xid, |t| t.changes[0].lsn);
+                state.entries[off as usize].lsn = next_lsn;
+                state.entries[off as usize].next_idx = 1;
+                state.heap.replace_first((next_lsn, off));
+                return Some(change);
+            }
+        }
+
+        // no changes left for this txn; remove it from the heap.
+        state.heap.remove_first();
+        Some(change)
+    }
+
+    /// `ReorderBufferIterTXNFinish(rb, state)` — free the iterator. The on-disk
+    /// vfd close belongs to the spill family; the in-memory heap drops here.
+    fn iter_txn_finish(&mut self, state: IterTxnState) {
+        state.heap.free();
+    }
+
+    /// Test-only: drive the full k-way merge and collect yielded LSNs in order.
+    #[cfg(test)]
+    pub(crate) fn iter_lsns_collect(&mut self, txn_xid: TransactionId) -> Vec<XLogRecPtr> {
+        let mut state = self.iter_txn_init(txn_xid);
+        let mut out = Vec::new();
+        while let Some(change) = self.iter_txn_next(&mut state) {
+            out.push(change.lsn);
+        }
+        self.iter_txn_finish(state);
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferProcessTXN — the per-change action dispatch
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferProcessTXN(rb, txn, commit_lsn, snapshot_now, command_id,
+    /// streaming)` — send a transaction's changes to the output plugin in LSN
+    /// order.
+    ///
+    /// The historic tuplecid hash this builds is what activates the now-landed
+    /// `ResolveCminCmaxDuringDecoding` path:
+    /// [`crate::set_active_tuplecid_hash`] installs `txn->tuplecid_hash` as the
+    /// active `(relfilelocator, ctid) -> (cmin, cmax)` lookup, exactly as the C
+    /// `SetupHistoricSnapshot(snapshot_now, txn->tuplecid_hash)` does.
+    ///
+    /// The output-plugin callbacks, the transaction machinery, and the decoded
+    /// tuple/relcache path are unported; the body drives the portable spine and
+    /// panics loudly at each of those boundaries (see the module docs).
+    fn process_txn(
+        &mut self,
+        txn_xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        snapshot_now: crate::SnapshotData,
+        command_id: CommandId,
+        streaming: bool,
+    ) {
+        // build data to be able to lookup the CommandIds of catalog tuples.
+        self.build_tuple_cid_hash(txn_xid);
+
+        // setup the initial snapshot: activate the decoded tuplecid hash so the
+        // historic-MVCC resolver can see it (SetupHistoricSnapshot side that
+        // this crate owns). The snapshot value itself is handed to snapmgr's
+        // SetupHistoricSnapshot, whose owned-value model is not yet built.
+        let tuplecid_hash = self.with_txn_pub(txn_xid, |t| t.tuplecid_hash.clone());
+        crate::set_active_tuplecid_hash(tuplecid_hash);
+        let _ = (&snapshot_now, command_id, commit_lsn, streaming);
+        self.setup_historic_snapshot(&snapshot_now, txn_xid);
+
+        // The transaction machinery (BeginInternalSubTransaction /
+        // StartTransactionCommand), the begin/begin_prepare output callback,
+        // and the per-change apply callbacks are all unported. Drive the merge
+        // so the spine is exercised, then panic at the first boundary the body
+        // actually reaches.
+        let mut iterstate = self.iter_txn_init(txn_xid);
+        let mut prev_lsn = InvalidXLogRecPtr;
+        let mut changes_count = 0;
+
+        self.begin_output(txn_xid, streaming);
+
+        while let Some(change) = self.iter_txn_next(&mut iterstate) {
+            // CHECK_FOR_INTERRUPTS();
+
+            if prev_lsn == InvalidXLogRecPtr && streaming {
+                self.stream_start_output(txn_xid, change.lsn);
+            }
+
+            debug_assert!(prev_lsn == InvalidXLogRecPtr || prev_lsn <= change.lsn);
+            prev_lsn = change.lsn;
+
+            match change.action {
+                ReorderBufferChangeType::Insert
+                | ReorderBufferChangeType::Update
+                | ReorderBufferChangeType::Delete
+                | ReorderBufferChangeType::InternalSpecInsert
+                | ReorderBufferChangeType::InternalSpecConfirm
+                | ReorderBufferChangeType::InternalSpecAbort
+                | ReorderBufferChangeType::Truncate => {
+                    // The decoded-tuple apply path (RelidByRelfilenumber,
+                    // RelationIdGetRelation, IsToastRelation, TOAST
+                    // reassembly, apply_change/apply_truncate) is gated on the
+                    // decoded-tuple carrier keystone.
+                    self.apply_decoded_change(txn_xid, &change, streaming);
+                }
+                ReorderBufferChangeType::Message => {
+                    self.apply_message(txn_xid, &change, streaming);
+                }
+                ReorderBufferChangeType::Invalidation => {
+                    if let ReorderBufferChangeData::Inval(msgs) = &change.data {
+                        self.execute_invalidations(msgs);
+                    }
+                }
+                ReorderBufferChangeType::InternalSnapshot => {
+                    // get rid of the old, switch to the change's snapshot.
+                    // The historic-snapshot teardown/setup ABI is unported.
+                    self.handle_internal_snapshot(txn_xid, &change, command_id);
+                }
+                ReorderBufferChangeType::InternalCommandId => {
+                    if let ReorderBufferChangeData::CommandId(cid) = &change.data {
+                        debug_assert!(*cid != types_core::xact::InvalidCommandId);
+                        self.handle_internal_command_id(txn_xid, *cid, command_id);
+                    }
+                }
+                ReorderBufferChangeType::InternalTupleCid => {
+                    panic!("tuplecid value in changequeue");
+                }
+            }
+
+            changes_count += 1;
+            if changes_count >= CHANGES_THRESHOLD {
+                self.update_progress_txn(txn_xid, prev_lsn);
+                changes_count = 0;
+            }
+        }
+
+        self.iter_txn_finish(iterstate);
+
+        // Commit-time tail (totals, commit/prepare callback, teardown, abort
+        // current txn, execute invalidations, cleanup/truncate) is unported
+        // beyond this point. The body has already reached an apply callback /
+        // historic-snapshot boundary above for any non-empty transaction.
+        let _ = prev_lsn;
+        self.process_txn_commit_tail(txn_xid, streaming);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferReplay / ReorderBufferCommit
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferReplay(txn, rb, xid, commit_lsn, end_lsn, commit_time,
+    /// origin_id, origin_lsn)` — replay a toplevel txn (and its subtxns).
+    #[allow(clippy::too_many_arguments)]
+    fn replay(
+        &mut self,
+        txn_xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+    ) {
+        self.with_txn_pub(txn_xid, |t| {
+            t.final_lsn = commit_lsn;
+            t.end_lsn = end_lsn;
+            t.xact_time = commit_time;
+            t.origin_id = origin_id;
+            t.origin_lsn = origin_lsn;
+        });
+
+        // A (partially) streamed txn commits the streamed way.
+        if self.with_txn_pub(txn_xid, |t| t.is_streamed()) {
+            self.stream_commit(txn_xid);
+            return;
+        }
+
+        // No snapshot -> no changes to decode.
+        if self.with_txn_pub(txn_xid, |t| t.base_snapshot.is_none()) {
+            debug_assert!(self.with_txn_pub(txn_xid, |t| t.invalidations.is_empty()));
+            if !self.with_txn_pub(txn_xid, |t| t.is_prepared()) {
+                self.cleanup_txn(txn_xid);
+            }
+            return;
+        }
+
+        let snapshot_now = self
+            .with_txn_pub(txn_xid, |t| t.base_snapshot.clone())
+            .expect("base_snapshot present");
+
+        self.process_txn(txn_xid, commit_lsn, snapshot_now, FirstCommandId, false);
+    }
+
+    /// `ReorderBufferCommit(rb, xid, commit_lsn, end_lsn, commit_time,
+    /// origin_id, origin_lsn)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit(
+        &mut self,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+    ) {
+        let txn_xid = match self.txn_by_xid_pub(xid, false, &mut None, InvalidXLogRecPtr, false) {
+            None => return, // unknown transaction, nothing to replay
+            Some(x) => x,
+        };
+        self.replay(txn_xid, commit_lsn, end_lsn, commit_time, origin_id, origin_lsn);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferCleanupTXN / TruncateTXN / ResetTXN
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferCleanupTXN(rb, txn)` — discard a transaction and all its
+    /// resources after commit/abort.
+    pub(crate) fn cleanup_txn(&mut self, txn_xid: TransactionId) {
+        // cleanup subtransactions & their changes (never recurses >1 deep).
+        let subtxns = self.with_txn_pub(txn_xid, |t| t.subtxns.clone());
+        for sub_xid in subtxns {
+            debug_assert!(self.with_txn_pub(sub_xid, |t| t.is_known_subxact()));
+            debug_assert!(self.with_txn_pub(sub_xid, |t| t.nsubtxns == 0));
+            self.cleanup_txn(sub_xid);
+        }
+
+        // cleanup changes in the txn (sum freed memory, update once below).
+        let changes = self.with_txn_pub(txn_xid, |t| core::mem::take(&mut t.changes));
+        let mut mem_freed = 0usize;
+        for change in changes {
+            mem_freed += crate::change_size(&change);
+            self.free_change(change, false);
+        }
+        self.change_memory_update_sub_txn(txn_xid, mem_freed);
+
+        // cleanup the tuplecids (catalog snapshot access).
+        let tuplecids = self.with_txn_pub(txn_xid, |t| core::mem::take(&mut t.tuplecids));
+        for change in tuplecids {
+            debug_assert!(change.action == ReorderBufferChangeType::InternalTupleCid);
+            self.free_change(change, true);
+        }
+
+        // cleanup the base snapshot, if set.
+        if self.with_txn_pub(txn_xid, |t| t.base_snapshot.is_some()) {
+            self.base_snapshot_dec_refcount(txn_xid);
+            self.txns_by_base_snapshot_lsn_remove(txn_xid);
+        }
+
+        // cleanup the snapshot for the last streamed run.
+        if self.with_txn_pub(txn_xid, |t| t.snapshot_now.is_some()) {
+            debug_assert!(self.with_txn_pub(txn_xid, |t| t.is_streamed()));
+            let snap = self.with_txn_pub(txn_xid, |t| t.snapshot_now.take()).unwrap();
+            self.free_snap(snap);
+        }
+
+        // remove TXN from its containing lists.
+        let (is_subxact, top_xid, has_cat) = self.with_txn_pub(txn_xid, |t| {
+            (t.is_known_subxact(), t.toplevel_xid, t.has_catalog_changes())
+        });
+        if is_subxact {
+            self.subtxns_remove(top_xid, txn_xid);
+        } else {
+            self.toplevel_by_lsn_remove(txn_xid);
+        }
+        if has_cat {
+            self.catchange_remove(txn_xid);
+        }
+
+        // remove entries spilled to disk (spill family).
+        if self.with_txn_pub(txn_xid, |t| t.is_serialized()) {
+            self.restore_cleanup(txn_xid);
+        }
+
+        // now remove reference from buffer + deallocate.
+        self.free_txn(txn_xid);
+    }
+
+    /// `ReorderBufferTruncateTXN(rb, txn, txn_prepared)` — discard a txn's
+    /// changes (after streaming / PREPARE / abort) while keeping the txn shell,
+    /// its invalidations, snapshot, and (unless prepared) its tuplecids.
+    pub(crate) fn truncate_txn(&mut self, txn_xid: TransactionId, txn_prepared: bool) {
+        // cleanup subtransactions & their changes.
+        let subtxns = self.with_txn_pub(txn_xid, |t| t.subtxns.clone());
+        for sub_xid in subtxns {
+            debug_assert!(self.with_txn_pub(sub_xid, |t| t.is_known_subxact()));
+            debug_assert!(self.with_txn_pub(sub_xid, |t| t.nsubtxns == 0));
+            self.maybe_mark_txn_streamed(sub_xid);
+            self.truncate_txn(sub_xid, txn_prepared);
+        }
+
+        // free changes, summing memory.
+        let changes = self.with_txn_pub(txn_xid, |t| core::mem::take(&mut t.changes));
+        let mut mem_freed = 0usize;
+        for change in changes {
+            mem_freed += crate::change_size(&change);
+            self.free_change(change, false);
+        }
+        self.change_memory_update_sub_txn(txn_xid, mem_freed);
+
+        if txn_prepared {
+            let tuplecids = self.with_txn_pub(txn_xid, |t| core::mem::take(&mut t.tuplecids));
+            for change in tuplecids {
+                debug_assert!(change.action == ReorderBufferChangeType::InternalTupleCid);
+                self.free_change(change, true);
+            }
+        }
+
+        // destroy the tuplecid_hash if built.
+        self.with_txn_pub(txn_xid, |t| t.tuplecid_hash = None);
+
+        if self.with_txn_pub(txn_xid, |t| t.is_serialized()) {
+            self.restore_cleanup(txn_xid);
+            self.with_txn_pub(txn_xid, |t| {
+                t.txn_flags &= !RBTXN_IS_SERIALIZED;
+                t.txn_flags |= RBTXN_IS_SERIALIZED_CLEAR;
+            });
+        }
+        self.with_txn_pub(txn_xid, |t| {
+            t.nentries_mem = 0;
+            t.nentries = 0;
+        });
+    }
+
+    /// `ReorderBufferResetTXN(rb, txn, snapshot_now, command_id, last_lsn,
+    /// specinsert)` — reset a streamed/prepared txn after a concurrent abort so
+    /// the remaining data can still be streamed.
+    ///
+    /// Reached from `ReorderBufferProcessTXN`'s `PG_CATCH` concurrent-abort arm,
+    /// which sits in the commit tail behind the still-unported output-plugin
+    /// dispatch; the body itself is ported in full.
+    #[allow(dead_code)]
+    pub(crate) fn reset_txn(
+        &mut self,
+        txn_xid: TransactionId,
+        snapshot_now: crate::SnapshotData,
+        command_id: CommandId,
+        last_lsn: XLogRecPtr,
+        specinsert: Option<ReorderBufferChange>,
+    ) {
+        let prepared = self.with_txn_pub(txn_xid, |t| t.is_prepared());
+        self.truncate_txn(txn_xid, prepared);
+        self.toast_reset(txn_xid);
+
+        if let Some(spec) = specinsert {
+            self.free_change(spec, true);
+        }
+
+        if self.with_txn_pub(txn_xid, |t| t.is_streamed()) {
+            self.stream_stop_output(txn_xid, last_lsn);
+            self.save_txn_snapshot(txn_xid, snapshot_now, command_id);
+        }
+        debug_assert!(self.with_txn_pub(txn_xid, |t| t.size) == 0);
+    }
+
+    /// `ReorderBufferMaybeMarkTXNStreamed(rb, txn)`.
+    pub(crate) fn maybe_mark_txn_streamed(&mut self, txn_xid: TransactionId) {
+        let (is_top, nentries_mem) =
+            self.with_txn_pub(txn_xid, |t| (!t.is_known_subxact(), t.nentries_mem));
+        if is_top || nentries_mem != 0 {
+            self.with_txn_pub(txn_xid, |t| t.txn_flags |= RBTXN_IS_STREAMED);
+        }
+    }
+
+    /// `ReorderBufferSaveTXNSnapshot(rb, txn, snapshot_now, command_id)`.
+    pub(crate) fn save_txn_snapshot(
+        &mut self,
+        txn_xid: TransactionId,
+        snapshot_now: crate::SnapshotData,
+        command_id: CommandId,
+    ) {
+        self.with_txn_pub(txn_xid, |t| t.command_id = command_id);
+        if snapshot_now.copied {
+            self.with_txn_pub(txn_xid, |t| t.snapshot_now = Some(snapshot_now));
+        } else {
+            let copied = self.copy_snap(&snapshot_now, txn_xid, command_id);
+            self.with_txn_pub(txn_xid, |t| t.snapshot_now = Some(copied));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferFreeChange / FreeTXN
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferFreeChange(rb, change, upd_mem)` — release one change's
+    /// owned payload. The change is consumed by value (the C `pfree(change)`).
+    pub(crate) fn free_change(&mut self, change: ReorderBufferChange, upd_mem: bool) {
+        if upd_mem {
+            let sz = crate::change_size(&change);
+            self.change_memory_update_sub(sz);
+        }
+        // The owned payload (tuples, message bytes, invalidations, relids) drops
+        // with `change`. An INTERNAL_SNAPSHOT change's snapshot is released via
+        // free_snap to mirror ReorderBufferFreeSnap's refcount discipline; every
+        // other payload simply drops with `change` here.
+        if let ReorderBufferChangeData::Snapshot(snap) = change.data {
+            self.free_snap(snap);
+        }
+    }
+
+    /// `ReorderBufferFreeTXN(rb, txn)` — deallocate a txn shell after its
+    /// resources are released, also clearing the one-entry lookup cache and
+    /// removing it from `by_txn`.
+    pub(crate) fn free_txn(&mut self, txn_xid: TransactionId) {
+        self.invalidate_by_txn_cache(txn_xid);
+        // gid / invalidations / invalidations_distributed / tuplecid_hash drop
+        // with the removed txn; ReorderBufferToastReset frees any toast data.
+        self.toast_reset(txn_xid);
+        debug_assert!(self.by_txn_get(txn_xid).map(|t| t.size).unwrap_or(0) == 0);
+        self.by_txn_remove(txn_xid);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReorderBufferExecuteInvalidations
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferExecuteInvalidations(nmsgs, msgs)` — locally execute each
+    /// accumulated shared-invalidation message.
+    pub(crate) fn execute_invalidations(
+        &self,
+        msgs: &[types_storage::sinval::SharedInvalidationMessage],
+    ) {
+        for msg in msgs {
+            backend_utils_cache_inval_seams::local_execute_invalidation_message::call(msg)
+                .expect("LocalExecuteInvalidationMessage");
+        }
+    }
+}
+
+/// `ReorderBufferIterCompare(a, b, arg)` — heap comparator over entry LSNs.
+/// `a`/`b` are `(lsn, off)` nodes; the smallest LSN must come out first, so we
+/// invert the sign exactly as the C does (a max-heap API driven as a min-heap).
+fn iter_compare(a: &IterNode, b: &IterNode) -> i32 {
+    let (pos_a, _) = *a;
+    let (pos_b, _) = *b;
+    if pos_a < pos_b {
+        1
+    } else if pos_a == pos_b {
+        0
+    } else {
+        -1
+    }
+}
+
+#[allow(unused_imports)]
+use InvalidTransactionId as _IgnoreInvalidTxn;
