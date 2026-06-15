@@ -509,6 +509,44 @@ pub(crate) fn check_for_standby_trigger() -> bool {
     false
 }
 
+// --- Page-read driver accessors for the file-static read-state thread-locals
+// (`currentSource`, `pendingWalRcvRestart`, `XLogReceiptTime`,
+// `XLogReceiptSource`). The driver runs as the reader's `page_read` callback
+// (`fn`, no `&mut st`), so it reaches these through the crate's canonical
+// thread-local home here. ---
+
+/// `currentSource` — the WAL source the recovery state machine is currently
+/// reading from.
+#[inline]
+pub(crate) fn current_source() -> XLogSource {
+    CURRENT_SOURCE.with(Cell::get)
+}
+/// Set `currentSource`.
+#[inline]
+pub(crate) fn set_current_source(s: XLogSource) {
+    CURRENT_SOURCE.with(|c| c.set(s));
+}
+/// `pendingWalRcvRestart`.
+#[inline]
+pub(crate) fn pending_wal_rcv_restart() -> bool {
+    PENDING_WAL_RCV_RESTART.with(Cell::get)
+}
+/// Set `pendingWalRcvRestart`.
+#[inline]
+pub(crate) fn set_pending_wal_rcv_restart(v: bool) {
+    PENDING_WAL_RCV_RESTART.with(|c| c.set(v));
+}
+/// Set `XLogReceiptTime`.
+#[inline]
+pub(crate) fn set_xlog_receipt_time(t: TimestampTz) {
+    XLOG_RECEIPT_TIME.with(|c| c.set(t));
+}
+/// Set `XLogReceiptSource`.
+#[inline]
+pub(crate) fn set_xlog_receipt_source(s: XLogSource) {
+    XLOG_RECEIPT_SOURCE.with(|c| c.set(s));
+}
+
 /// `PROMOTE_SIGNAL_FILE` (access/xlog.h) — relative to `$PGDATA`.
 const PROMOTE_SIGNAL_FILE: &str = "promote";
 

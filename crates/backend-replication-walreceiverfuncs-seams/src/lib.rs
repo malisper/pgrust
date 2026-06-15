@@ -76,3 +76,56 @@ seam_core::seam!(
     /// is fallible here even though the C return is a plain `bool`.
     pub fn wal_rcv_running() -> types_error::PgResult<bool>
 );
+
+// ===========================================================================
+// Streaming-control entry points consumed by the recovery page-read driver
+// (xlogrecovery.c WaitForWALToBecomeAvailable). The walreceiverfuncs owner is
+// unported, so these stay seam-and-panic until it lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `bool WalRcvStreaming(void)` (walreceiverfuncs.c) — whether the
+    /// walreceiver is streaming WAL (or about to). Like `WalRcvRunning`, may
+    /// lazily transition a stuck state, hence fallible.
+    pub fn wal_rcv_streaming() -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `void XLogShutdownWalRcv(void)` — request the walreceiver to stop and
+    /// wait for it to do so (a shmem state-write protected by the walrcv
+    /// spinlock).
+    pub fn xlog_shutdown_wal_rcv()
+);
+
+seam_core::seam!(
+    /// `void RequestXLogStreaming(tli, recptr, conninfo, slotname,
+    /// create_temp_slot)` — start the walreceiver streaming from `recptr` on
+    /// timeline `tli`. `Err` carries the slot-validation `ereport(ERROR)`.
+    pub fn request_xlog_streaming(
+        tli: types_core::TimeLineID,
+        recptr: types_core::XLogRecPtr,
+        conninfo: &str,
+        slotname: &str,
+        create_temp_slot: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `void SetInstallXLogFileSegmentActive(void)` — permit WAL-segment
+    /// installation into `pg_wal` (a shmem flag-write).
+    pub fn set_install_xlog_file_segment_active()
+);
+
+seam_core::seam!(
+    /// `void ResetInstallXLogFileSegmentActive(void)` — forbid WAL-segment
+    /// installation into `pg_wal` (a shmem flag-write).
+    pub fn reset_install_xlog_file_segment_active()
+);
+
+seam_core::seam!(
+    /// `XLogRecPtr GetWalRcvFlushRecPtr(XLogRecPtr *latestChunkStart,
+    /// TimeLineID *receiveTLI)` — the last byte+1 of WAL flushed to disk by the
+    /// walreceiver, plus the start of the latest chunk and the receive TLI.
+    /// Returns `(flushedUpto, latestChunkStart, receiveTLI)`.
+    pub fn get_wal_rcv_flush_rec_ptr_full() -> (types_core::XLogRecPtr, types_core::XLogRecPtr, types_core::TimeLineID)
+);
