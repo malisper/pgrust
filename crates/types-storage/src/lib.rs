@@ -21,6 +21,7 @@ pub mod latch;
 pub mod lock;
 pub mod relfilelocator;
 pub mod sinval;
+pub mod smgr;
 pub mod storage;
 pub mod sync;
 pub mod waiteventset;
