@@ -490,3 +490,31 @@ seam_core::seam!(
         replay_tli: TimeLineID,
     ) -> PgResult<()>
 );
+
+// ===========================================================================
+// WAL segment-file path / checkpoint-need / install-active helpers consumed by
+// the recovery page-read driver (xlogrecovery.c XLogFileRead / XLogPageRead /
+// WaitForWALToBecomeAvailable). Owned by xlog.c (the `static`
+// XLogFileSegmentInstallActive flag, XLogCheckpointNeeded, and XLogFilePath).
+// xlog.c is needs-decomp, so these stay seam-and-panic until it lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `XLogFilePath(path, tli, logSegNo, wal_segsz_bytes)` (xlog_internal.h) —
+    /// the full path of a WAL segment file inside `pg_wal` (`XLOGDIR "/%s"`
+    /// where `%s` is the bare segment file name). Pure path arithmetic.
+    pub fn xlog_file_path(tli: TimeLineID, log_seg_no: XLogSegNo) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `XLogCheckpointNeeded(new_segno)` (xlog.c) — whether enough WAL has been
+    /// written since the last checkpoint that a new one should be requested.
+    pub fn xlog_checkpoint_needed(new_segno: XLogSegNo) -> bool
+);
+
+seam_core::seam!(
+    /// `IsInstallXLogFileSegmentActive()` (xlog.c) — whether WAL-segment
+    /// installation into `pg_wal` is currently permitted (used by the recovery
+    /// page-read driver to assert it is OFF before restoring from archive).
+    pub fn is_install_xlog_file_segment_active() -> bool
+);

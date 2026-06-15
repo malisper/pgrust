@@ -14,6 +14,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RestoreArchivedFile(path, xlogfname, recovername, expectedSize,
+    /// cleanupEnabled)` (xlogarchive.c) — attempt to restore a WAL segment (or
+    /// any file) named `xlogfname` from the archive into a temp recovery name.
+    /// On success returns `Some(path)` (the restored file's path, in `mcx`); on
+    /// failure (not in the archive) returns `None`. Can `ereport` at
+    /// `ERROR`/`FATAL` on a `restore_command` failure.
+    pub fn restore_archived_file<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        xlogfname: &str,
+        recovername: &str,
+        expected_size: i64,
+        cleanup_enabled: bool,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `KeepFileRestoredFromArchive(path, xlogfname)` (xlogarchive.c) — move a
     /// file just restored from the archive into `pg_wal` under its final name so
     /// it is kept for future reference. Can `ereport` on rename failure.
