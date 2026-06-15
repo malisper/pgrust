@@ -1639,6 +1639,11 @@ fn seam_set_xact_iso_level_read_committed() {
     SetXactIsoLevel(XACT_READ_COMMITTED);
 }
 
+/// `XactIsoLevel = XACT_REPEATABLE_READ` — seam adapter.
+fn seam_set_xact_iso_level_repeatable_read() {
+    SetXactIsoLevel(XACT_REPEATABLE_READ);
+}
+
 // ---------------------------------------------------------------------------
 //  Seam installation
 // ---------------------------------------------------------------------------
@@ -1693,6 +1698,8 @@ pub fn init_seams() {
     // Reconciled adapters: seam contract differs slightly from the owner body.
     seams::define_savepoint::set(seam_define_savepoint);
     seams::set_xact_iso_level_read_committed::set(seam_set_xact_iso_level_read_committed);
+    seams::set_xact_iso_level_repeatable_read::set(seam_set_xact_iso_level_repeatable_read);
+    seams::set_xact_read_only::set(SetXactReadOnly);
 }
 
 #[cfg(test)]

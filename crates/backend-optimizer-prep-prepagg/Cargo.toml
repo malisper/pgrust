@@ -1,0 +1,38 @@
+[package]
+name = "backend-optimizer-prep-prepagg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_prep_prepagg"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+types-datum = { path = "../types-datum" }
+
+# Inward seams this unit owns + installs (preprocess_aggrefs /
+# get_agg_clause_costs) + the two outward boundary seams it declares & calls
+# (get_agg_catalog_info / get_agg_init_val / datum_is_equal).
+backend-optimizer-prep-prepagg-seams = { path = "../backend-optimizer-prep-prepagg-seams" }
+
+# Already-ported subsystems called directly (below prep; no cycle, no seam):
+# nodeFuncs (expr_type/expr_typmod/expression_tree_walker), clauses
+# (contain_volatile_functions), lsyscache (get_typlenbyval/get_typavgwidth).
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+
+# Cross-unit seams this unit consumes: equalfuncs equal() lists (installed),
+# parse_agg argtypes/sendreceive (installed), costsize cost helpers
+# (add_function_cost / cost_qual_eval_walker, owner uninstalled-until-costsize).
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
