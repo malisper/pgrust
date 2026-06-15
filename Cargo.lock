@@ -42,6 +42,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-pageops"
+version = "0.1.0"
+dependencies = [
+ "backend-access-brin-tuple",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-brin-tuple"
 version = "0.0.0"
 dependencies = [

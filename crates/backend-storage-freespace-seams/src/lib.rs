@@ -20,3 +20,49 @@ seam_core::seam!(
     /// write ereports.
     pub fn index_free_space_map_vacuum<'mcx>(rel: &Relation<'mcx>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetPageWithFreeSpace(rel, spaceNeeded)` (freespace.c): search the FSM
+    /// for a page with at least `space_needed` bytes free, returning its block
+    /// number (or `InvalidBlockNumber` if none). `Err` carries the FSM read
+    /// ereports.
+    pub fn get_page_with_free_space<'mcx>(
+        rel: &Relation<'mcx>,
+        space_needed: usize,
+    ) -> PgResult<BlockNumber>
+);
+
+seam_core::seam!(
+    /// `RecordPageWithFreeSpace(rel, heapBlk, spaceAvail)` (freespace.c):
+    /// record the amount of free space on a page in the FSM. `Err` carries the
+    /// FSM write ereports.
+    pub fn record_page_with_free_space<'mcx>(
+        rel: &Relation<'mcx>,
+        heap_blk: BlockNumber,
+        space_avail: usize,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RecordAndGetPageWithFreeSpace(rel, oldPage, oldSpaceAvail,
+    /// spaceNeeded)` (freespace.c): record the free space of `old_page` and in
+    /// the same descent find a (different) page with `space_needed` free. `Err`
+    /// carries the FSM ereports.
+    pub fn record_and_get_page_with_free_space<'mcx>(
+        rel: &Relation<'mcx>,
+        old_page: BlockNumber,
+        old_space_avail: usize,
+        space_needed: usize,
+    ) -> PgResult<BlockNumber>
+);
+
+seam_core::seam!(
+    /// `FreeSpaceMapVacuumRange(rel, start, end)` (freespace.c): update the
+    /// upper-level FSM pages covering the `[start, end)` block range so that
+    /// searchers see the leaf updates. `Err` carries the FSM write ereports.
+    pub fn free_space_map_vacuum_range<'mcx>(
+        rel: &Relation<'mcx>,
+        start: BlockNumber,
+        end: BlockNumber,
+    ) -> PgResult<()>
+);
