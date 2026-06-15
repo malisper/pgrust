@@ -241,7 +241,7 @@ fn seam_index_fetch_heap<'mcx>(
     slot: types_nodes::SlotId,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
-    let slot = estate.slot_mut(slot);
+    let slot = estate.slot_data_mut(slot);
     index_fetch_heap(mcx, scan, slot)
 }
 
@@ -253,7 +253,7 @@ fn seam_index_getnext_slot<'mcx>(
     slot: types_nodes::SlotId,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
-    let slot = estate.slot_mut(slot);
+    let slot = estate.slot_data_mut(slot);
     index_getnext_slot(mcx, scan, direction, slot)
 }
 
@@ -893,7 +893,7 @@ pub fn index_getnext_tid<'mcx>(
 pub fn index_fetch_heap<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
-    slot: &mut types_nodes::TupleTableSlot<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<bool> {
     let mut all_dead = false;
 
@@ -938,7 +938,7 @@ pub fn index_getnext_slot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
     direction: ScanDirection,
-    slot: &mut types_nodes::TupleTableSlot<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<bool> {
     loop {
         if !scan.xs_heap_continue {

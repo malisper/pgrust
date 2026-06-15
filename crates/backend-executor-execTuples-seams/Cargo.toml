@@ -16,3 +16,4 @@ mcx = { path = "../mcx" }
 types-tuple = { path = "../types-tuple" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-storage = { path = "../types-storage" }

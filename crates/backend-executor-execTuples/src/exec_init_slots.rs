@@ -419,6 +419,18 @@ fn seam_exec_store_minimal_tuple<'mcx>(
     crate::slot_store_fetch::ExecStoreMinimalTuple(mcx, mtup, estate.slot_data_mut(slot), should_free)
 }
 
+/// Seam `exec_store_buffer_heap_tuple` — `ExecStoreBufferHeapTuple`. The slot
+/// crosses as the payload-bearing `&mut SlotData` (the heap-scan vtable callback
+/// holds it directly, not as a pool `SlotId`), so this adapter forwards straight
+/// to the owner body, which performs the buffer-pin management.
+fn seam_exec_store_buffer_heap_tuple<'mcx>(
+    tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+    buffer: types_storage::buf::Buffer,
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecStoreBufferHeapTuple(tuple, slot, buffer)
+}
+
 /// Seam `exec_force_store_minimal_tuple` — `ExecForceStoreMinimalTuple`.
 fn seam_exec_force_store_minimal_tuple<'mcx>(
     slot: SlotId,
@@ -721,6 +733,7 @@ pub fn init_seams() {
     // pool now carries the proper per-kind superstructure, so these resolve a
     // SlotId to its live `&mut SlotData`).
     seams::exec_store_minimal_tuple::set(seam_exec_store_minimal_tuple);
+    seams::exec_store_buffer_heap_tuple::set(seam_exec_store_buffer_heap_tuple);
     seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
     seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
     seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);

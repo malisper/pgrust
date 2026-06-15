@@ -33,7 +33,6 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_xlog_records::ginxlog::PostingItem;
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{BlockNumber, OffsetNumber, Oid};
 use types_core::{InvalidOid, INDEX_MAX_KEYS};
@@ -138,6 +137,11 @@ pub const SIZEOF_GIN_PAGE_OPAQUE_DATA: usize = 8;
 /// ItemPointerData key;}` = 4 + 6, 2-aligned, 10 bytes. Re-exported from the
 /// crate that owns the [`PostingItem`] struct.
 pub use types_xlog_records::ginxlog::SIZEOF_POSTING_ITEM;
+
+/// `PostingItem` (ginblock.h) — `{BlockIdData child_blkno; ItemPointerData
+/// key;}`. Re-exported from the crate that owns the struct so all GIN carriers
+/// are reachable through `types_gin::*`.
+pub use types_xlog_records::ginxlog::PostingItem as PostingItem;
 
 /// `MAXALIGN(LEN)` (`c.h`) — round up to `MAXIMUM_ALIGNOF` (8 on supported
 /// platforms).
