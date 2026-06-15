@@ -106,4 +106,27 @@ backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat
 # lsyscache (lsyscache.c): get_func_rettype for gistrescan order-by types.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 
+# --- F5-vacuum deps (gistvacuum.c) ---
+
+# IntegerSet (lib/integerset.c): the internal/empty leaf page sets.
+backend-lib-integerset = { path = "../backend-lib-integerset" }
+
+# VACUUM delay (vacuum.c via heap vacuum lazy): vacuum_delay_point.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+
+# ReadNextFullTransactionId (varsup.c): the deleted-page recycle XID stamp.
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+
+# IndexBulkDeleteCallback dead-TID test (vacuum.c): vacuum_tid_is_dead.
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+
+# Relation-extension lock (lmgr.c): Lock/UnlockRelationForExtension.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+
+# RELATION_IS_LOCAL (hio.c): relation_is_local for the extension-lock skip.
+backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
+
+# ereport(LOG) for the legacy invalid-inner-tuple notice (elog.c).
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
+
 [dev-dependencies]
