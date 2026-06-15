@@ -439,9 +439,13 @@ pub fn expr_is_length_coercion(expr: Option<&Expr>) -> PgResult<(bool, i32)> {
 /// overwrite_ok)` (nodeFuncs.c) — add a `RelabelType` node if needed to make
 /// the expression expose the specified type/typmod/collation. Maintains the
 /// post-`eval_const_expressions` invariants (no adjacent RelabelTypes; no
-/// RelabelType atop a Const). `location` is trimmed from the layered model, so
-/// the C `rlocation` parameter is dropped (the new RelabelType has no location
-/// field to set, and the Const path's "keep original location" is a no-op).
+/// RelabelType atop a Const).
+///
+/// The C `rlocation` parameter is not yet threaded by this crate's callers
+/// (it would ripple the `ec_seam::apply_relabel_type` seam contract and the
+/// concurrently-edited clauses/equivclass consumers); the new `RelabelType` is
+/// built with `location = -1`, matching the prior behavior. The Const path
+/// keeps the Const's original `location` (it is cloned), per the C comment.
 pub fn apply_relabel_type(
     mut arg: Expr,
     rtype: Oid,
@@ -485,6 +489,7 @@ pub fn apply_relabel_type(
         resulttypmod: rtypmod,
         resultcollid: rcollid,
         relabelformat: rformat,
+        location: -1,
     }))
 }
 

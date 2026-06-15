@@ -67,6 +67,7 @@ fn and(args: Vec<Expr>) -> Expr {
     Expr::BoolExpr(BoolExpr {
         boolop: BoolExprType::AND_EXPR,
         args,
+        location: -1,
     })
 }
 
@@ -74,6 +75,7 @@ fn or(args: Vec<Expr>) -> Expr {
     Expr::BoolExpr(BoolExpr {
         boolop: BoolExprType::OR_EXPR,
         args,
+        location: -1,
     })
 }
 
@@ -82,6 +84,7 @@ fn not_null(arg: Expr) -> Expr {
         arg: Some(Box::new(arg)),
         nulltesttype: NullTestType::IS_NOT_NULL,
         argisrow: false,
+        location: -1,
     })
 }
 
@@ -90,6 +93,7 @@ fn is_null(arg: Expr) -> Expr {
         arg: Some(Box::new(arg)),
         nulltesttype: NullTestType::IS_NULL,
         argisrow: false,
+        location: -1,
     })
 }
 

@@ -25,6 +25,7 @@ fn fold_and_of_true_consts_to_true() {
     let and = Expr::BoolExpr(BoolExpr {
         boolop: BoolExprType::AND_EXPR,
         args: vec![bool_const(true), bool_const(true)],
+        location: -1,
     });
     let folded = eval_const_expressions(mcx, and).expect("fold");
     let c = folded.as_const().expect("Const");
@@ -40,6 +41,7 @@ fn fold_and_with_false_const_to_false() {
     let and = Expr::BoolExpr(BoolExpr {
         boolop: BoolExprType::AND_EXPR,
         args: vec![bool_const(true), bool_const(false)],
+        location: -1,
     });
     let folded = eval_const_expressions(mcx, and).expect("fold");
     let c = folded.as_const().expect("Const");
@@ -55,6 +57,7 @@ fn fold_or_with_true_const_to_true() {
     let or = Expr::BoolExpr(BoolExpr {
         boolop: BoolExprType::OR_EXPR,
         args: vec![bool_const(false), bool_const(true)],
+        location: -1,
     });
     let folded = eval_const_expressions(mcx, or).expect("fold");
     let c = folded.as_const().expect("Const");
@@ -74,6 +77,7 @@ fn fold_nulltest_on_const() {
         arg: Some(Box::new(Expr::Const(null_bool))),
         nulltesttype: NullTestType::IS_NULL,
         argisrow: false,
+        location: -1,
     });
     let folded = eval_const_expressions(mcx, ntest).expect("fold");
     let c = folded.as_const().expect("Const");
@@ -89,6 +93,7 @@ fn fold_booleantest_on_const() {
     let btest = Expr::BooleanTest(BooleanTest {
         arg: Some(Box::new(bool_const(true))),
         booltesttype: BoolTestType::IS_TRUE,
+        location: -1,
     });
     let folded = eval_const_expressions(mcx, btest).expect("fold");
     let c = folded.as_const().expect("Const");
@@ -108,6 +113,7 @@ fn contain_subplans_finds_sublink() {
         subLinkId: 0,
         testexpr: None,
         subselect: 0,
+        location: -1,
     });
     let exprs2 = [bool_const(true), sublink];
     assert!(contain_subplans_slice(&exprs2));

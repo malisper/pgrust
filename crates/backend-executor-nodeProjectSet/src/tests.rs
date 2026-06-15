@@ -255,6 +255,7 @@ fn funcexpr(funcretset: bool) -> FuncExpr {
         funccollid: 0,
         inputcollid: 0,
         args: Vec::new(),
+        location: -1,
     }
 }
 
