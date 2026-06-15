@@ -79,6 +79,7 @@ pub fn make_var(
         vartypmod,
         varcollid,
         varlevelsup,
+        ..Default::default()
     }
 }
 
