@@ -35,7 +35,6 @@ use backend_access_table_tableam as tableam;
 use backend_executor_execCurrent_seams as execCurrent;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execMain_seams as execMain;
-use backend_executor_execMain_seams::EpqScanFetch;
 use backend_executor_nodeTidscan_seams as execScan;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
@@ -473,8 +472,16 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
 }
 
 /// `TidRecheck(node, slot)` — access-method routine to recheck a tuple in
-/// `EvalPlanQual`.
-fn TidRecheck<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+/// `EvalPlanQual`. The `slot` is the operative tuple the EPQ driver wants to
+/// recheck: on the EvalPlanQual replacement path that is
+/// `epqstate->relsubs_slot[scanrelid - 1]` (a *different* slot from the node's
+/// own scan slot), so C reads `slot->tts_tid` from the passed slot — not from
+/// `node->ss_ScanTupleSlot`.
+fn TidRecheck<'mcx>(
+    node: &mut TidScanState<'mcx>,
+    slot: Option<SlotId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
     // WHERE CURRENT OF always intends to resolve to the latest tuple.
     if node.tss_isCurrentOf {
         return Ok(true);
@@ -486,7 +493,7 @@ fn TidRecheck<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>
 
     // Binary search the TidList to see if this ctid is mentioned.
     // match = bsearch(&slot->tts_tid, node->tss_TidList, node->tss_NumTids, ...);
-    let key = match node.ss.ss_ScanTupleSlot {
+    let key = match slot {
         Some(id) => estate.slot(id).tts_tid,
         None => return Ok(false),
     };
@@ -505,6 +512,13 @@ fn TidRecheck<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>
 
 /// `ExecScanFetch` (execScan.h) — check interrupts and fetch the next potential
 /// tuple, substituting a test tuple if inside an EvalPlanQual recheck.
+///
+/// Reproduced inline here exactly as `execScan.h` inlines it into the TidScan
+/// translation unit. The EvalPlanQual replacement-slot branch must recheck
+/// against the EPQ-supplied `epqstate->relsubs_slot[scanrelid - 1]` — a slot
+/// distinct from the node's own `ss_ScanTupleSlot` — and return *that* slot, so
+/// `TidRecheck` is passed the operative slot rather than always reading the base
+/// scan tuple.
 fn ExecScanFetch<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -> PgResult<Option<SlotId>> {
     // CHECK_FOR_INTERRUPTS();
     tcop_postgres::check_for_interrupts::call()?;
@@ -513,29 +527,133 @@ fn ExecScanFetch<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'m
         // We are inside an EvalPlanQual recheck.
         // Index scanrelid = ((Scan *) node->ps.plan)->scanrelid;
         let scanrelid = node_scanrelid(node);
-        match execMain::exec_scan_fetch_epq::call(&mut node.ss, estate, scanrelid)? {
-            EpqScanFetch::FallThrough => {} // fall through to the access method
-            EpqScanFetch::Result(slot) => return Ok(slot),
-            EpqScanFetch::Recheck { clear_on_fail } => {
-                // The EPQ branch needs the access-method recheck applied to the
-                // node's scan slot.
-                let ok = TidRecheck(node, estate)?;
-                let slot = node.ss.ss_ScanTupleSlot;
-                if !ok {
-                    if let Some(id) = slot {
-                        execTuples::exec_clear_tuple::call(estate, id)?;
-                    }
-                    if clear_on_fail {
+
+        if scanrelid == 0 {
+            // ForeignScan/CustomScan that pushed a join to the remote side. A
+            // TidScan plan node always carries a positive base-relation
+            // scanrelid, so this branch is unreachable for this node; the
+            // bms_is_member(epqParam, plan->extParam) test and recheck-into-
+            // ss_ScanTupleSlot it would gate are therefore not modeled here.
+            // (Fall through to the access method below, as the C does when the
+            // node is not a descendant of the EPQ recheck plan tree.)
+        } else if epq_relsubs_done(estate, scanrelid - 1) {
+            // Return empty slot, as either there is no EPQ tuple for this rel or
+            // we already returned it.
+            //   TupleTableSlot *slot = node->ss_ScanTupleSlot;
+            //   return ExecClearTuple(slot);
+            let slot = node.ss.ss_ScanTupleSlot;
+            if let Some(id) = slot {
+                execTuples::exec_clear_tuple::call(estate, id)?;
+            }
+            return Ok(slot);
+        } else if let Some(epq_slot) = epq_relsubs_slot(estate, scanrelid - 1) {
+            // Return replacement tuple provided by the EPQ caller.
+            //   TupleTableSlot *slot = epqstate->relsubs_slot[scanrelid - 1];
+            //   Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
+            debug_assert!(!epq_relsubs_rowmark_present(estate, scanrelid - 1));
+
+            // Mark to remember that we shouldn't return it again.
+            //   epqstate->relsubs_done[scanrelid - 1] = true;
+            epq_set_relsubs_done(estate, scanrelid - 1, true);
+
+            // Return empty slot if we haven't got a test tuple.
+            //   if (TupIsNull(slot)) return NULL;
+            if estate.slot(epq_slot).is_empty() {
+                return Ok(None);
+            }
+
+            // Check if it meets the access-method conditions.
+            //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
+            // The recheck reads the PASSED replacement slot's tts_tid, not the
+            // node's own scan slot.
+            if !TidRecheck(node, Some(epq_slot), estate)? {
+                execTuples::exec_clear_tuple::call(estate, epq_slot)?;
+                return Ok(None);
+            }
+            //   return slot;
+            return Ok(Some(epq_slot));
+        } else if epq_relsubs_rowmark_present(estate, scanrelid - 1) {
+            // Fetch and return replacement tuple using a non-locking rowmark.
+            //   TupleTableSlot *slot = node->ss_ScanTupleSlot;
+            let slot = node.ss.ss_ScanTupleSlot;
+
+            // Mark to remember that we shouldn't return more.
+            //   epqstate->relsubs_done[scanrelid - 1] = true;
+            epq_set_relsubs_done(estate, scanrelid - 1, true);
+
+            //   if (!EvalPlanQualFetchRowMark(epqstate, scanrelid, slot)) return NULL;
+            match slot {
+                Some(id) => {
+                    if !execMain::eval_plan_qual_fetch_row_mark::call(estate, scanrelid, id)? {
                         return Ok(None);
                     }
+                    // Return empty slot if we haven't got a test tuple.
+                    //   if (TupIsNull(slot)) return NULL;
+                    if estate.slot(id).is_empty() {
+                        return Ok(None);
+                    }
+                    // Check if it meets the access-method conditions.
+                    //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
+                    if !TidRecheck(node, slot, estate)? {
+                        execTuples::exec_clear_tuple::call(estate, id)?;
+                        return Ok(None);
+                    }
+                    //   return slot;
+                    return Ok(slot);
                 }
-                return Ok(slot);
+                None => return Ok(None),
             }
         }
     }
 
     // Run the node-type-specific access method function to get the next tuple.
     TidNext(node, estate)
+}
+
+/// `epqstate->relsubs_done[idx]` — read the active `EPQState`'s "already
+/// returned / none" flag. `false` for a `None` array (the C `NULL`).
+#[inline]
+fn epq_relsubs_done(estate: &EStateData<'_>, idx: Index) -> bool {
+    estate
+        .es_epq_active
+        .as_deref()
+        .and_then(|e| e.relsubs_done.as_ref())
+        .and_then(|v| v.get(idx as usize).copied())
+        .unwrap_or(false)
+}
+
+/// `epqstate->relsubs_done[idx] = value`.
+#[inline]
+fn epq_set_relsubs_done(estate: &mut EStateData<'_>, idx: Index, value: bool) {
+    if let Some(e) = estate.es_epq_active.as_deref_mut() {
+        if let Some(v) = e.relsubs_done.as_mut() {
+            if let Some(slot) = v.get_mut(idx as usize) {
+                *slot = value;
+            }
+        }
+    }
+}
+
+/// `epqstate->relsubs_slot[idx]` (`Some` = a non-NULL C entry).
+#[inline]
+fn epq_relsubs_slot(estate: &EStateData<'_>, idx: Index) -> Option<SlotId> {
+    estate
+        .es_epq_active
+        .as_deref()
+        .and_then(|e| e.relsubs_slot.as_ref())
+        .and_then(|v| v.get(idx as usize).copied())
+        .flatten()
+}
+
+/// `epqstate->relsubs_rowmark[idx] != NULL`.
+#[inline]
+fn epq_relsubs_rowmark_present(estate: &EStateData<'_>, idx: Index) -> bool {
+    estate
+        .es_epq_active
+        .as_deref()
+        .and_then(|e| e.relsubs_rowmark.as_ref())
+        .and_then(|v| v.get(idx as usize).copied())
+        .unwrap_or(false)
 }
 
 /// `ExecScanExtended` (execScan.h) — scan using the access method, optionally
