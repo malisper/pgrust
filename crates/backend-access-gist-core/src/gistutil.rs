@@ -1031,3 +1031,190 @@ pub fn gist_page_recyclable(page: &[u8]) -> PgResult<bool> {
     }
     Ok(false)
 }
+
+// ===========================================================================
+// gistoptions / gistproperty / gisttranslatecmptype (gistutil.c)
+// ===========================================================================
+
+/// `gistoptions(reloptions, validate)` (gistutil.c:912) — reloptions processing
+/// for GiST. The options are `fillfactor` (int) and `buffering` (enum);
+/// delegates to the reloptions owner's `build_reloptions_gist` seam, which
+/// carries the `RELOPT_KIND_GIST` parse table.
+pub fn gistoptions(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    backend_access_common_reloptions_seams::build_reloptions_gist::call(reloptions, validate)
+}
+
+/// `IndexAMProperty` (amapi.h) — the boolean/text property inquiry kinds. GiST
+/// overrides the core property code for `AMPROP_DISTANCE_ORDERABLE` and
+/// `AMPROP_RETURNABLE`; every other value is the C `default:` that returns
+/// false. Mirrors `backend-access-spgist-core`'s local enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexAMProperty {
+    /// `AMPROP_DISTANCE_ORDERABLE`.
+    DistanceOrderable,
+    /// `AMPROP_RETURNABLE`.
+    Returnable,
+    /// Any other `IndexAMProperty` value (the C `default:` case).
+    Other,
+}
+
+/// `gistproperty(index_oid, attno, prop, propname, res, isnull)`
+/// (gistutil.c:933) — check boolean properties of indexes. GiST overrides the
+/// core property code for `AMPROP_DISTANCE_ORDERABLE` (which the core does not
+/// support) and handles `AMPROP_RETURNABLE` here to save opening the rel to
+/// call `gistcanreturn`.
+///
+/// Returns `(handled, res, isnull)`: `handled` is the C boolean return (whether
+/// this routine answered the inquiry), `res`/`isnull` the out-params. The
+/// `propname` argument is unused by the C body (only `prop` is consulted), so
+/// it is omitted.
+pub fn gistproperty(
+    index_oid: Oid,
+    attno: i32,
+    prop: IndexAMProperty,
+) -> PgResult<(bool, bool, bool)> {
+    // Only answer column-level inquiries.
+    if attno == 0 {
+        return Ok((false, false, false));
+    }
+
+    // Currently, GiST distance-ordered scans require that there be a distance
+    // function in the opclass with the default types (i.e. the one loaded into
+    // the relcache entry, see initGISTstate). So we assume that if such a
+    // function exists, then there's a reason for it. Essentially the same code
+    // can test whether we support returning the column data, since that's true
+    // if the opclass provides a fetch proc.
+    let procno = match prop {
+        IndexAMProperty::DistanceOrderable => GIST_DISTANCE_PROC,
+        IndexAMProperty::Returnable => GIST_FETCH_PROC,
+        IndexAMProperty::Other => return Ok((false, false, false)),
+    };
+
+    // First we need to know the column's opclass.
+    let opclass = backend_utils_cache_lsyscache_seams::get_index_column_opclass::call(
+        index_oid, attno,
+    )?;
+    if !OidIsValid(opclass) {
+        // isnull = true; return true.
+        return Ok((true, false, true));
+    }
+
+    // Now look up the opclass family and input datatype.
+    let (opfamily, opcintype) =
+        match backend_utils_cache_lsyscache_seams::get_opclass_opfamily_and_input_type::call(
+            opclass,
+        )? {
+            Some(pair) => pair,
+            None => return Ok((true, false, true)),
+        };
+
+    // And now we can check whether the function is provided. The C uses
+    // `SearchSysCacheExists4(AMPROCNUM, opfamily, opcintype, opcintype, procno)`;
+    // `get_opfamily_proc` keys the identical `AMPROCNUM` syscache row and is
+    // valid exactly when the support function is registered.
+    let mut res = OidIsValid(backend_utils_cache_lsyscache_seams::get_opfamily_proc::call(
+        opfamily,
+        opcintype,
+        opcintype,
+        procno as i16,
+    )?);
+
+    // Special case: even without a fetch function, AMPROP_RETURNABLE is true if
+    // the opclass has no compress function.
+    if prop == IndexAMProperty::Returnable && !res {
+        res = !OidIsValid(backend_utils_cache_lsyscache_seams::get_opfamily_proc::call(
+            opfamily,
+            opcintype,
+            opcintype,
+            GIST_COMPRESS_PROC as i16,
+        )?);
+    }
+
+    // isnull = false; return true.
+    Ok((true, res, false))
+}
+
+/// `RTEqualStrategyNumber` (stratnum.h).
+const RT_EQUAL_STRATEGY_NUMBER: u16 = 18;
+/// `RTLessStrategyNumber` (stratnum.h).
+const RT_LESS_STRATEGY_NUMBER: u16 = 20;
+/// `RTLessEqualStrategyNumber` (stratnum.h).
+const RT_LESS_EQUAL_STRATEGY_NUMBER: u16 = 21;
+/// `RTGreaterStrategyNumber` (stratnum.h).
+const RT_GREATER_STRATEGY_NUMBER: u16 = 22;
+/// `RTGreaterEqualStrategyNumber` (stratnum.h).
+const RT_GREATER_EQUAL_STRATEGY_NUMBER: u16 = 23;
+/// `RTOverlapStrategyNumber` (stratnum.h).
+const RT_OVERLAP_STRATEGY_NUMBER: u16 = 3;
+/// `RTContainedByStrategyNumber` (stratnum.h).
+const RT_CONTAINED_BY_STRATEGY_NUMBER: u16 = 8;
+/// `InvalidStrategy` (stratnum.h).
+const INVALID_STRATEGY: u16 = 0;
+
+/// `GIST_TRANSLATE_CMPTYPE_PROC` (gist.h) — support function 12.
+const GIST_TRANSLATE_CMPTYPE_PROC: i16 = 12;
+/// `ANYOID` (pg_type.h).
+const ANYOID: Oid = 2276;
+
+/// `gist_translate_cmptype_common(cmptype)` (gistutil.c:1064) — the built-in
+/// stratnum translation support function for GiST opclasses that use the
+/// `RT*StrategyNumber` constants. Maps a [`CompareType`] to its R-tree strategy
+/// number, or `InvalidStrategy` for anything outside the recognized set. C
+/// returns the result as a `uint16` Datum.
+pub fn gist_translate_cmptype_common(cmptype: i32) -> u16 {
+    use types_tableam::amapi::CompareType;
+    if cmptype == CompareType::COMPARE_EQ as i32 {
+        RT_EQUAL_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_LT as i32 {
+        RT_LESS_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_LE as i32 {
+        RT_LESS_EQUAL_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_GT as i32 {
+        RT_GREATER_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_GE as i32 {
+        RT_GREATER_EQUAL_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_OVERLAP as i32 {
+        RT_OVERLAP_STRATEGY_NUMBER
+    } else if cmptype == CompareType::COMPARE_CONTAINED_BY as i32 {
+        RT_CONTAINED_BY_STRATEGY_NUMBER
+    } else {
+        INVALID_STRATEGY
+    }
+}
+
+/// `gisttranslatecmptype(cmptype, opfamily)` (gistutil.c:1097) — return the
+/// opclass's private stratnum used for the given compare type, by calling the
+/// opclass's `GIST_TRANSLATE_CMPTYPE_PROC` support function (if any). Returns
+/// `InvalidStrategy` if the function is not defined. The fmgr invocation needs
+/// the current context for any allocations and can `ereport`, so this carries
+/// `Mcx`/`PgResult` (the `amtranslatecmptype` vtable slot, infallible+context-free,
+/// cannot host it; GiST is dispatched by name).
+pub fn gisttranslatecmptype<'mcx>(
+    mcx: Mcx<'mcx>,
+    cmptype: i32,
+    opfamily: Oid,
+) -> PgResult<u16> {
+    // Check whether the function is provided.
+    let funcid = backend_utils_cache_lsyscache_seams::get_opfamily_proc::call(
+        opfamily,
+        ANYOID,
+        ANYOID,
+        GIST_TRANSLATE_CMPTYPE_PROC,
+    )?;
+    if !OidIsValid(funcid) {
+        return Ok(INVALID_STRATEGY);
+    }
+
+    // Ask the translation function:
+    // OidFunctionCall1Coll(funcid, InvalidOid, Int32GetDatum(cmptype)).
+    let result = backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::call(
+        mcx,
+        funcid,
+        InvalidOid,
+        Datum::from_i32(cmptype),
+    )?;
+    Ok(result.as_u16())
+}

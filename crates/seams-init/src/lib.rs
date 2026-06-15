@@ -173,6 +173,7 @@ pub fn init_all() {
     backend_optimizer_path_pathkeys::init_seams();
     backend_access_nbt_compare::init_seams();
     backend_access_nbt_validate::init_seams();
+    backend_access_gist_validate::init_seams();
     backend_access_nbtree_core::init_seams();
     backend_access_nbtree_nbtsort::init_seams();
     backend_common_relpath::init_seams();

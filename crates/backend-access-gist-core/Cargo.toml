@@ -103,8 +103,16 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 # pgstat (pgstat.h): pgstat_count_index_scan.
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 
-# lsyscache (lsyscache.c): get_func_rettype for gistrescan order-by types.
+# lsyscache (lsyscache.c): get_func_rettype for gistrescan order-by types;
+# get_opfamily_proc / get_index_column_opclass / get_opclass_opfamily_and_input_type
+# for gistproperty / gisttranslatecmptype.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
+# reloptions (reloptions.c): build_reloptions_gist for gistoptions.
+backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
+
+# fmgr (fmgr.c): OidFunctionCall1Coll for gisttranslatecmptype.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 
 # --- F5-vacuum deps (gistvacuum.c) ---
 

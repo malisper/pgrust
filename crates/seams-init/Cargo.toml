@@ -177,6 +177,7 @@ backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }
 backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
+backend-access-gist-validate = { path = "../backend-access-gist-validate" }
 backend-access-nbtree-core = { path = "../backend-access-nbtree-core" }
 backend-access-nbtree-nbtsort = { path = "../backend-access-nbtree-nbtsort" }
 backend-common-relpath = { path = "../backend-common-relpath" }
