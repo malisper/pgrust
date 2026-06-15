@@ -358,9 +358,8 @@ pub fn make_opclause(
 
 /// `makeTargetEntry(expr, resno, resname, resjunk)` (makefuncs.c) — a
 /// `TargetEntry` node, allocated in `mcx` (the boxed child `expr` and `resname`
-/// string live in the same context). The trimmed [`TargetEntry`] carries
-/// `expr`/`resno`/`resname`/`resjunk`; `ressortgroupref`, `resorigtbl`,
-/// `resorigcol` (set to 0/InvalidOid by the C) are not modeled here.
+/// string live in the same context). C `makeTargetEntry` zeroes
+/// `ressortgroupref`/`resorigtbl`/`resorigcol`.
 pub fn make_target_entry<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Expr,
@@ -375,6 +374,9 @@ pub fn make_target_entry<'mcx>(
             Some(s) => Some(PgString::from_str_in(s, mcx)?),
             None => None,
         },
+        ressortgroupref: 0,
+        resorigtbl: InvalidOid,
+        resorigcol: 0,
         resjunk,
     })
 }
