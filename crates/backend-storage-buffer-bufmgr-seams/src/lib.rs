@@ -4,9 +4,15 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 //!
-//! The `effective_io_concurrency` / `maintenance_io_concurrency` GUC globals
-//! deliberately have no getter seams: per the no-ambient-global-seams rule,
-//! consumers take the values as explicit parameters.
+//! Most per-backend GUC globals are passed as explicit parameters
+//! (no-ambient-global-seams rule). The exceptions are the ring-sizing knobs
+//! (`io_combine_limit` / `effective_io_concurrency` / `get_pin_limit` /
+//! `io_direct_data`): the `get_access_strategy(btype)` contract fixes its
+//! signature to `btype` alone (it is the bufmgr boundary the buffer-support
+//! ring builder crosses), so these process-global knobs that C's
+//! `GetAccessStrategy`/`PrefetchLocalBuffer` read directly are reached through
+//! getter seams here rather than threaded through a contract that cannot carry
+//! them.
 
 
 seam_core::seam!(
@@ -453,6 +459,64 @@ seam_core::seam!(
         page: &mut [u8],
         skip_fsync: bool,
     ) -> types_error::PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
+// Per-buffer header array primitives (buf_internals.h) consumed by freelist.c's
+// clock sweep and the backend-private ring. The shmem-resident `BufferDesc`
+// array (`BufferDescriptors`) is owned by the buffer manager (`buf_init.c`);
+// freelist.c reaches it by `buf_id` (the inherited 0-based-index opacity).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `LockBufHdr(desc)` (bufmgr.c) — spin to acquire the buffer header's
+    /// in-`state` spinlock bit (`BM_LOCKED`) and return the observed `state`
+    /// word (with `BM_LOCKED` set). Infallible (spins).
+    pub fn lock_buf_hdr(buf_id: i32) -> u32
+);
+
+seam_core::seam!(
+    /// `UnlockBufHdr(desc, buf_state)` (buf_internals.h) — write `buf_state`
+    /// back with `BM_LOCKED` cleared, releasing the header spinlock.
+    pub fn unlock_buf_hdr(buf_id: i32, buf_state: u32)
+);
+
+seam_core::seam!(
+    /// `GetBufferDescriptor(buf_id)->freeNext` (buf_internals.h) — read the
+    /// freelist link of a buffer (protected by `buffer_strategy_lock`).
+    pub fn buf_free_next(buf_id: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `GetBufferDescriptor(buf_id)->freeNext = value` (buf_internals.h) —
+    /// write the freelist link of a buffer (protected by
+    /// `buffer_strategy_lock`).
+    pub fn set_buf_free_next(buf_id: i32, value: i32)
+);
+
+seam_core::seam!(
+    /// `GetPinLimit()` (bufmgr.c) — the maximum number of buffers this backend
+    /// could ever additionally pin, used to size a `BAS_BULKREAD` ring.
+    pub fn get_pin_limit() -> i32
+);
+
+seam_core::seam!(
+    /// `io_combine_limit` (GUC) — the maximum number of blocks a single I/O may
+    /// combine, consulted when sizing a `BAS_BULKREAD` ring.
+    pub fn io_combine_limit() -> i32
+);
+
+seam_core::seam!(
+    /// `effective_io_concurrency` (GUC) — the configured degree of I/O
+    /// concurrency, consulted when sizing a `BAS_BULKREAD` ring. May be 0.
+    pub fn effective_io_concurrency() -> i32
+);
+
+seam_core::seam!(
+    /// `(io_direct_flags & IO_DIRECT_DATA) != 0` (fd.c/bufmgr.h) — whether
+    /// direct I/O is enabled for relation data, which disables prefetch in
+    /// `PrefetchLocalBuffer`.
+    pub fn io_direct_data() -> bool
 );
 
 seam_core::seam!(
