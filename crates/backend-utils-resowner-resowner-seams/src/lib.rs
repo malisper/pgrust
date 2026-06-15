@@ -78,3 +78,10 @@ seam_core::seam!(
     /// resource owner to nothing.
     pub fn reset_current_resource_owner()
 );
+
+seam_core::seam!(
+    /// `CurrentResourceOwner = owner` (resowner.c global): restore the current
+    /// resource owner. snapbuild.c's SnapBuildClearExportedSnapshot restores
+    /// the owner saved before StartTransactionCommand (NULL handle == C NULL).
+    pub fn set_current_resource_owner(owner: ParsestmtResourceOwnerHandle)
+);

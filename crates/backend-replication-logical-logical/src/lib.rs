@@ -2323,6 +2323,12 @@ pub fn init_seams() {
             )
         },
     );
+    backend_replication_logical_logical_seams::logical_increase_xmin_for_slot::set(
+        LogicalIncreaseXminForSlot,
+    );
+    backend_replication_logical_logical_seams::logical_increase_restart_decoding_for_slot::set(
+        LogicalIncreaseRestartDecodingForSlot,
+    );
 }
 
 /// Seam thunk: the inward seam carries only the callback; the reorderbuffer

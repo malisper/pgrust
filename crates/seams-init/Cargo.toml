@@ -19,7 +19,6 @@ backend-access-common-reloptions = { path = "../backend-access-common-reloptions
 backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
-backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
@@ -185,6 +184,7 @@ backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
 backend-optimizer-prep-prepjointree = { path = "../backend-optimizer-prep-prepjointree" }
 backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
+backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
@@ -212,6 +212,7 @@ backend-replication-logical-logical = { path = "../backend-replication-logical-l
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
+backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }

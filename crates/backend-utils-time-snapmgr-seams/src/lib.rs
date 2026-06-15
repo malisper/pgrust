@@ -17,6 +17,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `HaveRegisteredOrActiveSnapshot()` (snapmgr.c): true when there is any
+    /// registered or active snapshot besides the catalog snapshot. snapbuild.c
+    /// asserts this is false before building an initial slot snapshot.
+    pub fn have_registered_or_active_snapshot() -> bool
+);
+
+seam_core::seam!(
+    /// `ExportSnapshot(snapshot)` (snapmgr.c): make `snapshot` active and write
+    /// it to a shared snapshot file for `SET TRANSACTION SNAPSHOT`, returning
+    /// the snapshot's file name. snapbuild.c hands it the plain MVCC snapshot
+    /// built by `SnapBuildInitialSnapshot`. Fallible (file/allocation).
+    pub fn export_snapshot(
+        snapshot: types_snapshot::SnapshotData,
+    ) -> types_error::PgResult<std::string::String>
+);
+
+seam_core::seam!(
     /// `GetCatalogSnapshot(relid)` (snapmgr.c): an MVCC snapshot capable of
     /// reading the catalog (refreshed if invalidations arrived). Can
     /// `ereport(ERROR)` (snapshot import/allocation paths), carried on
