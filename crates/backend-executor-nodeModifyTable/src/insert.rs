@@ -59,17 +59,10 @@ seam_core::seam!(
     )
 );
 
-seam_core::seam!(
-    /// `ExecARInsertTriggers(estate, resultRelInfo, slot, NIL,
-    /// mt_transition_capture)` (trigger.c): fire AFTER ROW INSERT triggers (and
-    /// transition-table capture) for the inserted `slot`.
-    pub fn exec_ar_insert_triggers<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        mtstate: &mut ModifyTableState<'mcx>,
-        result_rel_info: RriId,
-        slot: SlotId,
-    ) -> PgResult<()>
-);
+// `ExecARInsertTriggers` is declared in `backend-commands-trigger-seams`
+// (the trigger owner). The FDW-batch call below extracts the transition-capture
+// state from `mtstate` (the C `mt_transition_capture`) and passes it explicitly,
+// matching the shared seam's signature.
 
 seam_core::seam!(
     /// `ExecClearTuple(slot)` (execTuples.c): clear the slot's tuple.
@@ -367,7 +360,13 @@ pub fn ExecBatchInsert<'mcx>(
         slot_set_table_oid::call(estate, slot, relid);
 
         // AFTER ROW INSERT Triggers
-        exec_ar_insert_triggers::call(estate, mtstate, result_rel_info, slot)?;
+        backend_commands_trigger_seams::exec_ar_insert_triggers::call(
+            estate,
+            result_rel_info,
+            slot,
+            &[],
+            mtstate.mt_transition_capture.as_deref_mut(),
+        )?;
 
         // Check any WITH CHECK OPTION constraints from parent views.  See the
         // comment in ExecInsert.

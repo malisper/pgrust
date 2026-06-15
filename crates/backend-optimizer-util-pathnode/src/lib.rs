@@ -746,6 +746,7 @@ pub fn init_seams() {
     ps::create_modifytable_path::set(create::create_modifytable_path);
     ps::create_limit_path::set(create::create_limit_path);
     ps::create_unique_path::set(create::create_unique_path);
+    ps::install_dummy_append_path::set(create::install_dummy_append_path);
     ps::reparameterize_path::set(create::reparameterize_path);
     ps::reparameterize_path_by_child::set(create::reparameterize_path_by_child);
     ps::path_is_reparameterizable_by_child::set(create::path_is_reparameterizable_by_child);

@@ -100,6 +100,9 @@ pub struct AuthIdRow<'mcx> {
     pub rolcanlogin: bool,
     /// `rolreplication` — role has explicit REPLICATION privilege.
     pub rolreplication: bool,
+    /// `rolbypassrls` — role bypasses row-level security
+    /// (`has_bypassrls_privilege`, acl.c).
+    pub rolbypassrls: bool,
     /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
     pub rolconnlimit: i32,
 }

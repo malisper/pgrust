@@ -290,23 +290,26 @@ pub fn ExecInterpExpr<'mcx>(
             }
 
             // Function-call implementations. Arguments have previously been
-            // evaluated directly into fcinfo->args (in C). All of these read
-            // `fcinfo->args[i].isnull` and/or dispatch `op->d.func.fn_addr(fcinfo)`,
-            // which the trimmed FunctionCallInfoBaseData (resultinfo only) cannot
-            // express — blocked on the same fmgr call-frame widening the keystone
-            // compiler records at its build sites.
-            EEOP_FUNCEXPR
-            | EEOP_FUNCEXPR_STRICT
+            // evaluated directly into fcinfo->args (in C); the owned model
+            // gathers the per-argument result cells into fcinfo->args just before
+            // dispatch (exec_func_step). #296: the fmgr-widened call frame carries
+            // fncollation/args/isnull, and function_call_invoke re-dispatches by
+            // fn_oid under the recorded collation. EEOP_FUNCEXPR is non-strict;
+            // the _STRICT[_1|_2] variants short-circuit to NULL on any NULL arg
+            // (the nargs-specialized forms are identical here — the args vector is
+            // already sized by the step).
+            EEOP_FUNCEXPR => {
+                // C: ExecInterpExecuteFuncStep (non-strict path).
+                eval_scalar::exec_func_step(state, op, false)?;
+                op += 1;
+            }
+            EEOP_FUNCEXPR_STRICT
             | EEOP_FUNCEXPR_STRICT_1
             | EEOP_FUNCEXPR_STRICT_2 => {
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_FUNCEXPR[_STRICT[_1|_2]]: the strict-NULL scan over \
-                     fcinfo->args[i].isnull and the op->d.func.fn_addr(fcinfo) \
-                     dispatch (reading back fcinfo->isnull) need the fmgr-widened \
-                     FunctionCallInfoBaseData (trimmed model has no args[]/isnull); \
-                     blocked until fmgr widens the call frame"
-                );
+                // C: strict function — short-circuit to NULL on any NULL arg,
+                //    else dispatch.
+                eval_scalar::exec_func_step(state, op, true)?;
+                op += 1;
             }
 
             EEOP_FUNCEXPR_FUSAGE => {

@@ -75,4 +75,35 @@ backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams
 # Recursion guard (postgres.c): check_stack_depth (gistSplit recursion).
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
+# --- F2-scan deps (gistscan.c / gistget.c) ---
+
+# Unified index-AM vocabulary (amapi.h): IndexAmRoutine, IndexScanDescData,
+# AmOpaque carrier, ScanKeyData, ScanDirection, IndexOrderByDistance.
+types-amapi = { path = "../types-amapi" }
+types-tableam = { path = "../types-tableam" }
+types-scan = { path = "../types-scan" }
+types-tidbitmap = { path = "../types-tidbitmap" }
+
+# Search-queue pairing heap (lib/pairingheap.h).
+backend-lib-pairingheap = { path = "../backend-lib-pairingheap" }
+
+# GiST opclass consistent/distance dispatch is already deps'd above
+# (backend-access-gist-dispatch-seams).
+
+# GiST AM insert/vacuum vtable callbacks (unported owners): gistinsert /
+# gistbulkdelete / gistvacuumcleanup.
+backend-access-gist-am-seams = { path = "../backend-access-gist-am-seams" }
+
+# tidbitmap (tidbitmap.c): tbm_add_tuples for gistgetbitmap.
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+
+# Predicate page lock (predicate.c): PredicateLockPage for gistScanPage.
+# (predicate-seams already deps'd above.)
+
+# pgstat (pgstat.h): pgstat_count_index_scan.
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+
+# lsyscache (lsyscache.c): get_func_rettype for gistrescan order-by types.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
 [dev-dependencies]

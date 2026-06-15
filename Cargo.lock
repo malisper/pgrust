@@ -939,6 +939,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gist-am-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gist-core"
 version = "0.1.0"
 dependencies = [
@@ -946,26 +959,35 @@ dependencies = [
  "backend-access-common-indextuple",
  "backend-access-common-indextuple-seams",
  "backend-access-common-tupdesc",
+ "backend-access-gist-am-seams",
  "backend-access-gist-core-seams",
  "backend-access-gist-dispatch-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-transam-xlog-seams",
+ "backend-lib-pairingheap",
+ "backend-nodes-core-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-storage-page",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-misc-stack-depth-seams",
  "mcx",
  "pg-prng",
+ "types-amapi",
  "types-core",
  "types-error",
  "types-gist",
  "types-rel",
+ "types-scan",
  "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -1520,6 +1542,7 @@ dependencies = [
  "backend-access-brin-validate",
  "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
+ "backend-access-gist-core",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
@@ -3583,6 +3606,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-commands-opclasscmds-seams",
  "backend-commands-policy-seams",
+ "backend-commands-proclang-seams",
  "backend-commands-tablespace-seams",
  "backend-commands-trigger-seams",
  "backend-commands-user-seams",
@@ -4725,6 +4749,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
+ "backend-commands-proclang-seams",
  "backend-executor-execMain-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-format-type-seams",
@@ -5042,6 +5067,29 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-commands-trigger"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-commands-trigger-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-snapshot",
+ "types-tableam",
+ "types-trigger",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7904,6 +7952,33 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-createplan"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-plan-createplan-seams",
+ "backend-optimizer-util-paramassign-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-placeholder-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-createplan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -13401,6 +13476,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-commands-proclang-seams",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -15214,6 +15290,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-commands-trigger",
  "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",

@@ -406,7 +406,7 @@ pub fn CreateTransform(stmt: &CreateTransformStmt) -> PgResult<ObjectAddress> {
 
     /* Get the language */
     let lang = stmt.lang.clone().unwrap_or_default();
-    let langid = seam::get_language_oid::call(lang.clone(), false)?;
+    let langid = backend_commands_proclang_seams::get_language_oid::call(&lang, false)?;
 
     let aclresult = seam::language_aclcheck::call(langid, seam::get_user_id::call()?, ACL_USAGE)?;
     if aclresult != ACLCHECK_OK {

@@ -42,6 +42,10 @@ pub struct Plan<'mcx> {
     pub plan_rows: f64,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `bool parallel_safe` — OK to use as part of a parallel plan? Set by
+    /// `copy_generic_path_info` / `copy_plan_costsize` (createplan.c) from the
+    /// `Path`'s parallel-safety; read by setrefs.c and the parallel planner.
+    pub parallel_safe: bool,
     /// `bool async_capable` — engage asynchronous-capable logic?
     pub async_capable: bool,
     /// `int plan_node_id` — unique across the entire final plan tree; used as
@@ -95,6 +99,7 @@ impl Plan<'_> {
             qual,
             plan_rows: self.plan_rows,
             parallel_aware: self.parallel_aware,
+            parallel_safe: self.parallel_safe,
             plan_width: self.plan_width,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
