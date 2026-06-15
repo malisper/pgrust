@@ -2520,15 +2520,80 @@ pub fn assign_createrole_self_grant(options: u32) -> (bool, GrantRoleOptions) {
  * Local helpers
  * ------------------------------------------------------------------------- */
 
-/// `parse_bool(value, &result)` — `Some(b)` on success, `None` if the string is
-/// not a recognized boolean.  Pure computation (utils/adt/bool.c semantics).
-fn parse_bool(value: &str) -> Option<bool> {
-    /* Mirror PostgreSQL's `parse_bool_with_len` recognized spellings. */
-    match value.to_ascii_lowercase().as_str() {
-        "t" | "true" | "y" | "yes" | "on" | "1" => Some(true),
-        "f" | "false" | "n" | "no" | "off" | "0" => Some(false),
-        _ => None,
+/// `pg_strncasecmp(value, lit, n) == 0` — case-insensitive equality over the
+/// first `n` bytes (ASCII fold), with a NUL byte terminating either operand
+/// early. This mirrors PostgreSQL's `pg_strncasecmp` for the spellings compared
+/// by `parse_bool_with_len`: a shorter `value` (e.g. `"tr"` vs `"true"`) stops at
+/// its implicit NUL so a unique prefix matches; an over-length `value` stops at
+/// `n` so trailing characters cause a mismatch against the literal's NUL.
+fn pg_strncasecmp_eq(value: &[u8], lit: &[u8], n: usize) -> bool {
+    for i in 0..n {
+        let a = value.get(i).copied().unwrap_or(0);
+        let b = lit.get(i).copied().unwrap_or(0);
+        if !a.eq_ignore_ascii_case(&b) {
+            return false;
+        }
+        /* Both bytes equal here; if both are NUL the strings end together. */
+        if a == 0 {
+            return true;
+        }
     }
+    true
+}
+
+/// `parse_bool(value, &result)` — `Some(b)` on success, `None` if the string is
+/// not a recognized boolean.  Faithful mirror of `parse_bool_with_len`
+/// (utils/adt/bool.c): valid values are `true`, `false`, `yes`, `no`, `on`,
+/// `off`, `1`, `0`, case-insensitively, as well as unique prefixes thereof.
+fn parse_bool(value: &str) -> Option<bool> {
+    let bytes = value.as_bytes();
+    let len = bytes.len();
+    /* C switches on `*value`; the empty string yields the NUL byte, which
+     * falls through to the default (no match). */
+    let first = bytes.first().copied().unwrap_or(0);
+    match first {
+        b't' | b'T' => {
+            if pg_strncasecmp_eq(bytes, b"true", len) {
+                return Some(true);
+            }
+        }
+        b'f' | b'F' => {
+            if pg_strncasecmp_eq(bytes, b"false", len) {
+                return Some(false);
+            }
+        }
+        b'y' | b'Y' => {
+            if pg_strncasecmp_eq(bytes, b"yes", len) {
+                return Some(true);
+            }
+        }
+        b'n' | b'N' => {
+            if pg_strncasecmp_eq(bytes, b"no", len) {
+                return Some(false);
+            }
+        }
+        b'o' | b'O' => {
+            /* 'o' is not unique enough: compare at least 2 chars. */
+            let n = if len > 2 { len } else { 2 };
+            if pg_strncasecmp_eq(bytes, b"on", n) {
+                return Some(true);
+            } else if pg_strncasecmp_eq(bytes, b"off", n) {
+                return Some(false);
+            }
+        }
+        b'1' => {
+            if len == 1 {
+                return Some(true);
+            }
+        }
+        b'0' => {
+            if len == 1 {
+                return Some(false);
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// `ObjectAddressSet(addr, class, object)` — sets `objectSubId = 0`.

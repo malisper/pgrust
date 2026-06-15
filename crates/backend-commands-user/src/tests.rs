@@ -129,8 +129,21 @@ fn parse_bool_recognizes_spellings() {
     for f in ["f", "false", "FALSE", "n", "No", "off", "0"] {
         assert_eq!(parse_bool(f), Some(false), "{f}");
     }
+    /* Unique prefixes are accepted, case-insensitively (parse_bool_with_len). */
+    for t in ["tr", "TRU", "ye", "ON", "yE"] {
+        assert_eq!(parse_bool(t), Some(true), "{t}");
+    }
+    for f in ["fa", "FAL", "of", "OFF"] {
+        assert_eq!(parse_bool(f), Some(false), "{f}");
+    }
     assert_eq!(parse_bool("maybe"), None);
     assert_eq!(parse_bool(""), None);
+    /* 'o' alone is ambiguous between on/off (C compares >= 2 chars). */
+    assert_eq!(parse_bool("o"), None);
+    /* Out-of-range single chars and over-length spellings reject. */
+    assert_eq!(parse_bool("2"), None);
+    assert_eq!(parse_bool("11"), None);
+    assert_eq!(parse_bool("offf"), None);
 }
 
 /// `check_createrole_self_grant` recognizes SET / INHERIT and rejects unknown
