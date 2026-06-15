@@ -1,0 +1,18 @@
+[package]
+name = "backend-common-relpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_common_relpath"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-catalog = { path = "../types-catalog" }
+types-storage = { path = "../types-storage" }
+types-error = { path = "../types-error" }
+backend-common-relpath-seams = { path = "../backend-common-relpath-seams" }
+common-relpath-seams = { path = "../common-relpath-seams" }
