@@ -558,13 +558,8 @@ fn wal_rcv_stopped_cv_broadcast() {
 }
 
 /// Install this unit's seams (`with_walrcv`, the atomic accessors, the shmem
-/// size/init pair, and the apply-delay / transfer-latency helpers). Wired into
-/// `seams_init::init_all()`.
-///
-/// NOTE: `xlog_request_wal_receiver_reply` is declared in this crate's `-seams`
-/// crate but is owned by `xlogrecovery.c` (`XLogRequestWalReceiverReply`), not
-/// `walreceiverfuncs.c`; it is therefore installed by the xlogrecovery owner,
-/// not here.
+/// size/init pair, `WalRcvRunning`, and the apply-delay / transfer-latency
+/// helpers). Wired into `seams_init::init_all()`.
 pub fn init_seams() {
     funcs_seams::wal_rcv_shmem_size::set(WalRcvShmemSize);
     funcs_seams::wal_rcv_shmem_init::set(WalRcvShmemInit);
@@ -576,6 +571,7 @@ pub fn init_seams() {
     funcs_seams::wal_rcv_stopped_cv_broadcast::set(wal_rcv_stopped_cv_broadcast);
     funcs_seams::get_replication_apply_delay::set(GetReplicationApplyDelay);
     funcs_seams::get_replication_transfer_latency::set(GetReplicationTransferLatency);
+    funcs_seams::wal_rcv_running::set(WalRcvRunning);
 
     // `GetWalRcvFlushRecPtr` is also reachable across a cycle via the
     // walreceiver-seams crate (xlog checkpoint / walsummarizer consume the

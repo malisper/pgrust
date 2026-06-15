@@ -41,3 +41,6 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+
+# ExecutorRewind's ExecReScan(planstate) dispatch.
+backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }

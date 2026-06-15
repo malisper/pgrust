@@ -40,6 +40,9 @@ fn shmem_init_then_accessors_roundtrip() {
         Ok((ptr, false))
     });
     condvar_seam::condition_variable_init::set(|_cv| {});
+    // `SetRecoveryPause(false)` broadcasts `recoveryNotPausedCV`; a no-op fake
+    // (no waiters here) suffices for the accessor round-trip.
+    condvar_seam::condition_variable_broadcast::set(|_cv| {});
 
     XLogRecoveryShmemInit().expect("XLogRecoveryShmemInit");
 
