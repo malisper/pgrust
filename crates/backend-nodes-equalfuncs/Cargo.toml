@@ -1,0 +1,21 @@
+[package]
+name = "backend-nodes-equalfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_nodes_equalfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+# For the `PgNodeEqual` trait — the generated per-struct `equal_node` comparator
+# of the Value leaf nodes (T_Integer/.../T_BitString).
+backend-nodes-node-support = { path = "../backend-nodes-node-support" }
+
+# Inward seams this unit owns + installs (the equalfuncs.c `equal()` boundary,
+# declared by every optimizer/parser consumer's central equal seam).
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
