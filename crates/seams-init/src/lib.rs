@@ -152,6 +152,7 @@ pub fn init_all() {
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
     backend_optimizer_path_equivclass::init_seams();
+    backend_optimizer_path_small::init_seams();
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_optimizer_util_vars::init_seams();
