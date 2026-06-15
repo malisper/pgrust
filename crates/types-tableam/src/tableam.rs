@@ -3,7 +3,6 @@
 //! tableam dispatch unit invokes. Further callbacks are added as their
 //! dispatch wrappers are ported.
 
-use core::any::Any;
 use std::boxed::Box;
 use std::sync::Arc;
 use std::vec::Vec;
@@ -112,8 +111,9 @@ pub struct IndexFetchTableData<'mcx> {
     /// `rel` — the relation the fetch was begun on.
     pub rel: Relation<'mcx>,
     /// The AM-private payload, owned by the access method that created it and
-    /// allocated in the scan's `mcx` arena (convention A).
-    pub am_private: Option<mcx::PgBox<'mcx, dyn Any>>,
+    /// allocated in the scan's `mcx` arena (convention A). The `'mcx`-safe
+    /// erased carrier with a tag-checked downcast (see [`crate::amopaque`]).
+    pub am_private: Option<mcx::PgBox<'mcx, dyn crate::amopaque::AmOpaque<'mcx> + 'mcx>>,
 }
 
 /// `BulkInsertStateData` (`access/hio.h`) — state for bulk inserts, private to

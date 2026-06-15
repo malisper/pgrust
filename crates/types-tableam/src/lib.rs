@@ -11,12 +11,14 @@
 #![allow(non_upper_case_globals)]
 
 pub mod amapi;
+pub mod amopaque;
 pub mod genam;
 pub mod relscan;
 pub mod scankey;
 pub mod tableam;
 
 pub use amapi::{IndexAmRoutine, IndexInfo, IndexUniqueCheck, TIDBitmap};
+pub use amopaque::{AmOpaque, AmOpaqueTag, AmOpaqueType};
 pub use genam::{
     IndexBulkDeleteResult, IndexOrderByDistance, IndexScanInstrumentation, IndexVacuumInfo,
     SharedIndexScanInstrumentation,

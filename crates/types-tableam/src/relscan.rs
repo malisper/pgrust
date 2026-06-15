@@ -6,7 +6,6 @@
 //! parallel descriptor's concurrently-mutated fields use real atomics and a
 //! `Mutex` standing in for the C spinlock.
 
-use core::any::Any;
 use core::sync::atomic::AtomicU64;
 use std::boxed::Box;
 use std::sync::Mutex;
@@ -19,6 +18,7 @@ use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
 use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDescData};
 
+use crate::amopaque::AmOpaque;
 use crate::genam::IndexScanInstrumentation;
 use crate::scankey::ScanKeyData;
 use crate::tableam::IndexFetchTableData;
@@ -78,8 +78,9 @@ pub struct TableScanDescData<'mcx> {
     pub rs_tbmiterator: types_tidbitmap::TBMIterator,
     /// The AM-private scan state (heap's `HeapScanDescData` tail), owned by
     /// the access method that created the descriptor and allocated in the
-    /// scan's `mcx` arena (convention A).
-    pub am_private: Option<mcx::PgBox<'mcx, dyn Any>>,
+    /// scan's `mcx` arena (convention A). The `'mcx`-safe erased carrier (C's
+    /// `void *`, but with a tag-checked downcast — see [`crate::amopaque`]).
+    pub am_private: Option<mcx::PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>>,
 }
 
 /// `TableScanDesc` — `TableScanDescData *`.
@@ -198,8 +199,10 @@ pub struct IndexScanDescData<'mcx> {
     /// `bool xactStartedInRecovery` — prevents killing/seeing killed tuples.
     pub xact_started_in_recovery: bool,
 
-    /// `void *opaque` — access-method-specific info, owned by the AM.
-    pub opaque: Option<Box<dyn Any>>,
+    /// `void *opaque` — access-method-specific info, owned by the AM. The
+    /// `'mcx`-safe erased carrier with a tag-checked downcast (see
+    /// [`crate::amopaque`]); allocated in the scan's `mcx` arena (convention A).
+    pub opaque: Option<mcx::PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>>,
 
     /// `struct IndexScanInstrumentation *instrument` — instrumentation
     /// counters maintained by the AM (`None` until set by the begin wrapper).

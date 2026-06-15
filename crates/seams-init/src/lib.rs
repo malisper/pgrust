@@ -989,9 +989,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "my_proc_subxids"),
-        ("backend_storage_lmgr_proc", "my_proc_vxid"),
-        ("backend_storage_lmgr_proc", "my_proc_xid"),
         ("backend_storage_lmgr_proc", "proc_clog_group_member_page"),
         ("backend_storage_lmgr_proc", "proc_clog_group_member_update"),
         ("backend_storage_lmgr_proc", "proc_clog_group_next"),
@@ -1000,8 +997,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_next"),
         ("backend_storage_lmgr_proc", "set_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "set_proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "store_subxid_in_proc"),
-        ("backend_storage_lmgr_proc", "store_top_xid_in_proc"),
         // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
         // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
         // It is correctly installed at runtime by backend-timezone-localtime's

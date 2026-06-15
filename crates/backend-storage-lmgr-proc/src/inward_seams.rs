@@ -15,7 +15,10 @@ use backend_storage_lmgr_proc_seams as seams;
 use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId};
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
-use types_storage::storage::{LWLockWaitState, ProcWaitStatus, DELAY_CHKPT_START};
+use types_storage::storage::{
+    LWLockWaitState, ProcWaitStatus, VirtualTransactionId, DELAY_CHKPT_START,
+    PGPROC_MAX_CACHED_SUBXIDS,
+};
 use types_storage::{proclist_node, LWLockMode};
 
 use crate::proc_shmem::{with_my_proc, with_my_proc_ref, with_proc_by_number};
@@ -508,6 +511,71 @@ fn proc_array_subxid_states_memmove(dst: i32, src: i32, count: i32) {
     crate::proc_shmem::proc_array_subxid_states_memmove(dst, src, count);
 }
 
+// --- MyProc xact-snapshot field accessors (clog group-update eligibility,
+//     snapmgr exported-snapshot labelling, varsup xid/subxid publication) ------
+
+/// `MyProc->xid` — this backend's top-level xid.
+fn my_proc_xid() -> TransactionId {
+    with_my_proc_ref(|p| p.xid)
+}
+
+/// `MyProc->vxid` (`{procNumber, lxid}`) as a `VirtualTransactionId`. C keeps
+/// the pair as two separately-assignable fields; the read is non-atomic but
+/// snapmgr only reads it inside its own transaction, so the pair is stable.
+fn my_proc_vxid() -> VirtualTransactionId {
+    with_my_proc_ref(|p| VirtualTransactionId {
+        procNumber: p.vxid.procNumber,
+        localTransactionId: p.vxid.lxid,
+    })
+}
+
+/// `(MyProc->subxidStatus.count, MyProc->subxids.xids[0..count])` — this
+/// backend's cached subxids (clog group-update eligibility compares these).
+fn my_proc_subxids() -> (i32, Vec<TransactionId>) {
+    with_my_proc_ref(|p| {
+        let count = p.subxidStatus.count as i32;
+        (count, p.subxids.xids[..count as usize].to_vec())
+    })
+}
+
+/// `GetNewTransactionId`'s non-subxact leg (varsup.c): publish a freshly
+/// allocated top-level `xid` into `MyProc->xid` and the dense
+/// `ProcGlobal->xids[MyProc->pgxactoff]` mirror while `XidGenLock` is held (its
+/// release acts as the write barrier). Mirrors the C `Assert`s that the subxid
+/// cache is empty before a fresh top-level xid is stored.
+fn store_top_xid_in_proc(xid: TransactionId) {
+    with_my_proc(|p| {
+        debug_assert_eq!(p.subxidStatus.count, 0);
+        debug_assert!(!p.subxidStatus.overflowed);
+        p.xid = xid;
+    });
+    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+    crate::proc_shmem::set_proc_array_xid(pgxactoff, xid);
+}
+
+/// `GetNewTransactionId`'s subxact leg (varsup.c): push a freshly allocated
+/// subtransaction `xid` into `MyProc->subxids.xids[]` and bump
+/// `subxidStatus.count` (plus the dense `ProcGlobal->subxidStates[pgxactoff]`
+/// mirror), or set the `overflowed` flag once `PGPROC_MAX_CACHED_SUBXIDS` is
+/// exceeded. The `pg_write_barrier()` between the slot store and the count bump
+/// is implicit here (single-threaded model under `XidGenLock`).
+fn store_subxid_in_proc(xid: TransactionId) {
+    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+    let nxids = with_my_proc_ref(|p| p.subxidStatus.count as i32);
+
+    if (nxids as usize) < PGPROC_MAX_CACHED_SUBXIDS {
+        with_my_proc(|p| {
+            p.subxids.xids[nxids as usize] = xid;
+            // pg_write_barrier()
+            p.subxidStatus.count = (nxids + 1) as u8;
+        });
+        crate::proc_shmem::set_proc_array_subxid_state(pgxactoff, nxids + 1, false);
+    } else {
+        with_my_proc(|p| p.subxidStatus.overflowed = true);
+        crate::proc_shmem::set_proc_array_subxid_state(pgxactoff, nxids, true);
+    }
+}
+
 fn proc_array_status_flags_memmove(dst: i32, src: i32, count: i32) {
     crate::proc_shmem::proc_array_status_flags_memmove(dst, src, count);
 }
@@ -700,6 +768,11 @@ pub(crate) fn install() {
     seams::proc_subxids::set(proc_subxids);
     seams::my_proc_xmin::set(my_proc_xmin);
     seams::set_my_proc_xmin::set(set_my_proc_xmin);
+    seams::my_proc_xid::set(my_proc_xid);
+    seams::my_proc_vxid::set(my_proc_vxid);
+    seams::my_proc_subxids::set(my_proc_subxids);
+    seams::store_top_xid_in_proc::set(store_top_xid_in_proc);
+    seams::store_subxid_in_proc::set(store_subxid_in_proc);
     seams::set_my_proc_status_flags::set(set_my_proc_status_flags);
     seams::prepared_xact_procno::set(prepared_xact_procno);
     seams::set_delay_chkpt_start::set(set_delay_chkpt_start);
