@@ -49,6 +49,7 @@ use types_nodes::tuptable::SlotData;
 use types_rel::{Relation, RelationData};
 use types_scan::genam::{SysScanDescData, SysScanLive};
 use types_scan::scankey::ScanKeyData;
+use types_tableam::scankey::ScanKeyData as TableScanKeyData;
 use types_scan::sdir::{ScanDirection, ForwardScanDirection};
 use types_snapshot::SnapshotData;
 use types_storage::lock::{AccessShareLock, NoLock};
@@ -91,14 +92,25 @@ impl<'mcx> SysScanLive for SysScanLiveState<'mcx> {
 }
 
 /// Recover the genam owner's concrete live state from the erased descriptor.
+///
+/// Two lifetimes: `'a` is the borrow of the descriptor; `'mcx` is the lifetime
+/// of the live state's `'mcx`-bearing fields. They are independent because the
+/// live state was allocated in `scan_cx` at begin time and `scan_cx` (owned by
+/// the descriptor) outlives every per-row `mcx` passed to `systable_getnext`.
+/// So a getnext call can re-fabricate the live state at its own `'mcx` (used to
+/// drive `index_getnext_slot` / `table_scan_getnextslot`, which need
+/// `&mut ...<'mcx>` / `&mut TupleTableSlot<'mcx>`), while the reference itself
+/// is bounded by `'a`.
+///
 /// SAFETY: only the genam owner ever stores a `SysScanLiveState` in a
-/// `SysScanDescData`, so the erased `dyn SysScanLive` is always this type; the
-/// re-fabricated `'mcx` is bounded by the `&mut` borrow of the descriptor,
-/// which owns the backing `scan_cx`.
-fn live_of<'a>(desc: &'a mut SysScanDescData) -> &'a mut SysScanLiveState<'a> {
+/// `SysScanDescData`, so the erased `dyn SysScanLive` is always this type. The
+/// fabricated `'mcx` is sound because the backing `scan_cx` outlives the
+/// per-row context (the live state physically persists across the whole scan);
+/// the `&mut` is bounded by `'a` so it cannot be stored past the call.
+fn live_of<'a, 'mcx>(desc: &'a mut SysScanDescData) -> &'a mut SysScanLiveState<'mcx> {
     let l: &mut (dyn SysScanLive + 'a) = desc.live_mut();
     // The only concrete type behind `dyn SysScanLive` in a genam descriptor.
-    unsafe { &mut *(l as *mut (dyn SysScanLive + 'a) as *mut SysScanLiveState<'a>) }
+    unsafe { &mut *(l as *mut (dyn SysScanLive + 'a) as *mut SysScanLiveState<'mcx>) }
 }
 
 /// `init_seams()` — install the `systable_*` family.
@@ -310,15 +322,26 @@ fn begin_unordered<'mcx>(
     ))
 }
 
-/// Clone the (unconverted) heap-relative keys into `mcx` for the heap-scan
-/// path (no attribute-number conversion — the heap case uses the keys as-is).
+/// Project the (unconverted) heap-relative keys into the table-AM scan-key
+/// shape for the heap-scan path (no attribute-number conversion — the heap
+/// case uses the keys as-is). The table-AM `ScanKeyData` is the trimmed
+/// `access/skey.h` carrier the `scan_begin` callback receives; the comparison
+/// function / argument payload (`sk_func` / `sk_argument`) is read by the heap
+/// AM provider, which is unported (bufmgr-gated), so this projection carries
+/// the structural key as the tableam contract spells it.
 fn clone_keys_in<'mcx>(
     mcx: Mcx<'mcx>,
     keys: &[ScanKeyData<'_>],
-) -> PgResult<PgVec<'mcx, ScanKeyData<'mcx>>> {
+) -> PgResult<PgVec<'mcx, TableScanKeyData>> {
     let mut out = mcx::vec_with_capacity_in(mcx, keys.len())?;
     for key in keys {
-        out.push(clone_key_in(mcx, key, key.sk_attno)?);
+        out.push(TableScanKeyData {
+            sk_flags: key.sk_flags,
+            sk_attno: key.sk_attno,
+            sk_strategy: key.sk_strategy,
+            sk_subtype: key.sk_subtype,
+            sk_collation: key.sk_collation,
+        });
     }
     Ok(out)
 }
@@ -474,6 +497,9 @@ fn systable_endscan(mut sysscan: SysScanDescData) -> PgResult<()> {
     // end-scan on the owned `'mcx` values. The descriptor still owns `scan_cx`
     // until it is dropped at the end of this function, after `live`.
     let live = *take_live_state(&mut sysscan);
+    // The AM teardown calls carry an `Mcx<'mcx>` tied to the same lifetime as
+    // the taken scan-state values; that is the descriptor's own `scan_cx`.
+    let mcx = sysscan.scan_cx_mcx();
 
     let SysScanLiveState {
         heap_rel,
@@ -490,12 +516,7 @@ fn systable_endscan(mut sysscan: SysScanDescData) -> PgResult<()> {
         // index_endscan(sysscan->iscan); index_close(sysscan->irel,
         // AccessShareLock);
         let iscan = iscan.expect("index path with no iscan at endscan");
-        // index_endscan needs an mcx (table_index_fetch_end allocates nothing,
-        // but the seam signature carries one); reuse the heap relation's arena
-        // via a fresh scratch borrowed from the live state's context is not
-        // available here, so allocate a transient context for the teardown.
-        let teardown = MemoryContext::new("systable endscan");
-        indexam::index_endscan(teardown.mcx(), iscan)?;
+        indexam::index_endscan(mcx, iscan)?;
         indexam::index_close(irel, AccessShareLock)?;
     } else {
         // table_endscan(sysscan->scan).
@@ -515,10 +536,15 @@ fn systable_endscan(mut sysscan: SysScanDescData) -> PgResult<()> {
 }
 
 /// Take the concrete live state out of the descriptor. SAFETY mirror of
-/// [`live_of`]: the only type ever stored is `SysScanLiveState`.
-fn take_live_state<'a>(desc: &'a mut SysScanDescData) -> Box<SysScanLiveState<'a>> {
-    let boxed: Box<dyn SysScanLive + 'a> = desc.take_live();
-    let raw = Box::into_raw(boxed) as *mut SysScanLiveState<'a>;
+/// [`live_of`]: the only type ever stored is `SysScanLiveState`. The owned
+/// `'mcx` is independent of the `&mut self` borrow `'a` (the state's backing
+/// `scan_cx` is still owned by the descriptor — the caller drops the whole
+/// descriptor after the taken state's teardown), so end-scan can run the AM
+/// teardown on the owned `'mcx` values without pinning `sysscan` for the rest
+/// of the function.
+fn take_live_state<'mcx>(desc: &mut SysScanDescData) -> Box<SysScanLiveState<'mcx>> {
+    let boxed: Box<dyn SysScanLive + '_> = desc.take_live();
+    let raw = Box::into_raw(boxed) as *mut SysScanLiveState<'mcx>;
     unsafe { Box::from_raw(raw) }
 }
 
@@ -642,6 +668,7 @@ fn systable_getnext_ordered<'mcx>(
 /// `systable_endscan_ordered(sysscan)`.
 fn systable_endscan_ordered(mut sysscan: SysScanDescData) -> PgResult<()> {
     let live = *take_live_state(&mut sysscan);
+    let mcx = sysscan.scan_cx_mcx();
     let SysScanLiveState {
         heap_rel,
         irel,
@@ -655,8 +682,7 @@ fn systable_endscan_ordered(mut sysscan: SysScanDescData) -> PgResult<()> {
 
     // Assert(sysscan->irel); index_endscan(sysscan->iscan).
     let iscan = iscan.expect("systable_endscan_ordered on a non-index scan");
-    let teardown = MemoryContext::new("systable ordered endscan");
-    indexam::index_endscan(teardown.mcx(), iscan)?;
+    indexam::index_endscan(mcx, iscan)?;
 
     // The ordered variant's caller opened + closes the index itself (unlike
     // systable_endscan, which index_closes here); we still drop the NoLock
@@ -673,5 +699,3 @@ fn systable_endscan_ordered(mut sysscan: SysScanDescData) -> PgResult<()> {
 
     Ok(())
 }
-
-extern crate alloc;

@@ -1,5 +1,9 @@
 //! System-table scan vocabulary (`access/genam.h`).
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
 use types_snapshot::SnapshotData;
 
 /// `SysScanDescData` (`access/genam.h`).
@@ -133,5 +137,23 @@ impl SysScanDescData {
         unsafe {
             core::mem::transmute::<Box<dyn SysScanLive + 'static>, Box<dyn SysScanLive + 'a>>(l)
         }
+    }
+
+    /// An `Mcx` over the descriptor's own backing context (`scan_cx`, the one
+    /// the live scan state was allocated in), re-fabricated at an independent
+    /// `'mcx`. The genam owner uses it to drive `index_endscan` /
+    /// `table_endscan` on the taken live state — those AM teardown calls carry
+    /// an `Mcx<'mcx>` tied to the same lifetime as the scan-state values, which
+    /// is exactly this context.
+    ///
+    /// SAFETY: `scan_cx` is owned by `self`, so it outlives the `&mut self`
+    /// borrow; the fabricated `'mcx` is sound because the teardown completes
+    /// (and drops the taken live state) before `self` — and thus `scan_cx` — is
+    /// dropped. The returned `Mcx` cannot be stored past the borrow.
+    pub fn scan_cx_mcx<'mcx>(&mut self) -> mcx::Mcx<'mcx> {
+        let cx: &mcx::MemoryContext = &self.scan_cx;
+        let cx: &'mcx mcx::MemoryContext =
+            unsafe { &*(cx as *const mcx::MemoryContext) };
+        cx.mcx()
     }
 }
