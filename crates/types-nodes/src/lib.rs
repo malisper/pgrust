@@ -77,6 +77,11 @@ pub mod parsestmt;
 /// keystone): the statement-node vocabulary the parser/analyze/rewrite emit and
 /// the raw-grammar nodes analyze.c/parse_clause/parse_expr consume.
 pub mod rawnodes;
+/// Raw-grammar *expression* nodes (the raw-expression node-model keystone): the
+/// pre-analysis `Expr`-deriving nodes the grammar builds with raw `Node *`
+/// children (BoolExpr/CaseExpr/SubLink/NullTest/…), distinct from the
+/// post-analysis [`primnodes::Expr`] enum.
+pub mod rawexprnodes;
 pub mod partition;
 pub mod pathnodes;
 pub mod portalcmds;
