@@ -77,6 +77,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read-and-reset `binary_upgrade_next_pg_enum_oid`
+    /// (`catalog/binary_upgrade.h`) the way `AddEnumLabel` (pg_enum.c) consumes
+    /// it during a `pg_upgrade` restore: it returns the global's current value
+    /// and clears it to `InvalidOid`. Returns `InvalidOid` when the global was
+    /// not set (the caller raises "pg_enum OID value not set when in binary
+    /// upgrade mode"). A plain global read/store — infallible.
+    pub fn consume_next_pg_enum_oid() -> Oid
+);
+
+seam_core::seam!(
     /// `binary_upgrade_record_init_privs = record_init_privs` — the
     /// init-privs recording flag (`catalog/binary_upgrade.h`).
     pub fn set_record_init_privs(record_init_privs: bool)

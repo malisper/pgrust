@@ -10,3 +10,10 @@ seam_core::seam!(
     /// raises.
     pub fn pg_char_to_encoding(name: &str) -> i32
 );
+
+seam_core::seam!(
+    /// `pg_encoding_to_char(encoding)` (encnames.c): the canonical name of the
+    /// given `pg_enc` id (the `pg_enc2name_tbl` reverse lookup), or `""` for an
+    /// out-of-range id. A pure table lookup — never raises.
+    pub fn pg_encoding_to_char(encoding: i32) -> &'static str
+);
