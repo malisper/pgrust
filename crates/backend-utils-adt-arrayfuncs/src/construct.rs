@@ -1518,6 +1518,157 @@ fn read_fixed4_oid_array<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
+// Byte-image array-decode seams (`&[u8]`-input). The canonical Datum model
+// carries a by-reference catalog attribute as a `Datum::ByRef(bytes)` byte
+// image (the deformed on-disk varlena). These take that image directly and run
+// the standard decode (`DatumGetArrayTypeP` == detoast, then the element walk),
+// avoiding the pointer-word `datum_as_byte_window` round-trip the Datum-input
+// seams would otherwise need. Faithful to C: `DatumGetArrayTypeP(d)` ==
+// `pg_detoast_datum((struct varlena *) DatumGetPointer(d))`.
+// ---------------------------------------------------------------------------
+
+/// Seam `deconstruct_array_bytes` — `deconstruct_array(DatumGetArrayTypeP(bytes),
+/// elmtype, elmlen, elmbyval, elmalign, ...)` (arrayfuncs.c), reading the
+/// on-disk array byte image directly. `DatumGetArrayTypeP` is `detoast_attr`.
+pub fn deconstruct_array_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, (Datum, bool)>> {
+    // DatumGetArrayTypeP(d) — detoast the on-disk array varlena image.
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    deconstruct_array(
+        mcx,
+        &arr,
+        elmtype,
+        elmlen as i32,
+        elmbyval,
+        elmalign as u8,
+    )
+}
+
+/// Seam `oidvector_to_oids_bytes` — `(oidvector *) DatumGetPointer(datum)` then
+/// `->values[0 .. ->dim1]`, reading the on-disk `oidvector` byte image directly.
+///
+/// An `oidvector` is a 1-D `ArrayType` of `OIDOID` (4-byte pass-by-value,
+/// int-aligned, no NULLs, lower bound 0 — `oidvectorin` constructs it that way),
+/// so `ARR_DATA_PTR` is `dim1` consecutive native-endian `Oid` words. The C
+/// reads `vec->values` directly (an `oidvector` is laid out as
+/// `int32 ndim; int32 dataoffset; Oid elemtype; int dim1; int lbound1; Oid
+/// values[];` — identical to a flat `ArrayType` header followed by the OID
+/// array data). A zero-dimension vector yields an empty result.
+pub fn oidvector_to_oids_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<PgVec<'mcx, Oid>> {
+    // DatumGetArrayTypeP(d) — detoast (oidvectors are PLAIN storage, so this is
+    // the verbatim-copy fall-through, but route through the seam for parity).
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    // dim1 == ARR_DIMS(vec)[0]; a 0-D vector (ndim == 0) has no elements.
+    let dim1 = if ndim >= 1 { foundation::arr_dim(&arr, 0) } else { 0 };
+    read_fixed4_oid_array(mcx, &arr, dim1)
+}
+
+/// Seam `text_array_to_strings_bytes` —
+/// `deconstruct_array_builtin(DatumGetArrayTypeP(bytes), TEXTOID, ...)` then
+/// `TextDatumGetCString` per element, reading the on-disk `text[]` byte image
+/// directly. The text elements live inline in the array data area (each with
+/// its natural short / 4-byte varlena header — never individually toasted), so
+/// each is projected to its UTF-8 string straight from the buffer (mirroring
+/// `VARDATA_ANY` / `VARSIZE_ANY_EXHDR`), without a per-element `Datum`
+/// round-trip.
+pub fn text_array_to_strings_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    // DatumGetArrayTypeP(d) — detoast the on-disk array varlena image.
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+
+    // nelems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+    let ndim = foundation::arr_ndim(&arr);
+    let dims = foundation::arr_dims(mcx, &arr)?;
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims)?;
+
+    let mut out = mcx::vec_with_capacity_in::<PgString<'mcx>>(mcx, nelems as usize)?;
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1;
+    // (TEXT: typlen == -1, typbyval == false, typalign == 'i'.)
+    let mut p = foundation::arr_data_ptr_off(&arr);
+    let bitmap = foundation::arr_nullbitmap_off(&arr);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (arr[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            // reloptions / proconfig text arrays have no NULLs; the C
+            // TextDatumGetCString would dereference NULL — surface the same
+            // null-not-allowed error.
+            return Err(PgError::error("null array element not allowed in this context")
+                .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        }
+        // The element is an inline text varlena at `arr[p..]`; project to its
+        // UTF-8 payload (VARDATA_ANY / VARSIZE_ANY_EXHDR over the natural
+        // short / 4-byte header), then advance past it (att_addlength_pointer +
+        // att_align_nominal, the same walk as deconstruct_array).
+        out.push(text_element_to_pgstring(mcx, &arr, p)?);
+        // p = att_addlength_pointer(p, -1 /* TEXT typlen */, p);
+        p = foundation::att_addlength_pointer(p, -1, &arr, p);
+        // p = att_align_nominal(p, 'i');
+        p = foundation::att_align_nominal(p, TYPALIGN_INT);
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `TextDatumGetCString` over an inline `text` element at offset `off` in the
+/// array data area: read the natural (short or 4-byte header) varlena's payload
+/// and return its UTF-8 string in `mcx`. Mirrors `text_to_cstring` /
+/// `VARDATA_ANY` + `VARSIZE_ANY_EXHDR`.
+fn text_element_to_pgstring<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr: &[u8],
+    off: usize,
+) -> PgResult<PgString<'mcx>> {
+    // VARDATA_ANY / VARSIZE_ANY_EXHDR: a 1-byte short header has a 1-byte
+    // payload offset and `(VARSIZE_1B - 1)` payload bytes; a 4-byte header has
+    // a 4-byte offset and `(VARSIZE_4B - 4)` payload bytes. (Array text
+    // elements are never externally toasted.)
+    let (data_off, data_len) = if foundation::varatt_is_1b(arr, off) {
+        const VARHDRSZ_SHORT: usize = 1;
+        (off + VARHDRSZ_SHORT, foundation::varsize_1b(arr, off) - VARHDRSZ_SHORT)
+    } else {
+        use types_datum::varlena::VARHDRSZ;
+        (off + VARHDRSZ, foundation::varsize_4b(arr, off) - VARHDRSZ)
+    };
+    let payload = arr.get(data_off..data_off + data_len).ok_or_else(|| {
+        PgError::error("malformed array (truncated element data)")
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+    })?;
+    let text = core::str::from_utf8(payload).map_err(|_| {
+        PgError::error("invalid UTF-8 in text array element")
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+    })?;
+    let mut s = PgString::new_in(mcx);
+    s.try_push_str(text)?;
+    Ok(s)
+}
+
+// ---------------------------------------------------------------------------
 // Datum / payload bridges for the byref element model. The text / tid
 // projection of element bytes is the text/tableam owner's surface; route it
 // through the owner seams (loud panic until they land) rather than inventing a

@@ -306,3 +306,69 @@ seam_core::seam!(
         element_type: Oid,
     ) -> PgResult<PgVec<'mcx, Option<PgVec<'mcx, u8>>>>
 );
+
+/* ---------------------------------------------------------------------------
+ * Byte-image array-decode seams (`&[u8]`-input).
+ *
+ * The canonical `Datum` model carries a by-reference catalog attribute as a
+ * `Datum::ByRef(bytes)` byte image (the deformed on-disk varlena), not a bare
+ * pointer word. The `Datum`-input seams above presuppose a pointer-word that
+ * `DatumGetArrayTypeP` can detoast; bridging a `ByRef` image to them would need
+ * an unsafe pointer-forge. These seams instead take the on-disk
+ * `ArrayType`/`oidvector` byte image directly — exactly the bytes
+ * `SysCacheGetAttr` returns for an array column — and perform the same decode
+ * (`DatumGetArrayTypeP` == `detoast_attr` on the bytes, then the standard
+ * element walk). No forge, no silent corruption.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `deconstruct_array(DatumGetArrayTypeP(bytes), elmtype, elmlen, elmbyval,
+    /// elmalign, &elemsp, &nullsp, &nelemsp)` (arrayfuncs.c) operating on the
+    /// on-disk array byte image `bytes` (a `Datum::ByRef` attribute image)
+    /// rather than a pointer-word `Datum`. The image is detoasted
+    /// (`detoast_attr`) and split into per-element `(Datum, isnull)` pairs, in
+    /// order, given the element type's storage attributes. Identical decode to
+    /// [`deconstruct_array`], reading the bytes directly. Fallible on the
+    /// `ereport(ERROR)` surface (malformed array) / detoast.
+    pub fn deconstruct_array_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, (Datum, bool)>>
+);
+
+seam_core::seam!(
+    /// `(oidvector *) DatumGetPointer(datum)` then read `->values[0 ..
+    /// ->dim1]` (e.g. `proargtypes`, `pg_index.indclass`) operating on the
+    /// on-disk `oidvector` byte image `bytes` (a `Datum::ByRef` attribute
+    /// image). An `oidvector` is stored as a 1-D `ArrayType` of `OIDOID`
+    /// (4-byte pass-by-value, int-aligned, no NULLs, lower bound 0); the image
+    /// is detoasted (`detoast_attr`), and `ARR_DATA_PTR` is read as the C
+    /// `Oid[ARR_DIMS[0]]`, returned in `mcx`. An empty/zero-dimension vector
+    /// yields an empty result (the C `dim1 == 0` case). Fallible on detoast /
+    /// truncated element data.
+    pub fn oidvector_to_oids_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `deconstruct_array_builtin(DatumGetArrayTypeP(bytes), TEXTOID, &elems,
+    /// NULL, &nelems)` then `TextDatumGetCString` per element (arrayfuncs.c)
+    /// operating on the on-disk `text[]` byte image `bytes` (a `Datum::ByRef`
+    /// attribute image, e.g. `proconfig`). The image is detoasted
+    /// (`detoast_attr`), then walked element by element, each non-null `text`
+    /// element's inline varlena (short or 4-byte header) projected to its UTF-8
+    /// string in `bytes`-storage order. A NULL element raises the C
+    /// null-not-allowed `ereport(ERROR)` (the proconfig / reloptions text arrays
+    /// have no NULLs, and the C `TextDatumGetCString` would dereference NULL).
+    /// Fallible on detoast / malformed array / invalid UTF-8.
+    pub fn text_array_to_strings_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
