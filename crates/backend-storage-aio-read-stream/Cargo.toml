@@ -1,0 +1,33 @@
+[package]
+name = "backend-storage-aio-read-stream"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_aio_read_stream"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-rel = { path = "../types-rel" }
+mcx = { path = "../mcx" }
+# The look-ahead pipeline drives StartReadBuffer(s)/WaitReadBuffers + the
+# ReadBuffer accessors (BufferGetBlockNumber/ReleaseBuffer) directly: bufmgr is
+# below read_stream in the dependency graph.
+backend-storage-buffer-bufmgr = { path = "../backend-storage-buffer-bufmgr" }
+# GetAccessStrategyPinLimit / GetLocalPinLimit (strategy.rs / localbuf.rs).
+backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
+# smgr->smgr_rlocator (tablespace lookup) + smgr-temp check.
+backend-storage-smgr-smgr = { path = "../backend-storage-smgr-smgr" }
+# get_tablespace_io_concurrency / get_tablespace_maintenance_io_concurrency.
+backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
+# IsCatalogRelation / IsCatalogRelationOid.
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+# The GUCs read once at begin time: io_combine_limit / effective_io_concurrency /
+# maintenance_io_concurrency / io_method==sync / io_direct_data / GetPinLimit.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# MyDatabaseId / MyDatabaseTableSpace.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

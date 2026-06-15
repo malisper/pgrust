@@ -34,6 +34,7 @@ mod read;
 mod refcount;
 
 pub use mgr::BufferManager;
+pub use read::ReadOp;
 
 use types_storage::storage::Buffer;
 

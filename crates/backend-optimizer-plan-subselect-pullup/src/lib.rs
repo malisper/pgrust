@@ -80,6 +80,26 @@ pub fn init_seams() {
     backend_optimizer_plan_subselect_pullup_seams::convert_EXISTS_sublink_to_join::set(
         convert_EXISTS_sublink_to_join,
     );
+    backend_optimizer_plan_subselect_pullup_seams::convert_VALUES_to_ANY::set(
+        convert_VALUES_to_ANY_panic,
+    );
+}
+
+/// `convert_VALUES_to_ANY(root, testexpr, values)` (subselect.c) — **deferred to
+/// the planmain stage**: its body needs `convert_testexpr` (already here) plus
+/// `eval_const_expressions` and `make_SAOP_expr`, which are part of the
+/// still-unported SubPlan-building half of subselect.c. Installed as a
+/// seam-and-panic body; `pull_up_sublinks_qual_recurse` (the only caller) is
+/// reachable only from the unported `subquery_planner`, so this panic is latent.
+fn convert_VALUES_to_ANY_panic<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &PlannerInfo,
+    _sublink: &SubLink,
+) -> PgResult<Option<Expr>> {
+    panic!(
+        "convert_VALUES_to_ANY: the VALUES-list fast path is part of the \
+         SubPlan-building (planmain) half of subselect.c, not yet ported"
+    )
 }
 
 // ===========================================================================
