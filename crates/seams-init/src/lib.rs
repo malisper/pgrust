@@ -180,6 +180,7 @@ pub fn init_all() {
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
     backend_optimizer_prep_preptlist::init_seams();
+    backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
@@ -726,6 +727,21 @@ mod recurrence_guard {
         // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
         // when allpaths.c lands.
         ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
+        // DESIGN_DEBT (TD-ADD-FUNCTION-COST-XOWNER): `add_function_cost`
+        // (costsize.c) is declared in `backend-optimizer-path-costsize-seams` but
+        // its install lives in `backend-optimizer-util-plancat`
+        // (`seam_add_function_cost`, plancat lib.rs) because the body reads
+        // `pg_proc.procost` (+ the support-function cost hook) through the relcache
+        // /catalog machinery plancat owns — costsize.c itself only *calls* it. The
+        // seam IS installed at runtime (plancat::init_seams runs in init_all); this
+        // is purely the owner-strict guard not detecting a cross-crate install (the
+        // guard checks only the dir-owner costsize's own source). It is a genuine,
+        // working install — NOT a runtime panic. prepagg's `get_agg_clause_costs`
+        // is the first non-test caller, which is why it only now surfaces. Re-home
+        // the install into costsize's own init_seams (or onto a shared path-seam
+        // owner) and DELETE this entry when the add_function_cost body's catalog
+        // dependency is restructured to live with costsize.
+        ("backend_optimizer_path_costsize", "add_function_cost"),
         // DESIGN_DEBT (TD-GIN-EXTRACT-QUERY): `gin_extract_query` is the GIN
         // `extractQueryFn` fmgr dispatch (`FunctionCall7Coll(...)` with by-pointer
         // out-params) that `ginscan.c`'s `ginNewScanKey` invokes. Its real owner
