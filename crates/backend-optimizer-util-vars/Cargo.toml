@@ -18,3 +18,6 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+# fix_indexqual_operand reaches indxpath.c's strip_phvs_in_index_operand by a
+# direct edge (indxpath depends only on var-SEAMS, not this owner, so no cycle).
+backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
