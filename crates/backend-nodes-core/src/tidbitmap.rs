@@ -1530,6 +1530,114 @@ pub fn tbm_intersect(
 }
 
 // ===========================================================================
+// GIN private-iteration bridge (ginget.c).
+//
+// `ginget.c` drives a private iteration directly: each `GinScanEntry` owns a
+// `TIDBitmap *matchBitmap`, a `TBMPrivateIterator *matchIterator`, and an
+// embedded `TBMIterateResult matchResult`, and calls `tbm_private_iterate`
+// per item. The repo carries `matchResult` as the consumer-side
+// `types_gin::TBMIterateResult` (with an opaque `Box<dyn Any>` `internal_page`),
+// so the tidbitmap owner fills that carrier here — the same "owner fills the
+// consumer's carrier" pattern used for the seam providers.
+// ===========================================================================
+
+/// `tbm_begin_private_iterate(tbm)` (`tidbitmap.c`) for the GIN scan: build a
+/// private iterator that keeps a back-pointer to `tbm` (which the `GinScanEntry`
+/// owns for the whole iteration; it is read-only while iterating, mirroring the
+/// C raw `iterator->tbm`).
+pub fn gin_tbm_begin_private_iterate(
+    tbm: &mut types_tidbitmap::TIDBitmap,
+) -> PgResult<types_tidbitmap::TBMPrivateIterator> {
+    let inner = carrier_inner_mut(tbm)?;
+    let inner_ptr = inner as *const TidBitmapInner;
+    let inner_it = begin_private_iterate(inner)?;
+    Ok(types_tidbitmap::TBMPrivateIterator(Some(Box::new(
+        PrivateIterCarrier {
+            tbm: inner_ptr,
+            iter: inner_it,
+        },
+    ))))
+}
+
+/// `tbm_private_iterate(iterator, tbmres)` (`tidbitmap.c`) for the GIN scan:
+/// advance the private iteration, filling the consumer-side
+/// `types_gin::TBMIterateResult`. Returns `false` at end (with `blockno ==
+/// InvalidBlockNumber`).
+pub fn gin_tbm_private_iterate(
+    iterator: &mut types_tidbitmap::TBMPrivateIterator,
+    tbmres: &mut types_gin::TBMIterateResult,
+) -> bool {
+    let carrier = iterator
+        .0
+        .as_mut()
+        .and_then(|p| p.downcast_mut::<PrivateIterCarrier>())
+        .expect("tbm_private_iterate: iterator carrier is NULL or foreign");
+    // SAFETY: `carrier.tbm` points at the `TidBitmapInner` owned by the
+    // `GinScanEntry.matchBitmap` carrier, which lives for the whole iteration
+    // and is read-only here (mirrors the C raw `iterator->tbm`).
+    let inner = unsafe { &*carrier.tbm };
+    let mut local = TBMIterateResult::default();
+    let more = private_iterate(inner, &mut carrier.iter, &mut local);
+    // Copy the result into the consumer carrier, moving the opaque per-page
+    // bitmap into the `Box<dyn Any>` slot.
+    tbmres.blockno = local.blockno;
+    tbmres.lossy = local.lossy;
+    tbmres.recheck = local.recheck;
+    tbmres.internal_page = local
+        .internal_page
+        .map(|p| p as Box<dyn core::any::Any>);
+    more
+}
+
+/// `tbm_extract_page_tuple(iteritem, offsets, max)` (`tidbitmap.c`) for the GIN
+/// scan, reading the consumer-side `types_gin::TBMIterateResult`.
+pub fn gin_tbm_extract_page_tuple(
+    iteritem: &types_gin::TBMIterateResult,
+    offsets: &mut [OffsetNumber],
+) -> i32 {
+    let page = match iteritem
+        .internal_page
+        .as_ref()
+        .and_then(|p| p.downcast_ref::<PagetableEntry>())
+    {
+        Some(p) => p,
+        None => return 0,
+    };
+    let max_offsets = offsets.len();
+    let mut ntuples = 0i32;
+    for wnum in 0..WORDS_PER_PAGE {
+        let mut w = page.words[wnum];
+        if w != 0 {
+            let mut off = (wnum * BITS_PER_BITMAPWORD + 1) as i32;
+            while w != 0 {
+                if w & 1 != 0 {
+                    if (ntuples as usize) < max_offsets {
+                        offsets[ntuples as usize] = off as OffsetNumber;
+                    }
+                    ntuples += 1;
+                }
+                off += 1;
+                w >>= 1;
+            }
+        }
+    }
+    ntuples
+}
+
+/// `tbm_end_private_iterate(iterator)` (`tidbitmap.c`): free the private
+/// iterator (here, drop the owned carrier).
+pub fn gin_tbm_end_private_iterate(_iterator: types_tidbitmap::TBMPrivateIterator) {
+    // Dropping the owned `Box` is the C `pfree(iterator)`.
+}
+
+/// `tbm_free(tbm)` (`tidbitmap.c`): free the bitmap (here, drop the owned
+/// carrier). Mirrors C `pfree`.
+pub fn tbm_free(tbm: types_tidbitmap::TIDBitmap) {
+    // Dropping the owned `Box` releases the `TidBitmapInner`.
+    let _ = tbm;
+}
+
+// ===========================================================================
 // Seam providers (the OWNED seams) + their installers.
 // ===========================================================================
 

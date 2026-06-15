@@ -212,6 +212,32 @@ pub fn GinDataLeafPageGetItems(page: &[u8], advance_past: ItemPointerData) -> Ve
     }
 }
 
+/// `GinDataLeafPageGetItemsToTbm(page, tbm)` (gindatapage.c:182): add all TIDs
+/// from a leaf data page directly to a [`types_tidbitmap::TIDBitmap`], returning
+/// the number of items added.
+pub fn GinDataLeafPageGetItemsToTbm(
+    page: &[u8],
+    tbm: &mut types_tidbitmap::TIDBitmap,
+) -> PgResult<i32> {
+    if GinPageIsCompressed(page) {
+        // GinPostingList *segment = GinDataLeafPageGetPostingList(page);
+        // Size len = GinDataLeafPageGetPostingListSize(page);
+        let segment = posting_list_slice(page);
+        let len = GinDataLeafPageGetPostingListSize(page);
+        backend_access_gin_core_probe::ginpostinglist::ginPostingListDecodeAllSegmentsToTbm(
+            segment, len as i32, tbm,
+        )
+    } else {
+        // uncompressed = dataLeafPageGetUncompressed(page, &nitems);
+        let uncompressed = data_leaf_page_get_uncompressed(page);
+        let nitems = uncompressed.len() as i32;
+        if nitems > 0 {
+            backend_nodes_core_seams::tbm_add_tuples::call(tbm, &uncompressed, false)?;
+        }
+        Ok(nitems)
+    }
+}
+
 /// `dataLeafPageGetUncompressed(page, &nitems)` (gindatapage.c:211): the
 /// uncompressed item array of a pre-9.4 leaf page (`maxoff` items at
 /// `GinDataPageGetData`).

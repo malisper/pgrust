@@ -16,6 +16,7 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginget::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
@@ -724,6 +725,17 @@ mod recurrence_guard {
         // not fire. It is genuinely uninstalled / loud-panic (mirror-pg-and-panic)
         // until the fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_extract_query"),
+        // DESIGN_DEBT (TD-GIN-COMPARE-PARTIAL): `gin_compare_partial` is the GIN
+        // `comparePartialFn` fmgr dispatch (`DatumGetInt32(FunctionCall4Coll(...))`)
+        // that `ginget.c`'s `collectMatchBitmap` / `matchPartialInPendingList`
+        // invoke. Its real owner is the fmgr GIN-call dispatcher (still unported)
+        // — the SAME owner as `gin_extract_query` / `gin_extract_value` /
+        // `gin_compare_entries`. It is declared in `backend-access-gin-ginutil-seams`
+        // (the GIN substrate seam crate) so the guard attributes it to the COMPLETE
+        // `ginutil` owner; but ginutil does not call it (ginget does). Genuinely
+        // uninstalled / loud-panic (mirror-pg-and-panic) until the fmgr GIN
+        // dispatcher lands. DELETE this entry when it does.
+        ("backend_access_gin_ginutil", "gin_compare_partial"),
         // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
         // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
         // ported in the otherwise-complete `backend-optimizer-util-pathnode`

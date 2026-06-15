@@ -137,6 +137,24 @@ seam_core::seam!(
     ) -> PgResult<i32>
 );
 
+seam_core::seam!(
+    /// `DatumGetInt32(FunctionCall4Coll(&ginstate->comparePartialFn[attnum-1],
+    /// collation, queryKey, idatum, UInt16GetDatum(strategy),
+    /// PointerGetDatum(extra_data)))` (ginget.c `collectMatchBitmap` /
+    /// `matchPartialInPendingList`): invoke the opclass `comparePartialFn` for a
+    /// partial-match query key against a stored key. The fmgr GIN
+    /// compare-partial dispatch is genuinely external (the same owner as
+    /// `gin_compare_entries`). `Err` carries its `ereport(ERROR)`.
+    pub fn gin_compare_partial<'mcx>(
+        flinfo: &FmgrInfo,
+        collation: Oid,
+        query_key: Datum<'mcx>,
+        idatum: Datum<'mcx>,
+        strategy: u16,
+        extra_data: Option<&[u8]>,
+    ) -> PgResult<i32>
+);
+
 /// The de-pointered outputs of the GIN `extractQueryFn`
 /// (`FunctionCall7Coll(&ginstate->extractQueryFn[attno-1], ...)`, ginscan.c
 /// `ginNewScanKey`). The C function returns `Datum *queryValues` and fills the

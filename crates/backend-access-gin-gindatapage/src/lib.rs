@@ -41,7 +41,7 @@ pub mod datatree;
 // ginvacuum) calls, exactly as `gindatapage.c` exports them.
 pub use datatree::{
     createPostingTree, ginInsertItemPointers, ginPrepareDataScan, ginScanBeginPostingTree,
-    ginVacuumPostingTreeLeaf, GinDataLeafPageGetItems,
+    ginVacuumPostingTreeLeaf, GinDataLeafPageGetItems, GinDataLeafPageGetItemsToTbm,
 };
 
 // Re-export the PostingItem carrier so consumers of the data-page substrate get
