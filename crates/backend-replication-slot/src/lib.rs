@@ -2691,6 +2691,7 @@ pub fn StandbySlotsHaveCaughtup(wait_for_lsn: XLogRecPtr, elevel: ErrorLevel) ->
                     .finish(loc(3000, "StandbySlotsHaveCaughtup"))?;
             }
             // Current slot hasn't caught up.
+            unlock_control()?;
             broke = true;
             break;
         }
