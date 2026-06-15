@@ -158,6 +158,7 @@ pub fn init_all() {
     backend_optimizer_path_pathkeys::init_seams();
     backend_access_nbt_compare::init_seams();
     backend_access_nbt_validate::init_seams();
+    backend_access_brin_validate::init_seams();
     backend_access_nbtree_core::init_seams();
     backend_access_nbtree_nbtsort::init_seams();
     backend_common_relpath::init_seams();
@@ -166,7 +167,6 @@ pub fn init_all() {
     backend_optimizer_path_small::init_seams();
     backend_optimizer_util_joininfo::init_seams();
     backend_optimizer_util_vars::init_seams();
-    backend_rewrite_core::init_seams();
     backend_parser_parse_expr::init_seams();
     backend_parser_agg::init_seams();
     backend_parser_func::init_seams();
@@ -205,6 +205,7 @@ pub fn init_all() {
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
+    backend_rewrite_core::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
     backend_storage_file_fileset::init_seams();
