@@ -132,6 +132,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `INTERRUPTS_PENDING_CONDITION()` (miscadmin.h): whether an interrupt is
+    /// pending. On non-Windows builds this is simply `InterruptPending`
+    /// (globals.c). Read by `spgdoinsert`'s descent loop to bail out (return
+    /// false to retry) when a query-cancel/die interrupt is pending.
+    pub fn interrupt_pending() -> bool
+);
+
+seam_core::seam!(
     /// `ProcDiePending = value` (globals.c).
     pub fn set_proc_die_pending(value: bool)
 );
