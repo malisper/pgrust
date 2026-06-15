@@ -32,11 +32,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ginHeapTupleFastCollect` + `ginHeapTupleFastInsert` (ginfast.c): collect
     /// one heap tuple's index entries into the fast-update pending list and write
-    /// the pending pages. The whole fast-update path (ginfast.c, GIN family F3)
-    /// is unported; this seam is its sole entry point. `Err` carries any
-    /// `ereport(ERROR)`.
+    /// the pending pages. Installed by the `ginfast` owner. The collect + page
+    /// I/O need the live index relation and an allocation context, so the seam
+    /// threads `mcx` and `&Relation` (the `index` Oid is kept for callers that
+    /// only have it). `Err` carries any `ereport(ERROR)`.
     pub fn gin_fast_insert<'mcx>(
-        index: Oid,
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        index_oid: Oid,
         values: Vec<Datum<'mcx>>,
         isnull: Vec<bool>,
         ht_ctid: ItemPointerData,

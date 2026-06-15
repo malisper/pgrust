@@ -1663,6 +1663,28 @@ fn build_reloptions_spgist_seam(
     build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_SPGIST, 8, &tab)
 }
 
+/// Seam target for `gistoptions(reloptions, validate)` (gistutil.c) — the
+/// GiST AM's `amoptions` callback. Mirrors the C:
+/// `build_reloptions(reloptions, validate, RELOPT_KIND_GIST,
+///  sizeof(GiSTOptions), tab, lengthof(tab))` where `tab` has the two entries
+/// `{"fillfactor", RELOPT_TYPE_INT, offsetof(GiSTOptions, fillfactor)}` and
+/// `{"buffering", RELOPT_TYPE_ENUM, offsetof(GiSTOptions, buffering_mode)}`.
+///
+/// `GiSTOptions` is `{ int32 varlena_header_; int fillfactor;
+/// GistOptBufferingMode buffering_mode; }`, so its size is 12, `fillfactor` is
+/// at offset 4 and `buffering_mode` (an `int`-sized enum) is at offset 8.
+fn build_reloptions_gist_seam(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    let scratch = mcx::MemoryContext::new("gistoptions");
+    let tab = [
+        RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4),
+        RelOptParseElt::new("buffering", RELOPT_TYPE_ENUM, 8),
+    ];
+    build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_GIST, 12, &tab)
+}
+
 /// Seam target for `tablespace_reloptions(reloptions, validate)` (see
 /// [`attribute_reloptions_seam`]).
 fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<TableSpaceOpts> {
@@ -1735,4 +1757,5 @@ pub fn init_seams() {
     backend_access_common_reloptions_seams::build_reloptions_spgist::set(
         build_reloptions_spgist_seam,
     );
+    backend_access_common_reloptions_seams::build_reloptions_gist::set(build_reloptions_gist_seam);
 }
