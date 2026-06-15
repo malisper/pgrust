@@ -664,6 +664,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-gindatapage"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-page",
+ "backend-utils-error",
+ "types-core",
+ "types-gin",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-ginscan"
 version = "0.0.0"
 dependencies = [

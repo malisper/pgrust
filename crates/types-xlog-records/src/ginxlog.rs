@@ -2,7 +2,7 @@
 //! pieces the records embed (`access/ginblock.h`), trimmed to the fields
 //! ports consume so far.
 
-use crate::bytes::{block_id_at, bool_at, i32_at, item_pointer_at, u16_at};
+use crate::bytes::{block_id_at, bool_at, i32_at, item_pointer_at, u16_at, u32_at};
 use types_core::OffsetNumber;
 use types_tuple::{BlockIdData, ItemPointerData};
 
@@ -31,6 +31,22 @@ impl ginxlogInsert {
             block_id_at(rec, SIZEOF_GINXLOG_INSERT),
             block_id_at(rec, SIZEOF_GINXLOG_INSERT + SIZEOF_BLOCK_ID_DATA),
         )
+    }
+}
+
+/// `ginxlogCreatePostingTree` (`access/ginxlog.h`): `{uint32 size;}` — a
+/// compressed posting list (the leaf's segments) follows the struct.
+#[derive(Clone, Copy, Debug)]
+pub struct ginxlogCreatePostingTree {
+    pub size: u32,
+}
+
+/// `sizeof(ginxlogCreatePostingTree)`.
+pub const SIZEOF_GINXLOG_CREATE_POSTING_TREE: usize = 4;
+
+impl ginxlogCreatePostingTree {
+    pub fn from_bytes(rec: &[u8]) -> Self {
+        Self { size: u32_at(rec, 0) }
     }
 }
 
@@ -74,6 +90,9 @@ pub struct PostingItem {
     pub child_blkno: BlockIdData,
     pub key: ItemPointerData,
 }
+
+/// `sizeof(PostingItem)` — `child_blkno` (4) + `key` (6), 2-aligned, 10 bytes.
+pub const SIZEOF_POSTING_ITEM: usize = 10;
 
 impl PostingItem {
     pub fn from_bytes(rec: &[u8]) -> Self {
