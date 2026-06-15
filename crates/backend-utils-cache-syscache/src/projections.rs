@@ -23,7 +23,12 @@ use crate::{
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
-use types_fmgr::LangInfo;
+use types_fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
+use backend_utils_misc_guc_seams as guc_seams;
+use backend_utils_error::ereport;
+use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
+use types_tuple::heaptuple::HeapTupleHeaderGetRawXmin;
 use backend_utils_cache_syscache_seams::{PgClassFullForm, PgProcForm};
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
@@ -689,8 +694,20 @@ const Anum_pg_proc_proisstrict: i32 = 13;
 const Anum_pg_proc_proretset: i32 = 14;
 const Anum_pg_proc_provolatile: i32 = 15;
 const Anum_pg_proc_proparallel: i32 = 16;
+const Anum_pg_proc_proowner: i32 = 4;
+const Anum_pg_proc_prolang: i32 = 5;
+const Anum_pg_proc_prosecdef: i32 = 11;
 const Anum_pg_proc_pronargs: i32 = 17;
 const Anum_pg_proc_prorettype: i32 = 19;
+const Anum_pg_proc_proargtypes: i32 = 20;
+const Anum_pg_proc_prosrc: i32 = 26;
+const Anum_pg_proc_probin: i32 = 27;
+const Anum_pg_proc_proconfig: i32 = 29;
+
+// Language OIDs the `prolang` switch matches (`catalog/pg_language_d.h`).
+const INTERNAL_LANGUAGE_ID: u32 = 12;
+const C_LANGUAGE_ID: u32 = 13;
+const SQL_LANGUAGE_ID: u32 = 14;
 
 // `catalog/pg_authid.h` attribute numbers.
 const Anum_pg_authid_oid: i32 = 1;
@@ -710,6 +727,9 @@ const Anum_pg_collation_collname: i32 = 2;
 const Anum_pg_collation_collnamespace: i32 = 3;
 
 // `catalog/pg_index.h` attribute numbers.
+const Anum_pg_index_indnatts: i32 = 3;
+const Anum_pg_index_indnkeyatts: i32 = 4;
+const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indpred: i32 = 21;
 
 // `catalog/pg_attribute.h` attribute numbers.
@@ -1295,6 +1315,216 @@ pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {
     let (_value, is_null) = SysCacheGetAttr(mcx, INDEXRELID, &tup, Anum_pg_index_indpred)?;
     ReleaseSysCache(tup);
     Ok(Some(!is_null))
+}
+
+/// `ParseLongOption` + skip-with-WARNING over the deconstructed `proconfig`
+/// element strings — the `TransformGUCArray(array, &names, &values)` body
+/// (guc.c), driven off the already-decoded `"name=value"` element strings.
+/// `value == NULL` (a bare `name`) raises the C
+/// `ereport(WARNING, "could not parse setting for parameter \"%s\"")` and skips
+/// the entry (C: `continue`). The split name/value pieces are copied into `mcx`.
+fn transform_guc_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[PgString<'mcx>],
+) -> PgResult<(PgVec<'mcx, PgString<'mcx>>, PgVec<'mcx, PgString<'mcx>>)> {
+    let mut names = vec_with_capacity_in::<PgString<'mcx>>(mcx, elems.len())?;
+    let mut values = vec_with_capacity_in::<PgString<'mcx>>(mcx, elems.len())?;
+    for s in elems {
+        // ParseLongOption(s, &name, &value).
+        let (name, value) = guc_seams::parse_long_option::call(mcx, s.as_str())?;
+        let Some(value) = value else {
+            // ereport(WARNING, errcode(ERRCODE_SYNTAX_ERROR),
+            //         errmsg("could not parse setting for parameter \"%s\"", name));
+            ereport(WARNING)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!(
+                    "could not parse setting for parameter \"{}\"",
+                    name.as_str()
+                ))
+                .finish(ErrorLocation::new("utils/misc/guc.c", 0, "TransformGUCArray"))?;
+            continue;
+        };
+        names.push(name);
+        values.push(value);
+    }
+    Ok((names, values))
+}
+
+/// `SearchSysCache1(PROCOID, ObjectIdGetDatum(functionId))` projected to the
+/// catalog facts `fmgr_info_cxt_security` reads (`fmgr.c`):
+/// `pronargs`/`proisstrict`/`proretset`/`prolang`/`prosrc`/`probin`/
+/// `prosecdef`/`proowner`/`proname`, the `TransformGUCArray`'d `proconfig`
+/// names+values, and the tuple's raw xmin + TID (the C-function cache key). The
+/// folded `security_definer` predicate is `prosecdef || proconfig-not-null`
+/// (the C `FmgrHookIsNeeded(functionId)` term stays with the fmgr consumer,
+/// which folds its hook check in). `Ok(None)` on a cache miss.
+pub(crate) fn lookup_proc<'mcx>(mcx: Mcx<'mcx>, function_id: Oid) -> PgResult<Option<ProcInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(function_id)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // procedureStruct = (Form_pg_proc) GETSTRUCT(procedureTuple).
+    let nargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let strict = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proisstrict)?;
+    let retset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let prolang = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prolang)?;
+    let prosecdef = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_prosecdef)?;
+    let proowner = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_proowner)?;
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+
+    // prolang switch (INTERNAL/C/SQL/else).
+    let language = match prolang {
+        INTERNAL_LANGUAGE_ID => ProcLanguage::Internal,
+        C_LANGUAGE_ID => ProcLanguage::C,
+        SQL_LANGUAGE_ID => ProcLanguage::Sql,
+        _ => ProcLanguage::Other,
+    };
+
+    // prosrc = SysCacheGetAttrNotNull(PROCOID, ftup, Anum_pg_proc_prosrc)
+    //          (BKI_FORCE_NOT_NULL); TextDatumGetCString(prosrcdatum). The
+    // internal-by-name leg reads it; carry it always (it is non-null).
+    let prosrc_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_prosrc)?;
+    let prosrc = Some(varlena_seams::text_to_cstring_v::call(mcx, &prosrc_datum)?);
+
+    // probin = SysCacheGetAttr(PROCOID, ftup, Anum_pg_proc_probin, &isnull):
+    // only set for a C-language function; NULL otherwise.
+    let (probin_datum, probin_isnull) = SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_probin)?;
+    let probin = if probin_isnull {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &probin_datum)?)
+    };
+
+    // datum = SysCacheGetAttr(PROCOID, ftup, Anum_pg_proc_proconfig, &isnull);
+    // !isnull feeds the security_definer predicate, and TransformGUCArray(datum)
+    // splits the text[] into the SET name/value lists.
+    let (proconfig_datum, proconfig_isnull) =
+        SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proconfig)?;
+    let (proconfig_names, proconfig_values) = if proconfig_isnull {
+        (vec_with_capacity_in(mcx, 0)?, vec_with_capacity_in(mcx, 0)?)
+    } else {
+        let bytes = match &proconfig_datum {
+            Datum::ByRef(b) => &b[..],
+            Datum::ByVal(_) => {
+                return Err(PgError::error(
+                    "syscache projection: proconfig attribute is by-value",
+                ))
+            }
+        };
+        // deconstruct the text[] image, then TransformGUCArray over the entries.
+        let elems = arrayfuncs_seams::text_array_to_strings_bytes::call(mcx, bytes)?;
+        transform_guc_array(mcx, &elems)?
+    };
+
+    // C: prosecdef || !proconfig-is-null routes through fmgr_security_definer.
+    // FmgrHookIsNeeded(functionId) is the fmgr consumer's term (it folds its
+    // plugin-hook check in).
+    let security_definer = prosecdef || !proconfig_isnull;
+
+    // HeapTupleHeaderGetRawXmin(procedureTuple->t_data) + procedureTuple->t_self.
+    let xmin = HeapTupleHeaderGetRawXmin(
+        tup.tuple
+            .t_data
+            .as_ref()
+            .expect("pg_proc tuple has a header"),
+    );
+    let tid = tup.tuple.t_self;
+
+    ReleaseSysCache(tup);
+    Ok(Some(ProcInfo {
+        nargs,
+        strict,
+        retset,
+        language,
+        prosrc,
+        probin,
+        security_definer,
+        prosecdef,
+        prolang,
+        proname: Some(proname),
+        proowner,
+        proconfig_names,
+        proconfig_values,
+        xmin,
+        tid,
+    }))
+}
+
+/// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` projected to the
+/// `pg_proc` facts `internal_get_result_type` (funcapi.c) reads:
+/// `prorettype`/`proretset`/`pronargs`/`proargtypes` (the declared input-type
+/// `oidvector`) and `NameStr(proname)`. `Ok(None)` on a cache miss.
+pub(crate) fn lookup_proc_result_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<ProcResultInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+
+    // procedureStruct->proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read
+    // its element OIDs directly off the on-disk image (== C's vec->values).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_) => {
+            return Err(PgError::error(
+                "syscache projection: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+
+    ReleaseSysCache(tup);
+    Ok(Some(ProcResultInfo {
+        prorettype,
+        proretset,
+        pronargs,
+        proargtypes,
+        proname,
+    }))
+}
+
+/// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` then
+/// `Form_pg_index.indnatts`/`indnkeyatts` + `SysCacheGetAttrNotNull(INDEXRELID,
+/// tuple, Anum_pg_index_indclass)` projected to the per-column opclass
+/// `oidvector` (`get_index_column_opclass`, lsyscache.c). Returns `(indnatts,
+/// indnkeyatts, indclass)` with the opclass OIDs copied into `mcx`. `Ok(None)`
+/// on a cache miss (the C `return InvalidOid`).
+pub(crate) fn pg_index_indclass<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_oid: Oid,
+) -> PgResult<Option<(i16, i16, PgVec<'mcx, Oid>)>> {
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let indnatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnatts)?;
+    let indnkeyatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnkeyatts)?;
+
+    // datum = SysCacheGetAttrNotNull(INDEXRELID, tuple, Anum_pg_index_indclass);
+    // indclass = (oidvector *) DatumGetPointer(datum); read ->values[0..dim1].
+    let indclass_datum = SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indclass)?;
+    let bytes = match &indclass_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_) => {
+            return Err(PgError::error(
+                "syscache projection: indclass attribute is by-value",
+            ))
+        }
+    };
+    let indclass = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+
+    ReleaseSysCache(tup);
+    Ok(Some((indnatts, indnkeyatts, indclass)))
 }
 
 /// `SearchSysCache1(COLLOID, collation)` then

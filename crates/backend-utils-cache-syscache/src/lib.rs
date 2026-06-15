@@ -951,6 +951,11 @@ pub fn init_seams() {
         projections::search_constraint_form_by_oid,
     );
     backend_utils_cache_syscache_seams::fetch_relchecks::set(projections::fetch_relchecks);
+    backend_utils_cache_syscache_seams::lookup_proc::set(projections::lookup_proc);
+    backend_utils_cache_syscache_seams::lookup_proc_result_info::set(
+        projections::lookup_proc_result_info,
+    );
+    backend_utils_cache_syscache_seams::pg_index_indclass::set(projections::pg_index_indclass);
     backend_utils_cache_syscache_seams::read_constraint_form::set(
         projections::read_constraint_form,
     );
