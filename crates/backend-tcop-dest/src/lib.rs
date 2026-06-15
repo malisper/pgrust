@@ -81,7 +81,7 @@ pub struct ReceiverVtable {
     /// `void (*rStartup)(DestReceiver *self, int operation, TupleDesc typeinfo)`.
     pub rStartup: fn(state: u64, operation: CmdType, tupdesc: &TupleDescData<'_>) -> PgResult<()>,
     /// `bool (*receiveSlot)(TupleTableSlot *slot, DestReceiver *self)`.
-    pub receiveSlot: fn(state: u64, slot: &SlotData<'_>) -> PgResult<bool>,
+    pub receiveSlot: fn(state: u64, slot: &mut SlotData<'_>) -> PgResult<bool>,
     /// `void (*rShutdown)(DestReceiver *self)`.
     pub rShutdown: fn(state: u64) -> PgResult<()>,
 }
@@ -118,7 +118,7 @@ fn donothing_startup(
 
 /// `donothingReceive(TupleTableSlot *slot, DestReceiver *self)` (dest.c) —
 /// returns `true`.
-fn donothing_receive(_state: u64, _slot: &SlotData<'_>) -> PgResult<bool> {
+fn donothing_receive(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
     Ok(true)
 }
 
@@ -159,7 +159,7 @@ fn unwired(mydest: CommandDest) -> ! {
 fn unwired_startup_remote(_state: u64, _op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
     unwired(CommandDest::Remote)
 }
-fn unwired_receive_remote(_state: u64, _slot: &SlotData<'_>) -> PgResult<bool> {
+fn unwired_receive_remote(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
     unwired(CommandDest::Remote)
 }
 fn unwired_shutdown_remote(_state: u64) -> PgResult<()> {
@@ -313,7 +313,7 @@ fn dest_rstartup_impl(
 
 /// `dest->receiveSlot(slot, dest)` — route to the receiver's `receiveSlot`
 /// callback, threading its `state` token.
-fn dest_receive_slot_impl(slot: &SlotData<'_>, dest: DestReceiverHandle) -> PgResult<bool> {
+fn dest_receive_slot_impl(slot: &mut SlotData<'_>, dest: DestReceiverHandle) -> PgResult<bool> {
     let r = lookup(dest);
     (r.vtable.receiveSlot)(r.state, slot)
 }
