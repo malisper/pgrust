@@ -439,6 +439,113 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hash-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-common-reloptions-seams",
+ "backend-access-hash-core-seams",
+ "backend-access-hash-entry-seams",
+ "backend-access-heap-heapam-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-commands-vacuum-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-hash-dynahash-seams",
+ "mcx",
+ "types-amapi",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-hash",
+ "types-rel",
+ "types-reloptions",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tidbitmap",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-hash-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-hash-entry"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-hash-core",
+ "backend-access-hash-entry-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-commands-vacuum-seams",
+ "backend-nodes-core-seams",
+ "backend-optimizer-util-plancat-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-page",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-small",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "types-amapi",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-hash",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-hash-entry-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-hash-xlog"
 version = "0.0.0"
 dependencies = [
@@ -1318,6 +1425,7 @@ dependencies = [
  "types-snapshot",
  "types-storage",
  "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2152,6 +2260,23 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+]
+
+[[package]]
+name = "backend-archive-shell-archive"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-archive-shell-archive-seams",
+ "backend-postmaster-pgarch",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "common-percentrepl",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "types-error",
+ "types-pgarch",
 ]
 
 [[package]]
@@ -6378,6 +6503,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -10576,6 +10702,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-hash",
  "types-nodes",
  "types-partition",
  "types-rel",
@@ -11700,6 +11827,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -12292,6 +12420,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-hash-core",
+ "backend-access-hash-entry",
  "backend-access-hash-xlog",
  "backend-access-hashvalidate",
  "backend-access-heap-heapam",
@@ -12326,6 +12456,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery",
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
+ "backend-archive-shell-archive",
  "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
@@ -12845,6 +12976,8 @@ dependencies = [
  "mcx",
  "types-amvalidate",
  "types-core",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

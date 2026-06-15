@@ -972,8 +972,8 @@ fn tuplestore_updatemax(state: &mut TuplestorestateState<'_>, ctx: &MemoryContex
 }
 
 /// `tuplestore_in_memory(state)`.
-pub fn tuplestore_in_memory(carrier: &mut types_nodes::Tuplestorestate<'_>) -> bool {
-    with_store(carrier, |state, _ctx| state.status == TSS_INMEM)
+pub fn tuplestore_in_memory(carrier: &types_nodes::Tuplestorestate<'_>) -> bool {
+    with_store_ref(carrier, |state| state.status == TSS_INMEM)
 }
 
 // ----------------------------------------------------------------------------

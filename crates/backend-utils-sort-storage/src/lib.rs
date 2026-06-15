@@ -98,4 +98,5 @@ fn install_tuplestore_seams() {
     seams::tuplestore_skiptuples::set(|state, ntuples, forward| {
         tuplestore::tuplestore_skiptuples(state, ntuples, forward)
     });
+    seams::tuplestore_in_memory::set(tuplestore::tuplestore_in_memory);
 }
