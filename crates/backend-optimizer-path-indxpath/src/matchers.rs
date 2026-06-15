@@ -1081,14 +1081,20 @@ pub fn match_join_clauses_to_index(
     // Scan the rel's joininfo list.
     let joininfo = root.rel(rel).joininfo.clone();
     for rinfo in joininfo {
-        // Check if it is a redundant (or-able) clause; collect OR clauses.
-        if restriction_is_or_clause(root, rinfo) {
-            if !joinorclauses.contains(&rinfo) {
-                joinorclauses.push(rinfo);
-            }
-        } else {
-            match_clause_to_index(mcx, root, rinfo, index, clauseset)?;
+        // Check if clause can be moved to this rel (C 2496).
+        if !backend_optimizer_util_restrictinfo_seams::join_clause_is_movable_to::call(
+            root, rinfo, rel,
+        ) {
+            continue;
         }
+
+        // Potentially usable: collect OR clauses (list_append_unique_ptr), then
+        // unconditionally try matching the clause to the index (C 2503-2507).
+        if restriction_is_or_clause(root, rinfo) && !joinorclauses.contains(&rinfo) {
+            joinorclauses.push(rinfo);
+        }
+
+        match_clause_to_index(mcx, root, rinfo, index, clauseset)?;
     }
     Ok(())
 }

@@ -126,10 +126,11 @@ pub fn check_index_predicates(
     } else {
         bms_difference_relids(&root.all_query_rels, &relids)
     };
-    // (rel->nulling_relids is not modeled in this RelOptInfo; PG subtracts it to
-    // avoid clauses computable only after a nulling outer join. With the field
-    // absent, no subtraction is applied — behaviorally a superset of usable
-    // clauses, conservatively still correct for predicate proving.)
+    // C 4005: otherrels = bms_del_members(otherrels, rel->nulling_relids) —
+    // mustn't consider clauses only computable after outer joins that null the
+    // rel.
+    let nulling_relids = root.rel(rel).nulling_relids.clone();
+    let otherrels = bms_difference_relids(&otherrels, &nulling_relids);
 
     if !relids_is_empty(&otherrels) {
         let joinrelids = bms_union_relids(&relids, &otherrels);
@@ -145,8 +146,11 @@ pub fn check_index_predicates(
     }
 
     // Is the rel a target relation of UPDATE/DELETE/MERGE/SELECT FOR UPDATE?
+    // C 4029: bms_is_member(rel->relid, root->all_result_relids) ||
+    //         get_plan_rowmark(root->rowMarks, rel->relid) != NULL.
     let relid_idx = root.rel(rel).relid;
-    let is_target_rel = restrictinfo::has_plan_rowmark::call(root, relid_idx);
+    let is_target_rel = crate::util::relids_is_member(relid_idx as i32, &root.all_result_relids)
+        || restrictinfo::has_plan_rowmark::call(root, relid_idx);
 
     // Now try to prove each index predicate true.
     let nindexes = root.rel(rel).indexlist.len();

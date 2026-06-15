@@ -9,8 +9,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use types_pathnodes::{NodeId, PlannerInfo, Relids, RinfoId};
 
 seam_core::seam!(

@@ -654,6 +654,15 @@ mod recurrence_guard {
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
+        // DESIGN_DEBT (TD-CREATE-PARTIAL-BITMAP-PATHS): `create_partial_bitmap_paths`
+        // is owned by `optimizer/path/allpaths.c`, NOT costsize.c — but the
+        // indxpath.c port declared it in `backend-optimizer-path-costsize-seams`
+        // (the nearest path-layer seam crate) since allpaths.c has no crate yet.
+        // costsize is COMPLETE, so the guard flags the uninstalled seam; the real
+        // owner allpaths.c is unported, so the loud-panic is correct mirror-pg-
+        // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
+        // when allpaths.c lands.
+        ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
         // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
         // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
         // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
@@ -730,18 +739,6 @@ mod recurrence_guard {
         // hashbuild / hashbuildempty call it; it becomes a real install once
         // heapam_handler.c lands. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "table_index_build_scan"),
-        // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
-        // is `common/relpath.c`'s function, not catalog.c's — the seam was
-        // mis-homed onto backend-catalog-catalog-seams (this owner's stable
-        // contract, `(db_oid, spc_oid) -> PgResult<String>`, owned String, no
-        // mcx). Its genuine owner crate `backend-common-relpath` (relpath.c) is
-        // unported; the canonical seam already has a value-shaped home in
-        // `backend-common-relpath-seams` (mcx -> PgString). Installing the path
-        // arithmetic here would re-home relpath.c's logic into the wrong TU
-        // (and the two seam contracts diverge: owned String vs Mcx/PgString).
-        // Install once relpath.c lands as its own owner; consumers (inval.c
-        // at_eoxact, relmapper relmap_redo) then move to the relpath seam.
-        ("backend_catalog_catalog", "get_database_path"),
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the

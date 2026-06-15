@@ -82,6 +82,7 @@ pub static PARALLEL_LEADER_PARTICIPATION: bool = true;
 // enable_* GUCs (default ON).
 pub static ENABLE_SEQSCAN: bool = true;
 pub static ENABLE_INDEXSCAN: bool = true;
+pub static ENABLE_INDEXONLYSCAN: bool = true;
 pub static ENABLE_BITMAPSCAN: bool = true;
 pub static ENABLE_TIDSCAN: bool = true;
 pub static ENABLE_SORT: bool = true;

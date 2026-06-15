@@ -40,6 +40,10 @@ pub fn init_seams() {
     /* ---- costsize-seams (this unit's own clamp helpers) ---------------- */
     cz::clamp_row_est::set(crate::clamp_row_est);
     cz::clamp_cardinality_to_long::set(crate::clamp_cardinality_to_long);
+    // costsize.c genuinely owns cost_bitmap_tree_node and the
+    // enable_indexonlyscan GUC; indxpath.c reaches them through these seams.
+    cz::cost_bitmap_tree_node::set(crate::scans::cost_bitmap_tree_node);
+    cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN);
 
     /* ---- pathnode-seams: cost GUC getters + sizing helpers owned here -- */
     ps::cpu_tuple_cost::set(|| crate::CPU_TUPLE_COST);

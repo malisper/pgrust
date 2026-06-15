@@ -6691,10 +6691,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-costsize"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -6736,6 +6755,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-indxpath"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-indxpath-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-path-joinrels-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-pathkeys-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-predtest-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-restrictinfo-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-support-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-indxpath-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-joinpath"
 version = "0.0.0"
 dependencies = [
@@ -6750,6 +6809,17 @@ dependencies = [
 
 [[package]]
 name = "backend-optimizer-path-joinpath-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-joinrels-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -6858,6 +6928,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-pathkeys-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-pathnode"
 version = "0.0.0"
 dependencies = [
@@ -6895,10 +6976,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-predtest-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-relnode-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-restrictinfo-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
  "types-pathnodes",
 ]
 
@@ -10647,6 +10750,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-selfuncs",
 ]
 
@@ -11528,6 +11632,16 @@ dependencies = [
  "types-namespace",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-fmgr-support-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -13014,7 +13128,9 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-costsize",
  "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-indxpath",
  "backend-optimizer-path-small",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
