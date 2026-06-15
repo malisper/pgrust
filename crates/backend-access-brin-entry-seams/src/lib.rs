@@ -19,3 +19,63 @@ seam_core::seam!(
         values: &mut [types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `index_getprocinfo(idxRel, keyno+1, BRIN_PROCNUM_OPCINFO)` +
+    /// `FunctionCall1(opcInfoFn, atttypid)` (brin.c `brin_build_desc`): invoke
+    /// indexed column `keyno` (0-based) opclass' `OpcInfo` support procedure,
+    /// returning the `BrinOpcInfo` describing that column's on-disk layout. The
+    /// opclass (`brin_minmax` / `brin_inclusion` / `brin_bloom` /
+    /// `brin_minmax_multi`) owns the procedure; until those land a call panics.
+    /// `Err` carries its `ereport(ERROR)` surface and OOM.
+    pub fn brin_opcinfo<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        keyno: usize,
+        atttypid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_brin::BrinOpcInfo<'mcx>>>
+);
+
+seam_core::seam!(
+    /// Whether indexed column `attno` (0-based) opclass' `Consistent` support
+    /// procedure accepts the multi-key form (`consistentFn->fn_nargs >= 4`,
+    /// brin.c `bringetbitmap`). Determines whether [`brin_consistent_multi`] or
+    /// per-key [`brin_consistent_single`] dispatch is used. Owned by the
+    /// opclass; panics until it lands.
+    pub fn brin_consistent_is_multi(
+        index: &types_rel::Relation<'_>,
+        attno: usize,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `FunctionCall4Coll(consistentFn, collation, bdesc, bval, keys, nkeys)`
+    /// (brin.c `bringetbitmap`): the multi-key opclass `Consistent` call — does
+    /// the page range described by `bval` possibly match all of `keys`? Owned by
+    /// the opclass; panics until it lands. `Err` carries its `ereport(ERROR)`.
+    pub fn brin_consistent_multi<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        attno: usize,
+        collation: types_core::primitive::Oid,
+        bdesc: &types_brin::BrinDesc<'mcx>,
+        bval: &types_brin::BrinValues<'mcx>,
+        keys: &[types_scan::scankey::ScanKeyData<'mcx>],
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `FunctionCall3Coll(consistentFn, collation, bdesc, bval, key)` (brin.c
+    /// `bringetbitmap`): the single-key opclass `Consistent` call — does the
+    /// page range described by `bval` possibly match `key`? Owned by the
+    /// opclass; panics until it lands. `Err` carries its `ereport(ERROR)`.
+    pub fn brin_consistent_single<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        attno: usize,
+        collation: types_core::primitive::Oid,
+        bdesc: &types_brin::BrinDesc<'mcx>,
+        bval: &types_brin::BrinValues<'mcx>,
+        key: &types_scan::scankey::ScanKeyData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);

@@ -617,6 +617,42 @@ seam_core::seam!(
     pub fn count_buffer_dirtied()
 );
 
+seam_core::seam!(
+    /// `pgBufferUsage.shared_blks_written++` (bufmgr.c) — note that this backend
+    /// just wrote one shared buffer to disk (the relation-extension path bumps it
+    /// once per newly-added block). Owned by the per-backend buffer-usage
+    /// statistics (pgstat) when it ports; infallible, stats-only.
+    pub fn count_buffer_write()
+);
+
+seam_core::seam!(
+    /// `pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_EXTEND,
+    /// io_start, cnt, bytes)` (bufmgr.c) — record an I/O operation against the
+    /// relation object: `cnt` extend operations totalling `bytes` bytes, plus the
+    /// elapsed time when `track_io_timing` is on. The `pgstat_prepare_io_time` /
+    /// `track_io_timing` start-timestamp dance is internal to the statistics
+    /// subsystem; this seam collapses it to the post-operation accounting call,
+    /// behaviour-neutral (stats only). Owned by pgstat when it ports; infallible.
+    pub fn count_io_op_extend(cnt: u64, bytes: u64)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberBufferIO(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// record one in-progress buffer I/O on the current resource owner so a
+    /// transaction/portal abort can clean up a buffer left mid-I/O. The buffer-IO
+    /// `ResourceOwnerDesc` is defined in bufmgr.c; installed by resowner when it
+    /// ports (panic-until-owner). Infallible in C (the enlarge that may `ereport`
+    /// is the earlier `resowner_enlarge` call in `StartBufferIO`).
+    pub fn remember_buffer_io(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetBufferIO(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// drop the record of one in-progress buffer I/O from the current resource
+    /// owner (`TerminateBufferIO` with `forget_owner`). Infallible in C.
+    pub fn forget_buffer_io(buffer: types_storage::storage::Buffer)
+);
+
 // ---------------------------------------------------------------------------
 // LockBufferForCleanup recovery-conflict (InHotStandby) deep leg (bufmgr.c).
 //

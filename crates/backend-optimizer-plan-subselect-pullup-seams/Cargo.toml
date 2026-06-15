@@ -1,20 +1,16 @@
 [package]
-name = "backend-nodes-core-seams"
+name = "backend-optimizer-plan-subselect-pullup-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_nodes_core_seams"
+name = "backend_optimizer_plan_subselect_pullup_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
-types-core = { path = "../types-core" }
 types-nodes = { path = "../types-nodes" }
-types-parsenodes = { path = "../types-parsenodes" }
 types-pathnodes = { path = "../types-pathnodes" }
-types-tuple = { path = "../types-tuple" }
-types-tidbitmap = { path = "../types-tidbitmap" }
+mcx = { path = "../mcx" }

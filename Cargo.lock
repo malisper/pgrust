@@ -37,7 +37,11 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-brin",
+ "types-core",
  "types-error",
+ "types-rel",
+ "types-scan",
  "types-tuple",
 ]
 
@@ -61,6 +65,34 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-brin-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-brin-pageops",
+ "backend-access-brin-tuple",
+ "backend-access-table-table-seams",
+ "backend-catalog-index-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-amapi",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
+ "types-tuple",
 ]
 
 [[package]]
@@ -928,6 +960,7 @@ dependencies = [
 name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-scan",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
@@ -6835,6 +6868,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
@@ -7268,6 +7302,37 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-subselect-pullup"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-plan-subselect-pullup-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-rewrite-core",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-plan-subselect-pullup-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -9451,17 +9516,23 @@ dependencies = [
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
+ "backend-storage-smgr-smgr",
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "mcx",
  "types-condvar",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -14314,6 +14385,7 @@ dependencies = [
  "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
