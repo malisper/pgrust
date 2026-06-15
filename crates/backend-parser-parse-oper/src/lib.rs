@@ -1061,6 +1061,7 @@ pub fn make_scalar_array_op(
         /* inputcollid will be set by parse_collate.c */
         inputcollid: InvalidOid,
         args,
+        location,
     };
 
     /* C ReleaseSysCache(tup) here; owned value, nothing to release. */

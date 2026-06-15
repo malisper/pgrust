@@ -419,6 +419,10 @@ pub struct ScalarArrayOpExpr {
     pub inputcollid: Oid,
     /// `List *args` — the scalar and array operands.
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown. Set by
+    /// `make_scalar_array_op` (parse_oper.c) and read by `exprLocation`
+    /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
+    pub location: i32,
 }
 
 /// `CurrentOfExpr` (nodes/primnodes.h) — the `WHERE CURRENT OF cursor`

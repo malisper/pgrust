@@ -831,7 +831,7 @@ pub fn expr_location(expr: Option<&Expr>) -> PgResult<i32> {
         Expr::OpExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
         Expr::DistinctExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
         Expr::NullIfExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
-        Expr::ScalarArrayOpExpr(s) => leftmost_loc(-1, expr_location_list(&s.args)?),
+        Expr::ScalarArrayOpExpr(s) => leftmost_loc(s.location, expr_location_list(&s.args)?),
         Expr::BoolExpr(b) => leftmost_loc(-1, expr_location_list(&b.args)?),
         Expr::SubLink(s) => leftmost_loc(expr_location(s.testexpr.as_deref())?, -1),
         Expr::FieldSelect(f) => expr_location(f.arg.as_deref())?,

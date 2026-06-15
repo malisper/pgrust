@@ -1619,5 +1619,6 @@ pub fn make_SAOP_expr(
         useOr: true,
         inputcollid,
         args: alloc::vec![leftexpr, array_node],
+        location: -1,
     })))
 }
