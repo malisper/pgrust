@@ -20,5 +20,10 @@ mcx = { path = "../mcx" }
 # cross-crate seams the snapshot-management family consumes
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 
+# change-replay family deps: the k-way merge binary heap + the inval seam that
+# ReorderBufferExecuteInvalidations applies decoded invalidations through.
+backend-lib-binaryheap = { path = "../backend-lib-binaryheap" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }

@@ -458,17 +458,25 @@ pub(crate) fn exec_init_func<'mcx>(
     // C: InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
     //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;
     //
-    // The owned FunctionCallInfoBaseData is trimmed (the fmgr owner widens it
-    // with flinfo/nargs/fncollation/args[]); the arguments the C threads into
-    // fcinfo->args[i] are carried instead by the Func step's `arg_cells`
-    // (one ResultCellId per arg), which the interpreter gathers into the call
-    // frame immediately before dispatch. We allocate the palloc0 fcinfo frame
-    // (defaulted) so the step shape matches C; inputcollid is recorded by the
-    // owner when it widens the frame.
-    let _ = inputcollid;
+    // `InitFunctionCallInfoData(Fcinfo, Flinfo, Nargs, Collation, Context,
+    // Resultinfo)` stamps flinfo / fncollation = Collation / nargs / NULL
+    // context / NULL resultinfo / isnull = false onto the call frame. The
+    // arguments the C threads into fcinfo->args[i] are carried instead by the
+    // Func step's `arg_cells` (one ResultCellId per arg), which the interpreter
+    // gathers into `fcinfo->args` immediately before dispatch; we leave `args`
+    // empty here (the palloc0 frame). #296: the widened frame now records
+    // `inputcollid` as `fcinfo->fncollation`, surviving to call time.
     let fcinfo_data = mcx::alloc_in(
         mcx,
-        types_nodes::fmgr::FunctionCallInfoBaseData::default(),
+        types_nodes::fmgr::FunctionCallInfoBaseData {
+            flinfo: Some(flinfo),
+            context: None,
+            resultinfo: None,
+            fncollation: inputcollid,
+            isnull: false,
+            nargs: nargs as i16,
+            args: Vec::new(),
+        },
     )?;
 
     // C: We only support non-set functions here.

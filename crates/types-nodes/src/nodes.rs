@@ -368,6 +368,8 @@ pub enum Node<'mcx> {
     WindowAgg(crate::nodewindowagg::WindowAgg<'mcx>),
     /// `T_TableFuncScan`.
     TableFuncScan(crate::nodetablefuncscan::TableFuncScan<'mcx>),
+    /// `T_FunctionScan`.
+    FunctionScan(crate::nodefunctionscan::FunctionScan<'mcx>),
     /// `T_ValuesScan`.
     ValuesScan(crate::nodevaluesscan::ValuesScan<'mcx>),
     /// `T_CteScan`.
@@ -891,6 +893,7 @@ impl<'mcx> Node<'mcx> {
             Node::Sort(_) => T_Sort,
             Node::WindowAgg(_) => crate::nodewindowagg::T_WindowAgg,
             Node::TableFuncScan(_) => T_TableFuncScan,
+            Node::FunctionScan(_) => T_FunctionScan,
             Node::ValuesScan(_) => T_ValuesScan,
             Node::CteScan(_) => crate::nodectescan::T_CteScan,
             Node::NamedTuplestoreScan(_) => T_NamedTuplestoreScan,
@@ -1141,6 +1144,7 @@ impl<'mcx> Node<'mcx> {
             Node::Sort(s) => &s.plan,
             Node::WindowAgg(w) => &w.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
+            Node::FunctionScan(f) => &f.scan.plan,
             Node::ValuesScan(v) => &v.scan.plan,
             Node::CteScan(c) => &c.scan.plan,
             Node::NamedTuplestoreScan(n) => &n.scan.plan,
@@ -1199,6 +1203,7 @@ impl<'mcx> Node<'mcx> {
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::WindowAgg(w) => Ok(Node::WindowAgg(w.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
+            Node::FunctionScan(f) => Ok(Node::FunctionScan(f.clone_in(mcx)?)),
             Node::ValuesScan(v) => Ok(Node::ValuesScan(v.clone_in(mcx)?)),
             Node::CteScan(c) => Ok(Node::CteScan(c.clone_in(mcx)?)),
             Node::NamedTuplestoreScan(n) => Ok(Node::NamedTuplestoreScan(n.clone_in(mcx)?)),
