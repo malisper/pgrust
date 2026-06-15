@@ -138,7 +138,7 @@ pub const fn TransactionIdIsNormal(xid: TransactionId) -> bool {
 /// (`objid_lo = objid as u32`, `objid_hi = (objid >> 32) as u32`;
 /// recombine with `((objid_hi as u64) << 32) | objid_lo as u64`) — never
 /// treat this struct's bytes as the record image.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct XlXactStatsItem {
     pub kind: i32,
     pub dboid: crate::primitive::Oid,

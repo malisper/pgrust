@@ -108,18 +108,10 @@ pub struct TypeName {
 // DefElem (nodes/parsenodes.h)
 // ---------------------------------------------------------------------------
 
-/// `typedef enum DefElemAction` (`nodes/parsenodes.h`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(u32)]
-pub enum DefElemAction {
-    /// no action given.
-    #[default]
-    DEFELEM_UNSPEC = 0,
-    DEFELEM_SET = 1,
-    DEFELEM_ADD = 2,
-    DEFELEM_DROP = 3,
-}
-pub use DefElemAction::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
+/// `typedef enum DefElemAction` (`nodes/parsenodes.h`). Canonically defined in
+/// `types_nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use types_nodes::ddlnodes::DefElemAction;
+pub use types_nodes::ddlnodes::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
 
 /// `typedef struct DefElem` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -175,20 +167,12 @@ pub struct FunctionParameter {
 // CoercionContext (nodes/primnodes.h)
 // ---------------------------------------------------------------------------
 
-/// `typedef enum CoercionContext` (`nodes/primnodes.h`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(i32)]
-pub enum CoercionContext {
-    /// coercion in context of expression.
-    #[default]
-    COERCION_IMPLICIT = 0,
-    /// coercion in context of assignment.
-    COERCION_ASSIGNMENT = 1,
-    /// if no assignment cast, use CoerceViaIO.
-    COERCION_PLPGSQL = 2,
-    /// explicit cast operation.
-    COERCION_EXPLICIT = 3,
-}
+/// `typedef enum CoercionContext` (`nodes/primnodes.h`). Canonically defined in
+/// `types_nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use types_nodes::ddlnodes::CoercionContext;
+pub use types_nodes::ddlnodes::{
+    COERCION_ASSIGNMENT, COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PLPGSQL,
+};
 
 // ---------------------------------------------------------------------------
 // AccessPriv (nodes/parsenodes.h)
@@ -333,14 +317,9 @@ pub struct CreateCastStmt {
 // Role statement nodes (nodes/parsenodes.h) consumed by user.c
 // ---------------------------------------------------------------------------
 
-/// `typedef enum RoleStmtType` (`nodes/parsenodes.h`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum RoleStmtType {
-    ROLESTMT_ROLE = 0,
-    ROLESTMT_USER = 1,
-    ROLESTMT_GROUP = 2,
-}
+/// `typedef enum RoleStmtType` (`nodes/parsenodes.h`). Canonically defined in
+/// `types_nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use types_nodes::ddlnodes::RoleStmtType;
 pub use RoleStmtType::{ROLESTMT_GROUP, ROLESTMT_ROLE, ROLESTMT_USER};
 
 /// `typedef struct CreateRoleStmt` (`nodes/parsenodes.h`).
@@ -428,15 +407,11 @@ pub struct DropStmt {
     pub concurrent: bool,
 }
 
-/// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — verified against
-/// PostgreSQL 18.3 (`DISCARD { ALL | PLANS | SEQUENCES | TEMP }`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiscardMode {
-    DISCARD_ALL,
-    DISCARD_PLANS,
-    DISCARD_SEQUENCES,
-    DISCARD_TEMP,
-}
+/// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — `DISCARD { ALL | PLANS |
+/// SEQUENCES | TEMP }`. Canonically defined in `types_nodes::ddlnodes`;
+/// re-exported here so the two crates share one type.
+pub use types_nodes::ddlnodes::DiscardMode;
+pub use types_nodes::ddlnodes::{DISCARD_ALL, DISCARD_PLANS, DISCARD_SEQUENCES, DISCARD_TEMP};
 
 /// `typedef struct DiscardStmt` (`nodes/parsenodes.h`). The C `NodeTag type`
 /// header field carries no information for the dispatcher (it switches solely

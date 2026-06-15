@@ -58,9 +58,9 @@ pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
 
 /// `CommandTag` (`tcop/cmdtag.h`) — a C `int`-sized enum that plancache only
 /// stores by value (it never inspects the tag). The full tag table is owned by
-/// `tcop/cmdtag.c`; here it is the opaque scalar identity carried through.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct CommandTag(pub i32);
+/// `tcop/cmdtag.c`; canonically defined in `types_core` and carried through by
+/// value here.
+pub use types_core::cmdtag::CommandTag;
 
 macro_rules! opaque_handle {
     ($(#[$m:meta])* $name:ident, $null_name:ident) => {
