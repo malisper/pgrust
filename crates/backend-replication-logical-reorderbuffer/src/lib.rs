@@ -2,12 +2,18 @@
 //!
 //! # Family decomposition
 //!
-//! reorderbuffer.c is ~5600 LOC. This crate lands the **foundational family**:
-//! the `ReorderBuffer` / `ReorderBufferTXN` data structures, the xid → txn
-//! lookup table with its one-entry cache, the txn lifecycle (allocate / free),
-//! the toplevel / base-snapshot / catalog-change txn lists, and the txn-level
-//! accessors and small queue helpers that the historic-snapshot builder
-//! (`snapbuild.c`) and `logical.c` reach through this crate's seam crate.
+//! reorderbuffer.c is ~5600 LOC. This crate lands the **foundational family**
+//! (the `ReorderBuffer` / `ReorderBufferTXN` data structures, the xid → txn
+//! lookup table with its one-entry cache, the txn lifecycle, the toplevel /
+//! base-snapshot / catalog-change txn lists, and the txn-level accessors and
+//! small queue helpers the historic-snapshot builder `snapbuild.c` and
+//! `logical.c` reach through this crate's seam crate) plus the
+//! **snapshot-management family**: the per-txn tuplecid hash
+//! (`ReorderBufferBuildTupleCidHash`), private snapshot copy/free
+//! (`ReorderBufferCopySnap` / `ReorderBufferFreeSnap`), and the combo-CID
+//! resolution `ResolveCminCmaxDuringDecoding` consumed by
+//! `HeapTupleSatisfiesHistoricMVCC` — the crate's 26th and final inward seam
+//! (see [`snapshot`]).
 //!
 //! The remaining families (recorded in the crate's memory note) are filled in
 //! later ports; their entry points are present here as crate-internal helpers
@@ -18,8 +24,6 @@
 //! * **spill-to-disk** — `ReorderBufferSerialize*` / `ReorderBufferRestore*` /
 //!   `ReorderBufferCheckMemoryLimit` / `ReorderBufferCleanupSerializedTXNs`.
 //! * **streaming** — `ReorderBufferStreamTXN` / `ReorderBufferStreamCommit`.
-//! * **snapshot management** — `ReorderBufferCopySnap` / `ReorderBufferFreeSnap`
-//!   / `ReorderBufferBuildTupleCidHash` / `ResolveCminCmaxDuringDecoding`.
 //! * **toast reassembly** — `ReorderBufferToast*`.
 //! * **cleanup / commit-time** — `ReorderBufferCleanupTXN` /
 //!   `ReorderBufferTruncateTXN` / abort / forget / prepare.
@@ -48,7 +52,9 @@ use types_storage::RelFileLocator;
 use types_tuple::ItemPointerData;
 
 mod registry;
-pub use registry::{init_seams, with_buffer, with_buffer_opt};
+mod snapshot;
+pub use registry::{init_seams, set_active_tuplecid_hash, with_buffer, with_buffer_opt};
+pub use snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey};
 
 /// `MAX_DISTR_INVAL_MSG_PER_TXN` — `(8 * 1024 * 1024) /
 /// sizeof(SharedInvalidationMessage)`. Each txn caps distributed invalidation
@@ -234,7 +240,11 @@ pub struct ReorderBufferTXN {
     pub tuplecids: Vec<ReorderBufferChange>,
     /// `uint64 ntuplecids`.
     pub ntuplecids: u64,
-    /// `dlist_head subtxns` — xids of non-aborted subtransactions.
+    /// `HTAB *tuplecid_hash` — `(relfilelocator, ctid) -> (cmin, cmax)` lookup
+    /// built lazily by `ReorderBufferBuildTupleCidHash` for catalog-modifying
+    /// txns; `None` == C NULL.
+    pub tuplecid_hash: Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>,
+    /// `dlist_head subtxns`— xids of non-aborted subtransactions.
     pub subtxns: Vec<TransactionId>,
     /// `uint32 nsubtxns`.
     pub nsubtxns: u32,
@@ -274,6 +284,7 @@ impl ReorderBufferTXN {
             changes: Vec::new(),
             tuplecids: Vec::new(),
             ntuplecids: 0,
+            tuplecid_hash: None,
             subtxns: Vec::new(),
             nsubtxns: 0,
             invalidations: Vec::new(),
@@ -470,6 +481,16 @@ impl ReorderBuffer {
 
         debug_assert!(!create || resolved.is_some());
         resolved
+    }
+
+    /// Immutable lookup of `xid`'s txn (`None` == C NULL).
+    pub(crate) fn by_txn_get(&self, xid: TransactionId) -> Option<&ReorderBufferTXN> {
+        self.by_txn.get(&xid)
+    }
+
+    /// Mutable lookup of `xid`'s txn (`None` == C NULL).
+    pub(crate) fn by_txn_get_mut(&mut self, xid: TransactionId) -> Option<&mut ReorderBufferTXN> {
+        self.by_txn.get_mut(&xid)
     }
 
     /// Borrow the live txn for `xid` (the C dereferences the `ReorderBufferTXN
