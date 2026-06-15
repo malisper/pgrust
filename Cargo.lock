@@ -3583,6 +3583,7 @@ dependencies = [
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-catalog",

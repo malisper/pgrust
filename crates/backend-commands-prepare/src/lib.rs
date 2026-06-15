@@ -690,7 +690,7 @@ pub fn ExplainExecuteQuery<'mcx>(
 
     // if (es->memory) { create+switch planner ctx } if (es->buffers) snapshot
     // pgBufferUsage; INSTR_TIME_SET_CURRENT(planstart);
-    let bk = explain_seam::explain_execute_begin::call(&*es)?;
+    let mut bk = explain_seam::explain_execute_begin::call(&*es)?;
 
     // entry = FetchPreparedStatement(execstmt->name, true);
     let name: &str = execstmt.name.as_ref().map(|s| s.as_str()).unwrap_or("");
@@ -731,7 +731,7 @@ pub fn ExplainExecuteQuery<'mcx>(
         plancache_seam::get_cached_plan::call(entry.plansource, param_li, owner, query_env)?;
 
     // INSTR_TIME_SET_CURRENT(planduration); INSTR_TIME_SUBTRACT(planduration, planstart);
-    explain_seam::explain_planduration::call(bk)?;
+    explain_seam::explain_planduration::call(&mut bk)?;
 
     let es_memory = es.memory;
     let es_buffers = es.buffers;
@@ -739,13 +739,13 @@ pub fn ExplainExecuteQuery<'mcx>(
     // if (es->memory) { MemoryContextSwitchTo(saved_ctx);
     //     MemoryContextMemConsumed(planner_ctx, &mem_counters); }
     if es_memory {
-        explain_seam::explain_memory_accounting::call(bk)?;
+        explain_seam::explain_memory_accounting::call(&mut bk)?;
     }
 
     // if (es->buffers) { memset(&bufusage, 0, ...);
     //     BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start); }
     if es_buffers {
-        explain_seam::explain_buffer_accounting::call(bk)?;
+        explain_seam::explain_buffer_accounting::call(&mut bk)?;
     }
 
     // plan_list = cplan->stmt_list;
@@ -773,7 +773,7 @@ pub fn ExplainExecuteQuery<'mcx>(
                 query_string.as_str(),
                 param_li,
                 query_env,
-                bk,
+                &bk,
                 es_buffers,
                 es_memory,
             )?;
