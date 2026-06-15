@@ -3870,13 +3870,19 @@ dependencies = [
 name = "backend-commands-explain-dr"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-instrument",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
+ "portability-instr-time",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
  "types-explain",
+ "types-nodes",
+ "types-slot",
  "types-stringinfo",
  "types-tuple",
 ]
