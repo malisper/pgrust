@@ -46,6 +46,7 @@ pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
 pub mod nodelimit;
+pub mod nodelockrows;
 pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;

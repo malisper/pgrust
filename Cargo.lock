@@ -167,6 +167,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-next"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
+ "backend-access-common-syncscan-seams",
+ "backend-access-common-tupconvert-seams",
+ "backend-executor-execTuples-seams",
+ "backend-nodes-core",
+ "backend-utils-adt-format-type",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-next-seams"
 version = "0.0.0"
 dependencies = [
@@ -5468,6 +5488,33 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeLockRows"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeLockRows-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeLockRows-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -13050,6 +13097,7 @@ dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
+ "backend-access-common-next",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tidstore",

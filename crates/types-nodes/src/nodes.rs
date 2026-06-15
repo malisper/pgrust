@@ -49,6 +49,7 @@ pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
 pub const T_ForeignScan: NodeTag = NodeTag(354);
 pub const T_SubqueryScan: NodeTag = NodeTag(347);
+pub const T_LockRows: NodeTag = NodeTag(372);
 pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
