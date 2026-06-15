@@ -1,0 +1,41 @@
+[package]
+name = "backend-access-gin-ginfast"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_gin_ginfast"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-gin = { path = "../types-gin" }
+
+# owned engine layers (direct deps — acyclic)
+backend-lib-rbtree = { path = "../backend-lib-rbtree" }
+backend-access-gin-ginbulk = { path = "../backend-access-gin-ginbulk" }
+backend-access-gin-ginutil = { path = "../backend-access-gin-ginutil" }
+backend-access-gin-ginentrypage = { path = "../backend-access-gin-ginentrypage" }
+backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
+backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
+backend-storage-page = { path = "../backend-storage-page" }
+backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# cross-owner seam crates
+backend-access-gin-gininsert-seams = { path = "../backend-access-gin-gininsert-seams" }
+backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
