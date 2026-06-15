@@ -100,7 +100,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`. Allocated in `mcx`.
     pub fn select_rtable_names_for_explain<'mcx>(
         mcx: Mcx<'mcx>,
-        rtable: &PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry>,
+        rtable: &PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry<'mcx>>,
         rels_used: &types_nodes::bitmapset::Bitmapset<'mcx>,
     ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
 );

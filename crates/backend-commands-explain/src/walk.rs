@@ -570,8 +570,8 @@ fn explain_scan_target_switch<'es, 'p>(
 /// first); retained as the documented shape.
 #[allow(dead_code)]
 fn rt_fetch<'a, 'mcx>(
-    rtable: &'a PgVec<'mcx, RangeTblEntry>,
+    rtable: &'a PgVec<'mcx, RangeTblEntry<'mcx>>,
     rti: usize,
-) -> &'a RangeTblEntry {
+) -> &'a RangeTblEntry<'mcx> {
     &rtable[rti - 1]
 }

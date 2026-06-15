@@ -116,7 +116,7 @@ pub struct ExplainState<'mcx> {
     pub pstmt: Option<PgBox<'mcx, PlannedStmt<'mcx>>>,
     /// `List *rtable` — range table (aliases `pstmt->rtable`). `None` is the C
     /// `NIL`.
-    pub rtable: Option<PgVec<'mcx, RangeTblEntry>>,
+    pub rtable: Option<PgVec<'mcx, RangeTblEntry<'mcx>>>,
     /// `List *rtable_names` — alias names for RTEs, produced by
     /// `select_rtable_names_for_explain`. Each element is the C
     /// `char *` (a `None` slot is the C `NULL`, meaning "use the RTE's eref").
