@@ -118,6 +118,7 @@ backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
 backend-executor-nodeIndexscan = { path = "../backend-executor-nodeIndexscan" }
 backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
+backend-executor-nodeLockRows = { path = "../backend-executor-nodeLockRows" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }

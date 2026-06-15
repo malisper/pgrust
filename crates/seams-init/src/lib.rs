@@ -116,6 +116,7 @@ pub fn init_all() {
     backend_executor_nodeIndexonlyscan::init_seams();
     backend_executor_nodeIndexscan::init_seams();
     backend_executor_nodeLimit::init_seams();
+    backend_executor_nodeLockRows::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMemoize::init_seams();
     backend_executor_nodeMergejoin::init_seams();
