@@ -150,6 +150,9 @@ pub mod tags {
     /// SP-GiST's `SpGistScanOpaqueData<'mcx>` scan state
     /// (`IndexScanDescData.opaque`, spgscan.c `spgbeginscan`).
     pub const SPGIST_SCAN: AmOpaqueTag = AmOpaqueTag(0x7370_675f_7363_6e00); // "spg_scn\0"
+    /// GiST's `GISTScanOpaqueData<'mcx>` scan state
+    /// (`IndexScanDescData.opaque`, gistscan.c `gistbeginscan`).
+    pub const GIST_SCAN: AmOpaqueTag = AmOpaqueTag(0x6769_7374_5f73_636e); // "gist_scn"
 
     /// hash's cached `HashMetaPageData` stored in `rel->rd_amcache`
     /// (`_hash_getcachedmetap`). The SP-GiST/GIN/GiST `rd_amcache` types
