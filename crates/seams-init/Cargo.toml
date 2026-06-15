@@ -11,6 +11,7 @@ path = "src/lib.rs"
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
+backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
