@@ -785,6 +785,8 @@ pub fn init_seams() {
     s::create_socket_lock_file::set(|socketfile, am_postmaster, socket_dir| {
         create_socket_lock_file(socketfile, am_postmaster, socket_dir)
     });
+    s::switch_to_shared_latch::set(crate::process::SwitchToSharedLatch);
+    s::switch_back_to_local_latch::set(crate::process::SwitchBackToLocalLatch);
     s::process_shmem_requests_in_progress::set(process_shmem_requests_in_progress);
     s::process_shared_preload_libraries_in_progress::set(
         process_shared_preload_libraries_in_progress,

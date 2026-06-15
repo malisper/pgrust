@@ -2728,6 +2728,7 @@ dependencies = [
  "types-cluster",
  "types-core",
  "types-error",
+ "types-foreigncmds",
  "types-rel",
  "types-tuple",
 ]
@@ -6288,6 +6289,10 @@ name = "backend-foreign-foreign"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions",
+ "backend-access-table-table",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-foreign-fdwapi-seams",
  "backend-foreign-foreign-seams",
  "backend-utils-adt-varlena",
@@ -6299,12 +6304,14 @@ dependencies = [
  "backend-utils-misc-guc-tables-seams",
  "mcx",
  "types-cache",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-foreigncmds",
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -9684,7 +9691,9 @@ name = "backend-storage-ipc-latch"
 version = "0.0.0"
 dependencies = [
  "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-waiteventset-seams",
+ "backend-storage-lmgr-proc-seams",
  "backend-utils-init-small-seams",
  "libc",
  "types-core",
@@ -10267,6 +10276,7 @@ dependencies = [
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-timeout-seams",

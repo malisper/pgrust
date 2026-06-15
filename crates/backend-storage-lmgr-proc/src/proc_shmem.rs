@@ -577,8 +577,12 @@ pub fn InitProcGlobal() -> PgResult<()> {
             proc.procLatch
                 .maybe_sleeping
                 .store(0, core::sync::atomic::Ordering::SeqCst);
-            proc.procLatch.is_shared = true;
-            proc.procLatch.owner_pid = 0;
+            proc.procLatch
+                .is_shared
+                .store(true, core::sync::atomic::Ordering::SeqCst);
+            proc.procLatch
+                .owner_pid
+                .store(0, core::sync::atomic::Ordering::SeqCst);
 
             // LWLockInitialize(&proc->fpInfoLock, LWTRANCHE_LOCK_FASTPATH).
             lwlock::lwlock_initialize::call(&mut proc.fpInfoLock, LWTRANCHE_LOCK_FASTPATH);
@@ -686,10 +690,19 @@ pub(crate) fn all_proc_count() -> u32 {
 /// process latch of the backend owning slot `procNumber`. (Owner accessor for
 /// [`crate::proc_misc::ProcSendSignal`]'s `SetLatch`.)
 pub(crate) fn proc_latch_handle(procNumber: ProcNumber) -> LatchHandle {
-    // The latch unit identifies a per-PGPROC `procLatch` by the owning slot's
-    // proc number (`storage/latch.h`: "C call sites that read `&proc->procLatch`
-    // translate to an explicit `LatchHandle`, obtained from the caller's own
-    // state"). The slot index is exactly that state; `+1` keeps `0` reserved as
-    // the never-valid handle.
-    LatchHandle::new(procNumber as usize + 1)
+    // A per-PGPROC `procLatch` is named in the latch unit's *proc-tagged*
+    // handle space (`LatchHandle::proc`), distinct from the latch unit's own
+    // registry: `SetLatch`/`OwnLatch`/`DisownLatch` dispatch the tagged handle
+    // back through `with_proc_latch` to this slot's embedded `Latch` (the
+    // faithful `&proc->procLatch`), rather than indexing the local registry.
+    LatchHandle::proc(procNumber)
+}
+
+/// Run `f` over `&ProcGlobal->allProcs[procno].procLatch` — hands the latch
+/// unit a shared reference to a backend's embedded `Latch` (the owner accessor
+/// behind the `with_proc_latch` seam). The proc unit owns the `allProcs`
+/// array; the latch unit applies its own `SetLatch`/`OwnLatch`/`DisownLatch`
+/// algorithm inside the callback.
+pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
+    with_proc_global(|pg| f(&pg.allProcs[procno as usize].procLatch));
 }

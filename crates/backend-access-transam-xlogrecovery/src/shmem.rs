@@ -221,8 +221,12 @@ pub fn XLogRecoveryShmemInit() -> PgResult<()> {
         ctl.recoveryWakeupLatch
             .maybe_sleeping
             .store(0, core::sync::atomic::Ordering::SeqCst);
-        ctl.recoveryWakeupLatch.is_shared = true;
-        ctl.recoveryWakeupLatch.owner_pid = 0;
+        ctl.recoveryWakeupLatch
+            .is_shared
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        ctl.recoveryWakeupLatch
+            .owner_pid
+            .store(0, core::sync::atomic::Ordering::SeqCst);
 
         // ConditionVariableInit(&XLogRecoveryCtl->recoveryNotPausedCV).
         condvar::condition_variable_init::call(&mut ctl.recoveryNotPausedCV);
@@ -245,9 +249,13 @@ pub fn recovery_wakeup_latch_handle() -> LatchHandle {
 }
 
 /// Reserved `LatchHandle` id for the recovery wakeup latch (a single,
-/// process-global shared latch). Distinct from the per-PGPROC handle space
-/// (`proc_number + 1`) used by `proc_latch_handle`.
-const RECOVERY_WAKEUP_LATCH_ID: usize = usize::MAX;
+/// process-global shared latch). It lives in this subsystem's own shmem
+/// (`XLogRecoveryCtl->recoveryWakeupLatch`), not the latch unit's registry, so
+/// this is still an unregistered local id — a latent handle for the not-yet-
+/// wired recovery `OwnLatch`/`SetLatch` families. It stays in the *local*
+/// handle space (the `PROC_TAG` bit clear), distinct from the per-PGPROC
+/// `procLatch` space (`LatchHandle::proc`).
+const RECOVERY_WAKEUP_LATCH_ID: usize = types_storage::latch::PROC_TAG - 1;
 
 // ===========================================================================
 // Shmem state accessors (the genuine shmem reads/writes, under info_lck where

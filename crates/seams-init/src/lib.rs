@@ -840,16 +840,6 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "link_subplan_planstate"),
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
-        // cur_tuple_getattr + exec_force_store_heap_tuple stay seam-and-panic:
-        // both carry a header-only `HeapTuple`/`&HeapTupleData` (no user-data
-        // area) where the op body needs the body-bearing `FormedTuple`.
-        // `cur_tuple_getattr` deforms `node.curTuple` (typed header-only
-        // `HeapTuple`, populated only by the still-deferred
-        // `replace_cur_tuple_from_slot`); `exec_force_store_heap_tuple`'s
-        // consumers (nodeIndexonlyscan `xs_hitup`, nodeModifyTable wholerow-junk
-        // `oldtuple`) hold header-only `HeapTuple`s, so the seam cannot be
-        // re-signed to `FormedTuple` without first widening those upstream
-        // carriers (index AM / junk filter). See exectuples-slot-payload note.
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
@@ -857,59 +847,53 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "pad_name_cstring_columns"),
         ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
-        // FDW-routine resolution, which it installs. The remaining seams in
-        // backend-foreign-foreign-seams are name-attributed to this owner but are
-        // NOT foreign.c functions — they belong to two other unported domains and
-        // cannot be installed here without faking (opacity-inherited-never-introduced).
-        // (1) pg_foreign_* catalog DML + options decode + IMPORT + the dynamic
-        //     validator dispatch: these are commands/foreigncmds.c machinery
-        //     (heap_form_tuple + CatalogTupleInsert/Update, SearchSysCacheCopy1,
-        //     GetNewOidWithIndex, SysCacheGetAttr decode, aclnewowner,
-        //     OidFunctionCall2(fdwvalidator), pg_parse_query RawStmt projection),
-        //     all needing the pg_foreign_* catalog-write substrate that is unported.
-        // (2) FDW-provider callbacks (node->fdwroutine->X) dispatch through a
-        //     runtime FDW vtable; no FDW provider (postgres_fdw/contrib) is ported,
-        //     so there is nothing to install. See DESIGN_DEBT.md.
+        // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams
+        // commands/foreigncmds.c issues (insert/update/set_owner/lookup/options
+        // for FDW/SERVER/USER MAPPING/FOREIGN TABLE + validate_options +
+        // import_classify_raw_stmt/import_set_schemaname) — all installed in its
+        // init_seams(). The heap_form_tuple + CatalogTupleInsert/Update value
+        // layer crosses the catalog/indexing.c-owned
+        // catalog_tuple_{insert,update}_pg_foreign_* seams (listed below; they
+        // panic until indexing.c lands — sanctioned mirror-pg-and-panic). Two of
+        // the installed seams are themselves seam-and-panic bodies (still
+        // INSTALLED, so removed from this list): `validate_options` reaches the
+        // unported text[]-Datum array build + OidFunctionCall2(fdwvalidator)
+        // fmgr-dispatch bridge; `import_classify_raw_stmt`/`import_set_schemaname`
+        // reach the unported RawStmt parser-node field accessor (and are only
+        // reachable after fdw_import_foreign_schema, a runtime FDW vtable with no
+        // provider). See DESIGN_DEBT.md.
+        //
+        // What REMAINS here for backend-foreign-foreign are the FDW-provider
+        // runtime-vtable callbacks (node->fdwroutine->X) dispatched through a
+        // runtime FDW vtable: no FDW provider (postgres_fdw/contrib) is ported,
+        // so there is nothing to ::set(). `fdw_import_foreign_schema` likewise
+        // dispatches the provider's ImportForeignSchema vtable callback.
         ("backend_foreign_foreign", "begin_direct_modify"),
         ("backend_foreign_foreign", "begin_foreign_scan"),
         ("backend_foreign_foreign", "end_direct_modify"),
         ("backend_foreign_foreign", "end_foreign_scan"),
         ("backend_foreign_foreign", "estimate_dsm_foreign_scan"),
         ("backend_foreign_foreign", "fdw_import_foreign_schema"),
-        ("backend_foreign_foreign", "fdw_lookup_by_name"),
-        ("backend_foreign_foreign", "fdw_options"),
-        ("backend_foreign_foreign", "fdw_owner_row_by_name"),
-        ("backend_foreign_foreign", "fdw_owner_row_by_oid"),
-        ("backend_foreign_foreign", "fdw_set_owner"),
         ("backend_foreign_foreign", "foreign_async_configure_wait"),
         ("backend_foreign_foreign", "foreign_async_notify"),
         ("backend_foreign_foreign", "foreign_async_request"),
-        ("backend_foreign_foreign", "import_classify_raw_stmt"),
-        ("backend_foreign_foreign", "import_set_schemaname"),
         ("backend_foreign_foreign", "initialize_dsm_foreign_scan"),
         ("backend_foreign_foreign", "initialize_worker_foreign_scan"),
-        ("backend_foreign_foreign", "insert_fdw"),
-        ("backend_foreign_foreign", "insert_foreign_table"),
-        ("backend_foreign_foreign", "insert_server"),
-        ("backend_foreign_foreign", "insert_usermapping"),
         ("backend_foreign_foreign", "iterate_direct_modify"),
         ("backend_foreign_foreign", "iterate_foreign_scan"),
         ("backend_foreign_foreign", "recheck_foreign_scan"),
         ("backend_foreign_foreign", "reinitialize_dsm_foreign_scan"),
         ("backend_foreign_foreign", "rescan_foreign_scan"),
-        ("backend_foreign_foreign", "server_lookup_by_name"),
-        ("backend_foreign_foreign", "server_options"),
-        ("backend_foreign_foreign", "server_owner_row_by_name"),
-        ("backend_foreign_foreign", "server_owner_row_by_oid"),
-        ("backend_foreign_foreign", "server_set_owner"),
         ("backend_foreign_foreign", "shutdown_foreign_scan"),
         ("backend_foreign_foreign", "stamp_scan_slot_tableoid"),
-        ("backend_foreign_foreign", "update_fdw"),
-        ("backend_foreign_foreign", "update_server"),
-        ("backend_foreign_foreign", "update_usermapping"),
-        ("backend_foreign_foreign", "usermapping_oid"),
-        ("backend_foreign_foreign", "usermapping_options"),
-        ("backend_foreign_foreign", "validate_options"),
+        // NOTE: the catalog/indexing.c-owned pg_foreign_* catalog-tuple
+        // insert/update seams the foreigncmds catalog-write seams above delegate
+        // to (catalog_tuple_{insert,update}_pg_foreign_{data_wrapper,server,
+        // user_mapping,table}) are NOT listed here: their owner
+        // backend-catalog-indexing is `todo` (not complete) in CATALOG.tsv, so
+        // the recurrence guard already exempts every indexing-seams seam (same
+        // as the existing catalog_tuple_insert_pg_namespace/pg_am). They panic
+        // until indexing.c lands — sanctioned mirror-pg-and-panic.
         // DESIGN_DEBT: `publish_wtparam_slot` is the *deposit* end of the
         // RecursiveUnion<->WorkTableScan cross-node aliasing channel. In C
         // `ExecInitRecursiveUnion` does `prmdata->value = PointerGetDatum(rustate)`,
@@ -958,25 +942,15 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
-        // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
-        // resolve another backend's PGPROC-embedded `procLatch` to a
-        // `LatchHandle` and set it. The owner (backend-storage-ipc-latch) names
-        // a latch by its position in this crate's own append-only `LATCHES`
-        // registry (`lookup_latch` panics on any handle not minted by
-        // `allocate_latch`). proc.c's `proc_latch` seam DOES return a handle,
-        // but it mints it from the proc number (`proc_latch_handle(procno)`),
-        // which is a DIFFERENT, unregistered handle space — `SetLatch` on it
-        // panics "invalid LatchHandle". Unifying the two (registering each
-        // PGPROC's `procLatch` into the latch registry, or sharing one handle
-        // space) is the latch<->proc PGPROC-latch integration bridge that does
-        // not exist yet; proc.c's own `set_proc_latch` already aborts loudly on
-        // exactly this boundary. `set_latch_for_proc_pid` is additionally
-        // blocked on procarray.c (unported, status=todo) for the PID->proc
-        // lookup (`BackendPidGetProc`). Install once that bridge lands; do not
-        // force-wire a handle from the wrong space.
-        ("backend_storage_ipc_latch", "set_latch_by_proc_number"),
-        ("backend_storage_ipc_latch", "set_latch_for_proc_pid"),
-        ("backend_storage_ipc_latch", "set_latch_for_procno"),
+        // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
+        // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
+        // The latch<->proc handle spaces were unified: a `LatchHandle` is a
+        // tagged union (`LatchKind::Local` registry slot vs `LatchKind::Proc`
+        // proc number), and the latch unit resolves a proc-tagged handle to the
+        // real `&ProcGlobal->allProcs[procno].procLatch` through the proc unit's
+        // `with_proc_latch` seam — no separate side-table for proc latches.
+        // `set_latch_for_proc_pid` maps PID->ProcNumber via procarray's
+        // `BackendPidGetProc`.)
         // DESIGN_DEBT (provider-unported): `xlog_request_wal_receiver_reply` is
         // declared on backend-replication-walreceiverfuncs-seams but its real
         // body is `XLogRequestWalReceiverReply()` in xlogrecovery.c, NOT

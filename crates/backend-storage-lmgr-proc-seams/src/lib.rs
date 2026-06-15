@@ -174,6 +174,18 @@ seam_core::seam!(
     pub fn proc_latch(procno: ProcNumber) -> types_storage::latch::LatchHandle
 );
 
+seam_core::seam!(
+    /// Run `f` over `&ProcGlobal->allProcs[procno].procLatch` — the `Latch`
+    /// embedded in a backend's `PGPROC`. The proc unit owns the `allProcs`
+    /// array; this callback hands the latch unit a shared reference to the
+    /// embedded latch so it can apply its `SetLatch`/`OwnLatch`/`DisownLatch`
+    /// algorithm to the *real* `&proc->procLatch` (faithful to the C
+    /// `Latch *`), instead of the latch unit's own registry. A callback shape
+    /// (not a returned reference) keeps the shmem borrow contained
+    /// (AGENTS.md: seams never return `&'static mut`).
+    pub fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch))
+);
+
 // ---- dummy-PGPROC stand-up for prepared transactions (twophase.c) ----
 
 seam_core::seam!(

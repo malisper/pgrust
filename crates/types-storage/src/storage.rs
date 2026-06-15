@@ -4,7 +4,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use types_core::{
     uint16, uint32, uint64, uint8, LocalTransactionId, Oid, ProcNumber, RelFileNumber, Size,
@@ -1107,8 +1107,8 @@ impl PGPROC {
             procLatch: Latch {
                 is_set: AtomicI32::new(0),
                 maybe_sleeping: AtomicI32::new(0),
-                is_shared: false,
-                owner_pid: 0,
+                is_shared: AtomicBool::new(false),
+                owner_pid: AtomicI32::new(0),
             },
             xid: 0,
             xmin: 0,

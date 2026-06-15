@@ -36,6 +36,7 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-storage-lmgr-deadlock-seams = { path = "../backend-storage-lmgr-deadlock-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-error = { path = "../backend-utils-error" }

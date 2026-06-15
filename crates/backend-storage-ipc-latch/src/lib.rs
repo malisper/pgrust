@@ -47,14 +47,14 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::fence;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::atomic::{fence, AtomicBool, AtomicI32};
 use std::sync::{Arc, RwLock};
 
 use backend_storage_ipc_waiteventset_seams::{self as wes_seams, WaitEventSet};
-use types_core::{pgsocket, PGINVALID_SOCKET};
+use types_core::{pgsocket, ProcNumber, PGINVALID_SOCKET};
 use types_error::{PgError, PgResult, PANIC};
-use types_storage::latch::LatchHandle;
+use types_storage::latch::{Latch, LatchHandle, LatchKind};
 use types_storage::waiteventset::{
     WaitEvent, WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_MASK, WL_TIMEOUT,
 };
@@ -63,74 +63,83 @@ use types_storage::waiteventset::{
 const LatchWaitSetLatchPos: i32 = 0;
 const LatchWaitSetPostmasterDeathPos: i32 = 1;
 
-/// `struct Latch` (`storage/latch.h`), with the fields a concurrent setter
-/// touches as atomics: `is_set` is `sig_atomic_t` written cross-process,
-/// `maybe_sleeping` is written by the waiter and read by setters, and
-/// `owner_pid` is fetched once in [`SetLatch`] exactly because it can change
-/// concurrently (the C comments rely on `pid_t` being effectively atomic).
-/// `is_shared` is only written at init, but `InitLatch` may re-initialize a
-/// shared-registry latch (C's `SwitchToLocalLatch` path), so it is atomic
-/// too. Deliberately not `Copy`/`Clone`: a latch is a synchronization object
-/// with one identity, named by [`LatchHandle`].
-#[derive(Debug)]
-pub struct Latch {
-    is_set: AtomicBool,
-    maybe_sleeping: AtomicBool,
-    is_shared: AtomicBool,
-    owner_pid: AtomicI32,
-}
+/// The single `Latch` representation lives in `types_storage::latch::Latch`
+/// (the C `struct Latch`, all fields atomic): both the latch unit's own
+/// registry latches and the `Latch` embedded in each `PGPROC` (`procLatch`,
+/// owned by the proc unit) use it, so a procno-derived handle resolves to the
+/// real `&proc->procLatch` — see [`with_latch`].
 
-impl Latch {
-    /// Read `latch->is_set` (for the wait-event-set owner's poll loop).
-    pub fn is_set(&self) -> bool {
-        self.is_set.load(SeqCst)
-    }
-
-    /// Write `latch->maybe_sleeping` (waiteventset.c sets it around the
-    /// blocking wait).
-    pub fn set_maybe_sleeping(&self, value: bool) {
-        self.maybe_sleeping.store(value, SeqCst);
-    }
-
-    /// Read `latch->owner_pid` (waiteventset.c asserts ownership when a
-    /// latch is registered).
-    pub fn owner_pid(&self) -> i32 {
-        self.owner_pid.load(SeqCst)
-    }
-}
-
-/// Process-global latch registry: handle id `n` names `LATCHES[n - 1]`
-/// (`0` is never a valid handle). Latches are C shared-memory /
-/// backend-private process-lifetime state — explicitly shared, synchronized,
-/// append-only. The write lock is held only while [`allocate_latch`] grows
-/// the vector; [`SetLatch`] (signal-handler-callable) takes only the read
-/// lock.
+/// Process-global registry of the latch unit's *own* `Latch` storage
+/// (`LocalLatchData`-style backend-private / process-global latches): a
+/// [`LatchKind::Local`] handle id `n` names `LATCHES[n - 1]` (`0` is never a
+/// valid handle). Latches are process-lifetime — explicitly shared,
+/// synchronized, append-only. The write lock is held only while
+/// [`allocate_latch`] grows the vector; [`SetLatch`] (signal-handler-callable)
+/// takes only the read lock. Per-PGPROC `procLatch` latches do *not* live
+/// here; they are reached through the proc unit's `with_proc_latch` seam.
 static LATCHES: RwLock<Vec<Arc<Latch>>> = RwLock::new(Vec::new());
 
-/// Mint a new, uninitialized latch and return its handle — the analogue of
-/// the C caller declaring `Latch` storage (globals.c's `LocalLatchData`,
-/// proc.c's `PGPROC.procLatch`) before calling [`InitLatch`] /
-/// [`InitSharedLatch`].
+/// Mint a new, uninitialized *local* latch and return its handle — the
+/// analogue of the C caller declaring backend-private / process-global `Latch`
+/// storage (globals.c's `LocalLatchData`) before calling [`InitLatch`] /
+/// [`InitSharedLatch`]. (A `PGPROC`'s `procLatch` is *not* allocated here; it
+/// is embedded in the proc array and named by [`LatchHandle::proc`].)
 pub fn allocate_latch() -> LatchHandle {
     let mut latches = LATCHES.write().unwrap();
-    latches.push(Arc::new(Latch {
-        is_set: AtomicBool::new(false),
-        maybe_sleeping: AtomicBool::new(false),
-        is_shared: AtomicBool::new(false),
-        owner_pid: AtomicI32::new(0),
-    }));
+    latches.push(Arc::new(Latch::new(false, 0)));
     LatchHandle::new(latches.len())
 }
 
-/// Resolve a handle to its latch. An invalid handle is the C wild-pointer
-/// case: panic.
+/// Resolve a *local* handle to its registry latch. Only valid for
+/// [`LatchKind::Local`] handles; a per-PGPROC `procLatch` is not an owned
+/// `Arc` (it is embedded in the proc array), so use [`with_latch`] for the
+/// general dispatch. An invalid local handle is the C wild-pointer case:
+/// panic.
 pub fn lookup_latch(latch: LatchHandle) -> Arc<Latch> {
-    LATCHES
-        .read()
-        .unwrap()
-        .get(latch.as_usize().wrapping_sub(1))
-        .cloned()
-        .expect("invalid LatchHandle")
+    match latch.kind() {
+        LatchKind::Local(id) => LATCHES
+            .read()
+            .unwrap()
+            .get(id.wrapping_sub(1))
+            .cloned()
+            .expect("invalid LatchHandle"),
+        LatchKind::Proc(_) => {
+            panic!("lookup_latch: per-PGPROC procLatch is not an owned Arc; use with_latch")
+        }
+    }
+}
+
+/// Run `f` over the `Latch` a handle names, dispatching on the handle's tag:
+/// a [`LatchKind::Local`] handle resolves in the latch unit's own registry; a
+/// [`LatchKind::Proc`] handle resolves to `&ProcGlobal->allProcs[procno]
+/// .procLatch` through the proc unit's `with_proc_latch` seam — the faithful
+/// `&proc->procLatch`. This is how the latch unit applies `SetLatch` /
+/// `OwnLatch` / `DisownLatch` / `ResetLatch` to either backing allocation
+/// without a separate side-table for proc latches.
+fn with_latch<R>(latch: LatchHandle, mut f: impl FnMut(&Latch) -> R) -> R {
+    match latch.kind() {
+        LatchKind::Local(id) => {
+            let arc = LATCHES
+                .read()
+                .unwrap()
+                .get(id.wrapping_sub(1))
+                .cloned()
+                .expect("invalid LatchHandle");
+            f(&arc)
+        }
+        LatchKind::Proc(procno) => with_proc_latch(procno, f),
+    }
+}
+
+/// Run `f` over `&ProcGlobal->allProcs[procno].procLatch` via the proc unit's
+/// `with_proc_latch` seam, capturing `f`'s result out of the void-returning
+/// callback shape.
+fn with_proc_latch<R>(procno: ProcNumber, mut f: impl FnMut(&Latch) -> R) -> R {
+    let mut result: Option<R> = None;
+    backend_storage_lmgr_proc_seams::with_proc_latch::call(procno, &mut |latch: &Latch| {
+        result = Some(f(latch));
+    });
+    result.expect("with_proc_latch: proc seam did not invoke the callback")
 }
 
 thread_local! {
@@ -194,11 +203,12 @@ pub fn InitializeLatchWaitSet() -> PgResult<()> {
 /// `InitLatch(Latch *latch)` — initialize a process-local latch, owned by
 /// the current process.
 pub fn InitLatch(latch: LatchHandle) {
-    let latch = lookup_latch(latch);
-    latch.is_set.store(false, SeqCst);
-    latch.maybe_sleeping.store(false, SeqCst);
-    latch.owner_pid.store(my_proc_pid(), SeqCst);
-    latch.is_shared.store(false, SeqCst);
+    with_latch(latch, |latch| {
+        latch.is_set.store(0, SeqCst);
+        latch.maybe_sleeping.store(0, SeqCst);
+        latch.owner_pid.store(my_proc_pid(), SeqCst);
+        latch.is_shared.store(false, SeqCst);
+    });
 }
 
 /// `InitSharedLatch(Latch *latch)` — initialize a shared latch that can be
@@ -208,11 +218,12 @@ pub fn InitLatch(latch: LatchHandle) {
 /// In C this must run in the postmaster before forking children (a Windows
 /// handle-inheritance restriction), so there are no concurrency issues here.
 pub fn InitSharedLatch(latch: LatchHandle) {
-    let latch = lookup_latch(latch);
-    latch.is_set.store(false, SeqCst);
-    latch.maybe_sleeping.store(false, SeqCst);
-    latch.owner_pid.store(0, SeqCst);
-    latch.is_shared.store(true, SeqCst);
+    with_latch(latch, |latch| {
+        latch.is_set.store(0, SeqCst);
+        latch.maybe_sleeping.store(0, SeqCst);
+        latch.owner_pid.store(0, SeqCst);
+        latch.is_shared.store(true, SeqCst);
+    });
 }
 
 /// `OwnLatch(Latch *latch)` — associate a shared latch with the current
@@ -221,31 +232,32 @@ pub fn InitSharedLatch(latch: LatchHandle) {
 /// There is no locking around the already-owned check; if two processes
 /// could race to own the same latch, the caller must provide an interlock.
 pub fn OwnLatch(latch: LatchHandle) -> PgResult<()> {
-    let latch = lookup_latch(latch);
+    with_latch(latch, |latch| {
+        debug_assert!(latch.is_shared.load(SeqCst));
 
-    debug_assert!(latch.is_shared.load(SeqCst));
+        let owner_pid = latch.owner_pid.load(SeqCst);
+        if owner_pid != 0 {
+            // elog(PANIC, "latch already owned by PID %d", owner_pid)
+            return Err(PgError::new(
+                PANIC,
+                format!("latch already owned by PID {owner_pid}"),
+            ));
+        }
 
-    let owner_pid = latch.owner_pid.load(SeqCst);
-    if owner_pid != 0 {
-        // elog(PANIC, "latch already owned by PID %d", owner_pid)
-        return Err(PgError::new(
-            PANIC,
-            format!("latch already owned by PID {owner_pid}"),
-        ));
-    }
-
-    latch.owner_pid.store(my_proc_pid(), SeqCst);
-    Ok(())
+        latch.owner_pid.store(my_proc_pid(), SeqCst);
+        Ok(())
+    })
 }
 
 /// `DisownLatch(Latch *latch)` — disown a shared latch currently owned by
 /// the current process.
 pub fn DisownLatch(latch: LatchHandle) {
-    let latch = lookup_latch(latch);
-    debug_assert!(latch.is_shared.load(SeqCst));
-    debug_assert_eq!(latch.owner_pid.load(SeqCst), my_proc_pid());
+    with_latch(latch, |latch| {
+        debug_assert!(latch.is_shared.load(SeqCst));
+        debug_assert_eq!(latch.owner_pid.load(SeqCst), my_proc_pid());
 
-    latch.owner_pid.store(0, SeqCst);
+        latch.owner_pid.store(0, SeqCst);
+    });
 }
 
 /// `WaitLatch(Latch *latch, int wakeEvents, long timeout, uint32
@@ -375,7 +387,7 @@ pub fn WaitLatchOrSocket(
 /// Cheap if the latch is already set, otherwise not so much. Called from
 /// critical sections and signal handlers, so it never errors.
 pub fn SetLatch(latch: LatchHandle) {
-    set_latch(&lookup_latch(latch));
+    with_latch(latch, set_latch);
 }
 
 fn set_latch(latch: &Latch) {
@@ -385,14 +397,14 @@ fn set_latch(latch: &Latch) {
     fence(SeqCst);
 
     // Quick exit if already set
-    if latch.is_set.load(SeqCst) {
+    if latch.is_set.load(SeqCst) != 0 {
         return;
     }
 
-    latch.is_set.store(true, SeqCst);
+    latch.is_set.store(1, SeqCst);
 
     fence(SeqCst);
-    if !latch.maybe_sleeping.load(SeqCst) {
+    if latch.maybe_sleeping.load(SeqCst) == 0 {
         return;
     }
 
@@ -419,20 +431,20 @@ fn set_latch(latch: &Latch) {
 /// this will sleep, unless the latch is set again before the [`WaitLatch`]
 /// call.
 pub fn ResetLatch(latch: LatchHandle) {
-    let latch = lookup_latch(latch);
+    with_latch(latch, |latch| {
+        // Only the owner should reset the latch.
+        debug_assert_eq!(latch.owner_pid.load(SeqCst), my_proc_pid());
+        debug_assert!(latch.maybe_sleeping.load(SeqCst) == 0);
 
-    // Only the owner should reset the latch.
-    debug_assert_eq!(latch.owner_pid.load(SeqCst), my_proc_pid());
-    debug_assert!(!latch.maybe_sleeping.load(SeqCst));
+        latch.is_set.store(0, SeqCst);
 
-    latch.is_set.store(false, SeqCst);
-
-    // Ensure that the write to is_set gets flushed to main memory before we
-    // examine any flag variables. Otherwise a concurrent SetLatch might
-    // falsely conclude that it needn't signal us, even though we have
-    // missed seeing some flag updates that SetLatch was supposed to inform
-    // us of.
-    fence(SeqCst);
+        // Ensure that the write to is_set gets flushed to main memory before
+        // we examine any flag variables. Otherwise a concurrent SetLatch
+        // might falsely conclude that it needn't signal us, even though we
+        // have missed seeing some flag updates that SetLatch was supposed to
+        // inform us of.
+        fence(SeqCst);
+    });
 }
 
 /// `SetLatch(MyLatch)` for the seam's parameterless signal-handler shape. A
@@ -540,6 +552,36 @@ fn kill_sigusr1(pid: i32) -> PgResult<()> {
     Ok(())
 }
 
+/// `SetLatch(&GetPGProcByNumber(procno)->procLatch)`
+/// (walreceiver.c / walreceiverfuncs.c) — wake the backend owning slot
+/// `procno` via its embedded process latch. The procno names the proc-tagged
+/// handle; [`with_latch`] resolves it to the real `&proc->procLatch`.
+/// Async-signal-safe and infallible in C.
+fn set_latch_for_procno(procno: ProcNumber) {
+    SetLatch(LatchHandle::proc(procno));
+}
+
+/// `SetLatch(&ProcGlobal->allProcs[pgprocno].procLatch)` (walsummarizer.c) —
+/// the same wake, named by the proc number directly. Infallible in C.
+fn set_latch_by_proc_number(pgprocno: ProcNumber) {
+    SetLatch(LatchHandle::proc(pgprocno));
+}
+
+/// `SetLatch(&worker->proc->procLatch)` for the backend whose PID is `pid`
+/// (launcher.c `logicalrep_worker_wakeup_ptr`). The launcher names the target
+/// by PID; map PID -> `ProcNumber` via `BackendPidGetProc` (procarray.c),
+/// then set that PGPROC's embedded latch. If the backend has already exited
+/// (`BackendPidGetProc` returns NULL — `pid` no longer live), there is no
+/// latch to set, exactly as the C dereference of a then-detached `worker->proc`
+/// is guarded by the caller holding LogicalRepWorkerLock. Infallible in C.
+fn set_latch_for_proc_pid(pid: i32) {
+    if let Some((_role, procno)) =
+        backend_storage_ipc_procarray_seams::backend_pid_get_proc_role::call(pid)
+    {
+        SetLatch(LatchHandle::proc(procno));
+    }
+}
+
 /// Install this unit's seams (`backend-storage-ipc-latch-seams`).
 pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::set(set_latch_my_latch);
@@ -559,6 +601,14 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::wait_latch_no_latch::set(wait_latch_no_latch);
     backend_storage_ipc_latch_seams::wait_latch_or_socket::set(wait_latch_or_socket_seam);
     backend_storage_ipc_latch_seams::kill_sigusr1::set(kill_sigusr1);
+    backend_storage_ipc_latch_seams::own_latch::set(OwnLatch);
+    backend_storage_ipc_latch_seams::disown_latch::set(DisownLatch);
+    // The SetLatch-by-proc seams: the proc-tagged handle space (unified with
+    // the local registry through `with_latch`/`with_proc_latch`) lets these
+    // resolve another backend's `&proc->procLatch` faithfully.
+    backend_storage_ipc_latch_seams::set_latch_for_procno::set(set_latch_for_procno);
+    backend_storage_ipc_latch_seams::set_latch_by_proc_number::set(set_latch_by_proc_number);
+    backend_storage_ipc_latch_seams::set_latch_for_proc_pid::set(set_latch_for_proc_pid);
 }
 
 #[cfg(test)]
