@@ -155,6 +155,7 @@ backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivcla
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-port-atomics = { path = "../backend-port-atomics" }
