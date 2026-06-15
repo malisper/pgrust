@@ -15525,6 +15525,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-spgist"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "types-startup"
 version = "0.0.0"
 dependencies = [
