@@ -31,6 +31,13 @@ backend-utils-adt-encode-seams = { path = "../backend-utils-adt-encode-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+common-path-seams = { path = "../common-path-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 types-nodes = { path = "../types-nodes" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }

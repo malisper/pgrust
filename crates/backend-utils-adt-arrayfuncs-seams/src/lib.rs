@@ -268,3 +268,41 @@ seam_core::seam!(
     /// detoast surface.
     pub fn array_const_nitems(constvalue: Datum) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `accumArrayResult`/`makeArrayResult` over `TEXTOID`, preserving per-element
+    /// NULLs (arrayfuncs.c) — the array-build half of `text_to_array` /
+    /// `text_to_array_null` (varlena.c:4771-4801). Each input element is either a
+    /// non-null `text` payload (`Some(bytes)`, run through `CStringGetTextDatum`)
+    /// or a SQL NULL (`None`, accumulated with `disnull = true`). An empty input
+    /// yields the C `construct_empty_array(TEXTOID)` (a zero-element array, not
+    /// NULL — matching the `tstate.astate == NULL` branch). The result is the
+    /// array varlena's raw bytes allocated in `mcx` (so the caller can carry it
+    /// on the canonical by-reference `Datum`, not a bare pointer word). `Err`
+    /// carries the `MaxAllocSize` / OOM `ereport(ERROR)` surface.
+    pub fn build_text_array_nullable<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[Option<&[u8]>],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// The element-deconstruct + per-element `OutputFunctionCall` walk of
+    /// `array_to_text_internal` (arrayfuncs.c / varlena.c:5130-5178): given the
+    /// already-detoasted array varlena bytes (`DatumGetArrayTypeP(v)` — the
+    /// caller resolves the by-reference payload), look up the element type's
+    /// output function via `get_type_io_data(element_type, IOFunc_output, ...)`,
+    /// then walk the flat array's data area element by element (consulting the
+    /// null bitmap), running each non-null element through its output function.
+    /// Returns one entry per array element in storage order: `Some(bytes)` for a
+    /// non-null element's output-formatted cstring bytes, `None` for a NULL
+    /// element. An empty array yields an empty list (the caller maps that to the
+    /// empty string). `element_type` is `ARR_ELEMTYPE(v)`, supplied by the
+    /// caller. `Err` carries the `ArrayGetNItems` / output-function
+    /// `ereport(ERROR)` surface.
+    pub fn array_to_text_elements<'mcx>(
+        mcx: Mcx<'mcx>,
+        array: &[u8],
+        element_type: Oid,
+    ) -> PgResult<PgVec<'mcx, Option<PgVec<'mcx, u8>>>>
+);

@@ -77,88 +77,143 @@ pub enum ArrayElement<'mcx> {
 }
 
 /// C: `accumArrayResult` loop + `makeArrayResult`/`construct_empty_array`
-/// building a `text[]` Datum from the split fields (arrayfuncs.c). Owner not
-/// yet ported.
-fn build_text_array<'mcx>(_mcx: Mcx<'mcx>, _fields: &[SplitField<'mcx>]) -> PgResult<Datum<'mcx>> {
-    panic!(
-        "unported owner: utils/adt/arrayfuncs.c accumArrayResult/makeArrayResult \
-         (text_to_array's array build) — port backend-utils-adt-arrayfuncs"
-    )
+/// building a `text[]` Datum from the split fields (arrayfuncs.c). Routes to the
+/// merged `backend-utils-adt-arrayfuncs` owner via its installed
+/// `build_text_array_nullable` seam: each split field is either a non-null
+/// `text` payload or a SQL NULL (the `is_null` flag set when it matched the
+/// null-string), preserved per element. An empty field set yields
+/// `construct_empty_array(TEXTOID)`.
+fn build_text_array<'mcx>(mcx: Mcx<'mcx>, fields: &[SplitField<'mcx>]) -> PgResult<Datum<'mcx>> {
+    let elems: PgVec<'mcx, Option<&[u8]>> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, fields.len())?;
+        for f in fields {
+            v.push(if f.is_null { None } else { Some(f.bytes.as_slice()) });
+        }
+        v
+    };
+    let bytes = backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(mcx, &elems)?;
+    // C: PG_RETURN_DATUM(makeArrayResult(...)) — the array varlena image rides
+    // the canonical by-reference `Datum`.
+    Ok(Datum::ByRef(bytes))
 }
 
 /// C: `tuplestore_putvalues(tstate->tupstore, tstate->tupdesc, values, nulls)`
-/// for one `text_to_table` row (tuplestore.c). Owner not yet ported.
-fn tuplestore_put_field(_field_value: &[u8], _is_null: bool) -> PgResult<()> {
-    panic!(
-        "unported owner: utils/sort/tuplestore.c tuplestore_putvalues \
-         (text_to_table SRF sink) — port backend-utils-sort-tuplestore"
-    )
+/// for one `text_to_table` row (tuplestore.c). Routes to the merged
+/// `backend-utils-sort-storage` owner via its installed `tuplestore_putvalues`
+/// seam. The single `text` column's value is the field payload (`ByRef` text
+/// varlena bytes) or SQL NULL.
+fn tuplestore_put_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut types_nodes::Tuplestorestate<'_>,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    field_value: &[u8],
+    is_null: bool,
+) -> PgResult<()> {
+    // C:5008-5014 values[0] = PointerGetDatum(cstring_to_text_with_len(...));
+    // nulls[0] = is_null; tuplestore_putvalues(...).
+    let value: Datum<'mcx> = if is_null {
+        Datum::null()
+    } else {
+        let text = cstring_to_text_with_len(mcx, field_value, field_value.len() as i32)?;
+        Datum::ByRef(text)
+    };
+    let values = [value];
+    let nulls = [is_null];
+    backend_utils_sort_storage_seams::tuplestore_putvalues::call(state, tupdesc, &values, &nulls)
 }
 
 /// C: the element deconstruction + per-element `OutputFunctionCall` of
 /// `array_to_text_internal` (arrayfuncs.c `deconstruct_array` + fmgr output
-/// dispatch). Owner not yet ported.
+/// dispatch). Routes to the merged `backend-utils-adt-arrayfuncs` owner via its
+/// installed `array_to_text_elements` seam, which detoasts the array, looks up
+/// the element type's output function and walks the elements. The detoasted
+/// array bytes ride the canonical `Datum`'s `ByRef` payload (C
+/// `DatumGetArrayTypeP(v)`).
 fn array_to_text_elements<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _v: &Datum<'mcx>,
-    _element_type: Oid,
+    mcx: Mcx<'mcx>,
+    v: &Datum<'mcx>,
+    element_type: Oid,
 ) -> PgResult<PgVec<'mcx, ArrayElement<'mcx>>> {
-    panic!(
-        "unported owner: utils/adt/arrayfuncs.c deconstruct_array + fmgr \
-         OutputFunctionCall (array_to_text element walk) — port \
-         backend-utils-adt-arrayfuncs / backend-utils-fmgr-core"
-    )
+    let array = v.as_ref_bytes();
+    let raw =
+        backend_utils_adt_arrayfuncs_seams::array_to_text_elements::call(mcx, array, element_type)?;
+    let mut out = mcx::vec_with_capacity_in(mcx, raw.len())?;
+    for item in raw {
+        out.push(match item {
+            Some(bytes) => ArrayElement::Value(bytes),
+            None => ArrayElement::Null,
+        });
+    }
+    Ok(out)
 }
 
 /// C: `downcase_truncate_identifier(ident, len, false)` (parser/scansup.c).
-/// Owner not yet ported.
-fn downcase_truncate_identifier<'mcx>(_mcx: Mcx<'mcx>, _ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: parser/scansup.c downcase_truncate_identifier \
-         (SplitIdentifierString downcasing) — port backend-parser-scansup"
-    )
+/// Routes to the merged `backend-parser-small1` owner (scansup family) via its
+/// installed `downcase_truncate_identifier` seam.
+fn downcase_truncate_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_parser_scansup_seams::downcase_truncate_identifier::call(mcx, ident, false)
 }
 
 /// C: `truncate_identifier(ident, strlen(ident), false)` (parser/scansup.c).
-/// Owner not yet ported.
-fn truncate_identifier<'mcx>(_mcx: Mcx<'mcx>, _ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: parser/scansup.c truncate_identifier \
-         (SplitIdentifierString overlength truncation) — port \
-         backend-parser-scansup"
-    )
+/// Routes to the merged `backend-parser-small1` owner (scansup family) via its
+/// installed `truncate_identifier` seam.
+fn truncate_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_parser_scansup_seams::truncate_identifier::call(mcx, ident, false)
 }
 
-/// C: `canonicalize_path(path)` (port/path.c). Owner not yet ported.
-fn canonicalize_path<'mcx>(_mcx: Mcx<'mcx>, _path: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: port/path.c canonicalize_path \
-         (SplitDirectoriesString path canonicalization) — port port-path"
-    )
+/// C: `canonicalize_path(path)` (common/path.c). Routes through the per-owner
+/// `common-path-seams::canonicalize_path` seam (loud panic-until-installed: the
+/// `common/path.c` owner is not yet ported, so the call faults exactly as the
+/// project seam-not-installed path would — and auto-lights when the owner lands,
+/// unlike a crate-local panic the recurrence guard can't see). The C input is a
+/// `char *` in the database encoding that `canonicalize_path` cleans up in
+/// place; the seam crosses the payload as `String` -> `String`.
+fn canonicalize_path<'mcx>(mcx: Mcx<'mcx>, path: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let s = core::str::from_utf8(path).map_err(|_| {
+        types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+    })?;
+    let canonical = common_path_seams::canonicalize_path::call(s.to_string());
+    let bytes = canonical.as_bytes();
+    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(out)
 }
 
 /// C: `OutputFunctionCall(&finfo, value)` after `getTypeOutputInfo(typid)`
 /// (fmgr.c / lsyscache.c) — stringify one value through its type output
-/// function. Owner not yet ported.
+/// function. Routes to the merged `backend-utils-cache-lsyscache`
+/// (`get_type_output_info`) and `backend-utils-fmgr-core`
+/// (`OidOutputFunctionCall`) owners via their installed seams.
 fn output_function_call<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _typid: Oid,
-    _value: &Datum<'mcx>,
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+    value: &Datum<'mcx>,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: fmgr.c OutputFunctionCall + lsyscache.c \
-         getTypeOutputInfo (format()/concat() value stringify) — port \
-         backend-utils-fmgr-core"
-    )
+    // C: getTypeOutputInfo(valtype, &typOutput, &typIsVarlena).
+    let (typ_output, _typ_is_varlena) =
+        backend_utils_cache_lsyscache_seams::get_type_output_info::call(typid)?;
+    // C: OutputFunctionCall(&foutcache->finfo, value) — the cache reduces to a
+    // by-OID lookup-and-call per the owner seam contract.
+    backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, typ_output, value)
 }
 
-/// C: `quote_identifier(ident)` (ruleutils.c) for the `%I` conversion. Owner
-/// not yet ported.
-fn quote_identifier<'mcx>(_mcx: Mcx<'mcx>, _ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: ruleutils.c quote_identifier (format() %I) — port \
-         backend-utils-adt-ruleutils"
-    )
+/// C: `quote_identifier(ident)` (ruleutils.c) for the `%I` conversion. Routes
+/// through the per-owner `backend-utils-adt-ruleutils-seams::quote_identifier`
+/// seam (loud panic-until-installed: the `ruleutils.c` owner is not yet ported,
+/// so the call faults exactly as the project seam-not-installed path would, and
+/// auto-lights when the owner lands). The C input is a NUL-terminated C string;
+/// the seam crosses the content as `&str` -> `PgString`.
+fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let s = core::str::from_utf8(ident).map_err(|_| {
+        types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+    })?;
+    let quoted = backend_utils_adt_ruleutils_seams::quote_identifier::call(mcx, s)?;
+    let bytes = quoted.as_bytes();
+    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(out)
 }
 
 /// C: `quote_literal_cstr(literal)` (quote.c) for the `%L` conversion. Calls the
@@ -193,12 +248,11 @@ fn pg_strtoint32(s: &[u8]) -> PgResult<i32> {
 }
 
 /// C: `toast_datum_size(value)` (access/common/detoast.c) for `pg_column_size`.
-/// Owner not yet ported.
-fn toast_datum_size(_value: &Datum<'_>) -> PgResult<i32> {
-    panic!(
-        "unported owner: access/common/detoast.c toast_datum_size \
-         (pg_column_size varlena path) — port backend-access-common-detoast"
-    )
+/// Routes to the merged `backend-access-common-detoast` owner via its installed
+/// `toast_datum_size` seam. `value` is the varlena attribute (`ByRef` bytes).
+fn toast_datum_size(mcx: Mcx<'_>, value: &Datum<'_>) -> PgResult<i32> {
+    let size = backend_access_common_detoast_seams::toast_datum_size::call(mcx, value.as_ref_bytes())?;
+    Ok(size as i32)
 }
 
 /// C: `strlen(DatumGetCString(value)) + 1` carrier for the cstring branch of
@@ -222,13 +276,12 @@ fn toast_get_compression_id(_value: &Datum<'_>) -> PgResult<ToastCompressionId> 
 
 /// C: `VARATT_IS_EXTERNAL_ONDISK(attr)` test + `VARATT_EXTERNAL_GET_POINTER`'s
 /// `va_valueid` extraction (postgres.h / detoast) for
-/// `pg_column_toast_chunk_id`. Owner not yet ported.
-fn toast_chunk_id(_value: &Datum<'_>) -> PgResult<Option<Oid>> {
-    panic!(
-        "unported owner: access/common detoast VARATT_EXTERNAL_GET_POINTER \
-         va_valueid (pg_column_toast_chunk_id) — port \
-         backend-access-common-detoast"
-    )
+/// `pg_column_toast_chunk_id`. Routes to the merged
+/// `backend-access-common-detoast` owner via its installed `toast_chunk_id`
+/// seam (`None` when the value is not stored on-disk-external). `value` is the
+/// varlena attribute (`ByRef` bytes).
+fn toast_chunk_id(value: &Datum<'_>) -> PgResult<Option<Oid>> {
+    backend_access_common_detoast_seams::toast_chunk_id::call(value.as_ref_bytes())
 }
 
 // The text_position_* Boyer-Moore-Horspool state machine is owned by the
@@ -1186,17 +1239,21 @@ pub fn text_to_array_null<'mcx>(
 /// rows (C's `split_text` returns false without touching the tuplestore).
 pub fn text_to_table<'mcx>(
     mcx: Mcx<'mcx>,
+    tupstore: &mut types_nodes::Tuplestorestate<'_>,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
     inputstring: Option<&[u8]>,
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
     collation: Oid,
 ) -> PgResult<()> {
-    // C:4819 (void) split_text(fcinfo, &tstate); — split_text would push each
-    // field to the tuplestore via split_text_accum_result's tupstore arm. Here
-    // we re-route the accumulated fields to the tuplestore owner seam.
+    // C:4810-4817 the SRF tuplestore/tupdesc come from the ReturnSetInfo
+    // (InitMaterializedSRF); the fmgr/SRF boundary supplies them here.
+    // C:4819 (void) split_text(fcinfo, &tstate); — split_text's tupstore arm
+    // pushes each field via tuplestore_putvalues. Here we re-route the
+    // accumulated fields to the tuplestore owner seam.
     if let Some(fields) = split_text(mcx, inputstring, fldsep, null_string, collation)? {
         for field in &fields {
-            tuplestore_put_field(&field.bytes, field.is_null)?;
+            tuplestore_put_field(mcx, tupstore, tupdesc, &field.bytes, field.is_null)?;
         }
     }
     Ok(())
@@ -1205,12 +1262,14 @@ pub fn text_to_table<'mcx>(
 /// C: `text_to_table_null` (varlena.c:4832-4836) — separate entry point only.
 pub fn text_to_table_null<'mcx>(
     mcx: Mcx<'mcx>,
+    tupstore: &mut types_nodes::Tuplestorestate<'_>,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
     inputstring: Option<&[u8]>,
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
     collation: Oid,
 ) -> PgResult<()> {
-    text_to_table(mcx, inputstring, fldsep, null_string, collation)
+    text_to_table(mcx, tupstore, tupdesc, inputstring, fldsep, null_string, collation)
 }
 
 // ===========================================================================
@@ -1309,12 +1368,12 @@ pub fn array_to_text_internal<'mcx>(
 /// compressed size of any datum. The `fn_extra` typlen cache + `get_typlen`
 /// lookup are the fmgr/Datum boundary's job; `typlen` is supplied resolved
 /// (known non-zero per the C `elog` guard).
-pub fn pg_column_size(value: &Datum<'_>, typlen: i32) -> PgResult<i32> {
+pub fn pg_column_size(mcx: Mcx<'_>, value: &Datum<'_>, typlen: i32) -> PgResult<i32> {
     let result;
 
     if typlen == -1 {
         // C:5300-5301 varlena type, possibly toasted.
-        result = toast_datum_size(value)?;
+        result = toast_datum_size(mcx, value)?;
     } else if typlen == -2 {
         // C:5305-5306 cstring -> strlen(DatumGetCString(value)) + 1.
         result = cstring_datum_len(value)? + 1;

@@ -73,6 +73,8 @@ pub fn init_seams() {
     seams::decode_text_array_to_strings::set(construct::decode_text_array_to_strings);
     seams::deconstruct_tid_array::set(construct::deconstruct_tid_array);
     seams::construct_text_array::set(construct::construct_text_array);
+    seams::build_text_array_nullable::set(construct::build_text_array_nullable);
+    seams::array_to_text_elements::set(io::array_to_text_elements);
     seams::construct_int4_array::set(construct::construct_int4_array);
     seams::array_get_ndim::set(construct::array_get_ndim);
     seams::array_get_elemtype::set(construct::array_get_elemtype);

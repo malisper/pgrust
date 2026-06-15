@@ -1080,6 +1080,61 @@ pub fn array_out<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>
     Ok(p)
 }
 
+/// Seam `array_to_text_elements` — the element-deconstruct + per-element
+/// `OutputFunctionCall` walk of `array_to_text_internal` (varlena.c:5130-5178).
+/// `array` is the already-detoasted array varlena bytes; `element_type` is
+/// `ARR_ELEMTYPE(v)`. Returns one entry per element in storage order
+/// (`Some(output-bytes)` / `None` for NULL); the `fldsep`/`null_string`
+/// interleaving stays with the varlena caller.
+pub fn array_to_text_elements<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    element_type: Oid,
+) -> PgResult<PgVec<'mcx, Option<PgVec<'mcx, u8>>>> {
+    // get_type_io_data(element_type, IOFunc_output, ...) for the output proc and
+    // the element storage attributes (typlen/typbyval/typalign).
+    let meta = lsyscache::get_array_element_io_data::call(element_type, ArrayIoFuncSelector::Output)?;
+    let typlen = meta.typlen as i32;
+    let typbyval = meta.typbyval;
+    let typalign = meta.typalign;
+
+    let ndim = foundation::arr_ndim(array);
+    let nitems = arrayutils::array_get_n_items::call(ndim, &dims_of(mcx, array, ndim)?)?;
+
+    // if there are no elements, the caller returns the empty string.
+    let mut out: PgVec<'mcx, Option<PgVec<'mcx, u8>>> =
+        vec_with_capacity_in(mcx, nitems.max(0) as usize)?;
+    if nitems == 0 {
+        return Ok(out);
+    }
+
+    // p = ARR_DATA_PTR(v); bitmap = ARR_NULLBITMAP(v).
+    let nullbitmap = foundation::arr_nullbitmap_off(array);
+    let mut data_ptr = foundation::arr_data_ptr_off(array);
+
+    for i in 0..nitems {
+        // Get source element, checking for NULL.
+        if foundation::array_get_isnull(array, nullbitmap, i) {
+            out.push(None);
+        } else {
+            // itemvalue = fetch_att(p, typbyval, typlen);
+            let itemvalue = element_at(array, data_ptr, typbyval, typlen);
+            // p = att_addlength_pointer(p, typlen, p);
+            // p = att_align_nominal(p, typalign);
+            let (new_off, _bm) = foundation::array_seek(
+                array, data_ptr, None, 0, typlen, typbyval, typalign, 1,
+            );
+            data_ptr = new_off;
+
+            // value = OutputFunctionCall(&my_extra->proc, itemvalue);
+            let value = fmgr::array_output_function_call::call(mcx, meta.typiofunc, itemvalue)?;
+            out.push(Some(value));
+        }
+    }
+
+    Ok(out)
+}
+
 /// `ARR_DIMS(array)` collected into a `MAXDIM`-bounded slice.
 fn dims_of<'mcx>(mcx: Mcx<'mcx>, array: &[u8], ndim: i32) -> PgResult<PgVec<'mcx, i32>> {
     let mut v: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, ndim.max(0) as usize)?;
