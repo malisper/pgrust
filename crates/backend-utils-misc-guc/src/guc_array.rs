@@ -12,12 +12,68 @@
 
 use backend_utils_error::ereport;
 use types_acl::{AclResult, ACL_SET};
-use types_error::{PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR, ERROR,
+    WARNING,
+};
+use types_guc::guc::{GucContext, GucSource};
 use types_guc::{GUC_CUSTOM_PLACEHOLDER, PGC_SUSET, PGC_S_TEST, PGC_USERSET};
 
 use crate::live::{set_config_option_global, with_store};
 use crate::process_config::valid_custom_variable_name;
 use crate::GUC_ACTION_SET;
+
+/// `ErrorLocation` for `ereport(...).finish(...)`.
+fn here(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("utils/misc/guc.c", 0, funcname)
+}
+
+/// `ParseLongOption(const char *string, char **name, char **value)` (guc.c):
+/// split at the first `=` into `(name, Some(value))`, mapping `-` to `_` in the
+/// name; with no `=`, `(name, None)`.
+fn parse_long_option(string: &str) -> (String, Option<String>) {
+    let (name, value) = match string.split_once('=') {
+        Some((n, v)) => (n.to_string(), Some(v.to_string())),
+        None => (string.to_string(), None),
+    };
+    (name.replace('-', "_"), value)
+}
+
+/// `void ProcessGUCArray(ArrayType *array, GucContext context, GucSource source,
+/// GucAction action)` (guc.c) — apply each `"name=value"` entry of a
+/// proconfig/setconfig `text[]` (carried here as the `Vec<String>` value-model,
+/// already `TransformGUCArray`-deconstructed) via `set_config_option`. The C
+/// ignores `set_config_option`'s return and uses `elevel = 0`, so failures are
+/// silent; an entry without a `=` raises a WARNING and is skipped.
+pub fn ProcessGUCArray(array: Vec<String>, context: GucContext, source: GucSource) -> PgResult<()> {
+    for s in array {
+        let (name, value) = parse_long_option(&s);
+        let Some(value) = value else {
+            ereport(WARNING)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!(
+                    "could not parse setting for parameter \"{name}\""
+                ))
+                .finish(here("ProcessGUCArray"))?;
+            continue;
+        };
+
+        // (void) set_config_option(name, value, context, source, action, true,
+        //                          0, false);  — elevel 0: never raises.
+        set_config_option_global(
+            &name,
+            Some(&value),
+            context,
+            source,
+            get_user_id(),
+            GUC_ACTION_SET,
+            true,
+            types_error::ErrorLevel(0),
+            false,
+        )?;
+    }
+    Ok(())
+}
 
 /// `superuser()` (superuser.c) via the misc-more-installed seam.
 fn superuser() -> PgResult<bool> {
