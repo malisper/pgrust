@@ -168,6 +168,7 @@ pub fn init_seams() {
     seams::get_typisdefined::set(type_::get_typisdefined);
     seams::get_typlen::set(type_::get_typlen);
     seams::get_typbyval::set(type_::get_typbyval);
+    seams::get_type_sendreceive_byval::set(type_::get_type_sendreceive_byval);
     seams::get_typlenbyval::set(type_::get_typlenbyval);
     seams::get_typstorage::set(type_::get_typstorage);
     seams::get_typtype::set(type_::get_typtype);

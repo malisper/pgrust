@@ -58,3 +58,23 @@ seam_core::seam!(
     /// error's `errposition`. Returns 0 when `location < 0`.
     pub fn parser_errposition(source_text: &str, location: i32) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `transformExpr(pstate, expr, exprKind)` (parse_expr.c) — run the full
+    /// expression transform on a raw parse node. Consumed across the cycle by
+    /// `transformGroupingFunc` (parse_agg.c). `None` input/output mirrors the C
+    /// NULL passthrough.
+    pub fn transform_expr<'mcx>(
+        pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+        expr: Option<Node<'mcx>>,
+        expr_kind: types_nodes::parsestmt::ParseExprKind,
+    ) -> PgResult<Option<Expr>>
+);
+
+seam_core::seam!(
+    /// `ParseExprKindName(exprKind)` (parse_expr.c) — the SQL-construct name for
+    /// an expression-kind, used in error messages (eg "GROUP BY").
+    pub fn parse_expr_kind_name(
+        expr_kind: types_nodes::parsestmt::ParseExprKind,
+    ) -> &'static str
+);

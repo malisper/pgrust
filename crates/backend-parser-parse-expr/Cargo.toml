@@ -25,6 +25,7 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
 
 # Outward dependency seams (catalog / cache / sibling-parser callees).
+backend-parser-agg-seams = { path = "../backend-parser-agg-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }

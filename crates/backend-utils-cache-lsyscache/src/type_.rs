@@ -910,3 +910,26 @@ pub fn get_typdefault<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<PgBox
         Ok(None)
     }
 }
+
+/// `agg_args_support_sendreceive`'s `pg_type` probe (parse_agg.c) — fetch a
+/// type's `typbyval`/`typsend`/`typreceive` via the TYPEOID syscache.
+///
+/// ```c
+/// typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
+/// if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", type);
+/// pt = (Form_pg_type) GETSTRUCT(typeTuple);
+/// /* read pt->typbyval, pt->typsend, pt->typreceive */
+/// ```
+pub fn get_type_sendreceive_byval(
+    type_oid: Oid,
+) -> PgResult<backend_utils_cache_lsyscache_seams::TypeSendReceive> {
+    let pt = match syscache::pg_type_form::call(type_oid)? {
+        Some(t) => t,
+        None => return cache_lookup_failed_for_type(type_oid),
+    };
+    Ok(backend_utils_cache_lsyscache_seams::TypeSendReceive {
+        typbyval: pt.typbyval,
+        typsend: pt.typsend,
+        typreceive: pt.typreceive,
+    })
+}

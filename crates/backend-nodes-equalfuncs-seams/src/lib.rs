@@ -16,3 +16,11 @@ seam_core::seam!(
     /// two expression sub-trees.
     pub fn equal_expr(a: &types_nodes::primnodes::Expr, b: &types_nodes::primnodes::Expr) -> bool
 );
+
+seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` (equalfuncs.c) — structural equality of
+    /// two arbitrary nodes (used by `transformWindowFuncCall` to de-duplicate
+    /// WINDOW definitions: PARTITION BY / ORDER BY clause lists and frame
+    /// offset expressions are general nodes, not bare `Expr`s).
+    pub fn equal_node(a: &types_nodes::nodes::Node<'_>, b: &types_nodes::nodes::Node<'_>) -> bool
+);

@@ -1044,3 +1044,22 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
+
+/// Result of [`get_type_sendreceive_byval`] — the `pg_type` fields
+/// `agg_args_support_sendreceive` (parse_agg.c) probes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypeSendReceive {
+    /// `pg_type.typbyval`.
+    pub typbyval: bool,
+    /// `pg_type.typsend` — the type's binary-send function OID (or InvalidOid).
+    pub typsend: Oid,
+    /// `pg_type.typreceive` — the type's binary-receive function OID.
+    pub typreceive: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, type)` reading `typbyval`/`typsend`/`typreceive`
+    /// (parse_agg.c `agg_args_support_sendreceive`). A missing pg_type row is the
+    /// C `elog(ERROR, "cache lookup failed for type %u")`, carried on `Err`.
+    pub fn get_type_sendreceive_byval(type_oid: Oid) -> PgResult<TypeSendReceive>
+);

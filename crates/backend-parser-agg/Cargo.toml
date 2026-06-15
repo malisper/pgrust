@@ -1,0 +1,36 @@
+[package]
+name = "backend-parser-agg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_agg"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Owner of the inward seams this crate installs.
+backend-parser-agg-seams = { path = "../backend-parser-agg-seams" }
+
+# Direct (no-cycle) callees.
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+
+# Outward dependency seams (sibling-parser / rewriter / catalog callees).
+backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
+backend-parser-clause-seams = { path = "../backend-parser-clause-seams" }
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }

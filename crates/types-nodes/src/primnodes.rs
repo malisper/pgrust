@@ -725,6 +725,14 @@ pub struct Aggref {
     pub aggdirectargs: Vec<Expr>,
     /// `List *args` — aggregated args + sort exprs (list of TargetEntry).
     pub args: Vec<TargetEntry<'static>>,
+    /// `List *aggorder` — ORDER BY (list of SortGroupClause). Set by the parser
+    /// (`transformAggregateCall`, parse_agg.c). Added field-for-field vs
+    /// primnodes.h.
+    pub aggorder: Vec<crate::rawnodes::SortGroupClause>,
+    /// `List *aggdistinct` — DISTINCT (list of SortGroupClause). Set by the
+    /// parser (`transformAggregateCall`, parse_agg.c). Added field-for-field vs
+    /// primnodes.h.
+    pub aggdistinct: Vec<crate::rawnodes::SortGroupClause>,
     /// `Expr *aggfilter` — FILTER expression, if any.
     pub aggfilter: Option<Box<Expr>>,
     /// `bool aggstar` — true if argument list was really `*`.

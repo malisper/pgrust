@@ -1856,10 +1856,10 @@ fn seam_transform_sublink<'mcx>(
 }
 
 fn seam_transform_grouping_func<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _gf: Node<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    gf: Node<'mcx>,
 ) -> PgResult<Expr> {
-    panic!("transformGroupingFunc lives in parse_agg.c (unported).")
+    backend_parser_agg_seams::transform_grouping_func::call(pstate, gf)
 }
 
 fn seam_transform_row_expr<'mcx>(
@@ -2063,6 +2063,8 @@ fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
 pub fn init_seams() {
     me::analyze_one_exec_param::set(analyze_one_exec_param_impl);
     me::parser_errposition::set(parser_errposition_impl);
+    me::transform_expr::set(transformExpr);
+    me::parse_expr_kind_name::set(ParseExprKindName);
 }
 
 #[cfg(test)]

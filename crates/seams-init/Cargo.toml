@@ -168,6 +168,7 @@ backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }
 backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-agg = { path = "../backend-parser-agg" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
