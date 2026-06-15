@@ -78,7 +78,7 @@ pub fn init_seams() {
     backend_access_table_tableam_bm_seams::table_rescan::set(table_rescan_bm);
 
     // The COPY/seqscan value-typed scan seams (unified off the retired
-    // `ScanToken` model onto the C-faithful `TableScanDesc<'mcx>`).
+    // opaque-scan-handle model onto the C-faithful `TableScanDesc<'mcx>`).
     backend_access_table_tableam_seams::table_beginscan::set(table_beginscan_seam);
     backend_access_table_tableam_seams::table_scan_getnextslot::set(table_scan_getnextslot_fwd);
     backend_access_table_tableam_seams::table_scan_getnextslot_direction::set(

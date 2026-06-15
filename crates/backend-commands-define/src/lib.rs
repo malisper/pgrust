@@ -256,7 +256,7 @@ pub fn defGetStringList(def: &types_parsenodes::DefElem) -> PgResult<&[Node]> {
 
 /// `errorConflictingDefElem` (define.c:370-377) — raise an error about a
 /// conflicting `DefElem`.
-pub fn errorConflictingDefElem(defel: &types_parsenodes::DefElem, pstate: &ParseState) -> PgResult<()> {
+pub fn errorConflictingDefElem(defel: &types_parsenodes::DefElem, pstate: &ParseState<'_>) -> PgResult<()> {
     let position = parser_errposition::call(pstate, defel.location)?;
     Err(ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)

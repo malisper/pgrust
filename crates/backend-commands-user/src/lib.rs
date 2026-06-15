@@ -220,7 +220,7 @@ fn have_createrole_privilege() -> PgResult<bool> {
 /// `CreateRole(pstate, stmt)` — CREATE ROLE/USER/GROUP.
 pub fn CreateRole<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     stmt: &CreateRoleStmt,
 ) -> PgResult<Oid> {
     let currentUserId = seam::get_user_id::call()?;
@@ -734,7 +734,7 @@ pub fn CreateRole<'mcx>(
 /// `AlterRole(pstate, stmt)` — ALTER ROLE.
 pub fn AlterRole<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     stmt: &AlterRoleStmt,
 ) -> PgResult<Oid> {
     let currentUserId = seam::get_user_id::call()?;
@@ -1569,7 +1569,7 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
 /// `GrantRole(pstate, stmt)` — GRANT/REVOKE role membership.
 pub fn GrantRole<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     stmt: &GrantRoleStmt,
 ) -> PgResult<()> {
     let currentUserId = seam::get_user_id::call()?;

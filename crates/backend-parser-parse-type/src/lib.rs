@@ -89,7 +89,7 @@ fn strVal(node: &Node) -> PgResult<&str> {
 /// location info and may be `None`; the C `parser_errposition(NULL, ...)`
 /// contributes 0. With a `ParseState` the cursor position crosses the
 /// `parser_errposition` seam (parse_node.c).
-fn parser_errposition(pstate: Option<&types_cluster::ParseState>, location: i32) -> PgResult<i32> {
+fn parser_errposition(pstate: Option<&types_cluster::ParseState<'_>>, location: i32) -> PgResult<i32> {
     match pstate {
         Some(ps) => backend_parser_small1_seams::parser_errposition::call(ps, location),
         None => Ok(0),
@@ -120,7 +120,7 @@ fn name_str(form: &FormData_pg_type) -> String {
 /// true, missing_ok)`.
 pub fn LookupTypeName(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
     missing_ok: bool,
 ) -> PgResult<Option<(Type, i32)>> {
@@ -131,7 +131,7 @@ pub fn LookupTypeName(
 /// entry for a `TypeName`, computing the typmod. Returns `None` if not found.
 pub fn LookupTypeNameExtended(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
     temp_ok: bool,
     missing_ok: bool,
@@ -271,7 +271,7 @@ pub fn LookupTypeNameExtended(
 /// The shared tail of `LookupTypeNameExtended` (parse_type.c:200-216): given the
 /// resolved `typoid`, fetch the Type tuple and compute the typmod.
 fn finish_lookup(
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
     typoid: Oid,
 ) -> PgResult<Option<(Type, i32)>> {
@@ -297,7 +297,7 @@ fn finish_lookup(
 /// OID (erroring or `InvalidOid` per `missing_ok`).
 pub fn LookupTypeNameOid(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
     missing_ok: bool,
 ) -> PgResult<Oid> {
@@ -326,7 +326,7 @@ pub fn LookupTypeNameOid(
 /// not yet defined; returns the Type plus its typmod.
 pub fn typenameType(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
 ) -> PgResult<(Type, i32)> {
     let tup = LookupTypeName(mcx, pstate, typeName, false)?;
@@ -358,7 +358,7 @@ pub fn typenameType(
 /// the OID.
 pub fn typenameTypeId(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
 ) -> PgResult<Oid> {
     let (tup, _typmod) = typenameType(mcx, pstate, typeName)?;
@@ -370,7 +370,7 @@ pub fn typenameTypeId(
 /// typmod.
 pub fn typenameTypeIdAndMod(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
 ) -> PgResult<(Oid, i32)> {
     let (tup, typmod) = typenameType(mcx, pstate, typeName)?;
@@ -380,7 +380,7 @@ pub fn typenameTypeIdAndMod(
 /// `typenameTypeMod()` (parse_type.c:332, static): compute the typmod by running
 /// the type's `typmodin` over the `TypeName`'s typmod decoration.
 fn typenameTypeMod(
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     typeName: &TypeName,
     typ: Type,
 ) -> PgResult<i32> {
@@ -515,7 +515,7 @@ pub fn TypeNameListToString(typenames: &[TypeName]) -> PgResult<String> {
 /// collation OID at a source location.
 pub fn LookupCollation(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     collnames: &[Node],
     location: i32,
 ) -> PgResult<Oid> {
@@ -533,7 +533,7 @@ pub fn LookupCollation(
 /// applies to a column definition of type `typeOid`.
 pub fn GetColumnDefCollation(
     mcx: Mcx<'_>,
-    pstate: Option<&types_cluster::ParseState>,
+    pstate: Option<&types_cluster::ParseState<'_>>,
     coldef: &ColumnDefInput,
     typeOid: Oid,
 ) -> PgResult<Oid> {

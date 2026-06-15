@@ -733,7 +733,7 @@ pub fn BeginCopyTo<'mcx>(
         // receiver, build the QueryDesc, ExecutorStart (copyto.c:719-851).
         let pstate = pstate.expect("COPY (query) TO requires a ParseState");
         let raw = raw_query.expect("COPY (query) TO requires a raw query");
-        let source_text = pstate.p_sourcetext.as_str();
+        let source_text = pstate.p_sourcetext.as_deref().unwrap_or("");
 
         // rewritten = pg_analyze_and_rewrite_fixedparams(...)
         let rewritten = backend_parser_analyze_seams::pg_analyze_and_rewrite_fixedparams::call(

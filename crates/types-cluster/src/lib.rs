@@ -133,14 +133,13 @@ pub struct ClusterStmt {
  * parser/parse_node.h: ParseState (opaque to this consumer)
  * ---------------------------------------------------------------- */
 
-/// `ParseState` (`parser/parse_node.h`). CLUSTER only forwards the pointer to
-/// `parser_errposition(pstate, location)`; the full struct belongs to the
-/// parser. Carries the source query text the error-position machinery reads.
-#[derive(Clone, Debug, Default)]
-pub struct ParseState {
-    /// `const char *p_sourcetext` — the source text of the query, or `None`.
-    pub p_sourcetext: Option<String>,
-}
+/// `ParseState` (`parser/parse_node.h`). Unified (K1 phase 4) onto the single
+/// canonical full struct in [`types_nodes::parsestmt`]. CLUSTER (and the other
+/// DDL consumers re-exporting through here) only forward the pointer to
+/// `parser_errposition(pstate, location)`; the parser (its owner) fills the
+/// rest. Re-exported for type identity — the struct now carries the full
+/// ~36-field set and an `'mcx` lifetime.
+pub use types_nodes::parsestmt::ParseState;
 
 /* ----------------------------------------------------------------
  * commands/vacuum.h: struct VacuumCutoffs
