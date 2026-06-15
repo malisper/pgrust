@@ -1464,7 +1464,9 @@ fn empty_pgvec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>
 /// scope is a leaf consumer called directly by its (still-unported) callers
 /// (`analyze.c`). The aggregator still invokes this so the crate participates in
 /// the wiring discipline; it installs nothing.
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_parser_clause_seams::transform_where_clause::set(transformWhereClause);
+}
 
 #[cfg(test)]
 mod tests;
