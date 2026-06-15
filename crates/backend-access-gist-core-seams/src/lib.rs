@@ -92,6 +92,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `gistXLogPageDelete(buffer, xid, parentBuffer, downlinkOffset)`
+    /// (gistxlog.c:552) — WAL-log the deletion of a GiST leaf page: mark the
+    /// child deleted with `xid` and remove the parent's downlink at
+    /// `downlinkOffset`. Returns the record's `XLogRecPtr`. Owned by the GiST
+    /// xlog (F7) lane; panics until that lands.
+    pub fn gist_xlog_page_delete(
+        buffer: types_storage::Buffer,
+        xid: types_core::xact::FullTransactionId,
+        parent_buffer: types_storage::Buffer,
+        downlink_offset: types_core::primitive::OffsetNumber,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
+
+seam_core::seam!(
     /// `gistGetFakeLSN(rel)` (gist.c) — produce a fake LSN for an unlogged or
     /// temp GiST index (so NSN interlocks still order correctly without real
     /// WAL). Owned by the GiST xlog (F7) lane; panics until that lands.

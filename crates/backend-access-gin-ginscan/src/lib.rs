@@ -85,6 +85,8 @@ use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber};
 
+use backend_storage_buffer_bufmgr_seams as bufmgr;
+
 use backend_access_gin_ginutil as ginutil;
 use backend_access_gin_ginutil_seams as sx;
 use backend_access_gin_core_probe::ginlogic::ginInitConsistentFunction;
@@ -830,12 +832,9 @@ fn relation_get_index_scan<'mcx>(
     }))
 }
 
-/// `ReleaseBuffer(buffer)` (bufmgr.c). The posting-tree buffers a scan entry
-/// pins are produced by the not-yet-ported `ginget.c`; with no scan engine
-/// running, `ginFreeScanKeys` never sees a valid buffer here, so the bufmgr
-/// release is reached only once `ginget.c` lands. Modelled as the C call.
-fn release_buffer(_buffer: types_storage::storage::Buffer) {
-    // ginget.c pins these via the bufmgr seam; until it lands this is
-    // unreachable (entries' `buffer` stays `InvalidBuffer`).
-    unreachable!("GIN posting-tree buffer release requires the unported ginget.c scan engine");
+/// `ReleaseBuffer(buffer)` (bufmgr.c). `ginget.c` (ported) pins posting-tree
+/// buffers into a scan entry's `buffer`; `ginFreeScanKeys` releases any valid
+/// pin here on rescan / endscan (ginscan.c:250-251), exactly as ginbtree does.
+fn release_buffer(buffer: types_storage::storage::Buffer) {
+    bufmgr::release_buffer::call(buffer)
 }

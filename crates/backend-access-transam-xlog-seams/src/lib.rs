@@ -264,6 +264,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogRecPtr GetInsertRecPtr(void)` (xlog.c:6544) — the approximate WAL
+    /// insert position (the latest fully-inserted record). Used by GiST VACUUM as
+    /// the scan-start NSN interlock (`gistvacuumscan`).
+    pub fn get_insert_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
     /// `XLogRecPtr GetXLogReplayRecPtr(TimeLineID *)` (xlogrecovery.c) — last
     /// replayed position (called with NULL by slot.c, so no TLI out).
     pub fn get_xlog_replay_rec_ptr() -> XLogRecPtr
