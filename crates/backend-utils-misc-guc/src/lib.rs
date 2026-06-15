@@ -62,7 +62,7 @@ mod tests;
 
 use backend_utils_error::ereport;
 use types_error::{
-    PgError, PgResult, SqlState, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
+    PgError, PgResult, SqlState, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, WARNING,
 };
 
 pub use enum_lookup::{
@@ -79,8 +79,8 @@ pub use name::{
 };
 pub use process_config::{apply_config_variables, ConfigItem};
 pub use registry::{
-    get_config_option_by_name, parse_and_validate_value, reset_all_options, reset_value_string,
-    set_config_option, show_guc_option, GucAction, GucRegistry, GucVariable,
+    get_config_option_by_name, get_config_option_flags, parse_and_validate_value, reset_all_options,
+    reset_value_string, set_config_option, show_guc_option, GucAction, GucRegistry, GucVariable,
 };
 pub use report::{begin_reporting_guc_options, report_changed_guc_options};
 pub use units::{
@@ -241,6 +241,48 @@ static GUC_NEST_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 /// `AtEOXact_GUC`.
 pub fn NewGUCNestLevel() -> i32 {
     GUC_NEST_LEVEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Read `GUCNestLevel` (guc.c file static). Used by `push_old_value`
+/// (registry.rs) to decide whether a save level is open and at what level.
+pub(crate) fn guc_nest_level() -> i32 {
+    GUC_NEST_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `GUCNestLevel = level` — set the nest-level counter. Used by `AtStart_GUC`
+/// (set to 1) and `AtEOXact_GUC` (set to `nestLevel - 1`).
+pub(crate) fn set_guc_nest_level(level: i32) {
+    GUC_NEST_LEVEL.store(level, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `AtStart_GUC(void)` (guc.c:2215): GUC processing at main transaction start.
+/// The nest level should be 0 between transactions; if not, warn (somebody
+/// missed an `AtEOXact_GUC`) and reset to 1.
+pub fn at_start_guc() {
+    if guc_nest_level() != 0 {
+        let e = ereport(WARNING)
+            .errmsg(format!(
+                "GUC nest level = {} at transaction start",
+                guc_nest_level()
+            ))
+            .into_error();
+        backend_utils_error::emit_error_report_for(&e);
+    }
+    set_guc_nest_level(1);
+}
+
+/// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c:2262): GUC processing at
+/// transaction/subtransaction commit or abort, or when exiting a function with
+/// proconfig settings, or undoing a transient assignment. Discards/restores all
+/// GUC settings applied at nesting levels >= `nest_level`, then updates the
+/// nesting level to `nest_level - 1`. Owned here (guc_stack.c is part of the GUC
+/// unit); the per-variable rollback walk lives in [`registry`].
+pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) {
+    live::with_store_mut(|reg| {
+        registry::at_eoxact_guc(reg, is_commit, nest_level);
+    });
+    // GUCNestLevel = nestLevel - 1 (guc.c:2536).
+    set_guc_nest_level(nest_level - 1);
 }
 
 /// `ParseLongOption(string, &name, &value)` (guc.c:6367) — a little "long
@@ -557,15 +599,19 @@ pub fn init_seams() {
     // the sibling combocid/snapshot serializers).
     install_guc_state_transfer_seams();
 
-    // GUC nesting level (guc.c): NewGUCNestLevel is `++GUCNestLevel`, owned
-    // here. AtEOXact_GUC's stack rollback still belongs to guc_stack.c.
+    // GUC nesting level + transactional stack (guc.c / guc_stack.c, both part of
+    // the GUC unit and owned here). NewGUCNestLevel is `++GUCNestLevel`;
+    // AtEOXact_GUC pops the per-variable save stack and restores/discards prior
+    // values; AtStart_GUC sanity-resets the nest level at xact start.
     s::new_guc_nest_level::set(NewGUCNestLevel);
-    s::at_eoxact_guc::set(|_is_commit, _nest_level| {
-        panic!(
-            "AtEOXact_GUC: the transactional GUC stack (guc_stack.c) is a separate unit not yet \
-             ported"
-        )
+    s::at_eoxact_guc::set(|is_commit, nest_level| {
+        at_eoxact_guc(is_commit, nest_level);
+        Ok(())
     });
+    // `AtStart_GUC()` is declared in the guc-file-seams sibling (guc-file.l's
+    // historical home) but is genuinely guc_stack.c's; install it here, its real
+    // owner. Consumed by xact (engine.rs StartTransaction).
+    backend_utils_misc_guc_file_seams::at_start_guc::set(at_start_guc);
 
     // --- guc.c bodies whose seam decls previously lived (mis-homed) in the
     //     sibling `backend-utils-misc-guc-file-seams` crate; they are now
