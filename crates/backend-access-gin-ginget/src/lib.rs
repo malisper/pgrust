@@ -79,7 +79,6 @@ use backend_access_gin_ginutil_seams as sx;
 use backend_nodes_core::tidbitmap as tbm;
 use backend_storage_lmgr_predicate_seams as predicate;
 use backend_tcop_postgres_seams as postgres;
-use backend_utils_activity_pgstat_seams::pgstat_count_index_scan;
 
 #[cfg(test)]
 mod tests;
@@ -1778,7 +1777,9 @@ pub fn gingetbitmap<'mcx>(
         return Ok(0);
     }
 
-    pgstat_count_index_scan::call(scan.index_relation.rd_id);
+    // NB: ginNewScanKey (ginscan.c:487) already issued
+    // pgstat_count_index_scan; gingetbitmap itself does NOT count in C
+    // (ginget.c). Counting here too would double-count the scan.
 
     let mut ntids: i64 = 0;
 

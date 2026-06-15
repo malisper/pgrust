@@ -11,12 +11,16 @@ pub fn init_all() {
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
+    backend_access_common_next::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginget::init_seams();
+    backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
+    backend_access_gin_ginvacuum::init_seams();
     backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
@@ -1231,13 +1235,28 @@ mod recurrence_guard {
         let mut i = 0;
         while i < src.len() {
             if i + needle.len() <= bytes.len() && &bytes[i..i + needle.len()] == needle {
-                // Skip to the first '{' and drop the balanced block.
+                // Scan forward to whichever comes first: a ';' (a block-less
+                // item DECL such as `#[cfg(test)] mod tests;`, which has no body
+                // to strip) or a '{' (an inline item with a balanced body to
+                // drop). Stopping at ';' first is essential: a bare module decl
+                // is terminated by ';' BEFORE the next item's '{', so naively
+                // scanning to the first '{' would erase the body of the NEXT
+                // item (e.g. `pub fn init_seams() {...}`) instead.
                 let mut j = i + needle.len();
-                while j < bytes.len() && bytes[j] as char != '{' {
+                while j < bytes.len()
+                    && bytes[j] as char != '{'
+                    && bytes[j] as char != ';'
+                {
                     j += 1;
                 }
                 if j >= bytes.len() {
                     break;
+                }
+                if bytes[j] as char == ';' {
+                    // Block-less decl: drop only the attribute + decl up to and
+                    // including the ';'. Nothing else to strip.
+                    i = j + 1;
+                    continue;
                 }
                 let mut depth = 0i32;
                 while j < bytes.len() {
