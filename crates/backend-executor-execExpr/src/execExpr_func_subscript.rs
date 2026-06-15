@@ -578,6 +578,151 @@ pub(crate) fn exec_init_func<'mcx>(
     Ok(())
 }
 
+/// `case T_ScalarArrayOpExpr:` (execExpr.c:1266) — compile a
+/// `scalar op ANY/ALL (array)` test. Selects the comparison function
+/// (`negfuncid` for hashed NOT IN, else `opfuncid`), ACL-checks it (and the
+/// hash function when hashed), resolves the fmgr lookup, builds the 2-arg call
+/// frame, then evaluates the scalar into `fcinfo->args[0]` (a fresh cell) and
+/// the array into the step's result cell (`resv`) before pushing either an
+/// `EEOP_HASHED_SCALARARRAYOP` (when `hashfuncid` is set) or `EEOP_SCALARARRAYOP`
+/// step.
+pub(crate) fn exec_init_scalar_array_op<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    opexpr: &types_nodes::primnodes::ScalarArrayOpExpr,
+    state: &mut ExprState<'mcx>,
+    resv: types_nodes::execexpr::ResultCellId,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+
+    // C: Select the correct comparison function. For hashed NOT IN the opfuncid
+    //    is the inequality function and negfuncid is the equality function we
+    //    must use for hash probes.
+    let cmpfuncid = if opexpr.negfuncid != types_core::InvalidOid {
+        debug_assert!(opexpr.hashfuncid != types_core::InvalidOid);
+        opexpr.negfuncid
+    } else {
+        opexpr.opfuncid
+    };
+
+    // C: Assert(list_length(opexpr->args) == 2);
+    //    scalararg = linitial(opexpr->args); arrayarg = lsecond(opexpr->args);
+    debug_assert_eq!(opexpr.args.len(), 2);
+    let scalararg = &opexpr.args[0];
+    let arrayarg = &opexpr.args[1];
+
+    // C: Check permission to call function (the comparison function).
+    //    aclresult = object_aclcheck(...); if (!OK) aclcheck_error(...);
+    //    InvokeFunctionExecuteHook(cmpfuncid);
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_parsenodes::ProcedureRelationId,
+        cmpfuncid,
+        backend_utils_init_miscinit_seams::get_user_id::call(),
+        types_acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::ACLCHECK_OK {
+        let funcname = backend_utils_cache_lsyscache_seams::get_func_name::call(mcx, cmpfuncid)?
+            .map(|s| s.to_string());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::OBJECT_FUNCTION,
+            funcname,
+        )?;
+    }
+    backend_catalog_objectaccess::invoke_function_execute_hook(cmpfuncid)?;
+
+    // C: if (OidIsValid(opexpr->hashfuncid)) { ACL-check the hash function too. }
+    if opexpr.hashfuncid != types_core::InvalidOid {
+        let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+            types_parsenodes::ProcedureRelationId,
+            opexpr.hashfuncid,
+            backend_utils_init_miscinit_seams::get_user_id::call(),
+            types_acl::ACL_EXECUTE,
+        )?;
+        if aclresult != types_acl::ACLCHECK_OK {
+            let funcname =
+                backend_utils_cache_lsyscache_seams::get_func_name::call(mcx, opexpr.hashfuncid)?
+                    .map(|s| s.to_string());
+            backend_catalog_aclchk_seams::aclcheck_error::call(
+                aclresult,
+                types_nodes::parsenodes::OBJECT_FUNCTION,
+                funcname,
+            )?;
+        }
+        backend_catalog_objectaccess::invoke_function_execute_hook(opexpr.hashfuncid)?;
+    }
+
+    // C: Set up the primary fmgr lookup information.
+    //    finfo = palloc0(sizeof(FmgrInfo)); fcinfo = palloc0(SizeForFunctionCallInfo(2));
+    //    fmgr_info(cmpfuncid, finfo); fmgr_info_set_expr(node, finfo);
+    //    InitFunctionCallInfoData(*fcinfo, finfo, 2, opexpr->inputcollid, NULL, NULL);
+    let flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, cmpfuncid)?;
+    let fcinfo_data = mcx::alloc_in(
+        mcx,
+        types_nodes::fmgr::FunctionCallInfoBaseData {
+            flinfo: Some(flinfo.clone()),
+            context: None,
+            resultinfo: None,
+            fncollation: opexpr.inputcollid,
+            isnull: false,
+            nargs: 2,
+            args: Vec::new(),
+        },
+    )?;
+
+    if opexpr.hashfuncid != types_core::InvalidOid {
+        // C (hashed path):
+        //    ExecInitExprRec(scalararg, state, &fcinfo->args[0].value/.isnull);
+        //    ExecInitExprRec(arrayarg, state, resv, resnull);
+        let scalar_cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+        crate::execExpr_core::exec_init_expr_rec(mcx, scalararg, state, scalar_cell)?;
+        crate::execExpr_core::exec_init_expr_rec(mcx, arrayarg, state, resv)?;
+
+        // C: scratch.opcode = EEOP_HASHED_SCALARARRAYOP;
+        //    .inclause = opexpr->useOr; .finfo = finfo; .fcinfo_data = fcinfo;
+        //    .saop = opexpr;
+        scratch.opcode = ExprEvalOp::EEOP_HASHED_SCALARARRAYOP;
+        scratch.d = ExprEvalStepData::HashedScalarArrayOp {
+            has_nulls: false,
+            inclause: opexpr.useOr,
+            elements_tab: None,
+            finfo: Some(mcx::alloc_in(mcx, flinfo)?),
+            fcinfo_data: Some(fcinfo_data),
+            saop: Some(mcx::alloc_in(mcx, opexpr.clone())?),
+            scalar_cell,
+        };
+    } else {
+        // C (linear path):
+        //    ExecInitExprRec(scalararg, state, &fcinfo->args[0].value/.isnull);
+        //    ExecInitExprRec(arrayarg, state, resv, resnull);
+        let scalar_cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+        crate::execExpr_core::exec_init_expr_rec(mcx, scalararg, state, scalar_cell)?;
+        crate::execExpr_core::exec_init_expr_rec(mcx, arrayarg, state, resv)?;
+
+        // C: scratch.opcode = EEOP_SCALARARRAYOP;
+        //    .element_type = InvalidOid; .useOr = opexpr->useOr; .finfo = finfo;
+        //    .fcinfo_data = fcinfo; .fn_addr = finfo->fn_addr;
+        // fn_addr stays None (the interpreter re-resolves by finfo.fn_oid, the
+        // fmgr-seam contract). The array side was evaluated into `resv`, which
+        // the step deconstructs; `array_cell` records that cell.
+        scratch.opcode = ExprEvalOp::EEOP_SCALARARRAYOP;
+        scratch.d = ExprEvalStepData::ScalarArrayOp {
+            element_type: types_core::InvalidOid,
+            use_or: opexpr.useOr,
+            typlen: 0,
+            typbyval: false,
+            typalign: 0,
+            finfo: Some(mcx::alloc_in(mcx, flinfo)?),
+            fcinfo_data: Some(fcinfo_data),
+            fn_addr: None,
+            scalar_cell,
+            array_cell: resv,
+        };
+    }
+
+    Ok(())
+}
+
 /// `ExecInitSubPlanExpr(subplan, state, resv, resnull)` (execExpr.c:2820) —
 /// compile a `SubPlan` reference: recurse each `parParam`/`args` pair into the
 /// param it sets, emit an `EEOP_PARAM_SET` step per pair, create the

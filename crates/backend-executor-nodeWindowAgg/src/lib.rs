@@ -21,13 +21,16 @@
 //! catalog readers, globals.c's `work_mem`, tcop/postgres.c's interrupt check)
 //! go through those owners' seam crates and panic until the owners land.
 //!
-//! The actual fmgr `FunctionCallInvoke` / `FunctionCall5Coll` dispatch and the
-//! expanded-datum primitives (`MakeExpandedObjectReadOnly` / `datumCopy` of a
-//! pass-by-ref value / `DeleteExpandedObject` / `pfree` of a Datum) have no
-//! owner in this repo yet, so the four per-aggregate / per-windowfunc
-//! transition bodies, the two in_range comparison sites, and the
-//! pass-by-reference copy/free stanzas panic loudly (mirror-PG-and-panic). All
-//! the surrounding control flow is real in-crate code.
+//! The fmgr `FunctionCallInvoke` / `FunctionCall5Coll` dispatch crosses the
+//! value-based `function_call_invoke` seam (fmgr-seams): the transfn /
+//! invtransfn / finalfn bodies and the two RANGE in_range comparison sites all
+//! gather their arguments into a `NullableDatum` call frame and invoke by
+//! `fn_oid` under the relevant collation. Only the expanded-datum primitives
+//! (`MakeExpandedObjectReadOnly` of a pass-by-ref value / `datumCopy` reparent /
+//! `DeleteExpandedObject` / `pfree` of a Datum) have no owner in this repo yet,
+//! so the pass-by-reference transition/result copy-free stanzas still panic
+//! loudly (mirror-PG-and-panic). All the surrounding control flow is real
+//! in-crate code.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -64,6 +67,19 @@ const INVALID_OID: Oid = 0;
 #[inline]
 fn oid_is_valid(o: Oid) -> bool {
     o != INVALID_OID
+}
+
+/// Build a `function_call_invoke` argument cell from an in-crate `Datum<'mcx>`
+/// value/isnull pair. The fmgr-call frame carries bare-word `types_datum`
+/// `NullableDatum`s (the seam's value-based ABI), so the canonical
+/// `Datum<'mcx>` is collapsed to its raw word here (mirror execExprInterp's
+/// `word_of` gather in `func_step_inputs`).
+#[inline]
+fn nd(value: &Datum<'_>, isnull: bool) -> types_datum::NullableDatum {
+    types_datum::NullableDatum {
+        value: types_datum::Datum::from_usize(value.as_usize()),
+        isnull,
+    }
 }
 
 /// nodeWindowAgg has no `<unit>-seams` crate: callers (execProcnode's dispatch
@@ -205,22 +221,65 @@ fn advance_windowaggregate<'mcx>(
         }
     }
 
-    // OK to call the transition function. Set winstate->curaggcontext.
-    //   InitFunctionCallInfoData(...); fcinfo->args[0] = transValue;
+    // OK to call the transition function. Set winstate->curaggcontext while
+    // calling it, for possible use by AggCheckCallContext.
+    //   InitFunctionCallInfoData(*fcinfo, &peraggstate->transfn,
+    //                            numArguments + 1, perfuncstate->winCollation, ...);
+    //   fcinfo->args[0].value = peraggstate->transValue;
+    //   fcinfo->args[0].isnull = peraggstate->transValueIsNull;
     //   winstate->curaggcontext = peraggstate->aggcontext;
     //   newVal = FunctionCallInvoke(fcinfo);
     //   winstate->curaggcontext = NULL;
     //
-    // The transfn invocation (FunctionCallInvoke), the moving-aggregate
-    // not-null result check, the transValueCount++ bookkeeping, and the
-    // pass-by-ref reparent/copy stanza all hang off this fmgr boundary, which
-    // has no seam in this repo yet (mirror nodeAgg::advance_transition_function).
-    let _ = (argvals, econtext);
-    panic!(
-        "backend-executor-nodeWindowAgg::advance_windowaggregate: \
-         the aggregate transition function invocation (FunctionCallInvoke) is owned \
-         by the not-yet-ported fmgr/execExpr units; no transfn-invoke seam exists yet"
-    );
+    // (The curaggcontext push/pop only matters to AggCheckCallContext within
+    // the callee; the call frame carries no aggcontext, so it is a no-op here.)
+    let pa = peragg_ref(winstate, peraggno);
+    let fn_oid = pa.transfn.fn_oid;
+    let collation = perfunc_ref(winstate, perfuncno).winCollation;
+
+    // fcinfo->args[0] = transValue; fcinfo->args[1..] = the evaluated arguments.
+    let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
+        alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+    args.push(nd(&pa.transValue, pa.transValueIsNull));
+    for i in 0..numArguments as usize {
+        args.push(nd(&argvals[i].0, argvals[i].1));
+    }
+
+    let (newVal, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+
+    // Moving-aggregate transition functions must not return null, see
+    // advance_windowaggregate_base().
+    //   if (fcinfo->isnull && OidIsValid(peraggstate->invtransfn_oid)) ereport(ERROR, ...);
+    if isnull && oid_is_valid(peragg_ref(winstate, peraggno).invtransfn_oid) {
+        return Err(types_error::PgError::error(
+            "moving-aggregate transition function must not return null",
+        )
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+
+    // We must track the number of rows included in transValue, since to remove
+    // the last input, advance_windowaggregate_base() mustn't call the inverse
+    // transition function, but simply reset transValue back to its initial value.
+    //   peraggstate->transValueCount++;
+    peragg_mut(winstate, peraggno).transValueCount += 1;
+
+    // If pass-by-ref datatype, must copy the new value into aggcontext and free
+    // the prior transValue. (See comments for ExecAggCopyTransValue.)
+    if !peragg_ref(winstate, peraggno).transtypeByVal {
+        panic!(
+            "backend-executor-nodeWindowAgg::advance_windowaggregate: \
+             reparenting a pass-by-reference transition value into the aggcontext \
+             (datumCopy / DeleteExpandedObject / pfree of the prior value) has no owner \
+             (by-reference datum-arena / expanded-datum primitives unported); no seam exists yet"
+        );
+    }
+
+    // peraggstate->transValue = newVal; peraggstate->transValueIsNull = fcinfo->isnull;
+    let pa = peragg_mut(winstate, peraggno);
+    pa.transValue = Datum::from_usize(newVal.as_usize());
+    pa.transValueIsNull = isnull;
+    let _ = econtext;
+    Ok(())
 }
 
 /// `advance_windowaggregate_base` — remove the oldest tuple from an
@@ -292,16 +351,55 @@ fn advance_windowaggregate_base<'mcx>(
         return Ok(true);
     }
 
-    // OK to call the inverse transition function.
-    //   newVal = FunctionCallInvoke(fcinfo);  (then transValueCount--, etc.)
-    //
-    // Same fmgr boundary as advance_windowaggregate; no seam yet.
-    let _ = (argvals, econtext);
-    panic!(
-        "backend-executor-nodeWindowAgg::advance_windowaggregate_base: \
-         the inverse-transition function invocation (FunctionCallInvoke) is owned \
-         by the not-yet-ported fmgr/execExpr units; no invtransfn-invoke seam exists yet"
-    );
+    // OK to call the inverse transition function. Set winstate->curaggcontext
+    // while calling it, for possible use by AggCheckCallContext.
+    //   InitFunctionCallInfoData(*fcinfo, &peraggstate->invtransfn,
+    //                            numArguments + 1, perfuncstate->winCollation, ...);
+    //   fcinfo->args[0].value = peraggstate->transValue;
+    //   fcinfo->args[0].isnull = peraggstate->transValueIsNull;
+    //   winstate->curaggcontext = peraggstate->aggcontext;
+    //   newVal = FunctionCallInvoke(fcinfo);
+    //   winstate->curaggcontext = NULL;
+    let pa = peragg_ref(winstate, peraggno);
+    let fn_oid = pa.invtransfn.fn_oid;
+    let collation = perfunc_ref(winstate, perfuncno).winCollation;
+
+    let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
+        alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+    args.push(nd(&pa.transValue, pa.transValueIsNull));
+    for i in 0..numArguments as usize {
+        args.push(nd(&argvals[i].0, argvals[i].1));
+    }
+
+    let (newVal, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+
+    // If the function returns NULL, report failure, forcing a restart.
+    //   if (fcinfo->isnull) { return false; }
+    if isnull {
+        return Ok(false);
+    }
+
+    // Update number of rows included in transValue.
+    //   peraggstate->transValueCount--;
+    peragg_mut(winstate, peraggno).transValueCount -= 1;
+
+    // If pass-by-ref datatype, must copy the new value into aggcontext and free
+    // the prior transValue. (See comments for ExecAggCopyTransValue.)
+    if !peragg_ref(winstate, peraggno).transtypeByVal {
+        panic!(
+            "backend-executor-nodeWindowAgg::advance_windowaggregate_base: \
+             reparenting a pass-by-reference inverse-transition value into the aggcontext \
+             (datumCopy / DeleteExpandedObject / pfree of the prior value) has no owner \
+             (by-reference datum-arena / expanded-datum primitives unported); no seam exists yet"
+        );
+    }
+
+    // peraggstate->transValue = newVal; peraggstate->transValueIsNull = fcinfo->isnull;
+    let pa = peragg_mut(winstate, peraggno);
+    pa.transValue = Datum::from_usize(newVal.as_usize());
+    pa.transValueIsNull = isnull;
+    let _ = econtext;
+    Ok(true)
 }
 
 /// `finalize_windowaggregate` — parallel to `finalize_aggregate` in nodeAgg.c.
@@ -313,20 +411,65 @@ fn finalize_windowaggregate<'mcx>(
 
     // Apply the agg's finalfn if one is provided, else return transValue.
     if oid_is_valid(peragg_ref(winstate, peraggno).finalfn_oid) {
-        // InitFunctionCallInfoData(...);
-        // fcinfo->args[0].value = MakeExpandedObjectReadOnly(transValue, ...);
-        // ... if strict && anynull: result = NULL; else res = FunctionCallInvoke(fcinfo);
-        //     result = MakeExpandedObjectReadOnly(res, ...);
+        // perfuncstate = &winstate->perfunc[peraggstate->wfuncno].
+        let perfuncno = peragg_ref(winstate, peraggno).wfuncno as usize;
+        let pa = peragg_ref(winstate, peraggno);
+        let numFinalArgs = pa.numFinalArgs;
+        let fn_oid = pa.finalfn.fn_oid;
+        let fn_strict = pa.finalfn.fn_strict;
+        let collation = perfunc_ref(winstate, perfuncno).winCollation;
+
+        // InitFunctionCallInfoData(fcinfo, &peraggstate->finalfn, numFinalArgs,
+        //                          perfuncstate->winCollation, ...);
+        // fcinfo->args[0].value = MakeExpandedObjectReadOnly(transValue,
+        //                            transValueIsNull, transtypeLen);
+        // fcinfo->args[0].isnull = transValueIsNull;
+        // anynull = transValueIsNull;
         //
-        // Both MakeExpandedObjectReadOnly and the FunctionCallInvoke have no
-        // owner; the whole finalfn path hangs off this boundary (mirror
-        // nodeAgg::finalize.rs).
-        panic!(
-            "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
-             the aggregate final function invocation (FunctionCallInvoke) and \
-             MakeExpandedObjectReadOnly are owned by the not-yet-ported fmgr/execExpr \
-             and expanded-datum units; no finalfn-invoke seam exists yet"
-        );
+        // For a by-value transition type MakeExpandedObjectReadOnly is a no-op;
+        // a pass-by-reference transValue would need the (unported) expanded-datum
+        // read-only wrapper as finalfn arg0.
+        let pa = peragg_ref(winstate, peraggno);
+        if !pa.transtypeByVal {
+            panic!(
+                "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
+                 MakeExpandedObjectReadOnly of a pass-by-reference transition value as \
+                 finalfn arg0 has no owner (expanded-datum primitive unported); no seam exists yet"
+            );
+        }
+        let mut anynull = pa.transValueIsNull;
+        let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
+            alloc::vec::Vec::with_capacity(numFinalArgs as usize);
+        args.push(nd(&pa.transValue, pa.transValueIsNull));
+
+        // Fill any remaining argument positions with nulls.
+        //   for (i = 1; i < numFinalArgs; i++) { args[i] = NULL; anynull = true; }
+        for _ in 1..numFinalArgs {
+            args.push(types_datum::NullableDatum::null());
+            anynull = true;
+        }
+
+        if fn_strict && anynull {
+            // Don't call a strict function with NULL inputs.
+            //   *result = (Datum) 0; *isnull = true;
+            Ok((Datum::null(), true))
+        } else {
+            //   winstate->curaggcontext = peraggstate->aggcontext;
+            //   res = FunctionCallInvoke(fcinfo);
+            //   winstate->curaggcontext = NULL;
+            //   *isnull = fcinfo->isnull;
+            //   *result = MakeExpandedObjectReadOnly(res, fcinfo->isnull, resulttypeLen);
+            let (res, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+            if !peragg_ref(winstate, peraggno).resulttypeByVal {
+                panic!(
+                    "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
+                     MakeExpandedObjectReadOnly of a pass-by-reference finalfn result has \
+                     no owner (expanded-datum primitive unported); no seam exists yet"
+                );
+            }
+            // For a by-value result type MakeExpandedObjectReadOnly is a no-op.
+            Ok((Datum::from_usize(res.as_usize()), isnull))
+        }
     } else {
         // *result = MakeExpandedObjectReadOnly(transValue, transValueIsNull, transtypeLen);
         // *isnull = transValueIsNull;
@@ -1114,14 +1257,24 @@ fn update_frameheadpos<'mcx>(
                         break;
                     }
                 } else {
-                    // FunctionCall5Coll(startInRangeFunc, inRangeColl, headval,
-                    //                   currval, startOffsetValue, sub, less)
-                    let _ = (headval, currval, sub, less);
-                    panic!(
-                        "backend-executor-nodeWindowAgg::update_frameheadpos: \
-                         the RANGE startOffset in_range comparison (FunctionCall5Coll) is \
-                         owned by the not-yet-ported fmgr unit; no in_range-invoke seam exists yet"
-                    );
+                    // if (DatumGetBool(FunctionCall5Coll(&winstate->startInRangeFunc,
+                    //         winstate->inRangeColl, headval, currval,
+                    //         winstate->startOffsetValue, BoolGetDatum(sub),
+                    //         BoolGetDatum(less)))) break;
+                    let fn_oid = winstate.startInRangeFunc.fn_oid;
+                    let collation = winstate.inRangeColl;
+                    let args = [
+                        nd(&headval, false),
+                        nd(&currval, false),
+                        nd(&winstate.startOffsetValue, false),
+                        nd(&Datum::from_bool(sub), false),
+                        nd(&Datum::from_bool(less), false),
+                    ];
+                    let (res, _isnull) =
+                        fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+                    if Datum::from_usize(res.as_usize()).as_bool() {
+                        break;
+                    }
                 }
                 winstate.frameheadpos += 1;
                 spool_tuples(winstate, winstate.frameheadpos, estate)?;
@@ -1328,14 +1481,24 @@ fn update_frametailpos<'mcx>(
                         break;
                     }
                 } else {
-                    // !DatumGetBool(FunctionCall5Coll(endInRangeFunc, inRangeColl,
-                    //   tailval, currval, endOffsetValue, sub, less)) -> break
-                    let _ = (tailval, currval, sub, less);
-                    panic!(
-                        "backend-executor-nodeWindowAgg::update_frametailpos: \
-                         the RANGE endOffset in_range comparison (FunctionCall5Coll) is \
-                         owned by the not-yet-ported fmgr unit; no in_range-invoke seam exists yet"
-                    );
+                    // if (!DatumGetBool(FunctionCall5Coll(&winstate->endInRangeFunc,
+                    //         winstate->inRangeColl, tailval, currval,
+                    //         winstate->endOffsetValue, BoolGetDatum(sub),
+                    //         BoolGetDatum(less)))) break;
+                    let fn_oid = winstate.endInRangeFunc.fn_oid;
+                    let collation = winstate.inRangeColl;
+                    let args = [
+                        nd(&tailval, false),
+                        nd(&currval, false),
+                        nd(&winstate.endOffsetValue, false),
+                        nd(&Datum::from_bool(sub), false),
+                        nd(&Datum::from_bool(less), false),
+                    ];
+                    let (res, _isnull) =
+                        fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+                    if !Datum::from_usize(res.as_usize()).as_bool() {
+                        break;
+                    }
                 }
                 winstate.frametailpos += 1;
                 spool_tuples(winstate, winstate.frametailpos, estate)?;

@@ -917,16 +917,15 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- nodes routed to owner families / structural blockers -----
-        Expr::ScalarArrayOpExpr(_) => panic!(
-            "execExpr-core: ScalarArrayOpExpr's compile reads opexpr->opfuncid / hashfuncid / \
-             negfuncid / inputcollid (execExpr.c:1282-1320), but the keystone-trimmed \
-             primnodes::ScalarArrayOpExpr carries only opno/useOr/args — the planner-set \
-             opfuncid/hashfuncid/negfuncid (and inputcollid) are absent, so neither the \
-             EEOP_SCALARARRAYOP nor the EEOP_HASHED_SCALARARRAYOP step can be filled. Genuine \
-             model gap: the primnodes ScalarArrayOpExpr struct must be expanded field-for-field \
-             (owned by the nodes/keystone model layer). The scalar_cell/array_cell fcinfo-arg \
-             cells are already modeled; the fmgr_info seam is landed."
-        ),
+        // ----- T_ScalarArrayOpExpr -----
+        Expr::ScalarArrayOpExpr(opexpr) => {
+            let mut scratch = scratch_for(resv);
+            crate::execExpr_func_subscript::exec_init_scalar_array_op(
+                mcx, &mut scratch, opexpr, state, resv,
+            )?;
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         Expr::MinMaxExpr(_) => panic!(
             "execExpr-core: MinMaxExpr recurses each arg into &scratch.d.minmax.values[off] / \
              nulls[off] (execExpr.c:2274-2284), but the ExprEvalStepData::MinMax variant models \
@@ -970,17 +969,109 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 mcx, &mut scratch, sbsref, state, resv,
             )
         }
-        Expr::CoerceViaIO(_) => panic!(
-            "execExpr-core: CoerceViaIO preloads the result type's input function's constant args \
-             (fcinfo_in->args[1] = typioparam, args[2] = -1; execExpr.c:1664-1668) and stamps \
-             fcinfo_in->context = state->escontext, but the keystone-trimmed \
-             FunctionCallInfoBaseData carries only `resultinfo` — it has no args[] array nor a \
-             context field, and the ExprEvalStepData::IoCoerce variant has no typioparam slot, so \
-             those load-bearing preloads cannot be modeled. Genuine model gap: the fcinfo / \
-             IoCoerce payload must be expanded (owned by the nodes/keystone model layer) before \
-             the interpreter can read typioparam. getTypeOutputInfo/getTypeInputInfo (lsyscache) \
-             and fmgr_info are landed seams."
-        ),
+        // ----- T_CoerceViaIO -----
+        Expr::CoerceViaIO(iocoerce) => {
+            // C: ExecInitExprRec(iocoerce->arg, state, resv, resnull);
+            let arg = iocoerce.arg.as_deref().expect("CoerceViaIO.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+
+            // C: if (state->escontext == NULL) opcode = EEOP_IOCOERCE;
+            //    else opcode = EEOP_IOCOERCE_SAFE;
+            let opcode = if state.escontext == 0 {
+                ExprEvalOp::EEOP_IOCOERCE
+            } else {
+                ExprEvalOp::EEOP_IOCOERCE_SAFE
+            };
+
+            // C: lookup the source type's output function (1-arg call frame).
+            //    getTypeOutputInfo(exprType(iocoerce->arg), &iofunc, &typisvarlena);
+            //    fmgr_info(iofunc, finfo_out);
+            //    InitFunctionCallInfoData(*fcinfo_out, finfo_out, 1, InvalidOid, NULL, NULL);
+            let src_type = backend_nodes_nodeFuncs_seams::expr_type_info::call(arg)?.typid;
+            let (out_func, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(src_type)?;
+            let finfo_out = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, out_func)?;
+            let fcinfo_data_out = mcx::alloc_in(
+                mcx,
+                types_nodes::fmgr::FunctionCallInfoBaseData {
+                    flinfo: Some(finfo_out.clone()),
+                    context: None,
+                    resultinfo: None,
+                    fncollation: types_core::InvalidOid,
+                    isnull: false,
+                    nargs: 1,
+                    args: vec![types_datum::NullableDatum {
+                        value: types_datum::Datum::from_usize(0),
+                        isnull: false,
+                    }],
+                },
+            )?;
+
+            // C: lookup the result type's input function (3-arg call frame).
+            //    getTypeInputInfo(iocoerce->resulttype, &iofunc, &typioparam);
+            //    fmgr_info(iofunc, finfo_in);
+            //    InitFunctionCallInfoData(*fcinfo_in, finfo_in, 3, InvalidOid, NULL, NULL);
+            let (in_func, typioparam) =
+                backend_utils_cache_lsyscache_seams::get_type_input_info::call(
+                    iocoerce.resulttype,
+                )?;
+            let finfo_in = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, in_func)?;
+
+            // C: We can preload the second and third arguments for the input
+            //    function, since they're constants.
+            //    fcinfo_in->args[1].value = ObjectIdGetDatum(typioparam); .isnull = false;
+            //    fcinfo_in->args[2].value = Int32GetDatum(-1); .isnull = false;
+            //    fcinfo_in->context = (Node *) state->escontext;
+            //
+            // The soft-error context (`state->escontext`) is the soft-error sink
+            // owned by the not-yet-ported elog/ErrorSaveContext layer; the
+            // owned model parks it as an opaque address on ExprState and the
+            // IoCoerce frame's `context` stays None until that lands (only the
+            // EEOP_IOCOERCE_SAFE path reads it; the common EEOP_IOCOERCE path
+            // never does).
+            let fcinfo_data_in = mcx::alloc_in(
+                mcx,
+                types_nodes::fmgr::FunctionCallInfoBaseData {
+                    flinfo: Some(finfo_in.clone()),
+                    context: None,
+                    resultinfo: None,
+                    fncollation: types_core::InvalidOid,
+                    isnull: false,
+                    nargs: 3,
+                    args: vec![
+                        // args[0] — the (cstring) value, filled at eval.
+                        types_datum::NullableDatum {
+                            value: types_datum::Datum::from_usize(0),
+                            isnull: false,
+                        },
+                        // args[1] — typioparam (constant).
+                        types_datum::NullableDatum {
+                            value: types_datum::Datum::from_oid(typioparam),
+                            isnull: false,
+                        },
+                        // args[2] — typmod = -1 (constant).
+                        types_datum::NullableDatum {
+                            value: types_datum::Datum::from_i32(-1),
+                            isnull: false,
+                        },
+                    ],
+                },
+            )?;
+
+            let scratch = ExprEvalStep {
+                opcode,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::IoCoerce {
+                    finfo_out: Some(mcx::alloc_in(mcx, finfo_out)?),
+                    fcinfo_data_out: Some(fcinfo_data_out),
+                    finfo_in: Some(mcx::alloc_in(mcx, finfo_in)?),
+                    fcinfo_data_in: Some(fcinfo_data_in),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         // ----- T_ArrayCoerceExpr -----
         Expr::ArrayCoerceExpr(acoerce) => {
             // C: ExecInitExprRec(acoerce->arg, state, resv, resnull);
