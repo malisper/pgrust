@@ -106,6 +106,10 @@ pub struct FormData_pg_index {
     pub indnullsnotdistinct: bool,
     /// `Oid indrelid` — the table this index is for.
     pub indrelid: Oid,
+    /// `bool indisvalid` — is the index currently valid for queries? BRIN's
+    /// `brin_summarize_range`/`brin_desummarize_range` gate their work on
+    /// `indexRel->rd_index->indisvalid` (see `gin_clean_pending_list()`).
+    pub indisvalid: bool,
     /// `int2vector indkey.values[0]` — the table column number of the index's
     /// first key column (`InvalidAttrNumber` for an expression key). `pg_nextoid`
     /// reads only this first entry.

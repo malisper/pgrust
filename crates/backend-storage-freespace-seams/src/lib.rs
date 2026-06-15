@@ -66,3 +66,12 @@ seam_core::seam!(
         end: BlockNumber,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `FreeSpaceMapVacuum(rel)` (freespace.c): update ALL upper-level FSM
+    /// pages of `rel` so that searchers see every leaf update, repairing any
+    /// pre-existing damage or out-of-dateness. The whole-relation form of
+    /// [`free_space_map_vacuum_range`], used by BRIN's `brin_vacuum_scan` after
+    /// it cleans up every index page. `Err` carries the FSM write ereports.
+    pub fn free_space_map_vacuum<'mcx>(rel: &Relation<'mcx>) -> PgResult<()>
+);
