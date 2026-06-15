@@ -9,11 +9,28 @@ name = "backend_access_gin_gindatapage"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-gin = { path = "../types-gin" }
 backend-storage-page = { path = "../backend-storage-page" }
 backend-utils-error = { path = "../backend-utils-error" }
+# posting-list codec / item-pointer compare (audited gin-core-probe).
+backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
+# ginbtree.c descent/insert spine (ginFindLeafPage / ginInsertValue).
+backend-access-gin-ginbtree = { path = "../backend-access-gin-ginbtree" }
+# bufmgr (bufmgr.c) — page access / mark-dirty / new buffer / lsn.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# relcache (utils/rel.h) — RelationNeedsWAL.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# xloginsert (xloginsert.c) — XLogBeginInsert / XLogRegister* / XLogInsert.
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# predicate (predicate.c) — PredicateLockPageSplit.
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+# ginutil (ginutil.c) — GinNewBuffer.
+backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
 
 [dev-dependencies]

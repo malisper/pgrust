@@ -695,10 +695,20 @@ dependencies = [
 name = "backend-access-gin-gindatapage"
 version = "0.0.0"
 dependencies = [
+ "backend-access-gin-core-probe",
+ "backend-access-gin-ginbtree",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-predicate-seams",
  "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "mcx",
  "types-core",
+ "types-error",
  "types-gin",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -15562,6 +15572,17 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-spgist"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

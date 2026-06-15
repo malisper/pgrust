@@ -32,6 +32,18 @@ use types_tuple::heaptuple::{
 #[cfg(test)]
 mod tests;
 
+/// GIN posting-tree (data tree) page handling — the `gindatapage.c` data-tree
+/// [`types_gin::GinBtreeData`] vtable callbacks + posting-tree entry points
+/// built on top of this byte substrate.
+pub mod datatree;
+
+// Re-export the posting-tree entry points the rest of GIN (ginget / gininsert /
+// ginvacuum) calls, exactly as `gindatapage.c` exports them.
+pub use datatree::{
+    createPostingTree, ginInsertItemPointers, ginPrepareDataScan, ginScanBeginPostingTree,
+    ginVacuumPostingTreeLeaf, GinDataLeafPageGetItems,
+};
+
 // Re-export the PostingItem carrier so consumers of the data-page substrate get
 // it (and its sizing constant) from the substrate owner. The struct itself is
 // owned by `types_gin` (re-exported from `types_xlog_records::ginxlog`).
