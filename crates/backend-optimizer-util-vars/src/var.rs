@@ -793,7 +793,65 @@ fn next_member(words: &[u64], prevbit: i32) -> i32 {
     }
 }
 
-/// Install the var.c-owned seams consumed by the join-path enumerator and by
+/// Materialize a lifetime-free word-set [`Relids`] into an `mcx`-owned
+/// `types_nodes::Bitmapset` by adding each member through the canonical
+/// `bms_add_member`. `None` → `None` (the empty set).
+fn relids_to_mcx_bitmapset<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relids: Relids,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    match relids {
+        None => Ok(None),
+        Some(bms) => {
+            let mut acc: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+            let mut bit: i32 = -1;
+            loop {
+                bit = next_member(&bms.words, bit);
+                if bit < 0 {
+                    break;
+                }
+                acc = Some(backend_nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
+            }
+            Ok(acc)
+        }
+    }
+}
+
+/// `contain_var_clause(node)` (var.c) — installed seam. Pure predicate; clauses.c
+/// (`contain_leaked_vars`/`is_pseudo_constant_clause`) consumes it.
+fn seam_contain_var_clause(node: &Expr) -> bool {
+    let wrapped = Node::Expr(node.clone());
+    contain_var_clause(&wrapped)
+}
+
+/// `pull_varnos(root, node)` (var.c) — installed seam over the rootless
+/// `&Expr`-only contract (matches a `root == NULL` call), returning the relids
+/// as an `mcx`-owned `types_nodes::Bitmapset`. Consumed by clauses.c.
+fn seam_pull_varnos_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &Expr,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    let wrapped = Node::Expr(node.clone());
+    let relids = pull_varnos(None, &wrapped);
+    relids_to_mcx_bitmapset(mcx, relids)
+}
+
+/// `NumRelids(root, clause)` (clauses.c) — installed seam. The number of
+/// distinct relids referenced by `clause`. The rootless seam contract cannot
+/// thread `root->outer_join_rels`, so this returns `bms_num_members(pull_varnos
+/// (NULL, clause))` (the documented limitation of the rootless ride).
+fn seam_num_relids(node: &Expr) -> PgResult<i32> {
+    let wrapped = Node::Expr(node.clone());
+    let relids = pull_varnos(None, &wrapped);
+    let n = match relids {
+        None => 0,
+        Some(bms) => bms.words.iter().map(|w| w.count_ones() as i32).sum(),
+    };
+    Ok(n)
+}
+
+/// Install the var.c-owned seams consumed by the join-path enumerator, by
+/// clauses.c (`contain_var_clause`/`pull_varnos`/`num_relids`), and by
 /// `nodeModifyTable` (`pull_varattnos`).
 pub fn init_seams() {
     use backend_optimizer_path_joinpath_seams as jp;
@@ -802,5 +860,9 @@ pub fn init_seams() {
     jp::node_is_var::set(seam_node_is_var);
     jp::var_varno::set(seam_var_varno);
 
-    backend_optimizer_util_var_seams::pull_varattnos::set(seam_pull_varattnos);
+    use backend_optimizer_util_var_seams as vs;
+    vs::pull_varattnos::set(seam_pull_varattnos);
+    vs::contain_var_clause::set(seam_contain_var_clause);
+    vs::pull_varnos::set(seam_pull_varnos_expr);
+    vs::num_relids::set(seam_num_relids);
 }
