@@ -876,7 +876,12 @@ pub struct NamedArgExpr {
 
 /// `SubLink` (nodes/primnodes.h) — a subselect in an expression. The planner
 /// replaces these with [`SubPlan`] nodes; never executed directly.
-#[derive(Clone, Debug)]
+///
+/// `Clone` panics: `subselect` is an embedded owned `Query` whose children are
+/// context-allocated `PgBox`/`PgString` (deep-copy goes through
+/// `SubLink::clone_in`). This mirrors the [`Aggref`]/[`SubPlanExpr`] convention
+/// for embedded owned sub-trees inside the lifetime-free [`Expr`] enum.
+#[derive(Debug)]
 pub struct SubLink {
     /// `SubLinkType subLinkType`.
     pub subLinkType: SubLinkType,
@@ -884,13 +889,27 @@ pub struct SubLink {
     pub subLinkId: i32,
     /// `Node *testexpr`.
     pub testexpr: Option<Box<Expr>>,
-    /// `Node *subselect` — Query* or raw parsetree. Opaque to the executor (a
-    /// SubLink is always replaced by a [`SubPlan`] before execution), carried
-    /// as the node address (mirrors the opaque-address precedent in
-    /// `execexpr.rs`, e.g. `ExprState::ext_params`). 0 means NULL.
-    pub subselect: usize,
+    /// `Node *subselect` — the sub-`Query` (after analysis), embedded owned and
+    /// walked by deref, exactly mirroring
+    /// [`RangeTblEntry::subquery`](crate::parsenodes::RangeTblEntry). Because the
+    /// `Expr` enum is lifetime-free, the embedded `Query` carries the `'static`
+    /// notional lifetime, matching the `Box<SubPlan<'static>>` convention used by
+    /// [`SubPlanExpr`]. `None` is the C `NULL` (and the value produced until
+    /// `transformSubLink` is ported).
+    pub subselect: Option<PgBox<'static, crate::copy_query::Query<'static>>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
+}
+
+impl Clone for SubLink {
+    fn clone(&self) -> Self {
+        panic!(
+            "SubLink::clone: subselect is an embedded owned Query whose children \
+             are context-allocated; deep-copy goes through copyObject / the \
+             analyzed-tree clone path, never a plain `.clone()` (mirrors \
+             Aggref::clone)"
+        )
+    }
 }
 
 /// `AlternativeSubPlan` (nodes/primnodes.h) — a choice among SubPlans

@@ -7409,6 +7409,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-prep-prepjointree"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-prep-prepjointree-seams",
+ "backend-optimizer-util-clauses",
+ "backend-rewrite-core",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-prepjointree-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-prep-prepqual"
 version = "0.0.0"
 dependencies = [
@@ -9597,6 +9624,8 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
  "backend-storage-smgr-smgr",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "mcx",
@@ -14461,6 +14490,7 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
  "backend-optimizer-plan-subselect-pullup",
+ "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
