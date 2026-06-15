@@ -141,6 +141,7 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-nodes-copyfuncs = { path = "../backend-nodes-copyfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-access-hash-core = { path = "../backend-access-hash-core" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
