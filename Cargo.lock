@@ -7953,6 +7953,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-createplan"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-plan-createplan-seams",
+ "backend-optimizer-util-paramassign-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-placeholder-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-createplan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-init-subselect-seams"
 version = "0.0.0"
 dependencies = [
