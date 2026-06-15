@@ -760,4 +760,7 @@ pub fn init_seams() {
     );
     backend_optimizer_prep_prepjointree_seams::pull_up_sublinks::set(sublinks::pull_up_sublinks);
     backend_optimizer_prep_prepjointree_seams::pull_up_subqueries::set(pullup::pull_up_subqueries);
+    backend_optimizer_prep_prepjointree_seams::flatten_simple_union_all::set(
+        pullup::flatten_simple_union_all,
+    );
 }

@@ -144,6 +144,7 @@ dependencies = [
  "backend-access-brin-bloom",
  "backend-access-brin-entry-seams",
  "backend-access-brin-inclusion",
+ "backend-access-brin-minmax-multi",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -156,6 +157,33 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
+name = "backend-access-brin-minmax-multi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-index-indexam-seams",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-rel",
+ "types-relcache-entry",
  "types-scan",
  "types-storage",
  "types-tuple",
@@ -931,12 +959,15 @@ name = "backend-access-heap-heapam"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-syncscan-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-hio",
  "backend-access-heap-hio-seams",
+ "backend-access-heap-pruneheap-seams",
  "backend-access-heap-vacuumlazy-seams",
+ "backend-access-table-tableam",
  "backend-access-transam-multixact-seams",
  "backend-access-transam-parallel-seams",
  "backend-access-transam-transam",
@@ -945,6 +976,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-catalog-seams",
+ "backend-executor-execTuples-seams",
  "backend-nodes-core-seams",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr-seams",
@@ -974,9 +1006,11 @@ dependencies = [
  "types-nbtree",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-snapshot",
  "types-storage",
  "types-tableam",
+ "types-tidbitmap",
  "types-tuple",
  "types-vacuum",
  "types-wal",
@@ -10775,6 +10809,7 @@ dependencies = [
  "types-scan",
  "types-snapshot",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

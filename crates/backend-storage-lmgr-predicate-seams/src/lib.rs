@@ -73,6 +73,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckForSerializableConflictOutNeeded(relation, snapshot)` (predicate.c):
+    /// whether a `HeapCheckForSerializableConflictOut` call would do anything for
+    /// this relation under `snapshot` (true only for a serializable transaction
+    /// scanning a non-catalog, non-temp relation). Keyed by the relation OID;
+    /// the predicate never errors.
+    pub fn check_for_serializable_conflict_out_needed(
+        relation_oid: types_core::primitive::Oid,
+        snapshot: &types_snapshot::SnapshotData,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `HeapCheckForSerializableConflictOut(visible, relation, tuple, buffer,
+    /// snapshot)` (predicate.c): the read-side rw-conflict check a heap scan
+    /// performs per tuple in a serializable transaction. `visible` is the tuple's
+    /// visibility under `snapshot`; the owner inspects the tuple's xmin/xmax to
+    /// register or raise the conflict. Keyed by the relation OID; `Err` carries
+    /// the serialization-failure `ereport(ERROR)`.
+    pub fn heap_check_for_serializable_conflict_out(
+        visible: bool,
+        relation_oid: types_core::primitive::Oid,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        buffer: types_storage::Buffer,
+        snapshot: &types_snapshot::SnapshotData,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber)`
     /// (predicate.c): the relation-granularity rw-conflict check
     /// `index_insert` performs when the AM does not handle predicate locks

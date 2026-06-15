@@ -27,6 +27,21 @@ use types_xlog_records::multixact::MultiXactStatus;
 use types_storage::lock::XLTW_Oper;
 
 seam_core::seam!(
+    /// `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (`access/valid.h`)
+    /// — does the tuple satisfy all `nkeys` scan keys? Owned by the heap AM scan
+    /// layer; SANCTIONED panic-until-keystone: the trimmed
+    /// [`types_tableam::scankey::ScanKeyData`] has no `sk_func`/`sk_argument`, so
+    /// the per-key comparison cannot run until the scan-key carrier keystone
+    /// (task #281) widens it. `nkeys == 0` (the executor seqscan path) never
+    /// reaches this seam. `Err` carries the comparison-function `ereport(ERROR)`.
+    pub fn heap_key_test<'mcx>(
+        tuple: &FormedTuple<'mcx>,
+        rel: &RelationData<'mcx>,
+        keys: &PgVec<'mcx, types_tableam::scankey::ScanKeyData>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// The bootstrap-mode tuple-insert sequence, batched at the heap owner
     /// (bootstrap.c `InsertOneTuple`): `tupDesc = CreateTupleDesc(numattr,
     /// attrtypes); tuple = heap_form_tuple(tupDesc, values, Nulls);
