@@ -2053,6 +2053,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-spgist-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
+ "backend-access-common-reloptions-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-index-amvalidate-seams",
+ "backend-access-spg-core-seams",
+ "backend-access-transam-xact-seams",
+ "backend-parser-coerce-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-page",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-amvalidate",
+ "types-cache",
+ "types-core",
+ "types-error",
+ "types-opclass",
+ "types-rel",
+ "types-scan",
+ "types-spgist",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-table-table"
 version = "0.0.0"
 dependencies = [
@@ -14862,6 +14895,7 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
+ "backend-access-spgist-core",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
@@ -15464,6 +15498,7 @@ dependencies = [
 name = "types-gist"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-pairingheap",
  "mcx",
  "types-core",
  "types-datum",

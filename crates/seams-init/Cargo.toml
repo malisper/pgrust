@@ -32,6 +32,7 @@ backend-access-index-genam = { path = "../backend-access-index-genam" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 backend-access-spg-proc = { path = "../backend-access-spg-proc" }
 backend-access-spg-quadtree = { path = "../backend-access-spg-quadtree" }
+backend-access-spgist-core = { path = "../backend-access-spgist-core" }
 backend-access-gist-proc = { path = "../backend-access-gist-proc" }
 backend-access-gist-core = { path = "../backend-access-gist-core" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }

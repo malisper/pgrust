@@ -254,8 +254,12 @@ pub fn ProcSleep(
     globals::set_deadlock_state(DeadLockState::NotYetChecked);
     globals::set_got_deadlock_timeout(false);
 
-    let deadlock_timeout = globals::deadlock_timeout();
-    let lock_timeout = globals::lock_timeout();
+    // C reads the live `DeadlockTimeout`/`LockTimeout` globals directly; those
+    // are the SET-wired GUC slots in guc_tables (same home the inward
+    // deadlock_timeout/transaction_timeout seams read), not a backend-private
+    // copy that no SET ever propagates to.
+    let deadlock_timeout = backend_utils_misc_guc_tables::vars::DeadlockTimeout.read();
+    let lock_timeout = backend_utils_misc_guc_tables::vars::LockTimeout.read();
 
     // Set the deadlock (and, if set, lock) timeout; reuse the deadlock timer's
     // start time as waitStart to avoid an extra clock read.
@@ -387,7 +391,9 @@ pub fn ProcSleep(
 
         // If awoken after the deadlock check ran and log_lock_waits is on, report.
         let mut dlstate = globals::deadlock_state();
-        if globals::log_lock_waits() && dlstate != DeadLockState::NotYetChecked {
+        if backend_utils_misc_guc_tables::vars::log_lock_waits.read()
+            && dlstate != DeadLockState::NotYetChecked
+        {
             let buf = lock::describe_lock_tag::call(lock_tag);
             let modename = lock::get_lockmode_name::call(lockmethodid as u16, lockmode);
             let start = timeout::get_timeout_start_time::call(TimeoutId::DEADLOCK_TIMEOUT);

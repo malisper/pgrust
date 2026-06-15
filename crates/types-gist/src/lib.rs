@@ -221,6 +221,64 @@ pub struct GISTSearchItem<'mcx> {
     pub distances: Vec<IndexOrderByDistance>,
 }
 
+/// `GISTSearchItemIsHeap(item)` (gist_private.h) — true if the item is a heap
+/// tuple rather than an index page.
+#[inline]
+pub fn GISTSearchItemIsHeap(item: &GISTSearchItem<'_>) -> bool {
+    item.blkno == types_core::InvalidBlockNumber
+}
+
+/// The pairing-heap comparator function-pointer type for the
+/// [`GISTSearchItem`] search queue. A plain `fn` (not a closure) because the
+/// only state the comparator needs — `scan->numberOfOrderBys` — is carried by
+/// each item's `distances.len()`.
+pub type GISTSearchItemCmp =
+    fn(&GISTSearchItem<'_>, &GISTSearchItem<'_>) -> core::cmp::Ordering;
+
+/// `GISTScanOpaqueData` (gist_private.h) — the GiST scan's `void *opaque`
+/// payload (stored in `IndexScanDescData.opaque` via the A0 carrier).
+pub struct GISTScanOpaqueData<'mcx> {
+    /// `GISTSTATE *giststate` — index information, see above.
+    pub giststate: GISTSTATE<'mcx>,
+    /// `pairingheap *queue` — queue of unvisited items.
+    pub queue: backend_lib_pairingheap::PairingHeap<GISTSearchItem<'mcx>, GISTSearchItemCmp>,
+    /// `MemoryContext queueCxt` — context holding the queue.
+    pub queueCxt: Mcx<'mcx>,
+    /// `MemoryContext pageDataCxt` — context holding `pageData` tuples; `None`
+    /// until an index-only scan needs it.
+    pub pageDataCxt: Option<Mcx<'mcx>>,
+
+    /// `bool qual_ok` — false if qual can never be satisfied.
+    pub qual_ok: bool,
+    /// `bool firstCall` — true until first gistgettuple call.
+    pub firstCall: bool,
+
+    /// `IndexOrderByDistance *distances` — output area for gistindex_keytest;
+    /// `numberOfOrderBys` entries.
+    pub distances: Vec<IndexOrderByDistance>,
+    /// `Oid *orderByTypes` — datatypes of ordering operators; `numberOfOrderBys`
+    /// entries.
+    pub orderByTypes: Vec<Oid>,
+
+    /// `OffsetNumber *killedItems` — offsets of killed items in the current
+    /// page; allocated lazily.
+    pub killedItems: Option<Vec<OffsetNumber>>,
+    /// `int numKilled` — number of currently stored items.
+    pub numKilled: i32,
+    /// `BlockNumber curBlkno` — current number of block.
+    pub curBlkno: BlockNumber,
+    /// `GistNSN curPageLSN` — pos in the WAL stream when page was read.
+    pub curPageLSN: XLogRecPtr,
+
+    /// `GISTSearchHeapItem pageData[BLCKSZ / sizeof(IndexTupleData)]` — tuples
+    /// found on the current leaf page (plain/non-ordered scan).
+    pub pageData: Vec<GISTSearchHeapItem<'mcx>>,
+    /// `OffsetNumber nPageData` — number of valid entries in `pageData`.
+    pub nPageData: OffsetNumber,
+    /// `OffsetNumber curPageData` — next entry in `pageData` to return.
+    pub curPageData: OffsetNumber,
+}
+
 // ---------------------------------------------------------------------------
 // gist_private.h — split / insert working structures
 // ---------------------------------------------------------------------------
