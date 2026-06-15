@@ -950,7 +950,15 @@ fn heap_lock_updated_tuple_rec<'mcx>(
             // buffer on a miss because keep_buf=false).
             return finish_chain_unlocked(vmbuffer, result);
         }
-        let mut mytup = fetched.tuple;
+        // heap_fetch (keep_buf=false) returns the visible tuple as an owned
+        // FormedTuple; this chain-walker only needs the header (it re-reads the
+        // on-page header under exclusive lock on every 'l4 pass via
+        // reread_on_page_tuple). Take the owned HeapTupleData header out of the
+        // FormedTuple, mirroring C's `mytup` seeded from `*tuple`.
+        let fetched_tuple = fetched
+            .tuple
+            .expect("heap_fetch found==true must carry the tuple");
+        let mut mytup = fetched_tuple.tuple.clone_in(mcx)?;
         let mut buf = fetched.userbuf;
 
         // 'l4 restart label.

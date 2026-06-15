@@ -439,6 +439,21 @@ fn seam_exec_clear_tuple_payload<'mcx>(
     crate::slot_store_fetch::ExecClearTuple(slot)
 }
 
+/// Seam `exec_fetch_slot_heap_tuple` — `ExecFetchSlotHeapTuple(slot,
+/// materialize, &shouldFree)` over the payload-bearing `&mut SlotData` the
+/// table-AM DML vtable callbacks hold directly. Forwards to the owner body,
+/// which dispatches on the slot kind.
+fn seam_exec_fetch_slot_heap_tuple<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+    materialize: bool,
+) -> PgResult<(
+    types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    bool,
+)> {
+    crate::slot_store_fetch::ExecFetchSlotHeapTuple(mcx, slot, materialize)
+}
+
 /// Seam `exec_force_store_minimal_tuple` — `ExecForceStoreMinimalTuple`.
 fn seam_exec_force_store_minimal_tuple<'mcx>(
     slot: SlotId,
@@ -820,6 +835,7 @@ pub fn init_seams() {
     seams::exec_store_minimal_tuple::set(seam_exec_store_minimal_tuple);
     seams::exec_store_buffer_heap_tuple::set(seam_exec_store_buffer_heap_tuple);
     seams::exec_clear_tuple_payload::set(seam_exec_clear_tuple_payload);
+    seams::exec_fetch_slot_heap_tuple::set(seam_exec_fetch_slot_heap_tuple);
     seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
     seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
     seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);
