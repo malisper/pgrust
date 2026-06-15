@@ -773,7 +773,7 @@ fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvReli
 
 /// `substitute_phv_relids((Node *) query, varno, subrelids)` (prepjointree.c:4146)
 /// applied to the top `&mut Query` (level 0, no sublevels bump).
-fn substitute_phv_relids_in_query(query: &mut Query, varno: i32, subrelids: &ExprRelids) {
+pub(crate) fn substitute_phv_relids_in_query(query: &mut Query, varno: i32, subrelids: &ExprRelids) {
     let mut context = SubstitutePhvRelidsContext {
         varno,
         sublevels_up: 0,
@@ -803,7 +803,7 @@ fn substitute_phv_relids_in_node(node: &mut Node, varno: i32, subrelids: &ExprRe
 ///
 /// `subrelids_bms` is the `'mcx` Relids (for `bms_singleton_member`); `subrelids`
 /// is its lifetime-free [`ExprRelids`] form (for the PHV editor).
-fn fix_append_rel_relids<'mcx>(
+pub(crate) fn fix_append_rel_relids<'mcx>(
     _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     varno: i32,
@@ -850,7 +850,7 @@ fn fix_append_rel_relids<'mcx>(
 
 /// `get_relids_in_jointree(jtnode, include_outer_joins, include_inner_joins)`
 /// (prepjointree.c:4234). Set of RT indexes present in a jointree.
-fn get_relids_in_jointree<'mcx>(
+pub(crate) fn get_relids_in_jointree<'mcx>(
     mcx: Mcx<'mcx>,
     jtnode: &Node<'mcx>,
     include_outer_joins: bool,

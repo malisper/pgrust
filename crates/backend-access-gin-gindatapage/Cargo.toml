@@ -1,0 +1,19 @@
+[package]
+name = "backend-access-gin-gindatapage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_gin_gindatapage"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-gin = { path = "../types-gin" }
+backend-storage-page = { path = "../backend-storage-page" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+[dev-dependencies]

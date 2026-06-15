@@ -705,3 +705,63 @@ pub(crate) fn get_partcheck<'mcx>(
         }
     })
 }
+
+/* ==========================================================================
+ * rd_amcache — the per-relation access-method-private cache slot.
+ *
+ * Mirrors C `void *rd_amcache` (utils/rel.h), allocated by each index/table AM
+ * in `rd_indexcxt` (a CacheMemoryContext child) and cast back to the AM's own
+ * struct on every call. The owned slot lives directly on the relcache entry's
+ * `rd_amcache` field as `Option<Box<dyn AmOpaque<'static>>>` (the erased,
+ * tag-checked AM-private payload). It is `'static`: the cache survives across
+ * queries, so the payload borrows nothing from a per-query `'mcx` arena —
+ * exactly the C `rd_indexcxt` lifetime. The AM bodies that *fill* this (SP-GiST
+ * `initSpGistState`, hash `_hash_getcachedmetap`, GIN `ginGetCache`, GiST) are
+ * not ported here; this is just the slot + accessors they use.
+ * ======================================================================== */
+
+/// `rel->rd_amcache = payload` (with the C `pfree(rel->rd_amcache)` of any
+/// stale payload subsumed by the `Box` drop). Stores the AM-private cache on
+/// the live entry. Errors only if `relid` names no open entry (a contract
+/// violation; the relation must be open).
+pub fn set_rd_amcache(
+    relid: Oid,
+    payload: Box<dyn types_tableam::amopaque::AmOpaque<'static> + 'static>,
+) -> PgResult<()> {
+    with_relation_mut(relid, |rd| rd.rd_amcache = Some(payload))
+}
+
+/// `pfree(rel->rd_amcache); rel->rd_amcache = NULL` — clear the AM-private
+/// cache (the relcache-invalidation / rebuild lifecycle step). No-op when the
+/// entry is absent (`None`), matching the C path that only touches a live
+/// descriptor.
+pub fn clear_rd_amcache(relid: Oid) {
+    let _ = with_relation_mut(relid, |rd| rd.rd_amcache = None);
+}
+
+/// Read `rel->rd_amcache` and tag-checked-downcast it to `&T`, running `f` over
+/// it; returns `Ok(None)` for the C `rd_amcache == NULL` (slot empty) and a
+/// loud error if the downcast tag mismatches (a different AM's payload is
+/// cached — the C never does this, so it is a contract violation). The closure
+/// form keeps the entry borrow scoped (the payload is owned by the cache cell).
+pub fn with_rd_amcache<T, R>(
+    relid: Oid,
+    f: impl FnOnce(&T) -> R,
+) -> PgResult<Option<R>>
+where
+    T: types_tableam::amopaque::AmOpaqueType<'static>,
+{
+    with_relation(relid, |rd| match rd.rd_amcache.as_ref() {
+        None => Ok(None),
+        Some(boxed) => match (boxed.as_ref()).downcast_ref::<T>() {
+            Some(t) => Ok(Some(f(t))),
+            None => Err(ereport(ERROR)
+                .errmsg_internal(format!(
+                    "rd_amcache for relation {relid} holds a different AM payload \
+                     than the one requested ({})",
+                    boxed.am_opaque_type_name()
+                ))
+                .into_error()),
+        },
+    })?
+}

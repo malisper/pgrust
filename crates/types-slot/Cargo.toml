@@ -12,4 +12,5 @@ path = "src/lib.rs"
 types-core = { path = "../types-core" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
+types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }

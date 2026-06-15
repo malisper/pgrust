@@ -692,6 +692,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-gindatapage"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-page",
+ "backend-utils-error",
+ "types-core",
+ "types-gin",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginentrypage"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple",
+ "backend-access-gin-core-probe",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-ginscan"
 version = "0.0.0"
 dependencies = [
@@ -5285,6 +5319,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -7570,10 +7605,14 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-placeholder-seams",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
+ "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
  "mcx",
  "seam-core",
@@ -15492,6 +15531,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
  "types-storage",
  "types-tuple",
 ]

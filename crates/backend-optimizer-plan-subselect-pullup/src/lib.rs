@@ -579,7 +579,7 @@ fn simplify_EXISTS_query<'mcx>(
 
 /// `replace_empty_jointree(parse)` (prepjointree.c): if the Query's jointree is
 /// empty, replace it with a dummy RTE_RESULT relation.  Does not recurse.
-fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
     // Nothing to do if jointree is already nonempty.
     {
         let jt = parse
@@ -626,7 +626,7 @@ fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgRe
 ///
 /// (Not yet ported in `backend-rewrite-core`, which defers it to the rule
 /// rewriter; this is a faithful local copy for the EXISTS pull-up.)
-fn combine_range_tables<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>, src: &mut Query<'mcx>) {
+pub fn combine_range_tables<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>, src: &mut Query<'mcx>) {
     let offset = parse.rteperminfos.len() as Index;
 
     if offset > 0 {

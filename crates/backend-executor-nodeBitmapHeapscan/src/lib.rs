@@ -185,7 +185,7 @@ fn BitmapHeapNext<'mcx>(
         let scan = node.ss_currentScanDesc.as_mut().expect("ss_currentScanDesc");
         let next = {
             let mcx = estate.es_query_cxt;
-            let slot_ref = estate.slot_mut(slot);
+            let slot_ref = estate.slot_data_mut(slot);
             tableam_bm::table_scan_bitmap_next_tuple::call(mcx, scan, slot_ref)?
         };
         let (recheck, lossy_inc, exact_inc) = match next {

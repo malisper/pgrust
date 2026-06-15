@@ -407,6 +407,33 @@ pub struct RelationData {
     /// `Oid rd_toastoid` — CLUSTER/rewrite toast-OID hack; `InvalidOid` off.
     pub rd_toastoid: Oid,
 
+    /// `void *rd_amcache` (`utils/rel.h`) — the per-relation access-method-private
+    /// cache. In C this is a bare `void *` the index AM (or table AM) fills lazily
+    /// the first time it needs derived state for this relation, allocated in
+    /// `rd_indexcxt` (a child of `CacheMemoryContext`) so it lives for the whole
+    /// backend / cache lifetime and is reused across queries. Each AM stashes its
+    /// own struct here and casts it back on every call: SP-GiST caches a
+    /// `SpGistCache` (`initSpGistState`), hash a `HashMetaPageData`
+    /// (`_hash_getcachedmetap`), GIN a `GinState` (`ginGetCache`), GiST a
+    /// `GISTSTATE`.
+    ///
+    /// The faithful owned rendering is the same erased AM-private payload, made
+    /// safe via [`types_tableam::amopaque::AmOpaque`] (the tag-checked downcast
+    /// from TOWER-A0 #244 — NOT new opacity, the same `void *` the C carries with
+    /// the unsafe cast encapsulated and proven sound by a per-type tag). The slot
+    /// is `'static`-bound on purpose: the cache outlives any single query's `'mcx`
+    /// arena (it lives for the `CacheMemoryContext` lifetime), so its payload may
+    /// borrow nothing from a per-query arena — exactly the C `rd_indexcxt`
+    /// lifetime invariant.
+    ///
+    /// Lifecycle mirrors C `rd_amcache`: filled lazily by each AM, and cleared
+    /// (the C `pfree(rd_amcache); rd_amcache = NULL`) on relcache invalidation /
+    /// rebuild so the next access refetches. The AM *bodies* that fill it
+    /// (`SpGistCache`/`GinState`/...) are NOT ported here — this keystone only
+    /// provides the typed slot and the get/set accessors those AM campaigns will
+    /// use.
+    pub rd_amcache: Option<Box<dyn types_tableam::amopaque::AmOpaque<'static> + 'static>>,
+
     /// `bool pgstat_enabled` — relation stats should be counted.
     pub pgstat_enabled: bool,
 }

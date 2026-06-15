@@ -33,7 +33,6 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_xlog_records::ginxlog::PostingItem;
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{BlockNumber, OffsetNumber, Oid};
 use types_core::{InvalidOid, INDEX_MAX_KEYS};
@@ -138,6 +137,11 @@ pub const SIZEOF_GIN_PAGE_OPAQUE_DATA: usize = 8;
 /// ItemPointerData key;}` = 4 + 6, 2-aligned, 10 bytes. Re-exported from the
 /// crate that owns the [`PostingItem`] struct.
 pub use types_xlog_records::ginxlog::SIZEOF_POSTING_ITEM;
+
+/// `PostingItem` (ginblock.h) — `{BlockIdData child_blkno; ItemPointerData
+/// key;}`. Re-exported from the crate that owns the struct so all GIN carriers
+/// are reachable through `types_gin::*`.
+pub use types_xlog_records::ginxlog::PostingItem as PostingItem;
 
 /// `MAXALIGN(LEN)` (`c.h`) — round up to `MAXIMUM_ALIGNOF` (8 on supported
 /// platforms).
@@ -632,6 +636,13 @@ pub enum GinInsertPayload<'mcx> {
 pub struct PtpWorkspace {
     /// `*ptp_workspace` (`None` == the C `NULL`, i.e. `GPTP_NO_WORK`).
     pub inner: Option<alloc::boxed::Box<dyn core::any::Any>>,
+    /// `RelationNeedsWAL(btree->index) && !btree->isBuild` — the WAL gate the
+    /// page-specific `execPlaceToPage` callback needs to decide whether to
+    /// register the slot-0 buffer/buffer-data. In C the callback recomputes this
+    /// from `btree->index` (a `Relation`); the owned `GinBtreeData` carries only
+    /// the index Oid, so `ginPlaceToPage` (which has the `Relation`) computes it
+    /// and hands it to the callback through the workspace it already threads.
+    pub want_wal: bool,
 }
 
 impl core::fmt::Debug for PtpWorkspace {
@@ -752,9 +763,19 @@ pub struct GinBtreeData<'mcx> {
     pub index: Oid,
     /// `BlockNumber rootBlkno`.
     pub rootBlkno: BlockNumber,
-    /// `GinState *ginstate` — not valid in a data scan; the index relation Oid
-    /// the (owned) `GinState` describes.
-    pub ginstate: Oid,
+    /// `GinState *ginstate` — the per-index working state the entry-tree page
+    /// callbacks read (`ginCompareAttEntries`, the key deform). `None` in a data
+    /// scan (the data-tree callbacks compare item pointers and never read it),
+    /// mirroring C's `ginstate` pointer being set only by `ginPrepareEntryScan`.
+    pub ginstate: Option<GinState<'mcx>>,
+    /// The memory context the entry-tree read callbacks (`isMoveRight` /
+    /// `findChildPage` / `findItem` / `findChildPtr` / `getLeftMostChild`)
+    /// deform key datums into. In C those callbacks use `CurrentMemoryContext`;
+    /// the owned model has no ambient context, and the spine's vtable dispatch
+    /// of the read callbacks threads no `Mcx`, so the entry-scan setup stashes
+    /// the scan's working context here. `None` for the data tree (its callbacks
+    /// never deform a key). `Mcx` is `Copy`, so this is a cheap handle.
+    pub tmpCtx: Option<Mcx<'mcx>>,
     /// `bool fullScan`.
     pub fullScan: bool,
     /// `bool isBuild`.
@@ -805,7 +826,8 @@ impl Default for GinBtreeData<'_> {
             isData: false,
             index: InvalidOid,
             rootBlkno: 0,
-            ginstate: InvalidOid,
+            ginstate: None,
+            tmpCtx: None,
             fullScan: false,
             isBuild: false,
             entryAttnum: 0,
@@ -818,12 +840,22 @@ impl Default for GinBtreeData<'_> {
 
 /// `GinBtreeEntryInsertData` (gin_private.h) — a tuple to be inserted into the
 /// entry tree.
+///
+/// `IndexTuple entry` is carried as the owned on-disk byte image of the index
+/// tuple (`t_tid` 6 + `t_info` 2 + key data + posting list), exactly as in C,
+/// where the `IndexTuple` is a single contiguous `palloc`'d chunk and the GIN
+/// entry-page codec (`ginentrypage.c`) does direct byte surgery on it
+/// (`GinSetPostingOffset` / posting-list copy / category byte / `repalloc`). The
+/// `gindatapage.c` byte substrate operates on the same `&[u8]` model.
 #[derive(Clone, Debug)]
 pub struct GinBtreeEntryInsertData<'mcx> {
-    /// `IndexTuple entry` — tuple to insert.
-    pub entry: types_tuple::heaptuple::IndexTuple<'mcx>,
+    /// `IndexTuple entry` — the on-disk byte image of the tuple to insert.
+    pub entry: Vec<u8>,
     /// `bool isDelete` — delete the old tuple at the same offset?
     pub isDelete: bool,
+    /// Marker to retain the `'mcx` parameter on the struct (so the enclosing
+    /// [`GinInsertPayload`] keeps a single lifetime across all variants).
+    pub _marker: core::marker::PhantomData<&'mcx ()>,
 }
 
 /// `GinBtreeDataLeafInsertData` (gin_private.h) — itempointer(s) to be inserted

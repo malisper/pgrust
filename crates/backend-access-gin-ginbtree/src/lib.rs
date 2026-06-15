@@ -583,6 +583,11 @@ fn ginPlaceToPage<'mcx>(
                 xlog_begin_insert()?;
             }
 
+            // Hand the WAL gate to the page-specific execPlaceToPage callback
+            // through the workspace (it carries only the index Oid, not the
+            // Relation, so it cannot recompute RelationNeedsWAL itself).
+            ptp_workspace.want_wal = want_wal;
+
             // Perform the page update, dirty and register stack->buffer, and
             // register any extra WAL data.
             call_execPlaceToPage(
