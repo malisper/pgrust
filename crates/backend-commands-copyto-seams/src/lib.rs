@@ -27,6 +27,6 @@ seam_core::seam!(
     /// `Err` carries any output-function / write `ereport(ERROR)`.
     pub fn copy_dest_receive(
         receiver: u64,
-        slot: &mut types_nodes::TupleTableSlot,
+        slot: &mut types_nodes::tuptable::SlotData<'_>,
     ) -> types_error::PgResult<bool>
 );

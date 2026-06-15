@@ -241,7 +241,8 @@ fn next_clears_slot_when_forward_eof_and_cte_already_done() {
     let mut estate = estate(ctx.mcx());
     let mut node = node_in(ctx.mcx());
     // Scan slot present so the final ExecClearTuple fires.
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let qcxt = estate.es_query_cxt;
+    let slot = estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap();
     node.ss.ss_ScanTupleSlot = Some(slot);
     assert!(!CteScanNext(&mut node, &mut estate).unwrap());
     log_eq(&["select_read_pointer", "ateof", "gettupleslot", "ClearTuple"]);
@@ -411,7 +412,8 @@ fn rescan_clears_result_slot_first() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = estate(ctx.mcx());
     let mut node = node_in(ctx.mcx());
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let qcxt = estate.es_query_cxt;
+    let slot = estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap();
     node.ss.ps.ps_ResultTupleSlot = Some(slot);
     ExecReScanCteScan(&mut node, &mut estate).unwrap();
     log_eq(&[

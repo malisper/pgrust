@@ -340,7 +340,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
     } else {
         // Restore state from previous execution
         off = slot.off as usize;
-        slow = slot.base.header.tts_flags & TTS_FLAG_SLOW != 0;
+        slow = slot.base.tts_flags & TTS_FLAG_SLOW != 0;
     }
 
     {
@@ -411,9 +411,9 @@ pub fn slot_deform_heap_tuple<'mcx>(
     slot.base.tts_nvalid = attnum as AttrNumber;
     slot.off = off as u32;
     if slow {
-        slot.base.header.tts_flags |= TTS_FLAG_SLOW;
+        slot.base.tts_flags |= TTS_FLAG_SLOW;
     } else {
-        slot.base.header.tts_flags &= !TTS_FLAG_SLOW;
+        slot.base.tts_flags &= !TTS_FLAG_SLOW;
     }
 
     Ok(())

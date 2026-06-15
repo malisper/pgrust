@@ -9,7 +9,7 @@ use mcx::{vec_with_capacity_in, Mcx};
 use types_core::primitive::Size;
 use types_error::PgResult;
 use types_nodes::tuptable::{
-    BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase, SlotData,
+    BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
 };
 use types_nodes::{TupleSlotKind, TupleTableSlot};
@@ -103,17 +103,14 @@ pub fn MakeTupleTableSlot<'mcx>(
     tupleDesc: TupleDesc<'mcx>,
     kind: TupleSlotKind,
 ) -> PgResult<SlotData<'mcx>> {
-    // tts_flags |= TTS_FLAG_EMPTY (the header default), plus TTS_FLAG_FIXED
-    // when a descriptor is supplied.
-    let mut header = TupleTableSlot {
-        tts_ops: kind,
-        ..TupleTableSlot::default()
-    };
+    // The unified base: tts_flags |= TTS_FLAG_EMPTY (a fresh slot is empty),
+    // plus TTS_FLAG_FIXED when a descriptor is supplied. `new_in` gives the
+    // empty virtual default; we override tts_ops and fill the payload below.
+    let mut base = TupleTableSlot::new_in(mcx);
+    base.tts_ops = kind;
 
-    let (mut tts_values, mut tts_isnull) = (vec_with_capacity_in(mcx, 0)?, vec_with_capacity_in(mcx, 0)?);
-
-    let tts_tupleDescriptor = if let Some(mut desc) = tupleDesc {
-        header.tts_flags |= TTS_FLAG_FIXED;
+    if let Some(mut desc) = tupleDesc {
+        base.tts_flags |= TTS_FLAG_FIXED;
 
         let natts = desc.natts as usize;
         // palloc0 of the Datum/bool arrays. A freshly-allocated slot has
@@ -123,8 +120,8 @@ pub fn MakeTupleTableSlot<'mcx>(
         let mut isnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
         values.resize(natts, Datum::null());
         isnull.resize(natts, false);
-        tts_values = values;
-        tts_isnull = isnull;
+        base.tts_values = values;
+        base.tts_isnull = isnull;
 
         // PinTupleDesc: bump the refcount of a refcounted descriptor
         // (`if (tupleDesc->tdrefcount >= 0) IncrTupleDescRefCount`). The
@@ -134,18 +131,8 @@ pub fn MakeTupleTableSlot<'mcx>(
         if desc.tdrefcount >= 0 {
             backend_access_common_tupdesc::IncrTupleDescRefCount(&mut desc)?;
         }
-        Some(desc)
-    } else {
-        None
-    };
-
-    let base = SlotBase {
-        header,
-        tts_nvalid: 0,
-        tts_tupleDescriptor,
-        tts_values,
-        tts_isnull,
-    };
+        base.tts_tupleDescriptor = Some(desc);
+    }
 
     // Build the concrete subtype, then run the slot-type-specific `init`
     // callback (`slot->tts_ops->init(slot)`), owned by the slot-ops vtable

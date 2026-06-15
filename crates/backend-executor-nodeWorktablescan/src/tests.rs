@@ -155,7 +155,8 @@ fn next_loads_tuple_from_working_table() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    let qcxt = estate.es_query_cxt;
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
     st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
@@ -172,7 +173,8 @@ fn next_returns_false_when_exhausted() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    let qcxt = estate.es_query_cxt;
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
     st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
@@ -192,7 +194,8 @@ fn exec_resolves_rustate_on_first_call() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    let qcxt = estate.es_query_cxt;
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
     st.rustate = None;
 
     let out = ExecWorkTableScan(&mut st, &mut estate).unwrap();
@@ -216,7 +219,8 @@ fn exec_skips_resolution_when_rustate_set() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    let qcxt = estate.es_query_cxt;
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
     st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let out = ExecWorkTableScan(&mut st, &mut estate).unwrap();
@@ -257,7 +261,8 @@ fn rescan_rescans_tuplestore_when_rustate_set() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    st.ss.ps.ps_ResultTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    let qcxt = estate.es_query_cxt;
+    st.ss.ps.ps_ResultTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
     st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     ExecReScanWorkTableScan(&mut st, &mut estate).unwrap();

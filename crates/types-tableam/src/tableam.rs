@@ -161,10 +161,10 @@ pub struct TableAmRoutine {
     /// `scan_getnextslot(scan, direction, slot)` — fetch the next tuple of an
     /// in-progress scan into `slot`, returning `true` if a tuple was produced
     /// (`false` at end of scan).
-    pub scan_getnextslot: fn(
-        scan: &mut TableScanDescData<'_>,
+    pub scan_getnextslot: for<'mcx> fn(
+        scan: &mut TableScanDescData<'mcx>,
         direction: ScanDirection,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<bool>,
 
     /// `parallelscan_estimate(rel)` — DSM space needed for the AM's shared
@@ -194,11 +194,11 @@ pub struct TableAmRoutine {
     /// `index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
     /// — fetch the tuple at `tid` into `slot`, returning true on a
     /// snapshot-visible match.
-    pub index_fetch_tuple: fn(
-        scan: &mut IndexFetchTableData<'_>,
+    pub index_fetch_tuple: for<'mcx> fn(
+        scan: &mut IndexFetchTableData<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
         call_again: &mut bool,
         all_dead: Option<&mut bool>,
     ) -> PgResult<bool>,
@@ -221,11 +221,11 @@ pub struct TableAmRoutine {
     /// `tuple_fetch_row_version(rel, tid, snapshot, slot)` — fetch the tuple at
     /// `tid` into `slot`, after a visibility test against `snapshot`; returns
     /// true if a visible tuple was found.
-    pub tuple_fetch_row_version: fn(
-        rel: &Relation<'_>,
+    pub tuple_fetch_row_version: for<'mcx> fn(
+        rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<bool>,
 
     /// `tuple_tid_valid(scan, tid)` — is `tid` potentially valid (within the
@@ -239,9 +239,9 @@ pub struct TableAmRoutine {
         fn(scan: &mut TableScanDescData<'_>, tid: &mut ItemPointerData) -> PgResult<()>,
 
     /// `tuple_insert(rel, slot, cid, options, bistate)`.
-    pub tuple_insert: fn(
-        rel: &Relation<'_>,
-        slot: &mut TupleTableSlot,
+    pub tuple_insert: for<'mcx> fn(
+        rel: &Relation<'mcx>,
+        slot: &mut TupleTableSlot<'mcx>,
         cid: CommandId,
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
@@ -262,10 +262,10 @@ pub struct TableAmRoutine {
 
     /// `tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait, tmfd,
     /// lockmode, update_indexes)`.
-    pub tuple_update: fn(
-        rel: &Relation<'_>,
+    pub tuple_update: for<'mcx> fn(
+        rel: &Relation<'mcx>,
         otid: &ItemPointerData,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
         cid: CommandId,
         snapshot: &Snapshot,
         crosscheck: &Snapshot,
@@ -278,11 +278,11 @@ pub struct TableAmRoutine {
     /// `tuple_lock(rel, tid, snapshot, slot, cid, mode, wait_policy, flags,
     /// tmfd)` — lock a tuple in the given mode, fetching it into `slot`.
     #[allow(clippy::type_complexity)]
-    pub tuple_lock: fn(
-        rel: &Relation<'_>,
+    pub tuple_lock: for<'mcx> fn(
+        rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
         cid: CommandId,
         mode: LockTupleMode,
         wait_policy: LockWaitPolicy,

@@ -40,7 +40,7 @@ use types_core::{
 // (`SysCacheKey::Value`) is an audited bare word (C: `Datum key1..key4`).
 use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
-use types_nodes::{Bitmapset, TupleTableSlot};
+use types_nodes::Bitmapset;
 use types_rel::RelationData;
 use types_stringinfo::StringInfo;
 // The canonical per-attribute value model (C's per-column `Datum`): a by-value
@@ -784,11 +784,11 @@ pub fn logicalrep_read_origin<'mcx>(
 }
 
 /// `logicalrep_write_insert`: write INSERT to the output stream.
-pub fn logicalrep_write_insert(
-    out: &mut StringInfo<'_>,
+pub fn logicalrep_write_insert<'mcx>(
+    out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    newslot: &TupleTableSlot,
+    newslot: &mut types_nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -827,12 +827,12 @@ pub fn logicalrep_read_insert<'mcx>(
 }
 
 /// `logicalrep_write_update`: write UPDATE to the output stream.
-pub fn logicalrep_write_update(
-    out: &mut StringInfo<'_>,
+pub fn logicalrep_write_update<'mcx>(
+    out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    oldslot: Option<&TupleTableSlot>,
-    newslot: &TupleTableSlot,
+    oldslot: Option<&mut types_nodes::tuptable::SlotData<'mcx>>,
+    newslot: &mut types_nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -910,11 +910,11 @@ pub fn logicalrep_read_update<'mcx>(
 }
 
 /// `logicalrep_write_delete`: write DELETE to the output stream.
-pub fn logicalrep_write_delete(
-    out: &mut StringInfo<'_>,
+pub fn logicalrep_write_delete<'mcx>(
+    out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    oldslot: &TupleTableSlot,
+    oldslot: &mut types_nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -1173,10 +1173,10 @@ pub fn logicalrep_read_typ<'mcx>(
 
 /// `logicalrep_write_tuple`: write a tuple to the output stream, in the most
 /// efficient format possible.
-fn logicalrep_write_tuple(
-    out: &mut StringInfo<'_>,
+fn logicalrep_write_tuple<'mcx>(
+    out: &mut StringInfo<'mcx>,
     rel: &RelationData<'_>,
-    slot: &TupleTableSlot,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,

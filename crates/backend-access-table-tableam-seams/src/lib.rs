@@ -114,7 +114,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn table_scan_getnextslot<'mcx>(
         scan: &mut TableScanDescData<'mcx>,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -127,7 +127,7 @@ seam_core::seam!(
     pub fn table_scan_getnextslot_direction<'mcx>(
         scan: &mut TableScanDescData<'mcx>,
         direction: types_scan::sdir::ScanDirection,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<bool>
 );
 

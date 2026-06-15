@@ -50,7 +50,7 @@ pub fn ExecStoreHeapTuple<'mcx>(
     // tts_heap_store_tuple(slot, tuple, shouldFree);
     tts_heap_store_tuple(hslot, tuple, should_free);
 
-    slot.base_mut().header.tts_tableOid = t_table_oid;
+    slot.base_mut().tts_tableOid = t_table_oid;
 
     Ok(())
 }
@@ -80,7 +80,7 @@ pub fn ExecStoreBufferHeapTuple<'mcx>(
     // tts_buffer_heap_store_tuple(slot, tuple, buffer, false);
     tts_buffer_heap_store_tuple(bslot, tuple, buffer, false);
 
-    slot.base_mut().header.tts_tableOid = t_table_oid;
+    slot.base_mut().tts_tableOid = t_table_oid;
 
     Ok(())
 }
@@ -108,7 +108,7 @@ pub fn ExecStorePinnedBufferHeapTuple<'mcx>(
     // tts_buffer_heap_store_tuple(slot, tuple, buffer, true);
     tts_buffer_heap_store_tuple(bslot, tuple, buffer, true);
 
-    slot.base_mut().header.tts_tableOid = t_table_oid;
+    slot.base_mut().tts_tableOid = t_table_oid;
 
     Ok(())
 }
@@ -158,7 +158,7 @@ pub fn ExecForceStoreHeapTuple<'mcx>(
                 bslot.base.tuple = copied;
             }
             // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-            slot.base_mut().header.tts_flags |= TTS_FLAG_SHOULDFREE;
+            slot.base_mut().tts_flags |= TTS_FLAG_SHOULDFREE;
             // MemoryContextSwitchTo(oldContext);
             // if (shouldFree) pfree(tuple); -- the owned model drops `tuple`.
             let _ = should_free;
@@ -571,7 +571,7 @@ pub(crate) fn tts_buffer_heap_store_tuple<'mcx>(
         debug_assert!(!BufferIsValid(slot.buffer));
         // heap_freetuple(bslot->base.tuple): dropping the owned tuple frees it.
         slot.base.tuple = None;
-        slot.base.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        slot.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
 
     // slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -579,7 +579,7 @@ pub(crate) fn tts_buffer_heap_store_tuple<'mcx>(
     // slot->tts_nvalid = 0;
     slot.base.base.tts_nvalid = 0;
     // slot->tts_tid = tuple->t_self; (read before the tuple is moved in).
-    slot.base.base.header.tts_tid = tuple.tuple.t_self;
+    slot.base.base.tts_tid = tuple.tuple.t_self;
     // bslot->base.tuple = tuple;
     slot.base.tuple = Some(tuple);
     // bslot->base.off = 0;

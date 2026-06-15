@@ -291,9 +291,10 @@ fn result_slot_ops_fallbacks() {
 
         // Fall back to the result slot's ops.
         let slot = estate
-            .make_slot(types_nodes::TupleTableSlot {
-                tts_ops: TupleSlotKind::HeapTuple,
-                ..Default::default()
+            .make_slot({
+                let mut slot = types_nodes::TupleTableSlot::new_in(estate.es_query_cxt);
+                slot.tts_ops = TupleSlotKind::HeapTuple;
+                slot
             })
             .unwrap();
         let ps = PlanStateData {

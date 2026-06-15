@@ -327,11 +327,24 @@ fn dispatch_tupslot_id<'mcx>(
     proute: &PartitionTupleRouting<'mcx>,
     dispatch: PartitionDispatchId,
 ) -> PgResult<SlotId> {
+    let mcx = estate.es_query_cxt;
     let slot = proute.partition_dispatch_info[dispatch]
         .tupslot
-        .clone()
+        .as_ref()
         .expect("dispatch_tupslot_id called without a tupslot");
-    estate.make_slot(slot)
+    // The dispatch's standalone slot is a virtual slot fully overwritten by each
+    // `execute_attr_map_slot`; build a fresh pool slot of the same kind/descriptor
+    // (its payload arrays are sized from the descriptor, exactly as
+    // `MakeTupleTableSlot`) so a fresh pool entry per use carries no stale payload.
+    let kind = slot.kind();
+    let tupdesc = match slot.base().tts_tupleDescriptor.as_deref() {
+        Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+        None => None,
+    };
+    let fresh = backend_executor_execTuples_seams::make_single_tuple_table_slot::call(
+        mcx, tupdesc, kind,
+    )?;
+    estate.push_slot_data(fresh)
 }
 
 /// Copy an `AttrMap` into `mcx` so the estate can be re-borrowed mutably.
