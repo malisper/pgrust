@@ -626,6 +626,29 @@ impl RowMarkClause {
     }
 }
 
+/// `LockingClause` (`nodes/parsenodes.h`) — a raw FOR [KEY] UPDATE/SHARE clause.
+#[derive(Debug)]
+pub struct LockingClause<'mcx> {
+    /// `List *lockedRels` — FOR [KEY] UPDATE/SHARE relations (of `RangeVar`);
+    /// empty means "all rels".
+    pub lockedRels: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `LockClauseStrength strength`.
+    pub strength: LockClauseStrength,
+    /// `LockWaitPolicy waitPolicy` — NOWAIT and SKIP LOCKED.
+    pub waitPolicy: LockWaitPolicy,
+}
+
+impl LockingClause<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `LockingClause`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<LockingClause<'b>> {
+        Ok(LockingClause {
+            lockedRels: copy_node_vec(&self.lockedRels, mcx)?,
+            strength: self.strength,
+            waitPolicy: self.waitPolicy,
+        })
+    }
+}
+
 /// `CommonTableExpr` (`nodes/parsenodes.h`) — a WITH list element.
 #[derive(Debug)]
 pub struct CommonTableExpr<'mcx> {
