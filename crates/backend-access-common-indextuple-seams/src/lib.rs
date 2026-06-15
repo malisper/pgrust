@@ -32,6 +32,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_form_tuple(tupdesc, values, isnull)` (indextuple.c) — same as
+    /// [`index_form_tuple`] but against a caller-supplied `tupdesc` rather than
+    /// the index's `rd_att`. GiST forms internal-page downlinks against its
+    /// *truncated* `nonLeafTupdesc` (`gistFormTuple`), which is not the
+    /// relation's own descriptor, so it cannot use the `&Relation` variant.
+    /// The formed on-disk bytes are returned in `mcx` (the caller stamps
+    /// `t_tid` itself). `Err` carries the oversize ereport and OOM.
+    pub fn index_form_tuple_desc<'mcx>(
+        mcx: Mcx<'mcx>,
+        tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        values: &[Datum<'mcx>],
+        isnull: &[bool],
+    ) -> types_error::PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `index_deform_tuple(itup, itupdesc, values, isnull)` (indextuple.c):
     /// deform an index tuple into per-attribute `(value, isnull)` pairs, using
     /// the AM-supplied descriptor `itupdesc` (not the slot's, in case the

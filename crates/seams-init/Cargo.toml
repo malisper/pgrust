@@ -18,8 +18,6 @@ backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
-backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
-backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
@@ -33,8 +31,9 @@ backend-access-index-amapi = { path = "../backend-access-index-amapi" }
 backend-access-index-genam = { path = "../backend-access-index-genam" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 backend-access-spg-proc = { path = "../backend-access-spg-proc" }
-backend-access-gist-proc = { path = "../backend-access-gist-proc" }
 backend-access-spg-quadtree = { path = "../backend-access-spg-quadtree" }
+backend-access-gist-proc = { path = "../backend-access-gist-proc" }
+backend-access-gist-core = { path = "../backend-access-gist-core" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
 backend-access-nbt-xlog = { path = "../backend-access-nbt-xlog" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
