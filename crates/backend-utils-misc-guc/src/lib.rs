@@ -275,6 +275,35 @@ fn set_config_option_seam(
     .map(|_| ())
 }
 
+/// `GUC_SAFE_SEARCH_PATH` (guc.c:74): the locked-down `search_path` value
+/// `RestrictSearchPath` installs for security-restricted maintenance.
+const GUC_SAFE_SEARCH_PATH: &str = "pg_catalog, pg_temp";
+
+/// `RestrictSearchPath()` (guc.c:2246). Outside bootstrap processing mode, set
+/// `search_path` to the safe value via `set_config_option("search_path",
+/// GUC_SAFE_SEARCH_PATH, PGC_USERSET, PGC_S_SESSION, GUC_ACTION_SAVE, true, 0,
+/// false)`. The C ignores the return; elevel 0 reports nothing.
+fn restrict_search_path() -> PgResult<()> {
+    if backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
+        return Ok(());
+    }
+    // C `set_config_option` (8-arg, guc.c:3342) derives srole from source:
+    // PGC_S_SESSION >= PGC_S_INTERACTIVE, so srole = GetUserId().
+    let srole = backend_utils_init_miscinit_seams::get_user_id::call();
+    set_config_option_global(
+        "search_path",
+        Some(GUC_SAFE_SEARCH_PATH),
+        types_guc::PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        srole,
+        GUC_ACTION_SAVE,
+        true,
+        types_error::ErrorLevel(0),
+        false,
+    )
+    .map(|_| ())
+}
+
 /// Install every seam declared in `backend-utils-misc-guc-seams`.
 pub fn init_seams() {
     use backend_utils_misc_guc_seams as s;
@@ -329,6 +358,9 @@ pub fn init_seams() {
     s::guc_array_add::set(|a, name, value| guc_array::GUCArrayAdd(a, &name, &value));
     s::guc_array_delete::set(|a, name| guc_array::GUCArrayDelete(a, &name));
     s::guc_array_reset::set(guc_array::GUCArrayReset);
+
+    // --- RestrictSearchPath (guc.c:2246; mis-homed seam re-homed here). ---
+    s::restrict_search_path::set(restrict_search_path);
 
     // --- Sub-features owned by separate, not-yet-ported units. Installed here
     //     (guc.c is their home) but each loud-panics into the unported sub-unit

@@ -24,3 +24,4 @@ backend-commands-matview-seams = { path = "../backend-commands-matview-seams" }
 
 # outward seams into the (mostly unported) owners matview drives
 backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }

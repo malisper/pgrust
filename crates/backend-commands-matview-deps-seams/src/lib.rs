@@ -127,10 +127,9 @@ seam_core::seam!(
     /// `NewGUCNestLevel()`.
     pub fn new_guc_nest_level() -> PgResult<i32>
 );
-seam_core::seam!(
-    /// `RestrictSearchPath()`.
-    pub fn restrict_search_path() -> PgResult<()>
-);
+// (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
+// function (guc.c:2246) — and installed by the merged guc owner. matview calls
+// it there.)
 seam_core::seam!(
     /// `AtEOXact_GUC(isCommit, nestLevel)` (called with `(false, save_nestlevel)`).
     pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> PgResult<()>

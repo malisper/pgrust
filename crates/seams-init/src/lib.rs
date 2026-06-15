@@ -721,15 +721,11 @@ mod recurrence_guard {
         // a contract redesign of a downstream consumer, out of scope here.
         ("backend_catalog_namespace", "copy_search_path_matcher"),
         ("backend_catalog_namespace", "get_search_path_matcher"),
-        // DESIGN_DEBT: RestrictSearchPath() is guc.c's function (mis-homed onto
-        // backend-catalog-namespace-seams). Its body is solely
-        // set_config_option("search_path", GUC_SAFE_SEARCH_PATH, PGC_USERSET,
-        // PGC_S_SESSION, GUC_ACTION_SAVE, true, 0, false). It is blocked on the
-        // unported GUC owner (backend-utils-misc-guc): set_config_option itself
-        // is declared-but-uninstalled, and the existing seam lacks the
-        // GUC_ACTION_SAVE/changeVal/elevel parameters this call needs, plus the
-        // GUC_SAFE_SEARCH_PATH constant is unported. Install once guc lands.
-        ("backend_catalog_namespace", "restrict_search_path"),
+        // (restrict_search_path retired: RestrictSearchPath is guc.c's function
+        // (guc.c:2246), now ported + installed by the merged guc owner
+        // (backend-utils-misc-guc) and its seam re-homed to
+        // backend-utils-misc-guc-seams. Consumers (matview, cluster) call it
+        // there.)
         ("backend_catalog_namespace", "search_path_matches_current_environment"),
         // xlog reconciled out: CATALOG status corrected merged->needs-decomp
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
