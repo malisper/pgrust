@@ -159,7 +159,7 @@ pub fn NewExplainState<'mcx>(mcx: Mcx<'mcx>) -> ExplainState<'mcx> {
 pub fn ParseExplainOptionList<'mcx>(
     es: &mut ExplainState<'mcx>,
     options: &[DefElem],
-    pstate: &mut ParseState,
+    pstate: &mut ParseState<'_>,
 ) -> PgResult<()> {
     let mut timing_set = false;
     let mut buffers_set = false;
@@ -428,7 +428,7 @@ pub fn RegisterExtensionExplainOption(option_name: &str, handler: ExplainOptionH
 pub fn ApplyExtensionExplainOption<'mcx>(
     es: &mut ExplainState<'mcx>,
     opt: &DefElem,
-    pstate: &mut ParseState,
+    pstate: &mut ParseState<'_>,
 ) -> PgResult<bool> {
     let defname = defname_str(opt);
 

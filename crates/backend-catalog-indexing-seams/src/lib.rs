@@ -374,6 +374,91 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `CastCreate`'s tuple build + insert: `GetNewOidWithIndex(rel,
+    /// CastOidIndexId, Anum_pg_cast_oid)` + `heap_form_tuple(RelationGetDescr(
+    /// rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` (catalog/
+    /// indexing.c + heapam). Returns the freshly-allocated cast OID. `Err`
+    /// carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_cast(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_cast::PgCastInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `ConversionCreate`'s tuple build + insert: `GetNewOidWithIndex(rel,
+    /// ConversionOidIndexId, Anum_pg_conversion_oid)` + `namestrcpy` +
+    /// `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +
+    /// `CatalogTupleInsert(rel, tup)` (catalog/indexing.c + heapam). Returns the
+    /// freshly-allocated conversion OID. `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_conversion(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_conversion::PgConversionInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RangeCreate`'s tuple build + insert: `heap_form_tuple(RelationGetDescr(
+    /// rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` (catalog/
+    /// indexing.c + heapam). `pg_range` has no OID column, so nothing is
+    /// returned. `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_range(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_range::PgRangeInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AddEnumLabel`'s single-row tuple build + insert: `heap_form_tuple(
+    /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)`
+    /// (catalog/indexing.c + heapam). The caller has already allocated `row.oid`
+    /// (the even/odd OID-selection logic lives in the port). `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_enum(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_enum::PgEnumInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_enum, EnumOidIndexId, Anum_pg_enum_oid)`
+    /// (catalog/catalog.c): allocate a fresh OID that does not collide with any
+    /// existing `pg_enum` row, verified against `EnumOidIndexId`. Returned to
+    /// the port so its even/odd-OID sort-order selection logic (`EnumValuesCreate`
+    /// / `AddEnumLabel`) can inspect the candidate before forming the tuple.
+    /// `Err` carries the index-probe error surface.
+    pub fn get_new_oid_with_index_pg_enum(rel: &RelationData<'_>) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `EnumValuesCreate`'s batched insert: `CatalogOpenIndexes(rel)` +
+    /// `MakeSingleTupleTableSlot`/`ExecStoreVirtualTuple` +
+    /// `CatalogTuplesMultiInsertWithInfo(rel, slots, n, indstate)` +
+    /// `CatalogCloseIndexes` (catalog/indexing.c + executor tuple slots). Each
+    /// caller-supplied row's `oid` is pre-allocated (the even-OID +
+    /// wraparound-sort logic lives in the port). `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuples_multi_insert_pg_enum(
+        rel: &RelationData<'_>,
+        rows: &[types_catalog::pg_enum::PgEnumInsertRow],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CatalogTupleUpdate(pg_enum, &tup->t_self, tup)` for the in-place
+    /// `pg_enum` mutators (`RenameEnumLabel` rewrites `enumlabel`;
+    /// `RenumberEnumType` rewrites `enumsortorder`): the owner re-forms the
+    /// tuple addressed by `tid` from the supplied row and stores it (catalog/
+    /// indexing.c). `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_enum(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        row: &types_catalog::pg_enum::PgEnumInsertRow,
+    ) -> PgResult<()>
+);
+
 /* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
 
 seam_core::seam!(

@@ -42,10 +42,10 @@ fn flag_opt(name: &str) -> DefElem {
     defelem(name, None)
 }
 
-fn empty_pstate() -> ParseState {
-    ParseState {
-        p_sourcetext: None,
-    }
+fn empty_pstate(mcx: mcx::Mcx<'_>) -> ParseState<'_> {
+    // `make_parsestate(NULL)` image: p_sourcetext is None (EXPLAIN options
+    // parsing never reads it); the rest are the C palloc0 defaults.
+    ParseState::new(mcx).unwrap()
 }
 
 // --- pg_nextpower2_32 -------------------------------------------------------
@@ -84,7 +84,7 @@ fn new_explain_state_defaults() {
 fn parse_basic_flags() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let opts = [bool_opt("verbose", true), bool_opt("costs", false)];
     ParseExplainOptionList(&mut es, &opts, &mut ps).unwrap();
     assert!(es.verbose);
@@ -101,7 +101,7 @@ fn parse_format_values() {
     ] {
         let ctx = MemoryContext::new("t");
         let mut es = NewExplainState(ctx.mcx());
-        let mut ps = empty_pstate();
+        let mut ps = empty_pstate(ctx.mcx());
         ParseExplainOptionList(&mut es, &[str_opt("format", s)], &mut ps).unwrap();
         assert_eq!(es.format, want);
     }
@@ -117,7 +117,7 @@ fn parse_serialize_values() {
     ] {
         let ctx = MemoryContext::new("t");
         let mut es = NewExplainState(ctx.mcx());
-        let mut ps = empty_pstate();
+        let mut ps = empty_pstate(ctx.mcx());
         // SERIALIZE requires ANALYZE unless NONE; add ANALYZE for the non-NONE.
         let opts = vec![flag_opt("analyze"), str_opt("serialize", s)];
         ParseExplainOptionList(&mut es, &opts, &mut ps).unwrap();
@@ -129,7 +129,7 @@ fn parse_serialize_values() {
 fn parse_serialize_no_arg_is_text() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let opts = vec![flag_opt("analyze"), flag_opt("serialize")];
     ParseExplainOptionList(&mut es, &opts, &mut ps).unwrap();
     assert_eq!(es.serialize, ExplainSerializeOption::EXPLAIN_SERIALIZE_TEXT);
@@ -139,7 +139,7 @@ fn parse_serialize_no_arg_is_text() {
 fn timing_buffers_summary_default_to_analyze() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     ParseExplainOptionList(&mut es, &[flag_opt("analyze")], &mut ps).unwrap();
     assert!(es.timing);
     assert!(es.buffers);
@@ -152,7 +152,7 @@ fn timing_buffers_summary_default_to_analyze() {
 fn wal_requires_analyze() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let err = ParseExplainOptionList(&mut es, &[flag_opt("wal")], &mut ps).unwrap_err();
     assert!(err.message().contains("WAL"));
 }
@@ -161,7 +161,7 @@ fn wal_requires_analyze() {
 fn timing_requires_analyze() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let err = ParseExplainOptionList(&mut es, &[bool_opt("timing", true)], &mut ps).unwrap_err();
     assert!(err.message().contains("TIMING"));
 }
@@ -170,7 +170,7 @@ fn timing_requires_analyze() {
 fn serialize_requires_analyze() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let err =
         ParseExplainOptionList(&mut es, &[str_opt("serialize", "text")], &mut ps).unwrap_err();
     assert!(err.message().contains("SERIALIZE"));
@@ -180,7 +180,7 @@ fn serialize_requires_analyze() {
 fn generic_plan_with_analyze_conflicts() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     let opts = vec![flag_opt("analyze"), bool_opt("generic_plan", true)];
     let err = ParseExplainOptionList(&mut es, &opts, &mut ps).unwrap_err();
     assert!(err.message().contains("GENERIC_PLAN"));
@@ -190,7 +190,7 @@ fn generic_plan_with_analyze_conflicts() {
 fn unrecognized_format_value_errors() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     // The error build itself reaches parser_errposition (unported) — but we
     // catch the panic to confirm the rejection path is taken, not a silent OK.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -249,7 +249,7 @@ fn extension_state_set_get_and_growth() {
 fn register_then_apply_unknown_returns_false() {
     let ctx = MemoryContext::new("t");
     let mut es = NewExplainState(ctx.mcx());
-    let mut ps = empty_pstate();
+    let mut ps = empty_pstate(ctx.mcx());
     // No handler registered for this name => ApplyExtensionExplainOption false.
     let applied =
         ApplyExtensionExplainOption(&mut es, &str_opt("no_such_opt_zzz", "x"), &mut ps).unwrap();

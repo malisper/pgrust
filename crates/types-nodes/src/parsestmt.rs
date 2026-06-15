@@ -11,12 +11,18 @@
 //! the C pointer to the owner-defined struct. These resolve to the real type
 //! when their owning unit lands.
 
-use mcx::{Mcx, PgBox};
-use types_core::primitive::TimestampTz;
+use mcx::{Mcx, PgBox, PgString, PgVec};
+use types_core::primitive::{AttrNumber, Index, Oid, TimestampTz, INVALID_OID};
 use types_error::PgResult;
 use types_opclass::TypeName;
+use types_rel::Relation;
 
-use crate::nodes::Node;
+use crate::bitmapset::Bitmapset;
+use crate::nodes::{Node, NodePtr};
+use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use crate::primnodes::{Param, TargetEntry, VarReturningType};
+use crate::queryenvironment::QueryEnvironment;
+use crate::rawnodes::{Alias, ColumnRef, CommonTableExpr, JoinExpr, ParamRef, WindowDef};
 
 /// Opaque handle to a `CachedPlanSource *` (`utils/plancache.h`). `NULL` is the
 /// `None` of the carrier. Owned by the unported plancache unit.
@@ -101,15 +107,342 @@ impl QueryCompletionHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CommandTag(pub i32);
 
-/// `ParseState *` (`parser/parse_node.h`), trimmed to what the command drivers
-/// read. The full struct has ~36 fields; the PREPARE/EXECUTE/EXPLAIN drivers
-/// only read `p_sourcetext` and `p_queryEnv`.
-#[derive(Debug)]
+/// `ParseExprKind` (`parser/parse_node.h`) — the kind of expression currently
+/// being parsed. `EXPR_KIND_NONE` when not in an expression. Discriminants
+/// follow PostgreSQL 18.3's enumeration order exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ParseExprKind {
+    /// "not in an expression"
+    #[default]
+    EXPR_KIND_NONE = 0,
+    /// reserved for extensions
+    EXPR_KIND_OTHER = 1,
+    /// JOIN ON
+    EXPR_KIND_JOIN_ON = 2,
+    /// JOIN USING
+    EXPR_KIND_JOIN_USING = 3,
+    /// sub-SELECT in FROM clause
+    EXPR_KIND_FROM_SUBSELECT = 4,
+    /// function in FROM clause
+    EXPR_KIND_FROM_FUNCTION = 5,
+    /// WHERE
+    EXPR_KIND_WHERE = 6,
+    /// HAVING
+    EXPR_KIND_HAVING = 7,
+    /// FILTER
+    EXPR_KIND_FILTER = 8,
+    /// window definition PARTITION BY
+    EXPR_KIND_WINDOW_PARTITION = 9,
+    /// window definition ORDER BY
+    EXPR_KIND_WINDOW_ORDER = 10,
+    /// window frame clause with RANGE
+    EXPR_KIND_WINDOW_FRAME_RANGE = 11,
+    /// window frame clause with ROWS
+    EXPR_KIND_WINDOW_FRAME_ROWS = 12,
+    /// window frame clause with GROUPS
+    EXPR_KIND_WINDOW_FRAME_GROUPS = 13,
+    /// SELECT target list item
+    EXPR_KIND_SELECT_TARGET = 14,
+    /// INSERT target list item
+    EXPR_KIND_INSERT_TARGET = 15,
+    /// UPDATE assignment source item
+    EXPR_KIND_UPDATE_SOURCE = 16,
+    /// UPDATE assignment target item
+    EXPR_KIND_UPDATE_TARGET = 17,
+    /// MERGE WHEN [NOT] MATCHED condition
+    EXPR_KIND_MERGE_WHEN = 18,
+    /// GROUP BY
+    EXPR_KIND_GROUP_BY = 19,
+    /// ORDER BY
+    EXPR_KIND_ORDER_BY = 20,
+    /// DISTINCT ON
+    EXPR_KIND_DISTINCT_ON = 21,
+    /// LIMIT
+    EXPR_KIND_LIMIT = 22,
+    /// OFFSET
+    EXPR_KIND_OFFSET = 23,
+    /// RETURNING in INSERT/UPDATE/DELETE
+    EXPR_KIND_RETURNING = 24,
+    /// RETURNING in MERGE
+    EXPR_KIND_MERGE_RETURNING = 25,
+    /// VALUES
+    EXPR_KIND_VALUES = 26,
+    /// single-row VALUES (in INSERT only)
+    EXPR_KIND_VALUES_SINGLE = 27,
+    /// CHECK constraint for a table
+    EXPR_KIND_CHECK_CONSTRAINT = 28,
+    /// CHECK constraint for a domain
+    EXPR_KIND_DOMAIN_CHECK = 29,
+    /// default value for a table column
+    EXPR_KIND_COLUMN_DEFAULT = 30,
+    /// default parameter value for function
+    EXPR_KIND_FUNCTION_DEFAULT = 31,
+    /// index expression
+    EXPR_KIND_INDEX_EXPRESSION = 32,
+    /// index predicate
+    EXPR_KIND_INDEX_PREDICATE = 33,
+    /// extended statistics expression
+    EXPR_KIND_STATS_EXPRESSION = 34,
+    /// transform expr in ALTER COLUMN TYPE
+    EXPR_KIND_ALTER_COL_TRANSFORM = 35,
+    /// parameter value in EXECUTE
+    EXPR_KIND_EXECUTE_PARAMETER = 36,
+    /// WHEN condition in CREATE TRIGGER
+    EXPR_KIND_TRIGGER_WHEN = 37,
+    /// USING or WITH CHECK expr in policy
+    EXPR_KIND_POLICY = 38,
+    /// partition bound expression
+    EXPR_KIND_PARTITION_BOUND = 39,
+    /// PARTITION BY expression
+    EXPR_KIND_PARTITION_EXPRESSION = 40,
+    /// procedure argument in CALL
+    EXPR_KIND_CALL_ARGUMENT = 41,
+    /// WHERE condition in COPY FROM
+    EXPR_KIND_COPY_WHERE = 42,
+    /// generation expression for a column
+    EXPR_KIND_GENERATED_COLUMN = 43,
+    /// cycle mark value
+    EXPR_KIND_CYCLE_MARK = 44,
+}
+
+/// `PreParseColumnRefHook` (`parser/parse_node.h`) — optional parser hook
+/// invoked before resolving a `ColumnRef`. Returns the replacement `Node`, or
+/// `None` to fall through to the default resolution. The hook owner (the
+/// parser's caller, e.g. SPI/PL) supplies the function; it is `None` unless set
+/// by `make_parsestate`'s caller.
+pub type PreParseColumnRefHook<'mcx> =
+    fn(&mut ParseState<'mcx>, &ColumnRef<'mcx>) -> PgResult<Option<NodePtr<'mcx>>>;
+
+/// `PostParseColumnRefHook` (`parser/parse_node.h`) — optional parser hook
+/// invoked after default `ColumnRef` resolution (`var` is the default result,
+/// possibly `None`). Returns the (possibly rewritten) `Node`.
+pub type PostParseColumnRefHook<'mcx> = fn(
+    &mut ParseState<'mcx>,
+    &ColumnRef<'mcx>,
+    Option<NodePtr<'mcx>>,
+) -> PgResult<Option<NodePtr<'mcx>>>;
+
+/// `ParseParamRefHook` (`parser/parse_node.h`) — optional parser hook for
+/// resolving a `$n` `ParamRef`. Returns the replacement `Node`.
+pub type ParseParamRefHook<'mcx> =
+    fn(&mut ParseState<'mcx>, &ParamRef) -> PgResult<Option<NodePtr<'mcx>>>;
+
+/// `CoerceParamHook` (`parser/parse_node.h`) — optional parser hook for coercing
+/// a `Param` to a target type. Returns the coerced `Node`.
+pub type CoerceParamHook<'mcx> =
+    fn(&mut ParseState<'mcx>, &Param, Oid, i32, i32) -> PgResult<Option<NodePtr<'mcx>>>;
+
+/// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
+/// for the parser hook functions above. Owned by the hook installer; opaque to
+/// everyone else. `None` is the C `NULL`.
+///
+/// Inherited opacity: the C field is a bare `void *` whose pointee is whatever
+/// the hook installer (SPI / PL / extension) chose. The owning unit threads its
+/// own state through it; until such an installer lands in the repo it is carried
+/// as a typed-but-empty box. (No stand-in is introduced — the pointee remains
+/// the installer's private type, mirrored by `Node` here as the universal
+/// parse-time payload the hooks already traffic in.)
+pub type ParseRefHookState<'mcx> = Option<PgBox<'mcx, Node<'mcx>>>;
+
+/// `ParseState` (`parser/parse_node.h`) — the working state threaded through
+/// parse analysis. The full ~36-field struct; this is the single canonical home
+/// for the parser cluster (`parse_expr`/`parse_relation`/`parse_clause`/...).
+///
+/// `make_parsestate` (parser/parse_node.c) is the C `palloc0` image with the
+/// two nonzero starts (`p_next_resno = 1`, `p_resolve_unknowns = true`); see
+/// [`ParseState::new`].
 pub struct ParseState<'mcx> {
-    /// `p_sourcetext` — the source text of the current query (may be `None`).
-    pub p_sourcetext: Option<mcx::PgString<'mcx>>,
-    /// `p_queryEnv` — the QueryEnvironment, or `None` for the default.
-    pub p_queryEnv: Option<PgBox<'mcx, crate::queryenvironment::QueryEnvironment<'mcx>>>,
+    /// `ParseState *parentParseState` — stack link; `None` in a top-level state.
+    pub parentParseState: Option<PgBox<'mcx, ParseState<'mcx>>>,
+    /// `const char *p_sourcetext` — the source text of the current query (used
+    /// only for error cursor positions); `None` if not available.
+    pub p_sourcetext: Option<PgString<'mcx>>,
+    /// `List *p_rtable` — range table so far.
+    pub p_rtable: PgVec<'mcx, RangeTblEntry<'mcx>>,
+    /// `List *p_rteperminfos` — `RTEPermissionInfo` for each `RTE_RELATION`.
+    pub p_rteperminfos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
+    /// `List *p_joinexprs` — `JoinExpr`s for `RTE_JOIN` p_rtable entries
+    /// (one-for-one with p_rtable, `None` for non-join RTEs, may be shorter).
+    pub p_joinexprs: PgVec<'mcx, Option<PgBox<'mcx, JoinExpr<'mcx>>>>,
+    /// `List *p_nullingrels` — `Bitmapset`s showing nulling outer joins
+    /// (one-for-one with p_rtable, may be shorter; missing == empty).
+    pub p_nullingrels: PgVec<'mcx, Bitmapset<'mcx>>,
+    /// `List *p_joinlist` — join items (`RangeTblRef`/`JoinExpr` nodes) that
+    /// will become the top-level `FromExpr`'s fromlist.
+    pub p_joinlist: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `List *p_namespace` — currently-referenceable RTEs
+    /// (list of `ParseNamespaceItem`).
+    pub p_namespace: PgVec<'mcx, ParseNamespaceItem<'mcx>>,
+    /// `bool p_lateral_active` — are `p_lateral_only` items visible?
+    pub p_lateral_active: bool,
+    /// `List *p_ctenamespace` — current namespace for common table exprs.
+    pub p_ctenamespace: PgVec<'mcx, CommonTableExpr<'mcx>>,
+    /// `List *p_future_ctes` — common table exprs not yet in namespace.
+    pub p_future_ctes: PgVec<'mcx, CommonTableExpr<'mcx>>,
+    /// `CommonTableExpr *p_parent_cte` — this query's containing CTE.
+    pub p_parent_cte: Option<PgBox<'mcx, CommonTableExpr<'mcx>>>,
+    /// `Relation p_target_relation` — INSERT/UPDATE/DELETE/MERGE target rel.
+    pub p_target_relation: Option<Relation<'mcx>>,
+    /// `ParseNamespaceItem *p_target_nsitem` — target rel's NSItem, or `None`.
+    pub p_target_nsitem: Option<PgBox<'mcx, ParseNamespaceItem<'mcx>>>,
+    /// `ParseNamespaceItem *p_grouping_nsitem` — NSItem for grouping, or `None`.
+    pub p_grouping_nsitem: Option<PgBox<'mcx, ParseNamespaceItem<'mcx>>>,
+    /// `bool p_is_insert` — process assignment like INSERT, not UPDATE.
+    pub p_is_insert: bool,
+    /// `List *p_windowdefs` — raw representations of window clauses.
+    pub p_windowdefs: PgVec<'mcx, WindowDef<'mcx>>,
+    /// `ParseExprKind p_expr_kind` — what kind of expression we're parsing.
+    pub p_expr_kind: ParseExprKind,
+    /// `int p_next_resno` — next `TargetEntry.resno` to assign (from 1).
+    pub p_next_resno: i32,
+    /// `List *p_multiassign_exprs` — junk tlist entries for multiassign.
+    pub p_multiassign_exprs: PgVec<'mcx, TargetEntry<'mcx>>,
+    /// `List *p_locking_clause` — raw FOR UPDATE/FOR SHARE info.
+    pub p_locking_clause: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `bool p_locked_from_parent` — parent has marked this subquery FOR
+    /// UPDATE/SHARE.
+    pub p_locked_from_parent: bool,
+    /// `bool p_resolve_unknowns` — resolve unknown-type SELECT outputs as text.
+    pub p_resolve_unknowns: bool,
+    /// `QueryEnvironment *p_queryEnv` — current env, or `None` for the default.
+    pub p_queryEnv: Option<PgBox<'mcx, QueryEnvironment<'mcx>>>,
+    /// `bool p_hasAggs` — found aggregates in the query?
+    pub p_hasAggs: bool,
+    /// `bool p_hasWindowFuncs` — found window functions?
+    pub p_hasWindowFuncs: bool,
+    /// `bool p_hasTargetSRFs` — found set-returning functions in a target list?
+    pub p_hasTargetSRFs: bool,
+    /// `bool p_hasSubLinks` — found subquery `SubLink`s?
+    pub p_hasSubLinks: bool,
+    /// `bool p_hasModifyingCTE` — found a data-modifying CTE?
+    pub p_hasModifyingCTE: bool,
+    /// `Node *p_last_srf` — most recent set-returning func/op found, or `None`.
+    pub p_last_srf: Option<NodePtr<'mcx>>,
+    /// `PreParseColumnRefHook p_pre_columnref_hook` — optional, `None` unless set.
+    pub p_pre_columnref_hook: Option<PreParseColumnRefHook<'mcx>>,
+    /// `PostParseColumnRefHook p_post_columnref_hook` — optional.
+    pub p_post_columnref_hook: Option<PostParseColumnRefHook<'mcx>>,
+    /// `ParseParamRefHook p_paramref_hook` — optional.
+    pub p_paramref_hook: Option<ParseParamRefHook<'mcx>>,
+    /// `CoerceParamHook p_coerce_param_hook` — optional.
+    pub p_coerce_param_hook: Option<CoerceParamHook<'mcx>>,
+    /// `void *p_ref_hook_state` — common passthrough state for the hooks above.
+    pub p_ref_hook_state: ParseRefHookState<'mcx>,
+}
+
+impl<'mcx> ParseState<'mcx> {
+    /// `make_parsestate(NULL)` (parser/parse_node.c) over a fresh top-level
+    /// state: the C `palloc0` image with the two nonzero starts
+    /// (`p_next_resno = 1`, `p_resolve_unknowns = true`). The `mcx` arena backs
+    /// the (initially empty) list fields. Hooks default to `None`.
+    pub fn new(mcx: Mcx<'mcx>) -> PgResult<ParseState<'mcx>> {
+        Ok(ParseState {
+            parentParseState: None,
+            p_sourcetext: None,
+            p_rtable: PgVec::new_in(mcx),
+            p_rteperminfos: PgVec::new_in(mcx),
+            p_joinexprs: PgVec::new_in(mcx),
+            p_nullingrels: PgVec::new_in(mcx),
+            p_joinlist: PgVec::new_in(mcx),
+            p_namespace: PgVec::new_in(mcx),
+            p_lateral_active: false,
+            p_ctenamespace: PgVec::new_in(mcx),
+            p_future_ctes: PgVec::new_in(mcx),
+            p_parent_cte: None,
+            p_target_relation: None,
+            p_target_nsitem: None,
+            p_grouping_nsitem: None,
+            p_is_insert: false,
+            p_windowdefs: PgVec::new_in(mcx),
+            p_expr_kind: ParseExprKind::EXPR_KIND_NONE,
+            p_next_resno: 1,
+            p_multiassign_exprs: PgVec::new_in(mcx),
+            p_locking_clause: PgVec::new_in(mcx),
+            p_locked_from_parent: false,
+            p_resolve_unknowns: true,
+            p_queryEnv: None,
+            p_hasAggs: false,
+            p_hasWindowFuncs: false,
+            p_hasTargetSRFs: false,
+            p_hasSubLinks: false,
+            p_hasModifyingCTE: false,
+            p_last_srf: None,
+            p_pre_columnref_hook: None,
+            p_post_columnref_hook: None,
+            p_paramref_hook: None,
+            p_coerce_param_hook: None,
+            p_ref_hook_state: None,
+        })
+    }
+}
+
+/// `ParseNamespaceItem` (`parser/parse_node.h`) — an element of a namespace
+/// list: the table/column names exposed by an RTE plus the per-column Var-
+/// construction data and the visibility flags used during FROM/RETURNING.
+pub struct ParseNamespaceItem<'mcx> {
+    /// `Alias *p_names` — table and column names exposed by this nsitem.
+    pub p_names: Option<PgBox<'mcx, Alias<'mcx>>>,
+    /// `RangeTblEntry *p_rte` — the relation's rangetable entry.
+    pub p_rte: Option<PgBox<'mcx, RangeTblEntry<'mcx>>>,
+    /// `int p_rtindex` — the relation's index in the rangetable.
+    pub p_rtindex: i32,
+    /// `RTEPermissionInfo *p_perminfo` — the relation's rteperminfos entry.
+    pub p_perminfo: Option<PgBox<'mcx, RTEPermissionInfo<'mcx>>>,
+    /// `ParseNamespaceColumn *p_nscolumns` — per-column data, same length as
+    /// `p_names->colnames`.
+    pub p_nscolumns: PgVec<'mcx, ParseNamespaceColumn>,
+    /// `bool p_rel_visible` — relation name visible (for qualified refs)?
+    pub p_rel_visible: bool,
+    /// `bool p_cols_visible` — column names visible as unqualified refs?
+    pub p_cols_visible: bool,
+    /// `bool p_lateral_only` — visible only to LATERAL expressions?
+    pub p_lateral_only: bool,
+    /// `bool p_lateral_ok` — if so, does the join type allow use?
+    pub p_lateral_ok: bool,
+    /// `VarReturningType p_returning_type` — OLD/NEW for use in RETURNING.
+    pub p_returning_type: VarReturningType,
+}
+
+/// `ParseNamespaceColumn` (`parser/parse_node.h`) — data about one column of a
+/// [`ParseNamespaceItem`], the info needed to construct a Var for the column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParseNamespaceColumn {
+    /// `Index p_varno` — rangetable index of the semantic referent.
+    pub p_varno: Index,
+    /// `AttrNumber p_varattno` — attribute number of the semantic referent.
+    pub p_varattno: AttrNumber,
+    /// `Oid p_vartype` — OID of the column's data type.
+    pub p_vartype: Oid,
+    /// `int32 p_vartypmod` — type modifier value.
+    pub p_vartypmod: i32,
+    /// `Oid p_varcollid` — OID of the column's collation, if any.
+    pub p_varcollid: Oid,
+    /// `VarReturningType p_varreturningtype` — OLD/NEW (duplicated per column).
+    pub p_varreturningtype: VarReturningType,
+    /// `Index p_varnosyn` — rangetable index for ruleutils display.
+    pub p_varnosyn: Index,
+    /// `AttrNumber p_varattnosyn` — attribute number for ruleutils display.
+    pub p_varattnosyn: AttrNumber,
+    /// `bool p_dontexpand` — suppress whole-row expansion?
+    pub p_dontexpand: bool,
+}
+
+impl Default for ParseNamespaceColumn {
+    /// The C `palloc0` image (all-zero) of a `ParseNamespaceColumn`.
+    fn default() -> Self {
+        ParseNamespaceColumn {
+            p_varno: 0,
+            p_varattno: 0,
+            p_vartype: INVALID_OID,
+            p_vartypmod: 0,
+            p_varcollid: INVALID_OID,
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: 0,
+            p_varattnosyn: 0,
+            p_dontexpand: false,
+        }
+    }
 }
 
 /// `RawStmt` (`nodes/parsenodes.h`) — the wrapper a raw parse tree is placed
