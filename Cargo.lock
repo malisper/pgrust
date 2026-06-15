@@ -883,7 +883,9 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-hash-entry",
+ "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
+ "backend-access-nbt-validate",
  "backend-access-nbtree-nbtree",
  "backend-utils-cache-syscache-seams",
  "mcx",
