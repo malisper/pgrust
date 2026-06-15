@@ -204,3 +204,37 @@ seam_core::seam!(
     /// per-variable assign hooks.
     pub fn reset_all_options() -> types_error::PgResult<()>
 );
+
+// ---- proconfig / pg_db_role_setting option-array helpers (guc.c) ----
+// The `text[]` proconfig array is carried as an owned `Vec<String>` of
+// `"name=value"` entries (the consumers' value-model). Re-homed here from
+// `backend-commands-functioncmds-seams` (first consumer); the real owner
+// `backend-utils-misc-guc` installs them.
+
+seam_core::seam!(
+    /// `GUCArrayAdd(array, name, value)` (utils/misc/guc.c) — append/replace the
+    /// `name=value` entry in the proconfig `text[]`.
+    pub fn guc_array_add(
+        a: Option<Vec<String>>,
+        name: String,
+        value: String,
+    ) -> types_error::PgResult<Vec<String>>
+);
+
+seam_core::seam!(
+    /// `GUCArrayDelete(array, name)` (utils/misc/guc.c) — drop the `name=...`
+    /// entry from the proconfig `text[]` (`None` if the array becomes empty).
+    pub fn guc_array_delete(
+        a: Option<Vec<String>>,
+        name: String,
+    ) -> types_error::PgResult<Option<Vec<String>>>
+);
+
+seam_core::seam!(
+    /// `GUCArrayReset(array)` (utils/misc/guc.c) — for a superuser, reset
+    /// (drop) all GUC entries, returning `None`; for a non-superuser, drop only
+    /// the entries that user may reset, returning the surviving `text[]`
+    /// (`None` if it becomes empty). `Err` carries the permission/validation
+    /// error surface.
+    pub fn guc_array_reset(a: Vec<String>) -> types_error::PgResult<Option<Vec<String>>>
+);

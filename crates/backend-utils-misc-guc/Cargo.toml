@@ -28,5 +28,6 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }

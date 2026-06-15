@@ -17,6 +17,7 @@ use backend_catalog_namespace::QualifiedNameGetCreationNamespace;
 use backend_commands_functioncmds_seams::{
     self as seam, AlterFunctionChanges, ProcedureCreateArgs,
 };
+use backend_utils_misc_guc_seams as guc_seam;
 use backend_utils_error::ereport;
 use mcx::Mcx;
 use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
@@ -621,10 +622,10 @@ fn update_proconfig_value(
                 backend_utils_misc_guc_funcs_seams::extract_set_variable_args::call(sstmt)?;
 
             if let Some(valuestr) = valuestr {
-                a = Some(seam::guc_array_add::call(a, name, valuestr)?);
+                a = Some(guc_seam::guc_array_add::call(a, name, valuestr)?);
             } else {
                 // RESET
-                a = seam::guc_array_delete::call(a, name)?;
+                a = guc_seam::guc_array_delete::call(a, name)?;
             }
         }
     }

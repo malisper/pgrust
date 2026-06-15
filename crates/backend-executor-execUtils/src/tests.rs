@@ -363,14 +363,14 @@ fn init_range_table_sets_arrays() {
     estate.with_mut(|estate| {
         let mcx = estate.es_query_cxt;
         let mut rt = PgVec::new_in(mcx);
-        rt.push(RangeTblEntry {
-            rtekind: RTE_RELATION,
-            relid: 16384,
-            relkind: b'r' as i8,
-            rellockmode: AccessShareLock,
-            perminfoindex: 1,
-        });
-        rt.push(RangeTblEntry::default());
+        let mut rte = RangeTblEntry::new_in(mcx);
+        rte.rtekind = RTE_RELATION;
+        rte.relid = 16384;
+        rte.relkind = b'r' as i8;
+        rte.rellockmode = AccessShareLock;
+        rte.perminfoindex = 1;
+        rt.push(rte);
+        rt.push(RangeTblEntry::new_in(mcx));
         ExecInitRangeTable(estate, rt, PgVec::new_in(mcx), None).unwrap();
         assert_eq!(estate.es_range_table_size, 2);
         assert_eq!(estate.es_relations.len(), 2);

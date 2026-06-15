@@ -46,6 +46,7 @@
 
 pub mod cnum;
 pub mod enum_lookup;
+pub mod guc_array;
 pub mod live;
 pub mod model;
 pub mod name;
@@ -323,6 +324,11 @@ pub fn init_seams() {
         reset_all_options_global();
         Ok(())
     });
+
+    // --- proconfig / pg_db_role_setting option-array helpers (guc.c). ---
+    s::guc_array_add::set(|a, name, value| guc_array::GUCArrayAdd(a, &name, &value));
+    s::guc_array_delete::set(|a, name| guc_array::GUCArrayDelete(a, &name));
+    s::guc_array_reset::set(guc_array::GUCArrayReset);
 
     // --- Sub-features owned by separate, not-yet-ported units. Installed here
     //     (guc.c is their home) but each loud-panics into the unported sub-unit

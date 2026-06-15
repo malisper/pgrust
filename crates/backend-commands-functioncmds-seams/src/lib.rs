@@ -292,33 +292,9 @@ seam_core::seam!(
 // `-seams` crate (`backend-utils-misc-guc-funcs-seams`), where its real owner
 // installs it (CONTRACT_RECONCILE_PENDING retired). Consumers call it there.
 
-seam_core::seam!(
-    /// `GUCArrayAdd(array, name, value)` (utils/misc/guc.c) — append/replace the
-    /// `name=value` entry in the proconfig `text[]`.
-    pub fn guc_array_add(
-        a: Option<Vec<String>>,
-        name: String,
-        value: String,
-    ) -> PgResult<Vec<String>>
-);
-
-seam_core::seam!(
-    /// `GUCArrayDelete(array, name)` (utils/misc/guc.c) — drop the `name=...`
-    /// entry from the proconfig `text[]` (`None` if the array becomes empty).
-    pub fn guc_array_delete(
-        a: Option<Vec<String>>,
-        name: String,
-    ) -> PgResult<Option<Vec<String>>>
-);
-
-seam_core::seam!(
-    /// `GUCArrayReset(array)` (utils/misc/guc.c) — for a superuser, reset
-    /// (drop) all GUC entries, returning `None`; for a non-superuser, drop only
-    /// the entries that user may reset, returning the surviving `text[]`
-    /// (`None` if it becomes empty). `Err` carries the value-parse error
-    /// surface.
-    pub fn guc_array_reset(a: Vec<String>) -> PgResult<Option<Vec<String>>>
-);
+// (GUCArrayAdd/Delete/Reset re-homed to backend-utils-misc-guc-seams — guc.c's
+// real owner — and installed by backend-utils-misc-guc. Consumers call them
+// there.)
 
 seam_core::seam!(
     /// `defGetQualifiedName(def)` (commands/define.c) — the qualified name list.

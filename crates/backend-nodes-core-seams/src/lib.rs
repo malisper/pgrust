@@ -252,7 +252,7 @@ seam_core::seam!(
     /// `print_rt(rtable)` (`nodes/print.c`): print the range table to stdout.
     /// Owned by the parsetree/parsenodes surface that carries the full
     /// `RangeTblEntry` (with `eref`/`inh`/`inFromCl`).
-    pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry]) -> types_error::PgResult<()>
+    pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>]) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -261,7 +261,7 @@ seam_core::seam!(
     /// `rt_fetch->eref->aliasname` + `get_rte_attribute_name`).
     pub fn print_expr(
         expr: Option<&types_nodes::nodes::Node<'_>>,
-        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
     ) -> types_error::PgResult<()>
 );
 
@@ -271,7 +271,7 @@ seam_core::seam!(
     /// `EquivalenceMember`/`ec_members` model + `eq_classes` side-table).
     pub fn print_pathkeys(
         pathkeys: &[types_pathnodes::PathKey],
-        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
     ) -> types_error::PgResult<()>
 );
 
@@ -281,7 +281,7 @@ seam_core::seam!(
     /// `TargetEntry` (with `resno`/`ressortgroupref`).
     pub fn print_tl<'mcx>(
         tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
-        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
     ) -> types_error::PgResult<()>
 );
 
