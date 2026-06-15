@@ -59,13 +59,16 @@ use crate::transition::{process_ordered_aggregate_multi, process_ordered_aggrega
 /// `ExecEvalExpr` of the direct arguments, `InitFunctionCallInfoData` +
 /// `FunctionCallInvoke` of the finalfn, and the `MakeExpandedObjectReadOnly`
 /// wrap of every state/result `Datum`. `FunctionCallInvoke` +
-/// `InitFunctionCallInfoData` ARE ported (fmgr-core, #52). The genuine blocker
-/// is the per-agg fcinfo *carrier*: the trimmed `FunctionCallInfoBaseData`/
-/// `FmgrInfo` here carry none of the consumed fields (`args`/`isnull`/`flinfo`/
-/// `fn_strict`), so there is no built call frame to feed the finalfn, and the
-/// direct-argument `ExecEvalExpr` is owned by the not-yet-ported execExpr unit.
-/// The body therefore stands behind a loud panic until that fcinfo carrier +
-/// execExpr boundary land, per the seam-and-panic discipline.
+/// `InitFunctionCallInfoData` ARE ported (fmgr-core, #52) and the shared
+/// `FunctionCallInfoBaseData` now carries `args`/`isnull`/`flinfo`/`fncollation`
+/// (#296). The genuine blocker is NOT the shared call frame: it is (a) the
+/// direct-argument `ExecEvalExpr` over `peragg->aggdirectargs`, owned by the
+/// not-yet-ported execExpr eval boundary, and (b) the finalfn's `fcinfo->context`
+/// back-reference to the AggState (`(void *) aggstate`, consumed by AggGetAggref)
+/// — reaching the nodeAgg-owned AggState as a Node is the #200 keystone this crate
+/// does not yet thread. The body therefore stands behind a loud panic until the
+/// execExpr eval boundary + AggState-as-Node (#200) land, per the seam-and-panic
+/// discipline.
 pub fn finalize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
@@ -197,10 +200,11 @@ pub fn finalize_aggregate<'mcx>(
 /// MemoryContextSwitchTo(oldContext);
 /// ```
 ///
-/// Same blockers as [`finalize_aggregate`]: the serialfn `FunctionCallInvoke`
-/// over `pertrans->serialfn_fcinfo` and `MakeExpandedObjectReadOnly` are
-/// unported with no seam, and the trimmed call-frame/`FmgrInfo` types carry
-/// none of the consumed fields. The body stands behind a loud panic until
+/// Same blockers as [`finalize_aggregate`]: the shared call frame carries args[]
+/// (#296) and `FunctionCallInvoke` is ported (fmgr #52), but the serialfn call
+/// over `pertrans->serialfn_fcinfo` needs the nodeAgg-owned per-trans serialfn
+/// frame (not yet built by the unported `ExecInitAgg`/build_pertrans path) and the
+/// AggState-as-Node (#200) reachability. The body stands behind a loud panic until
 /// those land.
 pub fn finalize_partialaggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
@@ -289,13 +293,16 @@ fn exec_eval_expr_direct_arg<'mcx>(
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` on the
-/// `LOCAL_FCINFO` finalfn call frame. The fmgr call-frame args payload is owned
-/// by the not-yet-ported fmgr unit; the trimmed call frame carries no `args`.
+/// `LOCAL_FCINFO` finalfn call frame. The shared call frame carries `args[]`
+/// (#296); this helper has no built LOCAL_FCINFO to write into because the
+/// finalfn call frame is set up by the unblocked finalize path (init_finalfn_fcinfo
+/// below), which is itself blocked on the execExpr/AggState boundary.
 fn local_fcinfo_set_arg(_i: i32, _value: Datum<'_>, _isnull: bool) {
     panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: writing the LOCAL_FCINFO finalfn args \
-         is part of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
-         FunctionCallInfoBaseData carries no args"
+        "backend-executor-nodeAgg::finalize_aggregate: the shared call frame carries \
+         args[] (#296), but no LOCAL_FCINFO finalfn frame is built here — \
+         init_finalfn_fcinfo is blocked on the execExpr eval boundary + \
+         AggState-as-Node (#200), so there is nothing to write into"
     );
 }
 
@@ -313,44 +320,52 @@ fn init_finalfn_fcinfo<'mcx>(
     );
 }
 
-/// `peragg->finalfn.fn_strict` — the finalfn's strictness, read off the
-/// resolved `FmgrInfo`. The trimmed `FmgrInfo` carries only the lookup key, so
-/// the strict flag comes from the fmgr owner.
+/// `peragg->finalfn.fn_strict` — the finalfn's strictness, read off the resolved
+/// `FmgrInfo`. `FmgrInfo.fn_strict` IS modeled (fmgr #52); the blocker is reaching
+/// the resolved per-agg finalfn FmgrInfo, which lives on the nodeAgg-owned
+/// `AggStatePerAggData.finalfn` set up by the unported `ExecInitAgg`/build path.
 fn finalfn_is_strict(_peragg: &AggStatePerAggData<'_>) -> bool {
     panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: peragg->finalfn.fn_strict comes from the \
-         resolved FmgrInfo, owned by the not-yet-ported fmgr unit; the trimmed FmgrInfo carries \
-         only fn_oid"
+        "backend-executor-nodeAgg::finalize_aggregate: FmgrInfo.fn_strict is modeled \
+         (fmgr #52), but the per-agg finalfn FmgrInfo (AggStatePerAggData.finalfn) is \
+         not yet populated by the unported ExecInitAgg/build_peragg path"
     );
 }
 
 /// `FunctionCallInvoke(fcinfo)` for the finalfn; returns `(result, fcinfo->isnull)`.
-/// `FunctionCallInvoke` is ported (fmgr-core #52); the block is the per-agg
-/// fcinfo carrier (the trimmed call frame carries no args/flinfo to invoke).
+/// `FunctionCallInvoke` is ported (fmgr-core #52) and the shared call frame carries
+/// args[] (#296); the block is the execExpr eval boundary + AggState-as-Node (#200)
+/// — the LOCAL_FCINFO finalfn frame (with its `(void*) aggstate` context) is never
+/// built here (init_finalfn_fcinfo panics).
 fn invoke_finalfn<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _peragg: &AggStatePerAggData<'mcx>,
 ) -> (Datum<'mcx>, bool) {
     panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: blocked on the per-agg finalfn fcinfo \
-         carrier (the trimmed FunctionCallInfoBaseData carries no args/flinfo); \
-         FunctionCallInvoke itself is ported (fmgr-core #52)"
+        "backend-executor-nodeAgg::finalize_aggregate: FunctionCallInvoke is ported \
+         (fmgr-core #52) and the shared call frame carries args[] (#296), but no \
+         finalfn LOCAL_FCINFO frame is built here — blocked on the execExpr eval \
+         boundary + AggState-as-Node (#200)"
     );
 }
 
 /// `pertrans->serialfn.fn_strict` — the serialfn's strictness from its resolved
-/// `FmgrInfo` (fmgr-owned; the trimmed `FmgrInfo` carries only the lookup key).
+/// `FmgrInfo`. `FmgrInfo.fn_strict` IS modeled (fmgr #52); the blocker is reaching
+/// the per-trans serialfn FmgrInfo on the nodeAgg-owned `AggStatePerTransData`,
+/// set up by the unported `ExecInitAgg`/build path.
 fn serialfn_is_strict<'mcx>(_aggstate: &AggStateData<'mcx>, _transno: i32) -> bool {
     panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: pertrans->serialfn.fn_strict comes \
-         from the resolved FmgrInfo, owned by the not-yet-ported fmgr unit; the trimmed FmgrInfo \
-         carries only fn_oid"
+        "backend-executor-nodeAgg::finalize_partialaggregate: FmgrInfo.fn_strict is \
+         modeled (fmgr #52), but the per-trans serialfn FmgrInfo \
+         (AggStatePerTransData.serialfn) is not yet populated by the unported \
+         ExecInitAgg/build_pertrans path"
     );
 }
 
 /// `fcinfo->args[0].value = v; fcinfo->args[0].isnull = isnull; fcinfo->isnull
-/// = false;` on `pertrans->serialfn_fcinfo`. The fmgr call-frame args payload
-/// is owned by the not-yet-ported fmgr unit.
+/// = false;` on `pertrans->serialfn_fcinfo`. The shared call frame carries args[]
+/// (#296); the blocker is the nodeAgg-owned per-trans serialfn_fcinfo frame, not
+/// yet built/populated by the unported ExecInitAgg/build path.
 fn set_serialfn_arg0<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _transno: i32,
@@ -358,20 +373,23 @@ fn set_serialfn_arg0<'mcx>(
     _isnull: bool,
 ) {
     panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: writing pertrans->serialfn_fcinfo \
-         args is part of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
-         FunctionCallInfoBaseData carries no args"
+        "backend-executor-nodeAgg::finalize_partialaggregate: the shared call frame \
+         carries args[] (#296), but the nodeAgg-owned per-trans serialfn_fcinfo \
+         (AggStatePerTransData.serialfn_fcinfo) is not yet built/populated by the \
+         unported ExecInitAgg/build_pertrans path"
     );
 }
 
 /// `FunctionCallInvoke(pertrans->serialfn_fcinfo)`; returns `(result,
-/// fcinfo->isnull)`. `FunctionCallInvoke` is ported (fmgr-core #52); the block
-/// is the per-trans serialfn_fcinfo carrier (trimmed call frame, no args/flinfo).
+/// fcinfo->isnull)`. `FunctionCallInvoke` is ported (fmgr-core #52) and the shared
+/// call frame carries args[] (#296); the block is the nodeAgg-owned per-trans
+/// serialfn_fcinfo frame, not yet built/populated by the unported ExecInitAgg path.
 fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum<'mcx>, bool) {
     panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: blocked on the per-trans \
-         serialfn_fcinfo carrier (the trimmed FunctionCallInfoBaseData carries no args/flinfo); \
-         FunctionCallInvoke itself is ported (fmgr-core #52)"
+        "backend-executor-nodeAgg::finalize_partialaggregate: FunctionCallInvoke is \
+         ported (fmgr-core #52) and the shared call frame carries args[] (#296), but \
+         the nodeAgg-owned per-trans serialfn_fcinfo (AggStatePerTransData.serialfn_fcinfo) \
+         is not yet built/populated by the unported ExecInitAgg/build_pertrans path"
     );
 }
 
