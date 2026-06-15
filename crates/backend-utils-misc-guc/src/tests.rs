@@ -221,6 +221,50 @@ fn report_changed_guc_options_dedup() {
 }
 
 #[test]
+fn report_guc_option_last_reported_dedup() {
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    // C ReportGUCOption (guc.c:2634) suppresses the ParameterStatus frame when
+    // the rendered value equals the variable's last_reported, and records
+    // last_reported after sending.
+    let set_app = |val: &str| {
+        set_config_option_global(
+            "application_name",
+            Some(val),
+            PGC_POSTMASTER,
+            PGC_S_OVERRIDE,
+            BOOTSTRAP_SUPERUSERID,
+            crate::GUC_ACTION_SET,
+            true,
+            ERROR,
+            false,
+        )
+        .expect("SET application_name should apply")
+    };
+
+    // First change to a genuinely new value: reports (1), records "psql".
+    assert_eq!(set_app("psql"), 1);
+    assert_eq!(crate::report_changed_guc_options(), 1);
+
+    // Re-SET to the SAME value: marks GUC_NEEDS_REPORT again, but the rendered
+    // value equals last_reported, so ReportGUCOption's dedup suppresses the
+    // frame -> 0 transmitted. The NEEDS_REPORT bit is still drained.
+    assert_eq!(set_app("psql"), 1);
+    assert_eq!(
+        crate::report_changed_guc_options(),
+        0,
+        "value equal to last_reported must be suppressed (guc.c:2638)"
+    );
+    assert_eq!(crate::report_changed_guc_options(), 0);
+
+    // A genuinely new value reports again and updates last_reported.
+    assert_eq!(set_app("pgbench"), 1);
+    assert_eq!(crate::report_changed_guc_options(), 1);
+}
+
+#[test]
 fn enum_seqscan_set_reset() {
     let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     install_once();
