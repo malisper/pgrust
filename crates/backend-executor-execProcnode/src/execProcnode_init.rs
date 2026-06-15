@@ -302,7 +302,11 @@ pub fn exec_init_node<'mcx>(
         // `PlanStateNode::as_agg_state` (read by `EEOP_GROUPING_FUNC`) starts
         // returning the real `AggState`.
 
-        // case T_WindowAgg: ExecInitWindowAgg(...) (nodeWindowAgg.c)
+        // case T_WindowAgg: ExecInitWindowAgg((WindowAgg *) node, estate, eflags)
+        Node::WindowAgg(_) => {
+            let s = backend_executor_nodeWindowAgg::ExecInitWindowAgg(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::WindowAgg(s))?
+        }
 
         // case T_Unique: ExecInitUnique(...) (nodeUnique.c)
         Node::Unique(_) => {

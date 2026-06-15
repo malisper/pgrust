@@ -152,35 +152,46 @@ pub fn multi_exec_proc_node<'mcx>(
     }
 
     // switch (nodeTag(node)) — only node types that actually support multiexec
-    // are listed. Each arm runs the owning node unit's `MultiExec*` routine,
-    // which is reached through that owner's per-node seam (loud panic until the
-    // owner lands). None of the multiexec owners
-    // (`nodeHash`/`nodeBitmapIndexscan`/`nodeBitmapAnd`/`nodeBitmapOr`) expose a
-    // `Node`-returning `MultiExecProcNode` seam yet, and their state variants
-    // (`T_HashState` aside) are not yet present in `PlanStateNode`; mirror the C
-    // switch and seam-and-panic per recognized arm.
-    match node.tag() {
+    // are listed. Each arm runs the owning node unit's `MultiExec*` routine
+    // directly (the bitmap owners depend only on this unit's seam crate, so the
+    // call is acyclic).
+    //
+    // case T_BitmapAndState: result = MultiExecBitmapAnd((BitmapAndState *) node);
+    //
+    // `MultiExecBitmapAnd` takes the whole `&mut PlanStateNode` (it re-derives
+    // the concrete `BitmapAndState` internally), so dispatch it before the
+    // borrowing `match` below.
+    if node.tag() == types_nodes::execstate_tags::T_BitmapAndState {
+        return backend_executor_nodeBitmapAnd::MultiExecBitmapAnd(node, estate);
+    }
+
+    let mcx = estate.es_query_cxt;
+    match node {
         // case T_HashState: result = MultiExecHash((HashState *) node);
-        types_nodes::execstate_tags::T_HashState => {
+        //
+        // `MultiExecHash` returns a hashtable `Node`, not a `TIDBitmap`; it does
+        // not fit this dispatch's `PgBox<TIDBitmap>` owned-seam return (the lone
+        // landed consumer, nodeBitmapHeapscan, always demands a bitmap). Route to
+        // the nodeHash owner once a `Node`-returning MultiExec seam exists.
+        PlanStateNode::Hash(_) => {
             panic!(
-                "MultiExecProcNode(T_HashState): route to backend-executor-nodeHash \
-                 MultiExecHash seam (owner has not yet exposed a Node-returning \
-                 MultiExecProcNode seam)"
+                "MultiExecProcNode(T_HashState): MultiExecHash returns a hashtable Node, \
+                 not a TIDBitmap — needs a Node-returning MultiExecProcNode seam"
             )
         }
         // case T_BitmapIndexScanState:
         //     result = MultiExecBitmapIndexScan((BitmapIndexScanState *) node);
-        // case T_BitmapAndState: result = MultiExecBitmapAnd((BitmapAndState *) node);
+        PlanStateNode::BitmapIndexScan(state) => {
+            backend_executor_nodeBitmapIndexscan::MultiExecBitmapIndexScan(state, estate)
+        }
         // case T_BitmapOrState:  result = MultiExecBitmapOr((BitmapOrState *) node);
-        //
-        // These three state types are not yet present in `PlanStateNode`, so
-        // their tags cannot occur. When their executor units land they take a
-        // `nodeTag` arm here routed through the owner's `MultiExec*` seam.
-        //
+        PlanStateNode::BitmapOr(state) => {
+            backend_executor_nodeBitmapOr::MultiExecBitmapOr(mcx, state, estate)
+        }
         // default: elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
         other => Err(PgError::error(format!(
             "unrecognized node type: {}",
-            other.0 as i32
+            other.tag().0 as i32
         ))),
     }
 }
@@ -208,6 +219,15 @@ pub fn exec_end_node<'mcx>(
     if node.ps_head().chgParam.is_some() {
         let chg = node.ps_head_mut().chgParam.take();
         nodes_core::bms_free::call(chg);
+    }
+
+    // case T_BitmapAndState: ExecEndBitmapAnd((BitmapAndState *) node);
+    //
+    // `ExecEndBitmapAnd` takes the whole `&mut PlanStateNode` (it re-derives the
+    // concrete `BitmapAndState` internally), so dispatch it before the borrowing
+    // `match node` below.
+    if node.tag() == types_nodes::execstate_tags::T_BitmapAndState {
+        return backend_executor_nodeBitmapAnd::ExecEndBitmapAnd(node, estate);
     }
 
     // switch (nodeTag(node)) — route each concrete state to its owning node
@@ -281,20 +301,96 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Hash(state) => {
             backend_executor_nodeHash::exec_hash::ExecEndHash(state, estate)
         }
+        // case T_ResultState: ExecEndResult((ResultState *) node);
+        PlanStateNode::Result(state) => {
+            backend_executor_nodeResult::ExecEndResult(state, estate)
+        }
+        // case T_ProjectSetState: ExecEndProjectSet((ProjectSetState *) node);
+        PlanStateNode::ProjectSet(state) => {
+            backend_executor_nodeProjectSet::ExecEndProjectSet(state, estate)
+        }
+        // case T_ModifyTableState: ExecEndModifyTable((ModifyTableState *) node);
+        PlanStateNode::ModifyTable(state) => {
+            backend_executor_nodeModifyTable::lifecycle::ExecEndModifyTable(state, estate)
+        }
+        // case T_RecursiveUnionState: ExecEndRecursiveUnion((RecursiveUnionState *) node);
+        PlanStateNode::RecursiveUnion(state) => {
+            backend_executor_nodeRecursiveunion::ExecEndRecursiveUnion(state, estate)
+        }
+        // case T_BitmapOrState: ExecEndBitmapOr((BitmapOrState *) node);
+        PlanStateNode::BitmapOr(state) => {
+            backend_executor_nodeBitmapOr::ExecEndBitmapOr(state, estate)
+        }
+        // case T_GatherMergeState: ExecEndGatherMerge((GatherMergeState *) node);
+        PlanStateNode::GatherMerge(state) => {
+            backend_executor_nodeGatherMerge::ExecEndGatherMerge(state, estate)
+        }
+        // case T_IndexScanState: ExecEndIndexScan((IndexScanState *) node);
+        PlanStateNode::IndexScan(state) => {
+            backend_executor_nodeIndexscan::ExecEndIndexScan(state, estate)
+        }
+        // case T_BitmapIndexScanState: ExecEndBitmapIndexScan((BitmapIndexScanState *) node);
+        PlanStateNode::BitmapIndexScan(state) => {
+            backend_executor_nodeBitmapIndexscan::ExecEndBitmapIndexScan(state, estate)
+        }
+        // case T_BitmapHeapScanState: ExecEndBitmapHeapScan((BitmapHeapScanState *) node);
+        PlanStateNode::BitmapHeapScan(state) => {
+            backend_executor_nodeBitmapHeapscan::ExecEndBitmapHeapScan(state, estate)
+        }
+        // case T_TidScanState: ExecEndTidScan((TidScanState *) node);
+        //
+        // `ExecEndTidScan` closes its own table-AM scan and takes no `EState`.
+        PlanStateNode::TidScan(state) => {
+            backend_executor_nodeTidscan::ExecEndTidScan(state)
+        }
+        // case T_SubqueryScanState: ExecEndSubqueryScan((SubqueryScanState *) node);
+        PlanStateNode::SubqueryScan(state) => {
+            backend_executor_nodeSubqueryscan::ExecEndSubqueryScan(state, estate)
+        }
+        // case T_CteScanState: ExecEndCteScan((CteScanState *) node);
+        //
+        // `ExecEndCteScan` frees the shared tuplestore only when this node is its
+        // own leader (`node->leader == node`); the leader link is an aliased
+        // self-/cross-reference resolved through the CteScan owner's seams, so the
+        // identity test is supplied via the `cte_leader_is_self` seam.
+        PlanStateNode::CteScan(state) => {
+            let is_leader =
+                backend_executor_execMain_seams::cte_leader_is_self::call(state)?;
+            backend_executor_nodeCtescan::ExecEndCteScan(state, is_leader)
+        }
+        // case T_CustomScanState: ExecEndCustomScan((CustomScanState *) node);
+        PlanStateNode::CustomScan(state) => {
+            backend_executor_nodeCustom::ExecEndCustomScan(state, estate)
+        }
+        // case T_GroupState: ExecEndGroup((GroupState *) node);
+        PlanStateNode::Group(state) => {
+            backend_executor_nodeGroup::ExecEndGroup(state, estate)
+        }
+        // case T_UniqueState: ExecEndUnique((UniqueState *) node);
+        PlanStateNode::Unique(state) => {
+            backend_executor_nodeUnique::ExecEndUnique(state, estate)
+        }
+        // case T_SetOpState: ExecEndSetOp((SetOpState *) node);
+        PlanStateNode::SetOp(state) => {
+            backend_executor_nodeSetOp::ExecEndSetOp(state, estate)
+        }
+        // case T_WindowAggState: ExecEndWindowAgg((WindowAggState *) node);
+        PlanStateNode::WindowAgg(state) => {
+            backend_executor_nodeWindowAgg::ExecEndWindowAgg(state, estate)
+        }
+        // No clean up actions for these nodes:
+        //   case T_ValuesScanState:
+        //   case T_NamedTuplestoreScanState:
+        //   case T_WorkTableScanState:
+        //       break;
+        PlanStateNode::ValuesScan(_) | PlanStateNode::NamedTuplestoreScan(_) => Ok(()),
 
-        // The remaining C arms (control nodes T_ResultState/T_ProjectSetState/
-        // T_ModifyTableState/T_RecursiveUnionState/T_BitmapAndState/
-        // T_BitmapOrState; scan nodes T_SampleScanState/T_GatherState/
-        // T_GatherMergeState/T_IndexScanState/T_BitmapIndexScanState/
-        // T_BitmapHeapScanState/T_TidScanState/T_TidRangeScanState/
-        // T_SubqueryScanState/T_FunctionScanState/T_CteScanState/
-        // T_CustomScanState; materialization nodes T_IncrementalSortState/
-        // T_GroupState/T_AggState/T_WindowAggState/T_UniqueState/T_SetOpState/
-        // T_LockRowsState; and the no-cleanup T_ValuesScanState/
-        // T_NamedTuplestoreScanState/T_WorkTableScanState arms) are not yet
-        // present in the `#[non_exhaustive]` `PlanStateNode` enum, so their tags
-        // cannot occur. The C `default: elog(ERROR, "unrecognized node type")`
-        // covers any tag with no arm.
+        // The remaining C arms (T_SampleScanState/T_FunctionScanState/
+        // T_IncrementalSortState/T_AggState/T_LockRowsState/T_TidRangeScanState/
+        // T_WorkTableScanState) operate on node-state variants not yet present in
+        // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.
+        // The C `default: elog(ERROR, "unrecognized node type")` covers any tag
+        // with no arm.
         other => Err(PgError::error(format!(
             "unrecognized node type: {}",
             other.tag().0 as i32
@@ -419,36 +515,74 @@ fn exec_shutdown_node_walker<'mcx>(
     // check_stack_depth();
     tcop_postgres::check_stack_depth::call()?;
 
-    // The full C body brackets the child-walk and per-node `ExecShutdown*`
-    // dispatch with instrumentation start/stop:
-    //
+    // Treat the node as running while we shut it down, but only if it's run at
+    // least once already (in the case of Gather/Gather Merge we may shut down
+    // workers here, propagating their buffer usage into the node's instrument).
     //   if (node->instrument && node->instrument->running)
     //       InstrStartNode(node->instrument);
-    //   planstate_tree_walker(node, ExecShutdownNode_walker, context);
-    //   switch (nodeTag(node)) {
-    //       case T_GatherState:      ExecShutdownGather(..);      break;
-    //       case T_ForeignScanState: ExecShutdownForeignScan(..); break;
-    //       case T_CustomScanState:  ExecShutdownCustomScan(..);  break;
-    //       case T_GatherMergeState: ExecShutdownGatherMerge(..); break;
-    //       case T_HashState:        ExecShutdownHash(..);        break;
-    //       case T_HashJoinState:    ExecShutdownHashJoin(..);    break;
-    //       default: break;
-    //   }
+    let started = match node.ps_head_mut().instrument.as_deref_mut() {
+        Some(instr) if instr.running => {
+            instrument::instr_start_node::call(instr)?;
+            true
+        }
+        _ => false,
+    };
+
+    // planstate_tree_walker(node, ExecShutdownNode_walker, context);
+    //
+    // Recurse over the child PlanState nodes. Mirrors the typed
+    // `planstate_tree_walker` (the same `planstate_tree_walker_children_mut`
+    // child enumeration it drives), recursing directly to avoid the closure
+    // lifetime invariance of threading `&mut EStateData<'mcx>` through the
+    // walker callback (same shape as execParallel's owned tree walks). The C
+    // return is always `false`; a nested ereport(ERROR) is propagated.
+    for child in node.planstate_tree_walker_children_mut() {
+        exec_shutdown_node_walker(child, estate)?;
+    }
+
+    // switch (nodeTag(node)) — per-node shutdown dispatch.
+    match node {
+        // case T_GatherState: ExecShutdownGather((GatherState *) node);
+        PlanStateNode::Gather(state) => {
+            backend_executor_nodeGather::ExecShutdownGather(state)?;
+        }
+        // case T_ForeignScanState: ExecShutdownForeignScan((ForeignScanState *) node);
+        PlanStateNode::ForeignScan(state) => {
+            backend_executor_nodeForeignscan::ExecShutdownForeignScan(state, estate)?;
+        }
+        // case T_CustomScanState: ExecShutdownCustomScan((CustomScanState *) node);
+        PlanStateNode::CustomScan(state) => {
+            backend_executor_nodeCustom::ExecShutdownCustomScan(state, estate)?;
+        }
+        // case T_GatherMergeState: ExecShutdownGatherMerge((GatherMergeState *) node);
+        PlanStateNode::GatherMerge(state) => {
+            backend_executor_nodeGatherMerge::ExecShutdownGatherMerge(state)?;
+        }
+        // case T_HashState: ExecShutdownHash((HashState *) node);
+        PlanStateNode::Hash(state) => {
+            let mcx = estate.es_query_cxt;
+            backend_executor_nodeHash::exec_hash::ExecShutdownHash(mcx, state)?;
+        }
+        // case T_HashJoinState: ExecShutdownHashJoin((HashJoinState *) node);
+        PlanStateNode::HashJoin(state) => {
+            backend_executor_nodeHashjoin::ExecShutdownHashJoin(state)?;
+        }
+        // default: break;
+        _ => {}
+    }
+
+    // Stop the node if we started it above, reporting 0 tuples.
     //   if (node->instrument && node->instrument->running)
     //       InstrStopNode(node->instrument, 0);
-    //   return false;
-    //
-    // The recursion uses the typed `planstate_tree_walker` over `PlanStateNode`
-    // (the `outerPlanState`/`innerPlanState`/per-node child-list walk), and the
-    // dispatch arms call each node owner's `ExecShutdown*` routine. Neither the
-    // typed walker (only the opaque-handle walker in execParallel-support
-    // exists) nor any per-node `ExecShutdown*` seam is available yet; route the
-    // whole walker body through those owner seams — loud panic until they land.
-    let _ = (&node, &estate);
-    panic!(
-        "ExecShutdownNode_walker: route the typed planstate_tree_walker recursion and the \
-         per-node ExecShutdown* dispatch (T_GatherState/T_ForeignScanState/T_CustomScanState/\
-         T_GatherMergeState/T_HashState/T_HashJoinState) through their owner seams \
-         (typed planstate_tree_walker + ExecShutdown* seams not yet available)"
-    )
+    if started {
+        let instr = node
+            .ps_head_mut()
+            .instrument
+            .as_deref_mut()
+            .expect("ExecShutdownNode_walker: instrument vanished between start and stop");
+        instrument::instr_stop_node::call(instr, 0.0)?;
+    }
+
+    // return false;
+    Ok(false)
 }

@@ -664,6 +664,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `node->leader == node` (`ExecEndCteScan` leader-identity test): whether
+    /// this node is its own leader. The leader link is an aliased self-/cross-
+    /// reference resolved through the owning crate's seams, so the identity test
+    /// cannot be expressed in safe Rust at the dispatch site.
+    pub fn cte_leader_is_self<'mcx>(
+        node: &CteScanState<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `tuplestore_end(node->cte_table)` (leader only, `ExecEndCteScan`).
     pub fn cte_tuplestore_end<'mcx>(
         node: &mut CteScanState<'mcx>,

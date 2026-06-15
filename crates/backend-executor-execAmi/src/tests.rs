@@ -210,11 +210,12 @@ fn mark_and_restore_dispatch_to_material() {
     let mcx = cx.mcx();
 
     // EXEC_FLAG_MARK set, no tuplestore yet: both calls are no-ops.
+    let mut estate = EStateData::new_in(mcx);
     let mut mat = MaterialState::default();
     mat.eflags = 0x0010;
     let mut node = PlanStateNode::Material(alloc_in(mcx, mat).unwrap());
-    exec_mark_pos(&mut node).unwrap();
-    exec_restr_pos(&mut node).unwrap();
+    exec_mark_pos(&mut node, &mut estate).unwrap();
+    exec_restr_pos(&mut node, &mut estate).unwrap();
 }
 
 // ===========================================================================

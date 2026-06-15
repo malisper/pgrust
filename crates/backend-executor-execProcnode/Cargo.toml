@@ -54,9 +54,16 @@ backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
 backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
+backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
+backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 # Per-owner seam crates for the unported neighbours this dispatch routes through
 # (loud panic until each owner wires its init_seams()).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
+# cte_leader_is_self / ExecShutdown* / planstate_tree_walker seams routed by the
+# ExecEndCteScan leader test and ExecShutdownNode walker (loud panic until owner).
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

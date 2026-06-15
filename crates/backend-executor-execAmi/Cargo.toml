@@ -16,6 +16,42 @@ backend-executor-instrument-seams = { path = "../backend-executor-instrument-sea
 backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
+# Landed node units this ExecReScan/ExecMarkPos/ExecRestrPos dispatch routes to
+# directly. Each owner depends only on backend-executor-execAmi-seams, never on
+# this crate, so routing to them is acyclic.
+backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
+backend-executor-nodeBitmapAnd = { path = "../backend-executor-nodeBitmapAnd" }
+backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapIndexscan" }
+backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
+backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
+backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
+backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
+backend-executor-nodeGather = { path = "../backend-executor-nodeGather" }
+backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
+backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
+backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
+backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
+backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
+backend-executor-nodeIndexscan = { path = "../backend-executor-nodeIndexscan" }
+backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
+backend-executor-nodeMergeAppend = { path = "../backend-executor-nodeMergeAppend" }
+backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
+backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
+backend-executor-nodeNestloop = { path = "../backend-executor-nodeNestloop" }
+backend-executor-nodeProjectSet = { path = "../backend-executor-nodeProjectSet" }
+backend-executor-nodeRecursiveunion = { path = "../backend-executor-nodeRecursiveunion" }
+backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
+backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
+backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
+backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
+backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
+backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
+backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
+backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 mcx = { path = "../mcx" }

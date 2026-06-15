@@ -27,6 +27,38 @@ use backend_executor_instrument_seams as instrument;
 use backend_executor_nodeLimit as nodeLimit;
 use backend_executor_nodeMaterial as nodeMaterial;
 use backend_executor_nodeSubplan_seams as nodeSubplan;
+use backend_executor_nodeAppend as nodeAppend;
+use backend_executor_nodeBitmapHeapscan as nodeBitmapHeapscan;
+use backend_executor_nodeBitmapIndexscan as nodeBitmapIndexscan;
+use backend_executor_nodeBitmapOr as nodeBitmapOr;
+use backend_executor_nodeCtescan as nodeCtescan;
+use backend_executor_nodeCustom as nodeCustom;
+use backend_executor_nodeForeignscan as nodeForeignscan;
+use backend_executor_nodeGather as nodeGather;
+use backend_executor_nodeGatherMerge as nodeGatherMerge;
+use backend_executor_nodeGroup as nodeGroup;
+use backend_executor_nodeHash as nodeHash;
+use backend_executor_nodeHashjoin as nodeHashjoin;
+use backend_executor_nodeIndexonlyscan as nodeIndexonlyscan;
+use backend_executor_nodeIndexscan as nodeIndexscan;
+use backend_executor_nodeMemoize as nodeMemoize;
+use backend_executor_nodeMergeAppend as nodeMergeAppend;
+use backend_executor_nodeMergejoin as nodeMergejoin;
+use backend_executor_nodeModifyTable as nodeModifyTable;
+use backend_executor_nodeNamedtuplestorescan as nodeNamedtuplestorescan;
+use backend_executor_nodeNestloop as nodeNestloop;
+use backend_executor_nodeProjectSet as nodeProjectSet;
+use backend_executor_nodeRecursiveunion as nodeRecursiveunion;
+use backend_executor_nodeResult as nodeResult;
+use backend_executor_nodeSeqscan as nodeSeqscan;
+use backend_executor_nodeSetOp as nodeSetOp;
+use backend_executor_nodeSort as nodeSort;
+use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
+use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
+use backend_executor_nodeTidscan as nodeTidscan;
+use backend_executor_nodeUnique as nodeUnique;
+use backend_executor_nodeValuesscan as nodeValuesscan;
+use backend_executor_nodeWindowAgg as nodeWindowAgg;
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_error::elog;
 use types_core::Oid;
@@ -44,8 +76,8 @@ use types_nodes::{EStateData, PlanStateNode};
 /// Install this crate's implementations into its seam slots.
 pub fn init_seams() {
     backend_executor_execAmi_seams::exec_re_scan::set(exec_re_scan);
-    backend_executor_execAmi_seams::exec_mark_pos::set(|node, _estate| exec_mark_pos(node));
-    backend_executor_execAmi_seams::exec_restr_pos::set(|node, _estate| exec_restr_pos(node));
+    backend_executor_execAmi_seams::exec_mark_pos::set(exec_mark_pos);
+    backend_executor_execAmi_seams::exec_restr_pos::set(exec_restr_pos);
 }
 
 /// `elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node))` — carries
@@ -179,18 +211,110 @@ pub fn exec_re_scan<'mcx>(
     }
 
     // And do node-type-specific processing.
-    match node {
-        // case T_MaterialState: ExecReScanMaterial(...)
-        PlanStateNode::Material(m) => nodeMaterial::ExecReScanMaterial(m, estate)?,
+    //
+    // case T_BitmapAndState: ExecReScanBitmapAnd((BitmapAndState *) node);
+    //
+    // `ExecReScanBitmapAnd` takes the whole `&mut PlanStateNode` (it re-derives
+    // the concrete `BitmapAndState` internally), so dispatch it before the
+    // borrowing `match` below; the C `chgParam` free at the tail still applies.
+    let mcx = estate.es_query_cxt;
+    if node.tag() == types_nodes::execstate_tags::T_BitmapAndState {
+        backend_executor_nodeBitmapAnd::ExecReScanBitmapAnd(node, estate)?;
+    } else {
+        match node {
+            // case T_ResultState: ExecReScanResult((ResultState *) node);
+            PlanStateNode::Result(m) => nodeResult::ExecReScanResult(m, estate)?,
+            // case T_ProjectSetState: ExecReScanProjectSet((ProjectSetState *) node);
+            PlanStateNode::ProjectSet(m) => nodeProjectSet::ExecReScanProjectSet(m, estate)?,
+            // case T_ModifyTableState: ExecReScanModifyTable((ModifyTableState *) node);
+            PlanStateNode::ModifyTable(m) => {
+                nodeModifyTable::lifecycle::ExecReScanModifyTable(m)?
+            }
+            // case T_AppendState: ExecReScanAppend((AppendState *) node);
+            PlanStateNode::Append(m) => nodeAppend::ExecReScanAppend(mcx, m, estate)?,
+            // case T_MergeAppendState: ExecReScanMergeAppend((MergeAppendState *) node);
+            PlanStateNode::MergeAppend(m) => nodeMergeAppend::ExecReScanMergeAppend(m, estate)?,
+            // case T_RecursiveUnionState: ExecReScanRecursiveUnion((RecursiveUnionState *) node);
+            PlanStateNode::RecursiveUnion(m) => {
+                nodeRecursiveunion::ExecReScanRecursiveUnion(m, estate)?
+            }
+            // case T_BitmapOrState: ExecReScanBitmapOr((BitmapOrState *) node);
+            PlanStateNode::BitmapOr(m) => nodeBitmapOr::ExecReScanBitmapOr(mcx, m, estate)?,
+            // case T_SeqScanState: ExecReScanSeqScan((SeqScanState *) node);
+            PlanStateNode::SeqScan(m) => nodeSeqscan::ExecReScanSeqScan(m, estate)?,
+            // case T_GatherState: ExecReScanGather((GatherState *) node);
+            PlanStateNode::Gather(m) => nodeGather::ExecReScanGather(m, estate)?,
+            // case T_GatherMergeState: ExecReScanGatherMerge((GatherMergeState *) node);
+            PlanStateNode::GatherMerge(m) => nodeGatherMerge::ExecReScanGatherMerge(m, estate)?,
+            // case T_IndexScanState: ExecReScanIndexScan((IndexScanState *) node);
+            PlanStateNode::IndexScan(m) => nodeIndexscan::ExecReScanIndexScan(m, estate)?,
+            // case T_IndexOnlyScanState: ExecReScanIndexOnlyScan((IndexOnlyScanState *) node);
+            PlanStateNode::IndexOnlyScan(m) => {
+                nodeIndexonlyscan::ExecReScanIndexOnlyScan(m, estate)?
+            }
+            // case T_BitmapIndexScanState: ExecReScanBitmapIndexScan((BitmapIndexScanState *) node);
+            PlanStateNode::BitmapIndexScan(m) => {
+                nodeBitmapIndexscan::ExecReScanBitmapIndexScan(m, estate)?
+            }
+            // case T_BitmapHeapScanState: ExecReScanBitmapHeapScan((BitmapHeapScanState *) node);
+            PlanStateNode::BitmapHeapScan(m) => {
+                nodeBitmapHeapscan::ExecReScanBitmapHeapScan(m, estate)?
+            }
+            // case T_TidScanState: ExecReScanTidScan((TidScanState *) node);
+            PlanStateNode::TidScan(m) => nodeTidscan::ExecReScanTidScan(m, estate)?,
+            // case T_SubqueryScanState: ExecReScanSubqueryScan((SubqueryScanState *) node);
+            PlanStateNode::SubqueryScan(m) => {
+                nodeSubqueryscan::ExecReScanSubqueryScan(m, estate)?
+            }
+            // case T_TableFuncScanState: ExecReScanTableFuncScan((TableFuncScanState *) node);
+            PlanStateNode::TableFuncScan(m) => {
+                nodeTableFuncscan::ExecReScanTableFuncScan(m, estate)?
+            }
+            // case T_ValuesScanState: ExecReScanValuesScan((ValuesScanState *) node);
+            PlanStateNode::ValuesScan(m) => nodeValuesscan::ExecReScanValuesScan(m, estate)?,
+            // case T_CteScanState: ExecReScanCteScan((CteScanState *) node);
+            PlanStateNode::CteScan(m) => nodeCtescan::ExecReScanCteScan(m, estate)?,
+            // case T_NamedTuplestoreScanState:
+            //     ExecReScanNamedTuplestoreScan((NamedTuplestoreScanState *) node);
+            PlanStateNode::NamedTuplestoreScan(m) => {
+                nodeNamedtuplestorescan::ExecReScanNamedTuplestoreScan(m, estate)?
+            }
+            // case T_ForeignScanState: ExecReScanForeignScan((ForeignScanState *) node);
+            PlanStateNode::ForeignScan(m) => nodeForeignscan::ExecReScanForeignScan(m, estate)?,
+            // case T_CustomScanState: ExecReScanCustomScan((CustomScanState *) node);
+            PlanStateNode::CustomScan(m) => nodeCustom::ExecReScanCustomScan(m, estate)?,
+            // case T_NestLoopState: ExecReScanNestLoop((NestLoopState *) node);
+            PlanStateNode::NestLoop(m) => nodeNestloop::ExecReScanNestLoop(m, estate)?,
+            // case T_MergeJoinState: ExecReScanMergeJoin((MergeJoinState *) node);
+            PlanStateNode::MergeJoin(m) => nodeMergejoin::ExecReScanMergeJoin(m, estate)?,
+            // case T_HashJoinState: ExecReScanHashJoin((HashJoinState *) node);
+            PlanStateNode::HashJoin(m) => nodeHashjoin::ExecReScanHashJoin(m, estate)?,
+            // case T_MaterialState: ExecReScanMaterial((MaterialState *) node);
+            PlanStateNode::Material(m) => nodeMaterial::ExecReScanMaterial(m, estate)?,
+            // case T_MemoizeState: ExecReScanMemoize((MemoizeState *) node);
+            PlanStateNode::Memoize(m) => nodeMemoize::ExecReScanMemoize(m, estate)?,
+            // case T_SortState: ExecReScanSort((SortState *) node);
+            PlanStateNode::Sort(m) => nodeSort::ExecReScanSort(m, estate)?,
+            // case T_GroupState: ExecReScanGroup((GroupState *) node);
+            PlanStateNode::Group(m) => nodeGroup::ExecReScanGroup(m, estate)?,
+            // case T_WindowAggState: ExecReScanWindowAgg((WindowAggState *) node);
+            PlanStateNode::WindowAgg(m) => nodeWindowAgg::ExecReScanWindowAgg(m, estate)?,
+            // case T_UniqueState: ExecReScanUnique((UniqueState *) node);
+            PlanStateNode::Unique(m) => nodeUnique::ExecReScanUnique(m, estate)?,
+            // case T_HashState: ExecReScanHash((HashState *) node);
+            PlanStateNode::Hash(m) => nodeHash::exec_hash::ExecReScanHash(m, estate)?,
+            // case T_SetOpState: ExecReScanSetOp((SetOpState *) node);
+            PlanStateNode::SetOp(m) => nodeSetOp::ExecReScanSetOp(m, estate)?,
+            // case T_LimitState: ExecReScanLimit((LimitState *) node);
+            PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
 
-        // case T_LimitState: ExecReScanLimit((LimitState *) node);
-        PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
-
-        // The remaining C arms (ResultState ...) gain match arms as their
-        // node-state variants are added to PlanStateNode; until then the only
-        // reachable wildcard case is the C default:
-        //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
-        other => return Err(unrecognized_node_type(other.tag())),
+            // The remaining C arms (T_SampleScanState/T_TidRangeScanState/
+            // T_FunctionScanState/T_WorkTableScanState/T_IncrementalSortState/
+            // T_AggState/T_LockRowsState) operate on node-state variants not yet
+            // present in PlanStateNode, so their tags cannot occur. C default:
+            //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
+            other => return Err(unrecognized_node_type(other.tag())),
+        }
     }
 
     // if (node->chgParam != NULL) { bms_free(node->chgParam); node->chgParam = NULL; }
@@ -208,13 +332,25 @@ pub fn exec_re_scan<'mcx>(
 /// which a node can pass through sorted data from its child; if we don't
 /// implement mark/restore for such a node type, the planner compensates by
 /// inserting a Material node above that node.
-pub fn exec_mark_pos(node: &mut PlanStateNode<'_>) -> PgResult<()> {
+pub fn exec_mark_pos<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     match node {
-        // case T_MaterialState: ExecMaterialMarkPos(...)
+        // case T_IndexScanState: ExecIndexMarkPos((IndexScanState *) node);
+        PlanStateNode::IndexScan(m) => nodeIndexscan::ExecIndexMarkPos(m, estate),
+        // case T_IndexOnlyScanState: ExecIndexOnlyMarkPos((IndexOnlyScanState *) node);
+        PlanStateNode::IndexOnlyScan(m) => nodeIndexonlyscan::ExecIndexOnlyMarkPos(m, estate),
+        // case T_CustomScanState: ExecCustomMarkPos((CustomScanState *) node);
+        PlanStateNode::CustomScan(m) => nodeCustom::ExecCustomMarkPos(m, estate),
+        // case T_MaterialState: ExecMaterialMarkPos((MaterialState *) node);
         PlanStateNode::Material(m) => nodeMaterial::ExecMaterialMarkPos(m),
+        // case T_SortState: ExecSortMarkPos((SortState *) node);
+        PlanStateNode::Sort(m) => nodeSort::ExecSortMarkPos(m),
+        // case T_ResultState: ExecResultMarkPos((ResultState *) node);
+        PlanStateNode::Result(m) => nodeResult::ExecResultMarkPos(m, estate),
 
-        // The IndexScan/IndexOnlyScan/CustomScan/Sort/Result arms gain match
-        // arms as their state variants land. C default:
+        // default:
         //   /* don't make hard error unless caller asks to restore... */
         //   elog(DEBUG2, "unrecognized node type: %d", (int) nodeTag(node));
         other => elog(DEBUG2, format!("unrecognized node type: {}", other.tag())),
@@ -231,13 +367,25 @@ pub fn exec_mark_pos(node: &mut PlanStateNode<'_>) -> PgResult<()> {
 /// a restore, but the node may choose to clear it or to load it with the
 /// restored-to tuple.)  Hence the caller should discard any previously
 /// returned TupleTableSlot after doing a restore.
-pub fn exec_restr_pos(node: &mut PlanStateNode<'_>) -> PgResult<()> {
+pub fn exec_restr_pos<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     match node {
-        // case T_MaterialState: ExecMaterialRestrPos(...)
+        // case T_IndexScanState: ExecIndexRestrPos((IndexScanState *) node);
+        PlanStateNode::IndexScan(m) => nodeIndexscan::ExecIndexRestrPos(m, estate),
+        // case T_IndexOnlyScanState: ExecIndexOnlyRestrPos((IndexOnlyScanState *) node);
+        PlanStateNode::IndexOnlyScan(m) => nodeIndexonlyscan::ExecIndexOnlyRestrPos(m, estate),
+        // case T_CustomScanState: ExecCustomRestrPos((CustomScanState *) node);
+        PlanStateNode::CustomScan(m) => nodeCustom::ExecCustomRestrPos(m, estate),
+        // case T_MaterialState: ExecMaterialRestrPos((MaterialState *) node);
         PlanStateNode::Material(m) => nodeMaterial::ExecMaterialRestrPos(m),
+        // case T_SortState: ExecSortRestrPos((SortState *) node);
+        PlanStateNode::Sort(m) => nodeSort::ExecSortRestrPos(m),
+        // case T_ResultState: ExecResultRestrPos((ResultState *) node);
+        PlanStateNode::Result(m) => nodeResult::ExecResultRestrPos(m, estate),
 
-        // The IndexScan/IndexOnlyScan/CustomScan/Sort/Result arms gain match
-        // arms as their state variants land. C default: elog(ERROR, ...).
+        // default: elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
         other => Err(unrecognized_node_type(other.tag())),
     }
 }
