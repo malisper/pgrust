@@ -7,7 +7,8 @@ use types_core::primitive::{Cost, Index};
 use types_pathnodes::{PathId, PlannerInfo, RelId, Relids, JOIN_SEMI};
 
 use backend_optimizer_path_costsize_seams as costsize;
-use backend_optimizer_path_joinrels_seams as joinrels;
+// joinrels.c is ported; is_dummy_rel is called directly on its owner.
+use backend_optimizer_path_joinrels as joinrels;
 use backend_optimizer_util_pathnode_seams as pathnode;
 use backend_optimizer_util_relnode_seams as relids_seam;
 use backend_utils_adt_selfuncs_seams as selfuncs;
@@ -34,7 +35,7 @@ pub fn approximate_joinrel_size(root: &PlannerInfo, relids: &Relids) -> f64 {
             None => continue,
         };
         // Relation could be proven empty, if so ignore.
-        if joinrels::is_dummy_rel::call(root, rel_id) {
+        if joinrels::is_dummy_rel(root, rel_id) {
             continue;
         }
         // Otherwise, rel's rows estimate should be valid by now. Accumulate.
@@ -95,7 +96,7 @@ pub fn get_loop_count(root: &PlannerInfo, cur_relid: Index, outer_relids: &Relid
             None => continue,
         };
         // Other relation could be proven empty, if so ignore.
-        if joinrels::is_dummy_rel::call(root, outer_rel_id) {
+        if joinrels::is_dummy_rel(root, outer_rel_id) {
             continue;
         }
         // Otherwise, rel's rows estimate should be valid by now.

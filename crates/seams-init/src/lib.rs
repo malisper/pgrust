@@ -147,6 +147,8 @@ pub fn init_all() {
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
     backend_optimizer_path_indxpath::init_seams();
+    backend_optimizer_path_joinrels::init_seams();
+    backend_optimizer_path_pathkeys::init_seams();
     backend_access_nbt_compare::init_seams();
     backend_access_nbt_validate::init_seams();
     backend_access_nbtree_core::init_seams();
@@ -663,6 +665,13 @@ mod recurrence_guard {
         // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
         // when allpaths.c lands.
         ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
+        // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
+        // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
+        // ported in the otherwise-complete `backend-optimizer-util-pathnode`
+        // crate; joinrels.c (backend-optimizer-path-joinrels) calls them through
+        // the pathnode-seams decls and seam-and-panics until pathnode ports them.
+        ("backend_optimizer_util_pathnode", "can_create_unique_path"),
+        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
         // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
         // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`

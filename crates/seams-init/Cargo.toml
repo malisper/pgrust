@@ -151,6 +151,8 @@ backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
+backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }
+backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }
 backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
 backend-access-nbtree-core = { path = "../backend-access-nbtree-core" }

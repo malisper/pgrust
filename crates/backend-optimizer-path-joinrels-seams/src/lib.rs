@@ -1,15 +1,19 @@
-//! Seam declarations for `optimizer/path/joinrels.c`, arena-shaped over
-//! [`types_pathnodes::PlannerInfo`].
+#![no_std]
+#![forbid(unsafe_code)]
+
+//! Inward seam crate for `optimizer/path/joinrels.c`.
 //!
-//! indxpath.c's loop-count / joinrel-size estimators skip relations that have
-//! been proven empty (`IS_DUMMY_REL`); the dummy-rel test reads the rel's
-//! cheapest path subtype, which is joinrels.c's `is_dummy_rel`. Defaults to a
-//! loud panic until joinrels.c is ported.
+//! joinrels.c owns the join-relation enumeration entry points
+//! (`join_search_one_level`, `make_join_rel`, `have_join_order_restriction`).
+//! The cross-crate-cycle consumer of joinrels is the GEQO join-search driver
+//! (`backend-geqo-all`), which reaches joinrels through seams it *declares* in
+//! `backend-geqo-all-seams` (`build_and_cost_join_rel` →
+//! `make_join_rel`, and `have_join_order_restriction`). Since those decls live
+//! in the consumer's seam crate, joinrels itself introduces **no new inward
+//! seam of its own**: this crate exists only so the build wiring has a
+//! `*-seams` crate to reference for joinrels, mirroring the per-owner seam
+//! layout. joinrels installs the `have_join_order_restriction` provider (and
+//! the `build_and_cost_join_rel`-adjacent `make_join_rel` reach) from its own
+//! `init_seams()` against the `backend-geqo-all-seams` decls.
 
-use types_pathnodes::{PlannerInfo, RelId};
-
-seam_core::seam!(
-    /// `is_dummy_rel(rel)` (joinrels.c) — true if the rel is known to produce no
-    /// rows (its cheapest_total_path is a dummy Append with no subpaths).
-    pub fn is_dummy_rel(root: &PlannerInfo, rel: RelId) -> bool
-);
+extern crate alloc;

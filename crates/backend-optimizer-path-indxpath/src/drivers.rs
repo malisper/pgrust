@@ -9,7 +9,8 @@ use types_pathnodes::{
     BackwardScanDirection, ForwardScanDirection,
 };
 
-use backend_optimizer_util_pathkeys_seams::{
+// pathkeys.c is ported (backend-optimizer-path-pathkeys); call it directly.
+use backend_optimizer_path_pathkeys::{
     build_index_pathkeys, has_useful_pathkeys, truncate_useless_pathkeys,
 };
 use backend_optimizer_util_pathnode_seams as pathnode;
@@ -554,8 +555,8 @@ pub fn build_index_paths(
     let loop_count = get_loop_count(root, relid, &outer_relids);
 
     // 2. Compute index ordering pathkeys, if relevant.
-    let pathkeys_possibly_useful =
-        scantype != ScanTypeControl::BitmapScan && has_useful_pathkeys::call(root, rel);
+    let pathkeys_possibly_useful = scantype != ScanTypeControl::BitmapScan
+        && has_useful_pathkeys(root, root.rel(rel));
     let index_is_ordered = !index.sortopfamily.is_empty();
 
     let mut orderbyclauses: Vec<NodeId> = Vec::new();
@@ -563,8 +564,8 @@ pub fn build_index_paths(
     let useful_pathkeys: Vec<types_pathnodes::PathKey>;
 
     if index_is_ordered && pathkeys_possibly_useful {
-        let index_pathkeys = build_index_pathkeys::call(root, index, ForwardScanDirection);
-        useful_pathkeys = truncate_useless_pathkeys::call(root, rel, index_pathkeys);
+        let index_pathkeys = build_index_pathkeys(root, index, ForwardScanDirection);
+        useful_pathkeys = truncate_useless_pathkeys(root, rel, &index_pathkeys);
         // orderbyclauses / orderbyclausecols stay NIL.
     } else if index.amcanorderbyop && pathkeys_possibly_useful {
         // Generate ordering operators for query_pathkeys (or a prefix).
@@ -634,8 +635,8 @@ pub fn build_index_paths(
 
     // 5. If the index is ordered, a backwards scan might be interesting.
     if index_is_ordered && pathkeys_possibly_useful {
-        let index_pathkeys = build_index_pathkeys::call(root, index, BackwardScanDirection);
-        let useful_pathkeys = truncate_useless_pathkeys::call(root, rel, index_pathkeys);
+        let index_pathkeys = build_index_pathkeys(root, index, BackwardScanDirection);
+        let useful_pathkeys = truncate_useless_pathkeys(root, rel, &index_pathkeys);
         if !useful_pathkeys.is_empty() {
             let ipath = pathnode::create_index_path::call(
                 root,

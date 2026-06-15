@@ -25,11 +25,11 @@ backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
-backend-optimizer-path-joinrels-seams = { path = "../backend-optimizer-path-joinrels-seams" }
+backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }
 backend-optimizer-util-restrictinfo-seams = { path = "../backend-optimizer-util-restrictinfo-seams" }
 backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
 backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
-backend-optimizer-util-pathkeys-seams = { path = "../backend-optimizer-util-pathkeys-seams" }
+backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 backend-utils-fmgr-support-seams = { path = "../backend-utils-fmgr-support-seams" }
