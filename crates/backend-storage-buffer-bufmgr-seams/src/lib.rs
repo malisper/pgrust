@@ -818,3 +818,108 @@ seam_core::seam!(
         wref: types_storage::buf::PgAioWaitRef,
     ) -> types_error::PgResult<bool>
 );
+
+// ---------------------------------------------------------------------------
+// F5 (flush/drop) outward seams.
+//
+// The local-buffer drop arms of DropRelationBuffers/DropRelationsAllBuffers
+// dispatch to localbuf.c (DropRelationLocalBuffers / DropRelationAllLocalBuffers
+// on the per-backend LocalBufferManager), which the local-buffer owner installs
+// (panic-until-owner — same posture as the F1 local-buffer pin dispatch).
+//
+// The checkpoint/bgwriter throttling + the strategy clock-sweep snapshot are
+// the checkpointer/bgwriter subsystems' concern; BufferSync/BgBufferSync call
+// out through these getters and pacing seams. The pure per-backend statistics
+// counters (pgstat) are bumped through no-op-installable accounting seams, the
+// same behaviour-neutral posture as F2's count_buffer_write/count_io_op_extend.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `DropRelationLocalBuffers(rlocator, forkNum, firstDelBlock)` (localbuf.c)
+    /// — drop from this backend's local (temp) buffer pool all pages of the
+    /// relation forks `forkNum[j]` with block number `>= firstDelBlock[j]`,
+    /// without writing them. Installed by the local-buffer owner (panic-until-
+    /// owner). `Err` carries the localbuf `ereport(ERROR)`s.
+    pub fn drop_relation_local_buffers(
+        rlocator: types_storage::RelFileLocator,
+        forknum: &[types_core::primitive::ForkNumber],
+        first_del_block: &[types_core::primitive::BlockNumber],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DropRelationAllLocalBuffers(rlocator)` (localbuf.c) — drop from this
+    /// backend's local (temp) buffer pool every page of all forks of the
+    /// relation. Installed by the local-buffer owner (panic-until-owner). `Err`
+    /// carries the localbuf `ereport(ERROR)`s.
+    pub fn drop_relation_all_local_buffers(
+        rlocator: types_storage::RelFileLocator,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_report_checkpointer()` accumulation of `ckpt_bufs_written++`
+    /// (bufmgr.c `BufferSync`) — note that the checkpoint wrote one shared
+    /// buffer. Owned by the checkpoint statistics when it ports; infallible,
+    /// stats-only.
+    pub fn count_checkpoint_buffer_written()
+);
+
+seam_core::seam!(
+    /// `PendingBgWriterStats.buf_alloc += recent_alloc` (bufmgr.c `BgBufferSync`)
+    /// — report the buffer allocations the clock sweep observed since the last
+    /// call. Owned by the bgwriter statistics when it ports; infallible.
+    pub fn report_bgwriter_buf_alloc(recent_alloc: i32)
+);
+
+seam_core::seam!(
+    /// `PendingBgWriterStats.maxwritten_clean++` (bufmgr.c `BgBufferSync`) — note
+    /// that the LRU scan stopped early because it hit `bgwriter_lru_maxpages`.
+    /// Owned by the bgwriter statistics when it ports; infallible.
+    pub fn count_bgwriter_maxwritten_clean()
+);
+
+seam_core::seam!(
+    /// `PendingBgWriterStats.buf_written_clean++` (bufmgr.c `BgBufferSync`) — note
+    /// that the bgwriter wrote one clean (reusable) buffer. Owned by the bgwriter
+    /// statistics when it ports; infallible.
+    pub fn count_bgwriter_buffer_written_clean()
+);
+
+seam_core::seam!(
+    /// `bgwriter_lru_maxpages` GUC (guc) — the max number of LRU pages the
+    /// background writer flushes per round (≤ 0 disables the LRU scan).
+    pub fn bgwriter_lru_maxpages() -> i32
+);
+
+seam_core::seam!(
+    /// `bgwriter_lru_multiplier` GUC (guc) — the multiple of recent average
+    /// allocations the bgwriter tries to keep clean ahead of the strategy point.
+    pub fn bgwriter_lru_multiplier() -> f64
+);
+
+seam_core::seam!(
+    /// `BgWriterDelay` GUC (guc) — the bgwriter's sleep between rounds, in
+    /// milliseconds (used to pace the whole-pool minimum scan rate).
+    pub fn bgwriter_delay() -> i32
+);
+
+seam_core::seam!(
+    /// `checkpoint_flush_after` GUC (guc) — after how many buffer writes the
+    /// checkpoint issues a kernel writeback hint (the writeback context's
+    /// `max_pending`, in pages; 0 disables writeback control).
+    pub fn checkpoint_flush_after() -> i32
+);
+
+seam_core::seam!(
+    /// `CheckpointWriteDelay(flags, progress)` (checkpointer.c) — throttle the
+    /// checkpoint write rate to spread the I/O across the checkpoint interval,
+    /// also servicing checkpointer requests / barrier events. `progress` is the
+    /// fraction (0..1) of buffers processed so far. Owned by the checkpointer
+    /// when it ports (panic-until-owner). `Err` carries the `ereport(ERROR)`
+    /// surface (shutdown request).
+    pub fn checkpoint_write_delay(
+        flags: i32,
+        progress: f64,
+    ) -> types_error::PgResult<()>
+);
