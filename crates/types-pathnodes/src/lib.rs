@@ -543,6 +543,95 @@ pub struct ParamPathInfo {
 }
 
 /* ==========================================================================
+ * Path-subtype supporting enums (nodes.h / access/sdir.h / pathnodes.h).
+ *
+ * These mirror the C enums the path constructors store on upper/scan paths.
+ * They are modeled as the existing local `pub type X = i32/u32` + const
+ * convention (cf. JoinType/RelOptKind above) so the crate stays self-contained,
+ * no_std and lifetime-free; the discriminant values match the C enums exactly.
+ * ======================================================================== */
+
+/// `ScanDirection` (access/sdir.h) — used by `IndexPath.indexscandir`.
+pub type ScanDirection = i32;
+pub const BackwardScanDirection: ScanDirection = -1;
+pub const NoMovementScanDirection: ScanDirection = 0;
+pub const ForwardScanDirection: ScanDirection = 1;
+
+/// `CmdType` (nodes.h) — used by `ModifyTablePath.operation`.
+pub type CmdType = u32;
+pub const CMD_UNKNOWN: CmdType = 0;
+pub const CMD_SELECT: CmdType = 1;
+pub const CMD_UPDATE: CmdType = 2;
+pub const CMD_INSERT: CmdType = 3;
+pub const CMD_DELETE: CmdType = 4;
+pub const CMD_MERGE: CmdType = 5;
+pub const CMD_UTILITY: CmdType = 6;
+pub const CMD_NOTHING: CmdType = 7;
+
+/// `AggStrategy` (nodes.h) — used by `AggPath`/`GroupingSetsPath`.
+pub type AggStrategy = u32;
+/// simple agg across all input rows.
+pub const AGG_PLAIN: AggStrategy = 0;
+/// grouped agg, input must be sorted.
+pub const AGG_SORTED: AggStrategy = 1;
+/// grouped agg, use internal hashtable.
+pub const AGG_HASHED: AggStrategy = 2;
+/// grouped agg, hash and sort both used.
+pub const AGG_MIXED: AggStrategy = 3;
+
+/// `AggSplit` (nodes.h) — bitmask of `AGGSPLITOP_*`; used by `AggPath`.
+pub type AggSplit = u32;
+/// substitute combinefn for transfn.
+pub const AGGSPLITOP_COMBINE: AggSplit = 0x01;
+/// skip finalfn, return state as-is.
+pub const AGGSPLITOP_SKIPFINAL: AggSplit = 0x02;
+/// apply serialfn to output.
+pub const AGGSPLITOP_SERIALIZE: AggSplit = 0x04;
+/// apply deserialfn to input.
+pub const AGGSPLITOP_DESERIALIZE: AggSplit = 0x08;
+/// Basic, non-split aggregation.
+pub const AGGSPLIT_SIMPLE: AggSplit = 0;
+/// Initial phase of partial aggregation, with serialization.
+pub const AGGSPLIT_INITIAL_SERIAL: AggSplit = AGGSPLITOP_SKIPFINAL | AGGSPLITOP_SERIALIZE;
+/// Final phase of partial aggregation, with deserialization.
+pub const AGGSPLIT_FINAL_DESERIAL: AggSplit = AGGSPLITOP_COMBINE | AGGSPLITOP_DESERIALIZE;
+
+/// `SetOpCmd` (nodes.h) — used by `SetOpPath.cmd`.
+pub type SetOpCmd = u32;
+pub const SETOPCMD_INTERSECT: SetOpCmd = 0;
+pub const SETOPCMD_INTERSECT_ALL: SetOpCmd = 1;
+pub const SETOPCMD_EXCEPT: SetOpCmd = 2;
+pub const SETOPCMD_EXCEPT_ALL: SetOpCmd = 3;
+
+/// `SetOpStrategy` (nodes.h) — used by `SetOpPath.strategy`.
+pub type SetOpStrategy = u32;
+/// input must be sorted.
+pub const SETOP_SORTED: SetOpStrategy = 0;
+/// use internal hashtable.
+pub const SETOP_HASHED: SetOpStrategy = 1;
+
+/// `LimitOption` (nodes.h) — used by `LimitPath.limit_option`.
+pub type LimitOption = u32;
+/// FETCH FIRST... ONLY.
+pub const LIMIT_OPTION_COUNT: LimitOption = 0;
+/// FETCH FIRST... WITH TIES.
+pub const LIMIT_OPTION_WITH_TIES: LimitOption = 1;
+
+/// `UniquePathMethod` (pathnodes.h) — used by `UniquePath.umethod`.
+pub type UniquePathMethod = u32;
+/// input is known unique already.
+pub const UNIQUE_PATH_NOOP: UniquePathMethod = 0;
+/// use hashing.
+pub const UNIQUE_PATH_HASH: UniquePathMethod = 1;
+/// use sorting.
+pub const UNIQUE_PATH_SORT: UniquePathMethod = 2;
+
+/// `uint32 CUSTOMPATH_*` flags (extensible.h) — mask stored in `CustomPath.flags`.
+pub const CUSTOMPATH_SUPPORT_BACKWARD_SCAN: u32 = 0x0001;
+pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
+pub const CUSTOMPATH_SUPPORT_PROJECTION: u32 = 0x0004;
+
+/* ==========================================================================
  * Path and its join subtypes (pathnodes.h)
  * ======================================================================== */
 
@@ -612,6 +701,518 @@ pub struct HashPath {
     pub inner_rows_total: Cardinality,
 }
 
+/* --------------------------------------------------------------------------
+ * Scan-path subtypes (pathnodes.h:1842-2047). Subpaths reference other paths
+ * by [`PathId`] (handle into `path_arena`), mirroring the join variants'
+ * `outerjoinpath`/`innerjoinpath`. Bare clause/expr lists are opaque [`NodeId`]
+ * handles; RestrictInfo lists are [`RinfoId`] handles.
+ * ------------------------------------------------------------------------ */
+
+/// `IndexClause` — how one restriction is applied to a particular index.
+#[derive(Clone, Debug)]
+pub struct IndexClause {
+    /// `RestrictInfo *rinfo` — original restriction or join clause (handle into
+    /// `rinfo_arena`).
+    pub rinfo: Option<RinfoId>,
+    /// `List *indexquals` — indexqual(s) derived from it (handles into
+    /// `rinfo_arena`).
+    pub indexquals: Vec<RinfoId>,
+    /// `bool lossy` — are indexquals a lossy version of the clause?
+    pub lossy: bool,
+    /// `AttrNumber indexcol` — index column the clause uses (zero-based).
+    pub indexcol: AttrNumber,
+    /// `List *indexcols` — multiple index columns, if a RowCompare.
+    pub indexcols: Vec<AttrNumber>,
+}
+
+/// `IndexPath` — an index scan over a single index (regular or index-only).
+#[derive(Clone, Debug)]
+pub struct IndexPath {
+    pub path: Path,
+    /// `IndexOptInfo *indexinfo` — the index to be scanned.
+    pub indexinfo: Option<Box<IndexOptInfo>>,
+    pub indexclauses: Vec<IndexClause>,
+    /// `List *indexorderbys` — ORDER BY expressions usable as ordering ops
+    /// (bare expr node handles).
+    pub indexorderbys: Vec<NodeId>,
+    /// `List *indexorderbycols` — index column numbers for each orderby.
+    pub indexorderbycols: Vec<i32>,
+    pub indexscandir: ScanDirection,
+    pub indextotalcost: Cost,
+    pub indexselectivity: Selectivity,
+}
+
+/// `BitmapHeapPath` — heap scan driven by a TID bitmap.
+#[derive(Clone, Debug)]
+pub struct BitmapHeapPath {
+    pub path: Path,
+    /// `Path *bitmapqual` — IndexPath, BitmapAndPath, or BitmapOrPath (handle
+    /// into `path_arena`).
+    pub bitmapqual: Option<PathId>,
+}
+
+/// `BitmapAndPath` — a BitmapAnd plan node (only under a BitmapHeapPath).
+#[derive(Clone, Debug)]
+pub struct BitmapAndPath {
+    pub path: Path,
+    /// `List *bitmapquals` — IndexPaths and BitmapOrPaths (handles into
+    /// `path_arena`).
+    pub bitmapquals: Vec<PathId>,
+    pub bitmapselectivity: Selectivity,
+}
+
+/// `BitmapOrPath` — a BitmapOr plan node (only under a BitmapHeapPath).
+#[derive(Clone, Debug)]
+pub struct BitmapOrPath {
+    pub path: Path,
+    /// `List *bitmapquals` — IndexPaths and BitmapAndPaths (handles into
+    /// `path_arena`).
+    pub bitmapquals: Vec<PathId>,
+    pub bitmapselectivity: Selectivity,
+}
+
+/// `TidPath` — a scan by TID.
+#[derive(Clone, Debug)]
+pub struct TidPath {
+    pub path: Path,
+    /// `List *tidquals` — qual(s) involving CTID = something (bare expr handles).
+    pub tidquals: Vec<NodeId>,
+}
+
+/// `TidRangePath` — a scan by a contiguous range of TIDs.
+#[derive(Clone, Debug)]
+pub struct TidRangePath {
+    pub path: Path,
+    /// `List *tidrangequals` — CTID relop pseudoconstant quals (bare expr
+    /// handles).
+    pub tidrangequals: Vec<NodeId>,
+}
+
+/// `SubqueryScanPath` — a scan of an unflattened subquery-in-FROM.
+#[derive(Clone, Debug)]
+pub struct SubqueryScanPath {
+    pub path: Path,
+    /// `Path *subpath` — path representing subquery execution (handle into
+    /// `path_arena`).
+    pub subpath: Option<PathId>,
+}
+
+/// `ForeignPath` — a scan of a foreign table/join/upper-relation.
+#[derive(Clone, Debug)]
+pub struct ForeignPath {
+    pub path: Path,
+    /// `Path *fdw_outerpath` — outer path for a foreign join (handle into
+    /// `path_arena`).
+    pub fdw_outerpath: Option<PathId>,
+    /// `List *fdw_restrictinfo` — RestrictInfos to apply to a foreign join
+    /// (handles into `rinfo_arena`).
+    pub fdw_restrictinfo: Vec<RinfoId>,
+    /// `List *fdw_private` — FDW private data (opaque node handles).
+    pub fdw_private: Vec<NodeId>,
+}
+
+/// `CustomPath` — a scan/join supplied by an out-of-core extension. The
+/// `methods` vtable is a function-pointer table owned by the extension and is
+/// not modeled at this lifetime-free layer (presence/flags are what core reads).
+#[derive(Clone, Debug)]
+pub struct CustomPath {
+    pub path: Path,
+    /// `uint32 flags` — mask of `CUSTOMPATH_*` flags.
+    pub flags: u32,
+    /// `List *custom_paths` — child Path nodes, if any (handles into
+    /// `path_arena`).
+    pub custom_paths: Vec<PathId>,
+    /// `List *custom_restrictinfo` — RestrictInfos to apply to a custom join
+    /// (handles into `rinfo_arena`).
+    pub custom_restrictinfo: Vec<RinfoId>,
+    /// `List *custom_private` — extension private data (opaque node handles).
+    pub custom_private: Vec<NodeId>,
+}
+
+/* --------------------------------------------------------------------------
+ * Append / upper / misc path subtypes (pathnodes.h:2064-2547).
+ * ------------------------------------------------------------------------ */
+
+/// `AppendPath` — successive execution of several member plans.
+#[derive(Clone, Debug)]
+pub struct AppendPath {
+    pub path: Path,
+    /// `List *subpaths` — component Paths (handles into `path_arena`).
+    pub subpaths: Vec<PathId>,
+    /// `int first_partial_path` — index of first partial path in `subpaths`.
+    pub first_partial_path: i32,
+    /// `Cardinality limit_tuples` — hard limit on output tuples, or -1.
+    pub limit_tuples: Cardinality,
+}
+
+/// `MergeAppendPath` — merge of sorted results from member plans.
+#[derive(Clone, Debug)]
+pub struct MergeAppendPath {
+    pub path: Path,
+    /// `List *subpaths` — component Paths (handles into `path_arena`).
+    pub subpaths: Vec<PathId>,
+    /// `Cardinality limit_tuples` — hard limit on output tuples, or -1.
+    pub limit_tuples: Cardinality,
+}
+
+/// `GroupResultPath` — a Result node for a degenerate GROUP BY.
+#[derive(Clone, Debug)]
+pub struct GroupResultPath {
+    pub path: Path,
+    /// `List *quals` — bare clauses (not RestrictInfos), expr node handles.
+    pub quals: Vec<NodeId>,
+}
+
+/// `MaterialPath` — a Material node caching its subpath's output.
+#[derive(Clone, Debug)]
+pub struct MaterialPath {
+    pub path: Path,
+    /// `Path *subpath` — handle into `path_arena`.
+    pub subpath: Option<PathId>,
+}
+
+/// `MemoizePath` — a Memoize node caching tuples from a parameterized subpath.
+#[derive(Clone, Debug)]
+pub struct MemoizePath {
+    pub path: Path,
+    /// `Path *subpath` — outerpath to cache tuples from (handle into
+    /// `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `List *hash_operators` — OIDs of hash equality ops for cache keys.
+    pub hash_operators: Vec<Oid>,
+    /// `List *param_exprs` — expressions that are cache keys (expr handles).
+    pub param_exprs: Vec<NodeId>,
+    /// `bool singlerow` — mark the cache entry complete after the first record?
+    pub singlerow: bool,
+    /// `bool binary_mode` — compare cache keys bit-by-bit?
+    pub binary_mode: bool,
+    /// `Cardinality calls` — expected number of rescans.
+    pub calls: Cardinality,
+    /// `uint32 est_entries` — max entries expected to fit, or 0 if unknown.
+    pub est_entries: u32,
+}
+
+/// `UniquePath` — elimination of distinct rows from its subpath.
+#[derive(Clone, Debug)]
+pub struct UniquePath {
+    pub path: Path,
+    /// `Path *subpath` — handle into `path_arena`.
+    pub subpath: Option<PathId>,
+    pub umethod: UniquePathMethod,
+    /// `List *in_operators` — equality operators of the IN clause (OIDs).
+    pub in_operators: Vec<Oid>,
+    /// `List *uniq_exprs` — expressions to be made unique (expr handles).
+    pub uniq_exprs: Vec<NodeId>,
+}
+
+/// `GatherPath` — runs copies of a plan in parallel and collects results.
+#[derive(Clone, Debug)]
+pub struct GatherPath {
+    pub path: Path,
+    /// `Path *subpath` — path for each worker (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `bool single_copy` — don't execute path more than once.
+    pub single_copy: bool,
+    /// `int num_workers` — number of workers sought to help.
+    pub num_workers: i32,
+}
+
+/// `GatherMergePath` — parallel collect preserving common sort order.
+#[derive(Clone, Debug)]
+pub struct GatherMergePath {
+    pub path: Path,
+    /// `Path *subpath` — path for each worker (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `int num_workers` — number of workers sought to help.
+    pub num_workers: i32,
+}
+
+/// `ProjectionPath` — a projection (targetlist computation) step.
+#[derive(Clone, Debug)]
+pub struct ProjectionPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `bool dummypp` — true if no separate Result is needed.
+    pub dummypp: bool,
+}
+
+/// `ProjectSetPath` — evaluation of a tlist containing set-returning functions.
+#[derive(Clone, Debug)]
+pub struct ProjectSetPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+}
+
+/// `SortPath` — an explicit sort step (keys are `path.pathkeys`).
+#[derive(Clone, Debug)]
+pub struct SortPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+}
+
+/// `IncrementalSortPath` — an incremental sort step (leading keys presorted).
+#[derive(Clone, Debug)]
+pub struct IncrementalSortPath {
+    pub spath: SortPath,
+    /// `int nPresortedCols` — number of presorted columns.
+    #[allow(non_snake_case)]
+    pub nPresortedCols: i32,
+}
+
+/// `GroupPath` — grouping of presorted input.
+#[derive(Clone, Debug)]
+pub struct GroupPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `List *groupClause` — SortGroupClauses (opaque node handles).
+    #[allow(non_snake_case)]
+    pub groupClause: Vec<NodeId>,
+    /// `List *qual` — HAVING quals, if any (bare expr node handles).
+    pub qual: Vec<NodeId>,
+}
+
+/// `UpperUniquePath` — adjacent-duplicate removal in presorted input.
+#[derive(Clone, Debug)]
+pub struct UpperUniquePath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `int numkeys` — number of pathkey columns to compare.
+    pub numkeys: i32,
+}
+
+/// `AggPath` — generic computation of aggregate functions.
+#[derive(Clone, Debug)]
+pub struct AggPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    pub aggstrategy: AggStrategy,
+    pub aggsplit: AggSplit,
+    /// `Cardinality numGroups` — estimated number of groups in input.
+    #[allow(non_snake_case)]
+    pub numGroups: Cardinality,
+    /// `uint64 transitionSpace` — for pass-by-ref transition data.
+    #[allow(non_snake_case)]
+    pub transitionSpace: u64,
+    /// `List *groupClause` — SortGroupClauses (opaque node handles).
+    #[allow(non_snake_case)]
+    pub groupClause: Vec<NodeId>,
+    /// `List *qual` — HAVING quals, if any (bare expr node handles).
+    pub qual: Vec<NodeId>,
+}
+
+/// `GroupingSetData` — one grouping set (pathnodes.h:2410).
+#[derive(Clone, Debug, Default)]
+pub struct GroupingSetData {
+    /// `List *set` — grouping set as a list of sortgrouprefs.
+    pub set: Vec<Index>,
+    /// `Cardinality numGroups` — est. number of result groups.
+    #[allow(non_snake_case)]
+    pub numGroups: Cardinality,
+}
+
+/// `RollupData` — one rollup specification (pathnodes.h:2419).
+#[derive(Clone, Debug, Default)]
+pub struct RollupData {
+    /// `List *groupClause` — applicable subset of parse->groupClause (handles).
+    #[allow(non_snake_case)]
+    pub groupClause: Vec<NodeId>,
+    /// `List *gsets` — lists of integer indexes into `groupClause`.
+    pub gsets: Vec<Vec<i32>>,
+    /// `List *gsets_data` — GroupingSetData entries.
+    pub gsets_data: Vec<GroupingSetData>,
+    /// `Cardinality numGroups` — est. number of result groups.
+    #[allow(non_snake_case)]
+    pub numGroups: Cardinality,
+    pub hashable: bool,
+    pub is_hashed: bool,
+}
+
+/// `GroupingSetsPath` — a GROUPING SETS aggregation.
+#[derive(Clone, Debug)]
+pub struct GroupingSetsPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    pub aggstrategy: AggStrategy,
+    /// `List *rollups` — RollupData entries.
+    pub rollups: Vec<RollupData>,
+    /// `List *qual` — HAVING quals, if any (bare expr node handles).
+    pub qual: Vec<NodeId>,
+    /// `uint64 transitionSpace` — for pass-by-ref transition data.
+    #[allow(non_snake_case)]
+    pub transitionSpace: u64,
+}
+
+/// `MinMaxAggInfo` — annotation for one MIN/MAX aggregate computed from an
+/// index (pathnodes.h). The expression `target` / output `param` are bare expr
+/// node handles; the per-agg sub-plan `path` is a handle into `path_arena`; the
+/// modified sub-`root` is not carried at this consumer layer (the C field is
+/// `read_write_ignore`).
+#[derive(Clone, Debug, Default)]
+pub struct MinMaxAggInfo {
+    /// `Oid aggfnoid` — pg_proc OID of the aggregate.
+    pub aggfnoid: Oid,
+    /// `Oid aggsortop` — OID of its sort operator.
+    pub aggsortop: Oid,
+    /// `Expr *target` — expression we are aggregating on (expr handle).
+    pub target: NodeId,
+    /// `Path *path` — access path for the subquery (handle into `path_arena`).
+    pub path: Option<PathId>,
+    /// `Cost pathcost` — estimated cost to fetch the first row.
+    pub pathcost: Cost,
+    /// `Param *param` — param for the subplan's output (expr handle).
+    pub param: NodeId,
+}
+
+/// `MinMaxAggPath` — computation of MIN/MAX aggregates from indexes.
+#[derive(Clone, Debug)]
+pub struct MinMaxAggPath {
+    pub path: Path,
+    /// `List *mmaggregates` — MinMaxAggInfo entries.
+    pub mmaggregates: Vec<MinMaxAggInfo>,
+    /// `List *quals` — HAVING quals, if any (bare expr node handles).
+    pub quals: Vec<NodeId>,
+}
+
+/// `WindowAggPath` — generic computation of window functions.
+#[derive(Clone, Debug)]
+pub struct WindowAggPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `WindowClause *winclause` — the WindowClause we'll use (opaque node
+    /// handle).
+    pub winclause: NodeId,
+    /// `List *qual` — lower-level WindowAgg runconditions (expr handles).
+    pub qual: Vec<NodeId>,
+    /// `List *runCondition` — OpExpr list to short-circuit execution (handles).
+    #[allow(non_snake_case)]
+    pub runCondition: Vec<NodeId>,
+    /// `bool topwindow` — true only for the WindowAgg closest to the plan root.
+    pub topwindow: bool,
+}
+
+/// `SetOpPath` — a set operation (INTERSECT or EXCEPT).
+#[derive(Clone, Debug)]
+pub struct SetOpPath {
+    pub path: Path,
+    /// `Path *leftpath` — left input source (handle into `path_arena`).
+    pub leftpath: Option<PathId>,
+    /// `Path *rightpath` — right input source (handle into `path_arena`).
+    pub rightpath: Option<PathId>,
+    pub cmd: SetOpCmd,
+    pub strategy: SetOpStrategy,
+    /// `List *groupList` — SortGroupClauses identifying target cols (handles).
+    #[allow(non_snake_case)]
+    pub groupList: Vec<NodeId>,
+    /// `Cardinality numGroups` — estimated number of groups in the left input.
+    #[allow(non_snake_case)]
+    pub numGroups: Cardinality,
+}
+
+/// `RecursiveUnionPath` — a recursive UNION node.
+#[derive(Clone, Debug)]
+pub struct RecursiveUnionPath {
+    pub path: Path,
+    /// `Path *leftpath` — left input source (handle into `path_arena`).
+    pub leftpath: Option<PathId>,
+    /// `Path *rightpath` — right input source (handle into `path_arena`).
+    pub rightpath: Option<PathId>,
+    /// `List *distinctList` — SortGroupClauses identifying target cols (handles).
+    #[allow(non_snake_case)]
+    pub distinctList: Vec<NodeId>,
+    /// `int wtParam` — ID of the Param representing the work table.
+    #[allow(non_snake_case)]
+    pub wtParam: i32,
+    /// `Cardinality numGroups` — estimated number of groups in input.
+    #[allow(non_snake_case)]
+    pub numGroups: Cardinality,
+}
+
+/// `LockRowsPath` — acquiring row locks for SELECT FOR UPDATE/SHARE.
+#[derive(Clone, Debug)]
+pub struct LockRowsPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `List *rowMarks` — PlanRowMarks (opaque node handles).
+    #[allow(non_snake_case)]
+    pub rowMarks: Vec<NodeId>,
+    /// `int epqParam` — ID of the Param for EvalPlanQual re-eval.
+    #[allow(non_snake_case)]
+    pub epqParam: i32,
+}
+
+/// `ModifyTablePath` — INSERT/UPDATE/DELETE/MERGE.
+#[derive(Clone, Debug)]
+pub struct ModifyTablePath {
+    pub path: Path,
+    /// `Path *subpath` — Path producing source data (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    pub operation: CmdType,
+    /// `bool canSetTag` — do we set the command tag/es_processed?
+    #[allow(non_snake_case)]
+    pub canSetTag: bool,
+    /// `Index nominalRelation` — parent RT index for use of EXPLAIN.
+    #[allow(non_snake_case)]
+    pub nominalRelation: Index,
+    /// `Index rootRelation` — root RT index if partitioned/inherited.
+    #[allow(non_snake_case)]
+    pub rootRelation: Index,
+    /// `bool partColsUpdated` — some part key in hierarchy updated?
+    #[allow(non_snake_case)]
+    pub partColsUpdated: bool,
+    /// `List *resultRelations` — integer list of RT indexes.
+    #[allow(non_snake_case)]
+    pub resultRelations: Vec<i32>,
+    /// `List *updateColnosLists` — per-target-table update_colnos lists.
+    #[allow(non_snake_case)]
+    pub updateColnosLists: Vec<Vec<AttrNumber>>,
+    /// `List *withCheckOptionLists` — per-target-table WCO lists (node handles).
+    #[allow(non_snake_case)]
+    pub withCheckOptionLists: Vec<Vec<NodeId>>,
+    /// `List *returningLists` — per-target-table RETURNING tlists (node handles).
+    #[allow(non_snake_case)]
+    pub returningLists: Vec<Vec<NodeId>>,
+    /// `List *rowMarks` — PlanRowMarks (non-locking only; opaque node handles).
+    #[allow(non_snake_case)]
+    pub rowMarks: Vec<NodeId>,
+    /// `OnConflictExpr *onconflict` — ON CONFLICT clause, or `None` (opaque
+    /// node handle; analysis is deferred to createplan.c).
+    pub onconflict: Option<NodeId>,
+    /// `int epqParam` — ID of the Param for EvalPlanQual re-eval.
+    #[allow(non_snake_case)]
+    pub epqParam: i32,
+    /// `List *mergeActionLists` — per-target-table MERGE action lists (handles).
+    #[allow(non_snake_case)]
+    pub mergeActionLists: Vec<Vec<NodeId>>,
+    /// `List *mergeJoinConditions` — per-target-table MERGE join conditions.
+    #[allow(non_snake_case)]
+    pub mergeJoinConditions: Vec<Vec<NodeId>>,
+}
+
+/// `LimitPath` — applying LIMIT/OFFSET restrictions.
+#[derive(Clone, Debug)]
+pub struct LimitPath {
+    pub path: Path,
+    /// `Path *subpath` — input source (handle into `path_arena`).
+    pub subpath: Option<PathId>,
+    /// `Node *limitOffset` — OFFSET parameter, or `None` (expr node handle).
+    #[allow(non_snake_case)]
+    pub limitOffset: Option<NodeId>,
+    /// `Node *limitCount` — COUNT parameter, or `None` (expr node handle).
+    #[allow(non_snake_case)]
+    pub limitCount: Option<NodeId>,
+    #[allow(non_snake_case)]
+    pub limitOption: LimitOption,
+}
+
 /// The polymorphic path-arena element — the owned-tree analogue of a `Path *`
 /// that may point at any path subtype. The path constructors (`pathnode.c`,
 /// reached via seams) mint the concrete variants; the enumerator reaches the
@@ -620,14 +1221,78 @@ pub struct HashPath {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum PathNode {
-    /// `T_Path` — a plain base/scan path.
+    /// `T_Path` — a plain base/scan path (seqscan/samplescan/function/values/…).
     Path(Path),
+    /// `T_IndexPath`.
+    IndexPath(IndexPath),
+    /// `T_BitmapHeapPath`.
+    BitmapHeapPath(BitmapHeapPath),
+    /// `T_BitmapAndPath`.
+    BitmapAndPath(BitmapAndPath),
+    /// `T_BitmapOrPath`.
+    BitmapOrPath(BitmapOrPath),
+    /// `T_TidPath`.
+    TidPath(TidPath),
+    /// `T_TidRangePath`.
+    TidRangePath(TidRangePath),
+    /// `T_SubqueryScanPath`.
+    SubqueryScanPath(SubqueryScanPath),
+    /// `T_ForeignPath`.
+    ForeignPath(ForeignPath),
+    /// `T_CustomPath`.
+    CustomPath(CustomPath),
     /// `T_NestPath`.
     NestPath(NestPath),
     /// `T_MergePath`.
     MergePath(MergePath),
     /// `T_HashPath`.
     HashPath(HashPath),
+    /// `T_AppendPath`.
+    AppendPath(AppendPath),
+    /// `T_MergeAppendPath`.
+    MergeAppendPath(MergeAppendPath),
+    /// `T_GroupResultPath`.
+    GroupResultPath(GroupResultPath),
+    /// `T_MaterialPath`.
+    MaterialPath(MaterialPath),
+    /// `T_MemoizePath`.
+    MemoizePath(MemoizePath),
+    /// `T_UniquePath`.
+    UniquePath(UniquePath),
+    /// `T_GatherPath`.
+    GatherPath(GatherPath),
+    /// `T_GatherMergePath`.
+    GatherMergePath(GatherMergePath),
+    /// `T_ProjectionPath`.
+    ProjectionPath(ProjectionPath),
+    /// `T_ProjectSetPath`.
+    ProjectSetPath(ProjectSetPath),
+    /// `T_SortPath`.
+    SortPath(SortPath),
+    /// `T_IncrementalSortPath`.
+    IncrementalSortPath(IncrementalSortPath),
+    /// `T_GroupPath`.
+    GroupPath(GroupPath),
+    /// `T_UpperUniquePath`.
+    UpperUniquePath(UpperUniquePath),
+    /// `T_AggPath`.
+    AggPath(AggPath),
+    /// `T_GroupingSetsPath`.
+    GroupingSetsPath(GroupingSetsPath),
+    /// `T_MinMaxAggPath`.
+    MinMaxAggPath(MinMaxAggPath),
+    /// `T_WindowAggPath`.
+    WindowAggPath(WindowAggPath),
+    /// `T_SetOpPath`.
+    SetOpPath(SetOpPath),
+    /// `T_RecursiveUnionPath`.
+    RecursiveUnionPath(RecursiveUnionPath),
+    /// `T_LockRowsPath`.
+    LockRowsPath(LockRowsPath),
+    /// `T_ModifyTablePath`.
+    ModifyTablePath(ModifyTablePath),
+    /// `T_LimitPath`.
+    LimitPath(LimitPath),
 }
 
 impl PathNode {
@@ -636,9 +1301,41 @@ impl PathNode {
     pub fn base(&self) -> &Path {
         match self {
             PathNode::Path(p) => p,
+            PathNode::IndexPath(p) => &p.path,
+            PathNode::BitmapHeapPath(p) => &p.path,
+            PathNode::BitmapAndPath(p) => &p.path,
+            PathNode::BitmapOrPath(p) => &p.path,
+            PathNode::TidPath(p) => &p.path,
+            PathNode::TidRangePath(p) => &p.path,
+            PathNode::SubqueryScanPath(p) => &p.path,
+            PathNode::ForeignPath(p) => &p.path,
+            PathNode::CustomPath(p) => &p.path,
             PathNode::NestPath(p) => &p.jpath.path,
             PathNode::MergePath(p) => &p.jpath.path,
             PathNode::HashPath(p) => &p.jpath.path,
+            PathNode::AppendPath(p) => &p.path,
+            PathNode::MergeAppendPath(p) => &p.path,
+            PathNode::GroupResultPath(p) => &p.path,
+            PathNode::MaterialPath(p) => &p.path,
+            PathNode::MemoizePath(p) => &p.path,
+            PathNode::UniquePath(p) => &p.path,
+            PathNode::GatherPath(p) => &p.path,
+            PathNode::GatherMergePath(p) => &p.path,
+            PathNode::ProjectionPath(p) => &p.path,
+            PathNode::ProjectSetPath(p) => &p.path,
+            PathNode::SortPath(p) => &p.path,
+            PathNode::IncrementalSortPath(p) => &p.spath.path,
+            PathNode::GroupPath(p) => &p.path,
+            PathNode::UpperUniquePath(p) => &p.path,
+            PathNode::AggPath(p) => &p.path,
+            PathNode::GroupingSetsPath(p) => &p.path,
+            PathNode::MinMaxAggPath(p) => &p.path,
+            PathNode::WindowAggPath(p) => &p.path,
+            PathNode::SetOpPath(p) => &p.path,
+            PathNode::RecursiveUnionPath(p) => &p.path,
+            PathNode::LockRowsPath(p) => &p.path,
+            PathNode::ModifyTablePath(p) => &p.path,
+            PathNode::LimitPath(p) => &p.path,
         }
     }
 
@@ -646,9 +1343,41 @@ impl PathNode {
     pub fn base_mut(&mut self) -> &mut Path {
         match self {
             PathNode::Path(p) => p,
+            PathNode::IndexPath(p) => &mut p.path,
+            PathNode::BitmapHeapPath(p) => &mut p.path,
+            PathNode::BitmapAndPath(p) => &mut p.path,
+            PathNode::BitmapOrPath(p) => &mut p.path,
+            PathNode::TidPath(p) => &mut p.path,
+            PathNode::TidRangePath(p) => &mut p.path,
+            PathNode::SubqueryScanPath(p) => &mut p.path,
+            PathNode::ForeignPath(p) => &mut p.path,
+            PathNode::CustomPath(p) => &mut p.path,
             PathNode::NestPath(p) => &mut p.jpath.path,
             PathNode::MergePath(p) => &mut p.jpath.path,
             PathNode::HashPath(p) => &mut p.jpath.path,
+            PathNode::AppendPath(p) => &mut p.path,
+            PathNode::MergeAppendPath(p) => &mut p.path,
+            PathNode::GroupResultPath(p) => &mut p.path,
+            PathNode::MaterialPath(p) => &mut p.path,
+            PathNode::MemoizePath(p) => &mut p.path,
+            PathNode::UniquePath(p) => &mut p.path,
+            PathNode::GatherPath(p) => &mut p.path,
+            PathNode::GatherMergePath(p) => &mut p.path,
+            PathNode::ProjectionPath(p) => &mut p.path,
+            PathNode::ProjectSetPath(p) => &mut p.path,
+            PathNode::SortPath(p) => &mut p.path,
+            PathNode::IncrementalSortPath(p) => &mut p.spath.path,
+            PathNode::GroupPath(p) => &mut p.path,
+            PathNode::UpperUniquePath(p) => &mut p.path,
+            PathNode::AggPath(p) => &mut p.path,
+            PathNode::GroupingSetsPath(p) => &mut p.path,
+            PathNode::MinMaxAggPath(p) => &mut p.path,
+            PathNode::WindowAggPath(p) => &mut p.path,
+            PathNode::SetOpPath(p) => &mut p.path,
+            PathNode::RecursiveUnionPath(p) => &mut p.path,
+            PathNode::LockRowsPath(p) => &mut p.path,
+            PathNode::ModifyTablePath(p) => &mut p.path,
+            PathNode::LimitPath(p) => &mut p.path,
         }
     }
 }
