@@ -97,19 +97,30 @@ pub fn ExecEvalGroupingFunc<'mcx>(
 
     // AggState *aggstate = castNode(AggState, state->parent);
     //   Bitmapset *grouped_cols = aggstate->grouped_cols;
-    // The parent AggState is owned by nodeAgg, which has not yet threaded its
-    // `T_AggState` into the `PlanStateNode` enum; `as_agg_state()` yields the
-    // cast (currently `None`). The `grouped_cols` it reads is the single
-    // current-grouping-set Bitmapset (AggState->grouped_cols, not the rollup
-    // **array**).
+    // The parent AggState is owned by nodeAgg (whose `AggStateData` lives in the
+    // `backend-executor-nodeAgg` crate). `as_agg_state()` type-erases it as a
+    // `&dyn Any` (types-nodes sits below nodeAgg and cannot name `AggStateData`),
+    // and this consumer downcasts to the real owner type — the faithful
+    // rendering of C's `castNode(AggState, ...)` across the crate boundary. The
+    // cast currently yields `None` because nodeAgg has not yet threaded its
+    // `T_AggState` into the `PlanStateNode` enum, so the `.expect` below is a
+    // not-yet-reachable seam-and-panic (the same gap as before the relocation).
+    // The `grouped_cols` it reads is the single current-grouping-set Bitmapset
+    // (AggState->grouped_cols, not the rollup **array**).
     let parent = state
         .parent
         .as_deref()
         .expect("ExecEvalGroupingFunc: EEOP_GROUPING_FUNC step has no parent PlanState");
-    let aggstate = parent.as_agg_state().expect(
+    let aggstate_any = parent.as_agg_state().expect(
         "ExecEvalGroupingFunc: castNode(AggState, state->parent) — the parent AggState is owned \
          by nodeAgg, which has not yet threaded its T_AggState into PlanStateNode",
     );
+    // `dyn Any` downcasts only to `'static` types; the erased payload is a fully
+    // owned `AggStateData` so its `'static` instantiation is the registered
+    // TypeId. (This `.expect` is unreachable until the threading above lands.)
+    let aggstate = aggstate_any
+        .downcast_ref::<backend_executor_nodeAgg::AggStateData<'static>>()
+        .expect("ExecEvalGroupingFunc: parent PlanState payload is not an AggStateData");
     let grouped_cols = aggstate.grouped_cols.as_deref();
 
     // foreach(lc, op->d.grouping_func.clauses)

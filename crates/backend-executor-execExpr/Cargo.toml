@@ -21,6 +21,10 @@ types-nodes = { path = "../types-nodes" }
 types-acl = { path = "../types-acl" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+# The Agg runtime state (AggStateData) now lives in its real owner nodeAgg
+# (relocated out of types-nodes for the logtape registry retire). nodeAgg deps
+# only execExpr's SEAM crate, not this owner, so there is no cycle.
+backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 # Outward seams routed through owner crates (panic until the owner lands):
 #   execExprInterp (the cycle partner: ExecReadyInterpretedExpr + eval dispatch)
 #   execUtils (ResetExprContext)

@@ -4,7 +4,8 @@
 
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
-use types_nodes::nodeagg::{AggStateData, AGG_MIXED, AGG_PLAIN};
+use types_nodes::nodeagg::{AGG_MIXED, AGG_PLAIN};
+use crate::aggstate::AggStateData;
 use types_nodes::{EStateData, SlotId};
 
 /// `TupIsNull(slot)` — true if `slot` is NULL or marked empty (`TTS_EMPTY`).

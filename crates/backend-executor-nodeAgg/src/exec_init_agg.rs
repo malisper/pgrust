@@ -11,8 +11,11 @@ use types_error::PgResult;
 use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodeagg::{
     do_aggsplit_combine, do_aggsplit_deserialize, do_aggsplit_serialize, do_aggsplit_skipfinal,
-    Agg, AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerHashData,
-    AggStatePerPhaseData, AggStatePerTransData, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+    Agg, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+};
+use crate::aggstate::{
+    AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerHashData,
+    AggStatePerPhaseData, AggStatePerTransData,
 };
 use types_nodes::{AggStrategy, EStateData, Sort, TupleSlotKind};
 
@@ -1404,5 +1407,3 @@ fn exec_build_agg_trans<'mcx>(
          AggState parent; not ported / no seam declared"
     )
 }
-
-extern crate alloc;

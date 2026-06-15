@@ -291,7 +291,14 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// into this enum (the same not-yet-landed-variant gap as
     /// [`Self::as_scan_state`]); the C `castNode` asserts the tag, so a caller
     /// that reaches this for a non-Agg parent is a planner/compiler bug.
-    pub fn as_agg_state(&self) -> Option<&crate::nodeagg::AggStateData<'mcx>> {
+    ///
+    /// Returns a type-erased `&dyn Any`: the concrete `AggStateData` lives in
+    /// the `backend-executor-nodeAgg` crate (which sits ABOVE `types-nodes`), so
+    /// this low crate cannot name it. The consumer (execExprInterp) downcasts to
+    /// the real `AggStateData`. This is the same owning-crate-indirection the
+    /// `Tuplesortstate` carrier uses — the faithful rendering of C's `void *`
+    /// across a crate boundary, not a side-table/registry.
+    pub fn as_agg_state(&self) -> Option<&dyn core::any::Any> {
         match self {
             // nodeAgg's `T_AggState` variant lands here when it threads into
             // this enum; no current variant carries an `AggState`.

@@ -25,7 +25,6 @@ pub mod sharedtuplestore;
 pub mod tuplestore;
 
 use backend_utils_sort_storage_seams as seams;
-use types_nodes::nodeagg::{LogicalTapeHandle, LogicalTapeSetHandle};
 
 /// Install every `backend-utils-sort-storage` seam.
 pub fn init_seams() {
@@ -34,27 +33,21 @@ pub fn init_seams() {
     sharedtuplestore::init_seams();
 }
 
-/// logtape.c — the handle-threaded logical-tape surface (the hash-agg spill
-/// path; `fileset = NULL`, `worker = -1`). The opaque `usize` words in
-/// `LogicalTapeSetHandle` / `LogicalTapeHandle` are the registry keys.
+/// logtape.c — the value-typed logical-tape surface (the hash-agg spill path;
+/// `fileset = NULL`, `worker = -1`). The set crosses as the real owned
+/// `LogicalTapeSet` value (held by the consumer); a tape is a `usize` slot
+/// index into the set's `tapes` vector. No side-table registry.
 fn install_logtape_seams() {
-    seams::logical_tape_set_create::set(|_mcx, preallocate, worker| {
-        Ok(LogicalTapeSetHandle(logtape::logical_tape_set_create(
-            preallocate,
-            worker,
-        )?))
+    seams::logical_tape_set_create::set(|mcx, preallocate, worker| {
+        logtape::logical_tape_set_create(mcx, preallocate, worker)
     });
-    seams::logical_tape_set_close::set(|lts| logtape::logical_tape_set_close(lts.0));
-    seams::logical_tape_set_blocks::set(|lts| logtape::logical_tape_set_blocks(lts.0));
-    seams::logical_tape_create::set(|_mcx, lts| {
-        Ok(LogicalTapeHandle(logtape::logical_tape_create(lts.0)?))
-    });
-    seams::logical_tape_close::set(|lt| logtape::logical_tape_close(lt.0));
-    seams::logical_tape_write::set(|lt, data| logtape::logical_tape_write(lt.0, data));
-    seams::logical_tape_rewind_for_read::set(|lt, buffer_size| {
-        logtape::logical_tape_rewind_for_read(lt.0, buffer_size)
-    });
-    seams::logical_tape_read::set(|lt, dst| logtape::logical_tape_read(lt.0, dst));
+    seams::logical_tape_set_close::set(logtape::logical_tape_set_close);
+    seams::logical_tape_set_blocks::set(logtape::logical_tape_set_blocks);
+    seams::logical_tape_create::set(logtape::logical_tape_create);
+    seams::logical_tape_close::set(logtape::logical_tape_close);
+    seams::logical_tape_write::set(logtape::logical_tape_write);
+    seams::logical_tape_rewind_for_read::set(logtape::logical_tape_rewind_for_read);
+    seams::logical_tape_read::set(logtape::logical_tape_read);
 }
 
 /// tuplestore.c — the tuple-store surface consumed by nodeMaterial /

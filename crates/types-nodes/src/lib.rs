@@ -149,10 +149,7 @@ pub use nodeappend::{
 pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
 pub use nodebitmapor::{BitmapOr, BitmapOrState, T_BitmapOrState};
 pub use nodeagg::{
-    Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
-    AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
-    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
-    AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+    Agg, AggSplit, AggStrategy, Aggref, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodectescan::{CteScan, CteScanState, T_CteScan, T_CteScanState};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};

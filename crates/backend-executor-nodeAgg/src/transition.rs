@@ -4,9 +4,7 @@
 
 use mcx::{alloc_in, Mcx};
 use types_error::PgResult;
-use types_nodes::nodeagg::{
-    AggStateData, AggStatePerGroupData, AggStatePerTransData,
-};
+use crate::aggstate::{AggStateData, AggStatePerGroupData, AggStatePerTransData};
 use types_nodes::EStateData;
 
 use crate::node_lifecycle::select_current_set;

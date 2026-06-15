@@ -5,9 +5,8 @@
 use backend_executor_nodeHash_seams as nodeHash_seams;
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodeagg::{
-    do_aggsplit_skipfinal, AggStatePerGroupData, AggStateData, AggStrategy, TupleHashEntryData,
-};
+use types_nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy, TupleHashEntryData};
+use crate::aggstate::{AggStateData, AggStatePerGroupData};
 use types_nodes::{EStateData, SlotId};
 
 use crate::{

@@ -14,26 +14,25 @@
 //! (`lts*`). The branch order, assertions, error messages, and SQLSTATEs match
 //! the C source.
 //!
-//! # Opacity model
+//! # Ownership model
 //!
 //! `LogicalTapeSet *` / `LogicalTape *` are opaque typedefs in C
-//! (`logtape.h`); the two working structs are private to `logtape.c`. The
-//! consumers that drive this unit (`nodeAgg`'s hash-agg spill, tuplesort) hold
-//! them only as the opaque handle tokens
-//! [`LogicalTapeSetHandle`](types_nodes::nodeagg::LogicalTapeSetHandle) /
-//! [`LogicalTapeHandle`](types_nodes::nodeagg::LogicalTapeHandle) (`usize`
-//! words that, on the C side, *are* the pointers). This is the
-//! opacity-inherited pattern (cf. `backend-lib-hyperloglog`): the owner keeps
-//! the real owned structs in a per-thread registry and resolves a word back to
-//! the struct on each seam call.
+//! (`logtape.h`); the two working structs are private to `logtape.c`. In this
+//! repo the structs ([`LogicalTapeSet`] / [`LogicalTape`]) are the shared
+//! vocabulary defined in the `backend-utils-sort-storage-seams` crate, and the
+//! consumer that drives this unit (`nodeAgg`'s hash-agg spill) holds the set
+//! BY VALUE as an owned `PgBox<LogicalTapeSet<'mcx>>`. A `LogicalTape *` is a
+//! `usize` slot index into the set's `tapes` vector (the faithful rendering of
+//! C's pointer into the set-owned tape array). There is no side-table
+//! registry: the set is a real owned value passed `&mut` through the seams.
 //!
 //! A whole tape set (its underlying `BufFile`, its free-block min-heap, and all
-//! the tapes created within it) lives in a single owned [`McxOwned`] bundle —
-//! the C `LogicalTapeSet` plus the `lt->tapeSet` back-pointer collapsed into
-//! one allocation, charged to one context, exactly as C charges everything in
-//! the set to the context captured at `LogicalTapeSetCreate`. A tape handle
-//! maps to `(set handle, slot)` so the per-tape state can be reached while it
-//! shares the set's state mutably.
+//! the tapes created within it) is one owned allocation — the C
+//! `LogicalTapeSet` plus the `lt->tapeSet` back-pointer collapsed together,
+//! charged to the `mcx` captured at `LogicalTapeSetCreate`, exactly as C
+//! charges everything in the set to the context captured there. A tape slot
+//! indexes the per-tape state so it can be reached while it shares the set's
+//! state mutably.
 //!
 //! # SharedFileSet (parallel sort)
 //!
@@ -50,17 +49,17 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use backend_utils_error::elog;
-use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::{BLCKSZ, MAXPGPATH};
 use types_error::{PgError, PgResult, ERROR};
-use types_nodes::nodehashjoin::BufFile;
-use types_storage::fileset::SharedFileSet;
 
 use backend_storage_file_buffile_seams as buffile;
+
+// The owned `LogicalTape` / `LogicalTapeSet` structs are the shared vocabulary,
+// defined in the seam crate so the consumer (nodeAgg) can name them and hold
+// the set by value. This owner crate fills the concrete bodies over them.
+use backend_utils_sort_storage_seams::{LogicalTape, LogicalTapeSet};
 
 /// `MaxAllocSize` (`memutils.h`).
 const MaxAllocSize: usize = mcx::MAX_ALLOC_SIZE;
@@ -177,155 +176,6 @@ fn TapeBlockSetNBytes(buf: &mut [u8], nbytes: i64) {
 fn steal<'mcx, T>(v: &mut PgVec<'mcx, T>) -> PgVec<'mcx, T> {
     let mcx = *v.allocator();
     core::mem::replace(v, PgVec::new_in(mcx))
-}
-
-// ---------------------------------------------------------------------------
-// Structures.
-// ---------------------------------------------------------------------------
-
-/// Per-tape state. Port of `struct LogicalTape`. The `lt->tapeSet`
-/// back-pointer is implicit: a tape lives in its set's `tapes` vector.
-struct LogicalTape<'mcx> {
-    /// T while in write phase.
-    writing: bool,
-    /// T if blocks should not be freed when read.
-    frozen: bool,
-    /// does buffer need to be written?
-    dirty: bool,
-
-    /// block number of the first block of the tape, or -1.
-    firstBlockNumber: i64,
-    /// "current" block number (valid when writing or reading a frozen tape).
-    curBlockNumber: i64,
-    /// next block of the tape, or -1.
-    nextBlockNumber: i64,
-    /// offset applied during reads for leader tapesets.
-    offsetBlockNumber: i64,
-
-    /// physical buffer (`char *buffer`), empty until lazily allocated.
-    buffer: PgVec<'mcx, u8>,
-    /// allocated/intended size of the buffer.
-    buffer_size: usize,
-    /// highest useful, safe `buffer_size`.
-    max_size: usize,
-    /// next read/write position in buffer.
-    pos: usize,
-    /// total # of valid bytes in buffer.
-    nbytes: usize,
-    /// has the read/write buffer been allocated yet? (`lt->buffer == NULL`).
-    buffer_allocated: bool,
-
-    /// preallocated block numbers, sorted descending; consumed from the end.
-    prealloc: PgVec<'mcx, i64>,
-    /// has the prealloc list been allocated yet? (`lt->prealloc != NULL`).
-    prealloc_allocated: bool,
-    /// number of valid elements in the list.
-    nprealloc: i32,
-    /// number of elements the list can hold.
-    prealloc_size: i32,
-}
-
-/// The mutable state of a set of related "logical tapes" sharing space in a
-/// single underlying file. Port of `struct LogicalTapeSet`, plus the tapes
-/// created in it (`tapes`) so the whole set is one owned bundle.
-struct LogicalTapeSet<'mcx> {
-    /// underlying file for whole tape set (`BufFile *pfile`), or `None`.
-    pfile: Option<PgBox<'mcx, BufFile>>,
-    /// shared fileset (parallel sort), or `None`.
-    #[allow(dead_code)]
-    fileset: Option<Box<SharedFileSet>>,
-    /// worker # if shared, -1 for leader/serial.
-    worker: i32,
-
-    /// # of blocks allocated.
-    nBlocksAllocated: i64,
-    /// # of blocks used in underlying file.
-    nBlocksWritten: i64,
-    /// # of "hole" blocks left.
-    nHoleBlocks: i64,
-
-    /// are we remembering free blocks?
-    forgetFreeSpace: bool,
-    /// minheap of free blocks (the first `nFreeBlocks` slots are the heap).
-    freeBlocks: PgVec<'mcx, i64>,
-    /// # of currently free blocks.
-    nFreeBlocks: i64,
-    /// current allocated length of `freeBlocks`.
-    freeBlocksLen: usize,
-    /// preallocate write blocks?
-    enable_prealloc: bool,
-
-    /// tapes created in this set, addressed by the tape handle's slot. A
-    /// `None` slot is a closed tape.
-    tapes: Vec<Option<LogicalTape<'mcx>>>,
-}
-
-mcx::bind!(LogicalTapeSetBind => LogicalTapeSet<'mcx>);
-type OwnedSet = McxOwned<LogicalTapeSetBind>;
-
-// ---------------------------------------------------------------------------
-// Registry (opacity-inherited handle table).
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static REGISTRY: RefCell<Registry> = const { RefCell::new(Registry::new()) };
-}
-
-struct Registry {
-    next_set: usize,
-    next_tape: usize,
-    sets: Option<HashMap<usize, OwnedSet>>,
-    /// tape handle -> (set handle, slot index).
-    tapes: Option<HashMap<usize, (usize, usize)>>,
-}
-
-impl Registry {
-    const fn new() -> Self {
-        Registry {
-            next_set: 1,
-            next_tape: 1,
-            sets: None,
-            tapes: None,
-        }
-    }
-    fn sets(&mut self) -> &mut HashMap<usize, OwnedSet> {
-        self.sets.get_or_insert_with(HashMap::new)
-    }
-    fn tapes(&mut self) -> &mut HashMap<usize, (usize, usize)> {
-        self.tapes.get_or_insert_with(HashMap::new)
-    }
-}
-
-/// Run `f` against the named set's owned state.
-fn with_set<R>(set_handle: usize, f: impl for<'mcx> FnOnce(&mut LogicalTapeSet<'mcx>) -> R) -> R {
-    REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        let owned = reg
-            .sets()
-            .get_mut(&set_handle)
-            .expect("logtape: unknown LogicalTapeSet handle");
-        owned.with_mut(|s| f(s))
-    })
-}
-
-/// Resolve a tape handle to `(set handle, slot)`.
-fn resolve_tape(tape_handle: usize) -> (usize, usize) {
-    REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        *reg.tapes()
-            .get(&tape_handle)
-            .expect("logtape: unknown LogicalTape handle")
-    })
-}
-
-/// Run `f` against the set and a specific tape slot mutably (the C
-/// `LogicalTapeSet *lts` + `LogicalTape *lt` pair).
-fn with_tape<R>(
-    tape_handle: usize,
-    f: impl for<'mcx> FnOnce(&mut LogicalTapeSet<'mcx>, usize) -> R,
-) -> R {
-    let (set_handle, slot) = resolve_tape(tape_handle);
-    with_set(set_handle, |set| f(set, slot))
 }
 
 // ---------------------------------------------------------------------------
@@ -693,8 +543,13 @@ fn make_tape<'mcx>(mcx: Mcx<'mcx>) -> LogicalTape<'mcx> {
 
 /// `LogicalTapeSetCreate(preallocate, fileset, worker)` (logtape.c). The
 /// installed seam passes no `SharedFileSet` (serial/hash-agg spill is always
-/// `fileset = NULL`, `worker = -1`).
-pub fn logical_tape_set_create(preallocate: bool, worker: i32) -> PgResult<usize> {
+/// `fileset = NULL`, `worker = -1`). The owned set is allocated in `mcx` and
+/// returned for the consumer to hold by value (no registry).
+pub fn logical_tape_set_create<'mcx>(
+    mcx: Mcx<'mcx>,
+    preallocate: bool,
+    worker: i32,
+) -> PgResult<PgBox<'mcx, LogicalTapeSet<'mcx>>> {
     // fileset == NULL on the seam path; the worker/leader fileset arms of C
     // would need sharedfileset.c (unported), so only the serial arm runs.
     if worker != -1 {
@@ -704,26 +559,26 @@ pub fn logical_tape_set_create(preallocate: bool, worker: i32) -> PgResult<usize
         );
     }
 
-    let ctx = MemoryContext::new("logtape");
-    let owned = OwnedSet::try_new(ctx, |mcx| {
-        // Create temp BufFile BEFORE the (charged) free-block heap so a failure
-        // can never strand a charged allocation.
-        let pfile = buffile::buf_file_create_temp::call(mcx, false)?;
+    // Create temp BufFile BEFORE the (charged) free-block heap so a failure
+    // can never strand a charged allocation.
+    let pfile = buffile::buf_file_create_temp::call(mcx, false)?;
 
-        let freeBlocksLen: usize = 32; // reasonable initial guess
-        let mut freeBlocks: PgVec<i64> = PgVec::new_in(mcx);
-        if let Err(e) = pgvec_zero_fill(
-            &mut freeBlocks,
-            mcx,
-            freeBlocksLen,
-            "out of memory allocating logical-tape free-block heap",
-        ) {
-            // Close the BufFile we just created so it does not leak.
-            let _ = buffile::buf_file_close::call(pfile);
-            return Err(e);
-        }
+    let freeBlocksLen: usize = 32; // reasonable initial guess
+    let mut freeBlocks: PgVec<i64> = PgVec::new_in(mcx);
+    if let Err(e) = pgvec_zero_fill(
+        &mut freeBlocks,
+        mcx,
+        freeBlocksLen,
+        "out of memory allocating logical-tape free-block heap",
+    ) {
+        // Close the BufFile we just created so it does not leak.
+        let _ = buffile::buf_file_close::call(pfile);
+        return Err(e);
+    }
 
-        Ok(LogicalTapeSet {
+    mcx::alloc_in(
+        mcx,
+        LogicalTapeSet {
             pfile: Some(pfile),
             fileset: None,
             worker,
@@ -736,106 +591,60 @@ pub fn logical_tape_set_create(preallocate: bool, worker: i32) -> PgResult<usize
             freeBlocksLen,
             enable_prealloc: preallocate,
             tapes: Vec::new(),
-        })
-    })?;
-
-    Ok(REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        let handle = reg.next_set;
-        reg.next_set += 1;
-        reg.sets().insert(handle, owned);
-        handle
-    }))
+        },
+    )
 }
 
 /// `LogicalTapeSetClose(lts)` (logtape.c): destroy the set and close its
 /// underlying `BufFile`. Infallible in C (close paths do not ereport(ERROR));
 /// a close error here surfaces as a loud panic to keep the `void` contract.
-pub fn logical_tape_set_close(set_handle: usize) {
-    let owned = REGISTRY.with(|reg| {
-        reg.borrow_mut()
-            .sets()
-            .remove(&set_handle)
-            .expect("logtape: close of unknown LogicalTapeSet handle")
-    });
-    // Also drop any tape-handle mappings for this set.
-    REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        let dead: Vec<usize> = reg
-            .tapes()
-            .iter()
-            .filter(|(_, (sh, _))| *sh == set_handle)
-            .map(|(th, _)| *th)
-            .collect();
-        for th in dead {
-            reg.tapes().remove(&th);
-        }
-    });
-
-    // BufFileClose the underlying file inside the bundle (the PgBox<'mcx>
-    // cannot escape `with_mut`), then drop the rest of the set.
-    let mut owned = owned;
-    owned.with_mut(|s| {
-        if let Some(pfile) = s.pfile.take() {
-            buffile::buf_file_close::call(pfile)
-                .expect("logtape LogicalTapeSetClose: BufFileClose failed");
-        }
-    });
-    drop(owned);
+/// Consumes the owned set.
+pub fn logical_tape_set_close(mut set: PgBox<'_, LogicalTapeSet<'_>>) {
+    if let Some(pfile) = set.pfile.take() {
+        buffile::buf_file_close::call(pfile)
+            .expect("logtape LogicalTapeSetClose: BufFileClose failed");
+    }
+    // Dropping `set` releases the free-block heap and every tape's buffer.
+    drop(set);
 }
 
 /// `LogicalTapeSetBlocks(lts)` (logtape.c): total disk space used, in blocks.
-pub fn logical_tape_set_blocks(set_handle: usize) -> i64 {
-    with_set(set_handle, |set| set.nBlocksWritten - set.nHoleBlocks)
+pub fn logical_tape_set_blocks(set: &LogicalTapeSet<'_>) -> i64 {
+    set.nBlocksWritten - set.nHoleBlocks
 }
 
 /// `LogicalTapeCreate(lts)` (logtape.c): allocate a new tape in the set, in
-/// write state.
-pub fn logical_tape_create(set_handle: usize) -> PgResult<usize> {
+/// write state. Returns the tape's slot index (the owned-model `LogicalTape *`).
+pub fn logical_tape_create(set: &mut LogicalTapeSet<'_>) -> PgResult<usize> {
     // The leader cannot create new tapes (BufFiles opened shared are
     // read-only). On the serial seam path `fileset` is always None, so this
     // never fires; preserved for fidelity.
-    let leader = with_set(set_handle, |set| set.fileset.is_some() && set.worker == -1);
-    if leader {
+    if set.fileset.is_some() && set.worker == -1 {
         elog(ERROR, "cannot create new tapes in leader process")?;
     }
 
-    let slot = with_set(set_handle, |set| {
-        let mcx = set_mcx(set);
-        let tape = make_tape(mcx);
-        let slot = set.tapes.len();
-        set.tapes.push(Some(tape));
-        slot
-    });
-
-    Ok(REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        let handle = reg.next_tape;
-        reg.next_tape += 1;
-        reg.tapes().insert(handle, (set_handle, slot));
-        handle
-    }))
+    let mcx = set_mcx(set);
+    let tape = make_tape(mcx);
+    let slot = set.tapes.len();
+    set.tapes.push(Some(tape));
+    Ok(slot)
 }
 
 /// `LogicalTapeClose(lt)` (logtape.c): release a single tape. Does NOT return
 /// blocks to the free list.
-pub fn logical_tape_close(tape_handle: usize) {
-    let (set_handle, slot) = resolve_tape(tape_handle);
-    REGISTRY.with(|reg| reg.borrow_mut().tapes().remove(&tape_handle));
-    with_set(set_handle, |set| {
-        // pfree(lt->buffer): drop the tape, freeing buffer/prealloc charge.
-        set.tapes[slot] = None;
-    });
+pub fn logical_tape_close(set: &mut LogicalTapeSet<'_>, slot: usize) {
+    // pfree(lt->buffer): drop the tape, freeing buffer/prealloc charge.
+    set.tapes[slot] = None;
 }
 
 /// `LogicalTapeSetForgetFreeSpace(lts)` (logtape.c).
-pub fn logical_tape_set_forget_free_space(set_handle: usize) {
-    with_set(set_handle, |set| set.forgetFreeSpace = true);
+pub fn logical_tape_set_forget_free_space(set: &mut LogicalTapeSet<'_>) {
+    set.forgetFreeSpace = true;
 }
 
 /// `LogicalTapeWrite(lt, ptr, size)` (logtape.c): append `data` to the tape.
-pub fn logical_tape_write(tape_handle: usize, data: &[u8]) -> PgResult<()> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_write(set: &mut LogicalTapeSet<'_>, slot: usize, data: &[u8]) -> PgResult<()> {
+    {
         let mut ptr = data;
         let mut size = ptr.len();
 
@@ -902,13 +711,17 @@ pub fn logical_tape_write(tape_handle: usize, data: &[u8]) -> PgResult<()> {
             size -= nthistime;
         }
         Ok(())
-    })
+    }
 }
 
 /// `LogicalTapeRewindForRead(lt, buffer_size)` (logtape.c): switch from write
 /// to read.
-pub fn logical_tape_rewind_for_read(tape_handle: usize, buffer_size: usize) -> PgResult<()> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_rewind_for_read(
+    set: &mut LogicalTapeSet<'_>,
+    slot: usize,
+    buffer_size: usize,
+) -> PgResult<()> {
+    {
         let mut buffer_size = buffer_size;
         if tape(set, slot).frozen {
             buffer_size = BLCKSZ;
@@ -959,13 +772,13 @@ pub fn logical_tape_rewind_for_read(tape_handle: usize, buffer_size: usize) -> P
             lt.prealloc_size = 0;
         }
         Ok(())
-    })
+    }
 }
 
 /// `LogicalTapeRead(lt, ptr, size)` (logtape.c): read up to `dst.len()` bytes;
 /// returns the number of bytes actually read.
-pub fn logical_tape_read(tape_handle: usize, dst: &mut [u8]) -> PgResult<usize> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_read(set: &mut LogicalTapeSet<'_>, slot: usize, dst: &mut [u8]) -> PgResult<usize> {
+    {
         let mut nread: usize = 0;
         let mut size = dst.len();
         let mut out_off = 0usize;
@@ -997,13 +810,13 @@ pub fn logical_tape_read(tape_handle: usize, dst: &mut [u8]) -> PgResult<usize> 
             nread += nthistime;
         }
         Ok(nread)
-    })
+    }
 }
 
 /// `LogicalTapeFreeze(lt, share)` (logtape.c). `share` is the serial-sort
 /// `NULL` here (the sharing arm needs sharedfileset.c).
-pub fn logical_tape_freeze(tape_handle: usize) -> PgResult<()> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_freeze(set: &mut LogicalTapeSet<'_>, slot: usize) -> PgResult<()> {
+    {
         debug_assert!(tape(set, slot).writing);
         debug_assert!(tape(set, slot).offsetBlockNumber == 0);
 
@@ -1054,13 +867,13 @@ pub fn logical_tape_freeze(tape_handle: usize) -> PgResult<()> {
         }
         lt.nbytes = TapeBlockGetNBytes(&lt.buffer) as usize;
         Ok(())
-    })
+    }
 }
 
 /// `LogicalTapeBackspace(lt, size)` (logtape.c): back up a frozen-for-read tape
 /// by `size` bytes; returns the number of bytes backed up.
-pub fn logical_tape_backspace(tape_handle: usize, size: usize) -> PgResult<usize> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_backspace(set: &mut LogicalTapeSet<'_>, slot: usize, size: usize) -> PgResult<usize> {
+    {
         debug_assert!(tape(set, slot).frozen);
         debug_assert!(tape(set, slot).buffer_size == BLCKSZ);
 
@@ -1107,13 +920,13 @@ pub fn logical_tape_backspace(tape_handle: usize, size: usize) -> PgResult<usize
 
         tape_mut(set, slot).pos = seekpos - size;
         Ok(size)
-    })
+    }
 }
 
 /// `LogicalTapeSeek(lt, blocknum, offset)` (logtape.c): seek a frozen-for-read
 /// tape to a position previously returned by `LogicalTapeTell`.
-pub fn logical_tape_seek(tape_handle: usize, blocknum: i64, offset: i32) -> PgResult<()> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_seek(set: &mut LogicalTapeSet<'_>, slot: usize, blocknum: i64, offset: i32) -> PgResult<()> {
+    {
         debug_assert!(tape(set, slot).frozen);
         debug_assert!(offset >= 0 && offset as usize <= TapeBlockPayloadSize);
         debug_assert!(tape(set, slot).buffer_size == BLCKSZ);
@@ -1139,12 +952,12 @@ pub fn logical_tape_seek(tape_handle: usize, blocknum: i64, offset: i32) -> PgRe
         }
         tape_mut(set, slot).pos = offset as usize;
         Ok(())
-    })
+    }
 }
 
 /// `LogicalTapeTell(lt, blocknum, offset)` (logtape.c): current position.
-pub fn logical_tape_tell(tape_handle: usize) -> PgResult<(i64, i32)> {
-    with_tape(tape_handle, |set, slot| {
+pub fn logical_tape_tell(set: &mut LogicalTapeSet<'_>, slot: usize) -> PgResult<(i64, i32)> {
+    {
         if !tape(set, slot).buffer_allocated {
             ltsInitReadBuffer(set, slot)?;
         }
@@ -1152,7 +965,7 @@ pub fn logical_tape_tell(tape_handle: usize) -> PgResult<(i64, i32)> {
         debug_assert!(tape(set, slot).buffer_size == BLCKSZ);
         let lt = tape(set, slot);
         Ok((lt.curBlockNumber, lt.pos as i32))
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,8 @@
 use mcx::MemoryContext;
 use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
-use types_nodes::nodeagg::{Aggref, AggStateData, AggregateInstrumentation, SharedAggInfo};
+use types_nodes::nodeagg::Aggref;
+use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo};
 use types_execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
