@@ -82,3 +82,24 @@ seam_core::seam!(
         parent: Option<&types_nodes::parsestmt::ParseState<'mcx>>,
     ) -> PgResult<mcx::PgBox<'mcx, types_nodes::parsestmt::ParseState<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `parse_sub_analyze(parseTree, parentParseState, parentCTE,
+    /// locked_from_parent, resolve_unknowns)` (parser/analyze.c) — analyze a
+    /// sub-statement (a CTE query, here) in a child `ParseState` built off
+    /// `parentParseState`, returning the resulting `Query` (wrapped as a
+    /// `Node::Query`, mirroring the C `(Node *) query` store back into
+    /// `cte->ctequery`). `parse_cte`'s `analyzeCTE` is the consumer: it calls
+    /// this with `parentCTE = cte`, `locked_from_parent = false`,
+    /// `resolve_unknowns = true`. This is the CTE ↔ analyze recursion seam (the
+    /// owner `parser/analyze.c` is not yet ported). `Err` carries the analysis
+    /// `ereport(ERROR)` surface. Allocates in `mcx`.
+    pub fn parse_sub_analyze<'mcx>(
+        mcx: Mcx<'mcx>,
+        parse_tree: &Node<'mcx>,
+        parent_pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+        parent_cte: &types_nodes::rawnodes::CommonTableExpr<'mcx>,
+        locked_from_parent: bool,
+        resolve_unknowns: bool,
+    ) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>>
+);

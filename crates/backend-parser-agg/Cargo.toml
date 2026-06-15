@@ -25,10 +25,12 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
+# parse_clause.c landed as a real owner; clause depends on parse-agg-seams (not
+# on this crate), so a direct agg->clause edge is acyclic.
+backend-parser-clause = { path = "../backend-parser-clause" }
 
 # Outward dependency seams (sibling-parser / rewriter / catalog callees).
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
-backend-parser-clause-seams = { path = "../backend-parser-clause-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

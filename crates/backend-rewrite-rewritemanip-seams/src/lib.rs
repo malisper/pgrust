@@ -1,12 +1,28 @@
-//! Seam declarations for `rewrite/rewriteManip.c`.
+//! Seam declarations for the `backend-rewrite-rewriteManip` unit
+//! (`rewrite/rewriteManip.c`, part of the unported `backend-rewrite-core` unit).
 //!
 //! These cross the cycle from the parser (`parse_agg.c`) into the rewriter,
-//! which is not yet ported. The owning unit installs them from its
-//! `init_seams()` when it lands; until then a call panics loudly.
+//! which is not yet ported. The owning unit installs these from its
+//! `init_seams()` when it lands; until then a call panics loudly
+//! (mirror-PG-and-panic).
+
+#![allow(non_snake_case)]
 
 use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
+
+seam_core::seam!(
+    /// `contain_windowfuncs(node)` (rewriteManip.c): does the node contain any
+    /// window function? Infallible (a pure expression-tree walk).
+    pub fn contain_windowfuncs(node: &Node<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `locate_windowfunc(node)` (rewriteManip.c): the parse location of any
+    /// window function in the node, or `-1`. Infallible.
+    pub fn locate_windowfunc(node: &Node<'_>) -> i32
+);
 
 seam_core::seam!(
     /// `flatten_join_alias_vars(NULL, query, node)` (rewriteManip.c) — replace
@@ -26,16 +42,4 @@ seam_core::seam!(
     /// location of the first aggregate of exactly the given query level in
     /// `node`'s tree, or -1 if none.
     pub fn locate_agg_of_level(node: &Node<'_>, levelsup: i32) -> i32
-);
-
-seam_core::seam!(
-    /// `locate_windowfunc(node)` (rewriteManip.c) — find the parse location of
-    /// the first window function in `node`'s tree, or -1 if none.
-    pub fn locate_windowfunc(node: &Node<'_>) -> i32
-);
-
-seam_core::seam!(
-    /// `contain_windowfuncs(node)` (rewriteManip.c) — true if `node`'s tree
-    /// contains any window function call.
-    pub fn contain_windowfuncs(node: &Node<'_>) -> bool
 );

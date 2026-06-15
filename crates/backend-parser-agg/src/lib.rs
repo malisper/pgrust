@@ -17,7 +17,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 
 use backend_utils_error::ereport;
 use types_error::ERROR;
@@ -162,9 +162,9 @@ pub fn transformAggregateCall<'mcx>(
     aggorder: PgVec<'mcx, NodePtr<'mcx>>,
     agg_distinct: bool,
 ) -> PgResult<()> {
-    let mut tlist: PgVec<types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
-    let mut torder: PgVec<SortGroupClause> = PgVec::new_in(mcx);
-    let mut tdistinct: PgVec<SortGroupClause> = PgVec::new_in(mcx);
+    let mut tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut torder: Vec<SortGroupClause> = Vec::new();
+    let mut tdistinct: Vec<SortGroupClause> = Vec::new();
     let mut attno: AttrNumber = 1;
 
     if AGGKIND_IS_ORDERED_SET(agg.aggkind) {
@@ -206,9 +206,9 @@ pub fn transformAggregateCall<'mcx>(
             tlist.push(tle);
 
             // torder = addTargetToSortList(pstate, tle, torder, tlist, sortby);
-            let last = tlist.last().unwrap();
-            torder = backend_parser_clause_seams::add_target_to_sort_list::call(
-                mcx, pstate, last, torder, &tlist, sortby,
+            let tle_idx = tlist.len() - 1;
+            backend_parser_clause::addTargetToSortList(
+                mcx, pstate, tle_idx, &mut torder, &mut tlist, sortby,
             )?;
         }
 
@@ -230,24 +230,35 @@ pub fn transformAggregateCall<'mcx>(
         let save_next_resno = pstate.p_next_resno;
         pstate.p_next_resno = attno as i32;
 
-        let r = backend_parser_clause_seams::transform_sort_clause::call(
+        // The owner takes the ORDER BY as `&[SortBy]`; aggorder is the raw
+        // `List *` of SortBy nodes. Unwrap each NodePtr into an owned SortBy.
+        let mut orderlist: Vec<types_nodes::rawnodes::SortBy<'mcx>> =
+            Vec::with_capacity(aggorder.len());
+        for sortby_node in aggorder.into_iter() {
+            match PgBox::into_inner(sortby_node) {
+                Node::SortBy(sb) => orderlist.push(sb),
+                _ => {
+                    return Err(PgError::error(
+                        "transformAggregateCall: aggorder element is not a SortBy node",
+                    ))
+                }
+            }
+        }
+
+        torder = backend_parser_clause::transformSortClause(
             mcx,
             pstate,
-            aggorder,
-            tlist,
+            &orderlist,
+            &mut tlist,
             ParseExprKind::EXPR_KIND_ORDER_BY,
             true, // force SQL99 rules
         )?;
-        tlist = r.targetlist;
-        torder = r.sortlist;
 
         // If we have DISTINCT, transform that to produce a distinctList.
         if agg_distinct {
-            let r = backend_parser_clause_seams::transform_distinct_clause::call(
-                mcx, pstate, tlist, &torder, true,
+            tdistinct = backend_parser_clause::transformDistinctClause(
+                mcx, pstate, &mut tlist, &torder, true,
             )?;
-            tlist = r.targetlist;
-            tdistinct = r.distinctlist;
 
             // Remove this check if executor support for hashed distinct for
             // aggregates is ever added.
@@ -308,15 +319,18 @@ pub fn transformAggregateCall<'mcx>(
 /// boxes/strings), so they may be reinterpreted as `'static`. This is a
 /// transmute of the lifetime parameter only; the data is unchanged.
 fn tlist_into_static<'mcx>(
-    tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>,
+    tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>>,
 ) -> PgResult<Vec<types_nodes::primnodes::TargetEntry<'static>>> {
     let mut out: Vec<types_nodes::primnodes::TargetEntry<'static>> = Vec::new();
     out.reserve(tlist.len());
     for te in tlist.into_iter() {
-        // SAFETY: TargetEntry<'mcx> built by the parser owns all of its data
-        // (Option<PgBox<Expr>>, Option<PgString>); the 'mcx parameter only
-        // tags the allocator. Aggref stores its args as 'static by the repo's
-        // convention (the same convention used by every Aggref producer).
+        // SAFETY: primnodes::Aggref is in the lifetime-free Expr tree (cf.
+        // SubPlanExpr(Box<SubPlan<'static>>)), so its args field is
+        // Vec<TargetEntry<'static>>; the only TargetEntry builder
+        // (make_target_entry) returns 'mcx-arena-bound entries. This erases the
+        // 'mcx lifetime to 'static to match the Expr-tree convention — a known
+        // model gap (the Aggref-lifetime keystone is unbuilt; the arena
+        // outlives parse analysis in practice).
         let te_static: types_nodes::primnodes::TargetEntry<'static> =
             unsafe { core::mem::transmute(te) };
         out.push(te_static);
@@ -375,7 +389,7 @@ pub fn transformGroupingFunc<'mcx>(
     result_list.reserve(p.args.len());
     let expr_kind = pstate.p_expr_kind;
     for arg in p.args.into_iter() {
-        let current_result = backend_parser_parse_expr_seams::transform_expr::call(
+        let current_result = backend_parser_parse_expr_seams::transformExpr::call(
             pstate,
             Some(Node::Expr(arg)),
             expr_kind,

@@ -92,6 +92,185 @@ fn dml_statements_convert_to_owned_rawstmt() {
 }
 
 #[test]
+fn create_family_statements_convert_to_owned_rawstmt() {
+    let ctx = MemoryContext::new("gram-test");
+    let mcx = ctx.mcx();
+
+    // CREATE TABLE with two columns and a column constraint.
+    let stmts = parse(mcx, "CREATE TABLE t (a int PRIMARY KEY, b text NOT NULL)");
+    assert_eq!(stmts.len(), 1);
+    match &*stmts[0].stmt {
+        Node::CreateStmt(s) => {
+            assert!(s.relation.is_some(), "has relation");
+            assert_eq!(s.tableElts.len(), 2, "two table elements");
+            match &*s.tableElts[0] {
+                Node::ColumnDef(c) => {
+                    assert!(c.typeName.is_some(), "column has a type");
+                    // PRIMARY KEY is a Constraint in the column's constraints.
+                    assert_eq!(c.constraints.len(), 1, "one column constraint");
+                    match &*c.constraints[0] {
+                        Node::Constraint(_) => {}
+                        other => panic!("expected Constraint, got {:?}", other.node_tag()),
+                    }
+                }
+                other => panic!("expected ColumnDef, got {:?}", other.node_tag()),
+            }
+        }
+        other => panic!("expected CreateStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE INDEX with one index column.
+    let stmts = parse(mcx, "CREATE INDEX ix ON t (a)");
+    match &*stmts[0].stmt {
+        Node::IndexStmt(s) => {
+            assert!(s.relation.is_some());
+            assert_eq!(s.indexParams.len(), 1, "one index column");
+            match &*s.indexParams[0] {
+                Node::IndexElem(_) => {}
+                other => panic!("expected IndexElem, got {:?}", other.node_tag()),
+            }
+        }
+        other => panic!("expected IndexStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE SEQUENCE.
+    let stmts = parse(mcx, "CREATE SEQUENCE s START 1");
+    match &*stmts[0].stmt {
+        Node::CreateSeqStmt(s) => {
+            assert!(s.sequence.is_some());
+            assert!(!s.options.is_empty(), "START produces an option DefElem");
+        }
+        other => panic!("expected CreateSeqStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE VIEW over a SELECT.
+    let stmts = parse(mcx, "CREATE VIEW v AS SELECT a FROM t");
+    match &*stmts[0].stmt {
+        Node::ViewStmt(s) => {
+            assert!(s.view.is_some());
+            assert!(s.query.is_some(), "view has a query");
+        }
+        other => panic!("expected ViewStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE FUNCTION with a parameter.
+    let stmts = parse(
+        mcx,
+        "CREATE FUNCTION f(x int) RETURNS int LANGUAGE sql AS 'SELECT $1'",
+    );
+    match &*stmts[0].stmt {
+        Node::CreateFunctionStmt(s) => {
+            assert_eq!(s.funcname.len(), 1, "function name");
+            assert_eq!(s.parameters.len(), 1, "one parameter");
+            match &*s.parameters[0] {
+                Node::FunctionParameter(_) => {}
+                other => panic!("expected FunctionParameter, got {:?}", other.node_tag()),
+            }
+            assert!(s.returnType.is_some());
+        }
+        other => panic!("expected CreateFunctionStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE SCHEMA AUTHORIZATION (RoleSpec).
+    let stmts = parse(mcx, "CREATE SCHEMA myschema");
+    match &*stmts[0].stmt {
+        Node::CreateSchemaStmt(s) => {
+            assert!(s.schemaname.is_some());
+        }
+        other => panic!("expected CreateSchemaStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE TYPE ... AS ENUM.
+    let stmts = parse(mcx, "CREATE TYPE color AS ENUM ('red', 'green')");
+    match &*stmts[0].stmt {
+        Node::CreateEnumStmt(s) => {
+            assert_eq!(s.vals.len(), 2, "two enum labels");
+        }
+        other => panic!("expected CreateEnumStmt, got {:?}", other.node_tag()),
+    }
+
+    // CREATE TABLE AS (IntoClause).
+    let stmts = parse(mcx, "CREATE TABLE ct AS SELECT a FROM t");
+    match &*stmts[0].stmt {
+        Node::CreateTableAsStmt(s) => {
+            assert!(s.query.is_some());
+            assert!(s.into.is_some(), "has an IntoClause");
+            match s.into.as_deref() {
+                Some(Node::IntoClause(_)) => {}
+                other => panic!("into should be IntoClause, got {:?}", other.map(|n| n.node_tag())),
+            }
+        }
+        other => panic!("expected CreateTableAsStmt, got {:?}", other.node_tag()),
+    }
+}
+
+#[test]
+fn alter_drop_family_statements_convert_to_owned_rawstmt() {
+    let ctx = MemoryContext::new("gram-test");
+    let mcx = ctx.mcx();
+
+    // ALTER TABLE ... ADD COLUMN ... , DROP COLUMN ...
+    let stmts = parse(mcx, "ALTER TABLE t ADD COLUMN c int, DROP COLUMN b");
+    assert_eq!(stmts.len(), 1);
+    match &*stmts[0].stmt {
+        Node::AlterTableStmt(s) => {
+            assert!(s.relation.is_some(), "has relation");
+            assert_eq!(s.cmds.len(), 2, "two subcommands");
+            for cmd in s.cmds.iter() {
+                match &**cmd {
+                    Node::AlterTableCmd(_) => {}
+                    other => panic!("expected AlterTableCmd, got {:?}", other.node_tag()),
+                }
+            }
+        }
+        other => panic!("expected AlterTableStmt, got {:?}", other.node_tag()),
+    }
+
+    // ALTER TABLE ... RENAME COLUMN ... TO ...
+    let stmts = parse(mcx, "ALTER TABLE t RENAME COLUMN a TO z");
+    match &*stmts[0].stmt {
+        Node::RenameStmt(s) => {
+            assert!(s.relation.is_some());
+            assert!(s.subname.is_some(), "old column name");
+            assert!(s.newname.is_some(), "new column name");
+        }
+        other => panic!("expected RenameStmt, got {:?}", other.node_tag()),
+    }
+
+    // DROP TABLE ... (objects list)
+    let stmts = parse(mcx, "DROP TABLE t1, t2 CASCADE");
+    match &*stmts[0].stmt {
+        Node::DropStmt(s) => {
+            assert_eq!(s.objects.len(), 2, "two dropped objects");
+            assert_eq!(s.behavior, types_nodes::parsenodes::DROP_CASCADE);
+        }
+        other => panic!("expected DropStmt, got {:?}", other.node_tag()),
+    }
+
+    // ALTER SEQUENCE ... RESTART
+    let stmts = parse(mcx, "ALTER SEQUENCE s RESTART WITH 5");
+    match &*stmts[0].stmt {
+        Node::AlterSeqStmt(s) => {
+            assert!(s.sequence.is_some());
+            assert_eq!(s.options.len(), 1, "one sequence option");
+        }
+        other => panic!("expected AlterSeqStmt, got {:?}", other.node_tag()),
+    }
+
+    // ALTER TABLE ... OWNER TO  (object-form RenameStmt sibling: AlterOwnerStmt
+    // is produced by ALTER <other-object> OWNER; for tables it is an
+    // AlterTableCmd AT_ChangeOwner. Use ALTER SCHEMA RENAME for AlterOwner path
+    // via ALTER TYPE ... OWNER TO.)
+    let stmts = parse(mcx, "ALTER TYPE ty OWNER TO bob");
+    match &*stmts[0].stmt {
+        Node::AlterOwnerStmt(s) => {
+            assert!(s.newowner.is_some(), "has new owner RoleSpec");
+        }
+        other => panic!("expected AlterOwnerStmt, got {:?}", other.node_tag()),
+    }
+}
+
+#[test]
 fn syntax_error_is_an_err() {
     let ctx = MemoryContext::new("gram-test");
     let mcx = ctx.mcx();
