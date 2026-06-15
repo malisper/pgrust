@@ -414,6 +414,17 @@ impl BufferManager {
         f(&mut blocks[start..start + BLCKSZ])
     }
 
+    /// `MemSet(BufHdrGetBlock(buf), 0, BLCKSZ)` (bufmgr.c
+    /// `ExtendBufferedRelShared`) — zero-fill a freshly-acquired victim buffer's
+    /// page bytes before the extension lock is taken. The page is owned by this
+    /// backend's pin and not yet valid, so no content lock is needed.
+    #[allow(dead_code)]
+    pub(crate) fn zero_block(&self, buf_id: usize) {
+        let mut blocks = self.blocks.borrow_mut();
+        let start = buf_id * BLCKSZ;
+        blocks[start..start + BLCKSZ].fill(0);
+    }
+
     /// Read-only view of buffer `buf_id`'s page bytes under a caller-held content
     /// lock (F1d `BufferGetPage` read / `PageGetLSN` / `PageIsNew`).
     #[allow(dead_code)]

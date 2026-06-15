@@ -117,7 +117,7 @@ impl BufferManager {
     /// freelist head (only if not already linked). The support control block
     /// owns the head; the per-descriptor `freeNext` it touches is reached via the
     /// F1-installed `buf_free_next` / `set_buf_free_next` seams.
-    fn strategy_free_buffer(&self, buf_id: usize) -> PgResult<()> {
+    pub(crate) fn strategy_free_buffer(&self, buf_id: usize) -> PgResult<()> {
         self.strategy_control().free_buffer(buf_id as i32)
     }
 
