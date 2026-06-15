@@ -143,3 +143,40 @@ seam_core::seam!(
     /// sort-output position (randomAccess only).
     pub fn tuplesort_restorepos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
 );
+
+// === index-btree build sort (tuplesortvariants.c) ==========================
+//
+// Consumed by `backend-access-nbtree-nbtsort` (`_bt_leafbuild` / `_bt_load`).
+// The nbtree build never passes a parallel `SortCoordinate` from the grounded
+// (serial) path, so the begin seam omits that parameter like the heap/datum
+// variants above. Owned by the (still-`todo`) tuplesort unit; panics until it
+// lands and installs them from `init_seams()`.
+
+seam_core::seam!(
+    /// `tuplesort_begin_index_btree(heapRel, indexRel, enforceUnique,
+    /// uniqueNullsNotDistinct, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a btree-index build sort keyed by the
+    /// index's sort operators (with heap TID as the implicit final tiebreaker).
+    /// Allocates the sort state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_index_btree<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &types_rel::Relation<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getindextuple(state, forward)` (tuplesortvariants.c): fetch
+    /// the next `IndexTuple` from a btree-index build sort, returned as owned
+    /// on-disk index-tuple bytes in `mcx`. `Ok(None)` at end of sort. Can
+    /// detoast / allocate, fallible.
+    pub fn tuplesort_getindextuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+    ) -> PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
