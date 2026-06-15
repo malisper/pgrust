@@ -4575,6 +4575,7 @@ dependencies = [
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-misc2-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
