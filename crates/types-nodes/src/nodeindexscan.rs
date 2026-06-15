@@ -24,6 +24,10 @@ pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `int disabled_nodes` — count of disabled nodes at and below this plan
+    /// node (the planner's `enable_*`-GUC disable accumulator; created by
+    /// costsize and propagated up the plan tree in createplan).
+    pub disabled_nodes: i32,
     /// `Cost startup_cost` — cost expended before fetching any tuples. `Cost`
     /// is `double` in C.
     pub startup_cost: f64,
@@ -82,6 +86,7 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            disabled_nodes: self.disabled_nodes,
             startup_cost: self.startup_cost,
             total_cost: self.total_cost,
             async_capable: self.async_capable,
