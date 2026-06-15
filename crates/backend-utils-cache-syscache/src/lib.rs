@@ -894,4 +894,11 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::user_mapping_options_by_oid::set(
         projections::user_mapping_options_by_oid,
     );
+    backend_utils_cache_syscache_seams::get_syscache_hash_value_constroid::set(
+        projections::get_syscache_hash_value_constroid,
+    );
+    backend_utils_cache_syscache_seams::search_constraint_form_by_oid::set(
+        projections::search_constraint_form_by_oid,
+    );
+    backend_utils_cache_syscache_seams::fetch_relchecks::set(projections::fetch_relchecks);
 }
