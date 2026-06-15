@@ -1115,7 +1115,7 @@ fn ExecParallelInitializeWorker<'mcx>(
     match planstate {
         PlanStateNode::SeqScan(node) => {
             if parallel_aware {
-                nodeSeqscan::ExecSeqScanInitializeWorker(node, pwcxt)?;
+                nodeSeqscan::ExecSeqScanInitializeWorker(node, pwcxt, estate)?;
             }
         }
         PlanStateNode::IndexScan(node) => {

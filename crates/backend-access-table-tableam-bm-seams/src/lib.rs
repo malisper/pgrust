@@ -20,6 +20,7 @@ seam_core::seam!(
     /// (`SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE`). The descriptor is allocated
     /// by the AM (`palloc`), so the call is fallible on OOM.
     pub fn table_beginscan_bm<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         rel: Relation<'mcx>,
         snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
     ) -> PgResult<TableScanDesc<'mcx>>
@@ -36,6 +37,7 @@ seam_core::seam!(
     /// `ereport`s (e.g. unexpected call during logical decoding) and the heap
     /// fetch can error.
     pub fn table_scan_bitmap_next_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<Option<(bool, u64, u64)>>

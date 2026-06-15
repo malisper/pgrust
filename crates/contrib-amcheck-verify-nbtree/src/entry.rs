@@ -581,6 +581,7 @@ pub fn heap_entry_is_visible<'mcx>(
         backend_access_table_tableam::table_slot_create(state.mcx, &state.heaprel)?;
     let snapshot = state.snapshot.clone();
     let tid_visible = backend_access_table_tableam::table_tuple_fetch_row_version(
+        state.mcx,
         &state.heaprel,
         tid,
         &snapshot,

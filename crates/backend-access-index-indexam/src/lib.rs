@@ -202,6 +202,7 @@ pub fn index_insert_cleanup(
 /// `index_beginscan(heapRelation, indexRelation, snapshot, instrument, nkeys,
 /// norderbys)` — start a scan of an index with `amgettuple`.
 pub fn index_beginscan<'mcx>(
+    mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
     snapshot: SnapshotData,
@@ -222,7 +223,7 @@ pub fn index_beginscan<'mcx>(
     scan.instrument = instrument;
 
     // prepare to fetch index matches from table
-    scan.xs_heapfetch = Some(tableam::table_index_fetch_begin(heap_relation)?);
+    scan.xs_heapfetch = Some(tableam::table_index_fetch_begin(mcx, heap_relation)?);
 
     Ok(scan)
 }
@@ -522,6 +523,7 @@ pub fn index_parallelrescan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 /// `index_beginscan_parallel(heaprel, indexrel, instrument, nkeys, norderbys,
 /// pscan)` — join a parallel index scan.
 pub fn index_beginscan_parallel<'mcx>(
+    mcx: Mcx<'mcx>,
     heaprel: &Relation<'mcx>,
     indexrel: &Relation<'mcx>,
     instrument: Option<IndexScanInstrumentation>,
@@ -551,7 +553,7 @@ pub fn index_beginscan_parallel<'mcx>(
     scan.instrument = instrument;
 
     // prepare to fetch index matches from table
-    scan.xs_heapfetch = Some(tableam::table_index_fetch_begin(heaprel)?);
+    scan.xs_heapfetch = Some(tableam::table_index_fetch_begin(mcx, heaprel)?);
 
     Ok(scan)
 }
@@ -605,6 +607,7 @@ pub fn index_getnext_tid(
 /// index TID most recently fetched by [`index_getnext_tid`]. On success the
 /// slot holds a visible heap tuple (its buffer pinned by the table AM).
 pub fn index_fetch_heap<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
     slot: &mut types_nodes::TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
@@ -620,6 +623,7 @@ pub fn index_fetch_heap<'mcx>(
         .as_deref_mut()
         .expect("index_fetch_heap with no xs_heapfetch (C would dereference NULL)");
     let found = tableam::table_index_fetch_tuple(
+        mcx,
         heapfetch,
         &heaptid,
         &snapshot,
@@ -647,6 +651,7 @@ pub fn index_fetch_heap<'mcx>(
 /// scan into `slot`, returning whether one satisfying the keys + snapshot was
 /// found.
 pub fn index_getnext_slot<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
     direction: ScanDirection,
     slot: &mut types_nodes::TupleTableSlot<'mcx>,
@@ -666,7 +671,7 @@ pub fn index_getnext_slot<'mcx>(
         // Fetch the next (or only) visible heap tuple for this index entry. If
         // we don't find anything, loop around and grab the next TID.
         // Assert(ItemPointerIsValid(&scan->xs_heaptid)) — debug-only.
-        if index_fetch_heap(scan, slot)? {
+        if index_fetch_heap(mcx, scan, slot)? {
             return Ok(true);
         }
     }

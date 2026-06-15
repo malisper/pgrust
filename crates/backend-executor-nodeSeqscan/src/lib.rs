@@ -140,7 +140,7 @@ fn SeqNext<'mcx>(
             .es_snapshot
             .clone()
             .expect("SeqNext: es_snapshot is NULL (C would pass NULL to the AM)");
-        let scandesc = tableam_seam::table_beginscan::call(rel, snapshot)?;
+        let scandesc = tableam_seam::table_beginscan::call(estate.es_query_cxt, rel, snapshot)?;
         node.ss_currentScanDesc = Some(scandesc);
     }
 
@@ -151,7 +151,9 @@ fn SeqNext<'mcx>(
         .ss_currentScanDesc
         .as_deref_mut()
         .expect("SeqNext: ss_currentScanDesc not set");
+    let mcx = estate.es_query_cxt;
     if tableam_seam::table_scan_getnextslot_direction::call(
+        mcx,
         scandesc,
         direction,
         estate.slot_mut(slot_id),
@@ -819,7 +821,8 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
         .ss_currentRelation
         .as_ref()
         .expect("ExecSeqScanInitializeDSM: ss_currentRelation not opened");
-    let scandesc = backend_access_table_tableam::table_beginscan_parallel(rel, pscan_arc)?;
+    let scandesc =
+        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan_arc)?;
     node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }
@@ -857,6 +860,7 @@ pub fn ExecSeqScanReInitializeDSM<'mcx>(
 pub fn ExecSeqScanInitializeWorker<'mcx>(
     node: &mut SeqScanState<'mcx>,
     pwcxt: ParallelWorkerContextHandle,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // ParallelTableScanDesc pscan;
 
@@ -885,7 +889,8 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
         .expect("ExecSeqScanInitializeWorker: ss_currentRelation not opened");
     let pscan_arc: std::sync::Arc<ParallelTableScanDescData> =
         std::sync::Arc::from(pscan_over_chunk(pscan_cursor));
-    let scandesc = backend_access_table_tableam::table_beginscan_parallel(rel, pscan_arc)?;
+    let scandesc =
+        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan_arc)?;
     node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }

@@ -191,9 +191,10 @@ pub fn ExecMergeMatched<'mcx>(
         }
         let rel = relation_alias(estate, result_rel_info);
         let any = snapshot_any();
+        let mcx = estate.es_query_cxt;
         let slot_ref = estate.slot_mut(old_tuple_slot);
         if !backend_access_table_tableam::table_tuple_fetch_row_version(
-            &rel, &tid, &any, slot_ref,
+            mcx, &rel, &tid, &any, slot_ref,
         )? {
             return finish(estate, result_rel_info, lockedtid, None);
         }
@@ -597,8 +598,10 @@ pub fn ExecMergeMatched<'mcx>(
                     let rel = relation_alias(estate, result_rel_info);
                     let snapshot = estate.es_snapshot.as_deref().cloned();
                     let cid = estate.es_output_cid;
+                    let mcx = estate.es_query_cxt;
                     let inslot = estate.slot_mut(inputslot);
                     let lock_result = backend_access_table_tableam::table_tuple_lock(
+                        mcx,
                         &rel,
                         &tid,
                         &snapshot,
@@ -679,9 +682,10 @@ pub fn ExecMergeMatched<'mcx>(
 
                                 let rel2 = relation_alias(estate, result_rel_info);
                                 let any = snapshot_any();
+                                let mcx = estate.es_query_cxt;
                                 let oldslot_ref = estate.slot_mut(old_tuple_slot);
                                 if !backend_access_table_tableam::table_tuple_fetch_row_version(
-                                    &rel2, &tid, &any, oldslot_ref,
+                                    mcx, &rel2, &tid, &any, oldslot_ref,
                                 )? {
                                     return Err(PgError::error(
                                         "failed to fetch the target tuple",

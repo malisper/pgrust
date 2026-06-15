@@ -144,7 +144,7 @@ fn BitmapTableScanSetup<'mcx>(
             .as_ref()
             .expect("ss_currentRelation")
             .alias();
-        node.ss_currentScanDesc = Some(tableam_bm::table_beginscan_bm::call(rel, estate.es_snapshot.clone())?);
+        node.ss_currentScanDesc = Some(tableam_bm::table_beginscan_bm::call(estate.es_query_cxt, rel, estate.es_snapshot.clone())?);
     }
 
     // node->ss.ss_currentScanDesc->st.rs_tbmiterator = tbmiterator;
@@ -184,8 +184,9 @@ fn BitmapHeapNext<'mcx>(
     loop {
         let scan = node.ss_currentScanDesc.as_mut().expect("ss_currentScanDesc");
         let next = {
+            let mcx = estate.es_query_cxt;
             let slot_ref = estate.slot_mut(slot);
-            tableam_bm::table_scan_bitmap_next_tuple::call(scan, slot_ref)?
+            tableam_bm::table_scan_bitmap_next_tuple::call(mcx, scan, slot_ref)?
         };
         let (recheck, lossy_inc, exact_inc) = match next {
             Some(t) => t,

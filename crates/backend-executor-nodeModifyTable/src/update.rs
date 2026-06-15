@@ -181,8 +181,10 @@ pub fn ExecUpdate<'mcx>(
                     let snapshot = estate.es_snapshot.as_deref().cloned();
                     let cid = estate.es_output_cid;
                     let lockmode = update_cxt.lockmode;
+                    let mcx = estate.es_query_cxt;
                     let inslot = estate.slot_mut(inputslot);
                     let r2 = backend_access_table_tableam::table_tuple_lock(
+                        mcx,
                         &rel,
                         &cur_tid,
                         &snapshot,
@@ -234,9 +236,10 @@ pub fn ExecUpdate<'mcx>(
                                 );
                             let rel2 = relation_alias(estate, result_rel_info);
                             let any = snapshot_any();
+                            let mcx = estate.es_query_cxt;
                             let oldslot_ref = estate.slot_mut(old_tuple_slot);
                             if !backend_access_table_tableam::table_tuple_fetch_row_version(
-                                &rel2, &cur_tid, &any, oldslot_ref,
+                                mcx, &rel2, &cur_tid, &any, oldslot_ref,
                             )? {
                                 return Err(types_error::PgError::error(
                                     "failed to fetch tuple being updated",
@@ -545,8 +548,10 @@ pub fn ExecUpdateAct<'mcx>(
         let snapshot = estate.es_snapshot.as_deref().cloned();
         let crosscheck = estate.es_crosscheck_snapshot.as_deref().cloned();
         let otid = *tupleid.expect("ExecUpdateAct: plain table update needs tupleid");
+        let mcx = estate.es_query_cxt;
         let slot_ref = estate.slot_mut(slot);
         break backend_access_table_tableam::table_tuple_update(
+            mcx,
             &rel,
             &otid,
             slot_ref,
@@ -737,9 +742,10 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
             let rel = relation_alias(estate, result_rel_info);
             let any = snapshot_any();
             let tid = *tupleid.expect("ExecCrossPartitionUpdate: needs tupleid");
+            let mcx = estate.es_query_cxt;
             let oldslot_ref = estate.slot_mut(old_slot);
             if !backend_access_table_tableam::table_tuple_fetch_row_version(
-                &rel, &tid, &any, oldslot_ref,
+                mcx, &rel, &tid, &any, oldslot_ref,
             )? {
                 return Err(types_error::PgError::error(
                     "failed to fetch tuple being updated",

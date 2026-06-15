@@ -539,8 +539,9 @@ pub fn ExecInsert<'mcx>(
             // insert the tuple normally
             let cid = estate.es_output_cid;
             let rel = relation_alias(estate, result_rel_info);
+            let mcx = estate.es_query_cxt;
             let slot_ref = estate.slot_mut(slot);
-            backend_access_table_tableam::table_tuple_insert(&rel, slot_ref, cid, 0, None)?;
+            backend_access_table_tableam::table_tuple_insert(mcx, &rel, slot_ref, cid, 0, None)?;
 
             // insert index entries for tuple
             if estate.result_rel(result_rel_info).ri_NumIndices > 0 {

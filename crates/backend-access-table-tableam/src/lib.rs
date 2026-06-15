@@ -116,33 +116,49 @@ fn table_rescan_seam(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
 /// keys (`SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE`,
 /// the C `table_beginscan` flags).
 fn table_beginscan_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
     snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
-    (am(relation).scan_begin)(relation, Some((*snapshot).clone()), 0, Vec::new(), None, flags)
+    (am(relation).scan_begin)(
+        mcx,
+        relation,
+        Some((*snapshot).clone()),
+        0,
+        mcx::PgVec::new_in(mcx),
+        None,
+        flags,
+    )
 }
 
 /// Adapter for `backend-access-table-tableam-seams::table_scan_getnextslot` —
 /// the forward-direction `table_scan_getnextslot(scan, ForwardScanDirection,
 /// slot)` form (COPY TO's scan loop).
 fn table_scan_getnextslot_fwd<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
     slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
-    table_scan_getnextslot(scan, types_scan::sdir::ScanDirection::ForwardScanDirection, slot)
+    table_scan_getnextslot(
+        mcx,
+        scan,
+        types_scan::sdir::ScanDirection::ForwardScanDirection,
+        slot,
+    )
 }
 
 /// `table_scan_getnextslot(scan, direction, slot)` (access/tableam.h inline) —
 /// fetch the next tuple of the in-progress scan into `slot`. The direction-
 /// carrying form (`nodeSeqscan.c`'s `SeqNext` passes `estate->es_direction`).
 pub fn table_scan_getnextslot<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
     direction: types_scan::sdir::ScanDirection,
     slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     let routine = am(&scan.rs_rd);
-    (routine.scan_getnextslot)(scan, direction, slot)
+    (routine.scan_getnextslot)(mcx, scan, direction, slot)
 }
 
 /// `table_relation_set_new_filelocator(rel, newrlocator, persistence,
@@ -323,9 +339,10 @@ pub fn table_slot_create<'mcx>(
 
 /// `table_beginscan_catalog(relation, nkeys, key)`.
 pub fn table_beginscan_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
     nkeys: i32,
-    key: Vec<ScanKeyData>,
+    key: mcx::PgVec<'mcx, ScanKeyData>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags =
         SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
@@ -334,7 +351,7 @@ pub fn table_beginscan_catalog<'mcx>(
         backend_utils_time_snapmgr_seams::get_catalog_snapshot::call(relid)?,
     )?;
 
-    (am(relation).scan_begin)(relation, Some(snapshot), nkeys, key, None, flags)
+    (am(relation).scan_begin)(mcx, relation, Some(snapshot), nkeys, key, None, flags)
 }
 
 // ===========================================================================
@@ -392,6 +409,7 @@ pub fn table_parallelscan_initialize(
 
 /// `table_beginscan_parallel(relation, pscan)`.
 pub fn table_beginscan_parallel<'mcx>(
+    mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
     pscan: Arc<ParallelTableScanDescData>,
 ) -> PgResult<TableScanDesc<'mcx>> {
@@ -419,7 +437,15 @@ pub fn table_beginscan_parallel<'mcx>(
         snapshot = None;
     }
 
-    (am(relation).scan_begin)(relation, snapshot, 0, Vec::new(), Some(pscan), flags)
+    (am(relation).scan_begin)(
+        mcx,
+        relation,
+        snapshot,
+        0,
+        mcx::PgVec::new_in(mcx),
+        Some(pscan),
+        flags,
+    )
 }
 
 // ===========================================================================
@@ -428,9 +454,10 @@ pub fn table_beginscan_parallel<'mcx>(
 
 /// `table_index_fetch_begin(rel)` (tableam.h inline).
 pub fn table_index_fetch_begin<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
 ) -> PgResult<Box<IndexFetchTableData<'mcx>>> {
-    (am(rel).index_fetch_begin)(rel)
+    (am(rel).index_fetch_begin)(mcx, rel)
 }
 
 /// `table_index_fetch_reset(scan)` (tableam.h inline) — release any resources
@@ -449,6 +476,7 @@ pub fn table_index_fetch_end(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>
 /// `table_index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
 /// (tableam.h inline).
 pub fn table_index_fetch_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
     scan: &mut IndexFetchTableData<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
@@ -466,7 +494,7 @@ pub fn table_index_fetch_tuple<'mcx>(
     }
 
     let routine = am(&scan.rel);
-    (routine.index_fetch_tuple)(scan, tid, snapshot, slot, call_again, all_dead)
+    (routine.index_fetch_tuple)(mcx, scan, tid, snapshot, slot, call_again, all_dead)
 }
 
 /// `table_index_fetch_tuple_check(rel, tid, snapshot, all_dead)` (tableam.c).
@@ -490,8 +518,9 @@ pub fn table_index_fetch_tuple_check<'mcx>(
     let mut call_again = false;
 
     let mut slot = table_slot_create(mcx, rel)?;
-    let mut scan = table_index_fetch_begin(rel)?;
+    let mut scan = table_index_fetch_begin(mcx, rel)?;
     let found = table_index_fetch_tuple(
+        mcx,
         &mut scan,
         tid,
         &snapshot,
@@ -547,11 +576,12 @@ pub fn table_tuple_get_latest_tid(
 /// `table_beginscan_tid(rel, snapshot)` (tableam.h inline) — alternative entry
 /// point for setting up a `TableScanDesc` for a TID scan.
 pub fn table_beginscan_tid<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     snapshot: Snapshot,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_TIDSCAN;
-    (am(rel).scan_begin)(rel, snapshot, 0, Vec::new(), None, flags)
+    (am(rel).scan_begin)(mcx, rel, snapshot, 0, mcx::PgVec::new_in(mcx), None, flags)
 }
 
 /// `table_endscan(scan)` (tableam.h inline) — end a relation scan.
@@ -580,6 +610,7 @@ pub fn table_tuple_tid_valid(
 /// — fetch the tuple at `tid` into `slot`, after a visibility test against
 /// `snapshot`.
 pub fn table_tuple_fetch_row_version<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
@@ -594,7 +625,7 @@ pub fn table_tuple_fetch_row_version<'mcx>(
         ));
     }
 
-    (am(rel).tuple_fetch_row_version)(rel, tid, snapshot, slot)
+    (am(rel).tuple_fetch_row_version)(mcx, rel, tid, snapshot, slot)
 }
 
 // ===========================================================================
@@ -603,13 +634,14 @@ pub fn table_tuple_fetch_row_version<'mcx>(
 
 /// `table_tuple_insert(rel, slot, cid, options, bistate)` (tableam.h inline).
 pub fn table_tuple_insert<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut TupleTableSlot<'mcx>,
     cid: types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
-    (am(rel).tuple_insert)(rel, slot, cid, options, bistate)
+    (am(rel).tuple_insert)(mcx, rel, slot, cid, options, bistate)
 }
 
 /// `table_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
@@ -631,6 +663,7 @@ pub fn table_tuple_delete(
 /// tmfd, lockmode, update_indexes)` (tableam.h inline).
 #[allow(clippy::too_many_arguments)]
 pub fn table_tuple_update<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
     slot: &mut TupleTableSlot<'mcx>,
@@ -643,6 +676,7 @@ pub fn table_tuple_update<'mcx>(
     update_indexes: &mut TU_UpdateIndexes,
 ) -> PgResult<TM_Result> {
     (am(rel).tuple_update)(
+        mcx,
         rel,
         otid,
         slot,
@@ -660,6 +694,7 @@ pub fn table_tuple_update<'mcx>(
 /// tmfd)` (tableam.h inline).
 #[allow(clippy::too_many_arguments)]
 pub fn table_tuple_lock<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
@@ -670,7 +705,7 @@ pub fn table_tuple_lock<'mcx>(
     flags: u8,
     tmfd: &mut TM_FailureData,
 ) -> PgResult<TM_Result> {
-    (am(rel).tuple_lock)(rel, tid, snapshot, slot, cid, mode, wait_policy, flags, tmfd)
+    (am(rel).tuple_lock)(mcx, rel, tid, snapshot, slot, cid, mode, wait_policy, flags, tmfd)
 }
 
 // ===========================================================================
@@ -683,11 +718,12 @@ pub fn table_tuple_lock<'mcx>(
 /// supplying a default command ID and not allowing access to the speedup
 /// options.
 pub fn simple_table_tuple_insert<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<()> {
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
-    table_tuple_insert(rel, slot, cid, 0, None)
+    table_tuple_insert(mcx, rel, slot, cid, 0, None)
 }
 
 /// `simple_table_tuple_delete(rel, tid, snapshot)` — delete a tuple.
@@ -737,6 +773,7 @@ pub fn simple_table_tuple_delete(
 /// relation associated with the tuple). Any failure is reported via
 /// `ereport()`.
 pub fn simple_table_tuple_update<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
     slot: &mut TupleTableSlot<'mcx>,
@@ -748,6 +785,7 @@ pub fn simple_table_tuple_update<'mcx>(
 
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
     let result = table_tuple_update(
+        mcx,
         rel,
         otid,
         slot,

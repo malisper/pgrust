@@ -8,6 +8,7 @@ use std::boxed::Box;
 use std::sync::Arc;
 use std::vec::Vec;
 
+use mcx::{Mcx, PgVec};
 use types_core::xact::CommandId;
 use types_core::TransactionId;
 use types_error::PgResult;
@@ -110,8 +111,9 @@ pub enum TU_UpdateIndexes {
 pub struct IndexFetchTableData<'mcx> {
     /// `rel` — the relation the fetch was begun on.
     pub rel: Relation<'mcx>,
-    /// The AM-private payload, owned by the access method that created it.
-    pub am_private: Option<Box<dyn Any>>,
+    /// The AM-private payload, owned by the access method that created it and
+    /// allocated in the scan's `mcx` arena (convention A).
+    pub am_private: Option<mcx::PgBox<'mcx, dyn Any>>,
 }
 
 /// `BulkInsertStateData` (`access/hio.h`) — state for bulk inserts, private to
@@ -148,12 +150,15 @@ pub struct TableAmRoutine {
     /// `slot_callbacks(rel)` — slot implementation suitable for the AM.
     pub slot_callbacks: fn(rel: &Relation<'_>) -> TupleSlotKind,
 
-    /// `scan_begin(rel, snapshot, nkeys, key, pscan, flags)` — start a scan.
+    /// `scan_begin(mcx, rel, snapshot, nkeys, key, pscan, flags)` — start a
+    /// scan. The leading `mcx` (convention A) is the arena the AM allocates the
+    /// returned scan descriptor and its scan state in.
     pub scan_begin: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         snapshot: Snapshot,
         nkeys: i32,
-        key: Vec<ScanKeyData>,
+        key: PgVec<'mcx, ScanKeyData>,
         pscan: Option<Arc<ParallelTableScanDescData>>,
         flags: u32,
     ) -> PgResult<TableScanDesc<'mcx>>,
@@ -162,6 +167,7 @@ pub struct TableAmRoutine {
     /// in-progress scan into `slot`, returning `true` if a tuple was produced
     /// (`false` at end of scan).
     pub scan_getnextslot: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         direction: ScanDirection,
         slot: &mut TupleTableSlot<'mcx>,
@@ -180,9 +186,10 @@ pub struct TableAmRoutine {
     pub parallelscan_reinitialize:
         fn(rel: &Relation<'_>, pscan: &ParallelTableScanDescData) -> PgResult<()>,
 
-    /// `index_fetch_begin(rel)` — set up index-fetch state.
+    /// `index_fetch_begin(mcx, rel)` — set up index-fetch state in the `mcx`
+    /// arena (convention A).
     pub index_fetch_begin:
-        for<'mcx> fn(rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
+        for<'mcx> fn(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
 
     /// `index_fetch_reset(data)` — release resources (buffer pins) held by
     /// the index fetch, without ending it.
@@ -195,6 +202,7 @@ pub struct TableAmRoutine {
     /// — fetch the tuple at `tid` into `slot`, returning true on a
     /// snapshot-visible match.
     pub index_fetch_tuple: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         scan: &mut IndexFetchTableData<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
@@ -222,6 +230,7 @@ pub struct TableAmRoutine {
     /// `tid` into `slot`, after a visibility test against `snapshot`; returns
     /// true if a visible tuple was found.
     pub tuple_fetch_row_version: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
@@ -238,8 +247,9 @@ pub struct TableAmRoutine {
     pub tuple_get_latest_tid:
         fn(scan: &mut TableScanDescData<'_>, tid: &mut ItemPointerData) -> PgResult<()>,
 
-    /// `tuple_insert(rel, slot, cid, options, bistate)`.
+    /// `tuple_insert(mcx, rel, slot, cid, options, bistate)`.
     pub tuple_insert: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         slot: &mut TupleTableSlot<'mcx>,
         cid: CommandId,
@@ -263,6 +273,7 @@ pub struct TableAmRoutine {
     /// `tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait, tmfd,
     /// lockmode, update_indexes)`.
     pub tuple_update: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         otid: &ItemPointerData,
         slot: &mut TupleTableSlot<'mcx>,
@@ -279,6 +290,7 @@ pub struct TableAmRoutine {
     /// tmfd)` — lock a tuple in the given mode, fetching it into `slot`.
     #[allow(clippy::type_complexity)]
     pub tuple_lock: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,

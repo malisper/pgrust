@@ -257,6 +257,7 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             .as_ref()
             .expect("TidListEval: scan relation not opened");
         tidstate.ss_currentScanDesc = Some(tableam::table_beginscan_tid(
+            estate.es_query_cxt,
             rel,
             estate.es_snapshot.as_ref().map(|s| (**s).clone()),
         )?);
@@ -443,11 +444,18 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
         // if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot))
         //     return slot;
         let found = {
+            let mcx = estate.es_query_cxt;
             let rel = node.ss.ss_currentRelation.as_ref().unwrap();
             let snapshot: types_tableam::tableam::Snapshot =
                 estate.es_snapshot.as_ref().map(|s| (**s).clone());
             let slot_id = slot.expect("TidNext: node has no scan tuple slot");
-            tableam::table_tuple_fetch_row_version(rel, &tid, &snapshot, estate.slot_mut(slot_id))?
+            tableam::table_tuple_fetch_row_version(
+                mcx,
+                rel,
+                &tid,
+                &snapshot,
+                estate.slot_mut(slot_id),
+            )?
         };
         if found {
             return Ok(slot);

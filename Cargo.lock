@@ -1535,6 +1535,7 @@ dependencies = [
 name = "backend-access-table-tableam-bm-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -1548,6 +1549,7 @@ dependencies = [
 name = "backend-access-table-tableam-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -13707,6 +13709,7 @@ dependencies = [
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
+ "backend-parser-relation",
  "backend-parser-small1",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
@@ -14537,6 +14540,7 @@ version = "0.0.0"
 name = "types-tableam"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-error",
  "types-rel",

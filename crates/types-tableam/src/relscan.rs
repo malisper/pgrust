@@ -63,8 +63,9 @@ pub struct TableScanDescData<'mcx> {
     pub rs_snapshot: Option<SnapshotData>,
     /// `rs_nkeys` — number of scan keys.
     pub rs_nkeys: i32,
-    /// `rs_key` — array of scan key descriptors.
-    pub rs_key: std::vec::Vec<ScanKeyData>,
+    /// `rs_key` — array of scan key descriptors, allocated in the scan's `mcx`
+    /// arena (convention A).
+    pub rs_key: mcx::PgVec<'mcx, ScanKeyData>,
     /// `rs_flags` — `SO_*` `ScanOptions` bitmask.
     pub rs_flags: u32,
     /// `rs_parallel` — parallel scan information (shared descriptor).
@@ -76,8 +77,9 @@ pub struct TableScanDescData<'mcx> {
     /// consumer.
     pub rs_tbmiterator: types_tidbitmap::TBMIterator,
     /// The AM-private scan state (heap's `HeapScanDescData` tail), owned by
-    /// the access method that created the descriptor.
-    pub am_private: Option<std::boxed::Box<dyn Any>>,
+    /// the access method that created the descriptor and allocated in the
+    /// scan's `mcx` arena (convention A).
+    pub am_private: Option<mcx::PgBox<'mcx, dyn Any>>,
 }
 
 /// `TableScanDesc` — `TableScanDescData *`.

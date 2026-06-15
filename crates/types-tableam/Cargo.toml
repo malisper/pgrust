@@ -9,6 +9,7 @@ name = "types_tableam"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }

@@ -102,6 +102,7 @@ seam_core::seam!(
     /// C-faithful value `TableScanDesc`). `Err` carries the AM's
     /// `ereport(ERROR)`.
     pub fn table_beginscan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         relation: &Relation<'mcx>,
         snapshot: Rc<SnapshotData>,
     ) -> PgResult<TableScanDesc<'mcx>>
@@ -113,6 +114,7 @@ seam_core::seam!(
     /// tuple was produced (`false` at end of scan). `Err` carries the AM's
     /// `ereport(ERROR)`.
     pub fn table_scan_getnextslot<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<bool>
@@ -125,6 +127,7 @@ seam_core::seam!(
     /// returning `true` if a tuple was produced (`false` at end of scan). `Err`
     /// carries the AM's `ereport(ERROR)`.
     pub fn table_scan_getnextslot_direction<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         direction: types_scan::sdir::ScanDirection,
         slot: &mut TupleTableSlot<'mcx>,
