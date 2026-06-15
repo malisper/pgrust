@@ -10,15 +10,14 @@
 //! installs its real implementation when it lands, so until then a call panics
 //! loudly with the seam path (mirror-PG-and-panic).
 //!
+//! `get_object_address` / `check_object_ownership` (objectaddress.c) are called
+//! through the canonical `backend-catalog-objectaddress-seams` (installed by the
+//! merged owner). The relation `get_object_address` opens is a real
+//! `types_rel::Relation`, so `strVal(stmt->object)`, the relation
+//! `relkind`/name reads, and `relation_close` are done in-crate, not seamed.
+//!
 //! Boundaries, by owning subsystem:
 //!
-//!  * objectaddress.c — [`get_object_address`] (name resolution + locking),
-//!    [`check_object_ownership`] (ownership / `ACLCHECK_NOT_OWNER`);
-//!  * dbcommands.c — [`database_name`] (`strVal(stmt->object)` for the opaque
-//!    parser node behind the DATABASE work-around);
-//!  * rel.h / relation.c — [`relation_get_relkind`],
-//!    [`relation_get_relation_name`], [`relation_close`] for the relation
-//!    `get_object_address` opened;
 //!  * access/table.h, genam.c, heaptuple.c, indexing.c — the decomposed
 //!    `pg_description` / `pg_shdescription` catalog primitives: `*_open` /
 //!    `*_close` (`table_open`/`table_close`), `*_find_one` /
@@ -38,11 +37,9 @@
 
 use mcx::Mcx;
 use seam_core::seam;
-use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_parsenodes::CommentStmt;
 use types_storage::lock::LOCKMODE;
 
 /// The row identity (`oldtuple->t_self`, the tuple's `ItemPointerData`) of a
@@ -52,22 +49,6 @@ use types_storage::lock::LOCKMODE;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DescriptionTupleId(pub types_tuple::heaptuple::ItemPointerData);
 
-/// What [`get_object_address`] resolved: the `ObjectAddress` plus the relation
-/// it opened, if any (the C out-parameter `Relation *relation`). The relation
-/// crosses as its bare `Oid` (the "Relation = Oid-via-relcache" model);
-/// `relation_close` re-resolves it from the live relcache.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolvedObject {
-    pub address: ObjectAddress,
-    pub relation: Option<Oid>,
-}
-
-impl ResolvedObject {
-    pub fn new(address: ObjectAddress, relation: Option<Oid>) -> Self {
-        Self { address, relation }
-    }
-}
-
 /// The description-column read of [`description_get_description`]: the column
 /// `Datum` plus its `isnull` flag (`heap_getattr(tuple, ..., &isnull)`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,63 +56,6 @@ pub struct DescriptionColumn<'mcx> {
     pub value: Datum<'mcx>,
     pub isnull: bool,
 }
-
-// --- objectaddress.c -------------------------------------------------------
-
-seam!(
-    /// `get_object_address(objtype, object, &relation, lockmode, false)`
-    /// (objectaddress.c) — resolve the parser representation behind `stmt` to an
-    /// `ObjectAddress`, taking `lockmode` on the target to guard against a
-    /// concurrent DROP, and reporting back whatever relation it opened. Errors
-    /// if the object does not exist (`missing_ok = false`).
-    pub fn get_object_address(stmt: &CommentStmt, lockmode: LOCKMODE) -> PgResult<ResolvedObject>
-);
-
-seam!(
-    /// `check_object_ownership(roleid, objtype, address, object, relation)`
-    /// (objectaddress.c) — require ownership of the target object; errors
-    /// (`ACLCHECK_NOT_OWNER`) if `roleid` does not own it. `stmt` carries the
-    /// `objtype` and the opaque parser `object`; `relation` is the opened
-    /// relation's `Oid`.
-    pub fn check_object_ownership(
-        roleid: Oid,
-        stmt: &CommentStmt,
-        address: ObjectAddress,
-        relation: Option<Oid>,
-    ) -> PgResult<()>
-);
-
-// --- dbcommands.c ----------------------------------------------------------
-
-seam!(
-    /// `strVal(stmt->object)` — the database name carried by the parser
-    /// `String` value node behind the COMMENT ON DATABASE work-around. The
-    /// opaque parser `object` belongs to the parser (not ported), so this
-    /// trivial accessor crosses the seam.
-    pub fn database_name(stmt: &CommentStmt) -> String
-);
-
-// --- rel.h / relation.c ----------------------------------------------------
-
-seam!(
-    /// `relation->rd_rel->relkind` — the relkind of the opened relation, for the
-    /// `OBJECT_COLUMN` integrity check. C `char`, idiomatic `u8`. `relation` is
-    /// the opened relation's `Oid` (resolved via the live relcache).
-    pub fn relation_get_relkind(relation: Oid) -> PgResult<u8>
-);
-
-seam!(
-    /// `RelationGetRelationName(relation)` (rel.h) — the relation's name, for the
-    /// `OBJECT_COLUMN` integrity-check error message. `relation` is its `Oid`.
-    pub fn relation_get_relation_name(relation: Oid) -> PgResult<String>
-);
-
-seam!(
-    /// `relation_close(relation, NoLock)` (relation.c) — drop the reference
-    /// `get_object_address` left open, retaining the lock until commit.
-    /// `relation` is the opened relation's `Oid`.
-    pub fn relation_close(relation: Oid, lockmode: LOCKMODE) -> PgResult<()>
-);
 
 // --- fmgr / varlena (the project-wide Datum/fmgr deferral) -----------------
 

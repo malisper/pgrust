@@ -28,6 +28,8 @@ backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" 
 # crates of execExpr*/execProcnode etc., not these owner crates, so no cycle.
 backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+# MakeExpandedObjectReadOnlyInternal (expandeddatum.c) for EEOP_ASSIGN_TMP_MAKE_RO.
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

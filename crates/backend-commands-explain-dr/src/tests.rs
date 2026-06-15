@@ -1,8 +1,14 @@
 //! Tests for the `explain_dr.c` port. The genuine externals (catalog
-//! type-output lookups + fmgr lookup, the executor slot accessors, the fmgr
-//! output-function calls, the tmpcontext discipline, and the timing/buffer
-//! instrumentation) are the stateful [`SerializeRuntime`] trait, scripted per
-//! test via [`ScriptRuntime`].
+//! type-output lookups + fmgr lookup, the executor slot deconstruction, and the
+//! fmgr output-function calls) are reached through the real per-owner `-seams`
+//! crates, exactly as production does. For the unit tests we install those
+//! seams once (process-wide, guarded by a [`Once`]) with deterministic test
+//! implementations that read a per-thread [`Script`]; each test sets its own
+//! script before driving the receive path. The timing clock and `pgBufferUsage`
+//! are read directly from the real `portability-instr-time` /
+//! `backend-executor-instrument` crates (not scriptable), so the
+//! timing/buffers test only asserts that the measured path runs and produces
+//! non-negative accumulations.
 //!
 //! The text-send path (`pq_sendcountedtext`) routes through pqformat's
 //! `pg_server_to_client` mbutils seam (a cross-crate concern installed by
@@ -11,101 +17,79 @@
 
 use super::*;
 use core::cell::RefCell;
-use mcx::MemoryContext;
+use std::sync::Once;
+
+use mcx::{MemoryContext, PgVec};
 use types_core::Oid;
-use types_tuple::heaptuple::{
-    CompactAttribute, FormData_pg_attribute, TupleDescData,
-};
+use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
+use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
 
-// --- scripted runtime --------------------------------------------------------
+// --- per-thread script the installed test seams read --------------------------
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Script {
     is_null: Vec<bool>,
-    values: Vec<Datum>,
     binary_out: Vec<u8>,
-    clock: Vec<i64>,
-    clock_pos: usize,
-    bufusage: Vec<BufferUsage>,
-    bufusage_pos: usize,
-    getallattrs_calls: u32,
-    enter_calls: u32,
-    exit_calls: u32,
-    create_calls: u32,
-    delete_calls: u32,
 }
 
-struct ScriptRuntime {
-    s: RefCell<Script>,
+thread_local! {
+    static SCRIPT: RefCell<Script> = RefCell::new(Script::default());
 }
 
-impl ScriptRuntime {
-    fn new(s: Script) -> Self {
-        ScriptRuntime { s: RefCell::new(s) }
-    }
+fn set_script(s: Script) {
+    SCRIPT.with(|c| *c.borrow_mut() = s);
 }
 
-fn finfo_for(oid: Oid) -> FmgrInfo {
-    let mut f = FmgrInfo::empty();
-    f.fn_oid = oid;
-    f
-}
+static INSTALL: Once = Once::new();
 
-impl SerializeRuntime for ScriptRuntime {
-    fn prepare_text(&self, atttypid: Oid) -> PgResult<FmgrInfo> {
-        Ok(finfo_for(atttypid))
-    }
-    fn prepare_binary(&self, atttypid: Oid) -> PgResult<FmgrInfo> {
-        Ok(finfo_for(atttypid))
-    }
-    fn slot_getallattrs(&self) -> PgResult<()> {
-        self.s.borrow_mut().getallattrs_calls += 1;
-        Ok(())
-    }
-    fn is_null(&self, attnum: usize) -> PgResult<bool> {
-        Ok(self.s.borrow().is_null[attnum])
-    }
-    fn value(&self, attnum: usize) -> PgResult<Datum> {
-        Ok(self.s.borrow().values[attnum])
-    }
-    fn send_function_call(&self, _finfo: &FmgrInfo, _attr: Datum) -> PgResult<OutputBytes> {
-        Ok(self.s.borrow().binary_out.clone())
-    }
-    fn create_tmpcontext(&self) -> PgResult<()> {
-        self.s.borrow_mut().create_calls += 1;
-        Ok(())
-    }
-    fn enter_tmpcontext(&self) -> PgResult<()> {
-        self.s.borrow_mut().enter_calls += 1;
-        Ok(())
-    }
-    fn exit_tmpcontext(&self) -> PgResult<()> {
-        self.s.borrow_mut().exit_calls += 1;
-        Ok(())
-    }
-    fn delete_tmpcontext(&self) -> PgResult<()> {
-        self.s.borrow_mut().delete_calls += 1;
-        Ok(())
-    }
-    fn instr_time_current(&self) -> PgResult<instr_time> {
-        let mut s = self.s.borrow_mut();
-        let t = s.clock[s.clock_pos];
-        s.clock_pos += 1;
-        Ok(instr_time { ticks: t })
-    }
-    fn pg_buffer_usage(&self) -> PgResult<BufferUsage> {
-        let mut s = self.s.borrow_mut();
-        let b = s.bufusage[s.bufusage_pos];
-        s.bufusage_pos += 1;
-        Ok(b)
-    }
+/// Install the outward seams this crate now calls with deterministic test
+/// bodies. Process-wide (the seam slots are `OnceLock`s); the per-test variation
+/// rides on the thread-local [`Script`].
+fn install_test_seams() {
+    INSTALL.call_once(|| {
+        // getTypeOutputInfo / getTypeBinaryOutputInfo: echo the type oid as the
+        // resolved function oid, non-varlena.
+        lsyscache_s::get_type_output_info::set(|typid| Ok((typid, false)));
+        lsyscache_s::get_type_binary_output_info::set(|typid| Ok((typid, false)));
+        // fmgr_info lookup half: always resolves.
+        fmgr_s::fmgr_info_check::set(|_oid| Ok(()));
+        // OutputFunctionCall / SendFunctionCall: return the scripted bytes.
+        fmgr_s::output_function_call::set(|mcx, _finfo, _val| {
+            let bytes = SCRIPT.with(|c| c.borrow().binary_out.clone());
+            let mut v = PgVec::new_in(mcx);
+            v.extend_from_slice(&bytes);
+            Ok(v)
+        });
+        fmgr_s::send_function_call::set(|mcx, _finfo, _val| {
+            let bytes = SCRIPT.with(|c| c.borrow().binary_out.clone());
+            let mut v = PgVec::new_in(mcx);
+            v.extend_from_slice(&bytes);
+            Ok(v)
+        });
+        // slot_getallattrs: hand back one (value, isnull) per scripted column.
+        exectuples_s::slot_getallattrs::set(|mcx, _slot| {
+            let is_null = SCRIPT.with(|c| c.borrow().is_null.clone());
+            let mut cols = PgVec::new_in(mcx);
+            for n in is_null {
+                cols.push((TupleDatum::ByVal(1), n));
+            }
+            Ok(cols)
+        });
+    });
 }
 
 // --- helpers -----------------------------------------------------------------
 
+fn make_slot<'mcx>(mcx: Mcx<'mcx>) -> SlotData<'mcx> {
+    SlotData::Virtual(types_nodes::tuptable::VirtualTupleTableSlot {
+        base: types_slot::TupleTableSlot::new_in(mcx),
+        data: PgVec::new_in(mcx),
+    })
+}
+
 fn make_tupdesc<'mcx>(mcx: Mcx<'mcx>, typoids: &[Oid]) -> TupleDescData<'mcx> {
-    let mut attrs = mcx::PgVec::new_in(mcx);
-    let mut compact = mcx::PgVec::new_in(mcx);
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
     for (i, &oid) in typoids.iter().enumerate() {
         let mut a = FormData_pg_attribute {
             atttypid: oid,
@@ -172,11 +156,9 @@ fn startup_selects_format_and_zeroes_metrics() {
     );
     let mut r = CreateExplainSerializeDestReceiver(&es_text);
     r.metrics.bytesSent = 999; // dirty it
-    let rt = ScriptRuntime::new(Script::default());
-    let _ = serializeAnalyzeStartup(&mut r, cx.mcx(), 0, &make_tupdesc(cx.mcx(), &[]), &rt).unwrap();
+    let _ = serializeAnalyzeStartup(&mut r, cx.mcx(), 0, &make_tupdesc(cx.mcx(), &[])).unwrap();
     assert_eq!(r.format, 0);
     assert_eq!(r.metrics, SerializeMetrics::default());
-    assert_eq!(rt.s.borrow().create_calls, 1);
 
     let es_bin = make_es(
         cx.mcx(),
@@ -185,21 +167,25 @@ fn startup_selects_format_and_zeroes_metrics() {
         false,
     );
     let mut r2 = CreateExplainSerializeDestReceiver(&es_bin);
-    let _ =
-        serializeAnalyzeStartup(&mut r2, cx.mcx(), 0, &make_tupdesc(cx.mcx(), &[]), &rt).unwrap();
+    let _ = serializeAnalyzeStartup(&mut r2, cx.mcx(), 0, &make_tupdesc(cx.mcx(), &[])).unwrap();
     assert_eq!(r2.format, 1);
 
-    // Shutdown clears finfos / attrinfo / nattrs and deletes the context.
-    r2.finfos.push(FmgrInfo::empty());
+    // Shutdown clears finfos / attrinfo / nattrs.
+    r2.finfos.push(FmgrInfo::default());
     r2.nattrs = 3;
-    serializeAnalyzeShutdown(&mut r2, &rt).unwrap();
+    serializeAnalyzeShutdown(&mut r2).unwrap();
     assert!(r2.finfos.is_empty());
     assert_eq!(r2.nattrs, 0);
-    assert!(rt.s.borrow().delete_calls >= 1);
 }
 
 #[test]
 fn binary_path_lengths_and_byte_count() {
+    install_test_seams();
+    set_script(Script {
+        is_null: vec![false],
+        binary_out: vec![0xde, 0xad, 0xbe, 0xef],
+    });
+
     let cx = MemoryContext::new("t");
     let es = make_es(
         cx.mcx(),
@@ -209,19 +195,13 @@ fn binary_path_lengths_and_byte_count() {
     );
     let mut receiver = CreateExplainSerializeDestReceiver(&es);
 
-    let rt = ScriptRuntime::new(Script {
-        is_null: alloc_vec(&[false]),
-        values: vec![Datum::from_usize(1)],
-        binary_out: vec![0xde, 0xad, 0xbe, 0xef],
-        ..Script::default()
-    });
-
     let typeinfo = make_tupdesc(cx.mcx(), &[17]);
-    let mut buf =
-        serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo, &rt).unwrap();
+    let mut buf = serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo).unwrap();
     assert_eq!(receiver.format, 1);
 
-    let ok = serializeAnalyzeReceive(&mut receiver, &mut buf, &typeinfo, &rt).unwrap();
+    let mut slot = make_slot(cx.mcx());
+    let ok =
+        serializeAnalyzeReceive(&mut receiver, cx.mcx(), &mut buf, &typeinfo, &mut slot).unwrap();
     assert!(ok);
 
     // Binary DataRow body: int16 natts, int32 payload length, payload bytes.
@@ -231,15 +211,16 @@ fn binary_path_lengths_and_byte_count() {
     expected.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
     assert_eq!(buf.as_bytes(), &expected[..]);
     assert_eq!(receiver.metrics.bytesSent, expected.len() as u64);
-
-    // Slot deconstructed once; per-row context entered then exited once.
-    assert_eq!(rt.s.borrow().getallattrs_calls, 1);
-    assert_eq!(rt.s.borrow().enter_calls, 1);
-    assert_eq!(rt.s.borrow().exit_calls, 1);
 }
 
 #[test]
 fn null_column_emits_minus_one_and_accumulates() {
+    install_test_seams();
+    set_script(Script {
+        is_null: vec![false, true],
+        binary_out: vec![0xaa],
+    });
+
     let cx = MemoryContext::new("t");
     let es = make_es(
         cx.mcx(),
@@ -249,18 +230,11 @@ fn null_column_emits_minus_one_and_accumulates() {
     );
     let mut receiver = CreateExplainSerializeDestReceiver(&es);
 
-    let rt = ScriptRuntime::new(Script {
-        is_null: alloc_vec(&[false, true]),
-        values: vec![Datum::from_usize(1), Datum::from_usize(0)],
-        binary_out: vec![0xaa],
-        ..Script::default()
-    });
-
     let typeinfo = make_tupdesc(cx.mcx(), &[17, 25]);
-    let mut buf =
-        serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo, &rt).unwrap();
+    let mut buf = serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo).unwrap();
 
-    serializeAnalyzeReceive(&mut receiver, &mut buf, &typeinfo, &rt).unwrap();
+    let mut slot = make_slot(cx.mcx());
+    serializeAnalyzeReceive(&mut receiver, cx.mcx(), &mut buf, &typeinfo, &mut slot).unwrap();
 
     let mut expected: Vec<u8> = Vec::new();
     expected.extend_from_slice(&2u16.to_be_bytes()); // natts
@@ -271,12 +245,18 @@ fn null_column_emits_minus_one_and_accumulates() {
     assert_eq!(receiver.metrics.bytesSent, expected.len() as u64);
 
     // A second row accumulates onto bytesSent.
-    serializeAnalyzeReceive(&mut receiver, &mut buf, &typeinfo, &rt).unwrap();
+    serializeAnalyzeReceive(&mut receiver, cx.mcx(), &mut buf, &typeinfo, &mut slot).unwrap();
     assert_eq!(receiver.metrics.bytesSent, (expected.len() * 2) as u64);
 }
 
 #[test]
-fn timing_and_buffers_accumulate() {
+fn timing_and_buffers_paths_run() {
+    install_test_seams();
+    set_script(Script {
+        is_null: vec![false],
+        binary_out: vec![0x07],
+    });
+
     let cx = MemoryContext::new("t");
     let es = make_es(
         cx.mcx(),
@@ -286,36 +266,23 @@ fn timing_and_buffers_accumulate() {
     );
     let mut receiver = CreateExplainSerializeDestReceiver(&es);
 
-    let before = BufferUsage {
-        shared_blks_hit: 100,
-        ..BufferUsage::default()
-    };
-    let after = BufferUsage {
-        shared_blks_hit: 105,
-        ..BufferUsage::default()
-    };
-
-    let rt = ScriptRuntime::new(Script {
-        is_null: alloc_vec(&[false]),
-        values: vec![Datum::from_usize(7)],
-        binary_out: vec![0x07],
-        clock: vec![1_000, 1_750],
-        bufusage: vec![before, after],
-        ..Script::default()
-    });
-
     let typeinfo = make_tupdesc(cx.mcx(), &[17]);
-    let mut buf =
-        serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo, &rt).unwrap();
+    let mut buf = serializeAnalyzeStartup(&mut receiver, cx.mcx(), 0, &typeinfo).unwrap();
 
-    serializeAnalyzeReceive(&mut receiver, &mut buf, &typeinfo, &rt).unwrap();
-
-    assert_eq!(receiver.metrics.timeSpent.ticks, 750);
-    assert_eq!(receiver.metrics.bufferUsage.shared_blks_hit, 5);
+    let mut slot = make_slot(cx.mcx());
+    // With timing+buffers on, the measurement code reads the real clock and
+    // pgBufferUsage twice each; the path must run and the accumulations stay
+    // non-negative (a monotonic clock can give a 0-tick delta on a fast machine).
+    serializeAnalyzeReceive(&mut receiver, cx.mcx(), &mut buf, &typeinfo, &mut slot).unwrap();
+    assert!(receiver.metrics.timeSpent.ticks >= 0);
+    // Binary body: int16 natts (2) + int32 len (4) + 1 payload byte = 7.
+    assert_eq!(receiver.metrics.bytesSent, 7);
 }
 
 #[test]
 fn unsupported_format_errors() {
+    // The format-7 branch errors before touching any seam (the loop's
+    // format dispatch hits its `else` arm first).
     let cx = MemoryContext::new("t");
     let es = make_es(
         cx.mcx(),
@@ -326,9 +293,8 @@ fn unsupported_format_errors() {
     let mut receiver = CreateExplainSerializeDestReceiver(&es);
     receiver.format = 7; // C `else` branch
 
-    let rt = ScriptRuntime::new(Script::default());
     let typeinfo = make_tupdesc(cx.mcx(), &[23]);
-    let err = serialize_prepare_info(&mut receiver, &typeinfo, 1, &rt).unwrap_err();
+    let err = serialize_prepare_info(&mut receiver, &typeinfo, 1).unwrap_err();
     assert!(err.message().contains("unsupported format code: 7"));
 }
 
@@ -353,8 +319,4 @@ fn get_serialization_metrics_handles_other_receiver() {
         GetSerializationMetrics(Some(&receiver)),
         SerializeMetrics::default()
     );
-}
-
-fn alloc_vec(v: &[bool]) -> Vec<bool> {
-    v.to_vec()
 }

@@ -19,6 +19,7 @@
 //! type produced the datum.
 
 use mcx::PgVec;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
 use types_datum::ExpandedObjectRef;
 use types_error::PgResult;
@@ -224,6 +225,33 @@ pub fn make_expanded_object_read_only_internal<'mcx>(
     }
     ro[1] = VARTAG_EXPANDED_RO;
     Ok(Some(ro))
+}
+
+/// Value-typed wrapper installed as the
+/// `make_expanded_object_read_only_internal_v` seam: marshals the unified
+/// [`Datum`] in/out around [`make_expanded_object_read_only_internal`]. Reached
+/// only on the non-null, `typlen == -1` branch of the
+/// `MakeExpandedObjectReadOnly` macro (the caller does the short-circuit). A
+/// by-value (`Datum::ByVal`) argument is never an expanded-object pointer, so it
+/// passes through verbatim (the C macro reaches here only for varlena); a
+/// by-reference argument is inspected by the internal helper, which returns the
+/// R/O image (R/W input) or signals "unchanged" (`Ok(None)`), in which case the
+/// original datum is returned.
+pub fn make_expanded_object_read_only_internal_v<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    d: &Datum<'_>,
+) -> PgResult<Datum<'mcx>> {
+    let bytes: &[u8] = match d {
+        Datum::ByRef(b) => b,
+        // A by-value datum is never an expanded-object pointer; return it
+        // unchanged (matching the internal helper's "not RW → return d").
+        Datum::ByVal(v) => return Ok(Datum::ByVal(*v)),
+    };
+    match make_expanded_object_read_only_internal(mcx, bytes)? {
+        Some(ro) => Ok(Datum::ByRef(ro)),
+        // C `return d` — the input was not a read-write expanded pointer.
+        None => Ok(d.clone_in(mcx)?),
+    }
 }
 
 /// `TransferExpandedObject(d, new_parent)` (expandeddatum.c:117):

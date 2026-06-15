@@ -1,8 +1,9 @@
-//! Tests for printtup. The executor slot / lsyscache / fmgr / portal externals
-//! are the stateful [`PrinttupRuntime`] trait; these exercise the seam-free
-//! surface: receiver setup, the descriptor-identity trigger, and the
-//! interactive `printatt` / `debugStartup` formatting (which read only the
-//! descriptor).
+//! Tests for printtup. The executor slot / lsyscache / fmgr externals are
+//! reached through their owners' `-seams` crates (panic-until-installed); these
+//! exercise the seam-free surface: receiver setup, the descriptor-identity
+//! trigger, the format-code rejection (this crate's own logic, which fires
+//! before any seam call), and the interactive `printatt` / `debugStartup`
+//! formatting (which read only the descriptor).
 
 use super::*;
 use mcx::{MemoryContext, PgVec};
@@ -80,15 +81,11 @@ fn printatt_formatting() {
     );
 }
 
-/// Fail-safe runtime: every method errors / no-ops by default.
-struct NoRuntime;
-impl PrinttupRuntime for NoRuntime {}
-
 #[test]
 fn debug_startup_renders_columns() {
     let cx = MemoryContext::new("t");
     let d = one_col_desc(cx.mcx(), attr("col", 23, 4, -1, true));
-    let out = debugStartup(&d, &NoRuntime).unwrap();
+    let out = debugStartup(&d);
     assert_eq!(
         out,
         "\t 1: col\t(typeid = 23, len = 4, typmod = -1, byval = t)\n\t----\n"
@@ -96,31 +93,20 @@ fn debug_startup_renders_columns() {
 }
 
 /// `printtup_prepare_info` rejects a format code other than 0/1 with the C
-/// `ERRCODE_INVALID_PARAMETER_VALUE` "unsupported format code" error.
-struct FormatRuntime(Vec<i16>);
-impl PrinttupRuntime for FormatRuntime {
-    fn formats(&self) -> PgResult<Option<Vec<i16>>> {
-        Ok(Some(self.0.clone()))
-    }
-    fn prepare_text(&self, _atttypid: Oid) -> PgResult<PrinttupAttrInfo> {
-        Ok(PrinttupAttrInfo::default())
-    }
-    fn prepare_binary(&self, _atttypid: Oid) -> PgResult<PrinttupAttrInfo> {
-        Ok(PrinttupAttrInfo::default())
-    }
-}
-
+/// `ERRCODE_INVALID_PARAMETER_VALUE` "unsupported format code" error. This is
+/// this crate's own logic, reached before any owner seam call.
 #[test]
 fn prepare_info_rejects_bad_format() {
     let cx = MemoryContext::new("t");
     let d = one_col_desc(cx.mcx(), attr("c", 23, 4, -1, true));
     let mut r = DR_printtup::printtup_create_DR(CommandDest::Remote);
-    let err = printtup_prepare_info(&mut r, &d, &FormatRuntime(vec![2]), 1).unwrap_err();
+    let formats = [2i16];
+    let err = printtup_prepare_info(&mut r, cx.mcx(), &d, Some(&formats), 1).unwrap_err();
     assert!(format!("{err:?}").contains("unsupported format code"));
 
-    // Format 0 (text) and 1 (binary) are accepted.
+    // numAttrs <= 0 short-circuits before any per-column work (no seam call).
     let mut r = DR_printtup::printtup_create_DR(CommandDest::Remote);
-    printtup_prepare_info(&mut r, &d, &FormatRuntime(vec![0]), 1).unwrap();
-    assert_eq!(r.myinfo.len(), 1);
-    assert_eq!(r.myinfo[0].format, 0);
+    printtup_prepare_info(&mut r, cx.mcx(), &d, None, 0).unwrap();
+    assert_eq!(r.nattrs, 0);
+    assert!(r.attrinfo_matches(&d));
 }
