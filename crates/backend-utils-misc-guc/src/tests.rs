@@ -313,3 +313,106 @@ fn guc_array_add_delete_reset_round_trip() {
     let reset = GUCArrayReset(a).expect("reset");
     assert_eq!(reset, None);
 }
+
+// ---------------------------------------------------------------------------
+// Parallel-worker GUC-state transfer (serialize.rs): EstimateGUCStateSpace /
+// SerializeGUCState / RestoreGUCState round-trips.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn serialize_restore_round_trip() {
+    use crate::live::{get_real, with_store, with_store_mut};
+    use crate::serialize::{estimate_guc_state_space, restore_guc_state, serialize_guc_state};
+
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    // Establish a few non-default values at PGC_S_OVERRIDE so they survive the
+    // source-priority comparison and become non-skippable.
+    for (name, value) in [
+        ("bgwriter_delay", "321"),
+        ("fsync", "off"),
+        ("bgwriter_lru_multiplier", "3.5"),
+    ] {
+        set_config_option_global(
+            name,
+            Some(value),
+            PGC_POSTMASTER,
+            PGC_S_OVERRIDE,
+            BOOTSTRAP_SUPERUSERID,
+            crate::GUC_ACTION_SET,
+            true,
+            ERROR,
+            false,
+        )
+        .unwrap_or_else(|_| panic!("set {name}"));
+    }
+
+    // Leader: estimate, allocate, serialize.
+    let size = with_store(estimate_guc_state_space).expect("store initialized");
+    assert!(size > std::mem::size_of::<usize>());
+    let mut buf = vec![0u8; size];
+    with_store(|reg| serialize_guc_state(reg, &mut buf))
+        .expect("store")
+        .expect("serialize fits within estimate");
+
+    // RestoreGUCState first resets every non-skippable GUC to its default (so
+    // set_config_option's source-priority comparison won't reject the re-set),
+    // then applies the serialized values. To prove the round trip moves real
+    // bytes, perturb one value to a different non-default before restoring: the
+    // internal reset clears it back to default, and the deserialized leader
+    // value is then re-applied.
+    set_config_option_global(
+        "bgwriter_delay",
+        Some("777"),
+        PGC_POSTMASTER,
+        PGC_S_OVERRIDE,
+        BOOTSTRAP_SUPERUSERID,
+        crate::GUC_ACTION_SET,
+        true,
+        ERROR,
+        false,
+    )
+    .expect("perturb bgwriter_delay");
+    assert_eq!(get_int("bgwriter_delay"), Some(777));
+
+    with_store_mut(|reg| restore_guc_state(reg, &buf))
+        .expect("store")
+        .expect("restore succeeds");
+
+    // The leader's non-default values are reproduced in the worker store.
+    assert_eq!(get_int("bgwriter_delay"), Some(321));
+    assert_eq!(get_bool("fsync"), Some(false));
+    assert_eq!(get_real("bgwriter_lru_multiplier"), Some(3.5));
+}
+
+#[test]
+fn estimate_is_upper_bound() {
+    use crate::live::with_store;
+    use crate::serialize::{estimate_guc_state_space, serialize_guc_state};
+
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    set_config_option_global(
+        "bgwriter_delay",
+        Some("250"),
+        PGC_POSTMASTER,
+        PGC_S_OVERRIDE,
+        BOOTSTRAP_SUPERUSERID,
+        crate::GUC_ACTION_SET,
+        true,
+        ERROR,
+        false,
+    )
+    .expect("set bgwriter_delay");
+
+    // The serialized payload must fit within the estimate.
+    let size = with_store(estimate_guc_state_space).expect("store");
+    let mut buf = vec![0u8; size];
+    with_store(|reg| serialize_guc_state(reg, &mut buf))
+        .expect("store")
+        .expect("payload fits within estimate");
+}
