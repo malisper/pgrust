@@ -170,6 +170,7 @@ backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivcla
 backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }
 backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-parser-agg = { path = "../backend-parser-agg" }
 backend-parser-func = { path = "../backend-parser-func" }
