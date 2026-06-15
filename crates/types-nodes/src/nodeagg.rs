@@ -667,6 +667,52 @@ pub struct AggStateData<'mcx> {
 }
 
 // ---------------------------------------------------------------------------
+// HyperLogLog cardinality estimator state (lib/hyperloglog.h)
+// ---------------------------------------------------------------------------
+
+/// `hyperLogLogState` (`lib/hyperloglog.h`) — HyperLogLog approximate
+/// cardinality estimator state.
+///
+/// The C struct is
+///
+/// ```text
+/// typedef struct hyperLogLogState
+/// {
+///     uint8    registerWidth;  /* Register width in bits */
+///     Size     nRegisters;     /* Number of registers */
+///     double   alphaMM;        /* Gamma times (number of registers) ^ 2 */
+///     uint8   *hashesArr;      /* Hashes of every element added */
+///     Size     arrSize;        /* Size of hashesArr array */
+/// } hyperLogLogState;
+/// ```
+///
+/// This is *pure data* — the register array is an owned [`PgVec<u8>`] charged to
+/// a [`mcx::MemoryContext`], the control fields are plain owned values, and
+/// there is no raw pointer. The struct lives here in the foundational
+/// `types-nodes` crate so that struct holders below the `backend-lib-*` layer
+/// (e.g. [`HashAggSpill`]) can store the estimator *by value*, exactly as C
+/// holds `hyperLogLogState` inline. The operations
+/// (`initHyperLogLog`/`addHyperLogLog`/`estimateHyperLogLog`/`freeHyperLogLog`)
+/// live in the higher `backend-lib-hyperloglog` crate and borrow this struct.
+///
+/// Fields are `pub` because the ops crate above must build and mutate them;
+/// they carry the C field names (camelCase) so the 1:1 mapping is obvious.
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct HyperLogLog<'mcx> {
+    /// `uint8 registerWidth` — register width, in bits ("k").
+    pub registerWidth: u8,
+    /// `Size nRegisters` — number of registers.
+    pub nRegisters: usize,
+    /// `double alphaMM` — alpha * m ^ 2 (see `initHyperLogLog()`).
+    pub alphaMM: f64,
+    /// `uint8 *hashesArr` — owned register array of hashes (the C `hashesArr`).
+    pub hashesArr: PgVec<'mcx, u8>,
+    /// `Size arrSize` — size of `hashesArr`.
+    pub arrSize: usize,
+}
+
+// ---------------------------------------------------------------------------
 // nodeAgg.c-local structs (HashAggSpill / HashAggBatch)
 // ---------------------------------------------------------------------------
 
@@ -683,9 +729,11 @@ pub struct HashAggSpill<'mcx> {
     pub mask: u32,
     /// `int shift` — after masking, shift down this many bits.
     pub shift: i32,
-    /// `hyperLogLogState *hll_card` — cardinality estimator per partition
-    /// (`utils/hyperloglog`, not ported) — opaque handle word per partition.
-    pub hll_card: Option<PgVec<'mcx, usize>>,
+    /// `hyperLogLogState *hll_card` — cardinality estimator per partition.
+    /// C `palloc0(sizeof(hyperLogLogState) * npartitions)`: an array of the
+    /// estimator state held by value (one per partition). The operations live
+    /// in `backend-lib-hyperloglog` and borrow `&mut hll_card[i]`.
+    pub hll_card: Option<PgVec<'mcx, HyperLogLog<'mcx>>>,
 }
 
 /// `HashAggBatch` (nodeAgg.c) — one batch of spilled tuples to refill from.

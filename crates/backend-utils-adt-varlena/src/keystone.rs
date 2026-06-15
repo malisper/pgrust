@@ -141,12 +141,12 @@ pub struct VarStringSortSupport<'mcx> {
     /// `collate_c` / no locale.
     pub locale_deterministic: bool,
     /// `abbr_card` (`hyperLogLogState`) — abbreviated-key cardinality counter,
-    /// held as the opaque HyperLogLog handle word from the `backend-lib-*`
-    /// owner; `None` until abbreviation is planned.
-    pub abbr_card: Option<usize>,
-    /// `full_card` (`hyperLogLogState`) — authoritative-key cardinality counter
-    /// handle; `None` until abbreviation is planned.
-    pub full_card: Option<usize>,
+    /// held by value (C `hyperLogLogState abbr_card`); `None` until abbreviation
+    /// is planned. The ops live in `backend-lib-hyperloglog`.
+    pub abbr_card: Option<types_nodes::nodeagg::HyperLogLog<'mcx>>,
+    /// `full_card` (`hyperLogLogState`) — authoritative-key cardinality counter,
+    /// held by value; `None` until abbreviation is planned.
+    pub full_card: Option<types_nodes::nodeagg::HyperLogLog<'mcx>>,
 }
 
 /// C: `SplitTextOutputData` (varlena.c) — `split_text()` output sink, either

@@ -141,7 +141,6 @@ backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" 
 backend-geqo-all = { path = "../backend-geqo-all" }
 backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
-backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }

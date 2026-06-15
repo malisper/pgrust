@@ -10,7 +10,7 @@ use types_nodes::nodeagg::{
 };
 use types_nodes::{EStateData, SlotId};
 
-use backend_lib_hyperloglog_seams as hll_seams;
+use backend_lib_hyperloglog as hll;
 use backend_executor_nodeHash_seams as nodeHash_seams;
 use backend_utils_sort_storage_seams as tape_seams;
 
@@ -395,10 +395,12 @@ pub fn hashagg_spill_init<'mcx>(
     let mut partitions =
         mcx::vec_with_capacity_in::<Option<LogicalTapeHandle>>(mcx, npartitions as usize)?;
     let mut ntuples = mcx::vec_with_capacity_in::<i64>(mcx, npartitions as usize)?;
-    let mut hll_card = mcx::vec_with_capacity_in::<usize>(mcx, npartitions as usize)?;
+    // C: spill->hll_card = palloc0(sizeof(hyperLogLogState) * npartitions) — an
+    // array of estimator state held by value, one per partition.
+    let mut hll_card =
+        mcx::vec_with_capacity_in::<types_nodes::nodeagg::HyperLogLog<'mcx>>(mcx, npartitions as usize)?;
     for _ in 0..npartitions {
         ntuples.push(0);
-        hll_card.push(0);
         partitions.push(None);
     }
 
@@ -414,8 +416,9 @@ pub fn hashagg_spill_init<'mcx>(
     }
     spill.npartitions = npartitions;
 
-    for i in 0..npartitions as usize {
-        hll_card[i] = hll_seams::init_hyper_log_log::call(HASHAGG_HLL_BIT_WIDTH);
+    for _ in 0..npartitions as usize {
+        // C: initHyperLogLog(&spill->hll_card[i], HASHAGG_HLL_BIT_WIDTH);
+        hll_card.push(hll::initHyperLogLog(mcx, HASHAGG_HLL_BIT_WIDTH)?);
     }
 
     spill.partitions = Some(partitions);
@@ -482,13 +485,20 @@ pub fn hashagg_spill_finish<'mcx>(
             continue;
         }
 
-        let hll_handle = spill
-            .hll_card
-            .as_ref()
-            .map(|h| h[i])
-            .expect("hashagg_spill_finish: hll_card missing");
-        let cardinality = hll_seams::estimate_hyper_log_log::call(hll_handle);
-        hll_seams::free_hyper_log_log::call(hll_handle);
+        // C: cardinality = estimateHyperLogLog(&spill->hll_card[i]);
+        let cardinality = {
+            let hll_card = spill
+                .hll_card
+                .as_ref()
+                .expect("hashagg_spill_finish: hll_card missing");
+            hll::estimateHyperLogLog(&hll_card[i])
+        };
+        // C: freeHyperLogLog(&spill->hll_card[i]) — releases this partition's
+        // register array. The estimator state is held by value in the
+        // `spill->hll_card` array; its register array (and the array itself,
+        // C's later `pfree(spill->hll_card)`) is released when `spill.hll_card`
+        // is dropped at the end of this function. (Empty partitions `continue`
+        // above without a per-element free in C, exactly as here.)
 
         // rewinding frees the buffer while not in use
         tape_seams::logical_tape_rewind_for_read::call(tape, HASHAGG_READ_BUFFER_SIZE)?;

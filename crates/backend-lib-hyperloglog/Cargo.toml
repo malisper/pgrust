@@ -11,5 +11,5 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
 backend-utils-error = { path = "../backend-utils-error" }
-backend-lib-hyperloglog-seams = { path = "../backend-lib-hyperloglog-seams" }

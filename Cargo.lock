@@ -4960,7 +4960,7 @@ dependencies = [
  "backend-executor-execUtils-seams",
  "backend-executor-nodeAgg-pq-seams",
  "backend-executor-nodeHash-seams",
- "backend-lib-hyperloglog-seams",
+ "backend-lib-hyperloglog",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -6383,17 +6383,9 @@ dependencies = [
 name = "backend-lib-hyperloglog"
 version = "0.0.0"
 dependencies = [
- "backend-lib-hyperloglog-seams",
  "backend-utils-error",
  "mcx",
  "types-error",
-]
-
-[[package]]
-name = "backend-lib-hyperloglog-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
  "types-nodes",
 ]
 
@@ -11198,7 +11190,7 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
- "backend-lib-hyperloglog-seams",
+ "backend-lib-hyperloglog",
  "backend-libpq-pqformat",
  "backend-regex-core-seams",
  "backend-tcop-postgres-seams",
@@ -11220,6 +11212,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-locale",
+ "types-nodes",
  "types-regex",
  "types-sortsupport",
  "types-stringinfo",
@@ -13472,7 +13465,6 @@ dependencies = [
  "backend-jit-jit",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
- "backend-lib-hyperloglog",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

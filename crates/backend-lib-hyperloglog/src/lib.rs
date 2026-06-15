@@ -30,22 +30,22 @@
 //! Register addressing (`hash >> k` index, `Max(count, reg)` update) is unchanged
 //! from C; it now indexes a safe slice.
 //!
-//! # The seam contract (opacity inherited, never introduced)
+//! # Type/ops split (no handle, no registry)
 //!
-//! `nodeAgg`'s spill path holds `hyperLogLogState *` only as an opaque handle
-//! word (`HashAggSpill.hll_card`'s entries) and never names the struct. The
-//! `backend-lib-hyperloglog-seams` crate models that with four handle-based
-//! seams (`init_hyper_log_log`/`add_hyper_log_log`/`estimate_hyper_log_log`/
-//! `free_hyper_log_log`) that cross `hyperLogLogState *` as a `usize`. This
-//! owner crate installs them from [`init_seams`] over a process-wide registry
-//! ([`registry`]) that maps each handle word to a real owned [`HyperLogLog`].
-//! The opaque C pointer thus resolves to the real struct on this side of the
-//! seam; the `usize` is only the cross-seam stand-in for the pointer value, as
-//! it is in C.
+//! The estimator *state* — the C `hyperLogLogState` struct — lives in the
+//! foundational [`types_nodes::nodeagg::HyperLogLog`] crate as pure data, so
+//! struct holders below this `backend-lib-*` layer (the `nodeAgg` spill path's
+//! `HashAggSpill.hll_card`, the varlena abbreviated-key sort state) can hold the
+//! counter *by value*, exactly as C holds `hyperLogLogState` inline. The
+//! *operations* — `initHyperLogLog`/`addHyperLogLog`/`estimateHyperLogLog`/
+//! `freeHyperLogLog` — live here and borrow that struct (`&mut HyperLogLog`).
+//! No opaque handle, no process-wide registry, no seam: the consumer holds the
+//! real owned struct and calls these functions on it directly.
 
 use backend_utils_error::elog;
-use mcx::{Mcx, McxOwned, MemoryContext, PgVec};
+use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERROR};
+use types_nodes::nodeagg::HyperLogLog;
 
 /// `BITS_PER_BYTE` from `c.h`.
 const BITS_PER_BYTE: usize = 8;
@@ -56,203 +56,63 @@ const NEG_POW_2_32: f64 = -4_294_967_296.0;
 /// `sizeof(uint32)` — the hash word width the estimator addresses, in bytes.
 const SIZEOF_UINT32: usize = 4;
 
-/// HyperLogLog state.
-///
-/// Idiomatic analog of `hyperLogLogState` from `hyperloglog.h`. The C struct is
-///
-/// ```text
-/// typedef struct hyperLogLogState
-/// {
-///     uint8    registerWidth;  /* Register width in bits */
-///     Size     nRegisters;     /* Number of registers */
-///     double   alphaMM;        /* Gamma times (number of registers) ^ 2 */
-///     uint8   *hashesArr;      /* Hashes of every element added */
-///     Size     arrSize;        /* Size of hashesArr array */
-/// } hyperLogLogState;
-/// ```
-///
-/// Here the raw `hashesArr` pointer becomes an owned [`PgVec<u8>`] register array
-/// (`hashes_arr`) charged to the context, and the control fields are plain owned
-/// values. The `'mcx` lifetime is the borrow of the owning memory context; the
-/// public [`HyperLogLog`] handle bundles a context together with this struct so
-/// it is movable and storable (the registry keeps one per spill partition).
-#[allow(non_camel_case_types)]
-pub struct hyperLogLogState<'mcx> {
-    /* Register width in bits */
-    register_width: u8,
-    /* Number of registers */
-    n_registers: usize,
-    /* Gamma times (number of registers) ^ 2 */
-    alpha_mm: f64,
-    /* Hashes of every element added (the C `hashesArr` register array) */
-    hashes_arr: PgVec<'mcx, u8>,
-    /* Size of the hashesArr array */
-    arr_size: usize,
-}
-
-impl<'mcx> hyperLogLogState<'mcx> {
-    /// Register width in bits (`registerWidth`).
-    pub fn register_width(&self) -> u8 {
-        self.register_width
-    }
-
-    /// Number of registers (`nRegisters`).
-    pub fn register_count(&self) -> usize {
-        self.n_registers
-    }
-
-    /// Gamma times `(number of registers) ^ 2` (`alphaMM`).
-    pub fn alpha_mm(&self) -> f64 {
-        self.alpha_mm
-    }
-
-    /// Size of the register array (`arrSize`).
-    pub fn array_size(&self) -> usize {
-        self.arr_size
-    }
-
-    /// The register array (`hashesArr`).
-    pub fn registers(&self) -> &[u8] {
-        &self.hashes_arr
-    }
-
-    /// Initialize HyperLogLog track state, by bit width.
-    ///
-    /// `bwidth` is bit width (so register size will be 2 to the power of bwidth).
-    /// Must be between 4 and 16 inclusive.
-    ///
-    /// 1:1 with `initHyperLogLog` in `hyperloglog.c`: every field is computed and
-    /// `hashesArr` is `palloc0`'d. The allocation is charged to `mcx`.
-    fn init(mcx: Mcx<'mcx>, bwidth: u8) -> PgResult<hyperLogLogState<'mcx>> {
-        // Transcribed verbatim from C (`if (bwidth < 4 || bwidth > 16)`); the
-        // `manual_range_contains` lint would rewrite this to a `RangeInclusive`,
-        // which obscures the 1:1 mapping, so it is suppressed here.
-        #[allow(clippy::manual_range_contains)]
-        if bwidth < 4 || bwidth > 16 {
-            elog(ERROR, "bit width must be between 4 and 16 inclusive")?;
-            // `elog(ERROR, ...)` is a non-local exit in C; here it returns an
-            // `Err`, so the `?` above already propagated. This is unreachable.
-            unreachable!("elog(ERROR, ...) returns Err");
-        }
-
-        let register_width = bwidth;
-        let n_registers: usize = 1usize << bwidth;
-        let arr_size = std::mem::size_of::<u8>() * n_registers + 1;
-
-        /*
-         * Initialize hashes array to zero, not negative infinity, per discussion
-         * of the coupon collector problem in the HyperLogLog paper
-         */
-        let hashes_arr = zeroed_array(mcx, arr_size)?;
-
-        /*
-         * "alpha" is a value that for each possible number of registers (m) is
-         * used to correct a systematic multiplicative bias present in m ^ 2 Z (Z
-         * is "the indicator function" through which we finally compute E,
-         * estimated cardinality).
-         */
-        let alpha = match n_registers {
-            16 => 0.673,
-            32 => 0.697,
-            64 => 0.709,
-            _ => 0.7213 / (1.0 + 1.079 / n_registers as f64),
-        };
-
-        /*
-         * Precalculate alpha m ^ 2, later used to generate "raw" HyperLogLog
-         * estimate E
-         */
-        let alpha_mm = alpha * n_registers as f64 * n_registers as f64;
-
-        Ok(hyperLogLogState {
-            register_width,
-            n_registers,
-            alpha_mm,
-            hashes_arr,
-            arr_size,
-        })
-    }
-
-    /// Adds element to the estimator, from caller-supplied hash.
-    ///
-    /// 1:1 with `addHyperLogLog` in `hyperloglog.c`. It is critical that the hash
-    /// value passed be an actual hash value (typically from `hash_any()`): the
-    /// algorithm relies on a uniform distribution of bits.
-    pub fn addHyperLogLog(&mut self, hash: u32) {
-        let register_width = self.register_width;
-
-        /* Use the first "k" (registerWidth) bits as a zero based index */
-        let index = hash >> (BITS_PER_BYTE * SIZEOF_UINT32 - register_width as usize);
-
-        /* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
-        let count = rho(
-            hash << register_width,
-            (BITS_PER_BYTE * SIZEOF_UINT32 - register_width as usize) as u8,
-        );
-
-        let register = &mut self.hashes_arr[index as usize];
-        *register = max_u8(count, *register);
-    }
-
-    /// Estimates cardinality, based on elements added so far.
-    ///
-    /// 1:1 with `estimateHyperLogLog` in `hyperloglog.c`, including the small-/
-    /// large-range corrections and the order of branches. Uses `pow`/`ln` to
-    /// mirror C's `pow`/`log`.
-    pub fn estimateHyperLogLog(&self) -> f64 {
-        let registers = &self.hashes_arr[..self.n_registers];
-        let mut sum = 0.0;
-
-        for &register in registers {
-            sum += 1.0 / 2.0_f64.powf(register as f64);
-        }
-
-        /* result set to "raw" HyperLogLog estimate (E in the HyperLogLog paper) */
-        let mut result = self.alpha_mm / sum;
-
-        if result <= (5.0 / 2.0) * self.n_registers as f64 {
-            /* Small range correction */
-            let mut zero_count: i32 = 0;
-
-            for &register in registers {
-                if register == 0 {
-                    zero_count += 1;
-                }
-            }
-
-            if zero_count != 0 {
-                result =
-                    self.n_registers as f64 * (self.n_registers as f64 / zero_count as f64).ln();
-            }
-        } else if result > (1.0 / 30.0) * POW_2_32 {
-            /* Large range correction */
-            result = NEG_POW_2_32 * (1.0 - (result / POW_2_32)).ln();
-        }
-
-        result
-    }
-}
-
-mcx::bind!(pub HyperLogLogTy => hyperLogLogState<'mcx>);
-
-/// A HyperLogLog counter, movable and storable as one value.
-///
-/// The C `hyperLogLogState` is allocated by the caller (often on the stack or
-/// inside another struct) and its `hashesArr` `palloc0`'d into the current
-/// memory context. This port bundles the state with the context its register
-/// array is charged to ([`McxOwned`]); moving the handle moves the whole
-/// counter, and dropping it returns the register array's bytes to the context
-/// (the analog of `freeHyperLogLog`'s `pfree`). The registry stores one of
-/// these per spill partition behind the handle words `nodeAgg` holds.
-pub type HyperLogLog = McxOwned<HyperLogLogTy>;
-
 /// Initialize HyperLogLog track state, by bit width.
 ///
-/// Mirrors the C `initHyperLogLog()` entry point. `context` is the memory
-/// context the register array is charged to (the analog of "the current memory
-/// context" at the C call site).
-pub fn initHyperLogLog(context: MemoryContext, bwidth: u8) -> PgResult<HyperLogLog> {
-    McxOwned::try_new(context, |mcx| hyperLogLogState::init(mcx, bwidth))
+/// `bwidth` is bit width (so register size will be 2 to the power of bwidth).
+/// Must be between 4 and 16 inclusive. `mcx` is the memory context the register
+/// array is charged to (the analog of "the current memory context" at the C
+/// call site).
+///
+/// 1:1 with `initHyperLogLog` in `hyperloglog.c`: every field is computed and
+/// `hashesArr` is `palloc0`'d into `mcx`.
+pub fn initHyperLogLog(mcx: Mcx<'_>, bwidth: u8) -> PgResult<HyperLogLog<'_>> {
+    // Transcribed verbatim from C (`if (bwidth < 4 || bwidth > 16)`); the
+    // `manual_range_contains` lint would rewrite this to a `RangeInclusive`,
+    // which obscures the 1:1 mapping, so it is suppressed here.
+    #[allow(clippy::manual_range_contains)]
+    if bwidth < 4 || bwidth > 16 {
+        elog(ERROR, "bit width must be between 4 and 16 inclusive")?;
+        // `elog(ERROR, ...)` is a non-local exit in C; here it returns an
+        // `Err`, so the `?` above already propagated. This is unreachable.
+        unreachable!("elog(ERROR, ...) returns Err");
+    }
+
+    let register_width = bwidth;
+    let n_registers: usize = 1usize << bwidth;
+    let arr_size = std::mem::size_of::<u8>() * n_registers + 1;
+
+    /*
+     * Initialize hashes array to zero, not negative infinity, per discussion
+     * of the coupon collector problem in the HyperLogLog paper
+     */
+    let hashes_arr = zeroed_array(mcx, arr_size)?;
+
+    /*
+     * "alpha" is a value that for each possible number of registers (m) is
+     * used to correct a systematic multiplicative bias present in m ^ 2 Z (Z
+     * is "the indicator function" through which we finally compute E,
+     * estimated cardinality).
+     */
+    let alpha = match n_registers {
+        16 => 0.673,
+        32 => 0.697,
+        64 => 0.709,
+        _ => 0.7213 / (1.0 + 1.079 / n_registers as f64),
+    };
+
+    /*
+     * Precalculate alpha m ^ 2, later used to generate "raw" HyperLogLog
+     * estimate E
+     */
+    let alpha_mm = alpha * n_registers as f64 * n_registers as f64;
+
+    Ok(HyperLogLog {
+        registerWidth: register_width,
+        nRegisters: n_registers,
+        alphaMM: alpha_mm,
+        hashesArr: hashes_arr,
+        arrSize: arr_size,
+    })
 }
 
 /// Initialize HyperLogLog track state, by error rate.
@@ -260,7 +120,7 @@ pub fn initHyperLogLog(context: MemoryContext, bwidth: u8) -> PgResult<HyperLogL
 /// Mirrors the C `initHyperLogLogError()` entry point: it finds the lowest
 /// `bwidth` for which `e = 1.04 / sqrt(m) < error` (`m = 2^bwidth`), then
 /// initializes the counter with it. 1:1 with `initHyperLogLogError`.
-pub fn initHyperLogLogError(context: MemoryContext, error: f64) -> PgResult<HyperLogLog> {
+pub fn initHyperLogLogError(mcx: Mcx<'_>, error: f64) -> PgResult<HyperLogLog<'_>> {
     let mut bwidth: u8 = 4;
 
     while bwidth < 16 {
@@ -272,30 +132,75 @@ pub fn initHyperLogLogError(context: MemoryContext, error: f64) -> PgResult<Hype
         bwidth += 1;
     }
 
-    initHyperLogLog(context, bwidth)
+    initHyperLogLog(mcx, bwidth)
+}
+
+/// Adds element to the estimator, from caller-supplied hash.
+///
+/// 1:1 with `addHyperLogLog` in `hyperloglog.c`. It is critical that the hash
+/// value passed be an actual hash value (typically from `hash_any()`): the
+/// algorithm relies on a uniform distribution of bits.
+pub fn addHyperLogLog(cState: &mut HyperLogLog<'_>, hash: u32) {
+    let register_width = cState.registerWidth;
+
+    /* Use the first "k" (registerWidth) bits as a zero based index */
+    let index = hash >> (BITS_PER_BYTE * SIZEOF_UINT32 - register_width as usize);
+
+    /* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
+    let count = rho(
+        hash << register_width,
+        (BITS_PER_BYTE * SIZEOF_UINT32 - register_width as usize) as u8,
+    );
+
+    let register = &mut cState.hashesArr[index as usize];
+    *register = max_u8(count, *register);
+}
+
+/// Estimates cardinality, based on elements added so far.
+///
+/// 1:1 with `estimateHyperLogLog` in `hyperloglog.c`, including the small-/
+/// large-range corrections and the order of branches. Uses `pow`/`ln` to
+/// mirror C's `pow`/`log`.
+pub fn estimateHyperLogLog(cState: &HyperLogLog<'_>) -> f64 {
+    let registers = &cState.hashesArr[..cState.nRegisters];
+    let mut sum = 0.0;
+
+    for &register in registers {
+        sum += 1.0 / 2.0_f64.powf(register as f64);
+    }
+
+    /* result set to "raw" HyperLogLog estimate (E in the HyperLogLog paper) */
+    let mut result = cState.alphaMM / sum;
+
+    if result <= (5.0 / 2.0) * cState.nRegisters as f64 {
+        /* Small range correction */
+        let mut zero_count: i32 = 0;
+
+        for &register in registers {
+            if register == 0 {
+                zero_count += 1;
+            }
+        }
+
+        if zero_count != 0 {
+            result =
+                cState.nRegisters as f64 * (cState.nRegisters as f64 / zero_count as f64).ln();
+        }
+    } else if result > (1.0 / 30.0) * POW_2_32 {
+        /* Large range correction */
+        result = NEG_POW_2_32 * (1.0 - (result / POW_2_32)).ln();
+    }
+
+    result
 }
 
 /// Free HyperLogLog track state.
 ///
 /// Mirrors the C `freeHyperLogLog()` entry point. C `Assert`s `hashesArr != NULL`
-/// then `pfree`s it; here dropping the bundle releases the register array's
-/// charge (state drops before context, per [`McxOwned`]).
-pub fn freeHyperLogLog(state: HyperLogLog) {
-    drop(state)
-}
-
-/// Adds element to the estimator, from caller-supplied hash.
-///
-/// Mirrors the C `addHyperLogLog()` entry point.
-pub fn addHyperLogLog(state: &mut HyperLogLog, hash: u32) {
-    state.with_mut(|s| s.addHyperLogLog(hash))
-}
-
-/// Estimates cardinality, based on elements added so far.
-///
-/// Mirrors the C `estimateHyperLogLog()` entry point.
-pub fn estimateHyperLogLog(state: &HyperLogLog) -> f64 {
-    state.with(|s| s.estimateHyperLogLog())
+/// then `pfree`s it; here dropping the value releases the register array's charge
+/// to its context.
+pub fn freeHyperLogLog(cState: HyperLogLog<'_>) {
+    drop(cState)
 }
 
 /// Worker for [`addHyperLogLog`].
@@ -359,18 +264,6 @@ fn max_u8(a: u8, b: u8) -> u8 {
     } else {
         b
     }
-}
-
-mod registry;
-
-/// Install the four handle-based seams declared in
-/// `backend-lib-hyperloglog-seams`, the project's startup wiring entry point.
-///
-/// This crate *owns* those seams (the `nodeAgg` spill path consumes them with
-/// `hyperLogLogState *` crossing as an opaque `usize` handle word). `seams-init`
-/// calls this once at startup; each `set` panics if called twice.
-pub fn init_seams() {
-    registry::init_seams();
 }
 
 #[cfg(test)]

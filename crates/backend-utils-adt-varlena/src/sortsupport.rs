@@ -30,9 +30,10 @@
 //! converter read/write the scratch and reach the locale providers
 //! (`pg_strcoll`/`pg_strxfrm`/`pg_strxfrm_prefix` and their `*_enabled` guards)
 //! through `backend-utils-adt-pg-locale-seams` (pg_locale.c — genuinely
-//! external collation/ICU owner). HyperLogLog cardinality goes through
-//! `backend-lib-hyperloglog-seams` and the abbreviated-key hashing through
-//! `common-hashfn-seams`.
+//! external collation/ICU owner). HyperLogLog cardinality uses the owned
+//! [`types_nodes::nodeagg::HyperLogLog`] counter held by value in the sort
+//! state, with the ops called directly from `backend-lib-hyperloglog`; the
+//! abbreviated-key hashing goes through `common-hashfn-seams`.
 //!
 //! Depends on the keystone for [`VarStringSortSupport`](crate::keystone) and
 //! [`check_collation_set`](crate::keystone::check_collation_set).
@@ -42,7 +43,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_sortsupport::SortSupportData;
 
-use backend_lib_hyperloglog_seams as hll;
+use backend_lib_hyperloglog as hll;
 use backend_utils_adt_pg_locale_seams as loc;
 use common_hashfn_seams as hashfn;
 
@@ -242,8 +243,8 @@ pub fn varstr_sortsupport<'mcx>(
             sss.prop_card = 0.20;
             // C:2107-2108 initHyperLogLog(&sss->abbr_card, 10);
             //             initHyperLogLog(&sss->full_card, 10);
-            sss.abbr_card = Some(hll::init_hyper_log_log::call(10));
-            sss.full_card = Some(hll::init_hyper_log_log::call(10));
+            sss.abbr_card = Some(hll::initHyperLogLog(ssup.ssup_cxt, 10)?);
+            sss.full_card = Some(hll::initHyperLogLog(ssup.ssup_cxt, 10)?);
             // C:2109-2112 abbrev_full_comparator = comparator;
             //             comparator = ssup_datum_unsigned_cmp;
             //             abbrev_converter = varstr_abbrev_convert;
@@ -527,8 +528,8 @@ pub fn varstr_abbrev_convert<'mcx>(
             hash ^= hashfn::hash_bytes_uint32::call(len as u32);
         }
         // C:2501 addHyperLogLog(&sss->full_card, hash);
-        if let Some(h) = sss.full_card {
-            hll::add_hyper_log_log::call(h, hash);
+        if let Some(h) = sss.full_card.as_mut() {
+            hll::addHyperLogLog(h, hash);
         }
 
         // C:2504-2515 hash the abbreviated key into abbr_card.
@@ -542,8 +543,8 @@ pub fn varstr_abbrev_convert<'mcx>(
             hashfn::hash_bytes_uint32::call(res as u32)
         };
         // C:2517 addHyperLogLog(&sss->abbr_card, abbr_hash);
-        if let Some(h) = sss.abbr_card {
-            hll::add_hyper_log_log::call(h, abbr_hash);
+        if let Some(h) = sss.abbr_card.as_mut() {
+            hll::addHyperLogLog(h, abbr_hash);
         }
 
         // C:2520 sss->cache_blob = true;
@@ -572,11 +573,13 @@ pub fn varstr_abbrev_abort(sss: &mut VarStringSortSupport<'_>, memtupcount: i32)
     // C:2558-2559 estimate cardinalities.
     let mut abbrev_distinct = sss
         .abbr_card
-        .map(|h| hll::estimate_hyper_log_log::call(h))
+        .as_ref()
+        .map(|h| hll::estimateHyperLogLog(h))
         .unwrap_or(0.0);
     let mut key_distinct = sss
         .full_card
-        .map(|h| hll::estimate_hyper_log_log::call(h))
+        .as_ref()
+        .map(|h| hll::estimateHyperLogLog(h))
         .unwrap_or(0.0);
 
     // C:2566-2570 clamp to at least one distinct value.
