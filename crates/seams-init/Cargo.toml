@@ -216,6 +216,7 @@ backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-dsm-registry = { path = "../backend-storage-ipc-dsm-registry" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
+backend-storage-buffer-bufmgr = { path = "../backend-storage-buffer-bufmgr" }
 backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
 backend-storage-ipc-procarray = { path = "../backend-storage-ipc-procarray" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }

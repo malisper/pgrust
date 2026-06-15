@@ -9309,6 +9309,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-buffer-bufmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-lwlock",
+ "mcx",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -9336,6 +9350,16 @@ dependencies = [
  "common-hashfn",
  "common-relpath-seams",
  "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-buffer-support-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
  "types-error",
  "types-storage",
@@ -14179,6 +14203,7 @@ dependencies = [
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",

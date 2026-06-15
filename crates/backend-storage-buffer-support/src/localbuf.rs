@@ -999,6 +999,17 @@ impl LocalBufferManager {
     pub fn buffer_tag(&self, buffer: Buffer) -> buftag {
         self.tag(Self::index_for_buffer(buffer))
     }
+
+    /// `LocalRefCount[-buffer - 1]++` — the local arm of `IncrBufferRefCount`
+    /// (bufmgr.c): bump this backend's local pin count on an already-pinned
+    /// local buffer. The resource-owner bookkeeping is bufmgr's, not this
+    /// function's.
+    pub fn IncrLocalBufferRefCount(&self, buffer: Buffer) {
+        let bufid = Self::index_for_buffer(buffer);
+        debug_assert!(Self::buffer_is_local(buffer));
+        debug_assert!(self.local_ref_count.borrow()[bufid as usize] >= 1);
+        self.local_ref_count.borrow_mut()[bufid as usize] += 1;
+    }
 }
 
 /// `ereport(FATAL, errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory"))`
