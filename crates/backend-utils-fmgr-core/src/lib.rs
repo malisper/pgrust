@@ -2318,6 +2318,65 @@ fn oid_function_call0_seam(function_id: Oid) -> PgResult<Datum> {
     oid_function_call0_coll(ctx.mcx(), function_id, InvalidOid)
 }
 
+/// `CreateConversionCommand`'s conversion-function empty-input self-test
+/// (conversioncmds.c):
+/// ```c
+/// char result[1];
+/// funcresult = OidFunctionCall6(funcoid,
+///                               Int32GetDatum(from_encoding),
+///                               Int32GetDatum(to_encoding),
+///                               CStringGetDatum(""),
+///                               CStringGetDatum(result),
+///                               Int32GetDatum(0),
+///                               BoolGetDatum(false));
+/// ... DatumGetInt32(funcresult);
+/// ```
+/// Only the fmgr owner can synthesize the two `cstring`-shaped `Datum`s (an empty
+/// source string and a 1-byte destination buffer): they cross the fmgr boundary
+/// as `RefPayload::Cstring` referents on the by-reference side channel, while the
+/// four `int4`/`bool` args travel as bare by-value words. The call dispatches
+/// through `OidFunctionCall6` (one-shot `fmgr_info` + `FunctionCall6Coll` under
+/// the default collation) and the result is read back with `DatumGetInt32`.
+fn conversion_proc_empty_input_test_seam(
+    funcoid: Oid,
+    from_encoding: i32,
+    to_encoding: i32,
+) -> PgResult<i32> {
+    let ctx = MemoryContext::new("conversion_proc_empty_input_test");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, funcoid)?;
+    // C `result[1]` is a 1-byte output buffer the conversion function writes the
+    // converted string into; for empty input it stays untouched. Mirror it as a
+    // 1-byte `cstring` referent. `CStringGetDatum("")` is the empty source.
+    let args = vec![
+        NullableDatum::value(int32_get_datum(from_encoding)),
+        NullableDatum::value(int32_get_datum(to_encoding)),
+        // CStringGetDatum("") — by-reference placeholder, referent in ref_args.
+        NullableDatum::value(Datum::null()),
+        // CStringGetDatum(result) — by-reference placeholder, referent in ref_args.
+        NullableDatum::value(Datum::null()),
+        NullableDatum::value(int32_get_datum(0)),
+        NullableDatum::value(Datum::from_bool(false)),
+    ];
+    let ref_args = vec![
+        None,
+        None,
+        Some(RefPayload::Cstring(String::new())),
+        Some(RefPayload::Cstring(String::from("\0"))),
+        None,
+        None,
+    ];
+    let funcresult = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        InvalidOid,
+        args,
+        ref_args,
+    )?;
+    Ok(funcresult.as_i32())
+}
+
 /// Install every seam in `backend-utils-fmgr-fmgr-seams` whose implementation is
 /// `fmgr.c`'s own logic.
 ///
@@ -2348,4 +2407,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::receive_function_call::set(receive_function_call_seam);
     backend_utils_fmgr_fmgr_seams::input_function_call_safe::set(input_function_call_safe_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
+    backend_utils_fmgr_fmgr_seams::conversion_proc_empty_input_test::set(
+        conversion_proc_empty_input_test_seam,
+    );
 }

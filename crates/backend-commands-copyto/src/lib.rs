@@ -1133,29 +1133,22 @@ fn copy_dest_shutdown(_state: u64) -> PgResult<()> {
     Ok(())
 }
 
-/// The dest-router `receiveSlot` slot for `DR_copy`.
+/// The dest-router `receiveSlot` slot for `DR_copy` — C's `copy_dest_receive`
+/// (copyto.c:1398).
 ///
-/// C's `copy_dest_receive` does `CopyOneRowTo(cstate, slot)` over the received
-/// `TupleTableSlot *`. The router hands this callback a
-/// [`types_nodes::tuptable::SlotData`] (the live slot enum), but copyto's
-/// row-output path (`CopyOneRowTo` → `slot_getallattrs`) consumes the *trimmed*
-/// header [`TupleTableSlot`], and there is no `SlotData` → header bridge yet:
-/// the execTuples slot-payload model (the `slot_getallattrs` seam is flagged
-/// PROVISIONAL for exactly this) has not landed. Until it does, a dispatch
-/// through this slot path panics honestly rather than silently dropping the row.
-///
-/// The live COPY-(query)-TO receive path is unaffected: the executor re-enters
-/// copyto through the [`copy_dest_receive`] seam (keyed by the copyto receiver
-/// index), which does the real `CopyOneRowTo`. This router slot is the unified
-/// `DestReceiver` identity for `DestCopyOut`.
-fn copy_dest_receive_slot(_state: u64, _slot: &types_nodes::tuptable::SlotData<'_>) -> PgResult<bool> {
-    panic!(
-        "backend-commands-copyto: copy_dest_receive via the tcop-dest router needs \
-         the execTuples slot-payload model (SlotData -> header TupleTableSlot \
-         deform bridge; the slot_getallattrs seam is PROVISIONAL for this), which \
-         has not landed yet — the live COPY-(query)-TO path uses the \
-         copy_dest_receive seam keyed by the receiver index instead"
-    )
+/// C does `CopyToState cstate = ((DR_copy *) self)->cstate; CopyOneRowTo(cstate,
+/// slot);` then bumps the processed counter and reports progress. The router
+/// hands this callback the per-receiver `state` token (the `RECEIVERS` index,
+/// copyto's `DR_copy` stand-in) and the live payload-bearing
+/// [`types_nodes::tuptable::SlotData`]; the slot-unification keystone landed the
+/// single deform path (`slot_getallattrs` over `&mut SlotData`), so this now does
+/// the real `CopyOneRowTo`. This is the unified `DestReceiver` identity for
+/// `DestCopyOut`; the [`copy_dest_receive`] inward seam delegates here.
+fn copy_dest_receive_slot(
+    state: u64,
+    slot: &mut types_nodes::tuptable::SlotData<'_>,
+) -> PgResult<bool> {
+    copy_dest_receive(state, slot)
 }
 
 /// `CreateCopyDestReceiver()` (copyto.c:1435) — build the COPY-TO
@@ -1164,7 +1157,7 @@ fn copy_dest_receive_slot(_state: u64, _slot: &types_nodes::tuptable::SlotData<'
 ///
 /// Mirrors C's `DR_copy` constructor: allocate the per-receiver state (the
 /// `RECEIVERS` slot holding `cstate`/`processed`, via [`receiver_register`]) and
-/// install the `copy_dest_startup`/`copy_dest_receive`/`copy_dest_shutdown`
+/// install the `copy_dest_startup`/`copy_dest_receive_slot`/`copy_dest_shutdown`
 /// callbacks. The `RECEIVERS` index is the router's `state` token — the
 /// owned-model stand-in for C's `(DR_copy *) self`. dest.c's `CreateDestReceiver`
 /// switch reaches this through the `create_copy_dest_receiver` seam.
