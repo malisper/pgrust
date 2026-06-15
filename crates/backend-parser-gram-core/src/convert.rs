@@ -383,7 +383,108 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         }
         tags::T_CreateAmStmt => Ok(Node::CreateAmStmt(conv_createamstmt(mcx, n.cast())?)),
 
-        // --- anything else: the absent DDL/utility node families (F3/F4) ---
+        // --- DDL "ALTER/DROP" family (F3): supporting / helper nodes ---
+        tags::T_PartitionCmd => Ok(Node::PartitionCmd(conv_partitioncmd(mcx, n.cast())?)),
+        tags::T_ReplicaIdentityStmt => {
+            Ok(Node::ReplicaIdentityStmt(conv_replicaidentitystmt(mcx, n.cast())?))
+        }
+        tags::T_ATAlterConstraint => {
+            Ok(Node::ATAlterConstraint(conv_ataltconstraint(mcx, n.cast())?))
+        }
+
+        // --- DDL "ALTER/DROP" family (F3): statements ---
+        tags::T_AlterTableStmt => {
+            Ok(Node::AlterTableStmt(conv_altertablestmt(mcx, n.cast())?))
+        }
+        tags::T_AlterTableCmd => Ok(Node::AlterTableCmd(conv_altertablecmd(mcx, n.cast())?)),
+        tags::T_AlterCollationStmt => {
+            Ok(Node::AlterCollationStmt(conv_altercollationstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterDomainStmt => {
+            Ok(Node::AlterDomainStmt(conv_alterdomainstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterEnumStmt => Ok(Node::AlterEnumStmt(conv_alterenumstmt(mcx, n.cast())?)),
+        tags::T_AlterStatsStmt => {
+            Ok(Node::AlterStatsStmt(conv_alterstatsstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterSeqStmt => Ok(Node::AlterSeqStmt(conv_alterseqstmt(mcx, n.cast())?)),
+        tags::T_AlterOpFamilyStmt => {
+            Ok(Node::AlterOpFamilyStmt(conv_alteropfamilystmt(mcx, n.cast())?))
+        }
+        tags::T_AlterFunctionStmt => {
+            Ok(Node::AlterFunctionStmt(conv_alterfunctionstmt(mcx, n.cast())?))
+        }
+        tags::T_DropStmt => Ok(Node::DropStmt(conv_dropstmt(mcx, n.cast())?)),
+        tags::T_RenameStmt => Ok(Node::RenameStmt(conv_renamestmt(mcx, n.cast())?)),
+        tags::T_AlterObjectDependsStmt => {
+            Ok(Node::AlterObjectDependsStmt(conv_alterobjectdependsstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterObjectSchemaStmt => {
+            Ok(Node::AlterObjectSchemaStmt(conv_alterobjectschemastmt(mcx, n.cast())?))
+        }
+        tags::T_AlterOwnerStmt => {
+            Ok(Node::AlterOwnerStmt(conv_alterownerstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterOperatorStmt => {
+            Ok(Node::AlterOperatorStmt(conv_alteroperatorstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterTypeStmt => Ok(Node::AlterTypeStmt(conv_altertypestmt(mcx, n.cast())?)),
+        tags::T_AlterDefaultPrivilegesStmt => Ok(Node::AlterDefaultPrivilegesStmt(
+            conv_alterdefaultprivilegesstmt(mcx, n.cast())?,
+        )),
+        tags::T_AlterRoleStmt => Ok(Node::AlterRoleStmt(conv_alterrolestmt(mcx, n.cast())?)),
+        tags::T_AlterRoleSetStmt => {
+            Ok(Node::AlterRoleSetStmt(conv_alterrolesetstmt(mcx, n.cast())?))
+        }
+        tags::T_DropOwnedStmt => Ok(Node::DropOwnedStmt(conv_dropownedstmt(mcx, n.cast())?)),
+        tags::T_ReassignOwnedStmt => {
+            Ok(Node::ReassignOwnedStmt(conv_reassignownedstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterTableSpaceOptionsStmt => Ok(Node::AlterTableSpaceOptionsStmt(
+            conv_altertablespaceoptionsstmt(mcx, n.cast())?,
+        )),
+        tags::T_AlterTableMoveAllStmt => {
+            Ok(Node::AlterTableMoveAllStmt(conv_altertablemoveallstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterExtensionStmt => {
+            Ok(Node::AlterExtensionStmt(conv_alterextensionstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterExtensionContentsStmt => Ok(Node::AlterExtensionContentsStmt(
+            conv_alterextensioncontentsstmt(mcx, n.cast())?,
+        )),
+        tags::T_AlterFdwStmt => Ok(Node::AlterFdwStmt(conv_alterfdwstmt(mcx, n.cast())?)),
+        tags::T_AlterForeignServerStmt => {
+            Ok(Node::AlterForeignServerStmt(conv_alterforeignserverstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterUserMappingStmt => {
+            Ok(Node::AlterUserMappingStmt(conv_alterusermappingstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterPolicyStmt => {
+            Ok(Node::AlterPolicyStmt(conv_alterpolicystmt(mcx, n.cast())?))
+        }
+        tags::T_AlterDatabaseStmt => {
+            Ok(Node::AlterDatabaseStmt(conv_alterdatabasestmt(mcx, n.cast())?))
+        }
+        tags::T_AlterDatabaseRefreshCollStmt => Ok(Node::AlterDatabaseRefreshCollStmt(
+            conv_alterdatabaserefreshcollstmt(mcx, n.cast())?,
+        )),
+        tags::T_AlterDatabaseSetStmt => {
+            Ok(Node::AlterDatabaseSetStmt(conv_alterdatabasesetstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterTSDictionaryStmt => {
+            Ok(Node::AlterTSDictionaryStmt(conv_altertsdictionarystmt(mcx, n.cast())?))
+        }
+        tags::T_AlterTSConfigurationStmt => Ok(Node::AlterTSConfigurationStmt(
+            conv_altertsconfigurationstmt(mcx, n.cast())?,
+        )),
+        tags::T_AlterPublicationStmt => {
+            Ok(Node::AlterPublicationStmt(conv_alterpublicationstmt(mcx, n.cast())?))
+        }
+        tags::T_AlterSubscriptionStmt => {
+            Ok(Node::AlterSubscriptionStmt(conv_altersubscriptionstmt(mcx, n.cast())?))
+        }
+
+        // --- anything else: the absent DDL/utility node families (F4) ---
         other => unported(other, node_tag_name(other)),
     }
 }

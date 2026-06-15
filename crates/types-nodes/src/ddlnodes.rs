@@ -24,7 +24,7 @@ use types_core::primitive::{Oid, ParseLoc, RelFileNumber};
 use types_error::PgResult;
 
 use crate::nodes::NodePtr;
-use crate::parsenodes::{ObjectType, RoleSpecType};
+use crate::parsenodes::{DropBehavior, ObjectType, RoleSpecType};
 use crate::primnodes::OnCommitAction;
 use crate::partition::{PartitionRangeDatumKind, PartitionStrategy};
 use crate::rawnodes::{copy_node_vec, copy_opt_node, copy_opt_str, SortByDir, SortByNulls};
@@ -1143,6 +1143,1027 @@ impl CreateAmStmt<'_> {
             amname: copy_opt_str(&self.amname, mcx)?,
             handler_name: copy_node_vec(&self.handler_name, mcx)?,
             amtype: self.amtype,
+        })
+    }
+}
+
+// ===========================================================================
+// ALTER / DROP family enums (nodes/parsenodes.h)
+// ===========================================================================
+
+/// `AlterTableType` (`nodes/parsenodes.h`) — the subtype of an
+/// [`AlterTableCmd`]. Values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterTableType {
+    /// add column
+    #[default]
+    AT_AddColumn = 0,
+    /// implicitly via CREATE OR REPLACE VIEW
+    AT_AddColumnToView = 1,
+    /// alter column default
+    AT_ColumnDefault = 2,
+    /// add a pre-cooked column default
+    AT_CookedColumnDefault = 3,
+    /// alter column drop not null
+    AT_DropNotNull = 4,
+    /// alter column set not null
+    AT_SetNotNull = 5,
+    /// alter column set expression
+    AT_SetExpression = 6,
+    /// alter column drop expression
+    AT_DropExpression = 7,
+    /// alter column set statistics
+    AT_SetStatistics = 8,
+    /// alter column set ( options )
+    AT_SetOptions = 9,
+    /// alter column reset ( options )
+    AT_ResetOptions = 10,
+    /// alter column set storage
+    AT_SetStorage = 11,
+    /// alter column set compression
+    AT_SetCompression = 12,
+    /// drop column
+    AT_DropColumn = 13,
+    /// add index
+    AT_AddIndex = 14,
+    /// internal to commands/tablecmds.c
+    AT_ReAddIndex = 15,
+    /// add constraint
+    AT_AddConstraint = 16,
+    /// internal to commands/tablecmds.c
+    AT_ReAddConstraint = 17,
+    /// internal to commands/tablecmds.c
+    AT_ReAddDomainConstraint = 18,
+    /// alter constraint
+    AT_AlterConstraint = 19,
+    /// validate constraint
+    AT_ValidateConstraint = 20,
+    /// add constraint using existing index
+    AT_AddIndexConstraint = 21,
+    /// drop constraint
+    AT_DropConstraint = 22,
+    /// internal to commands/tablecmds.c
+    AT_ReAddComment = 23,
+    /// alter column type
+    AT_AlterColumnType = 24,
+    /// alter column OPTIONS (...)
+    AT_AlterColumnGenericOptions = 25,
+    /// change owner
+    AT_ChangeOwner = 26,
+    /// CLUSTER ON
+    AT_ClusterOn = 27,
+    /// SET WITHOUT CLUSTER
+    AT_DropCluster = 28,
+    /// SET LOGGED
+    AT_SetLogged = 29,
+    /// SET UNLOGGED
+    AT_SetUnLogged = 30,
+    /// SET WITHOUT OIDS
+    AT_DropOids = 31,
+    /// SET ACCESS METHOD
+    AT_SetAccessMethod = 32,
+    /// SET TABLESPACE
+    AT_SetTableSpace = 33,
+    /// SET (...) -- AM specific parameters
+    AT_SetRelOptions = 34,
+    /// RESET (...) -- AM specific parameters
+    AT_ResetRelOptions = 35,
+    /// replace reloption list in its entirety
+    AT_ReplaceRelOptions = 36,
+    /// ENABLE TRIGGER name
+    AT_EnableTrig = 37,
+    /// ENABLE ALWAYS TRIGGER name
+    AT_EnableAlwaysTrig = 38,
+    /// ENABLE REPLICA TRIGGER name
+    AT_EnableReplicaTrig = 39,
+    /// DISABLE TRIGGER name
+    AT_DisableTrig = 40,
+    /// ENABLE TRIGGER ALL
+    AT_EnableTrigAll = 41,
+    /// DISABLE TRIGGER ALL
+    AT_DisableTrigAll = 42,
+    /// ENABLE TRIGGER USER
+    AT_EnableTrigUser = 43,
+    /// DISABLE TRIGGER USER
+    AT_DisableTrigUser = 44,
+    /// ENABLE RULE name
+    AT_EnableRule = 45,
+    /// ENABLE ALWAYS RULE name
+    AT_EnableAlwaysRule = 46,
+    /// ENABLE REPLICA RULE name
+    AT_EnableReplicaRule = 47,
+    /// DISABLE RULE name
+    AT_DisableRule = 48,
+    /// INHERIT parent
+    AT_AddInherit = 49,
+    /// NO INHERIT parent
+    AT_DropInherit = 50,
+    /// OF <type_name>
+    AT_AddOf = 51,
+    /// NOT OF
+    AT_DropOf = 52,
+    /// REPLICA IDENTITY
+    AT_ReplicaIdentity = 53,
+    /// ENABLE ROW SECURITY
+    AT_EnableRowSecurity = 54,
+    /// DISABLE ROW SECURITY
+    AT_DisableRowSecurity = 55,
+    /// FORCE ROW SECURITY
+    AT_ForceRowSecurity = 56,
+    /// NO FORCE ROW SECURITY
+    AT_NoForceRowSecurity = 57,
+    /// OPTIONS (...)
+    AT_GenericOptions = 58,
+    /// ATTACH PARTITION
+    AT_AttachPartition = 59,
+    /// DETACH PARTITION
+    AT_DetachPartition = 60,
+    /// DETACH PARTITION FINALIZE
+    AT_DetachPartitionFinalize = 61,
+    /// ADD IDENTITY
+    AT_AddIdentity = 62,
+    /// SET identity column options
+    AT_SetIdentity = 63,
+    /// DROP IDENTITY
+    AT_DropIdentity = 64,
+    /// internal to commands/tablecmds.c
+    AT_ReAddStatistics = 65,
+}
+pub use AlterTableType::{
+    AT_AddColumn, AT_AddColumnToView, AT_AddConstraint, AT_AddIdentity, AT_AddIndex,
+    AT_AddIndexConstraint, AT_AddInherit, AT_AddOf, AT_AlterColumnGenericOptions,
+    AT_AlterColumnType, AT_AlterConstraint, AT_ChangeOwner, AT_ClusterOn, AT_ColumnDefault,
+    AT_CookedColumnDefault, AT_DetachPartition, AT_DetachPartitionFinalize, AT_DisableRowSecurity,
+    AT_DisableRule, AT_DisableTrig, AT_DisableTrigAll, AT_DisableTrigUser, AT_DropCluster,
+    AT_DropColumn, AT_DropConstraint, AT_DropExpression, AT_DropIdentity, AT_DropInherit,
+    AT_DropNotNull, AT_DropOf, AT_DropOids, AT_EnableAlwaysRule, AT_EnableAlwaysTrig,
+    AT_EnableReplicaRule, AT_EnableReplicaTrig, AT_EnableRowSecurity, AT_EnableRule, AT_EnableTrig,
+    AT_EnableTrigAll, AT_EnableTrigUser, AT_ForceRowSecurity, AT_GenericOptions,
+    AT_NoForceRowSecurity, AT_ReAddComment, AT_ReAddConstraint, AT_ReAddDomainConstraint,
+    AT_ReAddIndex, AT_ReAddStatistics, AT_ReplaceRelOptions, AT_ReplicaIdentity, AT_ResetOptions,
+    AT_ResetRelOptions, AT_SetAccessMethod, AT_SetCompression, AT_SetExpression, AT_SetIdentity,
+    AT_SetLogged, AT_SetNotNull, AT_SetOptions, AT_SetRelOptions, AT_SetStatistics, AT_SetStorage,
+    AT_SetTableSpace, AT_SetUnLogged, AT_AttachPartition, AT_ValidateConstraint,
+};
+
+/// `AlterTSConfigType` (`nodes/parsenodes.h`) — kind of an
+/// [`AlterTSConfigurationStmt`]. Values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterTSConfigType {
+    #[default]
+    ALTER_TSCONFIG_ADD_MAPPING = 0,
+    ALTER_TSCONFIG_ALTER_MAPPING_FOR_TOKEN = 1,
+    ALTER_TSCONFIG_REPLACE_DICT = 2,
+    ALTER_TSCONFIG_REPLACE_DICT_FOR_TOKEN = 3,
+    ALTER_TSCONFIG_DROP_MAPPING = 4,
+}
+pub use AlterTSConfigType::{
+    ALTER_TSCONFIG_ADD_MAPPING, ALTER_TSCONFIG_ALTER_MAPPING_FOR_TOKEN,
+    ALTER_TSCONFIG_DROP_MAPPING, ALTER_TSCONFIG_REPLACE_DICT, ALTER_TSCONFIG_REPLACE_DICT_FOR_TOKEN,
+};
+
+/// `AlterPublicationAction` (`nodes/parsenodes.h`) — what
+/// [`AlterPublicationStmt`] does. Values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterPublicationAction {
+    /// add objects to publication
+    #[default]
+    AP_AddObjects = 0,
+    /// remove objects from publication
+    AP_DropObjects = 1,
+    /// set list of objects
+    AP_SetObjects = 2,
+}
+pub use AlterPublicationAction::{AP_AddObjects, AP_DropObjects, AP_SetObjects};
+
+/// `AlterSubscriptionType` (`nodes/parsenodes.h`) — kind of an
+/// [`AlterSubscriptionStmt`]. Values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterSubscriptionType {
+    #[default]
+    ALTER_SUBSCRIPTION_OPTIONS = 0,
+    ALTER_SUBSCRIPTION_CONNECTION = 1,
+    ALTER_SUBSCRIPTION_SET_PUBLICATION = 2,
+    ALTER_SUBSCRIPTION_ADD_PUBLICATION = 3,
+    ALTER_SUBSCRIPTION_DROP_PUBLICATION = 4,
+    ALTER_SUBSCRIPTION_REFRESH = 5,
+    ALTER_SUBSCRIPTION_ENABLED = 6,
+    ALTER_SUBSCRIPTION_SKIP = 7,
+}
+pub use AlterSubscriptionType::{
+    ALTER_SUBSCRIPTION_ADD_PUBLICATION, ALTER_SUBSCRIPTION_CONNECTION, ALTER_SUBSCRIPTION_DROP_PUBLICATION,
+    ALTER_SUBSCRIPTION_ENABLED, ALTER_SUBSCRIPTION_OPTIONS, ALTER_SUBSCRIPTION_REFRESH,
+    ALTER_SUBSCRIPTION_SET_PUBLICATION, ALTER_SUBSCRIPTION_SKIP,
+};
+
+// ===========================================================================
+// ALTER / DROP family — supporting / helper nodes
+// ===========================================================================
+
+/// `PartitionCmd` (`nodes/parsenodes.h`) — ATTACH/DETACH PARTITION subcommand.
+#[derive(Debug)]
+pub struct PartitionCmd<'mcx> {
+    /// `RangeVar *name`.
+    pub name: Option<NodePtr<'mcx>>,
+    /// `PartitionBoundSpec *bound`.
+    pub bound: Option<NodePtr<'mcx>>,
+    pub concurrent: bool,
+}
+
+impl PartitionCmd<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PartitionCmd<'b>> {
+        Ok(PartitionCmd {
+            name: copy_opt_node(&self.name, mcx)?,
+            bound: copy_opt_node(&self.bound, mcx)?,
+            concurrent: self.concurrent,
+        })
+    }
+}
+
+/// `ReplicaIdentityStmt` (`nodes/parsenodes.h`) — REPLICA IDENTITY clause.
+#[derive(Debug)]
+pub struct ReplicaIdentityStmt<'mcx> {
+    pub identity_type: i8,
+    pub name: Option<PgString<'mcx>>,
+}
+
+impl ReplicaIdentityStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReplicaIdentityStmt<'b>> {
+        Ok(ReplicaIdentityStmt {
+            identity_type: self.identity_type,
+            name: copy_opt_str(&self.name, mcx)?,
+        })
+    }
+}
+
+/// `ATAlterConstraint` (`nodes/parsenodes.h`) — ad-hoc node for
+/// `AT_AlterConstraint`.
+#[derive(Debug)]
+pub struct ATAlterConstraint<'mcx> {
+    pub conname: Option<PgString<'mcx>>,
+    pub alterEnforceability: bool,
+    pub is_enforced: bool,
+    pub alterDeferrability: bool,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub alterInheritability: bool,
+    pub noinherit: bool,
+}
+
+impl ATAlterConstraint<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ATAlterConstraint<'b>> {
+        Ok(ATAlterConstraint {
+            conname: copy_opt_str(&self.conname, mcx)?,
+            alterEnforceability: self.alterEnforceability,
+            is_enforced: self.is_enforced,
+            alterDeferrability: self.alterDeferrability,
+            deferrable: self.deferrable,
+            initdeferred: self.initdeferred,
+            alterInheritability: self.alterInheritability,
+            noinherit: self.noinherit,
+        })
+    }
+}
+
+// ===========================================================================
+// ALTER / DROP family — statements
+// ===========================================================================
+
+/// `AlterTableStmt` (`nodes/parsenodes.h`) — ALTER TABLE (and similar).
+#[derive(Debug)]
+pub struct AlterTableStmt<'mcx> {
+    /// `RangeVar *relation`.
+    pub relation: Option<NodePtr<'mcx>>,
+    /// `List *cmds` — list of [`AlterTableCmd`].
+    pub cmds: PgVec<'mcx, NodePtr<'mcx>>,
+    pub objtype: ObjectType,
+    pub missing_ok: bool,
+}
+
+impl AlterTableStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTableStmt<'b>> {
+        Ok(AlterTableStmt {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            cmds: copy_node_vec(&self.cmds, mcx)?,
+            objtype: self.objtype,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterTableCmd` (`nodes/parsenodes.h`) — one subcommand of an ALTER TABLE.
+#[derive(Debug)]
+pub struct AlterTableCmd<'mcx> {
+    pub subtype: AlterTableType,
+    pub name: Option<PgString<'mcx>>,
+    pub num: i16,
+    /// `RoleSpec *newowner`.
+    pub newowner: Option<NodePtr<'mcx>>,
+    pub def: Option<NodePtr<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+    pub recurse: bool,
+}
+
+impl AlterTableCmd<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTableCmd<'b>> {
+        Ok(AlterTableCmd {
+            subtype: self.subtype,
+            name: copy_opt_str(&self.name, mcx)?,
+            num: self.num,
+            newowner: copy_opt_node(&self.newowner, mcx)?,
+            def: copy_opt_node(&self.def, mcx)?,
+            behavior: self.behavior,
+            missing_ok: self.missing_ok,
+            recurse: self.recurse,
+        })
+    }
+}
+
+/// `AlterCollationStmt` (`nodes/parsenodes.h`) — ALTER COLLATION ... REFRESH.
+#[derive(Debug)]
+pub struct AlterCollationStmt<'mcx> {
+    pub collname: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterCollationStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterCollationStmt<'b>> {
+        Ok(AlterCollationStmt {
+            collname: copy_node_vec(&self.collname, mcx)?,
+        })
+    }
+}
+
+/// `AlterDomainStmt` (`nodes/parsenodes.h`) — ALTER DOMAIN.
+#[derive(Debug)]
+pub struct AlterDomainStmt<'mcx> {
+    pub subtype: i8,
+    pub typeName: PgVec<'mcx, NodePtr<'mcx>>,
+    pub name: Option<PgString<'mcx>>,
+    pub def: Option<NodePtr<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+}
+
+impl AlterDomainStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterDomainStmt<'b>> {
+        Ok(AlterDomainStmt {
+            subtype: self.subtype,
+            typeName: copy_node_vec(&self.typeName, mcx)?,
+            name: copy_opt_str(&self.name, mcx)?,
+            def: copy_opt_node(&self.def, mcx)?,
+            behavior: self.behavior,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterEnumStmt` (`nodes/parsenodes.h`) — ALTER TYPE ... (enum value).
+#[derive(Debug)]
+pub struct AlterEnumStmt<'mcx> {
+    pub typeName: PgVec<'mcx, NodePtr<'mcx>>,
+    pub oldVal: Option<PgString<'mcx>>,
+    pub newVal: Option<PgString<'mcx>>,
+    pub newValNeighbor: Option<PgString<'mcx>>,
+    pub newValIsAfter: bool,
+    pub skipIfNewValExists: bool,
+}
+
+impl AlterEnumStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterEnumStmt<'b>> {
+        Ok(AlterEnumStmt {
+            typeName: copy_node_vec(&self.typeName, mcx)?,
+            oldVal: copy_opt_str(&self.oldVal, mcx)?,
+            newVal: copy_opt_str(&self.newVal, mcx)?,
+            newValNeighbor: copy_opt_str(&self.newValNeighbor, mcx)?,
+            newValIsAfter: self.newValIsAfter,
+            skipIfNewValExists: self.skipIfNewValExists,
+        })
+    }
+}
+
+/// `AlterStatsStmt` (`nodes/parsenodes.h`) — ALTER STATISTICS.
+#[derive(Debug)]
+pub struct AlterStatsStmt<'mcx> {
+    pub defnames: PgVec<'mcx, NodePtr<'mcx>>,
+    pub stxstattarget: Option<NodePtr<'mcx>>,
+    pub missing_ok: bool,
+}
+
+impl AlterStatsStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterStatsStmt<'b>> {
+        Ok(AlterStatsStmt {
+            defnames: copy_node_vec(&self.defnames, mcx)?,
+            stxstattarget: copy_opt_node(&self.stxstattarget, mcx)?,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterSeqStmt` (`nodes/parsenodes.h`) — ALTER SEQUENCE.
+#[derive(Debug)]
+pub struct AlterSeqStmt<'mcx> {
+    /// `RangeVar *sequence`.
+    pub sequence: Option<NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub for_identity: bool,
+    pub missing_ok: bool,
+}
+
+impl AlterSeqStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterSeqStmt<'b>> {
+        Ok(AlterSeqStmt {
+            sequence: copy_opt_node(&self.sequence, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            for_identity: self.for_identity,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterOpFamilyStmt` (`nodes/parsenodes.h`) — ALTER OPERATOR FAMILY.
+#[derive(Debug)]
+pub struct AlterOpFamilyStmt<'mcx> {
+    pub opfamilyname: PgVec<'mcx, NodePtr<'mcx>>,
+    pub amname: Option<PgString<'mcx>>,
+    pub isDrop: bool,
+    pub items: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterOpFamilyStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterOpFamilyStmt<'b>> {
+        Ok(AlterOpFamilyStmt {
+            opfamilyname: copy_node_vec(&self.opfamilyname, mcx)?,
+            amname: copy_opt_str(&self.amname, mcx)?,
+            isDrop: self.isDrop,
+            items: copy_node_vec(&self.items, mcx)?,
+        })
+    }
+}
+
+/// `AlterFunctionStmt` (`nodes/parsenodes.h`) — ALTER FUNCTION.
+#[derive(Debug)]
+pub struct AlterFunctionStmt<'mcx> {
+    pub objtype: ObjectType,
+    /// `ObjectWithArgs *func`.
+    pub func: Option<NodePtr<'mcx>>,
+    pub actions: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterFunctionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterFunctionStmt<'b>> {
+        Ok(AlterFunctionStmt {
+            objtype: self.objtype,
+            func: copy_opt_node(&self.func, mcx)?,
+            actions: copy_node_vec(&self.actions, mcx)?,
+        })
+    }
+}
+
+/// `DropStmt` (`nodes/parsenodes.h`) — DROP <object>.
+#[derive(Debug)]
+pub struct DropStmt<'mcx> {
+    pub objects: PgVec<'mcx, NodePtr<'mcx>>,
+    pub removeType: ObjectType,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+    pub concurrent: bool,
+}
+
+impl DropStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropStmt<'b>> {
+        Ok(DropStmt {
+            objects: copy_node_vec(&self.objects, mcx)?,
+            removeType: self.removeType,
+            behavior: self.behavior,
+            missing_ok: self.missing_ok,
+            concurrent: self.concurrent,
+        })
+    }
+}
+
+/// `RenameStmt` (`nodes/parsenodes.h`) — ALTER ... RENAME.
+#[derive(Debug)]
+pub struct RenameStmt<'mcx> {
+    pub renameType: ObjectType,
+    pub relationType: ObjectType,
+    /// `RangeVar *relation`.
+    pub relation: Option<NodePtr<'mcx>>,
+    pub object: Option<NodePtr<'mcx>>,
+    pub subname: Option<PgString<'mcx>>,
+    pub newname: Option<PgString<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+}
+
+impl RenameStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RenameStmt<'b>> {
+        Ok(RenameStmt {
+            renameType: self.renameType,
+            relationType: self.relationType,
+            relation: copy_opt_node(&self.relation, mcx)?,
+            object: copy_opt_node(&self.object, mcx)?,
+            subname: copy_opt_str(&self.subname, mcx)?,
+            newname: copy_opt_str(&self.newname, mcx)?,
+            behavior: self.behavior,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterObjectDependsStmt` (`nodes/parsenodes.h`) — ALTER ... DEPENDS ON
+/// EXTENSION.
+#[derive(Debug)]
+pub struct AlterObjectDependsStmt<'mcx> {
+    pub objectType: ObjectType,
+    /// `RangeVar *relation`.
+    pub relation: Option<NodePtr<'mcx>>,
+    pub object: Option<NodePtr<'mcx>>,
+    /// `String *extname` — carried as a `Node` (String value node).
+    pub extname: Option<NodePtr<'mcx>>,
+    pub remove: bool,
+}
+
+impl AlterObjectDependsStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterObjectDependsStmt<'b>> {
+        Ok(AlterObjectDependsStmt {
+            objectType: self.objectType,
+            relation: copy_opt_node(&self.relation, mcx)?,
+            object: copy_opt_node(&self.object, mcx)?,
+            extname: copy_opt_node(&self.extname, mcx)?,
+            remove: self.remove,
+        })
+    }
+}
+
+/// `AlterObjectSchemaStmt` (`nodes/parsenodes.h`) — ALTER ... SET SCHEMA.
+#[derive(Debug)]
+pub struct AlterObjectSchemaStmt<'mcx> {
+    pub objectType: ObjectType,
+    /// `RangeVar *relation`.
+    pub relation: Option<NodePtr<'mcx>>,
+    pub object: Option<NodePtr<'mcx>>,
+    pub newschema: Option<PgString<'mcx>>,
+    pub missing_ok: bool,
+}
+
+impl AlterObjectSchemaStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterObjectSchemaStmt<'b>> {
+        Ok(AlterObjectSchemaStmt {
+            objectType: self.objectType,
+            relation: copy_opt_node(&self.relation, mcx)?,
+            object: copy_opt_node(&self.object, mcx)?,
+            newschema: copy_opt_str(&self.newschema, mcx)?,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterOwnerStmt` (`nodes/parsenodes.h`) — ALTER ... OWNER TO.
+#[derive(Debug)]
+pub struct AlterOwnerStmt<'mcx> {
+    pub objectType: ObjectType,
+    /// `RangeVar *relation`.
+    pub relation: Option<NodePtr<'mcx>>,
+    pub object: Option<NodePtr<'mcx>>,
+    /// `RoleSpec *newowner`.
+    pub newowner: Option<NodePtr<'mcx>>,
+}
+
+impl AlterOwnerStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterOwnerStmt<'b>> {
+        Ok(AlterOwnerStmt {
+            objectType: self.objectType,
+            relation: copy_opt_node(&self.relation, mcx)?,
+            object: copy_opt_node(&self.object, mcx)?,
+            newowner: copy_opt_node(&self.newowner, mcx)?,
+        })
+    }
+}
+
+/// `AlterOperatorStmt` (`nodes/parsenodes.h`) — ALTER OPERATOR.
+#[derive(Debug)]
+pub struct AlterOperatorStmt<'mcx> {
+    /// `ObjectWithArgs *opername`.
+    pub opername: Option<NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterOperatorStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterOperatorStmt<'b>> {
+        Ok(AlterOperatorStmt {
+            opername: copy_opt_node(&self.opername, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterTypeStmt` (`nodes/parsenodes.h`) — ALTER TYPE (base type properties).
+#[derive(Debug)]
+pub struct AlterTypeStmt<'mcx> {
+    pub typeName: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterTypeStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTypeStmt<'b>> {
+        Ok(AlterTypeStmt {
+            typeName: copy_node_vec(&self.typeName, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterDefaultPrivilegesStmt` (`nodes/parsenodes.h`) — ALTER DEFAULT
+/// PRIVILEGES. The `action` is a `GrantStmt` (GRANT/REVOKE family, F4) carried
+/// as a `Node`.
+#[derive(Debug)]
+pub struct AlterDefaultPrivilegesStmt<'mcx> {
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `GrantStmt *action`.
+    pub action: Option<NodePtr<'mcx>>,
+}
+
+impl AlterDefaultPrivilegesStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterDefaultPrivilegesStmt<'b>> {
+        Ok(AlterDefaultPrivilegesStmt {
+            options: copy_node_vec(&self.options, mcx)?,
+            action: copy_opt_node(&self.action, mcx)?,
+        })
+    }
+}
+
+/// `AlterRoleStmt` (`nodes/parsenodes.h`) — ALTER ROLE.
+#[derive(Debug)]
+pub struct AlterRoleStmt<'mcx> {
+    /// `RoleSpec *role`.
+    pub role: Option<NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `+1 = add members, -1 = drop members`.
+    pub action: i32,
+}
+
+impl AlterRoleStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterRoleStmt<'b>> {
+        Ok(AlterRoleStmt {
+            role: copy_opt_node(&self.role, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            action: self.action,
+        })
+    }
+}
+
+/// `AlterRoleSetStmt` (`nodes/parsenodes.h`) — ALTER ROLE ... SET. The
+/// `setstmt` is a `VariableSetStmt` (SET family, F4) carried as a `Node`.
+#[derive(Debug)]
+pub struct AlterRoleSetStmt<'mcx> {
+    /// `RoleSpec *role`.
+    pub role: Option<NodePtr<'mcx>>,
+    pub database: Option<PgString<'mcx>>,
+    /// `VariableSetStmt *setstmt`.
+    pub setstmt: Option<NodePtr<'mcx>>,
+}
+
+impl AlterRoleSetStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterRoleSetStmt<'b>> {
+        Ok(AlterRoleSetStmt {
+            role: copy_opt_node(&self.role, mcx)?,
+            database: copy_opt_str(&self.database, mcx)?,
+            setstmt: copy_opt_node(&self.setstmt, mcx)?,
+        })
+    }
+}
+
+/// `DropOwnedStmt` (`nodes/parsenodes.h`) — DROP OWNED.
+#[derive(Debug)]
+pub struct DropOwnedStmt<'mcx> {
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub behavior: DropBehavior,
+}
+
+impl DropOwnedStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropOwnedStmt<'b>> {
+        Ok(DropOwnedStmt {
+            roles: copy_node_vec(&self.roles, mcx)?,
+            behavior: self.behavior,
+        })
+    }
+}
+
+/// `ReassignOwnedStmt` (`nodes/parsenodes.h`) — REASSIGN OWNED.
+#[derive(Debug)]
+pub struct ReassignOwnedStmt<'mcx> {
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `RoleSpec *newrole`.
+    pub newrole: Option<NodePtr<'mcx>>,
+}
+
+impl ReassignOwnedStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReassignOwnedStmt<'b>> {
+        Ok(ReassignOwnedStmt {
+            roles: copy_node_vec(&self.roles, mcx)?,
+            newrole: copy_opt_node(&self.newrole, mcx)?,
+        })
+    }
+}
+
+/// `AlterTableSpaceOptionsStmt` (`nodes/parsenodes.h`) — ALTER TABLESPACE ...
+/// SET/RESET.
+#[derive(Debug)]
+pub struct AlterTableSpaceOptionsStmt<'mcx> {
+    pub tablespacename: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub isReset: bool,
+}
+
+impl AlterTableSpaceOptionsStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTableSpaceOptionsStmt<'b>> {
+        Ok(AlterTableSpaceOptionsStmt {
+            tablespacename: copy_opt_str(&self.tablespacename, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            isReset: self.isReset,
+        })
+    }
+}
+
+/// `AlterTableMoveAllStmt` (`nodes/parsenodes.h`) — ALTER TABLESPACE ... MOVE
+/// ALL.
+#[derive(Debug)]
+pub struct AlterTableMoveAllStmt<'mcx> {
+    pub orig_tablespacename: Option<PgString<'mcx>>,
+    pub objtype: ObjectType,
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub new_tablespacename: Option<PgString<'mcx>>,
+    pub nowait: bool,
+}
+
+impl AlterTableMoveAllStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTableMoveAllStmt<'b>> {
+        Ok(AlterTableMoveAllStmt {
+            orig_tablespacename: copy_opt_str(&self.orig_tablespacename, mcx)?,
+            objtype: self.objtype,
+            roles: copy_node_vec(&self.roles, mcx)?,
+            new_tablespacename: copy_opt_str(&self.new_tablespacename, mcx)?,
+            nowait: self.nowait,
+        })
+    }
+}
+
+/// `AlterExtensionStmt` (`nodes/parsenodes.h`) — ALTER EXTENSION ... UPDATE.
+#[derive(Debug)]
+pub struct AlterExtensionStmt<'mcx> {
+    pub extname: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterExtensionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterExtensionStmt<'b>> {
+        Ok(AlterExtensionStmt {
+            extname: copy_opt_str(&self.extname, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterExtensionContentsStmt` (`nodes/parsenodes.h`) — ALTER EXTENSION ...
+/// ADD/DROP.
+#[derive(Debug)]
+pub struct AlterExtensionContentsStmt<'mcx> {
+    pub extname: Option<PgString<'mcx>>,
+    /// `+1 = add object, -1 = drop object`.
+    pub action: i32,
+    pub objtype: ObjectType,
+    pub object: Option<NodePtr<'mcx>>,
+}
+
+impl AlterExtensionContentsStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterExtensionContentsStmt<'b>> {
+        Ok(AlterExtensionContentsStmt {
+            extname: copy_opt_str(&self.extname, mcx)?,
+            action: self.action,
+            objtype: self.objtype,
+            object: copy_opt_node(&self.object, mcx)?,
+        })
+    }
+}
+
+/// `AlterFdwStmt` (`nodes/parsenodes.h`) — ALTER FOREIGN DATA WRAPPER.
+#[derive(Debug)]
+pub struct AlterFdwStmt<'mcx> {
+    pub fdwname: Option<PgString<'mcx>>,
+    pub func_options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterFdwStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterFdwStmt<'b>> {
+        Ok(AlterFdwStmt {
+            fdwname: copy_opt_str(&self.fdwname, mcx)?,
+            func_options: copy_node_vec(&self.func_options, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterForeignServerStmt` (`nodes/parsenodes.h`) — ALTER SERVER.
+#[derive(Debug)]
+pub struct AlterForeignServerStmt<'mcx> {
+    pub servername: Option<PgString<'mcx>>,
+    pub version: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub has_version: bool,
+}
+
+impl AlterForeignServerStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterForeignServerStmt<'b>> {
+        Ok(AlterForeignServerStmt {
+            servername: copy_opt_str(&self.servername, mcx)?,
+            version: copy_opt_str(&self.version, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            has_version: self.has_version,
+        })
+    }
+}
+
+/// `AlterUserMappingStmt` (`nodes/parsenodes.h`) — ALTER USER MAPPING.
+#[derive(Debug)]
+pub struct AlterUserMappingStmt<'mcx> {
+    /// `RoleSpec *user`.
+    pub user: Option<NodePtr<'mcx>>,
+    pub servername: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterUserMappingStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterUserMappingStmt<'b>> {
+        Ok(AlterUserMappingStmt {
+            user: copy_opt_node(&self.user, mcx)?,
+            servername: copy_opt_str(&self.servername, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterPolicyStmt` (`nodes/parsenodes.h`) — ALTER POLICY.
+#[derive(Debug)]
+pub struct AlterPolicyStmt<'mcx> {
+    pub policy_name: Option<PgString<'mcx>>,
+    /// `RangeVar *table`.
+    pub table: Option<NodePtr<'mcx>>,
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub qual: Option<NodePtr<'mcx>>,
+    pub with_check: Option<NodePtr<'mcx>>,
+}
+
+impl AlterPolicyStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterPolicyStmt<'b>> {
+        Ok(AlterPolicyStmt {
+            policy_name: copy_opt_str(&self.policy_name, mcx)?,
+            table: copy_opt_node(&self.table, mcx)?,
+            roles: copy_node_vec(&self.roles, mcx)?,
+            qual: copy_opt_node(&self.qual, mcx)?,
+            with_check: copy_opt_node(&self.with_check, mcx)?,
+        })
+    }
+}
+
+/// `AlterDatabaseStmt` (`nodes/parsenodes.h`) — ALTER DATABASE.
+#[derive(Debug)]
+pub struct AlterDatabaseStmt<'mcx> {
+    pub dbname: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterDatabaseStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterDatabaseStmt<'b>> {
+        Ok(AlterDatabaseStmt {
+            dbname: copy_opt_str(&self.dbname, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterDatabaseRefreshCollStmt` (`nodes/parsenodes.h`) — ALTER DATABASE ...
+/// REFRESH COLLATION VERSION.
+#[derive(Debug)]
+pub struct AlterDatabaseRefreshCollStmt<'mcx> {
+    pub dbname: Option<PgString<'mcx>>,
+}
+
+impl AlterDatabaseRefreshCollStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterDatabaseRefreshCollStmt<'b>> {
+        Ok(AlterDatabaseRefreshCollStmt {
+            dbname: copy_opt_str(&self.dbname, mcx)?,
+        })
+    }
+}
+
+/// `AlterDatabaseSetStmt` (`nodes/parsenodes.h`) — ALTER DATABASE ... SET. The
+/// `setstmt` is a `VariableSetStmt` (SET family, F4) carried as a `Node`.
+#[derive(Debug)]
+pub struct AlterDatabaseSetStmt<'mcx> {
+    pub dbname: Option<PgString<'mcx>>,
+    /// `VariableSetStmt *setstmt`.
+    pub setstmt: Option<NodePtr<'mcx>>,
+}
+
+impl AlterDatabaseSetStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterDatabaseSetStmt<'b>> {
+        Ok(AlterDatabaseSetStmt {
+            dbname: copy_opt_str(&self.dbname, mcx)?,
+            setstmt: copy_opt_node(&self.setstmt, mcx)?,
+        })
+    }
+}
+
+/// `AlterTSDictionaryStmt` (`nodes/parsenodes.h`) — ALTER TEXT SEARCH
+/// DICTIONARY.
+#[derive(Debug)]
+pub struct AlterTSDictionaryStmt<'mcx> {
+    pub dictname: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterTSDictionaryStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTSDictionaryStmt<'b>> {
+        Ok(AlterTSDictionaryStmt {
+            dictname: copy_node_vec(&self.dictname, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `AlterTSConfigurationStmt` (`nodes/parsenodes.h`) — ALTER TEXT SEARCH
+/// CONFIGURATION.
+#[derive(Debug)]
+pub struct AlterTSConfigurationStmt<'mcx> {
+    pub kind: AlterTSConfigType,
+    pub cfgname: PgVec<'mcx, NodePtr<'mcx>>,
+    pub tokentype: PgVec<'mcx, NodePtr<'mcx>>,
+    pub dicts: PgVec<'mcx, NodePtr<'mcx>>,
+    pub override_: bool,
+    pub replace: bool,
+    pub missing_ok: bool,
+}
+
+impl AlterTSConfigurationStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterTSConfigurationStmt<'b>> {
+        Ok(AlterTSConfigurationStmt {
+            kind: self.kind,
+            cfgname: copy_node_vec(&self.cfgname, mcx)?,
+            tokentype: copy_node_vec(&self.tokentype, mcx)?,
+            dicts: copy_node_vec(&self.dicts, mcx)?,
+            override_: self.override_,
+            replace: self.replace,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `AlterPublicationStmt` (`nodes/parsenodes.h`) — ALTER PUBLICATION.
+#[derive(Debug)]
+pub struct AlterPublicationStmt<'mcx> {
+    pub pubname: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub pubobjects: PgVec<'mcx, NodePtr<'mcx>>,
+    pub for_all_tables: bool,
+    pub action: AlterPublicationAction,
+}
+
+impl AlterPublicationStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterPublicationStmt<'b>> {
+        Ok(AlterPublicationStmt {
+            pubname: copy_opt_str(&self.pubname, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            pubobjects: copy_node_vec(&self.pubobjects, mcx)?,
+            for_all_tables: self.for_all_tables,
+            action: self.action,
+        })
+    }
+}
+
+/// `AlterSubscriptionStmt` (`nodes/parsenodes.h`) — ALTER SUBSCRIPTION.
+#[derive(Debug)]
+pub struct AlterSubscriptionStmt<'mcx> {
+    pub kind: AlterSubscriptionType,
+    pub subname: Option<PgString<'mcx>>,
+    pub conninfo: Option<PgString<'mcx>>,
+    pub publication: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+
+impl AlterSubscriptionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterSubscriptionStmt<'b>> {
+        Ok(AlterSubscriptionStmt {
+            kind: self.kind,
+            subname: copy_opt_str(&self.subname, mcx)?,
+            conninfo: copy_opt_str(&self.conninfo, mcx)?,
+            publication: copy_node_vec(&self.publication, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
         })
     }
 }

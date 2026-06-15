@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
@@ -30,4 +30,12 @@ seam_core::seam!(
         colname: Option<&str>,
         resjunk: bool,
     ) -> PgResult<TargetEntry<'mcx>>
+);
+
+seam_core::seam!(
+    /// `FigureColname(node)` (parse_target.c): derive a column name for a
+    /// SELECT-output / FROM-function expression from the raw parse node, using
+    /// the SQL spec's heuristics; returns `"?column?"` when none can be found.
+    /// Reads the raw parse tree only (no `ParseState`). Allocates the name.
+    pub fn FigureColname<'mcx>(mcx: Mcx<'mcx>, node: &Node<'mcx>) -> PgResult<PgString<'mcx>>
 );

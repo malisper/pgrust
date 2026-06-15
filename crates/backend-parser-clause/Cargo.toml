@@ -16,6 +16,9 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-parsenodes = { path = "../types-parsenodes" }
+types-acl = { path = "../types-acl" }
+types-storage = { path = "../types-storage" }
+types-rel = { path = "../types-rel" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 
@@ -27,13 +30,20 @@ backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+types-samplescan = { path = "../types-samplescan" }
 
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-parser-target-seams = { path = "../backend-parser-target-seams" }
 backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
+backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-nodes-copyfuncs-seams = { path = "../backend-nodes-copyfuncs-seams" }
