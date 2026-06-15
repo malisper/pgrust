@@ -40,6 +40,7 @@ types-nodes = { path = "../types-nodes" }
 types-partition = { path = "../types-partition" }
 types-reloptions = { path = "../types-reloptions" }
 types-hash = { path = "../types-hash" }
+types-spgist = { path = "../types-spgist" }
 types-cache = { path = "../types-cache" }
 types-wal = { path = "../types-wal" }
 
