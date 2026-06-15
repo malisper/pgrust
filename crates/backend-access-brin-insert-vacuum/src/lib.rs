@@ -763,6 +763,7 @@ fn summarize_range<'mcx>(
             )
         };
         table_index_build_range_scan::call(
+            mcx,
             heap_rel,
             &state.bs_irel,
             index_info,

@@ -407,6 +407,7 @@ pub fn ExecReScanBitmapHeapScan<'mcx>(
 ) -> PgResult<()> {
     // TableScanDesc scan = node->ss.ss_currentScanDesc;
     // if (scan)
+    let mcx = estate.es_query_cxt;
     if let Some(scan) = node.ss_currentScanDesc.as_mut() {
         // End iteration on iterators saved in scan descriptor if they have not
         // already been cleaned up.
@@ -418,7 +419,7 @@ pub fn ExecReScanBitmapHeapScan<'mcx>(
 
         // rescan to release any page pin
         // table_rescan(node->ss.ss_currentScanDesc, NULL);
-        tableam_bm::table_rescan::call(scan)?;
+        tableam_bm::table_rescan::call(mcx, scan)?;
     }
 
     // release bitmaps and buffers if any

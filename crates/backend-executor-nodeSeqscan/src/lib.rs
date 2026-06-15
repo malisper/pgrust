@@ -723,8 +723,9 @@ pub fn ExecReScanSeqScan<'mcx>(
 ) -> PgResult<()> {
     // scan = node->ss.ss_currentScanDesc;
     // if (scan != NULL) table_rescan(scan, NULL);  /* scan desc / new keys */
+    let mcx = estate.es_query_cxt;
     if let Some(scandesc) = node.ss_currentScanDesc.as_deref_mut() {
-        tableam_seam::table_rescan::call(scandesc)?;
+        tableam_seam::table_rescan::call(mcx, scandesc)?;
     }
 
     // ExecScanReScan((ScanState *) node);

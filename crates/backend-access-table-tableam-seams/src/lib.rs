@@ -71,6 +71,7 @@ seam_core::seam!(
     /// [`table_index_build_scan`], the sanctioned build-path seam.
     #[allow(clippy::type_complexity)]
     pub fn table_index_build_range_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         table_rel: &types_rel::Relation<'mcx>,
         index_rel: &types_rel::Relation<'mcx>,
         index_info: &mut types_nodes::execnodes::IndexInfo,
@@ -173,8 +174,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `table_rescan(scan, NULL)` (access/tableam.h, static inline) — restart
     /// the scan `scan` with no new scan keys (`nodeSeqscan.c`'s
-    /// `ExecReScanSeqScan`). `Err` carries the AM's `ereport(ERROR)`.
-    pub fn table_rescan<'mcx>(scan: &mut TableScanDescData<'mcx>) -> PgResult<()>
+    /// `ExecReScanSeqScan`). The leading `mcx` (convention A) is the arena the
+    /// AM reinitializes the scan in. `Err` carries the AM's `ereport(ERROR)`.
+    pub fn table_rescan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

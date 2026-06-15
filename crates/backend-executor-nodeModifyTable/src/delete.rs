@@ -71,6 +71,7 @@ pub fn ExecDeleteAct<'mcx>(
     tupleid: &ItemPointerData,
     changing_part: bool,
 ) -> PgResult<TM_Result> {
+    let mcx = estate.es_query_cxt;
     let snapshot = estate.es_snapshot.as_deref().cloned();
     let crosscheck = estate.es_crosscheck_snapshot.as_deref().cloned();
     let output_cid = estate.es_output_cid;
@@ -81,6 +82,7 @@ pub fn ExecDeleteAct<'mcx>(
         .expect("ExecDeleteAct: ri_RelationDesc must be open");
 
     backend_access_table_tableam::table_tuple_delete(
+        mcx,
         rel,
         tupleid,
         output_cid,
