@@ -70,3 +70,15 @@ seam_core::seam!(
         proclist: &[AmprocRow],
     ) -> PgResult<mcx::PgVec<'mcx, OpFamilyOpFuncGroup>>
 );
+
+seam_core::seam!(
+    /// `opfamily_can_sort_type(opfamilyoid, datatypeoid)` (amvalidate.c:271) —
+    /// is `datatypeoid` a legitimate input type for the btree opfamily? Returns
+    /// `OidIsValid(opclass_for_family_datatype(BTREE_AM_OID, opfamilyoid,
+    /// datatypeoid))`. SP-GiST's `spgproperty` uses it for the
+    /// `AMPROP_DISTANCE_ORDERABLE` inquiry (spgutils.c:1355); gist/spgist
+    /// validators use it too. The owner (`backend-access-index-amvalidate`,
+    /// amvalidate.c) is unported, so this panics loudly until it lands. `Err`
+    /// carries the catcache failure surface.
+    pub fn opfamily_can_sort_type(opfamilyoid: Oid, datatypeoid: Oid) -> PgResult<bool>
+);

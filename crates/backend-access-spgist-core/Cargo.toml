@@ -1,0 +1,70 @@
+[package]
+name = "backend-access-spgist-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_spgist_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-scan = { path = "../types-scan" }
+types-spgist = { path = "../types-spgist" }
+types-amvalidate = { path = "../types-amvalidate" }
+types-opclass = { path = "../types-opclass" }
+
+# ereport / elog.
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Page-byte primitives (bufpage.c).
+backend-storage-page = { path = "../backend-storage-page" }
+
+# Tuple-form/deform cores (heaptuple.c / indextuple.c / tupdesc.c).
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+
+# Buffer manager (bufmgr.c).
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# Free-space map (indexfsm.c): GetFreeIndexPage.
+backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+
+# reloptions (reloptions.c): build_reloptions_spgist.
+backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
+
+# Transaction state (xact.c): GetTopTransactionIdIfAny.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+
+# Relcache accessors (rel.h / relcache.c): rd_amcache_spgist, index_getprocid.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+# lsyscache lookups (lsyscache.c): lookup_pg_type, get_base_type, get_atttype,
+# get_index_column_opclass, get_opclass_opfamily_and_input_type, get_op_rettype,
+# opfamily_can_sort_type (added here).
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+types-cache = { path = "../types-cache" }
+
+# syscache list lookups (syscache.c): search_amop_list.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+
+# amvalidate library (amvalidate.c): opfamily_can_sort_type.
+backend-access-index-amvalidate-seams = { path = "../backend-access-index-amvalidate-seams" }
+
+# Binary-coercibility test (parse_coerce.c): IsBinaryCoercible.
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+
+# This unit's own outward seams (initSpGistState / spgGetCache / page mgmt /
+# tuple builders / spgExtractNodeLabels / spgoptions / spgproperty), installed
+# from init_seams() and consumed downstream by spgdoinsert / spgscan / spgvacuum.
+backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
+
+[dev-dependencies]
