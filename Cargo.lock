@@ -9850,8 +9850,10 @@ dependencies = [
 name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-binaryheap",
  "backend-replication-logical-reorderbuffer-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-cache-inval-seams",
  "mcx",
  "types-core",
  "types-error",
