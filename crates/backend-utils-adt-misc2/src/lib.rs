@@ -46,6 +46,9 @@ pub mod scalars;
 pub fn init_seams() {
     backend_utils_adt_misc2_seams::eoh_get_flat_size::set(expandeddatum::eoh_get_flat_size);
     backend_utils_adt_misc2_seams::eoh_flatten_into::set(expandeddatum::eoh_flatten_into);
+    backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v::set(
+        expandeddatum::make_expanded_object_read_only_internal_v,
+    );
 
     // regproc.c printable-name / name-parsing helpers (owned seam crate
     // `backend-utils-adt-regproc-seams`). `format_procedure`/`format_operator`

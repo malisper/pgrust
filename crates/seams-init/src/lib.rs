@@ -984,7 +984,6 @@ mod recurrence_guard {
         ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
-        ("backend_utils_adt_misc2", "make_expanded_object_read_only_internal_v"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
         // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned
