@@ -895,8 +895,12 @@ pub fn BackgroundWorkerInitializeConnection(
 
     backend_utils_init_postinit_seams::init_postgres_by_name::call(dbname, username, init_flags)?;
 
-    // it had better not have gotten out of "init" mode yet (the seam owner
-    // performs the IsInitProcessingMode check + SetProcessingMode(Normal)).
+    // it had better not have gotten out of "init" mode yet.
+    if !backend_utils_init_miscinit_seams::is_init_processing_mode::call() {
+        return Err(PgError::new(ERROR, "invalid processing mode in background worker")
+            .with_error_location(loc(902, "BackgroundWorkerInitializeConnection")));
+    }
+    backend_utils_init_miscinit_seams::set_processing_mode_normal::call();
     Ok(())
 }
 
@@ -928,6 +932,12 @@ pub fn BackgroundWorkerInitializeConnectionByOid(
 
     backend_utils_init_postinit_seams::init_postgres_by_oid::call(dboid, useroid, init_flags)?;
 
+    // it had better not have gotten out of "init" mode yet.
+    if !backend_utils_init_miscinit_seams::is_init_processing_mode::call() {
+        return Err(PgError::new(ERROR, "invalid processing mode in background worker")
+            .with_error_location(loc(937, "BackgroundWorkerInitializeConnectionByOid")));
+    }
+    backend_utils_init_miscinit_seams::set_processing_mode_normal::call();
     Ok(())
 }
 

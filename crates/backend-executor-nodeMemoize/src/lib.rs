@@ -174,8 +174,16 @@ fn prepare_probe_slot<'mcx>(
         }
     }
 
-    // ExecStoreVirtualTuple(pslot): the probe slot now holds num_keys virtual
-    // attributes (the owned values/nulls vectors are the materialized slot).
+    // ExecStoreVirtualTuple(pslot): materialize the prepared values/nulls into
+    // the real probe slot so the expression engine (cache_eq_expr's OUTER_VAR)
+    // and the cache-key copy can read them.
+    let probeslot = mstate
+        .probeslot
+        .ok_or_else(|| elog_internal("Memoize probeslot not initialized"))?;
+    let values: Vec<DatumV<'_>> = mstate.probe_values.iter().cloned().collect();
+    let isnull: Vec<bool> = mstate.probe_isnull.iter().copied().collect();
+    execTuples::store_virtual_values::call(estate, probeslot, &values, &isnull)?;
+
     Ok(())
 }
 
@@ -301,16 +309,31 @@ fn memoize_hash_equal<'mcx>(
         // econtext->ecxt_innertuple = tslot; econtext->ecxt_outertuple = pslot;
         // return ExecQual(mstate->cache_eq_expr, econtext);
         //
-        // The table slot (the cached entry's deformed `params`) is the inner
-        // tuple and the probe slot is the outer tuple; the owned model holds
-        // those deformed values in `table_values`/`probe_values`. The expression
-        // engine (the owner leaf) reads them through the node's per-node
-        // ExprContext, which the cache-eq expression was compiled against.
+        // The cache_eq_expr (ExecBuildParamSetEqual) reads the cached entry's
+        // params off ecxt_innertuple (INNER_VAR) and the probe params off
+        // ecxt_outertuple (OUTER_VAR). Materialize the deformed table/probe
+        // values into the real slots, then point the node's ExprContext at them.
         let econtext = mstate
             .ss
             .ps
             .ps_ExprContext
             .ok_or_else(|| elog_internal("Memoize node has no ps_ExprContext"))?;
+        let tableslot = mstate
+            .tableslot
+            .ok_or_else(|| elog_internal("Memoize tableslot not initialized"))?;
+        let probeslot = mstate
+            .probeslot
+            .ok_or_else(|| elog_internal("Memoize probeslot not initialized"))?;
+
+        // ExecStoreMinimalTuple(key1->params, tslot, false) + slot_getallattrs:
+        // push the deformed cached-entry key into the real table slot.
+        let tvalues: Vec<DatumV<'_>> = mstate.table_values.iter().cloned().collect();
+        let tisnull: Vec<bool> = mstate.table_isnull.iter().copied().collect();
+        execTuples::store_virtual_values::call(estate, tableslot, &tvalues, &tisnull)?;
+
+        estate.ecxt_mut(econtext).ecxt_innertuple = Some(tableslot);
+        estate.ecxt_mut(econtext).ecxt_outertuple = Some(probeslot);
+
         let cache_eq_expr = mstate
             .cache_eq_expr
             .as_mut()
