@@ -431,6 +431,14 @@ fn seam_exec_store_buffer_heap_tuple<'mcx>(
     crate::slot_store_fetch::ExecStoreBufferHeapTuple(tuple, slot, buffer)
 }
 
+/// Seam `exec_clear_tuple_payload` — `ExecClearTuple(slot)` over the
+/// payload-bearing `&mut SlotData` the heap-scan vtable holds directly.
+fn seam_exec_clear_tuple_payload<'mcx>(
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(slot)
+}
+
 /// Seam `exec_force_store_minimal_tuple` — `ExecForceStoreMinimalTuple`.
 fn seam_exec_force_store_minimal_tuple<'mcx>(
     slot: SlotId,
@@ -734,6 +742,7 @@ pub fn init_seams() {
     // SlotId to its live `&mut SlotData`).
     seams::exec_store_minimal_tuple::set(seam_exec_store_minimal_tuple);
     seams::exec_store_buffer_heap_tuple::set(seam_exec_store_buffer_heap_tuple);
+    seams::exec_clear_tuple_payload::set(seam_exec_clear_tuple_payload);
     seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
     seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
     seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);
