@@ -25,8 +25,10 @@ use types_pathnodes::{PathId, PlannerInfo, RelId};
 
 seam_core::seam!(
     /// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c). The RTE
-    /// is identified by its 1-based range-table index.
-    pub fn relation_excluded_by_constraints(root: &PlannerInfo, rel: RelId, rti: Index) -> bool
+    /// is identified by its 1-based range-table index. Takes `&mut PlannerInfo`
+    /// because the C body allocates constraint expressions into the arena and may
+    /// set `rel->partition_qual` via `set_baserel_partition_constraint`.
+    pub fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> bool
 );
 
 seam_core::seam!(
