@@ -74,6 +74,7 @@ backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
+backend-common-relpath = { path = "../backend-common-relpath" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-comment = { path = "../backend-commands-comment" }
