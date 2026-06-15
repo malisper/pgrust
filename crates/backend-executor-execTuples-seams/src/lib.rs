@@ -223,6 +223,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot)` (tuptable.h) over the payload-bearing [`SlotData`]
+    /// the heap-scan vtable callback holds directly (the end-of-scan / no-match
+    /// path of `heapam_scan_getnextslot` / `heap_getnextslot_tidrange`). Unlike
+    /// the pool-id [`exec_clear_tuple`], the caller has the `&mut SlotData` from
+    /// the vtable, not an `EState` `SlotId`. Runs the real `tts_ops->clear`.
+    pub fn exec_clear_tuple_payload<'mcx>(
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
     /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
     /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.

@@ -1,33 +1,34 @@
 [package]
-name = "backend-access-brin-minmax"
+name = "backend-access-brin-minmax-multi"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_access_brin_minmax"
+name = "backend_access_brin_minmax_multi"
 path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
 types-brin = { path = "../types-brin" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }
-types-datum = { path = "../types-datum" }
+types-storage = { path = "../types-storage" }
 types-typcache = { path = "../types-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-access-brin-entry-seams = { path = "../backend-access-brin-entry-seams" }
-backend-access-brin-inclusion = { path = "../backend-access-brin-inclusion" }
-backend-access-brin-bloom = { path = "../backend-access-brin-bloom" }
-backend-access-brin-minmax-multi = { path = "../backend-access-brin-minmax-multi" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
+backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 
 [dev-dependencies]
-types-storage = { path = "../types-storage" }
+types-relcache-entry = { path = "../types-relcache-entry" }

@@ -317,7 +317,7 @@ fn brininsert_loop<'mcx>(
 
             // Before releasing the lock, check if we can attempt a same-page
             // update.
-            let (newtup, newsz) = brin_form_tuple(mcx, &bistate.bis_desc, heap_blk, &dtup)?;
+            let (newtup, newsz) = brin_form_tuple(mcx, &bistate.bis_desc, heap_blk, &mut dtup)?;
             let samepage = brin_can_do_samepage_update(*buf, origsz, newsz)?;
             lock_buffer::call(*buf, BUFFER_LOCK_UNLOCK)?;
 
@@ -780,7 +780,7 @@ fn summarize_range<'mcx>(
     loop {
         check_for_interrupts()?;
 
-        let (newtup, newsize) = brin_form_tuple(mcx, &state.bs_bdesc, heap_blk, &state.bs_dtuple)?;
+        let (newtup, newsize) = brin_form_tuple(mcx, &state.bs_bdesc, heap_blk, &mut state.bs_dtuple)?;
         let samepage = brin_can_do_samepage_update(phbuf, phsz, newsize)?;
         let didupdate = brin_doupdate(
             mcx,
@@ -966,7 +966,7 @@ fn brinsummarize<'mcx>(
 /// kept for fidelity and used by the build driver once the scan layer lands.)
 #[allow(dead_code)]
 fn form_and_insert_tuple<'mcx>(mcx: Mcx<'mcx>, state: &mut BrinBuildState<'mcx>) -> PgResult<()> {
-    let (tup, size) = brin_form_tuple(mcx, &state.bs_bdesc, state.bs_currRangeStart, &state.bs_dtuple)?;
+    let (tup, size) = brin_form_tuple(mcx, &state.bs_bdesc, state.bs_currRangeStart, &mut state.bs_dtuple)?;
     brin_doinsert(
         mcx,
         &state.bs_irel,

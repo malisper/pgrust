@@ -270,13 +270,69 @@ pub struct FormedTuple<'mcx> {
     pub data: PgVec<'mcx, u8>,
 }
 
-impl FormedTuple<'_> {
+impl<'mcx> FormedTuple<'mcx> {
     /// Deep copy into `mcx` (C: `heap_copytuple`'s single-block `memcpy` into
     /// the caller's current context).
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<FormedTuple<'b>> {
         Ok(FormedTuple {
             tuple: alloc_in(mcx, self.tuple.clone_in(mcx)?)?,
             data: slice_in(mcx, &self.data)?,
+        })
+    }
+
+    /// Materialize a full on-page heap tuple — header (incl. its `t_bits` null
+    /// bitmap) and user-data area — from an item's on-page bytes, the owned
+    /// rendering of C's `loctup.t_data = (HeapTupleHeader) PageGetItem(page,
+    /// lpp); loctup.t_len = ItemIdGetLength(lpp)`.
+    ///
+    /// `item` is the full item slice `PageGetItem(page, lpp)` of length
+    /// `ItemIdGetLength(lpp)` (= the tuple's `t_len`); `block`/`offset` set the
+    /// tuple's self TID. The 23-byte fixed header is decoded as in
+    /// [`HeapTupleHeaderData::read_on_page`]; when `HEAP_HASNULL` is set the null
+    /// bitmap (the bytes between the fixed header and `t_hoff`) is captured into
+    /// `t_bits`, and the user-data area (`item[t_hoff..t_len]`) travels as
+    /// [`FormedTuple::data`].
+    pub fn read_on_page_full(
+        mcx: Mcx<'mcx>,
+        item: &[u8],
+        block: types_core::primitive::BlockNumber,
+        offset: types_core::primitive::OffsetNumber,
+        table_oid: Oid,
+    ) -> PgResult<FormedTuple<'mcx>> {
+        use crate::heaptuple::{
+            HeapTupleData, HeapTupleHeaderData, ItemPointerData, ON_PAGE_HEADER_SIZE, HEAP_HASNULL,
+        };
+
+        let mut hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
+        let t_hoff = hdr.t_hoff as usize;
+
+        // Capture the on-page null bitmap into the owned header. C leaves it on
+        // the page (the `t_data` pointer aliases it); the owned model copies the
+        // bytes between the fixed header and `t_hoff`.
+        if (hdr.t_infomask & HEAP_HASNULL) != 0 {
+            let end = core::cmp::min(t_hoff, item.len());
+            if end > ON_PAGE_HEADER_SIZE {
+                hdr.t_bits = slice_in(mcx, &item[ON_PAGE_HEADER_SIZE..end])?;
+            }
+        }
+
+        // User-data area: item[t_hoff..t_len]. t_len == item.len().
+        let data = if t_hoff <= item.len() {
+            slice_in(mcx, &item[t_hoff..])?
+        } else {
+            PgVec::new_in(mcx)
+        };
+
+        let tuple = HeapTupleData {
+            t_len: item.len() as u32,
+            t_self: ItemPointerData::new(block, offset),
+            t_tableOid: table_oid,
+            t_data: Some(alloc_in(mcx, hdr)?),
+        };
+
+        Ok(FormedTuple {
+            tuple: alloc_in(mcx, tuple)?,
+            data,
         })
     }
 }

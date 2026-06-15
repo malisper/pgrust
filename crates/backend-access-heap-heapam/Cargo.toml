@@ -69,3 +69,12 @@ backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" 
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+# SEQUENTIAL-SCAN core (scan.rs): syncscan reporting, page pruning, the table-AM
+# parallel-block helpers + synchronize_seqscans GUC, the slot store/clear seams,
+# and the scan-key / TID-range vocabulary.
+backend-access-common-syncscan-seams = { path = "../backend-access-common-syncscan-seams" }
+backend-access-heap-pruneheap-seams = { path = "../backend-access-heap-pruneheap-seams" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+types-scan = { path = "../types-scan" }
+types-tidbitmap = { path = "../types-tidbitmap" }
