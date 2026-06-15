@@ -178,7 +178,7 @@ pub fn RefreshMatViewByOid(
         save_sec_context | SECURITY_RESTRICTED_OPERATION,
     )?;
     let save_nestlevel = seam::new_guc_nest_level::call()?;
-    seam::restrict_search_path::call()?;
+    backend_utils_misc_guc_seams::restrict_search_path::call()?;
 
     /* Make sure it is a materialized view. */
     if info.relkind != RELKIND_MATVIEW_I8 {

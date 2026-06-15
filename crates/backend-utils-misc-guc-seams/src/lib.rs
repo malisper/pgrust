@@ -238,3 +238,15 @@ seam_core::seam!(
     /// error surface.
     pub fn guc_array_reset(a: Vec<String>) -> types_error::PgResult<Option<Vec<String>>>
 );
+
+seam_core::seam!(
+    /// `RestrictSearchPath()` (guc.c:2246): outside bootstrap mode, set
+    /// `search_path` to the safe value `"pg_catalog, pg_temp"` via
+    /// `set_config_option(..., PGC_USERSET, PGC_S_SESSION, GUC_ACTION_SAVE,
+    /// changeVal=true, elevel=0, is_reload=false)`. Used to harden
+    /// security-restricted maintenance operations (REINDEX / CLUSTER / matview
+    /// refresh / index build). Re-homed here from
+    /// `backend-catalog-namespace-seams` (RestrictSearchPath is guc.c's
+    /// function, not namespace.c's); installed by `backend-utils-misc-guc`.
+    pub fn restrict_search_path() -> types_error::PgResult<()>
+);

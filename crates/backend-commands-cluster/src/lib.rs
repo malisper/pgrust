@@ -431,7 +431,7 @@ pub fn cluster_rel(
         save_sec_context | SECURITY_RESTRICTED_OPERATION,
     );
     let save_nestlevel = guc::new_guc_nest_level::call();
-    namespace::restrict_search_path::call()?;
+    guc::restrict_search_path::call()?;
 
     // The C body uses `goto out`; the inner closure replicates it, then the
     // `out:` cleanup runs unconditionally afterward.

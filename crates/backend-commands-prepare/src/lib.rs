@@ -56,9 +56,10 @@ use types_error::{
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::EStateData;
+use types_explain::ExplainState;
 use types_nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DeallocateStmt, DestReceiverHandle,
-    ExecuteStmt, ExplainState, IntoClause, ParamListInfoHandle, ParseState,
+    ExecuteStmt, IntoClause, ParamListInfoHandle, ParseState,
     PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, RawStmt,
     ResourceOwnerHandle,
 };

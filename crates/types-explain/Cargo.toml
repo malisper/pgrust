@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+types-nodes = { path = "../types-nodes" }

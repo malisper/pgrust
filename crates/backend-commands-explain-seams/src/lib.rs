@@ -9,9 +9,10 @@
 //! opaque [`ExplainBookkeeping`] token the explain unit re-materialises.
 
 use types_error::PgResult;
+use types_explain::ExplainState;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
-use types_nodes::parsestmt::{ExplainState, IntoClause, ParamListInfoHandle};
+use types_nodes::parsestmt::{IntoClause, ParamListInfoHandle};
 use types_nodes::queryenvironment::QueryEnvironment;
 
 /// Opaque token for the EXPLAIN-EXECUTE bookkeeping the explain unit owns

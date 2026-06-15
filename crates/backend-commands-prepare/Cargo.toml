@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+types-explain = { path = "../types-explain" }
 types-scan = { path = "../types-scan" }
 
 # Owner seam crates (calls into not-yet-ported owners panic until they land).

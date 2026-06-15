@@ -289,8 +289,6 @@ seam_core::seam!(
     /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
     pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>
 );
-seam_core::seam!(
-    /// `RestrictSearchPath()` (namespace.c): set search_path to a safe value
-    /// for a security-restricted operation.
-    pub fn restrict_search_path() -> PgResult<()>
-);
+// (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
+// function (guc.c:2246), not namespace.c's — and installed by the merged guc
+// owner. Consumers call it there.)

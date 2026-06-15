@@ -226,6 +226,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The EXPLAIN side of `ExplainOnePlan` (explain.c): `CreateQueryDesc(plan,
+    /// queryString, GetActiveSnapshot(), InvalidSnapshot, None_Receiver, params,
+    /// queryEnv, instrument_option)` followed by `ExecutorStart(queryDesc,
+    /// eflags)`. The caller has already pushed the active snapshot (explain
+    /// `PushCopiedSnapshot(GetActiveSnapshot())`) and passes it in as `snapshot`.
+    /// `dest` is the discard receiver (`None_Receiver` → `DestReceiverHandle::NULL`);
+    /// `instrument_option` is derived by the caller from the EXPLAIN options.
+    /// Returns the started `QueryDesc` whose plan-state tree `ExplainPrintPlan`
+    /// walks. Can `ereport(ERROR)`.
+    pub fn create_query_desc_and_start_explain<'mcx>(
+        parent: &mcx::MemoryContext,
+        plan: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
+        source_text: &str,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+        params: types_nodes::parsestmt::ParamListInfoHandle,
+        instrument_option: i32,
+        eflags: i32,
+    ) -> types_error::PgResult<types_nodes::querydesc::QueryDesc>
+);
+
+seam_core::seam!(
     /// `ExecutorRun(queryDesc, ForwardScanDirection, 0)` (copyto.c:1104) for the
     /// COPY-(query)-TO path: run the plan to completion; the COPY-OUT receiver
     /// emits each tuple into copyto's `cstate` (incrementing
