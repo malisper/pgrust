@@ -398,8 +398,10 @@ pub fn init_seams() {
     //     CONTRACT_RECONCILE_PENDING). The `process_config_file` decl stays in
     //     guc-file-seams — it is genuinely guc-file.l's (the lexer/reader unit). ---
 
-    // GUC_check_errdetail / GUC_check_errhint (guc.c): record check-hook
-    // failure detail/hint into the backend-local check-error state.
+    // GUC_check_errcode / GUC_check_errdetail / GUC_check_errhint (guc.c):
+    // record check-hook failure code/detail/hint into the backend-local
+    // check-error state.
+    s::guc_check_errcode::set(GUC_check_errcode);
     s::guc_check_errdetail::set(GUC_check_errdetail);
     s::guc_check_errhint::set(GUC_check_errhint);
 

@@ -2406,11 +2406,15 @@ dependencies = [
  "backend-access-transam-xlogreader-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-postmaster-startup-seams",
+ "backend-replication-slot-seams",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-s-lock",
+ "backend-utils-adt-lsn-trigfuncs",
+ "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-condvar",
@@ -5980,6 +5984,7 @@ dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execGrouping-seams",
+ "backend-executor-execMain-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -9320,6 +9325,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-buffer-bufmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-lwlock",
+ "mcx",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -9347,6 +9366,16 @@ dependencies = [
  "common-hashfn",
  "common-relpath-seams",
  "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-buffer-support-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
  "types-error",
  "types-storage",
@@ -14191,6 +14220,7 @@ dependencies = [
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",

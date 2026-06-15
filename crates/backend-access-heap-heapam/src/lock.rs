@@ -1260,11 +1260,7 @@ fn test_lockmode_for_conflict<'mcx>(
 
 /// The result of [`DoesMultiXactIdConflict`] — C's `bool` return + the
 /// `*current_is_member` out param.
-#[derive(Clone, Copy, Debug)]
-pub struct MultiXactConflict {
-    pub conflict: bool,
-    pub current_is_member: bool,
-}
+pub use types_storage::multixact::MultiXactConflict;
 
 /// `DoesMultiXactIdConflict(multi, infomask, lockmode, &current_is_member)`
 /// (heapam.c). The repo's callers always pass a non-NULL `current_is_member`

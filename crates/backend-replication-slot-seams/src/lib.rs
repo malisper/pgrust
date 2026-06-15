@@ -12,11 +12,21 @@
 #![allow(non_snake_case)]
 
 use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
-use types_error::PgResult;
+use types_error::{PgResult, SqlState};
 use types_replication_slot::{
     ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
 use types_tuple::heaptuple::NameData;
+
+seam_core::seam!(
+    /// `bool ReplicationSlotValidateNameInternal(const char *name,
+    /// int *err_code, char **err_msg, char **err_hint)` (slot.c) — validate a
+    /// slot name without raising. `Ok(())` is the C `true` return; `Err`
+    /// carries `(err_code, err_msg, err_hint)`.
+    pub fn replication_slot_validate_name_internal(
+        name: &str,
+    ) -> Result<(), (SqlState, String, Option<String>)>
+);
 
 seam_core::seam!(
     /// `void ReplicationSlotsShmemInit(void)` (slot.c:204).

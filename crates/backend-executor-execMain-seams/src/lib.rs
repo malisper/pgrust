@@ -32,6 +32,79 @@ seam_core::seam!(
     pub fn execute_call_stmt(stmt: types_parsenodes::CallStmt, atomic: bool) -> types_error::PgResult<()>
 );
 
+// ---------------------------------------------------------------------------
+// PARAM_EXEC `execPlan`-link plumbing. These operate on the executor-owned
+// `es_param_exec_vals` (the `ParamExecData.execPlan` link, now modeled as an
+// `ExecPlanLink` identity into `es_subplanstates`) and `es_subplanstates`, so
+// they are execMain machinery — NOT `execProcnode.c` functions. nodeSubplan was
+// their first consumer (which is why they were originally parked in
+// execProcnode-seams); they live here under their real owner. The three
+// field-level ops are installed by execMain::init_seams; the two
+// SubPlanState-resolving ops stay seam-and-panic until nodeSubplan's
+// SubPlanState-reachability wiring lands.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `prm->execPlan = sstate` — mark the PARAM_EXEC slot `paramid` as needing
+    /// evaluation by an initplan (nodeSubplan.c `ExecInitSubPlan` /
+    /// `ExecReScanSetParamPlan`). The `execPlan` link is modeled on
+    /// `ParamExecData` as an [`ExecPlanLink`](types_nodes::ExecPlanLink) — the
+    /// marking subplan's stable identity (its 1-based `plan_id`, the index into
+    /// `es_subplanstates`). The executor owns the param array, so it installs the
+    /// link from the subplan's `plan_id`.
+    pub fn mark_param_execplan_pending<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        paramid: i32,
+        plan_id: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `prm->execPlan = NULL` — clear the PARAM_EXEC `execPlan` link after the
+    /// initplan output has been set (nodeSubplan.c `ExecSetParamPlan`). The link
+    /// is executor-owned. Fallible only structurally.
+    pub fn clear_param_execplan<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        paramid: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `econtext->ecxt_param_exec_vals[paramid].execPlan != NULL` — is the
+    /// param not yet evaluated? (`ExecSetParamPlanMulti`). Reads the
+    /// executor-owned `execPlan` link. Infallible.
+    pub fn param_execplan_pending(estate: &types_nodes::EStateData<'_>, paramid: i32) -> bool
+);
+
+seam_core::seam!(
+    /// `ExecSetParamPlan(prm->execPlan, econtext)` for the not-yet-evaluated
+    /// PARAM_EXEC `paramid` (`ExecSetParamPlanMulti`): the executor resolves the
+    /// `SubPlanState` whose identity is stashed in the param's `execPlan` link and
+    /// re-enters `nodeSubplan::ExecSetParamPlan` over it. Fallible (the subplan's
+    /// failure surface). The `econtext` is the id of the expression context to
+    /// evaluate any down-passed params in.
+    pub fn exec_set_param_plan_for_pending<'mcx>(
+        econtext: types_nodes::EcxtId,
+        paramid: i32,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sstate->planstate = (PlanState *) list_nth(estate->es_subplanstates,
+    /// subplan->plan_id - 1)` then the "subplan was not initialized" check
+    /// (nodeSubplan.c:818-827). The executor owns `es_subplanstates`, so it
+    /// resolves and installs the link from the already-initialized child plan
+    /// state into the node, given the subplan's 1-based `plan_id`. `Err` carries
+    /// the C `elog(ERROR, "subplan \"%s\" was not initialized")` when the slot
+    /// is NULL (the owner reads `node->subplan->plan_name` for the message).
+    pub fn link_subplan_planstate<'mcx>(
+        node: &mut types_nodes::execexpr::SubPlanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        plan_id: i32,
+    ) -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `EvalPlanQualFetchRowMark(epqstate, rti, slot)` (execMain.c): fetch the
     /// replacement tuple for the non-locking rowmark of relation `rti` (the
