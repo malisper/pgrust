@@ -471,10 +471,9 @@ fn heap_compare_slots<'mcx>(
         let attno: AttrNumber = sort_key.ssup_attno;
 
         // datum1 = slot_getattr(s1, attno, &isNull1);
-        let mcx = estate.es_query_cxt;
-        let (datum1, is_null1) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id1), attno)?;
+        let (datum1, is_null1) = execTuples::slot_getattr::call(estate, id1, attno)?;
         // datum2 = slot_getattr(s2, attno, &isNull2);
-        let (datum2, is_null2) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id2), attno)?;
+        let (datum2, is_null2) = execTuples::slot_getattr::call(estate, id2, attno)?;
 
         // compare = ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
         // `datum1`/`datum2` are the canonical sort-column values straight from
