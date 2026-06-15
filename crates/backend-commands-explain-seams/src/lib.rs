@@ -5,9 +5,11 @@
 //! then a call panics loudly. The EXPLAIN-EXECUTE driver's memory/buffer
 //! bookkeeping (planner context creation+switch, `pgBufferUsage` snapshot,
 //! `instr_time` planstart/planduration, `MemoryContextCounters`) is all
-//! explain-owned C state; the driver threads it through these seams as an
-//! opaque [`ExplainBookkeeping`] token the explain unit re-materialises.
+//! explain-owned C state. Mirroring C's `ExplainExecuteQuery`, the driver keeps
+//! it as a plain stack local ([`Bookkeeping`]) and threads it through these
+//! seams by value / `&mut` — no opaque token, no registry (C uses none here).
 
+use types_core::instrument::{instr_time, BufferUsage};
 use types_error::PgResult;
 use types_explain::ExplainState;
 use types_nodes::nodeindexscan::PlannedStmt;
@@ -15,40 +17,59 @@ use types_nodes::nodes::Node;
 use types_nodes::parsestmt::{IntoClause, ParamListInfoHandle};
 use types_nodes::queryenvironment::QueryEnvironment;
 
-/// Opaque token for the EXPLAIN-EXECUTE bookkeeping the explain unit owns
-/// (`planner_ctx`/`saved_ctx`/`bufusage_start`/`planstart`/`planduration`/
-/// `mem_counters`). The driver carries it from `explain_execute_begin` through
-/// the accounting + per-plan seams without inspecting it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExplainBookkeeping(pub u64);
+/// The EXPLAIN-EXECUTE bookkeeping the C `ExplainExecuteQuery` keeps on its
+/// stack and threads through `ExplainOnePlan` (`instr_time planstart/
+/// planduration`, `BufferUsage bufusage_start/bufusage`, the planner
+/// `MemoryContext`/`MemoryContextCounters`). The driver owns one of these as a
+/// plain local; `explain_execute_begin` produces it, the accounting seams
+/// mutate it, and `explain_one_plan` reads the stashed `bufusage`/`planduration`
+/// out of it. (The planner `MemoryContext`/`MemoryContextCounters` `es->memory`
+/// fields are unported and live behind the `explain_memory_accounting` panic;
+/// they are not carried here yet.)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bookkeeping {
+    /// `instr_time planstart` — set at `explain_execute_begin`.
+    pub planstart: instr_time,
+    /// `instr_time planduration` — elapsed planning time (set at planduration).
+    pub planduration: instr_time,
+    /// `BufferUsage bufusage_start` — snapshot of `pgBufferUsage` at begin
+    /// (only when `es->buffers`).
+    pub bufusage_start: BufferUsage,
+    /// `BufferUsage bufusage` — accumulated planning buffer usage (set at
+    /// buffer_accounting).
+    pub bufusage: BufferUsage,
+    /// whether `es->buffers` was set at begin.
+    pub buffers: bool,
+}
 
 seam_core::seam!(
     /// The pre-lookup EXPLAIN bookkeeping: when `es->memory`, create the
     /// "explain analyze planner context" and switch to it; when `es->buffers`,
     /// snapshot `pgBufferUsage`; and `INSTR_TIME_SET_CURRENT(planstart)`.
     /// Reads `es->memory`/`es->buffers`. Allocates / can `ereport(ERROR)`.
-    pub fn explain_execute_begin<'mcx>(es: &ExplainState<'mcx>) -> PgResult<ExplainBookkeeping>
+    /// Returns the freshly-initialised stack [`Bookkeeping`] the driver owns.
+    pub fn explain_execute_begin<'mcx>(es: &ExplainState<'mcx>) -> PgResult<Bookkeeping>
 );
 
 seam_core::seam!(
     /// `INSTR_TIME_SET_CURRENT(planduration);
     /// INSTR_TIME_SUBTRACT(planduration, planstart)` — record the elapsed
     /// planning time into the bookkeeping.
-    pub fn explain_planduration(bk: ExplainBookkeeping) -> PgResult<()>
+    pub fn explain_planduration(bk: &mut Bookkeeping) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `if (es->memory) { MemoryContextSwitchTo(saved_ctx);
     /// MemoryContextMemConsumed(planner_ctx, &mem_counters); }` — the
     /// memory-accounting branch (guarded by the driver on `es->memory`).
-    pub fn explain_memory_accounting(bk: ExplainBookkeeping) -> PgResult<()>
+    pub fn explain_memory_accounting(bk: &mut Bookkeeping) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `if (es->buffers) { memset(&bufusage, 0, ...);
     /// BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start); }` —
     /// the buffer-accounting branch (guarded by the driver on `es->buffers`).
-    pub fn explain_buffer_accounting(bk: ExplainBookkeeping) -> PgResult<()>
+    pub fn explain_buffer_accounting(bk: &mut Bookkeeping) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -63,7 +84,7 @@ seam_core::seam!(
         query_string: &str,
         param_li: ParamListInfoHandle,
         query_env: Option<&QueryEnvironment<'mcx>>,
-        bk: ExplainBookkeeping,
+        bk: &Bookkeeping,
         es_buffers: bool,
         es_memory: bool,
     ) -> PgResult<()>

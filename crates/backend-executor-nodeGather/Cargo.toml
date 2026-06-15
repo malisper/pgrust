@@ -30,3 +30,4 @@ types-nodes = { path = "../types-nodes" }
 types-pgstat = { path = "../types-pgstat" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }

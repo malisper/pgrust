@@ -1,0 +1,30 @@
+[package]
+name = "backend-parser-parse-type"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_parse_type"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+types-cluster = { path = "../types-cluster" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-opclass = { path = "../types-opclass" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-parser-driver-seams = { path = "../backend-parser-driver-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }

@@ -29,3 +29,4 @@ types-execparallel = { path = "../types-execparallel" }
 types-nodes = { path = "../types-nodes" }
 types-sortsupport = { path = "../types-sortsupport" }
 types-tuple = { path = "../types-tuple" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }

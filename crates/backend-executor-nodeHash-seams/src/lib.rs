@@ -13,7 +13,6 @@ use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_nodes::nodehashjoin::{ExprState, HashJoinState};
 use types_nodes::EStateData;
-use types_tuple::heaptuple::MinimalTupleData;
 
 seam_core::seam!(
     /// `ExecHashTableCreate(node)` (nodeHash.c): build the empty hash table for
@@ -246,7 +245,7 @@ seam_core::seam!(
     /// (outer vs hash tuple slot).
     pub fn force_store_minimal_into_slot<'mcx>(
         slot: types_nodes::SlotId,
-        tuple: mcx::PgBox<'mcx, MinimalTupleData<'mcx>>,
+        tuple: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );

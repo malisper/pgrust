@@ -22,7 +22,7 @@ use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
 use types_storage::fileset::SharedFileSet;
 use types_storage::file::{File, PGAlignedBlock};
 use types_storage::lock::ResourceOwnerHandle;
-use types_tuple::heaptuple::MinimalTupleData;
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{Opaque, PlanStateData, SlotId};
@@ -198,8 +198,8 @@ pub struct HashJoinTupleData<'mcx> {
     pub next: HashJoinTupleLink,
     /// `uint32 hashvalue` — tuple's hash code.
     pub hashvalue: uint32,
-    /// the inline `MinimalTuple` payload.
-    pub mintuple: MinimalTupleData<'mcx>,
+    /// the inline `MinimalTuple` payload (header + user-data area).
+    pub mintuple: FormedMinimalTuple<'mcx>,
 }
 
 /// `HashSkewBucket` (hashjoin.h).

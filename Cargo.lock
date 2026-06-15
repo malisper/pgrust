@@ -606,6 +606,7 @@ dependencies = [
  "backend-access-heap-heaptoast-seams",
  "backend-access-index-genam-seams",
  "backend-access-table-toast-helper-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "mcx",
  "types-core",
@@ -3583,6 +3584,7 @@ dependencies = [
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-catalog",
@@ -4795,6 +4797,7 @@ dependencies = [
 name = "backend-executor-nodeGather"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4822,6 +4825,7 @@ dependencies = [
 name = "backend-executor-nodeGatherMerge"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4866,6 +4870,7 @@ dependencies = [
 name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4923,6 +4928,7 @@ dependencies = [
 name = "backend-executor-nodeHashjoin"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
@@ -5616,6 +5622,28 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeWindowAgg"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
  "types-nodes",
  "types-tuple",
 ]
@@ -6416,6 +6444,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-driver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-parser-gram-seams"
 version = "0.0.0"
 dependencies = [
@@ -6445,9 +6482,38 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-opclass",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-oper"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-commands-functioncmds-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-func-seams",
+ "backend-parser-parse-oper-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6459,6 +6525,31 @@ dependencies = [
  "types-error",
  "types-opclass",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-type"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-parser-driver-seams",
+ "backend-parser-parse-type-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10806,6 +10897,7 @@ name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
  "allocator-api2",
+ "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc",
@@ -12301,6 +12393,8 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-type",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
