@@ -46,6 +46,17 @@ pub const SK_BT_MINVAL: i32 = 0x00080000;
 /// `SK_BT_MAXVAL` — invalid `sk_argument`, use high_compare.
 pub const SK_BT_MAXVAL: i32 = 0x00100000;
 
+/// `SK_BT_INDOPTION_SHIFT` (`access/nbtree.h`) — the per-column `indoption`
+/// bits are stored in `sk_flags` shifted up by this amount.
+pub const SK_BT_INDOPTION_SHIFT: i32 = 24;
+/// `SK_BT_DESC` (`access/nbtree.h`, `= INDOPTION_DESC << SK_BT_INDOPTION_SHIFT`)
+/// — values are stored in reverse (descending) order for this key column.
+pub const SK_BT_DESC: i32 = 0x0001 << SK_BT_INDOPTION_SHIFT;
+/// `SK_BT_NULLS_FIRST` (`access/nbtree.h`,
+/// `= INDOPTION_NULLS_FIRST << SK_BT_INDOPTION_SHIFT`) — NULLs sort first
+/// instead of last for this key column.
+pub const SK_BT_NULLS_FIRST: i32 = 0x0002 << SK_BT_INDOPTION_SHIFT;
+
 /// `ScanKeyData` (`access/skey.h`) — one search condition for an index or heap
 /// scan. `sk_func` is trimmed to the procedure OID ([`FmgrInfo`]); the scan
 /// code performs the real fmgr lookup when it consumes the key.

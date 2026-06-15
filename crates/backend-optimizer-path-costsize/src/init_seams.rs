@@ -1,0 +1,254 @@
+// Seam installation for backend-optimizer-path-costsize.
+//
+// Installs every inward seam this unit owns:
+//   * costsize-seams: clamp_row_est, clamp_cardinality_to_long.
+//   * pathnode-seams: cpu_tuple_cost, cpu_operator_cost, enable_hashagg,
+//     sizeof_minimal_tuple_header, cost_qual_eval, expression_returns_set_rows,
+//     and the full cost-estimator family (cost_seqscan .. final_cost_hashjoin).
+//   * joinpath-seams: initial_cost_{nestloop,mergejoin,hashjoin},
+//     compute_semi_anti_join_factors.
+//
+// It does NOT install work_mem / get_hash_memory_limit (owned by misc-guc /
+// nodeHash; consumed via `ps::`), nor any cost GUC getter (those are costsize.c
+// globals backed by module statics here), nor compare_path_costs (pathnode's).
+
+// NOTE: this file is `include!`d into lib.rs, so it shares lib.rs's imports
+// (`cz`, `ps`, `PlannerInfo`, `PathId`, `RelId`, `QualCost`, ...). Only the
+// joinpath-seams alias is added here.
+use backend_optimizer_path_joinpath_seams as jp;
+use types_pathnodes::NodeId;
+
+/// `MAXALIGN(SizeofMinimalTupleHeader)` (htup_details.h). The minimal-tuple
+/// header is `offsetof(MinimalTupleData, t_bits)`; on supported targets this is
+/// `SizeofHeapTupleHeader - MINIMAL_TUPLE_OFFSET`, then MAXALIGN'd. C uses the
+/// MAXALIGN'd value (23 - 6 = 17, MAXALIGN -> 24? no: t_len(4) precedes header).
+/// PG's `SizeofMinimalTupleHeader` == `offsetof(MinimalTupleData, t_bits)` == 23
+/// - MINIMAL_TUPLE_OFFSET(8)... we reproduce the canonical MAXALIGN value used
+/// by the executor sizing: `MAXALIGN(offsetof(MinimalTupleData, t_bits))`.
+const SIZEOF_MINIMAL_TUPLE_HEADER: usize = {
+    // SizeofMinimalTupleHeader = offsetof(MinimalTupleData, t_bits).
+    // MinimalTupleData = { uint32 t_len; char mt_padding[..]; uint16 t_infomask2;
+    //   uint16 t_infomask; uint8 t_hoff; bits8 t_bits[]; } with t_bits at the
+    // same offset as a HeapTupleHeader's t_bits minus MINIMAL_TUPLE_PADDING.
+    // The value the cost model needs is MAXALIGN of that header; on LP64 it is
+    // MAXALIGN(crate::SizeofHeapTupleHeader - 8 + 8) == MAXALIGN(23).
+    let off = crate::SizeofHeapTupleHeader; // 23
+    (off + 7) & !7
+};
+
+pub fn init_seams() {
+    /* ---- costsize-seams (this unit's own clamp helpers) ---------------- */
+    cz::clamp_row_est::set(crate::clamp_row_est);
+    cz::clamp_cardinality_to_long::set(crate::clamp_cardinality_to_long);
+
+    /* ---- pathnode-seams: cost GUC getters + sizing helpers owned here -- */
+    ps::cpu_tuple_cost::set(|| crate::CPU_TUPLE_COST);
+    ps::cpu_operator_cost::set(|| crate::CPU_OPERATOR_COST);
+    ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG);
+    ps::sizeof_minimal_tuple_header::set(|| SIZEOF_MINIMAL_TUPLE_HEADER);
+
+    /* ---- pathnode-seams: cost_qual_eval + expression_returns_set_rows -- */
+    ps::cost_qual_eval::set(cost_qual_eval_seam);
+    ps::expression_returns_set_rows::set(expression_returns_set_rows_seam);
+
+    /* ---- pathnode-seams: the cost estimators ------------------------- */
+    ps::cost_seqscan::set(crate::scans::cost_seqscan);
+    ps::cost_samplescan::set(crate::scans::cost_samplescan);
+    ps::cost_index::set(crate::scans::cost_index);
+    ps::cost_bitmap_heap_scan::set(crate::scans::cost_bitmap_heap_scan);
+    ps::cost_bitmap_and_node::set(crate::scans::cost_bitmap_and_node);
+    ps::cost_bitmap_or_node::set(crate::scans::cost_bitmap_or_node);
+    ps::cost_tidscan::set(cost_tidscan_seam);
+    ps::cost_tidrangescan::set(cost_tidrangescan_seam);
+    ps::cost_subqueryscan::set(crate::scans::cost_subqueryscan);
+    ps::cost_functionscan::set(crate::scans::cost_functionscan);
+    ps::cost_tablefuncscan::set(crate::scans::cost_tablefuncscan);
+    ps::cost_valuesscan::set(crate::scans::cost_valuesscan);
+    ps::cost_ctescan::set(crate::scans::cost_ctescan);
+    ps::cost_namedtuplestorescan::set(crate::scans::cost_namedtuplestorescan);
+    ps::cost_resultscan::set(crate::scans::cost_resultscan);
+    ps::cost_append::set(crate::cost_append);
+    ps::cost_merge_append::set(cost_merge_append_seam);
+    ps::cost_material::set(crate::cost_material);
+    ps::cost_gather::set(cost_gather_seam);
+    ps::cost_gather_merge::set(crate::cost_gather_merge);
+    ps::cost_sort::set(cost_sort_seam);
+    ps::cost_incremental_sort::set(cost_incremental_sort_seam);
+    ps::cost_group::set(crate::exprcost::cost_group);
+    ps::cost_agg::set(cost_agg_seam);
+    ps::cost_windowagg::set(cost_windowagg_seam);
+    ps::cost_recursive_union::set(crate::cost_recursive_union);
+    ps::final_cost_nestloop::set(crate::joins::final_cost_nestloop);
+    ps::final_cost_mergejoin::set(crate::joins::final_cost_mergejoin);
+    ps::final_cost_hashjoin::set(crate::joins::final_cost_hashjoin);
+
+    /* ---- joinpath-seams: the preliminary join cost estimators -------- */
+    jp::initial_cost_nestloop::set(crate::joins::initial_cost_nestloop);
+    jp::initial_cost_mergejoin::set(crate::joins::initial_cost_mergejoin);
+    jp::initial_cost_hashjoin::set(crate::joins::initial_cost_hashjoin);
+    jp::compute_semi_anti_join_factors::set(crate::joins::compute_semi_anti_join_factors);
+}
+
+/* --------------------------------------------------------------------------
+ * Thin adapters where the seam signature differs cosmetically from the crate
+ * function (slice vs trailing args), so the installed `fn` pointer matches.
+ * ------------------------------------------------------------------------ */
+
+fn cost_qual_eval_seam(root: &PlannerInfo, quals: &[NodeId]) -> QualCost {
+    crate::cost_qual_eval(root, quals)
+}
+
+fn expression_returns_set_rows_seam(root: &PlannerInfo, node: NodeId) -> f64 {
+    cz::expression_returns_set_rows::call(root, node)
+}
+
+fn cost_tidscan_seam(root: &mut PlannerInfo, path: PathId, rel: RelId, tidquals: &[NodeId]) {
+    crate::scans::cost_tidscan(root, path, rel, tidquals);
+}
+fn cost_tidrangescan_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    rel: RelId,
+    tidrangequals: &[NodeId],
+) {
+    crate::scans::cost_tidrangescan(root, path, rel, tidrangequals);
+}
+
+fn cost_merge_append_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    pathkeys: &[types_pathnodes::PathKey],
+    n_streams: i32,
+    input_disabled_nodes: i32,
+    input_startup_cost: types_core::primitive::Cost,
+    input_total_cost: types_core::primitive::Cost,
+    tuples: f64,
+) {
+    crate::cost_merge_append(
+        root,
+        path,
+        pathkeys,
+        n_streams,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        tuples,
+    );
+}
+
+fn cost_gather_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    rel: RelId,
+    rows: Option<f64>,
+) {
+    crate::cost_gather(root, path, rel, rows);
+}
+
+fn cost_sort_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    pathkeys: &[types_pathnodes::PathKey],
+    input_disabled_nodes: i32,
+    input_cost: types_core::primitive::Cost,
+    tuples: f64,
+    width: i32,
+    comparison_cost: types_core::primitive::Cost,
+    sort_mem: i32,
+    limit_tuples: f64,
+) {
+    crate::cost_sort(
+        root,
+        path,
+        pathkeys,
+        input_disabled_nodes,
+        input_cost,
+        tuples,
+        width,
+        comparison_cost,
+        sort_mem,
+        limit_tuples,
+    );
+}
+
+fn cost_incremental_sort_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    pathkeys: &[types_pathnodes::PathKey],
+    presorted_keys: i32,
+    input_disabled_nodes: i32,
+    input_startup_cost: types_core::primitive::Cost,
+    input_total_cost: types_core::primitive::Cost,
+    input_tuples: f64,
+    width: i32,
+    comparison_cost: types_core::primitive::Cost,
+    sort_mem: i32,
+    limit_tuples: f64,
+) {
+    crate::cost_incremental_sort(
+        root,
+        path,
+        pathkeys,
+        presorted_keys,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        input_tuples,
+        width,
+        comparison_cost,
+        sort_mem,
+        limit_tuples,
+    );
+}
+
+fn cost_agg_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    aggstrategy: types_pathnodes::AggStrategy,
+    aggcosts: Option<ps::AggClauseCostsLite>,
+    num_group_cols: i32,
+    num_groups: f64,
+    quals: &[NodeId],
+    input_disabled_nodes: i32,
+    input_startup_cost: types_core::primitive::Cost,
+    input_total_cost: types_core::primitive::Cost,
+    input_tuples: f64,
+    input_width: i32,
+) {
+    crate::exprcost::cost_agg(
+        root,
+        path,
+        aggstrategy,
+        aggcosts,
+        num_group_cols,
+        num_groups,
+        quals,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        input_tuples,
+        input_width,
+    );
+}
+
+fn cost_windowagg_seam(
+    root: &mut PlannerInfo,
+    path: PathId,
+    window_funcs: &[NodeId],
+    winclause: NodeId,
+    input_disabled_nodes: i32,
+    input_startup_cost: types_core::primitive::Cost,
+    input_total_cost: types_core::primitive::Cost,
+    input_tuples: f64,
+) {
+    crate::exprcost::cost_windowagg(
+        root,
+        path,
+        window_funcs,
+        winclause,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        input_tuples,
+    );
+}

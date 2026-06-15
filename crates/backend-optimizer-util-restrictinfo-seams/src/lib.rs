@@ -72,20 +72,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `generate_join_implied_equalities(root, join_relids, outer_relids,
-    /// inner_rel, nominal_inner_relids)` (equivclass.c) — collect EC-derived
-    /// join clauses usable at `inner_rel`. Returns the new `RestrictInfo`
-    /// handles. The last argument is the C `nominal_join_relids` / child-rel hint
-    /// (`None` for a plain baserel). Used by `check_index_predicates`.
-    pub fn generate_join_implied_equalities(
-        root: &mut PlannerInfo,
-        join_relids: &Relids,
-        outer_relids: &Relids,
-        inner_rel: types_pathnodes::RelId
-    ) -> Vec<RinfoId>
-);
-
-seam_core::seam!(
     /// `find_childrel_parents(root, rel)` (relnode.c) — the relids of the
     /// topmost parents of an "other member" (partition/inheritance child) rel.
     /// Used by `check_index_predicates` to subtract parent relids from

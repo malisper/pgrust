@@ -147,6 +147,16 @@ pub fn init_all() {
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
     backend_optimizer_path_indxpath::init_seams();
+    backend_access_nbt_compare::init_seams();
+    backend_access_nbt_validate::init_seams();
+    backend_access_nbtree_core::init_seams();
+    backend_access_nbtree_nbtsort::init_seams();
+    backend_common_relpath::init_seams();
+    backend_optimizer_path_costsize::init_seams();
+    backend_optimizer_path_equivclass::init_seams();
+    backend_optimizer_path_small::init_seams();
+    backend_optimizer_util_vars::init_seams();
+    backend_parser_parse_expr::init_seams();
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_parse_oper::init_seams();

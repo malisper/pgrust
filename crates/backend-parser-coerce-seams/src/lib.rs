@@ -6,6 +6,9 @@
 
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::parsestmt::ParseState;
+use types_nodes::primnodes::{CoercionForm, Expr};
+use types_parsenodes::CoercionContext;
 
 /// `CoercionPathType` (parser/parse_coerce.h): the kind of coercion pathway
 /// `find_coercion_pathway` resolved between two types.
@@ -62,4 +65,87 @@ seam_core::seam!(
         rettype: types_core::Oid,
         allow_poly: bool,
     ) -> PgResult<types_core::Oid>
+);
+
+// ---------------------------------------------------------------------------
+// High-level coercion entry points consumed by parse_expr.c. These are the
+// `parse_coerce.c` public surface (`coerce_to_boolean`, `coerce_to_specific_type`,
+// `coerce_to_common_type`, `select_common_type`, `coerce_to_target_type`). The
+// owning `backend-parser-coerce` unit is not yet ported; until it lands every
+// call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `coerce_to_boolean(pstate, node, constructName)` (parse_coerce.c): coerce
+    /// an expression to `bool`, raising the construct-named datatype-mismatch
+    /// error if it cannot be. Returns the (possibly coerced) expression.
+    pub fn coerce_to_boolean<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr,
+        construct_name: &str,
+    ) -> PgResult<Expr>
+);
+
+seam_core::seam!(
+    /// `coerce_to_specific_type(pstate, node, targetTypeId, constructName)`
+    /// (parse_coerce.c): coerce to a specific built-in type for a named
+    /// construct.
+    pub fn coerce_to_specific_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr,
+        target_type_id: Oid,
+        construct_name: &str,
+    ) -> PgResult<Expr>
+);
+
+seam_core::seam!(
+    /// `coerce_to_common_type(pstate, node, targetTypeId, context)`
+    /// (parse_coerce.c): coerce a node to a previously-selected common type
+    /// (CASE/COALESCE/GREATEST/LEAST/ARRAY/IN). `context` is the construct name
+    /// for error text.
+    pub fn coerce_to_common_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        node: Expr,
+        target_type_id: Oid,
+        context: &str,
+    ) -> PgResult<Expr>
+);
+
+seam_core::seam!(
+    /// `select_common_type(pstate, exprs, context, which_expr)` (parse_coerce.c):
+    /// determine the common supertype of a list of already-transformed
+    /// expressions. The C `Node **which_expr` out-parameter is dropped (the
+    /// parse_expr.c call sites pass `NULL`). `context` is `None` when the C
+    /// passes `NULL` (a no-common-type failure yields `InvalidOid` instead of an
+    /// error — the `transformAExprIn` ScalarArrayOp probe).
+    pub fn select_common_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        exprs: &[Expr],
+        context: Option<&str>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `verify_common_type(common_type, exprs)` (parse_coerce.c): verify the
+    /// selected common type actually works for every expression (the
+    /// `transformAExprIn` ScalarArrayOp probe). Returns `false` when the type is
+    /// unusable (fall through to the boolean tree), without raising.
+    pub fn verify_common_type(common_type: Oid, exprs: &[Expr]) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `coerce_to_target_type(pstate, expr, exprtype, targettype, targettypmod,
+    /// ccontext, cformat, location)` (parse_coerce.c): the general explicit /
+    /// assignment / implicit coercion driver. Returns `None` when no coercion is
+    /// possible (the C NULL return — the caller raises the cannot-cast error).
+    pub fn coerce_to_target_type<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        expr: Expr,
+        exprtype: Oid,
+        targettype: Oid,
+        targettypmod: i32,
+        ccontext: CoercionContext,
+        cformat: CoercionForm,
+        location: i32,
+    ) -> PgResult<Option<Expr>>
 );

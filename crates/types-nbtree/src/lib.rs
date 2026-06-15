@@ -13,6 +13,8 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
+extern crate alloc;
+
 use mcx::PgVec;
 use types_core::primitive::{
     uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
@@ -97,6 +99,13 @@ pub const BTMaxItemSize: types_core::Size = 2704;
 /// `BTREE_SINGLEVAL_FILLFACTOR` (`access/nbtree.h`) — effective leaf-page
 /// fillfactor when a page is full of duplicates of a single value.
 pub const BTREE_SINGLEVAL_FILLFACTOR: i32 = 96;
+
+/// `BTREE_DEFAULT_FILLFACTOR` (`access/nbtree.h`) — default leaf-page fillfactor.
+pub const BTREE_DEFAULT_FILLFACTOR: i32 = 90;
+
+/// `BTREE_NONLEAF_FILLFACTOR` (`access/nbtree.h`) — fixed fillfactor used when
+/// packing internal (non-leaf) pages during an index build.
+pub const BTREE_NONLEAF_FILLFACTOR: i32 = 70;
 
 /// `INDEX_ALT_TID_MASK` (`access/itup.h`, `= INDEX_AM_RESERVED_BIT`) — set in a
 /// `t_info` to indicate an alternative (overloaded) `t_tid` interpretation.
@@ -515,6 +524,32 @@ pub struct BTArrayKeyInfo<'mcx> {
     pub sksup: Option<u64>,
     /// skip-support sentinels (only meaningful when `sksup.is_some()`)
     pub sksup_data: Option<BTSkipSupport<'mcx>>,
+    /// `ScanKey low_compare` — `> or >=` key (skip arrays only), or `None`.
+    /// In C this is a pointer into the preprocessed input scan keys; the owned
+    /// model carries an owned copy of the boxed scan key.
+    pub low_compare: Option<alloc::boxed::Box<ScanKeyData<'mcx>>>,
+    /// `ScanKey high_compare` — `< or <=` key (skip arrays only), or `None`.
+    pub high_compare: Option<alloc::boxed::Box<ScanKeyData<'mcx>>>,
+}
+
+impl<'mcx> BTArrayKeyInfo<'mcx> {
+    /// A fresh, empty array-key info over `mcx` (all fields zeroed as in a
+    /// `palloc0`'d `BTArrayKeyInfo`, `cur_elem == -1` for "invalid").
+    pub fn new_in(mcx: mcx::Mcx<'mcx>) -> Self {
+        BTArrayKeyInfo {
+            scan_key: 0,
+            num_elems: 0,
+            elem_values: PgVec::new_in(mcx),
+            cur_elem: -1,
+            attlen: 0,
+            attbyval: false,
+            null_elem: false,
+            sksup: None,
+            sksup_data: None,
+            low_compare: None,
+            high_compare: None,
+        }
+    }
 }
 
 /// `BTScanPosItem` — what we remember about each match (`access/nbtree.h`).
@@ -638,6 +673,11 @@ pub struct BTScanOpaqueData<'mcx> {
     pub numKilled: i32,
     /// drop leaf pin before btgettuple returns?
     pub dropPin: bool,
+    /// `scan->ignore_killed_tuples` — skip LP_DEAD-marked items during the scan.
+    /// Mirrored onto the opaque state because the `bt_first`/`bt_next` seams
+    /// carry only `(rel, &mut so, dir)`; the AM driver sets this from the scan
+    /// descriptor before each call (it never changes mid-scan).
+    pub ignore_killed_tuples: bool,
 
     /// itemIndex, or -1 if not valid
     pub markItemIndex: i32,
@@ -670,11 +710,73 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
             killedItems: PgVec::new_in(mcx),
             numKilled: 0,
             dropPin: false,
+            ignore_killed_tuples: false,
             markItemIndex: -1,
             currTuples: None,
             markTuples: None,
             currPos: BTScanPosData::new(mcx),
             markPos: BTScanPosData::new(mcx),
+        }
+    }
+}
+
+/// `BTReadPageState` (`access/nbtree.h`) — `_bt_readpage` state used across
+/// `_bt_checkkeys` calls for a single leaf page. `page` is the page being read,
+/// modelled as an owned byte buffer over `'mcx` (C carries a raw `Page`);
+/// `finaltup` is the page's high key (forward) or first non-pivot tuple
+/// (backward), needed by scans with array keys (`None` for the rightmost /
+/// leftmost page). The per-tuple `offnum` and the output `skip`/`continuescan`
+/// plus the private look-ahead/primscan-scheduling counters all mirror the C
+/// struct field-for-field.
+#[derive(Clone, Debug)]
+pub struct BTReadPageState<'mcx> {
+    /// Lowest non-pivot tuple's offset.
+    pub minoff: OffsetNumber,
+    /// Highest non-pivot tuple's offset.
+    pub maxoff: OffsetNumber,
+    /// Needed by scans with array keys (page high key / first non-pivot tuple),
+    /// or `None` on the rightmost/leftmost page. Owned page-item bytes.
+    pub finaltup: Option<PgVec<'mcx, u8>>,
+    /// Page being read (owned bytes over the scan context).
+    pub page: PgVec<'mcx, u8>,
+    /// page is first for primitive scan?
+    pub firstpage: bool,
+    /// treat all keys as nonrequired?
+    pub forcenonrequired: bool,
+    /// start comparisons from this scan key.
+    pub startikey: i32,
+
+    /// current tuple's page offset number.
+    pub offnum: OffsetNumber,
+
+    /// Array keys "look ahead" skip offnum.
+    pub skip: OffsetNumber,
+    /// Terminate ongoing (primitive) index scan?
+    pub continuescan: bool,
+
+    /// Private `_bt_checkkeys` "look ahead" / primscan-scheduling state.
+    pub rechecks: i16,
+    pub targetdistance: i16,
+    pub nskipadvances: i16,
+}
+
+impl<'mcx> BTReadPageState<'mcx> {
+    /// A fresh read-page state over `mcx` (with an empty owned page buffer).
+    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+        BTReadPageState {
+            minoff: 0,
+            maxoff: 0,
+            finaltup: None,
+            page: PgVec::new_in(mcx),
+            firstpage: false,
+            forcenonrequired: false,
+            startikey: 0,
+            offnum: 0,
+            skip: 0,
+            continuescan: false,
+            rechecks: 0,
+            targetdistance: 0,
+            nskipadvances: 0,
         }
     }
 }

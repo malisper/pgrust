@@ -1109,16 +1109,38 @@ pub fn match_eclass_clauses_to_index(
         return Ok(());
     }
 
+    // C passes `index->rel->lateral_referencers` as the prohibited_rels arg.
+    let prohibited_rels = root.rel(rel).lateral_referencers.clone();
+
     let nkeycolumns = index.nkeycolumns as usize;
     for indexcol in 0..nkeycolumns {
         // Generate clauses matching this index column from any EquivalenceClass.
+        // The C callback `ec_member_matches_indexcol` (with `arg` carrying
+        // `index`+`indexcol`) is supplied here as a closure that resolves the
+        // EC/EM arena handles and dispatches to the ported matcher in
+        // `crate::unique`.
+        let mut callback =
+            |cb_root: &PlannerInfo,
+             cb_rel: types_pathnodes::RelId,
+             ec: types_pathnodes::EcId,
+             em: types_pathnodes::EmId|
+             -> bool {
+                crate::unique::ec_member_matches_indexcol(
+                    cb_root,
+                    cb_rel,
+                    cb_root.ec(ec),
+                    cb_root.em(em),
+                    index,
+                    indexcol,
+                )
+            };
         let clauses =
-            backend_optimizer_path_equivclass_seams::generate_implied_equalities_for_column::call(
+            backend_optimizer_path_equivclass::join::generate_implied_equalities_for_column(
                 root,
                 rel,
-                index,
-                indexcol as i32,
-            );
+                &mut callback,
+                &prohibited_rels,
+            )?;
 
         // Recheck via the matcher: as in C, the generated clauses are double-
         // checked against the index (the EC opfamily test in

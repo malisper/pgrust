@@ -133,9 +133,12 @@ pub fn check_index_predicates(
 
     if !relids_is_empty(&otherrels) {
         let joinrelids = bms_union_relids(&relids, &otherrels);
-        let generated = restrictinfo::generate_join_implied_equalities::call(
-            root, &joinrelids, &otherrels, rel,
-        );
+        // equivclass.c owns generate_join_implied_equalities; C passes NULL for
+        // sjinfo here (check_index_predicates, indxpath.c:4010).
+        let generated =
+            backend_optimizer_path_equivclass_seams::generate_join_implied_equalities::call(
+                root, joinrelids, otherrels, rel, None,
+            )?;
         for ri in generated {
             clauselist.push(root.rinfo(ri).clause);
         }
