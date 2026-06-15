@@ -5257,6 +5257,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -15464,6 +15465,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
  "types-storage",
  "types-tuple",
 ]

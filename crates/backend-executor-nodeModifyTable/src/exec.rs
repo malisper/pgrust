@@ -463,7 +463,7 @@ pub fn ExecModifyTable<'mcx>(
                     let rel = relation_alias(estate, result_rel_info);
                     let any = snapshot_any();
                     let mcx = estate.es_query_cxt;
-                    let oldslot_ref = estate.slot_mut(old_slot);
+                    let oldslot_ref = estate.slot_data_mut(old_slot);
                     if !backend_access_table_tableam::table_tuple_fetch_row_version(
                         mcx, &rel, &tid, &any, oldslot_ref,
                     )? {

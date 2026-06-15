@@ -1014,7 +1014,7 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
         let mut slot = backend_access_table_tableam::table_slot_create(cstate.mcx, &rel_alias)?;
 
         let mut local_processed: u64 = 0;
-        while tableam_s::table_scan_getnextslot::call(cstate.mcx, &mut scandesc, slot.base_mut())? {
+        while tableam_s::table_scan_getnextslot::call(cstate.mcx, &mut scandesc, &mut slot)? {
             // CHECK_FOR_INTERRUPTS();
             backend_tcop_postgres_seams::check_for_interrupts::call()?;
 

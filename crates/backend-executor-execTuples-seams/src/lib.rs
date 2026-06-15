@@ -204,6 +204,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecStoreBufferHeapTuple(tuple, slot, buffer)` (execTuples.c): store an
+    /// on-disk heap tuple (still living in the pinned page `buffer`) into a
+    /// `BufferHeapTupleTableSlot`, taking a pin on `buffer` (releasing any pin
+    /// the slot previously held). This is the store the heap-scan layer
+    /// (`heapam_handler.c`'s `heapam_scan_getnextslot` / `index_fetch_tuple`)
+    /// performs on the payload-bearing slot the table-AM vtable hands it — the
+    /// reason the vtable's slot parameter is the [`SlotData`] enum (the C
+    /// `TupleTableSlot *` that actually points at a `BufferHeapTupleTableSlot`)
+    /// rather than the header-only base. The slot is borrowed directly (the
+    /// caller holds the `&mut SlotData` from the vtable callback, not an EState
+    /// pool id). `Err` carries the "wrong type of slot" `elog(ERROR)`.
+    pub fn exec_store_buffer_heap_tuple<'mcx>(
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        buffer: types_storage::buf::Buffer,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
     /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
     /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.

@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use types_nodes::TupleTableSlot;
+use types_nodes::tuptable::SlotData;
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_tableam::relscan::{TableScanDesc, TableScanDescData};
@@ -152,7 +152,7 @@ seam_core::seam!(
     pub fn table_scan_getnextslot<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -166,7 +166,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         direction: types_scan::sdir::ScanDirection,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>
 );
 

@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 
 use types_error::PgResult;
-use types_nodes::executor::TupleTableSlot;
+use types_nodes::tuptable::SlotData;
 use types_rel::Relation;
 use types_tableam::relscan::{TableScanDesc, TableScanDescData};
 
@@ -39,7 +39,7 @@ seam_core::seam!(
     pub fn table_scan_bitmap_next_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<Option<(bool, u64, u64)>>
 );
 

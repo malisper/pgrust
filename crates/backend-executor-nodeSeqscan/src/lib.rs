@@ -156,7 +156,7 @@ fn SeqNext<'mcx>(
         mcx,
         scandesc,
         direction,
-        estate.slot_mut(slot_id),
+        estate.slot_data_mut(slot_id),
     )? {
         Ok(Some(slot_id))
     } else {
