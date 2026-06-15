@@ -32,6 +32,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use mcx::Mcx;
+use types_error::PgResult;
+use types_xlog_records::ginxlog::PostingItem;
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{BlockNumber, OffsetNumber, Oid};
 use types_core::{InvalidOid, INDEX_MAX_KEYS};
@@ -544,40 +546,147 @@ pub enum GinPlaceToPageRC {
     GPTP_SPLIT,
 }
 
+/// The `void *insertdata` argument the GIN btree descent threads through
+/// `ginPlaceToPage` / `beginPlaceToPage` / `execPlaceToPage`, interpreted per
+/// tree-kind exactly as in C, where the same `void *` is cast to one of:
+/// - a `GinBtreeEntryInsertData *` for the entry tree (`ginentrypage.c`),
+/// - a `GinBtreeDataLeafInsertData *` for a data (posting tree) leaf page, or
+/// - a `PostingItem *` for an internal data page (`gindatapage.c`).
+///
+/// `ginbtree.c`'s spine never inspects the payload — it passes it straight
+/// through to the (L3) vtable callbacks; this enum is the owned stand-in for the
+/// untyped `void *` so the spine stays type-safe.
+#[derive(Clone, Debug)]
+pub enum GinInsertPayload<'mcx> {
+    /// `GinBtreeEntryInsertData *` — entry-tree insert.
+    Entry(GinBtreeEntryInsertData<'mcx>),
+    /// `GinBtreeDataLeafInsertData *` — data-leaf insert.
+    DataLeaf(GinBtreeDataLeafInsertData),
+    /// `PostingItem *` — internal data-page downlink.
+    DataInternal(PostingItem),
+}
+
+/// `*ptp_workspace` — the opaque `void *` workspace `beginPlaceToPage` produces
+/// for `execPlaceToPage` (the computed page-edit plan). The concrete payload is
+/// `gindatapage.c` / `ginentrypage.c` private (`disassembledLeaf`, the leaf
+/// segment list, etc.); the spine only carries it between the two callbacks, so
+/// it is modelled as an opaque erased box exactly like C's `void *`.
+#[derive(Default)]
+pub struct PtpWorkspace {
+    /// `*ptp_workspace` (`None` == the C `NULL`, i.e. `GPTP_NO_WORK`).
+    pub inner: Option<alloc::boxed::Box<dyn core::any::Any>>,
+}
+
+impl core::fmt::Debug for PtpWorkspace {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PtpWorkspace")
+            .field("inner", &self.inner.is_some())
+            .finish()
+    }
+}
+
+/// The out-parameters `beginPlaceToPage` fills (the C `void **ptp_workspace`,
+/// `Page *newlpage`, `Page *newrpage`). On `GPTP_SPLIT`, `newlpage`/`newrpage`
+/// hold palloc'd page images (modelled as `BLCKSZ`-sized byte buffers) not
+/// associated with buffers; otherwise they are `None`.
+#[derive(Default)]
+pub struct BeginPlaceToPageResult {
+    /// The `GinPlaceToPageRC` return code.
+    pub rc: GinPlaceToPageRC,
+    /// `*ptp_workspace`.
+    pub ptp_workspace: PtpWorkspace,
+    /// `*newlpage` — palloc'd left split page (`GPTP_SPLIT` only).
+    pub newlpage: Option<Vec<u8>>,
+    /// `*newrpage` — palloc'd right split page (`GPTP_SPLIT` only).
+    pub newrpage: Option<Vec<u8>>,
+}
+
+impl Default for GinPlaceToPageRC {
+    fn default() -> Self {
+        GinPlaceToPageRC::GPTP_NO_WORK
+    }
+}
+
+impl core::fmt::Debug for BeginPlaceToPageResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BeginPlaceToPageResult")
+            .field("rc", &self.rc)
+            .field("newlpage", &self.newlpage.is_some())
+            .field("newrpage", &self.newrpage.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// `GinBtreeData` (gin_private.h) — the abstract entry-tree / data-tree (posting
 /// tree) btree. The method-table function pointers are filled by
 /// `ginentrypage.c` (entry tree) and `gindatapage.c` (data tree); that opacity
 /// is inherited from C and kept as `Option<fn ...>` slots (the eventual L3 port
 /// installs them). The page bytes the callbacks operate on are reached through
-/// the bufmgr seam, so the callbacks are keyed on block/offset rather than raw
-/// `Page` pointers.
+/// the bufmgr seam, so the callbacks are keyed on the live `Buffer` rather than a
+/// raw `Page` pointer (the C `Page` argument is `BufferGetPage(buffer)`), and the
+/// C out-parameters become return values.
 pub struct GinBtreeData<'mcx> {
     // search methods
     /// `BlockNumber (*findChildPage)(GinBtree, GinBtreeStack *)`.
-    pub findChildPage: Option<fn(&mut GinBtreeData<'mcx>, &mut GinBtreeStack) -> BlockNumber>,
-    /// `BlockNumber (*getLeftMostChild)(GinBtree, Page)`.
-    pub getLeftMostChild: Option<fn(&mut GinBtreeData<'mcx>, BlockNumber) -> BlockNumber>,
+    pub findChildPage:
+        Option<fn(&mut GinBtreeData<'mcx>, &mut GinBtreeStack) -> PgResult<BlockNumber>>,
+    /// `BlockNumber (*getLeftMostChild)(GinBtree, Page)` — the `Page` is
+    /// `BufferGetPage(buffer)`.
+    pub getLeftMostChild: Option<fn(&mut GinBtreeData<'mcx>, Buffer) -> PgResult<BlockNumber>>,
     /// `bool (*isMoveRight)(GinBtree, Page)`.
-    pub isMoveRight: Option<fn(&mut GinBtreeData<'mcx>, BlockNumber) -> bool>,
+    pub isMoveRight: Option<fn(&mut GinBtreeData<'mcx>, Buffer) -> PgResult<bool>>,
     /// `bool (*findItem)(GinBtree, GinBtreeStack *)`.
-    pub findItem: Option<fn(&mut GinBtreeData<'mcx>, &mut GinBtreeStack) -> bool>,
+    pub findItem: Option<fn(&mut GinBtreeData<'mcx>, &mut GinBtreeStack) -> PgResult<bool>>,
 
     // insert methods
     /// `OffsetNumber (*findChildPtr)(GinBtree, Page, BlockNumber, OffsetNumber)`.
-    pub findChildPtr:
-        Option<fn(&mut GinBtreeData<'mcx>, BlockNumber, BlockNumber, OffsetNumber) -> OffsetNumber>,
-    /// `GinPlaceToPageRC (*beginPlaceToPage)(...)`.
-    pub beginPlaceToPage: Option<
-        fn(&mut GinBtreeData<'mcx>, Buffer, &mut GinBtreeStack, BlockNumber) -> GinPlaceToPageRC,
+    pub findChildPtr: Option<
+        fn(&mut GinBtreeData<'mcx>, Buffer, BlockNumber, OffsetNumber) -> PgResult<OffsetNumber>,
     >,
-    /// `void (*execPlaceToPage)(...)`.
-    pub execPlaceToPage:
-        Option<fn(&mut GinBtreeData<'mcx>, Buffer, &mut GinBtreeStack, BlockNumber)>,
-    /// `void *(*prepareDownlink)(GinBtree, Buffer)`.
-    pub prepareDownlink: Option<fn(&mut GinBtreeData<'mcx>, Buffer)>,
-    /// `void (*fillRoot)(GinBtree, Page, BlockNumber, Page, BlockNumber, Page)`.
-    pub fillRoot:
-        Option<fn(&mut GinBtreeData<'mcx>, BlockNumber, BlockNumber, BlockNumber, BlockNumber)>,
+    /// `GinPlaceToPageRC (*beginPlaceToPage)(GinBtree, Buffer, GinBtreeStack *,
+    /// void *insertdata, BlockNumber updateblkno, void **ptp_workspace, Page
+    /// *newlpage, Page *newrpage)`. The three out-params become the
+    /// [`BeginPlaceToPageResult`] return value.
+    pub beginPlaceToPage: Option<
+        fn(
+            &mut GinBtreeData<'mcx>,
+            Mcx<'mcx>,
+            Buffer,
+            &mut GinBtreeStack,
+            &GinInsertPayload<'mcx>,
+            BlockNumber,
+        ) -> PgResult<BeginPlaceToPageResult>,
+    >,
+    /// `void (*execPlaceToPage)(GinBtree, Buffer, GinBtreeStack *, void
+    /// *insertdata, BlockNumber updateblkno, void *ptp_workspace)`.
+    pub execPlaceToPage: Option<
+        fn(
+            &mut GinBtreeData<'mcx>,
+            Mcx<'mcx>,
+            Buffer,
+            &mut GinBtreeStack,
+            &GinInsertPayload<'mcx>,
+            BlockNumber,
+            &mut PtpWorkspace,
+        ) -> PgResult<()>,
+    >,
+    /// `void *(*prepareDownlink)(GinBtree, Buffer)` — returns the freshly
+    /// palloc'd `insertdata` for the parent's downlink.
+    pub prepareDownlink:
+        Option<fn(&mut GinBtreeData<'mcx>, Mcx<'mcx>, Buffer) -> PgResult<GinInsertPayload<'mcx>>>,
+    /// `void (*fillRoot)(GinBtree, Page root, BlockNumber lblkno, Page lpage,
+    /// BlockNumber rblkno, Page rpage)`. The pages are palloc'd temp images
+    /// (byte buffers); the root is written in place.
+    pub fillRoot: Option<
+        fn(
+            &mut GinBtreeData<'mcx>,
+            &mut [u8],
+            BlockNumber,
+            &[u8],
+            BlockNumber,
+            &[u8],
+        ) -> PgResult<()>,
+    >,
 
     /// `bool isData`.
     pub isData: bool,
