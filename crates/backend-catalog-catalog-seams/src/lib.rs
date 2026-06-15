@@ -65,16 +65,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `GetDatabasePath(dbOid, spcOid)` (catalog/catalog.c): build the
-    /// filesystem path to the directory holding `dbOid`'s relations in
-    /// tablespace `spcOid`. relmapper's `relmap_redo` calls it during WAL
-    /// replay, uses the path transiently, then `pfree`s it (the returned owned
-    /// `String` is dropped). Path construction allocates, so the result is
-    /// fallible (OOM).
-    pub fn get_database_path(db_oid: Oid, spc_oid: Oid) -> PgResult<String>
-);
-
-seam_core::seam!(
     /// `GetNewRelFileNumber(reltablespace, pg_class, relpersistence)`
     /// (catalog/catalog.c): allocate a brand-new relfilenumber unused by any
     /// existing relation in the target tablespace, probing the filesystem to

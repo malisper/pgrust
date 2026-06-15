@@ -43,8 +43,8 @@ use types_wal::{RM_RELMAP_ID, XLR_INFO_MASK};
 use backend_access_transam_xact_seams as xact_seams;
 use backend_access_transam_xlog_seams as xlog_seams;
 use backend_access_transam_xloginsert_seams as xloginsert_seams;
-use backend_catalog_catalog_seams as catalog_seams;
 use backend_catalog_storage_seams as storage_seams;
+use common_relpath_seams as relpath_seams;
 use backend_storage_file_fd_seams::{self as fd_seams, RelmapReadOutcome, RelmapWriteOutcome};
 use backend_storage_lmgr_lwlock_seams as lwlock_seams;
 use backend_utils_cache_inval_seams as inval_seams;
@@ -1049,7 +1049,7 @@ pub fn relmap_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> PgResul
         let mut newmap = decode_relmapfile(image);
 
         // We need to construct the pathname for this database.
-        let dbpath = catalog_seams::get_database_path::call(dbid, tsid)?;
+        let dbpath = relpath_seams::get_database_path::call(dbid, tsid);
 
         // Write out the new map and send sinval, but don't write a new WAL entry
         // (no surrounding transaction to preserve files). Grab the lock to

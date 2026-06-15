@@ -1,0 +1,90 @@
+#![allow(non_snake_case)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
+
+//! Owned-tree port of `src/backend/optimizer/util/clauses.c` (PostgreSQL 18.3)
+//! — the routines to inspect and manipulate qualification clauses.
+//!
+//! # Model
+//!
+//! The repo's executable-expression node is the lifetime-free
+//! [`types_nodes::primnodes::Expr`] enum (NOT a `Node`). The generic recursion
+//! engine is [`backend_nodes_core::nodefuncs`]
+//! (`expression_tree_walker(Option<&Expr>, &mut FnMut(&Expr)->bool)` and
+//! `expression_tree_mutator(Expr, &mut FnMut(Expr)->Expr)`); C's
+//! `bool (*)(Node *, void *)` walker becomes a named
+//! `fn(Option<&Expr>, &mut Ctx) -> PgResult<bool>` whose `void *context` is the
+//! explicit argument, and the default "recurse into children I don't care
+//! about" is `expression_tree_walker(Some(node), &mut |n| walker(n, ctx))`.
+//!
+//! The `Expr` walker model does **not** carry `Query`/`List`/`FromExpr`/
+//! `JoinExpr`/`RangeTblEntry` arms (the enum cannot construct those nodes), so
+//! the C `query_tree_walker` recursion arms inside the contain-*-functions
+//! walkers are unreachable for trees this model builds and are omitted; see
+//! [`grounded`] for the per-function notes. `max_parallel_hazard(parse: Query)`
+//! cannot be expressed (no walkable `Query`) and is not provided as a public
+//! entry — no merged consumer calls it; `is_parallel_safe` / the
+//! `max_parallel_hazard_walker` machinery over `Expr` IS ported.
+//!
+//! # Owned inward seam
+//!
+//! This crate owns and installs (`init_seams`) the one inward seam other crates
+//! consume: `contain_subplans(&[Expr]) -> bool` (used by `nodeValuesscan`).
+//!
+//! # Cross-subsystem reads
+//!
+//! Catalog property reads (`func_volatile` / `func_strict` / `func_parallel` /
+//! `get_func_leakproof` / `get_opcode` / `get_commutator` / `get_negator` /
+//! `get_op_hash_functions` / `get_type_{in,out}put_info` / `get_typlenbyval[align]`)
+//! call `backend-utils-cache-lsyscache-seams` directly (merged, real impls).
+//! The fallible PgResult propagates: pure C predicates that now reach a fallible
+//! seam become `PgResult`-returning, which is faithful (C ereports on cache
+//! miss).
+//!
+//! The const-folding engine's executor-backed legs (fmgr invocation, the
+//! pg_proc form read, the SQL inliner, planner support functions, type/domain
+//! probes) ride the OUTWARD seams declared in
+//! `backend-optimizer-util-clauses-seams`; `var.c`
+//! (`contain_var_clause`/`pull_varnos`/`NumRelids`) rides
+//! `backend-optimizer-util-var-seams`; `negate_clause` rides
+//! `backend-optimizer-prep-prepqual-seams`; `ArrayGetNItems` rides
+//! `backend-utils-adt-arrayfuncs-seams::array_const_nitems`. These are installed
+//! by their real owners; until then a call panics loudly (the const-folding
+//! legs C folds through the executor never silently skip).
+
+extern crate alloc;
+
+pub mod deferred;
+pub mod fold;
+pub mod grounded;
+pub mod leaf;
+pub mod srf_inline;
+
+#[cfg(test)]
+mod tests;
+
+pub use deferred::{
+    contain_mutable_functions_after_planning, contain_volatile_functions_after_planning,
+};
+pub use fold::{estimate_expression_value, eval_const_expressions, evaluate_expr, make_SAOP_expr};
+pub use grounded::{
+    contain_agg_clause, contain_context_dependent_node, contain_exec_param, contain_leaked_vars,
+    contain_mutable_functions, contain_nonstrict_functions, contain_subplans,
+    contain_volatile_functions, contain_volatile_functions_not_nextval, contain_window_function,
+    convert_saop_to_hashed_saop, expression_returns_set_rows, find_forced_null_var,
+    find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars, find_window_functions,
+    is_parallel_safe, is_pseudo_constant_clause, is_pseudo_constant_clause_relids, num_relids,
+    pull_paramids, CommuteOpExpr, WindowFuncLists,
+};
+pub use leaf::estimate_array_length;
+pub use srf_inline::inline_set_returning_function;
+
+/// Install the inward seam this unit owns (`contain_subplans`, consumed by
+/// `nodeValuesscan`). The OUTWARD seams this crate declares (in
+/// `clauses-seams` / `var-seams` / `prepqual-seams` / `arrayfuncs-seams`) are
+/// installed by their real owners, not here.
+pub fn init_seams() {
+    backend_optimizer_util_clauses_seams::contain_subplans::set(grounded::contain_subplans_slice);
+}
