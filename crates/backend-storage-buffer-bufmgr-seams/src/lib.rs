@@ -471,3 +471,39 @@ seam_core::seam!(
     /// is a no-op in C; callers should not pass one.
     pub fn free_access_strategy(strategy: types_storage::buf::BufferAccessStrategy)
 );
+
+seam_core::seam!(
+    /// `DropRelationBuffers(smgr_reln, forkNum, nforks, firstDelBlock)`
+    /// (bufmgr.c) — drop from the shared buffer pool every buffer of the given
+    /// relation that lies at or after `nblocks[i]` in fork `forknum[i]`, without
+    /// writing the contents. `smgrtruncate` calls it before truncating on disk.
+    /// The C `SMgrRelation` is flattened to its `RelFileLocatorBackend`. `Err`
+    /// carries the buffer-pool `ereport(ERROR)`s.
+    pub fn drop_relation_buffers(
+        smgr_reln: types_storage::RelFileLocatorBackend,
+        forknum: &[types_core::primitive::ForkNumber],
+        nblocks: &[types_core::primitive::BlockNumber],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DropRelationsAllBuffers(smgr_reln, nlocators)` (bufmgr.c) — drop every
+    /// buffer of all the given relations from the shared pool without writing
+    /// the contents. `smgrdounlinkall` calls it before unlinking on disk. The
+    /// C `SMgrRelation *` array is flattened to a `RelFileLocatorBackend` slice.
+    /// `Err` carries the buffer-pool `ereport(ERROR)`s.
+    pub fn drop_relations_all_buffers(
+        smgr_reln: &[types_storage::RelFileLocatorBackend],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `FlushRelationsAllBuffers(smgrs, nrels)` (bufmgr.c) — write every dirty
+    /// buffer of all the given relations to the kernel (but do not fsync them).
+    /// `smgrdosyncall` calls it before the per-fork immediate sync. The
+    /// C `SMgrRelation *` array is flattened to a `RelFileLocatorBackend` slice.
+    /// `Err` carries the write `ereport(ERROR)`s.
+    pub fn flush_relations_all_buffers(
+        smgrs: &[types_storage::RelFileLocatorBackend],
+    ) -> types_error::PgResult<()>
+);

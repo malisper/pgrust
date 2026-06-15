@@ -7423,6 +7423,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-analyze"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-util-vars",
+ "backend-parser-agg",
+ "backend-parser-analyze-seams",
+ "backend-parser-clause",
+ "backend-parser-coerce",
+ "backend-parser-cte",
+ "backend-parser-driver",
+ "backend-parser-gram-core",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-target",
+ "backend-parser-parse-type",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-typcache",
+ "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-parser-analyze-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -10198,6 +10234,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-smgr-bulkwrite"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-smgr",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-smgr-bulkwrite-seams"
 version = "0.0.0"
 dependencies = [
@@ -10206,6 +10262,28 @@ dependencies = [
  "types-core",
  "types-error",
  "types-rel",
+]
+
+[[package]]
+name = "backend-storage-smgr-md"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-catalog-binary-upgrade-seams",
+ "backend-commands-tablespace-seams",
+ "backend-common-relpath",
+ "backend-storage-file-fd",
+ "backend-storage-smgr-md-seams",
+ "backend-storage-sync-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -10221,6 +10299,23 @@ dependencies = [
 name = "backend-storage-smgr-seams"
 version = "0.0.0"
 dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-smgr-smgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-md",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -13940,6 +14035,7 @@ dependencies = [
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
  "backend-parser-agg",
+ "backend-parser-analyze",
  "backend-parser-clause",
  "backend-parser-coerce",
  "backend-parser-func",
@@ -13997,6 +14093,9 @@ dependencies = [
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
  "backend-storage-page-checksum",
+ "backend-storage-smgr-bulkwrite",
+ "backend-storage-smgr-md",
+ "backend-storage-smgr-smgr",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
  "backend-tcop-dest",

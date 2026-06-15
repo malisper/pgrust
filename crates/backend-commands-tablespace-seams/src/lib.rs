@@ -43,3 +43,15 @@ seam_core::seam!(
     /// Catalog access can `ereport(ERROR)`, carried on `Err`.
     pub fn prepare_temp_tablespaces() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TablespaceCreateDbspace(spcOid, dbOid, isRedo)` (tablespace.c) — create
+    /// the per-database subdirectory under a tablespace the first time it is
+    /// used in this database. `md.c`'s `mdcreate` calls it before opening a new
+    /// relation file. `Err` carries its `mkdir`/`stat` `ereport(ERROR)`s.
+    pub fn tablespace_create_dbspace(
+        spc_oid: types_core::Oid,
+        db_oid: types_core::Oid,
+        is_redo: bool,
+    ) -> types_error::PgResult<()>
+);
