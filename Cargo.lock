@@ -14773,6 +14773,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-datum",
  "types-hash",
  "types-nodes",
 ]

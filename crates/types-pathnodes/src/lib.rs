@@ -2216,6 +2216,94 @@ pub enum ArenaNode {
     /// A `StatisticExtInfo` node — `RelOptInfo::statlist` stores these as
     /// `Node *` handles in the same id-space.
     StatisticExt(StatisticExtInfo),
+    /// An `AggInfo` node — `PlannerInfo::agginfos` stores these as `Node *`
+    /// handles in the same id-space.
+    AggInfo(AggInfo),
+    /// An `AggTransInfo` node — `PlannerInfo::aggtransinfos` stores these as
+    /// `Node *` handles in the same id-space.
+    AggTransInfo(AggTransInfo),
+}
+
+/// `AggInfo` (nodes/pathnodes.h) — per-aggregate state collected by
+/// `preprocess_aggrefs` (prepagg.c). Field-for-field vs the C struct, with the
+/// C `List *aggrefs` of `Aggref *` pointers rendered as a [`Vec<NodeId>`] of
+/// arena handles.
+///
+/// CARRIER DECISION (`aggrefs`): the C `aggrefs` field is a `List *` of POINTERS
+/// to multiple *live* in-tree `Aggref`s that share this state value — it grows
+/// across `preprocess_aggref` (`aggref->aggno`/`aggtransno` are written back
+/// into the very same nodes), and is later re-read by `find_compatible_agg` /
+/// `get_agg_clause_costs`. To preserve that "alias the live node, mutate in
+/// place" semantics WITHOUT the panicking [`Expr::Aggref`] `Clone` (its `args`
+/// are a `TargetEntry` list with context-allocated children that only
+/// `clone_in` can deep-copy), the canonical live `Aggref` is interned into
+/// [`PlannerInfo::node_arena`] as [`ArenaNode::Expr`]`(`[`Expr::Aggref`]`)` by
+/// the producer (`preprocess_aggref`), and `aggrefs` holds the resulting
+/// [`NodeId`] handles. Reading [`PlannerInfo::node_mut`] then yields the one
+/// stored `Aggref` to mutate (mirroring the C pointer write-back), and reading
+/// [`PlannerInfo::node`] yields it for `find_compatible_agg`/cost inspection —
+/// exactly the "List* of pointers to shared, mutable nodes" model. (The
+/// alternative — deep-cloning each `Aggref` via `TargetEntry::clone_in` into the
+/// arena — would BREAK the shared-mutation contract, since per-call write-backs
+/// to `aggno`/`aggtransno` must be visible through every alias.)
+#[derive(Debug, Default)]
+pub struct AggInfo {
+    /// `List *aggrefs` — `Aggref` exprs this state value is for (arena handles
+    /// to live, interned `Aggref` nodes; always at least one, possibly several
+    /// identical ones sharing the same per-agg).
+    pub aggrefs: Vec<NodeId>,
+    /// `int transno` — transition state number for this aggregate.
+    pub transno: i32,
+    /// `bool shareable` — false if this agg cannot share state values with
+    /// other aggregates because the final function is read-write.
+    pub shareable: bool,
+    /// `Oid finalfn_oid` — OID of the final function, or `InvalidOid` if none.
+    pub finalfn_oid: Oid,
+}
+
+/// `AggTransInfo` (nodes/pathnodes.h) — per-transition-state info collected by
+/// `preprocess_aggrefs` (prepagg.c). Multiple aggregates can share the same
+/// transition state when they have the same inputs and transition function;
+/// `Aggref`s sharing one share its `aggtransno`. Field-for-field vs the C
+/// struct, with the C `List *args` of `TargetEntry *` rendered as a
+/// [`Vec<NodeId>`] of arena handles and `Expr *aggfilter` as an optional handle.
+#[derive(Debug, Default)]
+pub struct AggTransInfo {
+    /// `List *args` — inputs for this transition state (arena handles to
+    /// interned `TargetEntry` nodes).
+    pub args: Vec<NodeId>,
+    /// `Expr *aggfilter` — FILTER expr (arena handle), or `None`.
+    pub aggfilter: Option<NodeId>,
+    /// `Oid transfn_oid` — OID of the state transition function.
+    pub transfn_oid: Oid,
+    /// `Oid serialfn_oid` — OID of the serialization function, or `InvalidOid`.
+    pub serialfn_oid: Oid,
+    /// `Oid deserialfn_oid` — OID of the deserialization function, or
+    /// `InvalidOid`.
+    pub deserialfn_oid: Oid,
+    /// `Oid combinefn_oid` — OID of the combine function, or `InvalidOid`.
+    pub combinefn_oid: Oid,
+    /// `Oid aggtranstype` — OID of the state value's datatype.
+    pub aggtranstype: Oid,
+    /// `int32 aggtranstypmod` — additional data about transtype.
+    pub aggtranstypmod: i32,
+    /// `int transtypeLen` — length of the transition type.
+    #[allow(non_snake_case)]
+    pub transtypeLen: i32,
+    /// `bool transtypeByVal` — is the transition type pass-by-value?
+    pub transtypeByVal: bool,
+    /// `int32 aggtransspace` — space-consumption estimate.
+    pub aggtransspace: i32,
+    /// `Datum initValue` — initial transition value from the `pg_aggregate`
+    /// entry. The canonical `Datum` (a `usize` word) mirrors the C `Datum`
+    /// carried in `AggTransInfo`; for by-ref transtypes the planner re-fetches
+    /// the value through `GetAggInitVal`/fmgr at apply time, so the bare word is
+    /// the faithful carrier here.
+    #[allow(non_snake_case)]
+    pub initValue: types_datum::datum::Datum,
+    /// `bool initValueIsNull` — is the initial transition value NULL?
+    #[allow(non_snake_case)]
+    pub initValueIsNull: bool,
 }
 
 /// Lifetime-free arena form of `TargetEntry` (nodes/primnodes.h), field-for-field
@@ -2405,6 +2493,53 @@ impl PlannerInfo {
         }
     }
 
+    /// Resolve a [`NodeId`] to its [`AggInfo`] (a `root->agginfos` element).
+    #[inline]
+    pub fn agg_info(&self, id: NodeId) -> &AggInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::AggInfo(a) => a,
+            _ => panic!(
+                "PlannerInfo::agg_info: NodeId {} does not resolve to an AggInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`AggInfo`] for mutation (`preprocess_aggref`
+    /// appends to `aggrefs` / updates `transno` of an existing entry).
+    #[inline]
+    pub fn agg_info_mut(&mut self, id: NodeId) -> &mut AggInfo {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::AggInfo(a) => a,
+            _ => panic!(
+                "PlannerInfo::agg_info_mut: NodeId {} does not resolve to an AggInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`AggTransInfo`] (a `root->aggtransinfos`
+    /// element).
+    #[inline]
+    pub fn agg_trans_info(&self, id: NodeId) -> &AggTransInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::AggTransInfo(a) => a,
+            _ => panic!(
+                "PlannerInfo::agg_trans_info: NodeId {} does not resolve to an AggTransInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`AggTransInfo`] for mutation.
+    #[inline]
+    pub fn agg_trans_info_mut(&mut self, id: NodeId) -> &mut AggTransInfo {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::AggTransInfo(a) => a,
+            _ => panic!(
+                "PlannerInfo::agg_trans_info_mut: NodeId {} does not resolve to an AggTransInfo",
+                id.0
+            ),
+        }
+    }
+
     /// Push a [`RelOptInfo`] into the arena, returning its [`RelId`].
     #[inline]
     pub fn alloc_rel(&mut self, rel: RelOptInfo) -> RelId {
@@ -2471,5 +2606,117 @@ impl PlannerInfo {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::StatisticExt(s));
         id
+    }
+    /// Intern an [`AggInfo`] into the node store, returning its [`NodeId`]
+    /// handle (`root->agginfos` elements). Producer: prepagg's
+    /// `preprocess_aggref`.
+    #[inline]
+    pub fn alloc_agg_info(&mut self, a: AggInfo) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::AggInfo(a));
+        id
+    }
+    /// Intern an [`AggTransInfo`] into the node store, returning its [`NodeId`]
+    /// handle (`root->aggtransinfos` elements). Producer: prepagg's
+    /// `preprocess_aggref`.
+    #[inline]
+    pub fn alloc_agg_trans_info(&mut self, a: AggTransInfo) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::AggTransInfo(a));
+        id
+    }
+}
+
+#[cfg(test)]
+mod agginfo_carrier_tests {
+    use super::*;
+
+    /// The `AggInfo` carrier round-trips through the shared `node_arena`
+    /// id-space alongside `Expr`/`TargetEntry`, and `aggrefs` holds `NodeId`
+    /// handles to interned `Aggref` nodes — `agginfos`/`aggtransinfos` reference
+    /// the AggInfo/AggTransInfo nodes by `NodeId`, mirroring the C `List *` of
+    /// `Node *`.
+    #[test]
+    fn agg_info_carrier_round_trips() {
+        let mut root = PlannerInfo::default();
+
+        // Intern a couple of live "Aggref" placeholders (here `Expr::Const` is
+        // a stand-in for the interned Aggref node — the carrier model is the
+        // NodeId, independent of the Expr variant; the producer interns the
+        // real Aggref).
+        let aggref0 = root.alloc_node(Expr::Aggref(types_nodes::primnodes::Aggref {
+            aggfnoid: 2147,
+            aggtype: 20,
+            aggcollid: 0,
+            inputcollid: 0,
+            aggtranstype: 20,
+            aggargtypes: Vec::new(),
+            aggdirectargs: Vec::new(),
+            args: Vec::new(),
+            aggorder: Vec::new(),
+            aggdistinct: Vec::new(),
+            aggfilter: None,
+            aggstar: false,
+            aggvariadic: false,
+            aggkind: b'n' as i8,
+            aggpresorted: false,
+            agglevelsup: 0,
+            aggsplit: types_nodes::nodeagg::AGGSPLIT_SIMPLE,
+            aggno: -1,
+            aggtransno: -1,
+            location: -1,
+        }));
+
+        let info = AggInfo {
+            aggrefs: alloc::vec![aggref0],
+            transno: 0,
+            shareable: true,
+            finalfn_oid: 0,
+        };
+        let info_id = root.alloc_agg_info(info);
+        root.agginfos.push(info_id);
+
+        let trans = AggTransInfo {
+            args: Vec::new(),
+            aggfilter: None,
+            transfn_oid: 1841,
+            serialfn_oid: 0,
+            deserialfn_oid: 0,
+            combinefn_oid: 0,
+            aggtranstype: 20,
+            aggtranstypmod: -1,
+            transtypeLen: 8,
+            transtypeByVal: true,
+            aggtransspace: 0,
+            initValue: types_datum::datum::Datum::default(),
+            initValueIsNull: true,
+        };
+        let trans_id = root.alloc_agg_trans_info(trans);
+        root.aggtransinfos.push(trans_id);
+
+        // The AggInfo resolves and its `aggrefs` handle reaches the interned
+        // Aggref node (the "List* of pointers" alias).
+        assert_eq!(root.agg_info(info_id).aggrefs.len(), 1);
+        let ref_id = root.agg_info(info_id).aggrefs[0];
+        assert!(matches!(root.node(ref_id), Expr::Aggref(_)));
+
+        // In-place mutation through the live node alias (mirrors the C write of
+        // `aggref->aggno`).
+        if let Expr::Aggref(a) = root.node_mut(ref_id) {
+            a.aggno = 7;
+        }
+        if let Expr::Aggref(a) = root.node(ref_id) {
+            assert_eq!(a.aggno, 7);
+        } else {
+            unreachable!();
+        }
+
+        // AggTransInfo resolves; the transtype scalars survive.
+        assert_eq!(root.agg_trans_info(trans_id).transfn_oid, 1841);
+        assert!(root.agg_trans_info(trans_id).initValueIsNull);
+
+        // Mutating an AggInfo (append another shared Aggref) works.
+        root.agg_info_mut(info_id).transno = 3;
+        assert_eq!(root.agg_info(info_id).transno, 3);
     }
 }
