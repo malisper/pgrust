@@ -7145,6 +7145,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-prep-prepqual"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-prep-prepqual-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-optimizer-prep-prepqual-seams"
 version = "0.0.0"
 dependencies = [
@@ -14099,6 +14114,7 @@ dependencies = [
  "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
+ "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
