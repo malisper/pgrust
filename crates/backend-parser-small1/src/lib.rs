@@ -480,7 +480,10 @@ pub fn make_const<'mcx>(
     if aconst.isnull {
         // return a null const: makeConst(UNKNOWNOID, -1, InvalidOid, -2,
         //   (Datum) 0, true, false); con->location = aconst->location;
-        return makeConst(mcx, UNKNOWNOID, -1, InvalidOid, -2, Datum::from_usize(0), true, false);
+        let mut con =
+            makeConst(mcx, UNKNOWNOID, -1, InvalidOid, -2, Datum::from_usize(0), true, false)?;
+        con.location = aconst.location;
+        return Ok(con);
     }
 
     let val_node = aconst
@@ -555,8 +558,10 @@ pub fn make_const<'mcx>(
     let _ = (BITOID, NUMERICOID);
 
     // con = makeConst(typeid, -1, InvalidOid, typelen, val, false, typebyval);
-    // con->location = aconst->location;  (location not modeled on Const)
-    makeConst(mcx, typeid, -1, InvalidOid, typelen, val, false, typebyval)
+    // con->location = aconst->location;
+    let mut con = makeConst(mcx, typeid, -1, InvalidOid, typelen, val, false, typebyval)?;
+    con.location = aconst.location;
+    Ok(con)
 }
 
 /// `pg_strtoint64_safe(str, escontext)` (numutils.c) — parse an integer that may
@@ -624,6 +629,70 @@ pub fn fixed_paramref_hook<'mcx>(
         // param->location = pref->location;
         location: pref.location,
     })
+}
+
+/// `setup_parse_variable_parameters(pstate, paramTypes, numParams)`
+/// (parse_param.c, F3) — set up to process a query referencing a variable list
+/// of parameter types, growing the caller's `Oid *` array as `$n` refs appear.
+///
+/// C stores a `VarParamState *` (aliasing the caller's mutable `Oid **paramTypes`
+/// / `int *numParams`) in `pstate->p_ref_hook_state` and installs
+/// `variable_paramref_hook` + `variable_coerce_param_hook`. That caller-array-
+/// aliasing carrier is the F3 keystone — mirror-PG-and-panic until it lands.
+pub fn setup_parse_variable_parameters(_pstate: &ParseState<'_>) -> ! {
+    panic!(
+        "setup_parse_variable_parameters installs a VarParamState aliasing the \
+         caller's mutable Oid** paramTypes / int* numParams; the variable-parameter \
+         (F3) ParamHookState carrier keystone is not built (parse_param.c:84)"
+    )
+}
+
+/// `variable_paramref_hook(pstate, pref)` (parse_param.c, F3) — transform a
+/// `ParamRef` using variable parameter types, enlarging the type array as needed.
+///
+/// Reads/writes through the `VarParamState` carrier that aliases the caller's
+/// mutable `Oid **paramTypes` / `int *numParams` — the F3 keystone.
+pub fn variable_paramref_hook(_pstate: &ParseState<'_>, _pref: &ParamRef) -> ! {
+    panic!(
+        "variable_paramref_hook enlarges the caller's mutable Oid** paramTypes via \
+         a VarParamState carrier; the variable-parameter (F3) ParamHookState \
+         carrier keystone is not built (parse_param.c:131)"
+    )
+}
+
+/// `variable_coerce_param_hook(pstate, param, targetTypeId, targetTypeMod,
+/// location)` (parse_param.c, F3) — coerce a `Param` to a requested type in the
+/// varparams case, recording the deduced type in the caller's array.
+///
+/// Reads/writes through the `VarParamState` carrier aliasing the caller's mutable
+/// `Oid **paramTypes` / `int *numParams` — the F3 keystone.
+pub fn variable_coerce_param_hook(
+    _pstate: &ParseState<'_>,
+    _param: &Param,
+    _target_type_id: Oid,
+    _target_type_mod: i32,
+    _location: i32,
+) -> ! {
+    panic!(
+        "variable_coerce_param_hook records the deduced type into the caller's \
+         mutable Oid** paramTypes via a VarParamState carrier; the variable-parameter \
+         (F3) ParamHookState carrier keystone is not built (parse_param.c:186)"
+    )
+}
+
+/// `check_parameter_resolution_walker(node, pstate)` (parse_param.c, F3, static)
+/// — traverse a fully-analyzed tree verifying each `PARAM_EXTERN` `Param` matches
+/// its deduced type.
+///
+/// Reads through the `VarParamState` carrier aliasing the caller's mutable
+/// `Oid **paramTypes` / `int *numParams` — the F3 keystone.
+#[allow(dead_code)]
+fn check_parameter_resolution_walker(_node: &Node<'_>, _pstate: &ParseState<'_>) -> ! {
+    panic!(
+        "check_parameter_resolution_walker reads the caller's mutable Oid** \
+         paramTypes via a VarParamState carrier; the variable-parameter (F3) \
+         ParamHookState carrier keystone is not built (parse_param.c:286)"
+    )
 }
 
 /// `check_variable_parameters(pstate, query)` (parse_param.c, F3) — verify
