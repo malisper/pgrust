@@ -14,7 +14,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext, PgBox, PgVec};
+use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 
 use types_amapi::COMPARE_CONTAINED_BY;
 use types_catalog::catalog::{
@@ -46,7 +46,7 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{Node, NodePtr};
 use types_nodes::primnodes::Expr;
 use types_rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -951,39 +951,32 @@ pub fn AdjustNotNullInheritance(
  * RelationGetNotNullConstraints (pg_constraint.c:833-905)
  * ========================================================================= */
 
-/// The not-null-constraint data `RelationGetNotNullConstraints` returns per row
-/// (the fields a `CookedConstraint` / `Constraint` node is built from). The
-/// `makeNode(Constraint)` / `CookedConstraint` assembly the C performs requires
-/// the `Constraint`/`CookedConstraint` parse-node types, which are not yet
-/// modeled anywhere in this tree (unbuilt keystone); this returns every field
-/// the C reads off `conForm` so the node-builder can be filled lossless once
-/// that keystone lands. The `cooked` flag (which node shape) is carried for the
-/// same reason — both shapes carry these same fields.
-#[derive(Clone, Debug)]
-pub struct NotNullConstraint {
-    /// `conForm->oid`.
-    pub conoid: Oid,
-    /// `pstrdup(NameStr(conForm->conname))`.
-    pub conname: String,
-    /// the sole `conkey` attnum.
-    pub attnum: AttrNumber,
-    /// `conForm->convalidated`.
-    pub convalidated: bool,
-    /// `conForm->connoinherit`.
-    pub connoinherit: bool,
+/// One element of the list `RelationGetNotNullConstraints` returns. C returns a
+/// `List *` whose elements are `Constraint *` nodes when `cooked == false`, or
+/// `CookedConstraint *` nodes when `cooked == true`. We mirror both node shapes
+/// 1:1 here (rather than a trimmed carrier), so the caller gets the exact node
+/// the C built.
+#[derive(Debug)]
+pub enum NotNullConstraint<'mcx> {
+    /// `cooked == false`: a `makeNode(Constraint)` of type `CONSTR_NOTNULL`.
+    Raw(types_nodes::ddlnodes::Constraint<'mcx>),
+    /// `cooked == true`: a `palloc(sizeof(CookedConstraint))`.
+    Cooked(types_nodes::ddlnodes::CookedConstraint<'mcx>),
 }
 
 /// RelationGetNotNullConstraints — return the list of not-null constraints for
 /// the given rel. `include_noinh` chooses whether to include NO INHERIT ones.
-/// (`cooked` selects which node shape the caller builds; both shapes carry the
-/// same fields, returned here.)
+/// `cooked` selects which node shape the caller wants.
 pub fn RelationGetNotNullConstraints(
     mcx: Mcx<'_>,
     relid: Oid,
-    _cooked: bool,
+    cooked: bool,
     include_noinh: bool,
-) -> PgResult<Vec<NotNullConstraint>> {
-    let mut notnulls: Vec<NotNullConstraint> = Vec::new(); // NIL
+) -> PgResult<Vec<NotNullConstraint<'_>>> {
+    use types_nodes::ddlnodes::ConstrType::CONSTR_NOTNULL as CONSTR_NOTNULL_TYPE;
+    use types_nodes::ddlnodes::{Constraint, CookedConstraint};
+
+    let mut notnulls: Vec<NotNullConstraint<'_>> = Vec::new(); // NIL
 
     let constrRel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let skey = [oid_key(Anum_pg_constraint_conrelid, relid)?];
@@ -1000,13 +993,98 @@ pub fn RelationGetNotNullConstraints(
 
         let colnum = extractNotNullColumn(&row.htup)?;
 
-        notnulls.push(NotNullConstraint {
-            conoid: con_form.oid,
-            conname: name_str(&con_form.conname).to_string(),
-            attnum: colnum,
-            convalidated: con_form.convalidated,
-            connoinherit: con_form.connoinherit,
-        });
+        if cooked {
+            /*
+             * cooked->contype = CONSTR_NOTNULL;
+             * cooked->conoid = conForm->oid;
+             * cooked->name = pstrdup(NameStr(conForm->conname));
+             * cooked->attnum = colnum;
+             * cooked->expr = NULL;
+             * cooked->is_enforced = true;
+             * cooked->skip_validation = !conForm->convalidated;
+             * cooked->is_local = true;
+             * cooked->inhcount = 0;
+             * cooked->is_no_inherit = conForm->connoinherit;
+             */
+            let cookedc = CookedConstraint {
+                contype: CONSTR_NOTNULL_TYPE,
+                conoid: con_form.oid,
+                name: Some(PgString::from_str_in(name_str(&con_form.conname), mcx)?),
+                attnum: colnum,
+                expr: None,
+                is_enforced: true,
+                skip_validation: !con_form.convalidated,
+                is_local: true,
+                inhcount: 0,
+                is_no_inherit: con_form.connoinherit,
+            };
+            notnulls.push(NotNullConstraint::Cooked(cookedc));
+        } else {
+            /*
+             * constr = makeNode(Constraint);
+             * constr->contype = CONSTR_NOTNULL;
+             * constr->conname = pstrdup(NameStr(conForm->conname));
+             * constr->deferrable = false;
+             * constr->initdeferred = false;
+             * constr->location = -1;
+             * constr->keys = list_make1(makeString(get_attname(relid, colnum, false)));
+             * constr->is_enforced = true;
+             * constr->skip_validation = !conForm->convalidated;
+             * constr->initially_valid = true;
+             * constr->is_no_inherit = conForm->connoinherit;
+             */
+            /* get_attname(relid, colnum, false) — false == not missing_ok */
+            let attname = lsyscache_seams::get_attname::call(mcx, relid, colnum, false)?
+                .ok_or_else(|| {
+                    PgError::error(format!(
+                        "cache lookup failed for attribute {colnum} of relation {relid}"
+                    ))
+                })?;
+            let mut keys: PgVec<'_, NodePtr<'_>> = PgVec::new_in(mcx);
+            keys.push(alloc_in(
+                mcx,
+                Node::String(types_nodes::value::StringNode { sval: attname }),
+            )?);
+
+            let constr = Constraint {
+                contype: CONSTR_NOTNULL_TYPE,
+                conname: Some(PgString::from_str_in(name_str(&con_form.conname), mcx)?),
+                deferrable: false,
+                initdeferred: false,
+                is_enforced: true,
+                skip_validation: !con_form.convalidated,
+                initially_valid: true,
+                is_no_inherit: con_form.connoinherit,
+                raw_expr: None,
+                cooked_expr: None,
+                generated_when: 0,
+                generated_kind: 0,
+                nulls_not_distinct: false,
+                keys,
+                without_overlaps: false,
+                including: PgVec::new_in(mcx),
+                exclusions: PgVec::new_in(mcx),
+                options: PgVec::new_in(mcx),
+                indexname: None,
+                indexspace: None,
+                reset_default_tblspc: false,
+                access_method: None,
+                where_clause: None,
+                pktable: None,
+                fk_attrs: PgVec::new_in(mcx),
+                pk_attrs: PgVec::new_in(mcx),
+                fk_with_period: false,
+                pk_with_period: false,
+                fk_matchtype: 0,
+                fk_upd_action: 0,
+                fk_del_action: 0,
+                fk_del_set_cols: PgVec::new_in(mcx),
+                old_conpfeqop: PgVec::new_in(mcx),
+                old_pktable_oid: InvalidOid,
+                location: -1,
+            };
+            notnulls.push(NotNullConstraint::Raw(constr));
+        }
         Ok(true)
     })?;
 
