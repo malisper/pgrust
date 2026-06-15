@@ -15,6 +15,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetFreeIndexPage(rel)` (indexfsm.c): return the block number of a free
+    /// page reclaimed from the FSM (and mark it no-longer-free), or
+    /// `InvalidBlockNumber` if none is available. Used by SP-GiST/nbtree page
+    /// allocation. `Err` carries the FSM read/write ereports.
+    pub fn get_free_index_page<'mcx>(rel: &Relation<'mcx>) -> PgResult<BlockNumber>
+);
+
+seam_core::seam!(
     /// `IndexFreeSpaceMapVacuum(rel)` (indexfsm.c): force the upper FSM levels
     /// up to date so searchers find the freed pages. `Err` carries the FSM
     /// write ereports.

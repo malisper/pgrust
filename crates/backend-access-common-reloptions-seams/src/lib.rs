@@ -72,3 +72,18 @@ seam_core::seam!(
         validate: bool,
     ) -> PgResult<Option<std::vec::Vec<u8>>>
 );
+
+seam_core::seam!(
+    /// `build_reloptions(reloptions, validate, RELOPT_KIND_SPGIST,
+    /// sizeof(SpGistOptions), tab, lengthof(tab))` — the SP-GiST AM's
+    /// `spgoptions` (spgutils.c), whose only option is `fillfactor` at
+    /// `offsetof(SpGistOptions, fillfactor)`. The relopt-table layout and parse
+    /// are the reloptions owner's; the seam takes the raw `reloptions` varlena
+    /// bytes (`None` for a NULL datum) and returns the serialized
+    /// `SpGistOptions` `bytea` (`None` when no options apply). `Err` carries the
+    /// validation `ereport(ERROR)`s.
+    pub fn build_reloptions_spgist(
+        reloptions: Option<&[u8]>,
+        validate: bool,
+    ) -> PgResult<Option<std::vec::Vec<u8>>>
+);

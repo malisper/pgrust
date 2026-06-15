@@ -147,12 +147,18 @@ pub mod tags {
     pub const BRIN_SCAN: AmOpaqueTag = AmOpaqueTag(0x6272_696e_5f73_636e); // "brin_scn"
     /// `gin`'s `GinScanOpaqueData<'mcx>` scan state (`IndexScanDescData.opaque`).
     pub const GIN_SCAN: AmOpaqueTag = AmOpaqueTag(0x6769_6e5f_7363_6e00); // "gin_scn\0"
+    /// SP-GiST's `SpGistScanOpaqueData<'mcx>` scan state
+    /// (`IndexScanDescData.opaque`, spgscan.c `spgbeginscan`).
+    pub const SPGIST_SCAN: AmOpaqueTag = AmOpaqueTag(0x7370_675f_7363_6e00); // "spg_scn\0"
 
     /// hash's cached `HashMetaPageData` stored in `rel->rd_amcache`
-    /// (`_hash_getcachedmetap`). The only `rd_amcache` payload yet modeled; the
-    /// SP-GiST/GIN/GiST `rd_amcache` types (`SpGistCache`/`GinState`/`GISTSTATE`)
-    /// will pick their own tags here when those AM campaigns land.
+    /// (`_hash_getcachedmetap`). The SP-GiST/GIN/GiST `rd_amcache` types
+    /// (`SpGistCache`/`GinState`/`GISTSTATE`) pick their own tags here as those
+    /// AM campaigns land.
     pub const HASH_META: AmOpaqueTag = AmOpaqueTag(0x6861_7368_5f6d_6574); // "hash_met"
+    /// SP-GiST's cached `SpGistCache` stored in `rel->rd_amcache`
+    /// (spgutils.c `spgGetCache`).
+    pub const SPGIST_CACHE: AmOpaqueTag = AmOpaqueTag(0x7370_675f_6361_6368); // "spg_cach"
 }
 
 #[cfg(test)]
