@@ -173,6 +173,7 @@ backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-in
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }

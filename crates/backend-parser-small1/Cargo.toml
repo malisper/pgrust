@@ -1,0 +1,38 @@
+[package]
+name = "backend-parser-small1"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_small1"
+path = "src/lib.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-cluster = { path = "../types-cluster" }
+types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+
+# Merged owners called directly (cycle-free).
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+
+# Owner of the inward seams this crate installs.
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+
+# Outward dependency seams (catalog / cache / mb callees not yet ported / cyclic).
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
