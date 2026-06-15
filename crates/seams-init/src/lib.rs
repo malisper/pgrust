@@ -6,8 +6,8 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
-    contrib_amcheck_verify_nbtree::init_seams();
     backend_archive_shell_archive::init_seams();
+    contrib_amcheck_verify_nbtree::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -59,10 +59,14 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
+    backend_catalog_pg_conversion::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
