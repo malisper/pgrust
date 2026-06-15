@@ -852,6 +852,8 @@ pub fn init_seams() {
     s::lookup_type_name_oid::set(seam_lookup_type_name_oid);
     s::typename_type_id_node::set(seam_typename_type_id_node);
     s::type_name_list_to_string::set(seam_type_name_list_to_string);
+    s::lookup_type_name_oid_owa::set(seam_lookup_type_name_oid_owa);
+    s::func_name_as_type::set(seam_func_name_as_type);
 }
 
 /// `parse_type_string(str, soft)` — `parseTypeString(str, &typeid, &typmod,
@@ -933,6 +935,66 @@ fn seam_type_name_list_to_string<'mcx>(
     let mut out = mcx::PgString::new_in(mcx);
     out.try_push_str(&s)?;
     Ok(out)
+}
+
+/// `LookupTypeNameOid(NULL, typeName, missing_ok)` (parse_type.c:232) over the
+/// opclasscmds/function `types_opclass::TypeName` carrier — the `ObjectWithArgs`
+/// `objargs` path of `LookupFuncWithArgs` (parse_func.c).
+fn seam_lookup_type_name_oid_owa(
+    type_name: &types_opclass::TypeName,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+    let tn = from_opclass_typename(type_name);
+    LookupTypeNameOid(scratch.mcx(), None, &tn, missing_ok)
+}
+
+/// `FuncNameAsType(funcname)` (parse_func.c:1881): treat a function name as a
+/// type-coercion target. `LookupTypeNameExtended(NULL,
+/// makeTypeNameFromNameList(funcname), NULL, false, false)` then keep the OID
+/// only for a fully-defined, non-composite (scalar/domain) type.
+fn seam_func_name_as_type(funcname: &[mcx::PgString<'_>]) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("FuncNameAsType");
+
+    /*
+     * temp_ok=false protects the contract for writing SECURITY DEFINER
+     * functions safely.
+     */
+    let typeName = makeTypeNameFromNameList(funcname);
+    let typtup = LookupTypeNameExtended(scratch.mcx(), None, &typeName, false, false)?;
+    let (typtup, _typmod) = match typtup {
+        Some(t) => t,
+        None => return Ok(InvalidOid),
+    };
+
+    if typtup.typisdefined && !OidIsValid(typeTypeRelid(typtup)) {
+        typeTypeId(Some(typtup))
+    } else {
+        Ok(InvalidOid)
+    }
+}
+
+/// `makeTypeNameFromNameList(names)` (makefuncs.c) over a `String`-list function
+/// name: a `TypeName` carrying just the name components (no typmods/array
+/// bounds; `typemod = -1`, `location = -1`).
+fn makeTypeNameFromNameList(names: &[mcx::PgString<'_>]) -> TypeName {
+    TypeName {
+        names: names
+            .iter()
+            .map(|n| {
+                Node::String(types_parsenodes::StringNode {
+                    sval: Some(n.as_str().to_string()),
+                })
+            })
+            .collect(),
+        typeOid: InvalidOid,
+        setof: false,
+        pct_type: false,
+        typmods: Vec::new(),
+        typemod: -1,
+        arrayBounds: Vec::new(),
+        location: -1,
+    }
 }
 
 /// Convert the trimmed `types_opclass::TypeName` (names as `Vec<String>`) into
