@@ -15498,6 +15498,7 @@ dependencies = [
 name = "types-gist"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-pairingheap",
  "mcx",
  "types-core",
  "types-datum",
