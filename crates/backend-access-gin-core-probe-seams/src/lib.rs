@@ -21,12 +21,12 @@ seam_core::seam!(
     /// (ginlogic.c:73): invoke the opclass boolean `consistent` support
     /// function for `key`, returning its `bool` result. The support function
     /// also sets `key.recheckCurItem`.
-    pub fn gin_consistent_call_bool(key: &mut GinScanKey) -> bool
+    pub fn gin_consistent_call_bool<'mcx>(key: &mut GinScanKey<'mcx>) -> bool
 );
 
 seam_core::seam!(
     /// `FunctionCall7Coll(key->triConsistentFmgrInfo, key->collation, ...)`
     /// (ginlogic.c:91/112): invoke the opclass ternary `triConsistent` support
     /// function for `key`, returning its `GinTernaryValue` result.
-    pub fn gin_consistent_call_tri(key: &mut GinScanKey) -> GinTernaryValue
+    pub fn gin_consistent_call_tri<'mcx>(key: &mut GinScanKey<'mcx>) -> GinTernaryValue
 );
