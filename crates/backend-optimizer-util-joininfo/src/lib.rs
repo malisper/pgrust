@@ -1,0 +1,132 @@
+//! `optimizer/util/restrictinfo.c`, `optimizer/util/joininfo.c`,
+//! `optimizer/util/placeholder.c`, and `optimizer/plan/orclauses.c` — the
+//! RestrictInfo / joininfo-list / PlaceHolderVar / restriction-OR-clause
+//! manipulation routines, ported 1:1 over the arena+handle model of
+//! [`types_pathnodes::PlannerInfo`].
+//!
+//! Every `RestrictInfo *` is a [`RinfoId`] arena handle, every `RelOptInfo *` a
+//! [`RelId`], every `PlaceHolderInfo *` a [`PhInfoId`], and clause/expression
+//! nodes are interned as [`NodeId`] handles into the planner node arena. `Relids`
+//! set algebra is reached through the `backend-optimizer-util-relnode`/`-pathnode`
+//! seams; the EquivalenceClass relevance probe through equivclass's seam; and the
+//! not-yet-ported node operators (`pull_varnos`/`pull_var_clause`/
+//! `contain_leaked_vars`/`exprType`/…), the costsize width/selectivity helpers,
+//! the relnode base-rel lookup, and the initsplan always-true/false probes
+//! through seam crates (panicking until their owners land).
+
+#![allow(non_snake_case)]
+#![allow(clippy::too_many_arguments)]
+
+extern crate alloc;
+
+pub mod joininfo;
+pub mod orclauses;
+pub mod placeholder;
+pub mod restrictinfo;
+
+pub use joininfo::{
+    add_join_clause_to_rels, have_relevant_joinclause, remove_join_clause_from_rels,
+};
+pub use orclauses::extract_restriction_or_clauses;
+pub use placeholder::{
+    add_placeholders_to_base_rels, add_placeholders_to_joinrel,
+    contain_placeholder_references_to, find_placeholder_info, find_placeholders_in_jointree,
+    fix_placeholder_input_needed_levels, get_placeholder_nulling_relids, make_placeholder_expr,
+    rebuild_placeholder_attr_needed,
+};
+pub use restrictinfo::{
+    commute_restrictinfo, extract_actual_clauses, extract_actual_join_clauses,
+    get_actual_clauses, join_clause_is_movable_into, join_clause_is_movable_to,
+    make_plain_restrictinfo, make_restrictinfo, restriction_is_or_clause,
+    restriction_is_securely_promotable,
+};
+
+use backend_geqo_all_seams as geqo_seam;
+use backend_optimizer_path_costsize_seams as costsize_seam;
+use backend_optimizer_path_equivclass_ext_seams as ec_ext_seam;
+use backend_optimizer_path_joinpath_seams as joinpath_seam;
+use backend_optimizer_path_small_seams as small_seam;
+pub(crate) use backend_optimizer_util_joininfo_ext_seams as ext_seam;
+use types_nodes::primnodes::Expr;
+
+/// Install the inward seams owned by restrictinfo.c / joininfo.c / placeholder.c.
+/// Called once at single-threaded startup from `seams-init::init_all()`. Each of
+/// these seam declarations was placed in an earlier consumer's seam crate as a
+/// best guess; this unit is the C-source owner that installs the real bodies.
+pub fn init_seams() {
+    // restrictinfo.c — small-seams (consumed by clausesel.c/tidpath.c).
+    small_seam::restriction_is_or_clause::set(|root, rinfo| {
+        restriction_is_or_clause(root, rinfo)
+    });
+    small_seam::restriction_is_securely_promotable::set(|root, rinfo, rel| {
+        restriction_is_securely_promotable(root, rinfo, rel)
+    });
+    small_seam::join_clause_is_movable_to::set(|root, rinfo, rel| {
+        join_clause_is_movable_to(root, rinfo, rel)
+    });
+
+    // restrictinfo.c — costsize-seams (consumed by costsize.c joins).
+    costsize_seam::join_clause_is_movable_into::set(|root, rinfo, current_rel, join_rel| {
+        // C call: `join_clause_is_movable_into(rinfo, innerpath->parent->relids,
+        // joinrelids)` (costsize.c). The consumer passes the inner path's parent
+        // rel and the joinrel; `currentrelids` is the inner parent's relids and
+        // `current_and_outer` is the joinrel's relids (already the union the C
+        // caller formed). No extra union here.
+        let current_relids = root.rel(current_rel).relids.clone();
+        let current_and_outer = root.rel(join_rel).relids.clone();
+        join_clause_is_movable_into(root, rinfo, &current_relids, &current_and_outer)
+    });
+
+    // restrictinfo.c — equivclass-ext-seams (consumed by equivclass.c).
+    ec_ext_seam::make_restrictinfo::set(
+        |root,
+         clause,
+         is_pushed_down,
+         has_clone,
+         is_clone,
+         pseudoconstant,
+         security_level,
+         required_relids,
+         incompatible_relids,
+         outer_relids| {
+            make_restrictinfo(
+                root,
+                clause,
+                is_pushed_down,
+                has_clone,
+                is_clone,
+                pseudoconstant,
+                security_level,
+                required_relids,
+                incompatible_relids,
+                outer_relids,
+            )
+        },
+    );
+
+    // placeholder.c — joinpath-seams (consumed by joinpath.c memoize analysis).
+    // The seam identifies the PHV by a `NodeId` and returns `PhInfoId`
+    // (infallible). C `find_placeholder_info` can `elog(ERROR, "too late ...")`
+    // once placeholders are frozen and can OOM; neither happens on the memoize
+    // cache-key path (placeholders not yet frozen there), so the wrapper
+    // surfaces such an error as a panic, matching the fixed consumer signature.
+    joinpath_seam::find_placeholder_info::set(|root, node| {
+        let phv = match root.node(node) {
+            Expr::PlaceHolderVar(phv) => phv.clone(),
+            _ => panic!("find_placeholder_info: node is not a PlaceHolderVar"),
+        };
+        find_placeholder_info(root, &phv).expect("find_placeholder_info failed")
+    });
+
+    // joininfo.c — geqo-all-seams (consumed by geqo + joinrels).
+    geqo_seam::have_relevant_joinclause::set(|root, rel1, rel2| {
+        have_relevant_joinclause(root, rel1, rel2)
+    });
+}
+
+/// Shorthand for the `Relids` set-algebra seams (relnode.c owner).
+pub(crate) use backend_optimizer_util_relnode_seams as bms;
+pub(crate) use backend_optimizer_util_pathnode_seams as bms_path;
+
+#[cfg(test)]
+mod tests;

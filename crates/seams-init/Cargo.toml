@@ -163,6 +163,7 @@ backend-common-relpath = { path = "../backend-common-relpath" }
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
 backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }
+backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }

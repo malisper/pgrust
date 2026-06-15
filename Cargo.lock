@@ -6237,10 +6237,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-jit-jit"
+version = "0.0.0"
+dependencies = [
+ "backend-jit-jit-seams",
+ "backend-jit-llvmjit-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-jit-llvmjit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -7028,6 +7056,40 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-util-joininfo"
+version = "0.0.0"
+dependencies = [
+ "backend-geqo-all-seams",
+ "backend-nodes-core",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-path-small-seams",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-joininfo-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -13228,6 +13290,7 @@ dependencies = [
  "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-geqo-all",
+ "backend-jit-jit",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-lib-hyperloglog",
@@ -13245,6 +13308,7 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-vars",
  "backend-parser-parse-expr",
