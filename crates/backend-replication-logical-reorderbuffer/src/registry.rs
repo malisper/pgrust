@@ -12,14 +12,21 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
-use types_core::xact::CommandId;
+use std::collections::HashMap;
+
+use types_core::primitive::{ForkNumber, TransactionId, XLogRecPtr};
+use types_core::xact::{CommandId, InvalidCommandId};
+use types_error::PgResult;
 use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
+use types_snapshot::snapshot::ResolveCminCmaxResult;
 use types_snapshot::SnapshotData;
 use types_storage::sinval::SharedInvalidationMessage;
+use types_storage::storage::Buffer;
 use types_storage::RelFileLocator;
+use types_tuple::heaptuple::HeapTupleData;
 use types_tuple::ItemPointerData;
 
+use crate::snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey};
 use crate::ReorderBuffer;
 
 ::std::thread_local! {
@@ -243,13 +250,123 @@ fn seam_txn_is_prepared(handle: ReorderBufferHandle, txn: TxnHandle) -> bool {
     with_buffer(handle, |rb| rb.txn_is_prepared(xid))
 }
 
-/// Install every inward seam this unit owns (foundational family). The
-/// remaining-family seam (`resolve_cmin_cmax_during_decoding`) is installed
-/// when the snapshot-management / tuplecid-hash family lands; until then it
-/// keeps its loud-panic default.
+// ---------------------------------------------------------------------------
+// Active tuplecid hash (the `static HTAB *tuplecid_data` that
+// SetupHistoricSnapshot points at, owned here because reorderbuffer builds and
+// owns the per-txn `tuplecid_hash`). ReorderBufferProcessTXN (change-replay
+// family) sets this from `txn->tuplecid_hash` after building it; until that
+// family lands the active hash stays `None`, which is exactly the C
+// `tuplecid_data == NULL` path that makes ResolveCminCmaxDuringDecoding return
+// false ("CID is from the future command").
+// ---------------------------------------------------------------------------
+
+::std::thread_local! {
+    static ACTIVE_TUPLECID: RefCell<Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>> =
+        const { RefCell::new(None) };
+}
+
+/// `SetupHistoricSnapshot(snapshot, tuplecid_hash)` side: make `hash` the
+/// active `(relfilelocator, ctid) -> (cmin, cmax)` lookup. Called by
+/// ReorderBufferProcessTXN once the change-replay family lands.
+pub fn set_active_tuplecid_hash(
+    hash: Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>,
+) {
+    ACTIVE_TUPLECID.with(|a| *a.borrow_mut() = hash);
+}
+
+/// `ResolveCminCmaxDuringDecoding(tuplecid_data, snapshot, htup, buffer, &cmin,
+/// &cmax)` — look up the actual cmin/cmax of a tuple seen by a historic
+/// (logical-decoding) MVCC snapshot.
+fn seam_resolve_cmin_cmax_during_decoding(
+    snapshot: SnapshotData,
+    htup: HeapTupleData<'_>,
+    buffer: Buffer,
+    mut cmin: CommandId,
+    mut cmax: CommandId,
+) -> PgResult<ResolveCminCmaxResult> {
+    // Return unresolved if tuplecid_data is not valid. That's because when
+    // streaming in-progress transactions we may run into tuples with the CID
+    // before actually decoding them (e.g. INSERT followed by TRUNCATE). So we
+    // assume the CID is from the future command.
+    let active = ACTIVE_TUPLECID.with(|a| a.borrow().is_some());
+    if !active {
+        return Ok(ResolveCminCmaxResult {
+            resolved: false,
+            cmin,
+            cmax,
+        });
+    }
+
+    // get relfilelocator from the buffer; no convenient way other than that.
+    let (rlocator, forkno, blockno) =
+        backend_storage_buffer_bufmgr_seams::buffer_get_tag::call(buffer)?;
+
+    // tuples can only be in the main fork.
+    debug_assert!(forkno == ForkNumber::MAIN_FORKNUM);
+    debug_assert!(blockno == htup.t_self.ip_blkid.block_number());
+
+    let key = ReorderBufferTupleCidKey {
+        rlocator,
+        tid: htup.t_self,
+    };
+
+    let mut updated_mapping = false;
+    loop {
+        let found = ACTIVE_TUPLECID.with(|a| a.borrow().as_ref().and_then(|h| h.get(&key).copied()));
+
+        match found {
+            Some(ent) => {
+                cmin = ent.cmin;
+                cmax = ent.cmax;
+                return Ok(ResolveCminCmaxResult {
+                    resolved: true,
+                    cmin,
+                    cmax,
+                });
+            }
+            None => {
+                // failed to find a mapping; check whether the table was
+                // rewritten and apply mappings if so, but only once (we hold a
+                // lock on the relation so no new mappings can appear).
+                if !updated_mapping {
+                    update_logical_mappings(htup.t_tableOid, &snapshot)?;
+                    updated_mapping = true;
+                    continue;
+                }
+                let _ = InvalidCommandId;
+                return Ok(ResolveCminCmaxResult {
+                    resolved: false,
+                    cmin,
+                    cmax,
+                });
+            }
+        }
+    }
+}
+
+/// `UpdateLogicalMappings(tuplecid_data, relid, snapshot)` — apply any logical
+/// remapping files targeted at our transaction (when a catalog relation was
+/// rewritten with `VACUUM FULL`/`CLUSTER` during decoding). This scans
+/// `pg_logical/mappings/`, parses each `map-*` filename, and replays
+/// `ApplyLogicalMappingFile` in LSN order. It needs the fd/dir layer, the
+/// logical-rewrite filename format, and `TransactionIdDidCommit`; those land
+/// with the logical-rewrite-mapping family. Until then a rewritten catalog
+/// relation during decoding hits this loud panic (mirror-PG-and-panic) rather
+/// than silently mis-resolving a CID.
+fn update_logical_mappings(_relid: types_core::Oid, _snapshot: &SnapshotData) -> PgResult<()> {
+    panic!(
+        "UpdateLogicalMappings: logical-rewrite mapping-file replay not yet \
+         ported (logical-rewrite-mapping family)"
+    );
+}
+
+/// Install every inward seam this unit owns (foundational + snapshot-management
+/// families). The snapshot-management family installs the 26th inward seam,
+/// `resolve_cmin_cmax_during_decoding`.
 pub fn init_seams() {
     use backend_replication_logical_reorderbuffer_seams as s;
 
+    s::resolve_cmin_cmax_during_decoding::set(seam_resolve_cmin_cmax_during_decoding);
     s::ReorderBufferAllocate::set(seam_allocate);
     s::ReorderBufferFree::set(seam_free);
     s::wire_reorderbuffer_callbacks::set(seam_wire_callbacks);

@@ -9736,6 +9736,7 @@ name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
  "backend-replication-logical-reorderbuffer-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "mcx",
  "types-core",
  "types-error",
