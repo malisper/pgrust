@@ -12865,6 +12865,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-hash",
  "types-nodes",
  "types-storage",

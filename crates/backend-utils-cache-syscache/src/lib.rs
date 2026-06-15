@@ -894,4 +894,36 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::user_mapping_options_by_oid::set(
         projections::user_mapping_options_by_oid,
     );
+    backend_utils_cache_syscache_seams::relation_supports_syscache::set(
+        projections::relation_supports_syscache,
+    );
+    backend_utils_cache_syscache_seams::init_catalog_cache_phase2::set(
+        projections::init_catalog_cache_phase2,
+    );
+    backend_utils_cache_syscache_seams::search_syscache_exists_reloid::set(
+        projections::search_syscache_exists_reloid,
+    );
+    backend_utils_cache_syscache_seams::rel_relkind::set(projections::rel_relkind);
+    backend_utils_cache_syscache_seams::pg_proc_form::set(projections::pg_proc_form);
+    backend_utils_cache_syscache_seams::search_type_attr_info::set(
+        projections::search_type_attr_info,
+    );
+    backend_utils_cache_syscache_seams::get_opclass_oid::set(projections::get_opclass_oid);
+    backend_utils_cache_syscache_seams::search_syscache_attname::set(
+        projections::search_syscache_attname,
+    );
+    backend_utils_cache_syscache_seams::lookup_authid_by_oid::set(projections::lookup_authid_by_oid);
+    backend_utils_cache_syscache_seams::lookup_authid_by_name::set(
+        projections::lookup_authid_by_name,
+    );
+    backend_utils_cache_syscache_seams::lookup_language::set(projections::lookup_language);
+    backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
+        projections::pg_index_has_predicate,
+    );
+    backend_utils_cache_syscache_seams::collation_qualified_name::set(
+        projections::collation_qualified_name,
+    );
+    backend_utils_cache_syscache_seams::search_pg_class_full_form::set(
+        projections::search_pg_class_full_form,
+    );
 }
