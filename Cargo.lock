@@ -14868,8 +14868,6 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
- "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
  "backend-access-gist-core",
  "backend-access-gist-proc",
