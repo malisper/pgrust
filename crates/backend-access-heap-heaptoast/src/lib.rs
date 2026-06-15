@@ -62,6 +62,7 @@ use types_scan::sdir::ForwardScanDirection;
 use types_storage::lock::AccessShareLock;
 use types_tuple::heap::SizeofHeapTupleHeader;
 use types_tuple::heaptuple::{
+    HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, HeapTupleHeaderHasExternal,
     HeapTupleHeaderSetNatts, TupleDescData, BITMAPLEN, HEAP2_XACT_MASK, HEAP_HASEXTERNAL,
     HEAP_HASNULL, HEAP_HASVARWIDTH, HEAP_XACT_MASK, MaxHeapAttributeNumber,
     MaxTupleAttributeNumber, TYPSTORAGE_EXTENDED,
@@ -570,6 +571,52 @@ pub fn toast_flatten_tuple_to_datum<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
+// heap_tuple_header_get_datum (HeapTupleHeaderGetDatum, execTuples.c:2413)
+// ---------------------------------------------------------------------------
+
+/// `HeapTupleHeaderGetDatum(tuple)` (execTuples.c:2413) — convert a freshly
+/// formed tuple to a composite `Datum`, flattening any external TOAST pointers.
+///
+/// C takes a bare `HeapTupleHeader`; in the owned model the composite-Datum
+/// source must carry its column bytes, so the input is the data-carrying
+/// [`FormedTuple`]. The result pair is the (possibly flattened) tuple the Datum
+/// references plus the composite `Datum::ByRef` image itself (the
+/// composite/record-Datum carrier bridge, task #161).
+pub fn heap_tuple_header_get_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: FormedTuple<'mcx>,
+) -> PgResult<(FormedTuple<'mcx>, Datum<'mcx>)> {
+    let header = tuple
+        .tuple
+        .t_data
+        .as_ref()
+        .expect("heap_tuple_header_get_datum: tuple has no t_data");
+
+    // No work if there are no external TOAST pointers in the tuple: the tuple
+    // (with its composite-Datum header fields, set by heap_form_tuple) is the
+    // Datum image directly. C: return PointerGetDatum(tuple).
+    if !HeapTupleHeaderHasExternal(header) {
+        let datum = backend_access_common_heaptuple::heap_tuple_to_disk_image(mcx, &tuple)
+            .map(Datum::ByRef)?;
+        return Ok((tuple, datum));
+    }
+
+    // Use the type data saved by heap_form_tuple to look up the rowtype, then
+    // flatten the external pointers (toast_flatten_tuple_to_datum). C:
+    //   tupDesc = lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId(tuple),
+    //                                    HeapTupleHeaderGetTypMod(tuple));
+    //   result = toast_flatten_tuple_to_datum(tuple, ..., tupDesc);
+    let type_id = HeapTupleHeaderGetTypeId(header);
+    let typmod = HeapTupleHeaderGetTypMod(header);
+    let tup_desc =
+        backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(mcx, type_id, typmod)?;
+    let flattened = toast_flatten_tuple_to_datum(mcx, &tuple, &tup_desc)?;
+    let datum = backend_access_common_heaptuple::heap_tuple_to_disk_image(mcx, &flattened)
+        .map(Datum::ByRef)?;
+    Ok((flattened, datum))
+}
+
+// ---------------------------------------------------------------------------
 // toast_build_flattened_tuple
 // ---------------------------------------------------------------------------
 
@@ -953,4 +1000,8 @@ pub fn init_seams() {
         toast_flatten_tuple_to_datum,
     );
     backend_access_heap_heaptoast_seams::toast_flatten_tuple::set(toast_flatten_tuple);
+    // The composite/record-Datum carrier bridge (task #161) is now buildable.
+    backend_access_heap_heaptoast_seams::heap_tuple_header_get_datum::set(
+        heap_tuple_header_get_datum,
+    );
 }

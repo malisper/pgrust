@@ -19,11 +19,18 @@ seam_core::seam!(
     /// The composite `Datum` references the returned tuple's bytes, so in the
     /// canonical model it is a by-reference value:
     /// [`types_tuple::backend_access_common_heaptuple::Datum::ByRef`].
+    ///
+    /// The tuple crosses as the data-carrying [`FormedTuple`] (owned header +
+    /// user-data area), NOT the header-only `HeapTuple` — a composite Datum is
+    /// the whole contiguous `HeapTupleHeader` image, so its source must carry the
+    /// column bytes. The returned `FormedTuple` is the (possibly flattened) tuple
+    /// the Datum references; the composite/record-Datum carrier bridge (task #161)
+    /// mints the `Datum::ByRef` image from it.
     pub fn heap_tuple_header_get_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        tuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
     ) -> types_error::PgResult<(
-        types_tuple::heaptuple::HeapTuple<'mcx>,
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
         types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     )>
 );

@@ -24,3 +24,6 @@ backend-access-common-detoast-seams = { path = "../backend-access-common-detoast
 backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-toast-helper-seams = { path = "../backend-access-table-toast-helper-seams" }
+# lookup_rowtype_tupdesc for the HeapTupleHeaderGetDatum external-flatten case
+# (composite/record-Datum carrier bridge, task #161).
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
