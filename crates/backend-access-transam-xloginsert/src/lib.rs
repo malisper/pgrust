@@ -1638,6 +1638,7 @@ pub fn init_seams() {
     s::xlog_reset_insertion::set(XLogResetInsertion);
     s::init_xlog_insert::set(InitXLogInsert);
     s::log_newpage_buffer::set(log_newpage_buffer);
+    s::log_newpage_range::set(log_newpage_range);
     s::xlog_save_buffer_for_hint::set(XLogSaveBufferForHint);
 
     // `log_newpage` (xloginsert.c) is declared as a bufmgr seam (consumed by the

@@ -16,6 +16,7 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginfast::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();
@@ -758,6 +759,20 @@ mod recurrence_guard {
         // is genuinely uninstalled / loud-panic (mirror-pg-and-panic) until the
         // fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_compare_partial"),
+        // DESIGN_DEBT (TD-GIN-OPTIONS-RELCACHE): `gin_get_use_fast_update` and
+        // `gin_get_pending_list_cleanup_size` read the GIN-specific `GinOptions`
+        // bytea out of `rd_options`, which the trimmed relcache does not yet
+        // carry (`RelationData::rd_options` is the generic `StdRdOptions`, with
+        // no GIN reloptions lane). Their real owner is `ginutil` (the
+        // `GinOptions` owner), but it cannot resolve them until the relcache
+        // carries the GIN reloptions bytea — so they are genuinely uninstalled /
+        // loud-panic (mirror-pg-and-panic). The fast-update path
+        // (`ginfast::gin_get_use_fast_update` / `gin_fast_insert`) routes through
+        // them; reaching them requires `GinGetUseFastUpdate(index)` to be true,
+        // which it never is until this lands. DELETE both entries when the
+        // relcache GinOptions keystone lands.
+        ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
+        ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
         // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
         // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
         // ported in the otherwise-complete `backend-optimizer-util-pathnode`
