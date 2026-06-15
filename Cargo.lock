@@ -3610,6 +3610,7 @@ dependencies = [
 name = "backend-commands-comment"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-class",
  "backend-commands-comment-seams",
  "backend-commands-dbcommands-seams",
@@ -3621,6 +3622,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -3886,13 +3888,19 @@ dependencies = [
 name = "backend-commands-explain-dr"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-instrument",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
+ "portability-instr-time",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
  "types-explain",
+ "types-nodes",
+ "types-slot",
  "types-stringinfo",
  "types-tuple",
 ]
@@ -9240,6 +9248,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-core"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -14249,6 +14273,7 @@ dependencies = [
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
+ "backend-rewrite-core",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
