@@ -1481,6 +1481,17 @@ pub fn seam_numeric_subdiff(v1: Datum<'_>, v2: Datum<'_>) -> PgResult<f64> {
     numeric_to_float8(&diff)
 }
 
+/// Implements the `numeric_subdiff_bytes` seam: the owned-bytes counterpart of
+/// [`seam_numeric_subdiff`] — `numeric_float8(numeric_sub(a, b))` over two
+/// on-disk `numeric` byte images, with no pointer-deref. `Err` carries the
+/// `numeric_sub` / `numeric_float8` `ereport`s.
+pub fn seam_numeric_subdiff_bytes(a: &[u8], b: &[u8]) -> PgResult<f64> {
+    let ctx = mcx::MemoryContext::new("numeric_subdiff_bytes scratch");
+    let mcx = ctx.mcx();
+    let diff = numeric_sub(mcx, a, b)?;
+    numeric_to_float8(&diff)
+}
+
 /// Recover the on-disk `numeric` byte image a pointer-bearing `Datum` refers
 /// to. Reads `VARSIZE_4B` from the varlena header to determine the length.
 ///

@@ -55,6 +55,7 @@ use backend_utils_error::ereport;
 use backend_access_brin_entry_seams as opclass;
 use backend_access_brin_bloom as bloom;
 use backend_access_brin_inclusion as inclusion;
+use backend_access_brin_minmax_multi as mmm;
 use backend_access_index_indexam_seams as indexam;
 use backend_utils_adt_scalar_seams as scalar;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -479,6 +480,7 @@ fn dispatch_opcinfo<'mcx>(
         F_BRIN_MINMAX_OPCINFO => brin_minmax_opcinfo(mcx, atttypid),
         inclusion::F_BRIN_INCLUSION_OPCINFO => inclusion::brin_inclusion_opcinfo(mcx, atttypid),
         bloom::F_BRIN_BLOOM_OPCINFO => bloom::brin_bloom_opcinfo(mcx, atttypid),
+        mmm::F_BRIN_MINMAX_MULTI_OPCINFO => mmm::brin_minmax_multi_opcinfo(mcx, atttypid),
         _ => unported_opclass("OpcInfo", oid),
     }
 }
@@ -519,6 +521,23 @@ fn dispatch_addvalue<'mcx>(
                 None,
             )
         }
+        mmm::F_BRIN_MINMAX_MULTI_ADD_VALUE => {
+            // C `brin_minmax_multi_add_value` reads PG_GET_OPCLASS_OPTIONS()
+            // (values_per_range) and BrinGetPagesPerRange(bd_index); the relcache
+            // trim carries neither yet, so we pass the behaviour-preserving
+            // defaults (opts = None -> 32, BRIN_DEFAULT_PAGES_PER_RANGE) — the
+            // same trim-gap convention as bloom.
+            mmm::brin_minmax_multi_add_value(
+                mcx,
+                bdesc,
+                bval,
+                value,
+                isnull,
+                collation,
+                None,
+                mmm::PAGES_PER_RANGE_DEFAULT,
+            )
+        }
         _ => unported_opclass("AddValue", oid),
     }
 }
@@ -539,6 +558,9 @@ fn dispatch_union<'mcx>(
             inclusion::brin_inclusion_union(mcx, bdesc, col_a, col_b, collation)
         }
         bloom::F_BRIN_BLOOM_UNION => bloom::brin_bloom_union(mcx, col_a, col_b),
+        mmm::F_BRIN_MINMAX_MULTI_UNION => {
+            mmm::brin_minmax_multi_union(mcx, bdesc, col_a, col_b, collation)
+        }
         _ => unported_opclass("Union", oid),
     }
 }
@@ -549,9 +571,9 @@ fn dispatch_consistent_is_multi(index: &Relation<'_>, attno: usize) -> PgResult<
         // Both minmax's and inclusion's Consistent use the old 3-arg signature
         // (fn_nargs < 4), so neither selects the multi-key form.
         F_BRIN_MINMAX_CONSISTENT | inclusion::F_BRIN_INCLUSION_CONSISTENT => Ok(false),
-        // bloom's Consistent takes the 4-arg (keys, nkeys) signature, so it
-        // selects the multi-key form.
-        bloom::F_BRIN_BLOOM_CONSISTENT => Ok(true),
+        // bloom's and minmax-multi's Consistent take the 4-arg (keys, nkeys)
+        // signature, so they select the multi-key form.
+        bloom::F_BRIN_BLOOM_CONSISTENT | mmm::F_BRIN_MINMAX_MULTI_CONSISTENT => Ok(true),
         _ => unported_opclass("Consistent", oid),
     }
 }
@@ -580,7 +602,7 @@ fn dispatch_consistent_single<'mcx>(
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_consistent_multi<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     attno: usize,
     collation: Oid,
@@ -595,7 +617,31 @@ fn dispatch_consistent_multi<'mcx>(
         bloom::F_BRIN_BLOOM_CONSISTENT => {
             bloom::brin_bloom_consistent(bdesc, bval, keys, collation)
         }
+        mmm::F_BRIN_MINMAX_MULTI_CONSISTENT => {
+            mmm::brin_minmax_multi_consistent(mcx, bdesc, bval, keys, collation)
+        }
         _ => unported_opclass("Consistent (multi)", oid),
+    }
+}
+
+/// The `bv_serialize` callback dispatch (brin_tuple.c `brin_form_tuple`):
+/// serialize indexed column `keyno`'s live expanded value into its `dst` slice.
+/// The opclass is identified by its `OpcInfo` support-procedure OID (the column
+/// registered a serializer only if its opclass set `bv_serialize`). Only
+/// minmax-multi registers a serializer among the built-ins.
+fn dispatch_serialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    keyno: usize,
+    bdesc: &BrinDesc<'mcx>,
+    mem_value: &mut types_brin::BrinMemValue<'mcx>,
+    dst: &mut [Datum<'mcx>],
+) -> PgResult<()> {
+    let oid = support_proc_oid(&bdesc.bd_index, keyno, BRIN_PROCNUM_OPCINFO)?;
+    match oid {
+        mmm::F_BRIN_MINMAX_MULTI_OPCINFO => {
+            mmm::brin_minmax_multi_serialize(mcx, bdesc, mem_value, dst)
+        }
+        _ => unported_opclass("Serialize", oid),
     }
 }
 
@@ -603,12 +649,18 @@ fn dispatch_consistent_multi<'mcx>(
 /// Single installer per seam (CLAUDE.md); the built-in opclasses that have not
 /// landed panic loudly on dispatch.
 pub fn init_seams() {
+    // Register the minmax-multi distance functions as fmgr builtins so the
+    // by-OID `function_call2_coll(distance_oid, ...)` compaction dispatch
+    // resolves them (C: their `fmgr_builtins[]` rows).
+    mmm::register_distance_builtins();
+
     opclass::brin_opcinfo::set(dispatch_opcinfo);
     opclass::brin_addvalue::set(dispatch_addvalue);
     opclass::brin_union::set(dispatch_union);
     opclass::brin_consistent_is_multi::set(dispatch_consistent_is_multi);
     opclass::brin_consistent_single::set(dispatch_consistent_single);
     opclass::brin_consistent_multi::set(dispatch_consistent_multi);
+    opclass::brin_serialize::set(dispatch_serialize);
 }
 
 #[cfg(test)]

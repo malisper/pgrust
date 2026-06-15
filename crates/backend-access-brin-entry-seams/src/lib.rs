@@ -10,12 +10,24 @@ seam_core::seam!(
     /// dispatched for indexed column `keyno` (0-based). It serializes the
     /// in-memory expanded value `mem_value` (`bv_mem_value`) into the column's
     /// `values` slice (`bv_values`, length `oi_nstored`), allocating any
-    /// by-reference output in `mcx`. Owned by the opclass (e.g. `brin_bloom`,
-    /// `brin_minmax_multi`); `Err` carries its `ereport(ERROR)` surface and OOM.
+    /// by-reference output in `mcx`.
+    ///
+    /// `bdesc` is carried (it is the C callback's first argument) because the
+    /// only built-in user (`brin_minmax_multi`) compacts its accumulated buffer
+    /// at serialize time via `compactify_ranges`, which dispatches the cached
+    /// distance/cmp procinfos by OID through `function_call2_coll` keyed off the
+    /// per-attribute opaque cache in `bdesc.bd_info`. The column collation is
+    /// not a separate argument — it was stashed into the live buffer
+    /// (`MinmaxMultiRanges.colloid`) at `add_value` time, exactly as C keeps it
+    /// in `ranges->colloid`. `mem_value` is taken by `&mut` because compaction
+    /// mutates the live in-memory buffer in place (C mutates `*ranges` through
+    /// the `Datum src` pointer). Owned by the opclass (`brin_minmax_multi`);
+    /// `Err` carries its `ereport(ERROR)` surface and OOM.
     pub fn brin_serialize<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         keyno: usize,
-        mem_value: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+        bdesc: &types_brin::BrinDesc<'mcx>,
+        mem_value: &mut types_brin::BrinMemValue<'mcx>,
         values: &mut [types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
     ) -> types_error::PgResult<()>
 );

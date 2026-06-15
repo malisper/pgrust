@@ -104,13 +104,17 @@ pub(crate) fn RelationInvalidateRelation(relation: Oid) -> PgResult<()> {
     // weren't closed already. (smgr is a cross-unit owner.)
     xunit::relation_close_smgr(relation);
 
-    // Free AM cached data, if any. The owned entry models the AM cache as the
-    // resolved `rd_amcache`-equivalent state on the descriptor; clearing it is
-    // part of the index family's AM-init lifecycle, so there is no separate
-    // heap block to free here (the C `pfree(rd_amcache)` is subsumed by the
-    // owned descriptor). Nothing to do beyond marking invalid.
-
-    with_rel_mut(relation, |rd| rd.rd_isvalid = false);
+    // Free AM cached data, if any. The C does
+    //   if (relation->rd_amcache) { pfree(relation->rd_amcache);
+    //                               relation->rd_amcache = NULL; }
+    // The owned entry now carries the AM-private cache directly in its typed
+    // `rd_amcache` slot (Option<Box<dyn AmOpaque>>); clearing it drops the boxed
+    // payload, which is exactly the C `pfree` + NULL. The next AM access (e.g.
+    // SP-GiST `initSpGistState`, hash `_hash_getcachedmetap`) lazily refills it.
+    with_rel_mut(relation, |rd| {
+        rd.rd_amcache = None;
+        rd.rd_isvalid = false;
+    });
     Ok(())
 }
 
