@@ -21,7 +21,10 @@
 
 extern crate alloc;
 
+#[path = "alloc.rs"]
+mod bufalloc;
 mod buf_lock;
+mod extend;
 mod mgr;
 mod ops;
 mod page;
@@ -203,6 +206,71 @@ fn page_is_new(buffer: Buffer) -> types_error::PgResult<bool> {
     BufferManager::global_expect().page_is_new(buffer)
 }
 
+// --- F2b: relation-extension seams (bufmgr.c) -----------------------------
+
+/// `EB_LOCK_FIRST` (bufmgr.h) — return the first extended block exclusively
+/// locked.
+const EB_LOCK_FIRST: u32 = 1 << 3;
+/// `EB_SKIP_EXTENSION_LOCK` (bufmgr.h) — the caller already holds the
+/// relation-extension lock.
+const EB_SKIP_EXTENSION_LOCK: u32 = 1 << 0;
+/// `EB_CREATE_FORK_IF_NEEDED` (bufmgr.h) — create the fork if absent.
+const EB_CREATE_FORK_IF_NEEDED: u32 = 1 << 2;
+/// `EB_CLEAR_SIZE_CACHE` (bufmgr.h) — invalidate the smgr size cache.
+const EB_CLEAR_SIZE_CACHE: u32 = 1 << 4;
+
+/// `ExtendBufferedRel(BMR_REL(rel), forkNum, NULL, EB_LOCK_FIRST |
+/// EB_SKIP_EXTENSION_LOCK)` installed seam (bufmgr.c) — extend the relation fork
+/// by one block, returning the new write-locked, pinned buffer (the
+/// extend-the-EOF branch of `_hash_getnewbuf`).
+fn extend_buffered_rel(
+    rel: &types_rel::Relation,
+    fork_num: types_core::primitive::ForkNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ExtendBufferedRel(
+        rel,
+        fork_num,
+        false,
+        EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK,
+    )
+}
+
+/// `ExtendBufferedRelTo(BMR_REL(rel), FSM_FORKNUM, NULL, EB_CREATE_FORK_IF_NEEDED
+/// | EB_CLEAR_SIZE_CACHE, fsm_nblocks, RBM_ZERO_ON_ERROR)` installed seam
+/// (bufmgr.c) — ensure the FSM fork is at least `fsm_nblocks` long and pin the
+/// target block.
+fn extend_buffered_rel_to_fsm(
+    rel: &types_rel::Relation,
+    fsm_nblocks: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ExtendBufferedRelTo(
+        rel,
+        types_core::primitive::ForkNumber::FSM_FORKNUM,
+        false,
+        EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
+        fsm_nblocks,
+        types_storage::storage::ReadBufferMode::ZeroOnError,
+    )
+}
+
+/// `ExtendBufferedRelTo(BMR_REL(rel), VISIBILITYMAP_FORKNUM, NULL,
+/// EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE, vm_nblocks,
+/// RBM_ZERO_ON_ERROR)` installed seam (bufmgr.c) — ensure the VM fork is at
+/// least `vm_nblocks` long and pin the target block.
+fn extend_buffered_rel_to_vm(
+    rel: &types_rel::Relation,
+    vm_nblocks: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ExtendBufferedRelTo(
+        rel,
+        types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
+        false,
+        EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
+        vm_nblocks,
+        types_storage::storage::ReadBufferMode::ZeroOnError,
+    )
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -238,4 +306,12 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::page_set_lsn::set(page_set_lsn);
     backend_storage_buffer_bufmgr_seams::page_get_lsn::set(page_get_lsn);
     backend_storage_buffer_bufmgr_seams::page_is_new::set(page_is_new);
+    // F2b: relation-extension entry points.
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel::set(extend_buffered_rel);
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_fsm::set(extend_buffered_rel_to_fsm);
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_vm::set(extend_buffered_rel_to_vm);
+    // F2b: the relation-extension I/O accounting (stats-only; no-op installs,
+    // same posture as F1's `count_buffer_dirtied`, until pgstat ports).
+    backend_storage_buffer_bufmgr_seams::count_buffer_write::set(|| {});
+    backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|_cnt, _bytes| {});
 }
