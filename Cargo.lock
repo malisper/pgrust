@@ -12959,6 +12959,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-acl",
  "types-catalog",
