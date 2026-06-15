@@ -1074,19 +1074,15 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 }
 
 /// The `Datum` and isnull of a deformed column (`tts_values[i]`/`tts_isnull[i]`).
-/// The column's value is the canonical [`Datum`] enum; a by-value column yields
-/// its scalar `Datum`, a by-reference column's pointer-as-`Datum` is
-/// materialized by the slot layer, which is not yet modeled, so it routes
-/// through the (still-provisional) slot payload owner.
+/// The column's value is the canonical [`Datum`] enum. `setOpCompare`
+/// (nodeSetOp.c:382-394) reads `tts_values[attno-1]`/`tts_isnull[attno-1]` and
+/// passes them straight to `ApplySortComparator` for by-value AND by-reference
+/// columns alike, so this is a plain pass-through for both arms; the slot layer
+/// (execTuples `slot_getallattrs_by_id`) already materializes by-reference
+/// columns as a real `Datum::ByRef`.
 fn deformed_datum<'a, 'mcx>(col: &'a (Datum<'mcx>, bool)) -> (&'a Datum<'mcx>, bool) {
     let (value, isnull) = col;
-    match value {
-        Datum::ByVal(_) => (value, *isnull),
-        Datum::ByRef(_) => panic!(
-            "backend-executor-execTuples: tts_values[] Datum for a by-reference column needs \
-             the slot payload model (slot_getallattrs is provisional)"
-        ),
-    }
+    (value, *isnull)
 }
 
 /// `ApplySortComparator(datum1, isNull1, datum2, isNull2, ssup)`
