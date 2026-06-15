@@ -108,8 +108,9 @@ impl QueryCompletionHandle {
 
 /// `CommandTag` (`tcop/cmdtag.h`) — the statement's command-tag enumerator,
 /// carried as its integer value (the generated `cmdtaglist.h` order).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CommandTag(pub i32);
+/// Canonically defined in `types_core` (shared with the matview/plancache
+/// layers, which do not depend on `types-nodes`).
+pub use types_core::cmdtag::CommandTag;
 
 /// `ParseExprKind` (`parser/parse_node.h`) — the kind of expression currently
 /// being parsed. `EXPR_KIND_NONE` when not in an expression. Discriminants

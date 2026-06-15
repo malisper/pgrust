@@ -78,17 +78,10 @@ pub struct DeclareCursorStmt {
     pub query: Option<Box<Query>>,
 }
 
-/// `FetchDirection` (`nodes/parsenodes.h`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum FetchDirection {
-    FETCH_FORWARD = 0,
-    FETCH_BACKWARD = 1,
-    FETCH_ABSOLUTE = 2,
-    FETCH_RELATIVE = 3,
-}
-
-pub use FetchDirection::{FETCH_ABSOLUTE, FETCH_BACKWARD, FETCH_FORWARD, FETCH_RELATIVE};
+/// `FetchDirection` (`nodes/parsenodes.h`). Canonically defined in
+/// `crate::ddlnodes`; re-exported here so both modules share one type.
+pub use crate::ddlnodes::FetchDirection;
+pub use crate::ddlnodes::{FETCH_ABSOLUTE, FETCH_BACKWARD, FETCH_FORWARD, FETCH_RELATIVE};
 
 /// `FetchStmt` (`nodes/parsenodes.h`) — `FETCH` (also `MOVE`).
 pub struct FetchStmt {

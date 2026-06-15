@@ -289,19 +289,10 @@ pub enum VarReturningType {
     VAR_RETURNING_NEW,
 }
 
-/// `CompareType` (nodes/primnodes.h) — abstract comparison result requested of
-/// a `RowCompare`. Mirrored locally pending primnodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum CompareType {
-    COMPARE_INVALID,
-    COMPARE_LT,
-    COMPARE_LE,
-    COMPARE_EQ,
-    COMPARE_GE,
-    COMPARE_GT,
-    COMPARE_NE,
-}
+/// `CompareType` (nodes/cmptype.h) — abstract comparison result requested of a
+/// `RowCompare`. Canonically defined in `types_tableam::amapi`; re-exported here
+/// so the executor and access-method layers share one type.
+pub use types_tableam::amapi::CompareType;
 
 /// `MinMaxOp` (nodes/primnodes.h) — GREATEST vs LEAST. Mirrored locally.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

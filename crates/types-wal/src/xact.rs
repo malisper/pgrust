@@ -51,13 +51,9 @@ pub const fn xact_completion_apply_feedback(xinfo: u32) -> bool {
 
 /// One dropped pg_stat item, matching C's `xl_xact_stats_item`
 /// (`{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`, 16 bytes;
-/// the 64-bit objid is reassembled from its two halves).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct XlXactStatsItem {
-    pub kind: i32,
-    pub dboid: Oid,
-    pub objid: u64,
-}
+/// the 64-bit objid is reassembled from its two halves). Canonically defined in
+/// `types_core` (shared with the xact-system scalar vocabulary).
+pub use types_core::xact::XlXactStatsItem;
 
 /// `xl_xact_parsed_commit` (`access/xact.h`), the decoded form of a commit
 /// record.

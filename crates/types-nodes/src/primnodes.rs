@@ -533,25 +533,11 @@ pub struct BoolExpr {
 }
 
 /// `CompareType` (nodes/cmptype.h) — abstract comparison kind requested of a
-/// [`RowCompareExpr`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum CompareType {
-    /// `COMPARE_INVALID`.
-    COMPARE_INVALID = 0,
-    /// `COMPARE_LT`.
-    COMPARE_LT = 1,
-    /// `COMPARE_LE`.
-    COMPARE_LE = 2,
-    /// `COMPARE_EQ`.
-    COMPARE_EQ = 3,
-    /// `COMPARE_GE`.
-    COMPARE_GE = 4,
-    /// `COMPARE_GT`.
-    COMPARE_GT = 5,
-    /// `COMPARE_NE`.
-    COMPARE_NE = 6,
-}
+/// [`RowCompareExpr`]. Canonically defined in `types_tableam::amapi` (the full
+/// 9-variant `cmptype.h` enum); re-exported here so the node, executor, and
+/// access-method layers share one type. The btree comparison strategies
+/// (`COMPARE_INVALID`..`COMPARE_NE`) carry identical discriminants.
+pub use types_tableam::amapi::CompareType;
 
 /// `MinMaxOp` (nodes/primnodes.h) — GREATEST vs LEAST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
