@@ -14,11 +14,14 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_datum::Datum as KeyDatum;
 
 use crate::{
-    ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList, SearchSysCacheList1,
-    SysCacheGetAttr, SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET,
-    CLAOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, PROCOID, RELOID, USERMAPPINGOID,
+    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList,
+    SearchSysCacheList1, SysCacheGetAttr, SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM,
+    ATTNUM, CASTSOURCETARGET, CLAOID, FOREIGNDATAWRAPPERNAME, FOREIGNDATAWRAPPEROID,
+    FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, PROCOID, RELOID, USERMAPPINGOID,
+    USERMAPPINGUSERSERVER,
 };
 use backend_utils_cache_syscache_seams::CastRow;
+use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use types_catalog::pg_aggregate::AggRow;
@@ -60,6 +63,29 @@ const Anum_pg_aggregate_aggnumdirectargs: i32 = 3;
 const Anum_pg_foreign_data_wrapper_fdwoptions: i32 = 7;
 const Anum_pg_foreign_server_srvoptions: i32 = 8;
 const Anum_pg_user_mapping_umoptions: i32 = 4;
+
+// `catalog/pg_foreign_data_wrapper.h` scalar attribute numbers.
+const Anum_pg_foreign_data_wrapper_oid: i32 = 1;
+const Anum_pg_foreign_data_wrapper_fdwname: i32 = 2;
+const Anum_pg_foreign_data_wrapper_fdwowner: i32 = 3;
+const Anum_pg_foreign_data_wrapper_fdwhandler: i32 = 4;
+const Anum_pg_foreign_data_wrapper_fdwvalidator: i32 = 5;
+
+// `catalog/pg_foreign_server.h` scalar attribute numbers.
+const Anum_pg_foreign_server_oid: i32 = 1;
+const Anum_pg_foreign_server_srvname: i32 = 2;
+const Anum_pg_foreign_server_srvowner: i32 = 3;
+const Anum_pg_foreign_server_srvfdw: i32 = 4;
+
+// `catalog/pg_foreign_table.h` attribute numbers.
+const Anum_pg_foreign_table_ftserver: i32 = 2;
+const Anum_pg_foreign_table_ftoptions: i32 = 3;
+
+// `catalog/pg_user_mapping.h` attribute numbers.
+const Anum_pg_user_mapping_oid: i32 = 1;
+
+// `catalog/pg_attribute.h` attribute number.
+const Anum_pg_attribute_attfdwoptions: i32 = 24;
 
 // `catalog/pg_amproc.h` attribute numbers.
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -387,6 +413,199 @@ pub(crate) fn user_mapping_options_by_oid<'mcx>(
         return Ok(None);
     };
     let bytes = getattr_option_bytes(mcx, USERMAPPINGOID, &tup, Anum_pg_user_mapping_umoptions)?;
+    ReleaseSysCache(tup);
+    Ok(Some(bytes))
+}
+
+/// `SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid))` projected
+/// to `Form_pg_foreign_data_wrapper`'s `(fdwname, fdwowner, fdwhandler,
+/// fdwvalidator)`. `Ok(None)` on a cache miss.
+pub(crate) fn foreign_data_wrapper_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    fdwid: Oid,
+) -> PgResult<Option<ForeignDataWrapperFormRow<'mcx>>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNDATAWRAPPEROID,
+        SysCacheKey::Value(KeyDatum::from_oid(fdwid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = ForeignDataWrapperFormRow {
+        fdwname: getattr_name(
+            mcx,
+            FOREIGNDATAWRAPPEROID,
+            &tup,
+            Anum_pg_foreign_data_wrapper_fdwname,
+        )?,
+        fdwowner: getattr_oid(
+            mcx,
+            FOREIGNDATAWRAPPEROID,
+            &tup,
+            Anum_pg_foreign_data_wrapper_fdwowner,
+        )?,
+        fdwhandler: getattr_oid(
+            mcx,
+            FOREIGNDATAWRAPPEROID,
+            &tup,
+            Anum_pg_foreign_data_wrapper_fdwhandler,
+        )?,
+        fdwvalidator: getattr_oid(
+            mcx,
+            FOREIGNDATAWRAPPEROID,
+            &tup,
+            Anum_pg_foreign_data_wrapper_fdwvalidator,
+        )?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid))` projected to
+/// `Form_pg_foreign_server`'s `(srvname, srvowner, srvfdw)`. `Ok(None)` on a
+/// cache miss.
+pub(crate) fn foreign_server_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    serverid: Oid,
+) -> PgResult<Option<ForeignServerFormRow<'mcx>>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNSERVEROID,
+        SysCacheKey::Value(KeyDatum::from_oid(serverid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = ForeignServerFormRow {
+        srvname: getattr_name(mcx, FOREIGNSERVEROID, &tup, Anum_pg_foreign_server_srvname)?,
+        srvowner: getattr_oid(mcx, FOREIGNSERVEROID, &tup, Anum_pg_foreign_server_srvowner)?,
+        srvfdw: getattr_oid(mcx, FOREIGNSERVEROID, &tup, Anum_pg_foreign_server_srvfdw)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `GetSysCacheOid1(FOREIGNDATAWRAPPERNAME, Anum_pg_foreign_data_wrapper_oid,
+/// CStringGetDatum(fdwname))`: the FDW's OID, or `InvalidOid` when no row
+/// matches.
+pub(crate) fn foreign_data_wrapper_oid_by_name(fdwname: &str) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache fdw oid-by-name");
+    GetSysCacheOid(
+        scratch.mcx(),
+        FOREIGNDATAWRAPPERNAME,
+        Anum_pg_foreign_data_wrapper_oid as i16,
+        SysCacheKey::Str(fdwname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+/// `GetSysCacheOid1(FOREIGNSERVERNAME, Anum_pg_foreign_server_oid,
+/// CStringGetDatum(servername))`: the server's OID, or `InvalidOid` when no row
+/// matches.
+pub(crate) fn foreign_server_oid_by_name(servername: &str) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache foreign-server oid-by-name");
+    GetSysCacheOid(
+        scratch.mcx(),
+        FOREIGNSERVERNAME,
+        Anum_pg_foreign_server_oid as i16,
+        SysCacheKey::Str(servername),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+/// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+/// `Form_pg_foreign_table`'s `ftserver`. `Ok(None)` on a cache miss.
+pub(crate) fn foreign_table_server_by_relid(relid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache foreign-table ftserver");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNTABLEREL,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let ftserver = getattr_oid(mcx, FOREIGNTABLEREL, &tup, Anum_pg_foreign_table_ftserver)?;
+    ReleaseSysCache(tup);
+    Ok(Some(ftserver))
+}
+
+/// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+/// `(ftserver, ftoptions)`: the foreign server OID plus the raw `ftoptions`
+/// `text[]` (`Some(bytes)`), or `None` when SQL NULL. `Ok(None)` on a cache
+/// miss.
+pub(crate) fn foreign_table_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNTABLEREL,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let ftserver = getattr_oid(mcx, FOREIGNTABLEREL, &tup, Anum_pg_foreign_table_ftserver)?;
+    let bytes = getattr_option_bytes(mcx, FOREIGNTABLEREL, &tup, Anum_pg_foreign_table_ftoptions)?;
+    ReleaseSysCache(tup);
+    Ok(Some((ftserver, bytes)))
+}
+
+/// `SearchSysCache2(USERMAPPINGUSERSERVER, ObjectIdGetDatum(userid),
+/// ObjectIdGetDatum(serverid))` projected to the mapping OID
+/// (`Form_pg_user_mapping.oid`) plus the raw `umoptions` `text[]`
+/// (`Some(bytes)`), or `None` when SQL NULL. `Ok(None)` on a cache miss.
+pub(crate) fn user_mapping_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    userid: Oid,
+    serverid: Oid,
+) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        USERMAPPINGUSERSERVER,
+        SysCacheKey::Value(KeyDatum::from_oid(userid)),
+        SysCacheKey::Value(KeyDatum::from_oid(serverid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let umid = getattr_oid(mcx, USERMAPPINGUSERSERVER, &tup, Anum_pg_user_mapping_oid)?;
+    let bytes = getattr_option_bytes(
+        mcx,
+        USERMAPPINGUSERSERVER,
+        &tup,
+        Anum_pg_user_mapping_umoptions,
+    )?;
+    ReleaseSysCache(tup);
+    Ok(Some((umid, bytes)))
+}
+
+/// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+/// then `SysCacheGetAttr(Anum_pg_attribute_attfdwoptions)`: the raw
+/// `attfdwoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+/// `Ok(None)` on a cache miss.
+pub(crate) fn attribute_fdwoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<Option<PgVec<'mcx, u8>>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let bytes = getattr_option_bytes(mcx, ATTNUM, &tup, Anum_pg_attribute_attfdwoptions)?;
     ReleaseSysCache(tup);
     Ok(Some(bytes))
 }

@@ -500,19 +500,14 @@ pub fn pg_options_to_table<'mcx>(
         let mut nulls: [bool; 2] = [false; 2];
 
         // values[0] = CStringGetTextDatum(def->defname); nulls[0] = false;
-        // CStringGetTextDatum is a `text *` (by-reference) value; the funcapi
-        // seam still hands back the shim bare word, so lift it into the
-        // canonical enum's by-value word and lower it again at the tuplestore
-        // ABI edge below.
-        values[0] = Datum::from_usize(funcapi::cstring_get_text_datum::call(mcx, defname)?.as_usize());
+        values[0] = funcapi::cstring_get_text_datum::call(mcx, defname)?;
         nulls[0] = false;
 
         // if (def->arg) { values[1] = CStringGetTextDatum(strVal(def->arg)); }
         // else { values[1] = (Datum) 0; nulls[1] = true; }
         match arg {
             Some(v) => {
-                values[1] =
-                    Datum::from_usize(funcapi::cstring_get_text_datum::call(mcx, v)?.as_usize());
+                values[1] = funcapi::cstring_get_text_datum::call(mcx, v)?;
                 nulls[1] = false;
             }
             None => {
@@ -526,8 +521,6 @@ pub fn pg_options_to_table<'mcx>(
             .as_mut()
             .expect("InitMaterializedSRF set fcinfo->resultinfo");
         // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-        // The funcapi seam now takes the canonical unified value directly (the
-        // Datum-unification keystone flipped this edge).
         funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }
 
@@ -640,11 +633,7 @@ pub fn postgresql_fdw_validator<'mcx>(
     }
 
     // PG_RETURN_BOOL(true);
-    // fmgr owns the SQL-return bare-word ABI edge; lift its word into the
-    // canonical enum for this crate's return type.
-    Ok(Datum::from_usize(
-        fmgr::pg_return_bool::call(fcinfo, true).as_usize(),
-    ))
+    Ok(Datum::from_bool(true))
 }
 
 /* ===========================================================================

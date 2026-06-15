@@ -894,4 +894,22 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::user_mapping_options_by_oid::set(
         projections::user_mapping_options_by_oid,
     );
+    backend_utils_cache_syscache_seams::foreign_data_wrapper_form::set(
+        projections::foreign_data_wrapper_form,
+    );
+    backend_utils_cache_syscache_seams::foreign_server_form::set(projections::foreign_server_form);
+    backend_utils_cache_syscache_seams::foreign_data_wrapper_oid_by_name::set(
+        projections::foreign_data_wrapper_oid_by_name,
+    );
+    backend_utils_cache_syscache_seams::foreign_server_oid_by_name::set(
+        projections::foreign_server_oid_by_name,
+    );
+    backend_utils_cache_syscache_seams::foreign_table_server_by_relid::set(
+        projections::foreign_table_server_by_relid,
+    );
+    backend_utils_cache_syscache_seams::foreign_table_form::set(projections::foreign_table_form);
+    backend_utils_cache_syscache_seams::user_mapping_form::set(projections::user_mapping_form);
+    backend_utils_cache_syscache_seams::attribute_fdwoptions::set(
+        projections::attribute_fdwoptions,
+    );
 }
