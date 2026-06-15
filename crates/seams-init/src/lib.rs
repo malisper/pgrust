@@ -19,6 +19,7 @@ pub fn init_all() {
     backend_access_gin_ginscan::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
+    backend_access_heap_heapam_handler_core::init_seams();
     backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_pruneheap::init_seams();
@@ -821,25 +822,11 @@ mod recurrence_guard {
         // seam-and-panic (mirror-pg-and-panic). See DESIGN_DEBT.md.
         ("backend_access_index_indexam", "bt_resolve_parallel_scan"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
-        // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
-        // access method through `rel->rd_tableam` (the TableAmRoutine vtable). The
-        // heap AM provider (access/heap/heapam_handler.c) and the vtable resolver
-        // (access/table/tableamapi.c, GetTableAmRoutine) are BOTH unported (CATALOG
-        // status `todo`: backend-access-heap-heapam-handler / backend-access-small-
-        // core), so the owner has no value-typed body to install for the
-        // provider-facing seams: get_table_am_routine (tableamapi.c) and the
-        // relation_toast_am / relation_needs_toast_table vtable callbacks
-        // (heapam_handler.c). table_parallelscan_reinitialize likewise dispatches a
-        // vtable callback (relation_parallelscan_reinitialize) with no in-unit body.
-        // (table_beginscan / table_scan_getnextslot{,_direction} /
-        // table_relation_set_new_filelocator retired: the COPY/seqscan scan model
-        // was reconciled onto tableam.c's value-typed `TableScanDesc<'mcx>` and the
-        // owner now installs them — the ScanToken divergence is resolved.) Pay down
-        // the rest by porting heapam_handler.c + tableamapi.c. See DESIGN_DEBT.md.
-        ("backend_access_table_tableam", "get_table_am_routine"),
-        ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
-        ("backend_access_table_tableam", "table_relation_needs_toast_table"),
-        ("backend_access_table_tableam", "table_relation_toast_am"),
+        // (get_table_am_routine / table_relation_toast_am /
+        // table_relation_needs_toast_table / table_parallelscan_reinitialize
+        // retired: heapam_handler.c (core stage) + tableamapi.c::GetTableAmRoutine
+        // are ported in backend-access-heap-heapam-handler-core, which installs all
+        // four provider-facing seams from its init_seams().)
         // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
         // `table_index_build_scan` (tableam.h) dispatches to the heap AM's
         // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`).

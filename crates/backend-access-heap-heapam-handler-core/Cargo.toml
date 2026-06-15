@@ -1,0 +1,41 @@
+[package]
+name = "backend-access-heap-heapam-handler-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_heap_heapam_handler_core"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-nodes = { path = "../types-nodes" }
+types-slot = { path = "../types-slot" }
+types-tableam = { path = "../types-tableam" }
+types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-snapshot = { path = "../types-snapshot" }
+types-scan = { path = "../types-scan" }
+types-typcache = { path = "../types-typcache" }
+# Heap modify + scan + fetch core (direct dep — handler is the owner above heapam,
+# acyclic): scan_begin/getnextslot/rescan/endscan, heap_fetch, heap_hot_search_buffer,
+# heap_get_latest_tid live here.
+backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
+backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-access-heap-pruneheap-seams = { path = "../backend-access-heap-pruneheap-seams" }
+backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
+backend-storage-page = { path = "../backend-storage-page" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+# Provider-facing seams installed here: get_table_am_routine, table_relation_toast_am,
+# table_relation_needs_toast_table, table_parallelscan_reinitialize.
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+# DML callbacks delegate here (seam-and-panic until the dml stage lands).
+backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }

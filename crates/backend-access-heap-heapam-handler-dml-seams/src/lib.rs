@@ -1,0 +1,123 @@
+//! Seam declarations for the heap AM's *physical-tuple-modification* table-AM
+//! callbacks (`access/heap/heapam_handler.c`):
+//! `heapam_tuple_insert` / `heapam_tuple_delete` / `heapam_tuple_update` /
+//! `heapam_tuple_lock`. These are the vtable fields the
+//! `backend-access-heap-heapam-handler-core` crate populates by `::call`ing
+//! through here, so the heapam-handler **core** stage (scan + fetch + toast +
+//! filelocator) can assemble and install the complete `TableAmRoutine` vtable
+//! without yet porting the DML marshalling.
+//!
+//! Each callback in C wraps the heap modify core (`heap_insert` /
+//! `heap_delete` / `heap_update` / `heap_lock_tuple`, all already ported) plus
+//! the slot↔tuple bridge (`ExecFetchSlotHeapTuple`) and, for `tuple_lock`, the
+//! `FIND_LAST_VERSION` update-chain follow loop. That marshalling layer is the
+//! `backend-access-heap-heapam-handler-dml` owner; until it lands a call panics
+//! loudly. The signatures mirror the `TableAmRoutine` vtable fields exactly so
+//! the core's vtable assignment is a direct `::call` thunk.
+
+use mcx::Mcx;
+use types_core::xact::CommandId;
+use types_error::PgResult;
+use types_nodes::tuptable::SlotData;
+use types_rel::Relation;
+use types_tableam::tableam::{
+    BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,
+    TU_UpdateIndexes,
+};
+use types_storage::RelFileLocator;
+use types_tuple::heaptuple::ItemPointerData;
+
+seam_core::seam!(
+    /// `heapam_relation_set_new_filelocator(rel, newrlocator, persistence,
+    /// &freezeXid, &minmulti)` (heapam_handler.c): `*freezeXid = RecentXmin`,
+    /// `*minmulti = GetOldestMultiXactId()`, `RelationCreateStorage(*newrlocator,
+    /// persistence, true)`, and (for an unlogged rel) create + WAL-log the INIT
+    /// fork, then `smgrclose`. The storage-creation leg (RelationCreateStorage
+    /// returning a transient `SMgrRelation` plus the INIT-fork `smgrcreate` /
+    /// `log_smgrcreate`) is the DDL/storage owner's; this seam returns the
+    /// AM-chosen `(relfrozenxid, relminmxid)` the relcache stores in pg_class.
+    /// Owned by `backend-access-heap-heapam-handler-dml`.
+    pub fn heapam_relation_set_new_filelocator<'mcx>(
+        rel: &Relation<'mcx>,
+        newrlocator: &RelFileLocator,
+        persistence: i8,
+    ) -> PgResult<(u32, u32)>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_insert(rel, slot, cid, options, bistate)`
+    /// (heapam_handler.c): `ExecFetchSlotHeapTuple(slot, true, &shouldFree)`,
+    /// stamp `tts_tableOid`/`t_tableOid`, `heap_insert(...)`, copy `t_self`
+    /// back into `slot->tts_tid`. Owned by `backend-access-heap-heapam-handler-
+    /// dml`.
+    pub fn heapam_tuple_insert<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
+    /// changingPart)` (heapam_handler.c): forwards to `heap_delete`. Owned by
+    /// `backend-access-heap-heapam-handler-dml`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn heapam_tuple_delete<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        tid: &ItemPointerData,
+        cid: CommandId,
+        snapshot: &Snapshot,
+        crosscheck: &Snapshot,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        changing_part: bool,
+    ) -> PgResult<TM_Result>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait,
+    /// tmfd, lockmode, update_indexes)` (heapam_handler.c):
+    /// `ExecFetchSlotHeapTuple`, `heap_update`, copy `t_self` back, the
+    /// HOT/index-update assertions. Owned by `backend-access-heap-heapam-handler-
+    /// dml`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn heapam_tuple_update<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        otid: &ItemPointerData,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        snapshot: &Snapshot,
+        crosscheck: &Snapshot,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        lockmode: &mut LockTupleMode,
+        update_indexes: &mut TU_UpdateIndexes,
+    ) -> PgResult<TM_Result>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_lock(rel, tid, snapshot, slot, cid, mode, wait_policy,
+    /// flags, tmfd)` (heapam_handler.c): `heap_lock_tuple` plus the
+    /// `TUPLE_LOCK_FLAG_FIND_LAST_VERSION` update-chain follow loop
+    /// (`heap_fetch` under a dirty snapshot, `XactLockTableWait`), and the
+    /// `ExecStorePinnedBufferHeapTuple` of the locked tuple into `slot`. Owned
+    /// by `backend-access-heap-heapam-handler-dml`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn heapam_tuple_lock<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        tid: &ItemPointerData,
+        snapshot: &Snapshot,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        mode: LockTupleMode,
+        wait_policy: LockWaitPolicy,
+        flags: u8,
+        tmfd: &mut TM_FailureData,
+    ) -> PgResult<TM_Result>
+);

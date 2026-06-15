@@ -223,6 +223,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecStorePinnedBufferHeapTuple(tuple, slot, buffer)` (execTuples.c):
+    /// like [`exec_store_buffer_heap_tuple`] but *transfers* an existing pin on
+    /// `buffer` into the slot instead of taking a fresh one — the store
+    /// `heapam_handler.c`'s `heapam_fetch_row_version` performs on the
+    /// `heap_fetch`-returned (already-pinned) `userbuf`. The slot crosses as the
+    /// payload-bearing `&mut SlotData` (held directly by the table-AM vtable
+    /// callback, not an EState pool id). `Err` carries the "wrong type of slot"
+    /// `elog(ERROR)`.
+    pub fn exec_store_pinned_buffer_heap_tuple<'mcx>(
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        buffer: types_storage::buf::Buffer,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h) over the payload-bearing [`SlotData`]
     /// the heap-scan vtable callback holds directly (the end-of-scan / no-match
     /// path of `heapam_scan_getnextslot` / `heap_getnextslot_tidrange`). Unlike

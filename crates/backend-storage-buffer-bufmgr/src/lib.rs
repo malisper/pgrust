@@ -293,6 +293,30 @@ fn read_buffer<'mcx>(
     BufferManager::global_expect().ReadBuffer(rel, blkno)
 }
 
+/// `ReleaseAndReadBuffer(buffer, relation, blockNum)` installed seam (bufmgr.c):
+/// MAIN_FORKNUM. If `buffer` is valid and already holds `blockNum` of
+/// `relation`, return it as-is; else unpin (if valid) and `ReadBuffer`.
+fn release_and_read_buffer<'mcx>(
+    buffer: Buffer,
+    relation: &types_rel::Relation<'mcx>,
+    block_num: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    use types_storage::buf::BufferIsValid;
+    let bm = BufferManager::global_expect();
+    if BufferIsValid(buffer) {
+        // we have pin, so it's ok to examine tag without spinlock.
+        let (rlocator, fork_num, blk) = bm.BufferGetTag(buffer)?;
+        if blk == block_num
+            && rlocator == relation.rd_locator
+            && fork_num == types_core::primitive::ForkNumber::MAIN_FORKNUM
+        {
+            return Ok(buffer);
+        }
+        bm.ReleaseBuffer(buffer)?;
+    }
+    bm.ReadBuffer(relation, block_num)
+}
+
 /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy)` installed
 /// seam (bufmgr.c) — the VACUUM/bulk buffer-access-strategy read of the main
 /// fork. The ring kind collapses to `has_strategy: true`.
@@ -603,6 +627,7 @@ pub fn init_seams() {
     // explicit StartReadBuffers/WaitReadBuffers pipeline is a public API on
     // BufferManager + rides the panic-until-owner aio-handle seams).
     backend_storage_buffer_bufmgr_seams::read_buffer::set(read_buffer);
+    backend_storage_buffer_bufmgr_seams::release_and_read_buffer::set(release_and_read_buffer);
     backend_storage_buffer_bufmgr_seams::read_buffer_extended::set(read_buffer_extended);
     backend_storage_buffer_bufmgr_seams::read_buffer_extended_fork::set(read_buffer_extended_fork);
     backend_storage_buffer_bufmgr_seams::read_buffer_zero_and_lock::set(read_buffer_zero_and_lock);

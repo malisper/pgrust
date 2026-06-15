@@ -1193,6 +1193,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-heapam-handler-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-handler-dml-seams",
+ "backend-access-heap-heapam-seams",
+ "backend-access-heap-heaptoast",
+ "backend-access-heap-pruneheap-seams",
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
+ "backend-executor-execTuples-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-adt-format-type-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-slot",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
+name = "backend-access-heap-heapam-handler-dml-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-heap-heapam-seams"
 version = "0.0.0"
 dependencies = [
@@ -14976,6 +15021,7 @@ dependencies = [
  "backend-access-hash-xlog",
  "backend-access-hashvalidate",
  "backend-access-heap-heapam",
+ "backend-access-heap-heapam-handler-core",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-pruneheap",

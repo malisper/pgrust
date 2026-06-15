@@ -384,6 +384,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReleaseAndReadBuffer(buffer, relation, blockNum)` (bufmgr.c) — combine
+    /// `ReleaseBuffer` and `ReadBuffer`: if `buffer` is valid and already holds
+    /// `blockNum` of `relation`'s MAIN_FORKNUM, return it as-is (saving a
+    /// release+reacquire); otherwise unpin it (if valid) and read+pin the
+    /// requested block. `InvalidBuffer` is accepted (behaves like `ReadBuffer`).
+    /// The heap AM's `heapam_index_fetch_tuple` uses this to switch HOT-chain
+    /// pages. `Err` carries the smgr read `ereport(ERROR)`s.
+    pub fn release_and_read_buffer<'mcx>(
+        buffer: types_storage::storage::Buffer,
+        relation: &types_rel::Relation<'mcx>,
+        block_num: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
     /// `ReadBufferExtended(rel, forkNum, blkno, RBM_ZERO_AND_LOCK, NULL)`
     /// (bufmgr.c) — pin a block, zeroing it and acquiring the exclusive content
     /// lock (used by `_hash_getinitbuf` / the existing-block branch of

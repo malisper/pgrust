@@ -1195,6 +1195,20 @@ pub fn heap_endscan(mut sscan: std::boxed::Box<TableScanDescData<'_>>) -> PgResu
     Ok(())
 }
 
+/// `heapam_tuple_tid_valid(scan, tid)` (heapam_handler.c): is `tid` potentially
+/// valid (within the relation's current size)? `ItemPointerIsValid(tid) &&
+/// ItemPointerGetBlockNumber(tid) < hscan->rs_nblocks`. The `HeapScanDescData`
+/// rides in `am_private`, so the table-AM provider crate reaches it through this
+/// accessor rather than re-implementing the (crate-private) downcast.
+pub fn heapam_tuple_tid_valid(
+    sscan: &mut TableScanDescData<'_>,
+    tid: &ItemPointerData,
+) -> bool {
+    let nblocks = heap_scan(sscan).rs_nblocks;
+    backend_storage_page::ItemPointerIsValid(Some(tid))
+        && ItemPointerGetBlockNumberNoCheck(tid) < nblocks
+}
+
 /// `heap_getnext(sscan, direction)` - retrieve the next tuple in scan; returns
 /// a reference to the scan's `rs_ctup` (`None` at end of scan).
 pub fn heap_getnext<'a, 'mcx>(
