@@ -19,9 +19,6 @@
 
 extern crate alloc;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use mcx::Mcx;
 use types_core::instrument::{instr_time, BufferUsage};
 use types_error::{PgError, PgResult};
@@ -34,7 +31,7 @@ use types_scan::sdir::ForwardScanDirection;
 
 use backend_commands_explain_format as fmt;
 use backend_commands_explain_seams as seams;
-use backend_commands_explain_seams::ExplainBookkeeping;
+use backend_commands_explain_seams::Bookkeeping;
 use backend_executor_execMain_seams as execmain_s;
 use backend_executor_instrument as instr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
@@ -45,66 +42,21 @@ pub mod walk;
 mod tests;
 
 // ===========================================================================
-// EXPLAIN-EXECUTE bookkeeping (the ExplainBookkeeping token registry).
+// EXPLAIN-EXECUTE bookkeeping seams (prologue / accounting). prepare.c calls
+// these.
 //
 // The C `ExplainExecuteQuery` keeps `instr_time planstart/planduration`,
 // `BufferUsage bufusage_start/bufusage`, the planner `MemoryContext` and
-// `MemoryContextCounters` on its stack and threads them through `ExplainOnePlan`.
-// In this repo the prepare.c driver carries them as the opaque
-// `ExplainBookkeeping(u64)` token; this is the registry it indexes (sanctioned
-// opaque-C-state token table, like the snapshot/dest registries).
-// ===========================================================================
-
-#[derive(Default)]
-struct Bookkeeping {
-    /// `instr_time planstart` — set at `explain_execute_begin`.
-    planstart: instr_time,
-    /// `instr_time planduration` — elapsed planning time (set at planduration).
-    planduration: instr_time,
-    /// `BufferUsage bufusage_start` — snapshot of `pgBufferUsage` at begin
-    /// (only when `es->buffers`).
-    bufusage_start: BufferUsage,
-    /// `BufferUsage bufusage` — accumulated planning buffer usage (set at
-    /// buffer_accounting).
-    bufusage: BufferUsage,
-    /// whether `es->buffers` was set at begin.
-    buffers: bool,
-}
-
-thread_local! {
-    static BOOKKEEPING: RefCell<HashMap<u64, Bookkeeping>> = RefCell::new(HashMap::new());
-    static NEXT_BK: RefCell<u64> = const { RefCell::new(1) };
-}
-
-fn bk_new(bk: Bookkeeping) -> ExplainBookkeeping {
-    let id = NEXT_BK.with(|n| {
-        let mut n = n.borrow_mut();
-        let id = *n;
-        *n += 1;
-        id
-    });
-    BOOKKEEPING.with(|m| m.borrow_mut().insert(id, bk));
-    ExplainBookkeeping(id)
-}
-
-fn bk_with<R>(token: ExplainBookkeeping, f: impl FnOnce(&mut Bookkeeping) -> R) -> R {
-    BOOKKEEPING.with(|m| {
-        let mut m = m.borrow_mut();
-        let bk = m
-            .get_mut(&token.0)
-            .expect("ExplainBookkeeping token not in registry");
-        f(bk)
-    })
-}
-
-// ===========================================================================
-// Bookkeeping seams (prologue / accounting). prepare.c calls these.
+// `MemoryContextCounters` on its stack and threads them through `ExplainOnePlan`
+// by value / pointer — no handle, no token, no registry. We mirror that: the
+// driver owns one [`Bookkeeping`] local and threads it through these seams by
+// value / `&mut`.
 // ===========================================================================
 
 /// `explain_execute_begin` — the pre-lookup EXPLAIN-EXECUTE bookkeeping:
 /// `if (es->memory) { ... planner ctx ... }; if (es->buffers) bufusage_start =
 /// pgBufferUsage; INSTR_TIME_SET_CURRENT(planstart);`.
-fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<ExplainBookkeeping> {
+fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<Bookkeeping> {
     // if (es->memory) { mem_ctx = AllocSetContextCreate(..., "explain analyze
     //     planner context", ...); MemoryContextSwitchTo(mem_ctx); }
     if es.memory {
@@ -121,24 +73,22 @@ fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<ExplainBookkeeping> 
     }
     // INSTR_TIME_SET_CURRENT(planstart);
     portability_instr_time::instr_time_set_current(&mut bk.planstart);
-    Ok(bk_new(bk))
+    Ok(bk)
 }
 
 /// `explain_planduration` — `INSTR_TIME_SET_CURRENT(planduration);
 /// INSTR_TIME_SUBTRACT(planduration, planstart);`.
-fn explain_planduration(token: ExplainBookkeeping) -> PgResult<()> {
-    bk_with(token, |bk| {
-        let mut now = instr_time::default();
-        portability_instr_time::instr_time_set_current(&mut now);
-        now.subtract(bk.planstart);
-        bk.planduration = now;
-    });
+fn explain_planduration(bk: &mut Bookkeeping) -> PgResult<()> {
+    let mut now = instr_time::default();
+    portability_instr_time::instr_time_set_current(&mut now);
+    now.subtract(bk.planstart);
+    bk.planduration = now;
     Ok(())
 }
 
 /// `explain_memory_accounting` — the `es->memory` branch
 /// (`MemoryContextSwitchTo(saved); MemoryContextMemConsumed(planner_ctx, &mc);`).
-fn explain_memory_accounting(_token: ExplainBookkeeping) -> PgResult<()> {
+fn explain_memory_accounting(_bk: &mut Bookkeeping) -> PgResult<()> {
     panic!(
         "explain_memory_accounting: MemoryContextMemConsumed / planner context \
          restore (es->memory) unported"
@@ -147,13 +97,11 @@ fn explain_memory_accounting(_token: ExplainBookkeeping) -> PgResult<()> {
 
 /// `explain_buffer_accounting` — the `es->buffers` branch
 /// (`BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);`).
-fn explain_buffer_accounting(token: ExplainBookkeeping) -> PgResult<()> {
-    bk_with(token, |bk| {
-        let now = instr::pgBufferUsage();
-        let mut diff = BufferUsage::default();
-        instr::BufferUsageAccumDiff(&mut diff, &now, &bk.bufusage_start);
-        bk.bufusage = diff;
-    });
+fn explain_buffer_accounting(bk: &mut Bookkeeping) -> PgResult<()> {
+    let now = instr::pgBufferUsage();
+    let mut diff = BufferUsage::default();
+    instr::BufferUsageAccumDiff(&mut diff, &now, &bk.bufusage_start);
+    bk.bufusage = diff;
     Ok(())
 }
 
@@ -171,7 +119,7 @@ fn explain_one_plan<'mcx>(
     query_string: &str,
     params: ParamListInfoHandle,
     _query_env: Option<&QueryEnvironment<'mcx>>,
-    bk: ExplainBookkeeping,
+    bk: &Bookkeeping,
     es_buffers: bool,
     es_memory: bool,
 ) -> PgResult<()> {
@@ -257,11 +205,7 @@ fn explain_one_plan<'mcx>(
     // mem_counters. mem_counters is the es->memory branch (unported, gated at
     // begin); bufusage is the planning buffer usage from `bk`.
     let _ = (es_buffers, es_memory);
-    let planning_bufusage = if es_buffers {
-        Some(bk_with(bk, |b| b.bufusage))
-    } else {
-        None
-    };
+    let planning_bufusage = if es_buffers { Some(bk.bufusage) } else { None };
     let peek = planning_bufusage
         .map(|b| b != BufferUsage::default())
         .unwrap_or(false);
@@ -273,7 +217,7 @@ fn explain_one_plan<'mcx>(
 
     // if (es->summary && planduration) Planning Time.
     if es.summary {
-        let planduration = bk_with(bk, |b| b.planduration);
+        let planduration = bk.planduration;
         let plantime_ms = planduration.get_millisec();
         fmt::ExplainPropertyFloat("Planning Time", Some("ms"), plantime_ms, 3, es)?;
     }
