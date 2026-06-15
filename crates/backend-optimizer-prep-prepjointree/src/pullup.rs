@@ -65,8 +65,9 @@ use backend_optimizer_util_clauses::grounded::{
 };
 use backend_optimizer_util_vars::var::{contain_vars_of_level, pull_varnos, pull_varnos_of_level};
 use backend_rewrite_core::{
-    add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp, OffsetVarNodes,
-    ReplaceVarFromTargetList, ReplaceVarsNoMatchOption,
+    add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp,
+    IncrementVarSublevelsUp_rtable, OffsetVarNodes, ReplaceVarFromTargetList,
+    ReplaceVarsNoMatchOption,
 };
 use backend_rewrite_core::replace::ReplaceRteVariablesContext;
 
@@ -383,7 +384,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                 let is_union_all = {
                     let rte = &parse.rtable[(varno - 1) as usize];
                     let sub = rte.subquery.as_deref().unwrap();
-                    is_simple_union_all(sub)
+                    is_simple_union_all(sub)?
                 };
                 if is_union_all {
                     return pull_up_simple_union_all(mcx, root, parse, Node::RangeTblRef(r), varno);
@@ -863,29 +864,461 @@ fn last_ph_id(root: &PlannerInfo) -> u32 {
 }
 
 // ===========================================================================
-// F3 / F6 callees — seam-and-panic into not-yet-ported families.
+// FAMILY 3 — the simple-UNION-ALL pull-up.
+//
+// 1:1 port of `pull_up_simple_union_all` / `pull_up_union_leaf_queries` /
+// `make_setop_translation_list` / `is_simple_union_all` /
+// `is_simple_union_all_recurse` / `flatten_simple_union_all`
+// (prepjointree.c:1608..3060) over the lifetime-free owned `Query<'mcx>` +
+// embedded-`PgBox` model.
+//
+// Model notes:
+//   * The subquery's `setOperations` tree (`SetOperationStmt`/`RangeTblRef`
+//     nodes) lives in the embedded owned subquery; we walk it by deref exactly
+//     as the C walks `Node *`. `RangeTblRef.rtindex` indexes the *setop query's*
+//     own rtable (`rt_fetch(rtr->rtindex, setOpQuery->rtable)`), not the
+//     parent's.
+//   * `make_setop_translation_list` builds the `AppendRelInfo.translated_vars`
+//     list. Here `translated_vars` is `Vec<NodeId>` arena handles (#274); each
+//     `makeVarFromTargetEntry` Var is stored via `root.alloc_node(Expr::Var(..))`
+//     and the resulting `NodeId` pushed (a dropped/junk parent column keeps the
+//     C `palloc0` reverse-translation zero in `parent_colnos`; there is no entry
+//     pushed to `translated_vars` for junk columns, matching `vars = lappend`).
 // ===========================================================================
 
-/// `is_simple_union_all(subquery)` (prepjointree.c:2215). FAMILY 3 (union-all);
-/// not yet ported. The conservative answer until F3 lands is "no" — but a silent
-/// "no" would skip a required pull-up, so we panic loudly (mirror-PG-and-panic).
-fn is_simple_union_all(_subquery: &Query) -> bool {
-    panic!(
-        "is_simple_union_all: prepjointree FAMILY 3 (union-all pullup) not yet ported \
-         (separate lane); pull_up_simple_union_all + is_simple_union_all_recurse + \
-         make_setop_translation_list + pull_up_union_leaf_queries"
-    )
+/// `pull_up_simple_union_all(root, jtnode, rte)` (prepjointree.c:1617). FAMILY 3.
+///
+/// `jtnode` is the `RangeTblRef` identified as a simple UNION ALL subquery; we
+/// pull up the leaf subqueries and build an append relation for the union set.
+/// The result is just `jtnode` (the query jointree is unchanged).
+fn pull_up_simple_union_all<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    jtnode: Node<'mcx>,
+    varno: i32,
+) -> PgResult<Node<'mcx>> {
+    // int rtoffset = list_length(root->parse->rtable);
+    let rtoffset = parse.rtable.len() as i32;
+
+    // Take the subquery out of the RTE so we can own + adjust it. (The C keeps
+    // `rte->subquery` live and `copyObject(subquery->rtable)`s only the rtable;
+    // here we move the whole owned subquery out, mutate its rtable in place, and
+    // never put it back — the appendrel parent RTE no longer needs the subtree.)
+    let mut subquery = parse.rtable[(varno - 1) as usize]
+        .subquery
+        .take()
+        .expect("RTE_SUBQUERY with NULL subquery");
+    let rte_lateral = parse.rtable[(varno - 1) as usize].lateral;
+
+    // Make a modifiable copy of the subquery's rtable, so we can adjust
+    // upper-level Vars in it. (We already own the subquery; move its rtable out
+    // into our working list — the subquery itself is discarded afterwards.)
+    let mut rtable: PgVec<'mcx, RangeTblEntry<'mcx>> =
+        core::mem::replace(&mut subquery.rtable, PgVec::new_in(mcx));
+
+    // Upper-level vars in subquery are now one level closer to their parent than
+    // before. We don't have to worry about offsetting varnos, though, because the
+    // UNION leaf queries can't cross-reference each other.
+    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1);
+
+    // If the UNION ALL subquery had a LATERAL marker, propagate that to all its
+    // children.
+    if rte_lateral {
+        for child_rte in rtable.iter_mut() {
+            debug_assert!(child_rte.rtekind == RTEKind::RTE_SUBQUERY);
+            child_rte.lateral = true;
+        }
+    }
+
+    // Append child RTEs (and their perminfos) to parent rtable.
+    // C: CombineRangeTables(&root->parse->rtable, &root->parse->rteperminfos,
+    //                       rtable, subquery->rteperminfos);
+    // combine_range_tables consumes a `&mut Query` for the source; wrap the
+    // modified rtable + the subquery's perminfos in a transient Query.
+    {
+        let mut src = Query::new(mcx);
+        src.rtable = rtable;
+        src.rteperminfos = core::mem::replace(&mut subquery.rteperminfos, PgVec::new_in(mcx));
+        subselect::combine_range_tables(mcx, parse, &mut src);
+    }
+
+    // Recursively scan the subquery's setOperations tree and add AppendRelInfo
+    // nodes for leaf subqueries to the parent's append_rel_list. Also apply
+    // pull_up_subqueries to the leaf subqueries.
+    debug_assert!(subquery.setOperations.is_some());
+    let setop = subquery
+        .setOperations
+        .take()
+        .expect("UNION ALL subquery has no setOperations");
+    pull_up_union_leaf_queries(
+        mcx,
+        root,
+        parse,
+        &*setop,
+        varno,
+        &subquery,
+        rtoffset,
+    )?;
+
+    // Mark the parent as an append relation.
+    parse.rtable[(varno - 1) as usize].inh = true;
+
+    Ok(jtnode)
 }
 
-/// `pull_up_simple_union_all(root, jtnode, rte)` (prepjointree.c:1617). FAMILY 3.
-fn pull_up_simple_union_all<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-    _jtnode: Node<'mcx>,
-    _varno: i32,
-) -> PgResult<Node<'mcx>> {
-    panic!("pull_up_simple_union_all: prepjointree FAMILY 3 (union-all pullup) not yet ported")
+/// `pull_up_union_leaf_queries(setOp, root, parentRTindex, setOpQuery,
+/// childRToffset)` (prepjointree.c:1699). Recursive guts of
+/// `pull_up_simple_union_all` / `flatten_simple_union_all`.
+///
+/// `set_op_query` is the Query containing the setOp node (whose tlist references
+/// all the setop output columns); when called from `pull_up_simple_union_all`
+/// this is *not* `root.parse`. `child_rt_offset` is where in the parent's range
+/// table the child RTEs were copied (0 for the flatten path).
+fn pull_up_union_leaf_queries<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    set_op: &Node<'mcx>,
+    parent_rt_index: i32,
+    set_op_query: &Query<'mcx>,
+    child_rt_offset: i32,
+) -> PgResult<()> {
+    match set_op {
+        Node::RangeTblRef(rtr) => {
+            // Calculate the index in the parent's range table.
+            let child_rt_index = child_rt_offset + rtr.rtindex;
+
+            // Build a suitable AppendRelInfo, and attach to parent's list.
+            let mut appinfo = types_pathnodes::AppendRelInfo {
+                parent_relid: parent_rt_index as u32,
+                child_relid: child_rt_index as u32,
+                parent_reltype: 0,
+                child_reltype: 0,
+                translated_vars: Vec::new(),
+                num_child_cols: 0,
+                parent_colnos: Vec::new(),
+                parent_reloid: 0,
+            };
+            make_setop_translation_list(root, set_op_query, child_rt_index, &mut appinfo);
+            root.append_rel_list.push(appinfo);
+
+            // Recursively apply pull_up_subqueries to the new child RTE. (We must
+            // build the AppendRelInfo first, because this will modify it; indeed,
+            // that's the only part of the upper query where Vars referencing
+            // childRTindex can exist at this point.)
+            //
+            // We can pass NULL containing-join info even if actually under an
+            // outer join, because the child's expressions don't propagate up to
+            // the join. We ignore the possibility that the recurse returns a
+            // different jointree node; the important thing is it replaced the
+            // child relid in the AppendRelInfo node.
+            let rtr = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+                rtindex: child_rt_index,
+            });
+            let _ = pull_up_subqueries_recurse(mcx, root, parse, rtr, None, None)?;
+            Ok(())
+        }
+        Node::SetOperationStmt(op) => {
+            // Recurse to reach leaf queries.
+            let larg = op
+                .larg
+                .as_ref()
+                .expect("SetOperationStmt with NULL larg");
+            pull_up_union_leaf_queries(
+                mcx,
+                root,
+                parse,
+                &**larg,
+                parent_rt_index,
+                set_op_query,
+                child_rt_offset,
+            )?;
+            let rarg = op
+                .rarg
+                .as_ref()
+                .expect("SetOperationStmt with NULL rarg");
+            pull_up_union_leaf_queries(
+                mcx,
+                root,
+                parse,
+                &**rarg,
+                parent_rt_index,
+                set_op_query,
+                child_rt_offset,
+            )?;
+            Ok(())
+        }
+        other => Err(types_error::PgError::error(alloc::format!(
+            "unrecognized node type: {:?}",
+            other.node_tag()
+        ))),
+    }
+}
+
+/// `make_setop_translation_list(query, newvarno, appinfo)` (prepjointree.c:1769).
+///
+/// Build the list of translations from parent Vars to child Vars for a UNION ALL
+/// member, plus the trivial reverse-translation array. Each translated Var is
+/// stored in the planner arena and referenced by `NodeId` (#274).
+fn make_setop_translation_list<'mcx>(
+    root: &mut PlannerInfo,
+    query: &Query<'mcx>,
+    newvarno: i32,
+    appinfo: &mut types_pathnodes::AppendRelInfo,
+) {
+    // Initialize reverse-translation array with all entries zero. (Entries for
+    // resjunk columns stay zero.)
+    appinfo.num_child_cols = query.targetList.len() as i32;
+    appinfo.parent_colnos = alloc::vec![0i16; query.targetList.len()];
+
+    let mut vars: Vec<NodeId> = Vec::new();
+    for tle in query.targetList.iter() {
+        if tle.resjunk {
+            continue;
+        }
+        let var = backend_nodes_core::makefuncs::make_var_from_target_entry(newvarno, tle)
+            .expect("make_var_from_target_entry");
+        let id = root.alloc_node(Expr::Var(var));
+        vars.push(id);
+        appinfo.parent_colnos[(tle.resno - 1) as usize] = tle.resno;
+    }
+    appinfo.translated_vars = vars;
+}
+
+/// `is_simple_union_all(subquery)` (prepjointree.c:2215). FAMILY 3.
+///
+/// We require all the setops to be UNION ALL (no mixing) and there can't be any
+/// datatype coercions involved, ie, all the leaf queries must emit the same
+/// datatypes.
+fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
+    // Let's just make sure it's a valid subselect. (commandType is the only
+    // check we can make on the owned Query; the IsA(Query) is structural.)
+    if subquery.commandType != types_nodes::nodes::CmdType::CMD_SELECT {
+        return Err(types_error::PgError::error("subquery is bogus"));
+    }
+
+    // Is it a set-operation query at all?
+    let topop_node = match subquery.setOperations.as_ref() {
+        Some(n) => &**n,
+        None => return Ok(false),
+    };
+    let topop = match topop_node {
+        Node::SetOperationStmt(op) => op,
+        // castNode would error on a wrong tag; setOperations is always a
+        // SetOperationStmt when present.
+        _ => return Ok(false),
+    };
+
+    // Can't handle ORDER BY, LIMIT/OFFSET, locking, or WITH.
+    if !subquery.sortClause.is_empty()
+        || subquery.limitOffset.is_some()
+        || subquery.limitCount.is_some()
+        || !subquery.rowMarks.is_empty()
+        || !subquery.cteList.is_empty()
+    {
+        return Ok(false);
+    }
+
+    // Recursively check the tree of set operations.
+    is_simple_union_all_recurse(topop_node, subquery, &topop.colTypes)
+}
+
+/// `is_simple_union_all_recurse(setOp, setOpQuery, colTypes)`
+/// (prepjointree.c:2242).
+fn is_simple_union_all_recurse(
+    set_op: &Node,
+    set_op_query: &Query,
+    col_types: &[types_core::primitive::Oid],
+) -> PgResult<bool> {
+    // Since this function recurses, it could be driven to stack overflow.
+    backend_tcop_postgres_seams::check_stack_depth::call()?;
+
+    match set_op {
+        Node::RangeTblRef(rtr) => {
+            // rt_fetch(rtr->rtindex, setOpQuery->rtable)
+            let rte = &set_op_query.rtable[(rtr.rtindex - 1) as usize];
+            let subquery = rte
+                .subquery
+                .as_deref()
+                .expect("UNION ALL leaf RTE has NULL subquery");
+            // Leaf nodes are OK if they match the toplevel column types. We don't
+            // have to compare typmods or collations here.
+            backend_optimizer_util_vars::tlist::tlist_same_datatypes(
+                &subquery.targetList,
+                col_types,
+                true,
+            )
+        }
+        Node::SetOperationStmt(op) => {
+            // Must be UNION ALL.
+            if op.op != types_nodes::rawnodes::SetOperation::SETOP_UNION || !op.all {
+                return Ok(false);
+            }
+            // Recurse to check inputs.
+            let larg = op.larg.as_ref().expect("SetOperationStmt with NULL larg");
+            let rarg = op.rarg.as_ref().expect("SetOperationStmt with NULL rarg");
+            Ok(
+                is_simple_union_all_recurse(&**larg, set_op_query, col_types)?
+                    && is_simple_union_all_recurse(&**rarg, set_op_query, col_types)?,
+            )
+        }
+        other => Err(types_error::PgError::error(alloc::format!(
+            "unrecognized node type: {:?}",
+            other.node_tag()
+        ))),
+    }
+}
+
+/// `flatten_simple_union_all(root)` (prepjointree.c:2983). FAMILY 3.
+///
+/// If a query's `setOperations` tree consists entirely of simple UNION ALL
+/// operations, flatten it into an append relation (which we can process more
+/// intelligently than the general setops case). Otherwise, do nothing.
+pub fn flatten_simple_union_all<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    // Shouldn't be called unless query has setops.
+    debug_assert!(parse.setOperations.is_some());
+
+    // Can't optimize away a recursive UNION.
+    if root.hasRecursion {
+        return Ok(());
+    }
+
+    // Recursively check the tree of set operations. If not all UNION ALL with
+    // identical column types, punt.
+    {
+        let topop_node: &Node = &**parse
+            .setOperations
+            .as_ref()
+            .expect("flatten_simple_union_all: no setOperations");
+        let topop = match topop_node {
+            Node::SetOperationStmt(op) => op,
+            _ => return Ok(()),
+        };
+        if !is_simple_union_all_recurse(topop_node, parse, &topop.colTypes)? {
+            return Ok(());
+        }
+    }
+
+    // Locate the leftmost leaf query in the setops tree. The upper query's Vars
+    // all refer to this RTE (see transformSetOperationStmt). Walk down `larg`.
+    let leftmost_rti = {
+        let mut node: &Node = &**parse
+            .setOperations
+            .as_ref()
+            .expect("flatten_simple_union_all: no setOperations");
+        loop {
+            match node {
+                Node::SetOperationStmt(op) => {
+                    node = &**op.larg.as_ref().expect("setop NULL larg");
+                }
+                Node::RangeTblRef(rtr) => break rtr.rtindex,
+                _ => panic!("flatten_simple_union_all: leftmost jtnode is not a RangeTblRef"),
+            }
+        }
+    };
+    debug_assert!(
+        parse.rtable[(leftmost_rti - 1) as usize].rtekind == RTEKind::RTE_SUBQUERY
+    );
+
+    // Make a copy of the leftmost RTE and add it to the rtable. This copy
+    // represents the leftmost leaf query in its capacity as a member of the
+    // appendrel; the original represents the appendrel as a whole. (We must do
+    // things this way because the upper query's Vars have to be seen as
+    // referring to the whole appendrel.)
+    let child_rte = parse.rtable[(leftmost_rti - 1) as usize].clone_in(mcx)?;
+    parse.rtable.push(child_rte);
+    let child_rti = parse.rtable.len() as i32;
+
+    // Modify the setops tree to reference the child copy. We must walk down to
+    // the leftmost RangeTblRef again and mutate its rtindex.
+    {
+        let mut node: &mut Node = &mut **parse
+            .setOperations
+            .as_mut()
+            .expect("flatten_simple_union_all: no setOperations");
+        loop {
+            match node {
+                Node::SetOperationStmt(op) => {
+                    node = &mut **op.larg.as_mut().expect("setop NULL larg");
+                }
+                Node::RangeTblRef(rtr) => {
+                    rtr.rtindex = child_rti;
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    // Modify the formerly-leftmost RTE to mark it as an appendrel parent.
+    parse.rtable[(leftmost_rti - 1) as usize].inh = true;
+
+    // Form a RangeTblRef for the appendrel, and insert it into FROM. The top
+    // Query of a setops tree should have had an empty FromClause initially.
+    let rtr_node = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+        rtindex: leftmost_rti,
+    });
+    {
+        let jt = parse
+            .jointree
+            .as_mut()
+            .expect("flatten_simple_union_all: no jointree");
+        debug_assert!(jt.fromlist.is_empty());
+        jt.fromlist.push(alloc_in(mcx, rtr_node)?);
+    }
+
+    // Pull the setOperations tree out before subquery pullup (because of the
+    // assert in pull_up_simple_subquery). We still need to walk it to build the
+    // AppendRelInfos, so keep it in a local.
+    let topop = parse
+        .setOperations
+        .take()
+        .expect("flatten_simple_union_all: no setOperations");
+
+    // Build AppendRelInfo information, and apply pull_up_subqueries to the leaf
+    // queries of the UNION ALL. We must do that now because they weren't
+    // previously referenced by the jointree, and so were missed by the main
+    // invocation of pull_up_subqueries. (childRToffset is 0; the child RTEs were
+    // already in parse->rtable.) The setOpQuery here is `parse` itself; we hold
+    // `topop` separately so there's no aliasing with the `&mut parse` walk.
+    let topop_node = PgBox::into_inner(topop);
+    flatten_pull_up_union_leaf_queries(mcx, root, parse, &topop_node, leftmost_rti, 0)
+}
+
+/// `pull_up_union_leaf_queries((Node *) topop, root, leftmostRTI, parse, 0)`
+/// for the flatten path: here `setOpQuery == root->parse == parse`, but we
+/// cannot borrow `parse` both as the mutated target and as the immutable
+/// `set_op_query` arg. The only use of `set_op_query` is reading its
+/// `targetList` in `make_setop_translation_list` (via the leftmost-leaf tlist
+/// reference). We snapshot the needed targetlist by cloning it once up front.
+fn flatten_pull_up_union_leaf_queries<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    set_op: &Node<'mcx>,
+    parent_rt_index: i32,
+    child_rt_offset: i32,
+) -> PgResult<()> {
+    // Snapshot parse->targetList (the setOpQuery tlist) once; make_setop_*
+    // reads only the tlist. This avoids aliasing the &mut parse.
+    let tlist_snapshot = clone_targetlist(mcx, &parse.targetList)?;
+    let mut snapshot_query = Query::new(mcx);
+    snapshot_query.commandType = parse.commandType;
+    snapshot_query.targetList = tlist_snapshot;
+    pull_up_union_leaf_queries(
+        mcx,
+        root,
+        parse,
+        set_op,
+        parent_rt_index,
+        &snapshot_query,
+        child_rt_offset,
+    )
 }
 
 /// `is_simple_values(root, rte)` (prepjointree.c:2044). FAMILY 6 (RTE expanders).

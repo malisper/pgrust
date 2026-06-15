@@ -92,3 +92,16 @@ seam_core::seam!(
         parse: &mut types_nodes::copy_query::Query<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `flatten_simple_union_all(root)` (prepjointree.c): if the query's
+    /// `setOperations` tree consists entirely of simple UNION ALL operations,
+    /// flatten it into an append relation; otherwise do nothing. Mutates `parse`
+    /// (rtable, jointree, setOperations) and `root.append_rel_list`. **FAMILY 3,
+    /// ported** (installed by the owner's `init_seams`).
+    pub fn flatten_simple_union_all<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut types_pathnodes::PlannerInfo,
+        parse: &mut types_nodes::copy_query::Query<'mcx>,
+    ) -> types_error::PgResult<()>
+);
