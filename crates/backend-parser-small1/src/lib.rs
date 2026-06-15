@@ -621,7 +621,8 @@ pub fn fixed_paramref_hook<'mcx>(
         paramtype,
         paramtypmod: -1,
         paramcollid: lsyscache::get_typcollation::call(paramtype)?,
-        // location: pref->location — not modeled on Param.
+        // param->location = pref->location;
+        location: pref.location,
     })
 }
 

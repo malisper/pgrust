@@ -120,10 +120,12 @@ fn collate_expr_forces_explicit_collation() {
     let lhs = Expr::CollateExpr(CollateExpr {
         arg: Some(Box::new(text_var(DEFAULT_COLLATION_OID))),
         collOid: FOO_COLL,
+        location: -1,
     });
     let rhs = Expr::CollateExpr(CollateExpr {
         arg: Some(Box::new(text_var(DEFAULT_COLLATION_OID))),
         collOid: BAR_COLL,
+        location: -1,
     });
     let mut e = bool_op(vec![lhs, rhs]);
     let res = assign_expr_collations(None, &mut e);
@@ -160,6 +162,7 @@ fn noncollatable_inputs_give_none() {
             bool_op(vec![text_var(FOO_COLL), text_var(FOO_COLL)]),
             bool_op(vec![text_var(FOO_COLL), text_var(FOO_COLL)]),
         ],
+        location: -1,
     });
     // Should not error; inner ops get foo inputcollid, the AND stays noncollatable.
     assign_expr_collations(None, &mut e).unwrap();

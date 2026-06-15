@@ -177,6 +177,8 @@ pub fn make_const<'mcx>(
         constcollid,
         constvalue,
         constisnull,
+        // makeConst sets location = -1.
+        location: -1,
     })
 }
 
@@ -196,39 +198,48 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
         constcollid: InvalidOid,
         constvalue: Datum::from_bool(value),
         constisnull: isnull,
+        // makeConst sets location = -1.
+        location: -1,
     }
 }
 
 /// `makeBoolExpr(boolop, args, location)` (makefuncs.c) — a `BoolExpr` node.
-///
-/// The trimmed [`BoolExpr`] carries `boolop`/`args`; `location` (set by the C)
-/// is not modeled here.
-pub fn make_bool_expr(boolop: BoolExprType, args: Vec<Expr>, _location: i32) -> Expr {
-    Expr::BoolExpr(BoolExpr { boolop, args })
+pub fn make_bool_expr(boolop: BoolExprType, args: Vec<Expr>, location: i32) -> Expr {
+    Expr::BoolExpr(BoolExpr {
+        boolop,
+        args,
+        location,
+    })
 }
 
 /// `make_andclause(andclauses)` (makefuncs.c) — `BoolExpr` with `AND_EXPR`.
+/// (clauses.c sets `location = -1`.)
 pub fn make_andclause(andclauses: Vec<Expr>) -> Expr {
     Expr::BoolExpr(BoolExpr {
         boolop: AND_EXPR,
         args: andclauses,
+        location: -1,
     })
 }
 
 /// `make_orclause(orclauses)` (makefuncs.c) — `BoolExpr` with `OR_EXPR`.
+/// (clauses.c sets `location = -1`.)
 pub fn make_orclause(orclauses: Vec<Expr>) -> Expr {
     Expr::BoolExpr(BoolExpr {
         boolop: OR_EXPR,
         args: orclauses,
+        location: -1,
     })
 }
 
 /// `make_notclause(notclause)` (makefuncs.c) — `BoolExpr` with `NOT_EXPR` over
-/// the single negated expression (`list_make1(notclause)`).
+/// the single negated expression (`list_make1(notclause)`). (clauses.c sets
+/// `location = -1`.)
 pub fn make_notclause(notclause: Expr) -> Expr {
     Expr::BoolExpr(BoolExpr {
         boolop: NOT_EXPR,
         args: vec![notclause],
+        location: -1,
     })
 }
 
@@ -282,8 +293,8 @@ pub fn make_ands_implicit(clause: Option<Expr>) -> Vec<Expr> {
 /// `makeRelabelType(arg, rtype, rtypmod, rcollid, rformat)` (makefuncs.c) — a
 /// no-op binary-compatible coercion node.
 ///
-/// The trimmed [`RelabelType`] carries every field the C sets except
-/// `location` (set to -1 by the C).
+/// The [`RelabelType`] carries every field the C sets; `makeRelabelType` sets
+/// `location = -1`.
 pub fn make_relabel_type(
     arg: Expr,
     rtype: Oid,
@@ -297,13 +308,14 @@ pub fn make_relabel_type(
         resulttypmod: rtypmod,
         resultcollid: rcollid,
         relabelformat: rformat,
+        location: -1,
     })
 }
 
 /// `makeFuncExpr(funcid, rettype, args, funccollid, inputcollid, fformat)`
 /// (makefuncs.c) — a function-call expression. `funcretset`/`funcvariadic` are
-/// always `false` here (the only allowed case); `location` (set to -1 by the C)
-/// is not modeled in the trimmed [`FuncExpr`].
+/// always `false` here (the only allowed case); `makeFuncExpr` sets
+/// `location = -1`.
 pub fn make_func_expr(
     funcid: Oid,
     rettype: Oid,
@@ -321,6 +333,7 @@ pub fn make_func_expr(
         funccollid,
         inputcollid,
         args,
+        location: -1,
     })
 }
 
@@ -397,11 +410,12 @@ pub fn flat_copy_target_entry<'mcx>(
 // ===========================================================================
 
 /// `makeJsonFormat(type, encoding, location)` (makefuncs.c) — a `JsonFormat`
-/// node. `location` (set by the C) is not modeled in the trimmed [`JsonFormat`].
-pub fn make_json_format(format_type: JsonFormatType, encoding: JsonEncoding, _location: i32) -> JsonFormat {
+/// node.
+pub fn make_json_format(format_type: JsonFormatType, encoding: JsonEncoding, location: i32) -> JsonFormat {
     JsonFormat {
         format_type,
         encoding,
+        location,
     }
 }
 
@@ -420,31 +434,31 @@ pub fn make_json_value_expr(
 }
 
 /// `makeJsonBehavior(btype, expr, location)` (makefuncs.c) — a `JsonBehavior`
-/// node. `location` (set by the C) is not modeled; `coerce` is left at its
-/// default (the C leaves it zero too).
-pub fn make_json_behavior(btype: JsonBehaviorType, expr: Option<Expr>, _location: i32) -> JsonBehavior {
+/// node. `coerce` is left at its default (the C leaves it zero too).
+pub fn make_json_behavior(btype: JsonBehaviorType, expr: Option<Expr>, location: i32) -> JsonBehavior {
     JsonBehavior {
         btype,
         expr: expr.map(Box::new),
         coerce: false,
+        location,
     }
 }
 
 /// `makeJsonIsPredicate(expr, format, item_type, unique_keys, location)`
 /// (makefuncs.c) — a `JsonIsPredicate` node, returned as a `Node` in the C.
-/// `location` (set by the C) is not modeled in the trimmed [`JsonIsPredicate`].
 pub fn make_json_is_predicate(
     expr: Option<Expr>,
     format: Option<JsonFormat>,
     item_type: JsonValueType,
     unique_keys: bool,
-    _location: i32,
+    location: i32,
 ) -> Expr {
     Expr::JsonIsPredicate(JsonIsPredicate {
         expr: expr.map(Box::new),
         format,
         item_type,
         unique_keys,
+        location,
     })
 }
 
