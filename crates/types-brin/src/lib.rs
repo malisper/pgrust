@@ -85,6 +85,11 @@ pub const INCLUSION_MAX_PROCNUMS: usize = 4;
 /// (just `PROCNUM_HASH`), cached in [`BloomOpaque::extra_procinfos`].
 pub const BLOOM_MAX_PROCNUMS: usize = 1;
 
+/// `MINMAX_MAX_PROCNUMS` (`brin_minmax_multi.c`): the number of optional
+/// minmax-multi support procedures (just `PROCNUM_DISTANCE`), cached in
+/// [`MinmaxMultiOpaque::extra_procinfos`].
+pub const MINMAX_MULTI_MAX_PROCNUMS: usize = 1;
+
 /// Payload for `BrinOpcInfo::oi_opaque` — the opclass-private blob (C
 /// `void *oi_opaque`). In C each opclass `palloc0`s its own private struct in
 /// the tail of the `BrinOpcInfo` allocation (`MinmaxOpaque`, `InclusionOpaque`,
@@ -106,6 +111,34 @@ pub enum OpaqueOpcInfo {
     Inclusion(InclusionOpaque),
     /// `brin_bloom.c` `BloomOpaque` — the per-attribute hash-procinfo cache.
     Bloom(BloomOpaque),
+    /// `brin_minmax_multi.c` `MinmaxMultiOpaque` — the per-attribute distance
+    /// support-procinfo + B-tree strategy-procinfo cache.
+    MinmaxMulti(MinmaxMultiOpaque),
+}
+
+/// `MinmaxMultiOpaque` (`brin_minmax_multi.c`): the per-attribute support- and
+/// strategy-procinfo cache.
+///
+/// C: `{ FmgrInfo extra_procinfos[MINMAX_MAX_PROCNUMS]; Oid cached_subtype;
+///        FmgrInfo strategy_procinfos[BTMaxStrategyNumber]; }`.
+///
+/// As in [`MinmaxOpaque`] each cached `FmgrInfo` is reduced to the resolved
+/// function's `Oid` (the BRIN fmgr-call seam re-resolves by OID). An `Oid` of
+/// `InvalidOid` (0) marks an uninitialized slot, exactly as `palloc0` leaves it.
+/// The `Cell`s give interior mutability so the cache fills lazily through the
+/// `&BrinDesc` the AM passes (C mutates the same struct through a pointer).
+#[derive(Debug, Default)]
+pub struct MinmaxMultiOpaque {
+    /// `extra_procinfos[MINMAX_MAX_PROCNUMS]`: the resolved distance-support
+    /// function `Oid` (`InvalidOid` marks an uninitialized slot).
+    pub extra_procinfos:
+        [core::cell::Cell<types_core::primitive::Oid>; MINMAX_MULTI_MAX_PROCNUMS],
+    /// `cached_subtype`.
+    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    /// `strategy_procinfos[BTMaxStrategyNumber]`: each slot's resolved
+    /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
+    pub strategy_procinfos:
+        [core::cell::Cell<types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
 }
 
 /// `MinmaxOpaque` (`brin_minmax.c`): the per-attribute strategy-procinfo cache.
@@ -225,12 +258,75 @@ pub struct BrinValues<'mcx> {
     pub bv_values: PgVec<'mcx, Datum<'mcx>>,
     /// `bv_mem_value`: opclass-expanded accumulated value (`Datum` of an
     /// expanded object in C); `None` is C's `PointerGetDatum(NULL)`.
-    pub bv_mem_value: Option<Datum<'mcx>>,
+    ///
+    /// C carries this as a bare `Datum` pointing at an opclass-private expanded
+    /// object. The only built-in opclass that uses it (`brin_minmax_multi`)
+    /// keeps a live in-memory [`MinmaxMultiRanges`] struct across many
+    /// `add_value` calls and serializes it once at `brin_form_tuple` time
+    /// through the `bv_serialize` callback. Modeled here as a typed enum so the
+    /// live struct can be named (mirrors [`OpaqueOpcInfo`]); the [`Datum`] arm
+    /// keeps C's finished-datum case representable.
+    pub bv_mem_value: Option<BrinMemValue<'mcx>>,
     /// Whether a `bv_serialize` opclass callback is registered for this column
     /// (`brin_serialize_callback_type`; `false` is the C NULL pointer). The
     /// callback itself is opclass-owned and invoked through the brin-tuple
     /// `brin_serialize` seam keyed by the column index.
     pub bv_has_serialize: bool,
+}
+
+/// Payload for [`BrinValues::bv_mem_value`] — the opclass-private expanded
+/// accumulated value (C's `Datum bv_mem_value`). Modeled as a typed enum, one
+/// arm per shape the built-in opclasses store (mirrors [`OpaqueOpcInfo`]); the
+/// genuinely heterogeneous `void *` of an extension opclass is not used by the
+/// built-ins.
+#[derive(Debug)]
+pub enum BrinMemValue<'mcx> {
+    /// A finished by-value/by-reference `Datum` expanded object (the C
+    /// `bv_mem_value = PointerGetDatum(x)` case for opclasses that store a
+    /// plain expanded datum). Unused by the built-in opclasses, kept so the
+    /// contract stays faithful to C.
+    Datum(Datum<'mcx>),
+    /// `brin_minmax_multi.c`: a live in-memory [`MinmaxMultiRanges`] insert
+    /// buffer, accumulated across `add_value` and compacted/serialized once by
+    /// the `bv_serialize` callback at `brin_form_tuple` time.
+    MinmaxMultiRanges(MinmaxMultiRanges<'mcx>),
+}
+
+/// `Ranges` (`brin_minmax_multi.c`): the in-memory minmax-multi summary — an
+/// oversized insert buffer of boundary values, accumulated across many
+/// `add_value` calls and compacted to `target_maxvalues` once at serialize
+/// time.
+///
+/// The `values` array stores `2*nranges` regular-range boundary values first,
+/// then `nvalues` single-point values (`nsorted` of which are sorted). The
+/// cached `FmgrInfo *cmp` is reduced to the comparison function's `Oid` (the
+/// BRIN fmgr-call seam re-resolves by OID).
+#[derive(Debug)]
+pub struct MinmaxMultiRanges<'mcx> {
+    /// `typid`: the indexed column's type Oid.
+    pub typid: types_core::primitive::Oid,
+    /// `colloid`: the collation Oid.
+    pub colloid: types_core::primitive::Oid,
+    /// `attno`: the indexed attribute number (1-based).
+    pub attno: AttrNumber,
+    /// `cmp`: the cached less-than comparison function `Oid` (`InvalidOid` when
+    /// not yet resolved).
+    pub cmp: types_core::primitive::Oid,
+    /// `nranges`: number of regular ranges in `values`.
+    pub nranges: i32,
+    /// `nsorted`: number of `nvalues` point values that are sorted.
+    pub nsorted: i32,
+    /// `nvalues`: number of single-point values in `values`.
+    pub nvalues: i32,
+    /// `maxvalues`: number of elements allocated in `values` (the oversized
+    /// insert-buffer capacity).
+    pub maxvalues: i32,
+    /// `target_maxvalues`: the requested (`values_per_range`) number of values
+    /// to compact down to before serializing.
+    pub target_maxvalues: i32,
+    /// `values[]`: boundary values — `2*nranges` regular-range bounds followed
+    /// by `nvalues` single-point values.
+    pub values: PgVec<'mcx, Datum<'mcx>>,
 }
 
 /// `BrinMemTuple` (`brin_tuple.h`): the in-memory (deformed) BRIN tuple.

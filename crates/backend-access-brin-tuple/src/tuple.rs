@@ -38,9 +38,9 @@ pub const INVALID_COMPRESSION_METHOD: i8 = -1;
 /// See [`brin_form_placeholder_tuple`] if you touch this.
 pub fn brin_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
-    brdesc: &BrinDesc<'_>,
+    brdesc: &BrinDesc<'mcx>,
     blkno: BlockNumber,
-    tuple: &BrinMemTuple<'_>,
+    tuple: &mut BrinMemTuple<'mcx>,
 ) -> PgResult<(BrinTupleImage<'mcx>, Size)> {
     let total = brdesc.bd_totalstored as usize;
     debug_assert!(brdesc.bd_totalstored > 0);
@@ -61,11 +61,10 @@ pub fn brin_form_tuple<'mcx>(
     // Set up the values/nulls arrays for heap_fill_tuple.
     let mut idxattno: usize = 0;
     for keyno in 0..brdesc.natts() {
-        let col = &tuple.bt_columns[keyno];
         let nstored = brdesc.bd_info[keyno].nstored();
 
         // "allnulls": no data to store; set the null bits and continue.
-        if col.bv_allnulls {
+        if tuple.bt_columns[keyno].bv_allnulls {
             for _ in 0..nstored {
                 nulls[idxattno] = true;
                 idxattno += 1;
@@ -75,26 +74,31 @@ pub fn brin_form_tuple<'mcx>(
         }
 
         // "hasnulls": still store a real value, but need a null bitmap.
-        if col.bv_hasnulls {
+        if tuple.bt_columns[keyno].bv_hasnulls {
             anynulls = true;
         }
 
         // If needed, serialize the values before forming the on-disk tuple.
         // The opclass serialize callback fills a fresh `col_values` slice from
-        // bv_mem_value; otherwise the column's bv_values are used directly.
+        // bv_mem_value; otherwise the column's bv_values are used directly. The
+        // callback mutates the live expanded buffer in place (C compacts
+        // `*ranges`), so take a mutable borrow of just this column for the call.
         let mut serialized: Option<PgVec<'mcx, Datum<'mcx>>> = None;
-        if col.bv_has_serialize {
+        if tuple.bt_columns[keyno].bv_has_serialize {
             let mut dst: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, nstored)?;
             for _ in 0..nstored {
                 dst.push(Datum::null());
             }
-            let mem = col
+            let mem = tuple.bt_columns[keyno]
                 .bv_mem_value
-                .as_ref()
+                .as_mut()
                 .expect("bv_serialize set but bv_mem_value is NULL");
-            backend_access_brin_entry_seams::brin_serialize::call(mcx, keyno, mem, &mut dst)?;
+            backend_access_brin_entry_seams::brin_serialize::call(mcx, keyno, brdesc, mem, &mut dst)?;
             serialized = Some(dst);
         }
+
+        // Re-borrow the column immutably now that the in-place serialize is done.
+        let col = &tuple.bt_columns[keyno];
 
         // Now obtain the values of each stored datum. Some values might be
         // toasted; detoast them and try to compress them (TOAST_INDEX_HACK).

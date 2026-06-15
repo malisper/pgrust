@@ -144,6 +144,7 @@ dependencies = [
  "backend-access-brin-bloom",
  "backend-access-brin-entry-seams",
  "backend-access-brin-inclusion",
+ "backend-access-brin-minmax-multi",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -156,6 +157,33 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
+name = "backend-access-brin-minmax-multi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-index-indexam-seams",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-rel",
+ "types-relcache-entry",
  "types-scan",
  "types-storage",
  "types-tuple",
@@ -671,6 +699,28 @@ dependencies = [
  "backend-utils-error",
  "types-core",
  "types-gin",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginentrypage"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple",
+ "backend-access-gin-core-probe",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
