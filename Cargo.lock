@@ -2185,6 +2185,7 @@ dependencies = [
 name = "backend-access-transam-xlogreader"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-varsup-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
@@ -6675,6 +6676,15 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-rte-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pathnodes",
 ]
 
 [[package]]
