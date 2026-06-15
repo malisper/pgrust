@@ -728,7 +728,11 @@ pub fn _bt_leafbuild<'mcx>(
     }
 
     // _bt_mkscankey(index, NULL): the build insertion scankey.
-    let inskey = nbtcore::bt_mkscankey::call(&btspool.index, None)?;
+    let mut inskey = nbtcore::bt_mkscankey::call(&btspool.index, None)?;
+    // _bt_mkscankey() won't set allequalimage without metapage
+    if let Some(key) = inskey.as_mut() {
+        key.allequalimage = nbtcore::bt_allequalimage_dbg::call(&btspool.index, true)?;
+    }
 
     let keysz = btspool.index.indnkeyatts();
     let natts = rel_natts(&btspool.index);

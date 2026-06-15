@@ -32,6 +32,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_getprocinfo(irel, attnum, procnum)` (indexam.c): the cached fmgr
+    /// lookup info for a support procedure (only the default functions are
+    /// cached). The relcache owner holds + lazily initializes the
+    /// `rd_supportinfo` cache; the procindex arithmetic + `procnum` range
+    /// assert are indexam's logic, which this seam encapsulates. `Err` carries
+    /// the `missing support function ...` ereport.
+    pub fn index_getprocinfo<'mcx>(
+        irel: &types_rel::Relation<'mcx>,
+        attnum: types_core::primitive::AttrNumber,
+        procnum: u16,
+    ) -> types_error::PgResult<types_core::fmgr::FmgrInfo>
+);
+
+seam_core::seam!(
     /// `index_beginscan_parallel(heaprel, indexrel, instrument, nkeys,
     /// norderbys, pscan)` (indexam.c): begin a parallel index scan attached to
     /// the shared `ParallelIndexScanDesc`. Fallible on OOM / `ereport(ERROR)`.
