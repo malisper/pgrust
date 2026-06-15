@@ -237,9 +237,13 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
     match ss.ps.plan {
         Some(Node::SeqScan(s)) => s.scan.scanrelid,
         Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
+        Some(Node::IndexScan(s)) => s.scan.scanrelid,
         Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
         Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
         Some(Node::ForeignScan(s)) => s.scan.scanrelid,
+        Some(Node::SubqueryScan(s)) => s.scan.scanrelid,
+        Some(Node::CteScan(s)) => s.scan.scanrelid,
+        Some(Node::NamedTuplestoreScan(s)) => s.scan.scanrelid,
         Some(other) => panic!("scan_scanrelid: plan is not a Scan node: {other:?}"),
         None => panic!("scan_scanrelid: ScanStateData has no plan"),
     }

@@ -266,6 +266,7 @@ fn IndexOnlyNext<'mcx>(
         // If the index was lossy, we have to recheck the index quals.
         if node.ioss_ScanDesc.as_ref().unwrap().xs_recheck {
             // econtext->ecxt_scantuple = slot;
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(scan_slot);
             // if (!ExecQualAndReset(node->recheckqual, econtext))
             let passed = match &mut node.recheckqual {
                 Some(rq) => {
