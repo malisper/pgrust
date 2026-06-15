@@ -7305,6 +7305,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-subselect-pullup"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-plan-subselect-pullup-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-rewrite-core",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-plan-subselect-pullup-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-prep-prepqual"
 version = "0.0.0"
 dependencies = [
@@ -14351,6 +14382,7 @@ dependencies = [
  "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
