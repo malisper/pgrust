@@ -604,3 +604,388 @@ fn unrecognized_strategy(strategy: i32, func: &'static str, line: i32) -> PgErro
         .with_sqlstate(ERRCODE_INTERNAL_ERROR)
         .with_error_location(ErrorLocation::new(C_FILE, line, func))
 }
+
+// ===========================================================================
+// Typed support-proc dispatch (mirrors BRIN's opclass-by-OID dispatch)
+//
+// The SP-GiST core resolves the opclass support procedure OID via
+// `index_getprocinfo(rel, 1, SPGIST_*_PROC).fn_oid` and calls the typed seam
+// `spg_*::call(proc_oid, &in, &mut out)`. We install our arm keyed on the
+// quad-tree opclass support-proc OIDs (pg_proc.dat). The seam crosses the
+// `types_spgist::spg*In/Out` structs whose `Datum` fields carry the `point`/
+// `box` images; these dispatch wrappers decode them to the `types_core::geo`
+// working structs (the honest `DatumGetPointP` / `DatumGetBoxP`), run the
+// unchanged opclass body, and re-encode the output Datums (`PointPGetDatum`).
+// This is exactly the geo_spgist.c idiom (decoded working structs internally).
+// ===========================================================================
+
+use mcx::Mcx;
+use types_core::primitive::Oid;
+use types_spgist as spgt;
+use types_tuple::backend_access_common_heaptuple::Datum;
+
+/// `F_SPG_QUAD_CONFIG` — `spg_quad_config` (pg_proc.dat oid 4018).
+pub const F_SPG_QUAD_CONFIG: Oid = 4018;
+/// `F_SPG_QUAD_CHOOSE` — `spg_quad_choose` (pg_proc.dat oid 4019).
+pub const F_SPG_QUAD_CHOOSE: Oid = 4019;
+/// `F_SPG_QUAD_PICKSPLIT` — `spg_quad_picksplit` (pg_proc.dat oid 4020).
+pub const F_SPG_QUAD_PICKSPLIT: Oid = 4020;
+/// `F_SPG_QUAD_INNER_CONSISTENT` — `spg_quad_inner_consistent` (pg_proc.dat oid 4021).
+pub const F_SPG_QUAD_INNER_CONSISTENT: Oid = 4021;
+/// `F_SPG_QUAD_LEAF_CONSISTENT` — `spg_quad_leaf_consistent` (pg_proc.dat oid 4022).
+/// Also the registered `leaf_consistent` for the k-d-tree opclass.
+pub const F_SPG_QUAD_LEAF_CONSISTENT: Oid = 4022;
+
+/// `DatumGetPointP(datum)` — decode a `point`'s by-reference image.
+#[inline]
+fn datum_get_point(datum: &Datum<'_>) -> Point {
+    Point::from_datum_bytes(datum.as_ref_bytes())
+}
+
+/// `DatumGetBoxP(datum)` — decode a `box`'s by-reference image.
+#[inline]
+fn datum_get_box(datum: &Datum<'_>) -> BOX {
+    BOX::from_datum_bytes(datum.as_ref_bytes())
+}
+
+/// `PointPGetDatum(p)` — encode a point as a by-reference `Datum` in `mcx`.
+#[inline]
+fn point_get_datum<'mcx>(mcx: Mcx<'mcx>, p: &Point) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &p.to_datum_bytes())?))
+}
+
+/// Decode a typed scankey array into the opclass' `SpgScanKey` working form.
+/// For `RTContainedBy` the `sk_argument` is a `box`, else a `point`.
+fn decode_scankeys(scankeys: &[types_scan::scankey::ScanKeyData<'_>]) -> Vec<SpgScanKey> {
+    scankeys
+        .iter()
+        .map(|sk| {
+            let sk_strategy = sk.sk_strategy as u16;
+            if sk_strategy == RTContainedByStrategyNumber {
+                SpgScanKey {
+                    sk_strategy,
+                    query_point: Point::default(),
+                    query_box: datum_get_box(&sk.sk_argument),
+                }
+            } else {
+                SpgScanKey {
+                    sk_strategy,
+                    query_point: datum_get_point(&sk.sk_argument),
+                    query_box: BOX::default(),
+                }
+            }
+        })
+        .collect()
+}
+
+/// `DatumGetPointP(orderbys[i].sk_argument)` for each ordering scan key.
+fn decode_orderby_points(orderbys: &[types_scan::scankey::ScanKeyData<'_>]) -> Vec<Point> {
+    orderbys.iter().map(|sk| datum_get_point(&sk.sk_argument)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Per-OID typed dispatch arms. Mirrors BRIN's single-crate opclass dispatcher
+// (brin-minmax matches F_BRIN_MINMAX_* / F_BRIN_INCLUSION_* / ... in one
+// crate): this crate is the SINGLE installer of the SP-GiST core dispatch
+// seams and routes BOTH the quad-tree opclass (its own bodies) AND the
+// k-d-tree opclass (the sibling `backend-access-spg-kdtree` crate's bodies) by
+// support-proc OID — exactly as the seam's single-shot `set` requires. The
+// text opclass (F5) will fold its OIDs into this dispatcher when it lands.
+// ---------------------------------------------------------------------------
+
+use backend_access_spg_kdtree as kd;
+
+/// `unrecognized SP-GiST support function OID` — a dispatch to an OID no
+/// installed opclass owns (mirror-PG-and-panic: the SP-GiST core only ever
+/// resolves OIDs that belong to a registered opclass support procedure).
+fn unrecognized_proc(proc_oid: Oid, method: &'static str) -> PgError {
+    PgError::error(format!(
+        "unrecognized SP-GiST {method} support function OID: {proc_oid}"
+    ))
+    .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+}
+
+/// `spg_config` dispatcher: quad-tree + k-d-tree config bodies.
+fn dispatch_config(
+    proc_oid: Oid,
+    _in: &spgt::spgConfigIn,
+    out: &mut spgt::spgConfigOut,
+) -> PgResult<()> {
+    let cfg = match proc_oid {
+        F_SPG_QUAD_CONFIG => {
+            let mut cfg = SpgConfigOut::default();
+            spg_quad_config(&mut cfg);
+            (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
+        }
+        kd::F_SPG_KD_CONFIG => {
+            let mut cfg = kd::SpgConfigOut::default();
+            kd::spg_kd_config(&mut cfg);
+            (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
+        }
+        _ => return Err(unrecognized_proc(proc_oid, "config")),
+    };
+    out.prefixType = cfg.0;
+    out.labelType = cfg.1;
+    out.leafType = cfg.2;
+    out.canReturnData = cfg.3;
+    out.longValuesOK = cfg.4;
+    Ok(())
+}
+
+/// `spg_choose` dispatcher.
+fn dispatch_choose<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc_oid: Oid,
+    in_: &spgt::spgChooseIn<'mcx>,
+    out: &mut spgt::spgChooseOut<'mcx>,
+) -> PgResult<()> {
+    match proc_oid {
+        F_SPG_QUAD_CHOOSE => {
+            let local_in = SpgChooseIn {
+                in_point: datum_get_point(&in_.datum),
+                level: in_.level,
+                allTheSame: in_.allTheSame,
+                hasPrefix: in_.hasPrefix,
+                prefix_point: if in_.hasPrefix {
+                    datum_get_point(&in_.prefixDatum)
+                } else {
+                    Point::default()
+                },
+                nNodes: in_.nNodes,
+            };
+            let mut local_out = SpgChooseOut::default();
+            spg_quad_choose(&local_in, &mut local_out)?;
+            out.result = spgt::spgChooseOutResult::MatchNode(spgt::spgChooseOutMatchNode {
+                nodeN: local_out.nodeN,
+                levelAdd: local_out.levelAdd,
+                restDatum: point_get_datum(mcx, &local_out.rest_point)?,
+            });
+            Ok(())
+        }
+        kd::F_SPG_KD_CHOOSE => {
+            let local_in = kd::SpgChooseIn {
+                in_point: datum_get_point(&in_.datum),
+                level: in_.level,
+                allTheSame: in_.allTheSame,
+                hasPrefix: in_.hasPrefix,
+                // k-d-tree prefix is a float8 splitting coordinate, not a point.
+                prefix_coord: if in_.hasPrefix {
+                    in_.prefixDatum.as_f64()
+                } else {
+                    0.0
+                },
+                nNodes: in_.nNodes,
+            };
+            let mut local_out = kd::SpgChooseOut::default();
+            kd::spg_kd_choose(&local_in, &mut local_out)?;
+            out.result = spgt::spgChooseOutResult::MatchNode(spgt::spgChooseOutMatchNode {
+                nodeN: local_out.nodeN,
+                levelAdd: local_out.levelAdd,
+                restDatum: point_get_datum(mcx, &local_out.rest_point)?,
+            });
+            Ok(())
+        }
+        _ => Err(unrecognized_proc(proc_oid, "choose")),
+    }
+}
+
+/// `spg_picksplit` dispatcher.
+fn dispatch_picksplit<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc_oid: Oid,
+    in_: &spgt::spgPickSplitIn<'mcx>,
+    out: &mut spgt::spgPickSplitOut<'mcx>,
+) -> PgResult<()> {
+    match proc_oid {
+        F_SPG_QUAD_PICKSPLIT => {
+            let local_in = SpgPickSplitIn {
+                points: in_.datums.iter().map(datum_get_point).collect(),
+                level: in_.level,
+            };
+            let mut local_out = SpgPickSplitOut::default();
+            spg_quad_picksplit(&local_in, &mut local_out)?;
+            out.hasPrefix = local_out.hasPrefix;
+            out.prefixDatum = if local_out.hasPrefix {
+                Some(point_get_datum(mcx, &local_out.prefix_point)?)
+            } else {
+                None
+            };
+            out.nNodes = local_out.nNodes;
+            out.nodeLabels = None;
+            out.mapTuplesToNodes = local_out.mapTuplesToNodes;
+            out.leafTupleDatums = local_out
+                .leafTupleDatums
+                .iter()
+                .map(|p| point_get_datum(mcx, p))
+                .collect::<PgResult<Vec<_>>>()?;
+            Ok(())
+        }
+        kd::F_SPG_KD_PICKSPLIT => {
+            let local_in = kd::SpgPickSplitIn {
+                points: in_.datums.iter().map(datum_get_point).collect(),
+                level: in_.level,
+            };
+            let mut local_out = kd::SpgPickSplitOut::default();
+            kd::spg_kd_picksplit(&local_in, &mut local_out);
+            out.hasPrefix = local_out.hasPrefix;
+            // k-d-tree prefix is the float8 splitting coordinate.
+            out.prefixDatum = if local_out.hasPrefix {
+                Some(Datum::from_f64(local_out.prefix_coord))
+            } else {
+                None
+            };
+            out.nNodes = local_out.nNodes;
+            out.nodeLabels = None;
+            out.mapTuplesToNodes = local_out.mapTuplesToNodes;
+            out.leafTupleDatums = local_out
+                .leafTupleDatums
+                .iter()
+                .map(|p| point_get_datum(mcx, p))
+                .collect::<PgResult<Vec<_>>>()?;
+            Ok(())
+        }
+        _ => Err(unrecognized_proc(proc_oid, "picksplit")),
+    }
+}
+
+/// `spg_inner_consistent` dispatcher. `_mcx` is part of the seam signature but
+/// unused here: the typed `traversalValues`/`distances` carriers are owned
+/// `Vec`s (global alloc), not by-reference `Datum`s, so no index-context
+/// allocation is needed for the inner-consistent output.
+fn dispatch_inner_consistent<'mcx>(
+    _mcx: Mcx<'mcx>,
+    proc_oid: Oid,
+    in_: &spgt::spgInnerConsistentIn<'mcx>,
+    out: &mut spgt::spgInnerConsistentOut<'mcx>,
+) -> PgResult<()> {
+    match proc_oid {
+        F_SPG_QUAD_INNER_CONSISTENT => {
+            let local_in = SpgInnerConsistentIn {
+                scankeys: decode_scankeys(&in_.scankeys),
+                orderby_points: decode_orderby_points(&in_.orderbys),
+                norderbys: in_.norderbys(),
+                traversalValue: in_.traversalValue.as_ref().map(|b| BOX::from_datum_bytes(b)),
+                level: in_.level,
+                allTheSame: in_.allTheSame,
+                hasPrefix: in_.hasPrefix,
+                prefix_point: if in_.hasPrefix {
+                    datum_get_point(&in_.prefixDatum)
+                } else {
+                    Point::default()
+                },
+                nNodes: in_.nNodes,
+            };
+            let mut local_out = SpgInnerConsistentOut::default();
+            spg_quad_inner_consistent(&local_in, &mut local_out)?;
+            write_inner_out(out, local_out.nNodes, local_out.nodeNumbers, local_out.levelAdds, &local_out.traversalValues, local_out.distances)
+        }
+        kd::F_SPG_KD_INNER_CONSISTENT => {
+            let local_in = kd::SpgInnerConsistentIn {
+                scankeys: decode_kd_scankeys(&in_.scankeys),
+                orderby_points: decode_orderby_points(&in_.orderbys),
+                norderbys: in_.norderbys(),
+                traversalValue: in_.traversalValue.as_ref().map(|b| BOX::from_datum_bytes(b)),
+                level: in_.level,
+                allTheSame: in_.allTheSame,
+                hasPrefix: in_.hasPrefix,
+                // k-d-tree prefix is a float8 splitting coordinate.
+                prefix_coord: if in_.hasPrefix {
+                    in_.prefixDatum.as_f64()
+                } else {
+                    0.0
+                },
+                nNodes: in_.nNodes,
+            };
+            let mut local_out = kd::SpgInnerConsistentOut::default();
+            kd::spg_kd_inner_consistent(&local_in, &mut local_out)?;
+            write_inner_out(out, local_out.nNodes, local_out.nodeNumbers, local_out.levelAdds, &local_out.traversalValues, local_out.distances)
+        }
+        _ => Err(unrecognized_proc(proc_oid, "inner_consistent")),
+    }
+}
+
+/// Write the (BOX-traversal-value) inner-consistent result into the typed out.
+/// Both point opclasses produce no reconstructed values and BOX traversals.
+fn write_inner_out<'mcx>(
+    out: &mut spgt::spgInnerConsistentOut<'mcx>,
+    n_nodes: i32,
+    node_numbers: Vec<i32>,
+    level_adds: Vec<i32>,
+    traversal_boxes: &[BOX],
+    distances: Vec<Vec<f64>>,
+) -> PgResult<()> {
+    out.nNodes = n_nodes;
+    out.nodeNumbers = node_numbers;
+    out.levelAdds = level_adds;
+    out.reconstructedValues = Vec::new();
+    out.traversalValues = traversal_boxes
+        .iter()
+        .map(|b| Ok(Some(b.to_datum_bytes().to_vec())))
+        .collect::<PgResult<Vec<Option<Vec<u8>>>>>()?;
+    out.distances = distances;
+    Ok(())
+}
+
+/// `spg_leaf_consistent` dispatcher. Only the quad-tree opclass defines a leaf
+/// body; the k-d-tree opclass registers `spg_quad_leaf_consistent` (OID 4022)
+/// for its leaf slot (spgkdtreeproc.c borrows it verbatim).
+fn dispatch_leaf_consistent<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc_oid: Oid,
+    in_: &spgt::spgLeafConsistentIn<'mcx>,
+    out: &mut spgt::spgLeafConsistentOut<'mcx>,
+) -> PgResult<bool> {
+    match proc_oid {
+        F_SPG_QUAD_LEAF_CONSISTENT => {
+            let local_in = SpgLeafConsistentIn {
+                scankeys: decode_scankeys(&in_.scankeys),
+                orderby_points: decode_orderby_points(&in_.orderbys),
+                norderbys: in_.norderbys(),
+                leaf_point: datum_get_point(&in_.leafDatum),
+            };
+            let mut local_out = SpgLeafConsistentOut::default();
+            let res = spg_quad_leaf_consistent(&local_in, &mut local_out)?;
+            out.leafValue = Some(point_get_datum(mcx, &local_out.leaf_point)?);
+            out.recheck = local_out.recheck;
+            out.recheckDistances = false;
+            out.distances = local_out.distances;
+            Ok(res)
+        }
+        _ => Err(unrecognized_proc(proc_oid, "leaf_consistent")),
+    }
+}
+
+/// Decode a typed scankey array into the k-d-tree opclass' `SpgScanKey` form.
+/// (Same `point`/`box` rule as the quad-tree opclass.)
+fn decode_kd_scankeys(scankeys: &[types_scan::scankey::ScanKeyData<'_>]) -> Vec<kd::SpgScanKey> {
+    scankeys
+        .iter()
+        .map(|sk| {
+            let sk_strategy = sk.sk_strategy as u16;
+            if sk_strategy == kd::RTContainedByStrategyNumber {
+                kd::SpgScanKey {
+                    sk_strategy,
+                    query_point: Point::default(),
+                    query_box: datum_get_box(&sk.sk_argument),
+                }
+            } else {
+                kd::SpgScanKey {
+                    sk_strategy,
+                    query_point: datum_get_point(&sk.sk_argument),
+                    query_box: BOX::default(),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Install the quad-tree AND k-d-tree opclass support-procedure bodies into the
+/// SP-GiST core's typed dispatch seams (this crate is the single installer for
+/// both point opclasses, mirroring brin-minmax's single-crate dispatcher).
+pub fn init_seams() {
+    backend_access_spg_core_seams::spg_config::set(dispatch_config);
+    backend_access_spg_core_seams::spg_choose::set(dispatch_choose);
+    backend_access_spg_core_seams::spg_picksplit::set(dispatch_picksplit);
+    backend_access_spg_core_seams::spg_inner_consistent::set(dispatch_inner_consistent);
+    backend_access_spg_core_seams::spg_leaf_consistent::set(dispatch_leaf_consistent);
+}
