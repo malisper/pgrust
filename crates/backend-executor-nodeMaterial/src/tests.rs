@@ -18,6 +18,7 @@ use types_nodes::Bitmapset;
 use super::*;
 use types_nodes::TupleTableSlot;
 use types_nodes::tuptable::SlotData;
+use types_nodes::{EStateData, SlotId};
 
 /// The fake tuplestore engine behind the opaque carrier: a row count plus the
 /// two read-pointer positions nodeMaterial uses (0 = active, 1 = mark).
@@ -97,11 +98,12 @@ fn mock_advance(state: &mut Tuplestorestate<'_>, forward: bool) -> PgResult<bool
     }
 }
 
-fn mock_gettupleslot(
-    state: &mut Tuplestorestate<'_>,
+fn mock_gettupleslot<'mcx>(
+    state: &mut Tuplestorestate<'mcx>,
     forward: bool,
     _copy: bool,
-    slot: &mut TupleTableSlot,
+    slot: SlotId,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let s = store_mut(state);
     let fetched = if forward {
@@ -118,12 +120,16 @@ fn mock_gettupleslot(
         false
     };
     if fetched {
-        slot.tts_flags &= !TTS_FLAG_EMPTY;
+        estate.slot_mut(slot).tts_flags &= !TTS_FLAG_EMPTY;
     }
     Ok(fetched)
 }
 
-fn mock_puttupleslot(state: &mut Tuplestorestate<'_>, _slot: &TupleTableSlot) -> PgResult<()> {
+fn mock_puttupleslot<'mcx>(
+    state: &mut Tuplestorestate<'mcx>,
+    _slot: SlotId,
+    _estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     let s = store_mut(state);
     s.ntuples += 1;
     // The store is at EOF when material appends, so the active read pointer

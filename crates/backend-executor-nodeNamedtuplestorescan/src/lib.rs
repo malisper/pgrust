@@ -90,7 +90,7 @@ fn NamedTuplestoreScanNext<'mcx>(
 
     //   (void) tuplestore_gettupleslot(node->relation, true, false, slot);
     let relation = relation_mut(node);
-    tuplestore::tuplestore_gettupleslot::call(relation, true, false, estate.slot_mut(scanslot))
+    tuplestore::tuplestore_gettupleslot::call(relation, true, false, scanslot, estate)
 }
 
 /// `NamedTuplestoreScanRecheck(node, slot)` — access-method routine to recheck
