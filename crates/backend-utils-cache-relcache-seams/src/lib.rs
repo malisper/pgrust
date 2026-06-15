@@ -642,3 +642,26 @@ seam_core::seam!(
         metap: types_hash::hashpage::HashMetaPageData,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `(SpGistCache *) index->rd_amcache` (spgutils.c `spgGetCache`) — fetch
+    /// the cached `SpGistCache` for this index, or `None` (the C
+    /// `rd_amcache == NULL`, in which case `spgGetCache` rebuilds and installs
+    /// one via [`set_rd_amcache_spgist`]). The opaque `rd_amcache` slot lives on
+    /// the relcache entry, so the cache read/write is seamed onto the relcache
+    /// owner.
+    pub fn rd_amcache_spgist(
+        index_oid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_spgist::SpGistCache>>
+);
+
+seam_core::seam!(
+    /// `index->rd_amcache = MemoryContextAlloc(index->rd_indexcxt,
+    /// sizeof(SpGistCache)); memcpy(index->rd_amcache, &cache, ...)` (spgutils.c
+    /// `spgGetCache`) — install/refresh the cached `SpGistCache` on the relcache
+    /// entry's `rd_amcache` slot.
+    pub fn set_rd_amcache_spgist(
+        index_oid: types_core::primitive::Oid,
+        cache: types_spgist::SpGistCache,
+    ) -> types_error::PgResult<()>
+);
