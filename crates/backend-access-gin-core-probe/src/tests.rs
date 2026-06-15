@@ -212,8 +212,7 @@ fn merge_item_pointers_disjoint_and_overlapping() {
 
 use crate::ginlogic::{
     callTriConsistentFn, directBoolConsistentFn, ginInitConsistentFunction, shimBoolConsistentFn,
-    shimTriConsistentFn, trueConsistentFn, trueTriConsistentFn, GinAttrConsistent, GinState,
-    MAX_MAYBE_ENTRIES,
+    shimTriConsistentFn, trueConsistentFn, trueTriConsistentFn, GinState, MAX_MAYBE_ENTRIES,
 };
 use types_tsearch::backend_access_gin_ginlogic::{
     GinBoolConsistentKind, GinScanKey, GinTriConsistentKind,
@@ -359,11 +358,10 @@ fn init_everything_uses_true_fns() {
 #[test]
 fn init_selects_direct_vs_shim_per_oid() {
     let mut gs = GinState::new();
-    gs.attrs_mut()[0] = GinAttrConsistent {
-        consistent_fn_oid: 1234,
-        tri_consistent_fn_oid: types_core::InvalidOid,
-        support_collation: 100,
-    };
+    // attno 0: opclass provides a boolean consistent fn but no ternary one.
+    gs.consistentFn[0].fn_oid = 1234;
+    gs.triConsistentFn[0].fn_oid = types_core::InvalidOid;
+    gs.supportCollation[0] = 100;
     let mut key = GinScanKey::from_entry_res(vec![GIN_TRUE]);
     key.attnum = 1;
     key.searchMode = 0;
@@ -373,11 +371,10 @@ fn init_selects_direct_vs_shim_per_oid() {
     assert_eq!(key.collation, 100);
     assert_eq!(key.consistent_fmgr_oid, 1234);
 
-    gs.attrs_mut()[1] = GinAttrConsistent {
-        consistent_fn_oid: types_core::InvalidOid,
-        tri_consistent_fn_oid: 5678,
-        support_collation: 0,
-    };
+    // attno 1: opclass provides a ternary consistent fn but no boolean one.
+    gs.consistentFn[1].fn_oid = types_core::InvalidOid;
+    gs.triConsistentFn[1].fn_oid = 5678;
+    gs.supportCollation[1] = 0;
     let mut key2 = GinScanKey::from_entry_res(vec![GIN_TRUE]);
     key2.attnum = 2;
     key2.searchMode = 0;

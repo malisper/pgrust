@@ -53,6 +53,8 @@ const HASH_AM_OID: Oid = 405;
 const F_BTHANDLER: Oid = 330;
 /// `F_HASHHANDLER` (pg_proc.dat oid 331) — the hash AM handler function.
 const F_HASHHANDLER: Oid = 331;
+/// `F_BRINHANDLER` (pg_proc.dat oid 335) — the BRIN AM handler function.
+const F_BRINHANDLER: Oid = 335;
 
 /// `BTMaxStrategyNumber` (access/nbtree.h) — the btree fast-path bound used by
 /// `IndexAmTranslateStrategy`.
@@ -87,6 +89,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmRoutine> {
     let routine = match amhandler {
         F_BTHANDLER => backend_access_nbtree_nbtree::bthandler(),
         F_HASHHANDLER => backend_access_hash_entry::hashhandler(),
+        F_BRINHANDLER => backend_access_brin_scan::brinhandler(),
         // A handler the built-in fmgr table doesn't carry would be a
         // dynamically loaded extension AM, reached through the (unported)
         // dynamic-fmgr dispatch. `mirror PG and panic` until that lands; a
