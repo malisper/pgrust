@@ -266,6 +266,42 @@ seam_core::seam!(
 // ---- ROW-trigger firing (commands/trigger.c), called by nodeModifyTable.c ----
 
 seam_core::seam!(
+    /// `ExecBRInsertTriggers(estate, relinfo, slot)` (trigger.c): fire BEFORE
+    /// ROW INSERT triggers; returns `false` ("do nothing") to skip the insert.
+    /// May replace the slot contents and `ereport(ERROR)` from user code.
+    pub fn exec_br_insert_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecIRInsertTriggers(estate, relinfo, slot)` (trigger.c): fire INSTEAD
+    /// OF ROW INSERT triggers (on a view); returns `false` ("do nothing").
+    pub fn exec_ir_insert_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecARInsertTriggers(estate, relinfo, slot, recheckIndexes,
+    /// transition_capture)` (trigger.c): queue AFTER ROW INSERT trigger events
+    /// (and capture the NEW tuple for transition tables). The transition-capture
+    /// state is owned by the caller's `ModifyTableState`; `None` is the C
+    /// `NULL`.
+    pub fn exec_ar_insert_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        recheck_indexes: &[types_core::Oid],
+        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecBRDeleteTriggers(estate, epqstate, relinfo, tupleid, fdw_trigtuple,
     /// epqslot, tmresult, tmfd, is_merge_delete)` (trigger.c) — fire BEFORE ROW
     /// DELETE triggers, returning `false` when one of them turns the delete

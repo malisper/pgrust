@@ -5030,6 +5030,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-trigger"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-commands-trigger-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-snapshot",
+ "types-tableam",
+ "types-trigger",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-trigger-seams"
 version = "0.0.0"
 dependencies = [
@@ -15197,6 +15220,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-commands-trigger",
  "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",

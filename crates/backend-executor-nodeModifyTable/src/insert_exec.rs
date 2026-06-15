@@ -28,41 +28,12 @@ const WCO_VIEW_CHECK: i32 = 0;
 // dependency cycle but for which no shared seam declaration exists yet.
 // ---------------------------------------------------------------------------
 
-seam_core::seam!(
-    /// `ExecBRInsertTriggers(estate, relinfo, slot)` (trigger.c): fire BEFORE
-    /// ROW INSERT triggers; returns `false` ("do nothing") to skip the insert.
-    /// May replace the slot contents and `ereport(ERROR)` from user code.
-    pub fn exec_br_insert_triggers<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        slot: SlotId,
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `ExecIRInsertTriggers(estate, relinfo, slot)` (trigger.c): fire INSTEAD
-    /// OF ROW INSERT triggers (on a view); returns `false` ("do nothing").
-    pub fn exec_ir_insert_triggers<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        slot: SlotId,
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `ExecARInsertTriggers(estate, relinfo, slot, recheckIndexes,
-    /// transition_capture)` (trigger.c): queue AFTER ROW INSERT trigger events
-    /// (and capture the NEW tuple for transition tables). The transition-capture
-    /// state is owned by the caller's `ModifyTableState`; `None` is the C
-    /// `NULL`.
-    pub fn exec_ar_insert_triggers<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        slot: SlotId,
-        recheck_indexes: &[types_core::Oid],
-        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
-    ) -> PgResult<()>
-);
+// The BEFORE/INSTEAD-OF/AFTER ROW INSERT trigger entry points are declared in
+// `backend-commands-trigger-seams` (the trigger owner) and called via that path
+// below — they are no longer locally redeclared here.
+use backend_commands_trigger_seams::{
+    exec_ar_insert_triggers, exec_br_insert_triggers, exec_ir_insert_triggers,
+};
 
 seam_core::seam!(
     /// `ExecCheckIndexConstraints(resultRelInfo, slot, estate, conflictTid,
