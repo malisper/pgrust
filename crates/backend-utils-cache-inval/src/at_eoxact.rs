@@ -14,8 +14,8 @@ use types_wal::xact::XLOG_XACT_INVALIDATIONS;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_access_transam_xlog_seams as xlog_seams;
 use backend_access_transam_xloginsert_seams as xloginsert_seams;
-use backend_catalog_catalog_seams as catalog_seams;
 use backend_storage_ipc_sinval_seams as sinval_seams;
+use common_relpath_seams as relpath_seams;
 use backend_utils_cache_relcache_seams as relcache_seams;
 use backend_utils_init_miscinit_seams as miscinit_seams;
 
@@ -455,7 +455,7 @@ pub fn ProcessCommittedInvalidationMessages(
             // GetDatabasePath builds the path string; we hold it for the
             // duration of the set/use/clear dance, then drop it (C:
             // pfree(DatabasePath) below).
-            let path = catalog_seams::get_database_path::call(dbid, tsid)?;
+            let path = relpath_seams::get_database_path::call(dbid, tsid);
             miscinit_seams::set_database_path::call(path.as_str());
         }
 
