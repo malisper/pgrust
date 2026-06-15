@@ -22,5 +22,6 @@ backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
+backend-access-brin-scan = { path = "../backend-access-brin-scan" }
 backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }

@@ -138,6 +138,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tbm_add_page(tbm, pageno)` (tidbitmap.c): mark an entire heap page lossy
+    /// in the bitmap. BRIN's `bringetbitmap` adds whole page ranges this way.
+    /// The index AM holds the real `TIDBitmap *`; the owner mutates its boxed
+    /// interior. `Err` carries OOM from growing the bitmap.
+    pub fn tbm_add_page(
+        tbm: &mut types_tidbitmap::TIDBitmap,
+        pageno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `bms_num_members(a)` (bitmapset.c): count the members of `a`. A `None`
     /// set is the C NULL (empty) set, yielding 0. Infallible.
     pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32

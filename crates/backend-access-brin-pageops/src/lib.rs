@@ -72,5 +72,5 @@ pub use brin_pageops::{
 pub use brin_revmap::{
     brinGetTupleForHeapBlock, brinLockRevmapPageForUpdate, brinRevmapDesummarizeRange,
     brinRevmapExtend, brinRevmapInitialize, brinRevmapTerminate, brinSetHeapBlockItemptr,
-    FoundTuple,
+    read_found_tuple_bytes, FoundTuple,
 };
