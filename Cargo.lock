@@ -1503,10 +1503,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-spg-kdtree"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-spg-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-spg-proc-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-spg-quadtree"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
  "types-core",
  "types-error",
 ]
@@ -14063,6 +14093,7 @@ dependencies = [
  "backend-access-nbtree-nbtsort",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
+ "backend-access-spg-proc",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
