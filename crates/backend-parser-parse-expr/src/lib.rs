@@ -399,7 +399,7 @@ fn transformAExprOp<'mcx>(
     // "row op subselect" → ROWCOMPARE sublink: rewrites the SubLink and
     // recurses; needs SubLink transform machinery — routed through the SubLink
     // seam (parse_expr.c:953-973).
-    if is_rowexpr(lexpr.as_ref()) && is_sublink(rexpr.as_ref()) {
+    if is_rowexpr(lexpr.as_ref()) && is_expr_sublink(rexpr.as_ref()) {
         let sublink = build_rowcompare_sublink(lexpr.unwrap(), rexpr.unwrap())?;
         return seam_transform_sublink(pstate, sublink);
     }
@@ -1720,8 +1720,15 @@ fn is_casetestexpr(n: Option<&Node<'_>>) -> bool {
 fn is_rowexpr(n: Option<&Node<'_>>) -> bool {
     matches!(n, Some(Node::Expr(Expr::RowExpr(_))))
 }
-fn is_sublink(n: Option<&Node<'_>>) -> bool {
-    matches!(n, Some(Node::Expr(Expr::SubLink(_))))
+/// `rexpr IsA SubLink && ((SubLink *) rexpr)->subLinkType == EXPR_SUBLINK`
+/// (parse_expr.c:954-955): only a plain expression sublink may be rewritten
+/// into a ROWCOMPARE sublink.
+fn is_expr_sublink(n: Option<&Node<'_>>) -> bool {
+    matches!(
+        n,
+        Some(Node::Expr(Expr::SubLink(s)))
+            if s.subLinkType == types_nodes::primnodes::SubLinkType::Expr
+    )
 }
 fn is_rowexpr_expr_opt(e: Option<&Expr>) -> bool {
     matches!(e, Some(Expr::RowExpr(_)))
