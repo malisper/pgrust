@@ -69,8 +69,13 @@ backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 
 # --- spgdoinsert.c WAL-emit + dispatch deps ---
 
-# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert.
+# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert,
+# plus log_newpage_range for the spgbuild post-build WAL emit.
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# table-AM heap-scan provider (tableam.c): table_index_build_scan for spgbuild.
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+# bulk page writer (bulk_write.c): smgr_bulk_* for spgbuildempty.
+backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 # REGBUF_* flag constants + spgxlog record write-side serializers.
 types-wal = { path = "../types-wal" }
 types-xlog-records = { path = "../types-xlog-records" }

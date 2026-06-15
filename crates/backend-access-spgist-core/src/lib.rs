@@ -1615,5 +1615,8 @@ pub use spgscan::{
     SpGistScanOpaqueData,
 };
 
+pub mod spginsert;
+pub use spginsert::{spgbuild, spgbuildempty, spginsert};
+
 #[cfg(test)]
 mod tests;
