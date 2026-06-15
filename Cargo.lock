@@ -1404,6 +1404,8 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-scan",
+ "backend-access-brin-validate",
+ "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
@@ -14926,10 +14928,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
- "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
- "backend-access-gin-ginvacuum",
+ "backend-access-gist-core",
  "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",
