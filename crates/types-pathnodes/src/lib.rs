@@ -1650,6 +1650,13 @@ pub struct PlaceHolderInfo {
     /// `ph_var` is a `PlaceHolderVar` tree; the join-path layer only reads its
     /// `phexpr`, so just that expr handle is carried.
     pub ph_var_phexpr: NodeId,
+    /// `ph_var->phrels` — base+OJ relids syntactically within the PHV's
+    /// expression. `pull_varnos_walker` (var.c) compares this against a
+    /// `PlaceHolderVar`'s own `phrels` to detect a translated (appendrel-child)
+    /// PHV and translate `ph_eval_at` to match. Added field-for-field vs
+    /// pathnodes.h's `PlaceHolderInfo.ph_var` (the consumer mirror previously
+    /// carried only `phexpr`); `Default` (empty set) keeps construction additive.
+    pub ph_var_phrels: Relids,
     /// lowest level we can evaluate the value at.
     pub ph_eval_at: Relids,
     /// relids of contained lateral refs, if any (NULL/empty if none).

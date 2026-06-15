@@ -6580,6 +6580,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-extensible"
 version = "0.0.0"
 dependencies = [
@@ -6826,6 +6834,21 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-vars"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-var-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -12891,6 +12914,7 @@ dependencies = [
  "backend-nodes-extensible",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-vars",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
  "backend-port-atomics",
