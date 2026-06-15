@@ -36,6 +36,7 @@ pub fn init_all() {
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
+    backend_access_transam_multixact::init_seams();
     backend_access_transam_parallel::init_seams();
     backend_access_transam_subtrans::init_seams();
     backend_access_transam_timeline::init_seams();
@@ -58,10 +59,14 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
+    backend_catalog_pg_conversion::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
