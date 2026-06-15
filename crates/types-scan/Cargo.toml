@@ -9,6 +9,7 @@ name = "types_scan"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-snapshot = { path = "../types-snapshot" }
 types-tuple = { path = "../types-tuple" }

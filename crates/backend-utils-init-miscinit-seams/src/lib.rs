@@ -219,6 +219,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IgnoreSystemIndexes` getter (the miscinit.c-owned global): whether
+    /// system-table scans must skip their indexes (set during bootstrap / by
+    /// the `ignore_system_indexes` GUC). genam's `systable_beginscan` reads it
+    /// to decide the index-vs-heap path. Backend-local read; infallible.
+    pub fn get_ignore_system_indexes() -> bool
+);
+
+seam_core::seam!(
     /// `bool has_rolreplication(Oid roleid)` (`miscinit.c:739`) — whether the
     /// role has the REPLICATION attribute. Superusers bypass the check; the
     /// non-superuser path does an `AUTHOID` syscache lookup, so it takes an

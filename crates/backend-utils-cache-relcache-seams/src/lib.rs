@@ -455,6 +455,17 @@ seam_core::seam!(
     pub fn rd_index_has_indpred(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
 seam_core::seam!(
+    /// `index->rd_index->indkey.values[0..IndexRelationGetNumberOfAttributes]`
+    /// — the table column number of each index column (the full `int2vector`
+    /// indkey), as genam's `systable_beginscan` attribute-number→index-column
+    /// conversion loop reads it. The trimmed in-cache `FormData_pg_index`
+    /// carrier (`types_rel`) keeps only `indkey0`; the full vector lives in the
+    /// relcache entry, so the conversion reads it through this accessor.
+    /// `None` if `rd_index == NULL` (not an index). `IndexRelationGetNumber-
+    /// OfAttributes(irel)` is the returned vector's length (`indnatts`).
+    pub fn rd_index_indkey(index: &types_rel::Relation<'_>) -> types_error::PgResult<Option<std::vec::Vec<types_core::primitive::AttrNumber>>>
+);
+seam_core::seam!(
     /// `index->rd_indam->amclusterable`.
     pub fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
