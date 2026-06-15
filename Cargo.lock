@@ -497,6 +497,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-gin",
  "types-hash",
  "types-jsonb",
  "types-scan",
@@ -14788,6 +14789,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-gin"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-scan",
+ "types-storage",
+ "types-tidbitmap",
+ "types-tuple",
+]
+
+[[package]]
 name = "types-gist"
 version = "0.0.0"
 dependencies = [
@@ -15248,6 +15261,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-gin",
 ]
 
 [[package]]

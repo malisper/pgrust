@@ -22,10 +22,10 @@
 //! until the fmgr GIN-call dispatcher installs them). There is no
 //! `ereport`/`elog` anywhere in `ginlogic.c`, so this module raises no errors.
 
-use types_core::{InvalidOid, OidIsValid, INDEX_MAX_KEYS};
-use types_core::Oid;
+use types_core::OidIsValid;
 use types_tsearch::gin::{GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_EVERYTHING, GIN_TRUE};
 
+pub use types_gin::GinState;
 pub use types_tsearch::backend_access_gin_ginlogic::{
     GinBoolConsistentKind, GinScanKey, GinTriConsistentKind,
 };
@@ -35,85 +35,6 @@ use backend_access_gin_core_probe_seams::{gin_consistent_call_bool, gin_consiste
 /// `MAX_MAYBE_ENTRIES` (ginlogic.c:44): maximum number of MAYBE inputs that
 /// [`shimTriConsistentFn`] will resolve by enumerating all combinations.
 pub const MAX_MAYBE_ENTRIES: usize = 4;
-
-/// Per-attribute consistent-support metadata — the slice of `GinState`
-/// (`access/gin_private.h`) that [`ginInitConsistentFunction`] reads.
-///
-/// In C, `GinState` carries `FmgrInfo consistentFn[INDEX_MAX_KEYS]`,
-/// `FmgrInfo triConsistentFn[INDEX_MAX_KEYS]`, and
-/// `Oid supportCollation[INDEX_MAX_KEYS]`; selection only inspects each entry's
-/// `fn_oid` (via `OidIsValid`) plus the collation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GinAttrConsistent {
-    /// `consistentFn[i].fn_oid`: the OID of the opclass boolean consistent
-    /// support function, or [`InvalidOid`] if none.
-    pub consistent_fn_oid: Oid,
-    /// `triConsistentFn[i].fn_oid`: the OID of the opclass ternary consistent
-    /// support function, or [`InvalidOid`] if none.
-    pub tri_consistent_fn_oid: Oid,
-    /// `supportCollation[i]`: the collation to pass when calling either fn.
-    pub support_collation: Oid,
-}
-
-impl GinAttrConsistent {
-    /// An empty entry (both OIDs invalid, no collation).
-    pub const fn empty() -> Self {
-        GinAttrConsistent {
-            consistent_fn_oid: InvalidOid,
-            tri_consistent_fn_oid: InvalidOid,
-            support_collation: InvalidOid,
-        }
-    }
-}
-
-/// Idiomatic model of `GinState` (`access/gin_private.h`), restricted to the
-/// per-attribute consistent-function metadata `ginlogic.c` consults.
-///
-/// Indexed by `attnum - 1`, exactly as C's `ginstate->consistentFn[attnum-1]`.
-/// The `[INDEX_MAX_KEYS]` C arrays are modeled as a single fixed array of
-/// [`GinAttrConsistent`] slots — `INDEX_MAX_KEYS` is a compile-time constant
-/// (32) and the slots are POD (three `Oid`s), so no allocation is involved
-/// (matching the fixed-size, in-`GinState` C arrays).
-#[derive(Clone, Debug)]
-pub struct GinState {
-    attrs: [GinAttrConsistent; INDEX_MAX_KEYS as usize],
-}
-
-impl Default for GinState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GinState {
-    /// A `GinState` with `INDEX_MAX_KEYS` empty attribute slots.
-    pub fn new() -> Self {
-        GinState {
-            attrs: [GinAttrConsistent::empty(); INDEX_MAX_KEYS as usize],
-        }
-    }
-
-    /// Mutable view of the per-attribute slots, for callers wiring the opclass
-    /// support-function OIDs (C: assigning into `ginstate->consistentFn[i]`).
-    #[inline]
-    pub fn attrs_mut(&mut self) -> &mut [GinAttrConsistent] {
-        &mut self.attrs
-    }
-}
-
-impl core::ops::Deref for GinState {
-    type Target = [GinAttrConsistent];
-    /// Read the per-attribute slots by index (`ginstate[attnum - 1]`).
-    fn deref(&self) -> &[GinAttrConsistent] {
-        &self.attrs
-    }
-}
-
-impl core::ops::DerefMut for GinState {
-    fn deref_mut(&mut self) -> &mut [GinAttrConsistent] {
-        &mut self.attrs
-    }
-}
 
 /// `trueConsistentFn` (ginlogic.c:49): dummy boolean consistent function for an
 /// EVERYTHING key. Just claim it matches, without recheck.
@@ -260,19 +181,24 @@ pub fn ginInitConsistentFunction(ginstate: &GinState, key: &mut GinScanKey) {
         key.boolConsistentFn = GinBoolConsistentKind::True;
         key.triConsistentFn = GinTriConsistentKind::True;
     } else {
-        let attr = &ginstate[(key.attnum - 1) as usize];
+        // C: key->consistentFmgrInfo = &ginstate->consistentFn[key->attnum - 1];
+        //    key->triConsistentFmgrInfo = &ginstate->triConsistentFn[key->attnum - 1];
+        //    key->collation = ginstate->supportCollation[key->attnum - 1];
+        let attno = (key.attnum - 1) as usize;
+        let consistent_fn_oid = ginstate.consistentFn[attno].fn_oid;
+        let tri_consistent_fn_oid = ginstate.triConsistentFn[attno].fn_oid;
 
-        key.consistent_fmgr_oid = attr.consistent_fn_oid;
-        key.tri_consistent_fmgr_oid = attr.tri_consistent_fn_oid;
-        key.collation = attr.support_collation;
+        key.consistent_fmgr_oid = consistent_fn_oid;
+        key.tri_consistent_fmgr_oid = tri_consistent_fn_oid;
+        key.collation = ginstate.supportCollation[attno];
 
-        if OidIsValid(attr.consistent_fn_oid) {
+        if OidIsValid(consistent_fn_oid) {
             key.boolConsistentFn = GinBoolConsistentKind::Direct;
         } else {
             key.boolConsistentFn = GinBoolConsistentKind::Shim;
         }
 
-        if OidIsValid(attr.tri_consistent_fn_oid) {
+        if OidIsValid(tri_consistent_fn_oid) {
             key.triConsistentFn = GinTriConsistentKind::Direct;
         } else {
             key.triConsistentFn = GinTriConsistentKind::Shim;

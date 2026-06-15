@@ -1,21 +1,11 @@
-//! GIN ternary / search-mode vocabulary (`access/gin.h`), trimmed to the items
-//! the `tsvector_ops` GIN support functions consume.
+//! GIN ternary / search-mode vocabulary (`access/gin.h`).
+//!
+//! The whole GIN vocabulary is owned by the `types-gin` crate (the GIN index
+//! AM's home); `types-tsearch`'s `tsvector_ops` GIN support functions consume
+//! the ternary / search-mode items from there. Re-exported here so the existing
+//! `types_tsearch::gin::*` paths keep resolving.
 
-/// `GinTernaryValue` — a `char`-sized tri-state (access/gin.h).
-pub type GinTernaryValue = i8;
-
-/// `GIN_FALSE`: item is not present / does not match.
-pub const GIN_FALSE: GinTernaryValue = 0;
-/// `GIN_TRUE`: item is present / matches.
-pub const GIN_TRUE: GinTernaryValue = 1;
-/// `GIN_MAYBE`: don't know if item is present / matches.
-pub const GIN_MAYBE: GinTernaryValue = 2;
-
-/// `GIN_SEARCH_MODE_DEFAULT` (access/gin.h).
-pub const GIN_SEARCH_MODE_DEFAULT: i32 = 0;
-/// `GIN_SEARCH_MODE_INCLUDE_EMPTY` (access/gin.h).
-pub const GIN_SEARCH_MODE_INCLUDE_EMPTY: i32 = 1;
-/// `GIN_SEARCH_MODE_ALL` (access/gin.h).
-pub const GIN_SEARCH_MODE_ALL: i32 = 2;
-/// `GIN_SEARCH_MODE_EVERYTHING` (access/gin.h).
-pub const GIN_SEARCH_MODE_EVERYTHING: i32 = 3;
+pub use types_gin::{
+    GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT,
+    GIN_SEARCH_MODE_EVERYTHING, GIN_SEARCH_MODE_INCLUDE_EMPTY, GIN_TRUE,
+};
