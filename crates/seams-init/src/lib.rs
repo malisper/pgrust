@@ -36,6 +36,8 @@ pub fn init_all() {
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
     backend_access_spg_quadtree::init_seams();
+    backend_access_spg_text::init_seams();
+    backend_access_spg_validate::init_seams();
     backend_access_gist_proc::init_seams();
     backend_access_gist_core::init_seams();
     backend_access_nbt_dedup::init_seams();

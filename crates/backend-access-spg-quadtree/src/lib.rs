@@ -694,6 +694,7 @@ fn decode_orderby_points(orderbys: &[types_scan::scankey::ScanKeyData<'_>]) -> V
 // ---------------------------------------------------------------------------
 
 use backend_access_spg_kdtree as kd;
+use backend_access_spg_text as text;
 
 /// `unrecognized SP-GiST support function OID` — a dispatch to an OID no
 /// installed opclass owns (mirror-PG-and-panic: the SP-GiST core only ever
@@ -721,6 +722,12 @@ fn dispatch_config(
             let mut cfg = kd::SpgConfigOut::default();
             kd::spg_kd_config(&mut cfg);
             (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
+        }
+        text::F_SPG_TEXT_CONFIG => {
+            // The text opclass writes its config straight into the typed out
+            // (TEXTOID prefix / INT2OID label / no explicit leaf type).
+            text::spg_text_config(_in, out);
+            return Ok(());
         }
         _ => return Err(unrecognized_proc(proc_oid, "config")),
     };
@@ -785,6 +792,7 @@ fn dispatch_choose<'mcx>(
             });
             Ok(())
         }
+        text::F_SPG_TEXT_CHOOSE => text::spg_text_choose(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "choose")),
     }
 }
@@ -844,6 +852,7 @@ fn dispatch_picksplit<'mcx>(
                 .collect::<PgResult<Vec<_>>>()?;
             Ok(())
         }
+        text::F_SPG_TEXT_PICKSPLIT => text::spg_text_picksplit(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "picksplit")),
     }
 }
@@ -900,6 +909,7 @@ fn dispatch_inner_consistent<'mcx>(
             kd::spg_kd_inner_consistent(&local_in, &mut local_out)?;
             write_inner_out(out, local_out.nNodes, local_out.nodeNumbers, local_out.levelAdds, &local_out.traversalValues, local_out.distances)
         }
+        text::F_SPG_TEXT_INNER_CONSISTENT => text::spg_text_inner_consistent(_mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "inner_consistent")),
     }
 }
@@ -951,6 +961,7 @@ fn dispatch_leaf_consistent<'mcx>(
             out.distances = local_out.distances;
             Ok(res)
         }
+        text::F_SPG_TEXT_LEAF_CONSISTENT => text::spg_text_leaf_consistent(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "leaf_consistent")),
     }
 }

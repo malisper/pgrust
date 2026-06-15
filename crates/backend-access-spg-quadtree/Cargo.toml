@@ -19,3 +19,4 @@ backend-utils-adt-geo-ops-seams = { path = "../backend-utils-adt-geo-ops-seams" 
 backend-access-spg-proc-seams = { path = "../backend-access-spg-proc-seams" }
 backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 backend-access-spg-kdtree = { path = "../backend-access-spg-kdtree" }
+backend-access-spg-text = { path = "../backend-access-spg-text" }
