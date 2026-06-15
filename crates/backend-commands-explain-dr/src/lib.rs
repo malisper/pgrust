@@ -28,16 +28,26 @@
 //! opaque identity token (never dereferenced — only compared) to reproduce the
 //! "did the slot's descriptor change?" trigger exactly.
 //!
-//! Only genuinely-external subsystems go through the [`SerializeRuntime`] trait
-//! (stateful per-receiver, mirroring sibling `printtup.c`'s `PrinttupRuntime`):
-//! the executor `TupleTableSlot` (`slot_getallattrs`, `tts_values`,
-//! `tts_isnull`), the catalog type-output lookups + fmgr lookup
-//! (`getTypeOutputInfo` / `getTypeBinaryOutputInfo` + `fmgr_info`), the fmgr
-//! calling convention (`OutputFunctionCall` / `SendFunctionCall`), the per-row
-//! `tmpcontext` (`mcxt.c`), the timing clock (`INSTR_TIME_SET_CURRENT`) and the
-//! global buffer-usage snapshot (`pgBufferUsage`). The pure in-process
-//! arithmetic the C performs inline (`INSTR_TIME_ACCUM_DIFF`,
-//! `BufferUsageAccumDiff`) is ported directly here.
+//! Every genuinely-external subsystem is reached through its owner's per-owner
+//! `-seams` crate (loud-panic until the owner installs it), exactly as the
+//! sibling COPY-OUT path (`copyto.c`) does for the same calls: the catalog
+//! type-output lookups go through `backend-utils-cache-lsyscache-seams`
+//! (`getTypeOutputInfo` / `getTypeBinaryOutputInfo`); the fmgr lookup +
+//! calling convention go through `backend-utils-fmgr-fmgr-seams` (`fmgr_info` /
+//! `OutputFunctionCall` / `SendFunctionCall`); the executor `TupleTableSlot`
+//! deconstruction (`slot_getallattrs` + the subsequent `tts_values` /
+//! `tts_isnull` reads) goes through `backend-executor-execTuples-seams`. The
+//! timing clock (`INSTR_TIME_SET_CURRENT`) and the global buffer-usage snapshot
+//! (`pgBufferUsage`) are direct calls into the already-ported
+//! `portability-instr-time` / `backend-executor-instrument` crates, exactly as
+//! `explain.c` reads them. The pure in-process arithmetic the C performs inline
+//! (`INSTR_TIME_ACCUM_DIFF`, `BufferUsageAccumDiff`) is ported directly here.
+//!
+//! The per-row `tmpcontext` (`AllocSetContextCreate` + `MemoryContextReset`)
+//! exists in C only to recover the output strings allocated per row; in the
+//! owned model those allocations are the per-row `cols`/output `PgVec`s, dropped
+//! as locals at the end of each `serializeAnalyzeReceive` call (the same
+//! technique `CopyOneRowTo` uses), so there is no separate context to juggle.
 
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
@@ -46,14 +56,18 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::Mcx;
+use types_core::fmgr::FmgrInfo;
 use types_core::instrument::{instr_time, BufferUsage};
-use types_core::FmgrInfo;
-use types_datum::datum::Datum;
 use types_dest::dest::CommandDest;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_explain::{ExplainSerializeOption, ExplainState};
+use types_nodes::tuptable::SlotData;
 use types_stringinfo::StringInfo;
 use types_tuple::heaptuple::TupleDescData;
+
+use backend_executor_execTuples_seams as exectuples_s;
+use backend_utils_cache_lsyscache_seams as lsyscache_s;
+use backend_utils_fmgr_fmgr_seams as fmgr_s;
 
 use backend_libpq_pqformat::{
     pq_beginmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16, pq_sendint32,
@@ -75,113 +89,6 @@ pub struct SerializeMetrics {
     pub bufferUsage: BufferUsage,
 }
 
-/// Result of a text output call (`OutputFunctionCall`) — the NUL-terminated C
-/// string's payload bytes (NUL excluded), matching `strlen(outputstr)`.
-pub type OutputStr = Vec<u8>;
-
-/// Result of a binary output call (`SendFunctionCall`) — the `bytea*` payload
-/// bytes (`VARDATA` for `VARSIZE - VARHDRSZ` bytes; the runtime strips the
-/// varlena header).
-pub type OutputBytes = Vec<u8>;
-
-/// Seam over the genuinely-external subsystems `explain_dr.c` drives, modelled
-/// exactly as sibling `printtup.c`'s `PrinttupRuntime`. The `TupleDesc` is
-/// **not** on the seam (passed as a parameter, read directly). Every method has
-/// a fail-safe default (an informative error, or a safe no-op for the
-/// memory-context / instrumentation discipline); the surrounding control flow is
-/// ported 1:1.
-pub trait SerializeRuntime {
-    /// `getTypeOutputInfo(atttypid, &typoutput, &typisvarlena)` + `fmgr_info`
-    /// for a text-format column.
-    fn prepare_text(&self, atttypid: types_core::Oid) -> PgResult<FmgrInfo> {
-        let _ = atttypid;
-        Err(seam_unavailable("getTypeOutputInfo"))
-    }
-
-    /// `getTypeBinaryOutputInfo(atttypid, &typsend, &typisvarlena)` +
-    /// `fmgr_info` for a binary-format column.
-    fn prepare_binary(&self, atttypid: types_core::Oid) -> PgResult<FmgrInfo> {
-        let _ = atttypid;
-        Err(seam_unavailable("getTypeBinaryOutputInfo"))
-    }
-
-    /// `slot_getallattrs(slot)` (`execTuples.c`).
-    fn slot_getallattrs(&self) -> PgResult<()> {
-        Err(seam_unavailable("slot_getallattrs"))
-    }
-
-    /// `slot->tts_isnull[attnum]` (`execTuples.c`).
-    fn is_null(&self, attnum: usize) -> PgResult<bool> {
-        let _ = attnum;
-        Err(seam_unavailable("slot->tts_isnull"))
-    }
-
-    /// `slot->tts_values[attnum]` (`execTuples.c`).
-    fn value(&self, attnum: usize) -> PgResult<Datum> {
-        let _ = attnum;
-        Err(seam_unavailable("slot->tts_values"))
-    }
-
-    /// `OutputFunctionCall(finfo, attr)` (`fmgr.c`): text output. Returns the C
-    /// string payload bytes (NUL excluded).
-    fn output_function_call(&self, finfo: &FmgrInfo, attr: Datum) -> PgResult<OutputStr> {
-        let _ = (finfo, attr);
-        Err(seam_unavailable("OutputFunctionCall"))
-    }
-
-    /// `SendFunctionCall(finfo, attr)` (`fmgr.c`): binary output. Returns the
-    /// `bytea*` payload (varlena header stripped).
-    fn send_function_call(&self, finfo: &FmgrInfo, attr: Datum) -> PgResult<OutputBytes> {
-        let _ = (finfo, attr);
-        Err(seam_unavailable("SendFunctionCall"))
-    }
-
-    /// C `serializeAnalyzeStartup`: `AllocSetContextCreate(CurrentMemoryContext,
-    /// "SerializeTupleReceive", ALLOCSET_DEFAULT_SIZES)` — create the per-row
-    /// temporary context. Fail-safe default is a no-op.
-    fn create_tmpcontext(&self) -> PgResult<()> {
-        Ok(())
-    }
-
-    /// `MemoryContextSwitchTo(myState->tmpcontext)` (`mcxt.c`): enter the
-    /// per-row workspace before the loop. Fail-safe default is a no-op.
-    fn enter_tmpcontext(&self) -> PgResult<()> {
-        Ok(())
-    }
-
-    /// `MemoryContextSwitchTo(oldcontext)` + `MemoryContextReset(tmpcontext)`
-    /// (`mcxt.c`): leave/flush the per-row workspace after the loop. Fail-safe
-    /// default is a no-op.
-    fn exit_tmpcontext(&self) -> PgResult<()> {
-        Ok(())
-    }
-
-    /// C `serializeAnalyzeShutdown`: `MemoryContextDelete(myState->tmpcontext)`
-    /// (plus `pfree(myState->buf.data)`, owned by the runtime). Fail-safe
-    /// default is a no-op.
-    fn delete_tmpcontext(&self) -> PgResult<()> {
-        Ok(())
-    }
-
-    /// `INSTR_TIME_SET_CURRENT(t)` (`instr_time.h`): read the monotonic clock.
-    /// Fail-safe default returns a zero reading (no timing recorded).
-    fn instr_time_current(&self) -> PgResult<instr_time> {
-        Ok(instr_time::default())
-    }
-
-    /// `pgBufferUsage` (`instrument.c`): a snapshot of the global per-backend
-    /// buffer-usage counters. Fail-safe default returns all-zeroes.
-    fn pg_buffer_usage(&self) -> PgResult<BufferUsage> {
-        Ok(BufferUsage::default())
-    }
-}
-
-fn seam_unavailable(what: &str) -> PgError {
-    PgError::error(format!(
-        "explain_dr serialize runtime seam `{what}` is not installed"
-    ))
-}
-
 /// C's `myState->attrinfo` is a `TupleDesc` pointer that `serializeAnalyzeReceive`
 /// compares for raw equality against the slot's descriptor to decide whether the
 /// cached per-attribute info needs re-deriving. The owned model records the
@@ -192,10 +99,10 @@ fn descriptor_identity(typeinfo: &TupleDescData) -> usize {
 
 /// C: `typedef struct SerializeDestReceiver` — private state for an
 /// `EXPLAIN (SERIALIZE)` destination object. The I/O buffer (`buf`) and the
-/// per-row `tmpcontext` belong to external subsystems (reached via the
-/// [`SerializeRuntime`] / a caller-supplied buffer); `es` is held as an owned
-/// borrow rather than a raw `*const`. What remains is the receiver bookkeeping
-/// `explain_dr.c` owns directly.
+/// per-row `tmpcontext` belong to external subsystems (reached via a
+/// caller-supplied buffer / the owned per-row-local discipline); `es` is held
+/// as an owned borrow rather than a raw `*const`. What remains is the receiver
+/// bookkeeping `explain_dr.c` owns directly.
 pub struct SerializeDestReceiver<'es> {
     /// C: `DestReceiver pub` — the `CommandDest` this receiver targets
     /// (`DestExplainSerialize`), set by [`SerializeDestReceiver::create`].
@@ -309,6 +216,22 @@ fn buffer_usage_accum_diff(dst: &mut BufferUsage, add: &BufferUsage, sub: &Buffe
     );
 }
 
+/// `INSTR_TIME_SET_CURRENT(t)` (`instr_time.h`): read the monotonic clock,
+/// directly through the ported `portability-instr-time`, exactly as
+/// `explain.c` does.
+fn instr_time_current() -> instr_time {
+    let mut t = instr_time::default();
+    portability_instr_time::instr_time_set_current(&mut t);
+    t
+}
+
+/// `pgBufferUsage` (`instrument.c`): a snapshot of the global per-backend
+/// buffer-usage counters, read directly through the ported
+/// `backend-executor-instrument`, exactly as `explain.c` does.
+fn pg_buffer_usage() -> BufferUsage {
+    backend_executor_instrument::pgBufferUsage()
+}
+
 /// C: `serialize_prepare_info(SerializeDestReceiver *receiver, TupleDesc
 /// typeinfo, int nattrs)` — get the function lookup info we need for output.
 ///
@@ -321,7 +244,6 @@ pub fn serialize_prepare_info(
     receiver: &mut SerializeDestReceiver<'_>,
     typeinfo: &TupleDescData,
     nattrs: i32,
-    runtime: &dyn SerializeRuntime,
 ) -> PgResult<()> {
     // get rid of any old data (C: if (receiver->finfos) pfree(...);
     // receiver->finfos = NULL).
@@ -347,13 +269,25 @@ pub fn serialize_prepare_info(
         if receiver.format == 0 {
             // wire protocol format text
             // getTypeOutputInfo(attr->atttypid, &typoutput, &typisvarlena);
+            let (typoutput, _typisvarlena) =
+                lsyscache_s::get_type_output_info::call(attr.atttypid)?;
             // fmgr_info(typoutput, finfo);
-            finfo = runtime.prepare_text(attr.atttypid)?;
+            fmgr_s::fmgr_info_check::call(typoutput)?;
+            finfo = FmgrInfo {
+                fn_oid: typoutput,
+                ..Default::default()
+            };
         } else if receiver.format == 1 {
             // wire protocol format binary
             // getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+            let (typsend, _typisvarlena) =
+                lsyscache_s::get_type_binary_output_info::call(attr.atttypid)?;
             // fmgr_info(typsend, finfo);
-            finfo = runtime.prepare_binary(attr.atttypid)?;
+            fmgr_s::fmgr_info_check::call(typsend)?;
+            finfo = FmgrInfo {
+                fn_oid: typsend,
+                ..Default::default()
+            };
         } else {
             return Err(
                 PgError::error(format!("unsupported format code: {}", receiver.format))
@@ -376,16 +310,17 @@ pub fn serialize_prepare_info(
 /// next iteration (as also happens in `printtup()`).
 ///
 /// The caller owns the reusable per-message `buf` (created in
-/// [`serializeAnalyzeStartup`]) and supplies the slot's `typeinfo`
-/// (`slot->tts_tupleDescriptor`); we re-derive attr info if the slot's
-/// `TupleDesc` changed, fully deconstruct the tuple (runtime), then build the
-/// DataRow bytes. The per-row `tmpcontext` switch is driven structurally around
-/// the loop via the runtime.
-pub fn serializeAnalyzeReceive(
+/// [`serializeAnalyzeStartup`]) and supplies the slot (`slot->tts_tupleDescriptor`
+/// is read off `typeinfo`); we re-derive attr info if the slot's `TupleDesc`
+/// changed, fully deconstruct the tuple (`slot_getallattrs` seam), then build the
+/// DataRow bytes. The C per-row `tmpcontext` is the owned `cols`/output `PgVec`s
+/// dropped as locals at the end of the call.
+pub fn serializeAnalyzeReceive<'mcx>(
     myState: &mut SerializeDestReceiver<'_>,
+    mcx: Mcx<'mcx>,
     buf: &mut StringInfo<'_>,
     typeinfo: &TupleDescData,
-    runtime: &dyn SerializeRuntime,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let natts = typeinfo.natts;
 
@@ -397,25 +332,26 @@ pub fn serializeAnalyzeReceive(
     let mut start = instr_time::default();
     if timing {
         // INSTR_TIME_SET_CURRENT(start);
-        start = runtime.instr_time_current()?;
+        start = instr_time_current();
     }
     let mut instr_start = BufferUsage::default();
     if buffers {
         // instr_start = pgBufferUsage;
-        instr_start = runtime.pg_buffer_usage()?;
+        instr_start = pg_buffer_usage();
     }
 
     // Set or update my derived attribute info, if needed.
     if !myState.attrinfo_matches(typeinfo) || myState.nattrs != natts {
-        serialize_prepare_info(myState, typeinfo, natts, runtime)?;
+        serialize_prepare_info(myState, typeinfo, natts)?;
     }
 
-    // Make sure the tuple is fully deconstructed.
-    runtime.slot_getallattrs()?;
+    // Make sure the tuple is fully deconstructed (C: slot_getallattrs(slot);
+    // then the per-column reads are slot->tts_values[i] / slot->tts_isnull[i]).
+    let cols = exectuples_s::slot_getallattrs::call(mcx, slot)?;
 
-    // Switch into per-row context so we can recover memory below
-    // (C: oldcontext = MemoryContextSwitchTo(myState->tmpcontext)).
-    runtime.enter_tmpcontext()?;
+    // Switch into per-row context so we can recover memory below: in the owned
+    // model the per-row workspace is `cols` plus the output `PgVec`s built
+    // below, all dropped as locals at the end of this call.
 
     // Prepare a DataRow message (note buffer is in per-query context). We fill a
     // StringInfo buffer the same as printtup() does, so as to capture the costs
@@ -425,9 +361,9 @@ pub fn serializeAnalyzeReceive(
 
     // send the attributes of this tuple
     for i in 0..natts as usize {
-        let attr = runtime.value(i)?;
+        let (value, isnull) = &cols[i];
 
-        if runtime.is_null(i)? {
+        if *isnull {
             pq_sendint32(buf, (-1i32) as u32)?;
             continue;
         }
@@ -436,16 +372,16 @@ pub fn serializeAnalyzeReceive(
             // Text output
             let outputstr = {
                 let finfo = &myState.finfos[i];
-                runtime.output_function_call(finfo, attr)?
+                fmgr_s::output_function_call::call(mcx, finfo, value)?
             };
             pq_sendcountedtext(buf, &outputstr)?;
         } else {
             // Binary output
             let outputbytes = {
                 let finfo = &myState.finfos[i];
-                runtime.send_function_call(finfo, attr)?
+                fmgr_s::send_function_call::call(mcx, finfo, value)?
             };
-            // C: pq_sendint32(buf, VARSIZE(outputbytes) - VARHDRSZ); the runtime
+            // C: pq_sendint32(buf, VARSIZE(outputbytes) - VARHDRSZ); the seam
             // returns exactly those VARDATA payload bytes.
             pq_sendint32(buf, outputbytes.len() as u32)?;
             pq_sendbytes(buf, &outputbytes)?;
@@ -458,14 +394,14 @@ pub fn serializeAnalyzeReceive(
     // printtup()).
     myState.metrics.bytesSent += buf.len() as u64;
 
-    // Return to caller's context, and flush row's temporary memory
-    // (C: MemoryContextSwitchTo(oldcontext); MemoryContextReset(tmpcontext)).
-    runtime.exit_tmpcontext()?;
+    // Return to caller's context, and flush row's temporary memory: the owned
+    // per-row `cols`/output `PgVec`s are dropped as locals at the end of the
+    // call (C: MemoryContextSwitchTo(oldcontext); MemoryContextReset(tmpcontext)).
 
     // Update timing data
     if timing {
         // INSTR_TIME_SET_CURRENT(end);
-        let end = runtime.instr_time_current()?;
+        let end = instr_time_current();
         // INSTR_TIME_ACCUM_DIFF(myState->metrics.timeSpent, end, start);
         instr_time_accum_diff(&mut myState.metrics.timeSpent, end, start);
     }
@@ -474,7 +410,7 @@ pub fn serializeAnalyzeReceive(
     if buffers {
         // BufferUsageAccumDiff(&myState->metrics.bufferUsage, &pgBufferUsage,
         //                      &instr_start);
-        let now = runtime.pg_buffer_usage()?;
+        let now = pg_buffer_usage();
         buffer_usage_accum_diff(&mut myState.metrics.bufferUsage, &now, &instr_start);
     }
 
@@ -485,17 +421,19 @@ pub fn serializeAnalyzeReceive(
 /// typeinfo)` — start up the serializeAnalyze receiver.
 ///
 /// Asserts `receiver.es != NULL` (always true for an owned borrow), selects the
-/// wire-protocol `format` from `es.serialize`, creates the per-row temporary
-/// memory context (runtime), initializes the re-used I/O buffer (returned to the
-/// caller; it must be re-used across rows and live outside `tmpcontext`,
-/// mirroring `initStringInfo(&receiver->buf)`), and zeroes the metrics. The
-/// `operation` and `typeinfo` arguments are unused in the C code (matched here).
+/// wire-protocol `format` from `es.serialize`, initializes the re-used I/O
+/// buffer (returned to the caller; it must be re-used across rows and live
+/// outside the per-row workspace, mirroring `initStringInfo(&receiver->buf)`),
+/// and zeroes the metrics. The C per-row `tmpcontext`
+/// (`AllocSetContextCreate("SerializeTupleReceive", ...)`) is the owned per-row-
+/// local discipline in [`serializeAnalyzeReceive`], so nothing is created here.
+/// The `operation` and `typeinfo` arguments are unused in the C code (matched
+/// here).
 pub fn serializeAnalyzeStartup<'mcx>(
     receiver: &mut SerializeDestReceiver<'_>,
     mcx: Mcx<'mcx>,
     _operation: i32,
     _typeinfo: &TupleDescData,
-    runtime: &dyn SerializeRuntime,
 ) -> PgResult<StringInfo<'mcx>> {
     // Assert(receiver->es != NULL); — an owned borrow is always non-null.
 
@@ -515,10 +453,6 @@ pub fn serializeAnalyzeStartup<'mcx>(
         }
     }
 
-    // Create per-row temporary memory context (C: AllocSetContextCreate(
-    // CurrentMemoryContext, "SerializeTupleReceive", ALLOCSET_DEFAULT_SIZES)).
-    runtime.create_tmpcontext()?;
-
     // The output buffer is re-used across rows, as in printtup.c
     // (C: initStringInfo(&receiver->buf)).
     let buf = StringInfo::new_in(mcx);
@@ -534,24 +468,22 @@ pub fn serializeAnalyzeStartup<'mcx>(
 /// C: `serializeAnalyzeShutdown(DestReceiver *self)` — shut down the
 /// serializeAnalyze receiver.
 ///
-/// Frees the cached `finfos` (and resets the descriptor identity), the I/O
-/// buffer, and deletes the per-row memory context. The `buf` and `tmpcontext`
-/// are released by the runtime / caller (they belong to the calling subsystem).
-pub fn serializeAnalyzeShutdown(
-    receiver: &mut SerializeDestReceiver<'_>,
-    runtime: &dyn SerializeRuntime,
-) -> PgResult<()> {
+/// Frees the cached `finfos` (and resets the descriptor identity). The I/O
+/// buffer is released by the caller and the per-row workspace is the owned
+/// per-row-local discipline (nothing to delete).
+pub fn serializeAnalyzeShutdown(receiver: &mut SerializeDestReceiver<'_>) -> PgResult<()> {
     // C: if (receiver->finfos) pfree(receiver->finfos); receiver->finfos = NULL.
     receiver.finfos.clear();
     receiver.attrinfo = None;
     receiver.nattrs = 0;
 
     // C: if (receiver->buf.data) pfree(receiver->buf.data); buf.data = NULL.
-    // The buffer is owned by the caller / runtime.
+    // The buffer is owned by the caller.
 
     // C: if (receiver->tmpcontext) MemoryContextDelete(receiver->tmpcontext);
-    //    receiver->tmpcontext = NULL.
-    runtime.delete_tmpcontext()
+    //    receiver->tmpcontext = NULL. The per-row workspace is the owned
+    //    per-row-local discipline; there is no separate context to delete.
+    Ok(())
 }
 
 /// C: `serializeAnalyzeDestroy(DestReceiver *self)` — `pfree(self)`. The receiver
@@ -582,8 +514,8 @@ pub fn GetSerializationMetrics(dest: Option<&SerializeDestReceiver<'_>>) -> Seri
     }
 }
 
-/// This crate owns no inward seams (its externals are the stateful
-/// [`SerializeRuntime`] trait, supplied per receiver), so `init_seams` is empty.
+/// This crate owns no inward seams (it only calls outward through other
+/// owners' `-seams` crates), so `init_seams` is empty.
 pub fn init_seams() {}
 
 #[cfg(test)]

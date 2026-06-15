@@ -24,13 +24,15 @@
 //! kept in sync with the `ExprState` scalar fields by [`read_cell`] /
 //! [`write_cell`].
 //!
+//! Slot value access. The slot per-attribute value/null arrays
+//! (`slot->tts_values[]` / `tts_isnull[]`) now live on the canonical
+//! [`TupleTableSlot`](types_slot::TupleTableSlot) (slot-payload keystone, #199);
+//! the `EEOP_*_FETCHSOME` / `EEOP_*_VAR` arms read input columns through the
+//! `execTuples` owner's `slot_getsomeattr` seam, and the `EEOP_ASSIGN_*_VAR` /
+//! `EEOP_ASSIGN_TMP[_MAKE_RO]` arms write the projected columns directly into
+//! [`ExprState::resultslot`]'s value/null arrays.
+//!
 //! Blocked surfaces (genuinely-unported owners, seam-and-panic'd inline):
-//! - Slot value arrays (`slot->tts_values[]` / `tts_isnull[]`): owned by the
-//!   not-yet-ported `execTuples` unit; its `TupleTableSlot` in the shared
-//!   vocabulary is trimmed to header bits, so the `EEOP_*_VAR` /
-//!   `EEOP_ASSIGN_*_VAR` arms cannot read/write per-attribute slot words. This
-//!   is the same blocker the `ExecJust*` Var fast paths hit in
-//!   [`crate::justs`].
 //! - The fmgr call frame (`fcinfo->args[]` / `fcinfo->isnull`): the shared
 //!   [`FunctionCallInfoBaseData`](types_nodes::fmgr::FunctionCallInfoBaseData)
 //!   is trimmed to `resultinfo` only (the fmgr port widens it). Every arm that
@@ -60,6 +62,7 @@ use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell,
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 
+use crate::dispatch::CheckOpSlotCompatibility;
 use crate::eval_agg;
 use crate::eval_array;
 use crate::eval_composite;
@@ -147,18 +150,28 @@ pub fn ExecInterpExpr<'mcx>(
                 // C: CheckOpSlotCompatibility(op, <slot>);
                 //    slot_getsomeattrs(<slot>, op->d.fetch.last_var);
                 //
-                // The per-attribute deform writes slot->tts_values/tts_isnull up
-                // to last_var, both execTuples-owned arrays absent from the
-                // trimmed shared TupleTableSlot. Blocked until execTuples lands
-                // the slot payload + slot_getsomeattrs; the VAR arms that would
-                // consume the deformed columns are blocked on the same model.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_*_FETCHSOME: slot_getsomeattrs deforms slot->tts_values/\
-                     tts_isnull up to op->d.fetch.last_var, both execTuples-owned \
-                     arrays absent from the trimmed TupleTableSlot; blocked until \
-                     execTuples lands the slot payload model"
-                );
+                // Deform the first `last_var` columns of the input slot. The slot
+                // payload (tts_values/tts_isnull) now lives on the canonical
+                // TupleTableSlot, addressed through the EState tuple-table pool;
+                // the execTuples owner's `slot_getsomeattr` seam runs the real
+                // `slot_getsomeattrs` deform.
+                let slot_id = input_slot(opcode, econtext, estate);
+                let last_var = fetch_last_var(state, op);
+                {
+                    let steps = state.steps.as_ref().unwrap();
+                    CheckOpSlotCompatibility(&steps[op], estate.slot(slot_id))?;
+                }
+                // slot_getsomeattrs(slot, last_var) deforms columns 1..=last_var;
+                // the seam fetches up to a 1-based attnum and returns that
+                // attribute (discarded here — the subsequent VAR arms re-read the
+                // deformed columns). last_var == 0 means "nothing to deform".
+                if last_var > 0 {
+                    let _ =
+                        backend_executor_execTuples_seams::slot_getsomeattr::call(
+                            estate, slot_id, last_var,
+                        )?;
+                }
+                op += 1;
             }
 
             EEOP_INNER_VAR | EEOP_OUTER_VAR | EEOP_SCAN_VAR | EEOP_OLD_VAR | EEOP_NEW_VAR => {
@@ -167,14 +180,19 @@ pub fn ExecInterpExpr<'mcx>(
                 //    *op->resnull  = <slot>->tts_isnull[attnum];
                 //
                 // The decomposed-data arrays (tts_values/tts_isnull, filled by
-                // the preceding FETCHSOME) are execTuples-owned and absent from
-                // the trimmed slot. Same blocker as the ExecJust* Var paths.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_*_VAR: reads <slot>->tts_values/tts_isnull[op->d.var.attnum], \
-                     both execTuples-owned arrays absent from the trimmed \
-                     TupleTableSlot; blocked until execTuples lands the slot payload model"
-                );
+                // the preceding FETCHSOME) now live on the canonical
+                // TupleTableSlot. attnum is 0-based here (op->d.var.attnum); the
+                // seam is 1-based, so read attnum + 1.
+                let slot_id = input_slot(opcode, econtext, estate);
+                let attnum = var_attnum(state, op);
+                let (value, isnull) =
+                    backend_executor_execTuples_seams::slot_getsomeattr::call(
+                        estate,
+                        slot_id,
+                        attnum + 1,
+                    )?;
+                write_cell(state, resv, value, isnull);
+                op += 1;
             }
 
             EEOP_INNER_SYSVAR
@@ -204,34 +222,33 @@ pub fn ExecInterpExpr<'mcx>(
                 //    resultslot->tts_values[resultnum] = <slot>->tts_values[attnum];
                 //    resultslot->tts_isnull[resultnum] = <slot>->tts_isnull[attnum];
                 //
-                // Both the source <slot> and the destination state->resultslot
-                // value/isnull arrays are execTuples-owned and absent from the
-                // trimmed TupleTableSlot. Same blocker as ExecJustAssignVar*.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_ASSIGN_*_VAR: copies <slot>->tts_values/tts_isnull[attnum] \
-                     into state->resultslot->tts_values/tts_isnull[resultnum], all \
-                     execTuples-owned arrays absent from the trimmed TupleTableSlot; \
-                     blocked until execTuples lands the slot payload model"
-                );
+                // The source <slot> column is read through the execTuples deform
+                // seam (attnum is 0-based, the seam is 1-based) and written into
+                // state->resultslot's per-attribute value/null arrays, which the
+                // canonical TupleTableSlot now carries directly. The preceding
+                // FETCHSOME has already deformed the source slot; CheckVarSlot-
+                // Compatibility was handled at compile time, so no check here.
+                let slot_id = input_slot(opcode, econtext, estate);
+                let (resultnum, attnum) = assign_var_fields(state, op);
+                let (value, isnull) =
+                    backend_executor_execTuples_seams::slot_getsomeattr::call(
+                        estate,
+                        slot_id,
+                        attnum + 1,
+                    )?;
+                write_resultslot(state, resultnum, value, isnull);
+                op += 1;
             }
 
             EEOP_ASSIGN_TMP => {
                 // C: int resultnum = op->d.assign_tmp.resultnum;
                 //    resultslot->tts_values[resultnum] = state->resvalue;
                 //    resultslot->tts_isnull[resultnum] = state->resnull;
-                //
-                // The source (state->resvalue/resnull) is modeled, but the write
-                // into state->resultslot->tts_values/tts_isnull[resultnum] needs
-                // the execTuples slot value arrays. Same blocker as
-                // ExecJustAssignVarImpl's destination write.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_ASSIGN_TMP: writes state->resvalue/resnull into \
-                     state->resultslot->tts_values/tts_isnull[op->d.assign_tmp.resultnum], \
-                     execTuples-owned arrays absent from the trimmed TupleTableSlot; \
-                     blocked until execTuples lands the slot payload model"
-                );
+                let resultnum = assign_tmp_resultnum(state, op);
+                let value = state.resvalue.clone();
+                let isnull = state.resnull;
+                write_resultslot(state, resultnum, value, isnull);
+                op += 1;
             }
 
             EEOP_ASSIGN_TMP_MAKE_RO => {
@@ -241,18 +258,24 @@ pub fn ExecInterpExpr<'mcx>(
                 //        resultslot->tts_values[resultnum] =
                 //            MakeExpandedObjectReadOnlyInternal(state->resvalue);
                 //    else resultslot->tts_values[resultnum] = state->resvalue;
-                //
-                // Blocked on both the execTuples slot value arrays (destination)
-                // and MakeExpandedObjectReadOnlyInternal (expandeddatum.c,
-                // unported).
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_ASSIGN_TMP_MAKE_RO: writes into state->resultslot->\
-                     tts_values/tts_isnull[resultnum] (execTuples-owned arrays absent \
-                     from the trimmed TupleTableSlot) and applies \
-                     MakeExpandedObjectReadOnlyInternal (expandeddatum.c, unported); \
-                     blocked until execTuples + expandeddatum land"
-                );
+                let resultnum = assign_tmp_resultnum(state, op);
+                let isnull = state.resnull;
+                let value = if !isnull {
+                    // MakeExpandedObjectReadOnlyInternal: a read-write expanded
+                    // object becomes its built-in read-only pointer; any other
+                    // datum (by-value or non-expanded by-reference) passes
+                    // through unchanged. The pointer deref lives in the
+                    // expandeddatum owner, so the transform crosses the seam.
+                    let mcx = estate.es_query_cxt;
+                    backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v::call(
+                        mcx,
+                        &state.resvalue,
+                    )?
+                } else {
+                    state.resvalue.clone()
+                };
+                write_resultslot(state, resultnum, value, isnull);
+                op += 1;
             }
 
             EEOP_CONST => {
@@ -1070,6 +1093,94 @@ fn sysvar_slot(
         _ => unreachable!("sysvar_slot: not a SYSVAR opcode"),
     };
     slot.unwrap_or_else(|| panic!("EEOP_*_SYSVAR: econtext->{name} is NULL"))
+}
+
+/// Resolve the input slot a `*_FETCHSOME` / `*_VAR` / `ASSIGN_*_VAR` opcode
+/// reads, mirroring the C cached `innerslot`/`outerslot`/`scanslot`/`oldslot`/
+/// `newslot` setup. The compiler only emits the opcode where the matching
+/// econtext slot is present, so a missing link is a caller bug (C dereferences
+/// the NULL slot).
+fn input_slot(
+    opcode: ExprEvalOp,
+    econtext: EcxtId,
+    estate: &EStateData<'_>,
+) -> types_nodes::SlotId {
+    use ExprEvalOp::*;
+    let ecxt = estate.ecxt(econtext);
+    let (slot, name) = match opcode {
+        EEOP_INNER_FETCHSOME | EEOP_INNER_VAR | EEOP_ASSIGN_INNER_VAR => {
+            (ecxt.ecxt_innertuple, "ecxt_innertuple")
+        }
+        EEOP_OUTER_FETCHSOME | EEOP_OUTER_VAR | EEOP_ASSIGN_OUTER_VAR => {
+            (ecxt.ecxt_outertuple, "ecxt_outertuple")
+        }
+        EEOP_SCAN_FETCHSOME | EEOP_SCAN_VAR | EEOP_ASSIGN_SCAN_VAR => {
+            (ecxt.ecxt_scantuple, "ecxt_scantuple")
+        }
+        EEOP_OLD_FETCHSOME | EEOP_OLD_VAR | EEOP_ASSIGN_OLD_VAR => {
+            (ecxt.ecxt_oldtuple, "ecxt_oldtuple")
+        }
+        EEOP_NEW_FETCHSOME | EEOP_NEW_VAR | EEOP_ASSIGN_NEW_VAR => {
+            (ecxt.ecxt_newtuple, "ecxt_newtuple")
+        }
+        _ => unreachable!("input_slot: not a FETCHSOME/VAR/ASSIGN_VAR opcode"),
+    };
+    slot.unwrap_or_else(|| panic!("EEOP_*: econtext->{name} is NULL"))
+}
+
+/// `op->d.fetch.last_var` — the highest 1-based attribute a FETCHSOME must
+/// deform.
+fn fetch_last_var(state: &ExprState<'_>, op: usize) -> i32 {
+    match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::Fetch { last_var, .. } => *last_var,
+        _ => unreachable!("EEOP_*_FETCHSOME: payload is not Fetch"),
+    }
+}
+
+/// `op->d.var.attnum` — the 0-based attribute a VAR reads.
+fn var_attnum(state: &ExprState<'_>, op: usize) -> i32 {
+    match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::Var { attnum, .. } => *attnum,
+        _ => unreachable!("EEOP_*_VAR: payload is not Var"),
+    }
+}
+
+/// `(op->d.assign_var.resultnum, op->d.assign_var.attnum)`.
+fn assign_var_fields(state: &ExprState<'_>, op: usize) -> (i32, i32) {
+    match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::AssignVar { resultnum, attnum } => (*resultnum, *attnum),
+        _ => unreachable!("EEOP_ASSIGN_*_VAR: payload is not AssignVar"),
+    }
+}
+
+/// `op->d.assign_tmp.resultnum`.
+fn assign_tmp_resultnum(state: &ExprState<'_>, op: usize) -> i32 {
+    match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::AssignTmp { resultnum } => *resultnum,
+        _ => unreachable!("EEOP_ASSIGN_TMP[_MAKE_RO]: payload is not AssignTmp"),
+    }
+}
+
+/// Write `(value, isnull)` into `state->resultslot->tts_values[resultnum]` /
+/// `tts_isnull[resultnum]`. C asserts `resultnum < resultslot->...->natts`; the
+/// canonical slot's `tts_values`/`tts_isnull` carry the projected columns.
+fn write_resultslot<'mcx>(
+    state: &mut ExprState<'mcx>,
+    resultnum: i32,
+    value: Datum<'mcx>,
+    isnull: bool,
+) {
+    let resultslot = state
+        .resultslot
+        .as_mut()
+        .expect("EEOP_ASSIGN_*: ExprState has no resultslot");
+    let idx = resultnum as usize;
+    debug_assert!(
+        idx < resultslot.tts_values.len(),
+        "EEOP_ASSIGN_*: resultnum {resultnum} out of range"
+    );
+    resultslot.tts_values[idx] = value;
+    resultslot.tts_isnull[idx] = isnull;
 }
 
 /// `op->d.boolexpr.anynull` — the shared is-null tracking cell for one

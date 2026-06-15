@@ -798,6 +798,10 @@ pub fn init_seams() {
     s::get_user_name_from_id::set(|mcx, roleid, noerr| GetUserNameFromId(mcx, roleid, noerr));
     s::init_postmaster_child::set(InitPostmasterChild);
     s::get_user_id::set(GetUserId);
+    // SetDataDir(dir) (miscinit.c:440) and the port/path.c make_absolute_path
+    // re-export, consumed by guc.c SelectConfigFiles.
+    s::set_data_dir::set(SetDataDir);
+    s::make_absolute_path::set(|path| backend_port_path_seams::make_absolute_path::call(path));
 
     // Remaining miscinit.c-owned declarations (added by later consumers). Each
     // delegates to this crate's own function so the seam is no longer an

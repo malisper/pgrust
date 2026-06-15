@@ -1402,8 +1402,10 @@ fn exec_build_agg_trans<'mcx>(
     _mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     panic!(
-        "backend-executor-execExpr::ExecBuildAggTrans: compiling a phase's \
-         transition-expression program needs execExpr's agg-trans builder and the \
-         AggState parent; not ported / no seam declared"
+        "backend-executor-execExpr::ExecBuildAggTrans: owner is ported \
+         (execExpr_domain_agg::exec_build_agg_trans) but unreachable from nodeAgg — it takes \
+         &mut AggStateData, which lives in this crate ABOVE types-nodes (cannot cross \
+         execExpr-seams), and PlanStateNode carries no Agg variant (T_Agg keystone) for the \
+         type-erased bridge. Blocked on the T_Agg/PlanStateNode::Agg carrier keystone"
     )
 }

@@ -217,10 +217,10 @@ fn strategy_routines_route_to_installers() {
 
     // Recording sortsupport installers: stamp an observable token so we know
     // which install path the in-crate dispatch reached.
-    sort::install_sortsupport_int2::set(|ssup| ssup.comparator = Some(SortComparatorId(2)));
-    sort::install_sortsupport_int4::set(|ssup| ssup.comparator = Some(SortComparatorId(4)));
-    sort::install_sortsupport_int8::set(|ssup| ssup.comparator = Some(SortComparatorId(8)));
-    sort::install_sortsupport_oid::set(|ssup| ssup.comparator = Some(SortComparatorId(26)));
+    sort::install_sortsupport_int2::set(|ssup, _cmp| ssup.comparator = Some(SortComparatorId(2)));
+    sort::install_sortsupport_int4::set(|ssup, _cmp| ssup.comparator = Some(SortComparatorId(4)));
+    sort::install_sortsupport_int8::set(|ssup, _cmp| ssup.comparator = Some(SortComparatorId(8)));
+    sort::install_sortsupport_oid::set(|ssup, _cmp| ssup.comparator = Some(SortComparatorId(26)));
 
     // Recording skipsupport installers: stamp a token into both inc/dec slots so
     // we can confirm the routine reached the right installer; low/high are set
@@ -269,6 +269,21 @@ fn strategy_routines_route_to_installers() {
     let mut s = SortSupportData::new(mcx);
     btoidsortsupport(&mut s);
     assert_eq!(s.comparator, Some(SortComparatorId(26)));
+
+    // --- run_sortsupport by-OID dispatch (the OidFunctionCall1 stand-in) ---
+    let mut s = SortSupportData::new(mcx);
+    assert!(super::run_sortsupport(super::F_BTINT4SORTSUPPORT, &mut s));
+    assert_eq!(s.comparator, Some(SortComparatorId(4)));
+
+    let mut s = SortSupportData::new(mcx);
+    assert!(super::run_sortsupport(super::F_BTOIDSORTSUPPORT, &mut s));
+    assert_eq!(s.comparator, Some(SortComparatorId(26)));
+
+    // An OID that is not an nbtcompare sortsupport routine: no dispatch, the
+    // caller (sortsupport.c) falls through to its fmgr path.
+    let mut s = SortSupportData::new(mcx);
+    assert!(!super::run_sortsupport(9999, &mut s));
+    assert_eq!(s.comparator, None);
 
     // --- skipsupport: boundary Datums set by routine + inc/dec installed ---
     let mut sk = SkipSupportData::new();

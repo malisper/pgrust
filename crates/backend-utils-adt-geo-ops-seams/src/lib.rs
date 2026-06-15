@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::geo::BOX;
+use types_core::geo::{Point, BOX};
 use types_error::PgResult;
 
 // ---------------------------------------------------------------------------
@@ -91,4 +91,50 @@ seam_core::seam!(
 seam_core::seam!(
     /// `box_overbelow(box, box)` (geo_ops.c).
     pub fn box_overbelow(a: &BOX, b: &BOX) -> bool
+);
+
+// ---------------------------------------------------------------------------
+// point <-> point boolean operators (geo_ops.c).  All are `Datum NAME(point,
+// point)` fmgr functions returning `bool`; none ereport, so a plain `bool`
+// return.  Consumed by the SP-GiST quad-tree `point` opclass
+// (`spgquadtreeproc.c`).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `point_left(point, point)` (geo_ops.c): fuzzy `FPlt(pt1->x, pt2->x)`.
+    pub fn point_left(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_right(point, point)` (geo_ops.c): fuzzy `FPgt(pt1->x, pt2->x)`.
+    pub fn point_right(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_above(point, point)` (geo_ops.c): fuzzy `FPgt(pt1->y, pt2->y)`.
+    pub fn point_above(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_below(point, point)` (geo_ops.c): fuzzy `FPlt(pt1->y, pt2->y)`.
+    pub fn point_below(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_horiz(point, point)` (geo_ops.c): fuzzy `FPeq(pt1->y, pt2->y)`.
+    pub fn point_horiz(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_vert(point, point)` (geo_ops.c): fuzzy `FPeq(pt1->x, pt2->x)`.
+    pub fn point_vert(a: &Point, b: &Point) -> bool
+);
+seam_core::seam!(
+    /// `point_eq(point, point)` (geo_ops.c): fuzzy `FPeq(pt1->x, pt2->x) &&
+    /// FPeq(pt1->y, pt2->y)`.
+    pub fn point_eq(a: &Point, b: &Point) -> bool
+);
+
+// ---------------------------------------------------------------------------
+// box <-> point containment (geo_ops.c).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `box_contain_pt(box, point)` (geo_ops.c): the box contains the point.
+    pub fn box_contain_pt(b: &BOX, p: &Point) -> bool
 );
