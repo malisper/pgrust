@@ -879,6 +879,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-index-amapi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-hash-entry",
+ "backend-access-index-amapi-seams",
+ "backend-access-nbtree-nbtree",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nbtree",
+ "types-opclass",
+ "types-scan",
+ "types-tableam",
+]
+
+[[package]]
 name = "backend-access-index-amapi-seams"
 version = "0.0.0"
 dependencies = [
@@ -13919,6 +13937,7 @@ dependencies = [
  "backend-access-heap-pruneheap",
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
+ "backend-access-index-amapi",
  "backend-access-index-indexam",
  "backend-access-nbt-compare",
  "backend-access-nbt-dedup",

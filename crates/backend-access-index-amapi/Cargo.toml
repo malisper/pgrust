@@ -1,0 +1,24 @@
+[package]
+name = "backend-access-index-amapi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_index_amapi"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-opclass = { path = "../types-opclass" }
+types-tableam = { path = "../types-tableam" }
+types-scan = { path = "../types-scan" }
+types-nbtree = { path = "../types-nbtree" }
+mcx = { path = "../mcx" }
+
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
+backend-access-hash-entry = { path = "../backend-access-hash-entry" }

@@ -23,6 +23,7 @@ pub fn init_all() {
     backend_access_heap_pruneheap::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
+    backend_access_index_amapi::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
@@ -723,6 +724,26 @@ mod recurrence_guard {
         // RETIRED (task #161): `heap_tuple_header_get_datum`
         // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
         // The composite/record-Datum carrier bridge landed.
+        // DESIGN_DEBT (TOWER-B): the index-AM owner (backend-access-index-amapi,
+        // amapi.c) installs the 11 GetIndexAmRoutine-derived seams, but
+        // `am_adjust_members` and `am_reloptions` are NOT amapi.c functions and
+        // cannot be installed by it: am_adjust_members is opclasscmds.c's
+        // `amroutine->amadjustmembers(...)` dispatch and am_reloptions is
+        // reloptions.c's `index_reloptions` -> `amoptions(reloptions, validate)`
+        // dispatch. Both reach by-name AM callbacks (`amadjustmembers` /
+        // `amoptions`) that the unified `IndexAmRoutine` vtable deliberately
+        // DROPPED in TOWER-A (the AM validate crate's `amadjustmembers` returns a
+        // soft-error result that cannot be a raw fn-ptr; `amoptions` is reached
+        // by name). am_adjust_members additionally needs a conversion between the
+        // seam's `types_opclass::OpFamilyMember` and the trimmed per-AM
+        // `OpFamilyMember` the bt/hash adjustmembers callbacks mutate. Installing
+        // these is a by-amoid AM-callback dispatch table + carrier reconcile in
+        // the right owner (opclasscmds / reloptions), not amapi.c logic.
+        // (am_adjust_members is consumed only via a brace-grouped `use ...::{...}`
+        // import that the recurrence guard's call-site scanner does not resolve
+        // to its seam crate, so it is not seen as "called" and needs no allowlist
+        // entry; it remains uninstalled for the same contract reason.)
+        ("backend_access_index_amapi", "am_reloptions"),
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
