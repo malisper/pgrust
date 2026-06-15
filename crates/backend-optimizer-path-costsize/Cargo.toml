@@ -19,3 +19,5 @@ backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-path
 backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
+types-selfuncs = { path = "../types-selfuncs" }

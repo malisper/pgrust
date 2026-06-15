@@ -120,15 +120,10 @@ seam_core::seam!(
         sjinfo: Option<&SpecialJoinInfo>,
     ) -> Selectivity
 );
-seam_core::seam!(
-    /// `estimate_num_groups(root, groupExprs, input_rows, NULL, NULL)` —
-    /// returns the estimated number of groups.
-    pub fn estimate_num_groups(
-        root: &PlannerInfo,
-        group_exprs: &[NodeId],
-        input_rows: f64,
-    ) -> f64
-);
+// NOTE: `estimate_num_groups` is owned by selfuncs.c and is declared once in
+// `backend-utils-adt-selfuncs-seams`; consumers (including this crate's costsize
+// code) call it through that seam. It is intentionally NOT redeclared here to
+// avoid a redundant, divergent contract.
 seam_core::seam!(
     /// `mergejoinscansel(root, clause, opfamily, cmptype, nulls_first)` —
     /// returns `(leftstartsel, leftendsel, rightstartsel, rightendsel)`.
