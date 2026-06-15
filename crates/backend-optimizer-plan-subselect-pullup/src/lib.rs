@@ -29,8 +29,13 @@
 //!
 //! `PlannerInfo.parse` is a lifetime-free `QueryId` handle; the caller resolves
 //! the top `Query` (`run.resolve_mut`) and threads `&mut Query` + `&PlannerInfo`
-//! in. Nested sub-Queries are embedded owned (`SubLink.subselect` →
-//! `Node::Query`, `RangeTblEntry.subquery`), walked by deref. `pull_varnos`,
+//! in. The conversions consume the **analyzed** SubLink
+//! (`Expr::SubLink(primnodes::SubLink)`): its `subselect` is an embedded owned
+//! `Option<PgBox<Query>>` (mirroring `RangeTblEntry.subquery`) and its
+//! `testexpr` is `Option<Box<Expr>>`; both are walked by deref. Where the
+//! level/varno walkers need a `&Node` (C casts `(Node *) subselect` /
+//! `(Node *) testexpr`) we wrap a clone in `Node::Query` / `Node::Expr`.
+//! `RangeTblEntry.subquery` is likewise embedded owned. `pull_varnos`,
 //! `contain_vars_of_level`, `contain_volatile_functions` and the `Var`
 //! manipulators (`OffsetVarNodes` / `IncrementVarSublevelsUp`) come from their
 //! ported owners. The `eval_const_expressions` LIMIT-folding leg of
@@ -59,8 +64,7 @@ use types_nodes::jointype::JoinType;
 use types_nodes::nodes::Node;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
-use types_nodes::primnodes::{Expr, ParamKind, SubLinkType};
-use types_nodes::rawexprnodes::SubLink;
+use types_nodes::primnodes::{Expr, ParamKind, SubLink, SubLinkType};
 use types_nodes::rawnodes::{FromExpr, JoinExpr, RangeTblRef};
 use types_pathnodes::{Bitmapset, PlannerInfo, Relids};
 
@@ -156,24 +160,28 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     parse: &mut Query<'mcx>,
-    sublink: &SubLink<'mcx>,
+    sublink: &SubLink,
     available_rels: &Relids,
 ) -> PgResult<Option<JoinExpr<'mcx>>> {
-    debug_assert!(sublink.sub_link_type == SubLinkType::Any);
+    debug_assert!(sublink.subLinkType == SubLinkType::Any);
 
-    // sublink->subselect is a Query.
-    let subselect_node = sublink
+    // `subselect = (Query *) sublink->subselect`. In the analyzed tree the
+    // SubLink carries its sub-`Query` embedded-owned (mirroring
+    // `RangeTblEntry.subquery`); walk it by deref. Wrap it in a `Node::Query`
+    // for the level walkers, which take a `&Node` (C casts `(Node *) subselect`).
+    let subselect = sublink
         .subselect
         .as_deref()
         .expect("convert_ANY_sublink_to_join: SubLink has no subselect");
-    let subselect = subselect_node
-        .as_query()
-        .expect("convert_ANY_sublink_to_join: subselect is not a Query");
+    let subselect_node = Node::Query(subselect.clone_in(mcx)?);
 
     // If the sub-select contains any Vars of the parent query, we treat it as
     // LATERAL.  (Vars from higher levels don't matter here.)
+    //
+    // C: `pull_varnos_of_level(NULL, (Node *) subselect, 1)` — root is passed as
+    // NULL here (no PlaceHolderInfo resolution), so we pass `None`.
     let sub_ref_outer_relids =
-        backend_optimizer_util_vars::var::pull_varnos_of_level(Some(root), subselect_node, 1);
+        backend_optimizer_util_vars::var::pull_varnos_of_level(None, &subselect_node, 1);
     let use_lateral = !relids_is_empty(&sub_ref_outer_relids);
 
     // Can't convert if the sub-select contains parent-level Vars of relations
@@ -185,12 +193,18 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     // The test expression must contain some Vars of the parent query, else
     // it's not gonna be a join.  (Note that it won't have Vars referring to
     // the subquery, rather Params.)
-    let testexpr_node = sublink
+    //
+    // `sublink->testexpr` is the analyzed test expression (`Expr`), embedded as
+    // `Option<Box<Expr>>`. Wrap it in a `Node::Expr` for `pull_varnos` (which
+    // takes `&Node`), and hand the `&Expr` straight to
+    // `contain_volatile_functions`.
+    let testexpr_expr = sublink
         .testexpr
         .as_deref()
         .expect("convert_ANY_sublink_to_join: ANY SubLink has no testexpr");
+    let testexpr_node = Node::Expr(testexpr_expr.clone());
     let upper_varnos =
-        backend_optimizer_util_vars::var::pull_varnos(Some(root), testexpr_node);
+        backend_optimizer_util_vars::var::pull_varnos(Some(root), &testexpr_node);
     if relids_is_empty(&upper_varnos) {
         return Ok(None);
     }
@@ -201,7 +215,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     }
 
     // The combining operators and left-hand expressions mustn't be volatile.
-    if backend_optimizer_util_clauses::grounded::contain_volatile_functions(testexpr_node.as_expr())?
+    if backend_optimizer_util_clauses::grounded::contain_volatile_functions(Some(testexpr_expr))?
     {
         return Ok(None);
     }
@@ -250,7 +264,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     };
 
     // Build the new join's qual expression, replacing Params with these Vars.
-    let quals = convert_testexpr(testexpr_node, &subquery_vars);
+    let quals = convert_testexpr(&testexpr_node, &subquery_vars);
 
     // And finally, build the JoinExpr node.
     let result = JoinExpr {
@@ -278,19 +292,19 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     parse: &mut Query<'mcx>,
-    sublink: &SubLink<'mcx>,
+    sublink: &SubLink,
     under_not: bool,
     available_rels: &Relids,
 ) -> PgResult<Option<JoinExpr<'mcx>>> {
-    debug_assert!(sublink.sub_link_type == SubLinkType::Exists);
+    debug_assert!(sublink.subLinkType == SubLinkType::Exists);
 
-    let subselect_node = sublink
+    // `subselect = (Query *) sublink->subselect`. In the analyzed tree the
+    // SubLink carries its sub-`Query` embedded-owned (mirroring
+    // `RangeTblEntry.subquery`); walk it by deref.
+    let subselect_ref = sublink
         .subselect
         .as_deref()
         .expect("convert_EXISTS_sublink_to_join: SubLink has no subselect");
-    let subselect_ref = subselect_node
-        .as_query()
-        .expect("convert_EXISTS_sublink_to_join: subselect is not a Query");
 
     // Can't flatten if it contains WITH.
     if !subselect_ref.cteList.is_empty() {

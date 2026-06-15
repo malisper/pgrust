@@ -64,6 +64,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `remove_useless_result_rtes(root)` (prepjointree.c): remove `RTE_RESULT`
+    /// RTEs from the join tree and elide single-child `FromExpr`s, fixing up
+    /// `PlaceHolderVar` phrels (`substitute_phv_relids`) and dropped-outer-join
+    /// nulling refs (`remove_nulling_relids`). Mutates `parse` (jointree, PHVs,
+    /// rowMarks) and `root.append_rel_list`. **FAMILY 5, ported now** (installed
+    /// by the owner's `init_seams`). `Err` carries the bitmapset-allocation
+    /// `ereport(ERROR)` surface.
+    pub fn remove_useless_result_rtes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut types_pathnodes::PlannerInfo,
+        parse: &mut types_nodes::copy_query::Query<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `pull_up_subqueries(root)` (prepjointree.c): pull up simple subqueries,
     /// simple UNION ALLs, constant functions, and VALUES that appear as
     /// range-table entries of the query's jointree, flattening them into the

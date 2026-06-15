@@ -29,6 +29,9 @@ backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+# parse_sub_analyze (analyze.c) — transformSubLink runs the sub-SELECT through
+# the analyze owner via its seam (decl-only crate, cycle-free).
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 
 # Merged sibling owners called directly (cycle-free).
 backend-parser-small1 = { path = "../backend-parser-small1" }

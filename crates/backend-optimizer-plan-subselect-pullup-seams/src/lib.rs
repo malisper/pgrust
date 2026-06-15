@@ -40,7 +40,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         root: &types_pathnodes::PlannerInfo,
         parse: &mut types_nodes::copy_query::Query<'mcx>,
-        sublink: &types_nodes::rawexprnodes::SubLink<'mcx>,
+        sublink: &types_nodes::primnodes::SubLink,
         available_rels: &types_pathnodes::Relids,
     ) -> types_error::PgResult<Option<types_nodes::rawnodes::JoinExpr<'mcx>>>
 );
@@ -58,7 +58,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         root: &types_pathnodes::PlannerInfo,
         parse: &mut types_nodes::copy_query::Query<'mcx>,
-        sublink: &types_nodes::rawexprnodes::SubLink<'mcx>,
+        sublink: &types_nodes::primnodes::SubLink,
         under_not: bool,
         available_rels: &types_pathnodes::Relids,
     ) -> types_error::PgResult<Option<types_nodes::rawnodes::JoinExpr<'mcx>>>
