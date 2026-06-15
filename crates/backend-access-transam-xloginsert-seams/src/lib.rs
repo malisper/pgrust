@@ -107,3 +107,19 @@ seam_core::seam!(
         page_std: bool,
     ) -> PgResult<XLogRecPtr>
 );
+
+seam_core::seam!(
+    /// `log_newpages(rlocator, forknum, num_pages, blknos, pages, page_std)`
+    /// (xloginsert.c) — WAL-log a batch of full-page images in as few records
+    /// as possible (up to `XLR_MAX_BLOCK_ID` per record). `bulk_write.c`'s
+    /// `smgr_bulk_flush` uses it to log a flushed batch. `blknos[i]` is the
+    /// block number of `pages[i]` (each a `BLCKSZ` page image). `Err` carries
+    /// the WAL insertion `ereport(ERROR)`s.
+    pub fn log_newpages(
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+        blknos: &[BlockNumber],
+        pages: &[&[u8]],
+        page_std: bool,
+    ) -> PgResult<()>
+);

@@ -127,6 +127,33 @@ pub const WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE: u32 = PG_WAIT_IPC + 30
 /// c2rust.)
 pub const WAIT_EVENT_RELATION_MAP_READ: u32 = PG_WAIT_IO + 40;
 
+// --- DataFile* WaitEventIO events (md.c). 0-based indexes 17..24 within the
+// alphabetically-sorted `WaitEventIO` section; values match c2rust verbatim. ---
+/// `WAIT_EVENT_DATA_FILE_EXTEND` — "Waiting for a relation data file to be
+/// extended." (0-based 17 in `WaitEventIO`.)
+pub const WAIT_EVENT_DATA_FILE_EXTEND: u32 = PG_WAIT_IO + 17;
+/// `WAIT_EVENT_DATA_FILE_FLUSH` — "Waiting for a relation data file to reach
+/// durable storage." (0-based 18.)
+pub const WAIT_EVENT_DATA_FILE_FLUSH: u32 = PG_WAIT_IO + 18;
+/// `WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC` — "Waiting for an immediate
+/// synchronization of a relation data file to durable storage." (0-based 19.)
+pub const WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC: u32 = PG_WAIT_IO + 19;
+/// `WAIT_EVENT_DATA_FILE_PREFETCH` — "Waiting for an asynchronous prefetch from
+/// a relation data file." (0-based 20.)
+pub const WAIT_EVENT_DATA_FILE_PREFETCH: u32 = PG_WAIT_IO + 20;
+/// `WAIT_EVENT_DATA_FILE_READ` — "Waiting for a read from a relation data
+/// file." (0-based 21.)
+pub const WAIT_EVENT_DATA_FILE_READ: u32 = PG_WAIT_IO + 21;
+/// `WAIT_EVENT_DATA_FILE_SYNC` — "Waiting for changes to a relation data file to
+/// reach durable storage." (0-based 22.)
+pub const WAIT_EVENT_DATA_FILE_SYNC: u32 = PG_WAIT_IO + 22;
+/// `WAIT_EVENT_DATA_FILE_TRUNCATE` — "Waiting for a relation data file to be
+/// truncated." (0-based 23.)
+pub const WAIT_EVENT_DATA_FILE_TRUNCATE: u32 = PG_WAIT_IO + 23;
+/// `WAIT_EVENT_DATA_FILE_WRITE` — "Waiting for a write to a relation data
+/// file." (0-based 24.)
+pub const WAIT_EVENT_DATA_FILE_WRITE: u32 = PG_WAIT_IO + 24;
+
 /// `WAIT_EVENT_XACT_GROUP_UPDATE` — "Waiting for the group leader to update
 /// transaction status at transaction end." 57th entry (0-based 56) of the
 /// `WaitEventIPC` section of `wait_event_names.txt` (APPEND_READY is index 0).

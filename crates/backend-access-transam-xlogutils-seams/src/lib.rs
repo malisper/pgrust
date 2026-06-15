@@ -25,6 +25,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogDropRelation(rlocator, forknum)` (xlogutils.c) — forget the cached
+    /// last-known block number for a relation fork in the redo-time
+    /// invalid-page tracking table. `DropRelationFiles` calls it per fork during
+    /// replay. Infallible (`void` in C; only updates a backend-local hash).
+    pub fn xlog_drop_relation(
+        rlocator: types_storage::RelFileLocator,
+        forknum: types_core::primitive::ForkNumber,
+    )
+);
+
+seam_core::seam!(
     /// Write `InRecovery` (xlog.c / xlogrecovery.c drive it during recovery).
     pub fn set_in_recovery(value: bool)
 );

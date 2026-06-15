@@ -230,6 +230,9 @@ backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page = { path = "../backend-storage-page" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-storage-smgr-bulkwrite = { path = "../backend-storage-smgr-bulkwrite" }
+backend-storage-smgr-md = { path = "../backend-storage-smgr-md" }
+backend-storage-smgr-smgr = { path = "../backend-storage-smgr-smgr" }
 backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
