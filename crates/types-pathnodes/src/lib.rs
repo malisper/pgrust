@@ -81,17 +81,55 @@ pub type PathnodesMemoryContext = Option<Box<MemoryContextData>>;
  * ======================================================================== */
 
 /// `struct derives_hash *ec_derives_hash` (equivclass.c) — an optional
-/// fast-lookup hash over an EquivalenceClass's derived RestrictInfos, holding
-/// the same entries as `ec_derives_list`. It is an opaque, rebuildable cache
-/// (`pg_node_attr(read_write_ignore)` in C): the consumer layer never inspects
-/// it and a deep copy is meaningless, so it carries no fields here and `Clone`
-/// yields the same empty marker. Presence is what matters; the owning
-/// equivclass unit (re)builds the real table.
+/// `ECDerivesKey` (equivclass.c) — the lookup key for [`DerivesHash`]: the
+/// (canonicalised) pair of [`EmId`] handles plus the originating EC. The C key
+/// orders the two EM pointers by address; here the equivalent canonical order
+/// is by [`EmId`] arena index (see `fill_ec_derives_key`). A constant-bearing
+/// derived clause stores only the non-constant EM in `em2`, with `em1 = None`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ECDerivesKey {
+    /// canonical lower EM (or `None` for the const-EM lookup case).
+    pub em1: Option<EmId>,
+    /// canonical higher EM (or the sole EM for the const case).
+    pub em2: Option<EmId>,
+    /// `EquivalenceClass *parent_ec` — the EC this derived clause is redundant
+    /// with, if any (handle into `eq_classes`).
+    pub parent_ec: Option<EcId>,
+}
+
+/// `ECDerivesEntry` (equivclass.c) — one open-addressing slot of a
+/// [`DerivesHash`]: the simplehash status word, the key, and the cached
+/// derived [`RinfoId`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ECDerivesEntry {
+    /// simplehash status (`SH_STATUS_EMPTY`/`SH_STATUS_IN_USE`).
+    pub status: u32,
+    /// the (canonicalised) lookup key.
+    pub key: ECDerivesKey,
+    /// `RestrictInfo *rinfo` — the cached derived clause (handle into
+    /// `rinfo_arena`).
+    pub rinfo: Option<RinfoId>,
+}
+
+/// fast-lookup hash over an EquivalenceClass's derived RestrictInfos, holding
+/// the same entries as `ec_derives_list`. It is a rebuildable cache
+/// (`pg_node_attr(read_write_ignore)` in C): the consumer layer never inspects
+/// it and a deep copy is meaningless. The owning equivclass unit (re)builds the
+/// real table; it is modelled here as PostgreSQL's `simplehash` (open
+/// addressing, linear probing, power-of-two sizing, 0.9 fill-factor grow), the
+/// only observable behaviour being key→rinfo lookup.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DerivesHash {
-    /// `true` once the owning unit has built the real lookup table. The table
-    /// itself is not carried at this layer.
-    pub built: bool,
+    /// number of allocated buckets (a power of two), or 0 if unbuilt.
+    pub size: u64,
+    /// `size - 1`, the bucket index mask.
+    pub sizemask: u32,
+    /// number of live entries.
+    pub members: u32,
+    /// resize once `members` reaches this (`size * fillfactor`).
+    pub grow_threshold: u32,
+    /// the bucket array.
+    pub data: Vec<ECDerivesEntry>,
 }
 
 /// A clone-skipping wrapper for `subroot` — a shared `PlannerInfo *` in C
@@ -1610,6 +1648,60 @@ pub struct EquivalenceMember {
     pub em_parent: Option<EmId>,
 }
 
+/// `EquivalenceMemberIterator` (equivclass.c) — state for iterating an EC's
+/// parent members (`ec_members`) followed by the child members
+/// (`ec_childmembers[relid]`) for the requested `child_relids`. Resolved against
+/// a [`PlannerInfo`] by `eclass_member_iterator_next`.
+#[derive(Clone, Debug, Default)]
+pub struct EquivalenceMemberIterator {
+    /// `EquivalenceClass *ec` — the EC being iterated (handle into `eq_classes`).
+    pub ec: Option<EcId>,
+    /// `int current_relid` — the child relid most recently advanced to (-1 to
+    /// start; the parent-member pass uses the initial `current_list`).
+    pub current_relid: i32,
+    /// `Relids child_relids` — the child relids whose `ec_childmembers` lists are
+    /// to be walked (empty/`None` if the EC has no child members).
+    pub child_relids: Relids,
+    /// `ListCell *current_cell` — cursor into `current_list` (index, or `None`).
+    pub current_cell: Option<usize>,
+    /// `List *current_list` — the member list currently being walked (a copy of
+    /// `ec_members` or one of the `ec_childmembers[relid]` lists).
+    pub current_list: Vec<EmId>,
+}
+
+/// `ForeignKeyOptInfo` (pathnodes.h) — per-foreign-key planner bookkeeping,
+/// trimmed to the fields `match_eclasses_to_foreign_key_col` reads/writes. The
+/// per-column EC match results are stored back into `eclass`/`fk_eclass_member`.
+#[derive(Clone, Debug, Default)]
+pub struct ForeignKeyOptInfo {
+    /// `Index con_relid` — RT index of the referencing (FK) table.
+    pub con_relid: Index,
+    /// `Index ref_relid` — RT index of the referenced (PK) table.
+    pub ref_relid: Index,
+    /// `int nkeys` — number of columns in the FK.
+    pub nkeys: i32,
+    /// `AttrNumber conkey[]` — cols in the FK table (zero-based access).
+    pub conkey: Vec<AttrNumber>,
+    /// `AttrNumber confkey[]` — cols in the referenced table.
+    pub confkey: Vec<AttrNumber>,
+    /// `Oid conpfeqop[]` — PK = FK operator OIDs.
+    pub conpfeqop: Vec<Oid>,
+    /// `EquivalenceClass *eclass[]` — matching EC for each column (or `None`).
+    pub eclass: Vec<Option<EcId>>,
+    /// `EquivalenceMember *fk_eclass_member[]` — the FK-table EM within that EC.
+    pub fk_eclass_member: Vec<Option<EmId>>,
+}
+
+/// `OuterJoinClauseInfo` (pathnodes.h) — an outer-join clause set aside by
+/// `distribute_qual_to_rels` for `reconsider_outer_join_clauses` to re-examine.
+#[derive(Clone, Debug)]
+pub struct OuterJoinClauseInfo {
+    /// `RestrictInfo *rinfo` — the set-aside clause (handle into `rinfo_arena`).
+    pub rinfo: RinfoId,
+    /// `SpecialJoinInfo *sjinfo` — the outer join the clause came from.
+    pub sjinfo: SpecialJoinInfo,
+}
+
 /* ==========================================================================
  * SpecialJoinInfo (pathnodes.h)
  * ======================================================================== */
@@ -1870,14 +1962,13 @@ pub struct PlannerInfo {
     pub ec_merging_done: bool,
     /// `List *canon_pathkeys` — "canonical" PathKeys.
     pub canon_pathkeys: Vec<PathKey>,
-    /// `List *left_join_clauses` — OuterJoinClauseInfos, nonnullable var on left
-    /// (opaque node handles).
-    pub left_join_clauses: Vec<NodeId>,
+    /// `List *left_join_clauses` — OuterJoinClauseInfos, nonnullable var on left.
+    pub left_join_clauses: Vec<OuterJoinClauseInfo>,
     /// `List *right_join_clauses` — OuterJoinClauseInfos, nonnullable var on
     /// right.
-    pub right_join_clauses: Vec<NodeId>,
+    pub right_join_clauses: Vec<OuterJoinClauseInfo>,
     /// `List *full_join_clauses` — OuterJoinClauseInfos for full join clauses.
-    pub full_join_clauses: Vec<NodeId>,
+    pub full_join_clauses: Vec<OuterJoinClauseInfo>,
     /// `Relids all_result_relids` — set of all result relids.
     pub all_result_relids: Relids,
     /// `Relids leaf_result_relids` — set of all leaf result relids.
@@ -2068,6 +2159,33 @@ impl PlannerInfo {
     #[inline]
     pub fn ec(&self, id: EcId) -> &EquivalenceClass {
         &self.eq_classes[id.index()]
+    }
+    /// Resolve an [`EcId`] for mutation.
+    #[inline]
+    pub fn ec_mut(&mut self, id: EcId) -> &mut EquivalenceClass {
+        &mut self.eq_classes[id.index()]
+    }
+    /// Follow the `ec_merged` union-find link (with no path compression, as in
+    /// C, where `ec_merged` always points directly at the surviving EC) to the
+    /// canonical [`EcId`]. equivclass.c never chains merges more than one level
+    /// because a merge target is itself already canonical, but we chase to a
+    /// fixpoint to be safe.
+    #[inline]
+    pub fn ec_canonical(&self, id: EcId) -> EcId {
+        let mut cur = id;
+        while let Some(next) = self.eq_classes[cur.index()].ec_merged {
+            cur = next;
+        }
+        cur
+    }
+    /// Push an [`EquivalenceClass`] into the arena, returning its [`EcId`]. The
+    /// arena index doubles as the C `list_nth(root->eq_classes, i)` position
+    /// that `RelOptInfo::eclass_indexes` bitmaps reference.
+    #[inline]
+    pub fn alloc_ec(&mut self, ec: EquivalenceClass) -> EcId {
+        let id = EcId(self.eq_classes.len() as u32);
+        self.eq_classes.push(ec);
+        id
     }
     /// Resolve a [`PhInfoId`] to its [`PlaceHolderInfo`].
     #[inline]
