@@ -86,15 +86,19 @@ seam_core::seam!(
 seam_core::seam!(
     /// `parse_sub_analyze(parseTree, parentParseState, parentCTE,
     /// locked_from_parent, resolve_unknowns)` (parser/analyze.c) — analyze a
-    /// delimited subquery (a sub-SELECT in FROM, or a CTE/sublink body) under a
-    /// child `ParseState` linked to `parent`, returning the transformed `Query`.
-    /// The FROM sub-select caller passes `parentCTE = NULL` (not modeled here;
-    /// the owner builds the child state from `parent`). Can `ereport(ERROR)`.
+    /// delimited sub-statement in a child `ParseState` built off
+    /// `parent_pstate`, returning the resulting `Query` (wrapped as a
+    /// `Node::Query`, mirroring the C `(Node *) query`). `parent_cte` is the C
+    /// `CommonTableExpr *parentCTE` (`Some` for a CTE body — `parse_cte`'s
+    /// `analyzeCTE` passes the cte; `None` for a FROM sub-SELECT — parse_clause's
+    /// `transformRangeSubselect`). The owner `parser/analyze.c` is not yet
+    /// ported. `Err` carries the analysis `ereport(ERROR)` surface. Allocates.
     pub fn parse_sub_analyze<'mcx>(
         mcx: Mcx<'mcx>,
         parse_tree: &Node<'mcx>,
-        parent: &mut types_nodes::parsestmt::ParseState<'mcx>,
+        parent_pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+        parent_cte: Option<&types_nodes::rawnodes::CommonTableExpr<'mcx>>,
         locked_from_parent: bool,
         resolve_unknowns: bool,
-    ) -> PgResult<CopyQuery<'mcx>>
+    ) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>>
 );

@@ -288,6 +288,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_EQ_OPR)->eq_opr` (typcache.c) — the
+    /// equality OPERATOR oid of a type (not the function). `analyzeCTE`
+    /// (parse_cte.c) calls this to resolve the cycle-mark column's `=` operator
+    /// so it can then take its negator (the `<>` operator) for cycle detection.
+    /// Returns `InvalidOid` (0) when the type has no equality operator (the
+    /// caller then `ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION)`). The trimmed
+    /// `TypeCacheEntry` returned by [`lookup_type_cache`] does not carry
+    /// `eq_opr`, so this dedicated accessor reads it from the full cache row.
+    /// `Err` carries the typcache lookup surface.
+    pub fn lookup_type_cache_eq_opr(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`
     /// (typcache.c): resolve the OID of `element_type`'s btree comparison
     /// support function (the cached `cmp_proc_finfo`), as `array_cmp` /

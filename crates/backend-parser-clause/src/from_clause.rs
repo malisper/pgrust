@@ -508,7 +508,9 @@ fn transformRangeSubselect<'mcx>(
         .subquery
         .as_deref()
         .ok_or_else(|| elog_error("transformRangeSubselect: subquery is NULL"))?;
-    let query = analyze::parse_sub_analyze::call(mcx, subquery_node, pstate, locked, true)?;
+    /* parentCTE = NULL for a FROM sub-SELECT */
+    let query_node =
+        analyze::parse_sub_analyze::call(mcx, subquery_node, pstate, None, locked, true)?;
 
     /* Restore state */
     pstate.p_lateral_active = false;
@@ -517,7 +519,12 @@ fn transformRangeSubselect<'mcx>(
     /*
      * Check that we got a SELECT.  Anything else should be impossible given
      * restrictions of the grammar, but check anyway.
+     * (C: `!IsA(query, Query) || query->commandType != CMD_SELECT`.)
      */
+    let query = match &*query_node {
+        Node::Query(q) => q.clone_in(mcx)?,
+        _ => return Err(elog_error("unexpected non-SELECT command in subquery in FROM")),
+    };
     if query.commandType != CmdType::CMD_SELECT {
         return Err(elog_error("unexpected non-SELECT command in subquery in FROM"));
     }
