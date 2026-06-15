@@ -15,4 +15,7 @@ pub fn init_seams() {
         super::BufFileReadMaybeEOF(file, buf, eof_ok)
     });
     seams::buf_file_read_exact::set(|file, buf| super::BufFileReadExact(file, buf));
+    seams::buf_file_seek_block::set(|file, blknum| super::BufFileSeekBlock(file, blknum));
+    seams::buf_file_tell::set(|file| super::BufFileTell(file));
+    seams::buf_file_size::set(|file| super::BufFileSize(file));
 }

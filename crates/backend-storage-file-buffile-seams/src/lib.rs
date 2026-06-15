@@ -59,3 +59,25 @@ seam_core::seam!(
     /// bytes; a short read is `ereport(ERROR)`.
     pub fn buf_file_read_exact(file: &mut BufFile, buf: &mut [u8]) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `BufFileSeekBlock(file, blknum)` (buffile.c): block-oriented absolute
+    /// seek (`BufFileSeek(file, blknum / nblocks, (blknum % nblocks) * BLCKSZ,
+    /// SEEK_SET)`). Returns the C status (0 on success, `EOF`==-1 on an
+    /// impossible seek), so logtape can fail loudly on a non-zero result.
+    pub fn buf_file_seek_block(file: &mut BufFile, blknum: i64) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `BufFileTell(file, fileno, offset)` (buffile.c): report the current
+    /// read/write position as `(fileno, offset)`. A pure field read in C —
+    /// infallible.
+    pub fn buf_file_tell(file: &BufFile) -> (i32, i64)
+);
+
+seam_core::seam!(
+    /// `BufFileSize(file)` (buffile.c): the current size of the file in bytes.
+    /// A `FileSize` failure on the last segment is `ereport(ERROR)`, so the
+    /// call is fallible.
+    pub fn buf_file_size(file: &BufFile) -> PgResult<i64>
+);

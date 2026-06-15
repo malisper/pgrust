@@ -262,6 +262,7 @@ pub fn init_all() {
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
     backend_utils_sort_sortsupport::init_seams();
+    backend_utils_sort_storage::init_seams();
     backend_utils_time_combocid::init_seams();
     backend_utils_time_snapmgr::init_seams();
     common_checksum_helper::init_seams();

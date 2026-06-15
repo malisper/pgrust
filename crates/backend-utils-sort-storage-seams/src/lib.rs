@@ -61,26 +61,34 @@ seam_core::seam!(
     /// fetch the next tuple into the given slot; returns `true` when a tuple
     /// was fetched.
     ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no payload), so this contract cannot yet move tuple data; re-sign it
-    /// when the slot payload model lands.
-    pub fn tuplestore_gettupleslot(
-        state: &mut types_nodes::Tuplestorestate<'_>,
+    /// Re-signed off the header-only provisional shape once the MinimalTuple
+    /// payload-bearing carrier + the EState slot pool landed: the slot is the
+    /// pool [`SlotId`], resolved against `estate` (the payload-bearing
+    /// `&mut SlotData` lives in `estate.es_tupleTable`). The owner stores the
+    /// fetched MinimalTuple via the `exec_store_minimal_tuple` /
+    /// `exec_clear_tuple_by_id` execTuples seams (which build the slot's carrier
+    /// in `estate.es_query_cxt`).
+    pub fn tuplestore_gettupleslot<'mcx>(
+        state: &mut types_nodes::Tuplestorestate<'mcx>,
         forward: bool,
         copy: bool,
-        slot: &mut types_nodes::TupleTableSlot,
+        slot: types_nodes::SlotId,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
     /// `tuplestore_puttupleslot(state, slot)` (tuplestore.c): append a copy of
-    /// the slot's tuple to the store.
-    ///
-    /// PROVISIONAL: see `tuplestore_gettupleslot` — re-sign when the slot
-    /// payload model lands.
-    pub fn tuplestore_puttupleslot(
-        state: &mut types_nodes::Tuplestorestate<'_>,
-        slot: &types_nodes::TupleTableSlot,
+    /// the slot's tuple to the store. Re-signed off the header-only provisional
+    /// shape once the MinimalTuple payload-bearing carrier + EState slot pool
+    /// landed: the slot is the pool [`SlotId`] resolved against `estate`; the
+    /// owner forms the MinimalTuple from the live slot via the
+    /// `exec_copy_slot_minimal_tuple` execTuples seam, then copies it into the
+    /// store's own context.
+    pub fn tuplestore_puttupleslot<'mcx>(
+        state: &mut types_nodes::Tuplestorestate<'mcx>,
+        slot: types_nodes::SlotId,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 

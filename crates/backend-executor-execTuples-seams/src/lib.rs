@@ -75,6 +75,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot)` (tuptable.h) resolving a pool [`SlotId`] to its
+    /// live payload-bearing slot first — the form the `tuplestore_gettupleslot`
+    /// "no tuple" path needs (the header-only [`exec_clear_tuple`] cannot reach
+    /// the payload).
+    pub fn exec_clear_tuple_by_id(
+        estate: &mut types_nodes::EStateData<'_>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecResetTupleTable`'s per-slot processing (execTuples.c): given one
     /// live `es_tupleTable` slot, `ExecClearTuple(slot)` then
     /// `slot->tts_ops->release(slot)` then `ReleaseTupleDesc` the slot's

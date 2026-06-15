@@ -263,7 +263,7 @@ pub fn ExecRecursiveUnion<'mcx>(
                 .working_table
                 .as_deref_mut()
                 .expect("ExecRecursiveUnion: working_table is NULL");
-            tuplestore::tuplestore_puttupleslot::call(working, estate.slot(slot))?;
+            tuplestore::tuplestore_puttupleslot::call(working, slot, estate)?;
             // ... and to the caller
             return Ok(Some(slot));
         }
@@ -350,7 +350,7 @@ pub fn ExecRecursiveUnion<'mcx>(
             .intermediate_table
             .as_deref_mut()
             .expect("ExecRecursiveUnion: intermediate_table is NULL");
-        tuplestore::tuplestore_puttupleslot::call(intermediate, estate.slot(slot))?;
+        tuplestore::tuplestore_puttupleslot::call(intermediate, slot, estate)?;
         // ... and return it
         return Ok(Some(slot));
     }

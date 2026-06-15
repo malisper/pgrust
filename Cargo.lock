@@ -11815,6 +11815,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-storage"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-commands-tablespace-seams",
+ "backend-executor-execTuples-seams",
+ "backend-storage-file-buffile-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-sort-storage-seams"
 version = "0.0.0"
 dependencies = [
@@ -12678,6 +12698,7 @@ dependencies = [
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-sortsupport",
+ "backend-utils-sort-storage",
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
  "common-checksum-helper",

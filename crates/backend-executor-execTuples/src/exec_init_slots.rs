@@ -132,13 +132,18 @@ fn seam_exec_init_result_tuple_slot_tl<'mcx>(
     seam_exec_init_result_slot(planstate, estate, tts_ops)
 }
 
-/// Seam `exec_clear_tuple` — `ExecClearTuple`.
-///
-/// PAYLOAD MODEL: the `clear` callback resets the slot's stored-tuple payload,
-/// which the trimmed pool header does not carry. Stays seam-and-panic until the
-/// slot payload model lands.
+/// Seam `exec_clear_tuple` — `ExecClearTuple`. The seam's `&mut TupleTableSlot`
+/// is the header-only projection; the live payload-bearing clear is reached via
+/// `exec_reset_one_slot` / the `SlotId` store seams, so this header-only seam
+/// stays a loud panic (no payload reachable from the header alone).
 fn seam_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
-    panic!("execTuples.c ExecClearTuple — needs the slot payload model (tts_ops->clear)")
+    panic!("execTuples.c ExecClearTuple — header-only slot view carries no payload to clear; use a SlotId-based path")
+}
+
+/// Seam `exec_clear_tuple_by_id` — `ExecClearTuple` resolving the pool `SlotId`
+/// to its live payload-bearing `&mut SlotData` first.
+fn seam_exec_clear_tuple_by_id<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(estate.slot_data_mut(slot))
 }
 
 /// Seam `exec_reset_one_slot` — `ExecResetTupleTable`'s per-slot processing.
@@ -470,6 +475,7 @@ pub fn init_seams() {
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
     seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);
     seams::exec_clear_tuple::set(seam_exec_clear_tuple);
+    seams::exec_clear_tuple_by_id::set(seam_exec_clear_tuple_by_id);
     seams::exec_reset_one_slot::set(seam_exec_reset_one_slot);
     seams::exec_copy_slot::set(seam_exec_copy_slot);
     seams::exec_init_result_slot::set(seam_exec_init_result_slot);
