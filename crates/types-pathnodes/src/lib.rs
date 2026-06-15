@@ -2163,7 +2163,49 @@ pub struct PlannerInfo {
     /// Node-walking owners (var.c / clauses.c via their seams) resolve a
     /// [`NodeId`] to `&Expr` through [`PlannerInfo::node`] and walk the tree;
     /// the join-path enumerator still only forwards/compares the opaque handle.
-    pub node_arena: Vec<Expr>,
+    pub node_arena: Vec<ArenaNode>,
+}
+
+/// Lifetime-free arena element for [`PlannerInfo::node_arena`].
+///
+/// The arena historically held only [`Expr`], but `RelOptInfo`/`IndexOptInfo`
+/// targetlists (`indextlist`, reltarget tlists) carry `TargetEntry` node
+/// handles as plain [`NodeId`]s, so `TargetEntry` must live in the SAME id-space
+/// as `Expr`. This enum is the additive widening: every existing `Expr` still
+/// stores as [`ArenaNode::Expr`] and the legacy `node`/`node_mut`/`alloc_node`
+/// accessors keep their `&Expr` shape, while `TargetEntry`s store as
+/// [`ArenaNode::TargetEntry`] resolved through the new `targetentry`/
+/// `targetentry_mut`/`alloc_targetentry` accessors.
+#[derive(Debug)]
+pub enum ArenaNode {
+    /// An expression node (the original, sole arena payload).
+    Expr(Expr),
+    /// A `TargetEntry` node (lifetime-free; child `expr` is an arena handle).
+    TargetEntry(TargetEntryNode),
+}
+
+/// Lifetime-free arena form of `TargetEntry` (nodes/primnodes.h), field-for-field
+/// vs the C struct, with the child `Expr *expr` rendered as a [`NodeId`] arena
+/// handle (mirroring how `Expr` children already become `NodeId` in this arena)
+/// rather than a `&'mcx Expr`. Cross-checked against
+/// `types_nodes::primnodes::TargetEntry<'mcx>` and `nodes/primnodes.h`.
+#[derive(Debug, Default, Clone)]
+pub struct TargetEntryNode {
+    /// `Expr *expr` — expression to evaluate, as an arena handle.
+    pub expr: NodeId,
+    /// `AttrNumber resno` — attribute number.
+    pub resno: AttrNumber,
+    /// `char *resname` — name of the column (could be NULL).
+    pub resname: Option<alloc::string::String>,
+    /// `Index ressortgroupref` — nonzero if referenced by a sort/group clause.
+    pub ressortgroupref: Index,
+    /// `Oid resorigtbl` — OID of column's source table, or 0.
+    pub resorigtbl: Oid,
+    /// `AttrNumber resorigcol` — column's number in source table, or 0.
+    pub resorigcol: AttrNumber,
+    /// `bool resjunk` — set to true to eliminate the attribute from the final
+    /// target list.
+    pub resjunk: bool,
 }
 
 impl PlannerInfo {
@@ -2261,12 +2303,48 @@ impl PlannerInfo {
     /// call this to obtain `&Expr` and recurse.
     #[inline]
     pub fn node(&self, id: NodeId) -> &Expr {
-        &self.node_arena[id.index()]
+        match &self.node_arena[id.index()] {
+            ArenaNode::Expr(e) => e,
+            ArenaNode::TargetEntry(_) => panic!(
+                "PlannerInfo::node: NodeId {} resolves to a TargetEntry, not an Expr",
+                id.0
+            ),
+        }
     }
     /// Resolve a [`NodeId`] for mutation.
     #[inline]
     pub fn node_mut(&mut self, id: NodeId) -> &mut Expr {
-        &mut self.node_arena[id.index()]
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::Expr(e) => e,
+            ArenaNode::TargetEntry(_) => panic!(
+                "PlannerInfo::node_mut: NodeId {} resolves to a TargetEntry, not an Expr",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`TargetEntryNode`]. Panics if the handle
+    /// resolves to an [`Expr`] (mirrors C, where a `NodeId` used in a
+    /// `TargetEntry` context is always a `TargetEntry`).
+    #[inline]
+    pub fn targetentry(&self, id: NodeId) -> &TargetEntryNode {
+        match &self.node_arena[id.index()] {
+            ArenaNode::TargetEntry(te) => te,
+            ArenaNode::Expr(_) => panic!(
+                "PlannerInfo::targetentry: NodeId {} resolves to an Expr, not a TargetEntry",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`TargetEntryNode`] for mutation.
+    #[inline]
+    pub fn targetentry_mut(&mut self, id: NodeId) -> &mut TargetEntryNode {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::TargetEntry(te) => te,
+            ArenaNode::Expr(_) => panic!(
+                "PlannerInfo::targetentry_mut: NodeId {} resolves to an Expr, not a TargetEntry",
+                id.0
+            ),
+        }
     }
 
     /// Push a [`RelOptInfo`] into the arena, returning its [`RelId`].
@@ -2305,7 +2383,17 @@ impl PlannerInfo {
     #[inline]
     pub fn alloc_node(&mut self, node: Expr) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
-        self.node_arena.push(node);
+        self.node_arena.push(ArenaNode::Expr(node));
+        id
+    }
+    /// Intern a [`TargetEntryNode`] into the node store, returning its
+    /// [`NodeId`] handle. The producer path: plancat / the plan layer build
+    /// `RelOptInfo`/`IndexOptInfo` targetlists (`indextlist`, reltarget tlists)
+    /// of these handles.
+    #[inline]
+    pub fn alloc_targetentry(&mut self, te: TargetEntryNode) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::TargetEntry(te));
         id
     }
 }

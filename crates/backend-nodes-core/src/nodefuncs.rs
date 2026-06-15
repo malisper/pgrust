@@ -1512,11 +1512,28 @@ pub fn init_seams() {
     seams::expr_variadic::set(seam_expr_variadic);
     seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
     seams::expr_input_collation_node::set(seam_expr_input_collation_node);
+    seams::targetentry_info::set(seam_targetentry_info);
     // `get_expr_result_type_node` reaches into funcapi/tupdesc catalog machinery
     // owned by backend-utils-fmgr-funcapi (CreateTemplateTupleDesc /
     // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
     // lookup spine is not part of this pure-node-inspection family, so the seam
     // stays installed by its real owner. Not set here.
+}
+
+/// `targetentry_info(root, tle)` seam — read the `TargetEntry` fields pathkeys
+/// needs off a `NodeId` resolving to a `TargetEntry` in the planner node arena.
+/// Infallible: a plain arena resolve (mirrors C field reads off a `TargetEntry *`).
+fn seam_targetentry_info(
+    root: &types_pathnodes::PlannerInfo,
+    tle: types_pathnodes::NodeId,
+) -> backend_nodes_nodeFuncs_seams::TargetEntryInfo {
+    let te = root.targetentry(tle);
+    backend_nodes_nodeFuncs_seams::TargetEntryInfo {
+        ressortgroupref: te.ressortgroupref,
+        resno: te.resno,
+        resjunk: te.resjunk,
+        expr: te.expr,
+    }
 }
 
 /// `expr_type_info(expr)` seam — the `(typid, typmod, collation)` triple read
