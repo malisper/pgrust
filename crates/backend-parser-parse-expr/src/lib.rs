@@ -147,16 +147,13 @@ fn opname_strings(name: &mcx::PgVec<'_, nodes::NodePtr<'_>>) -> Vec<String> {
 }
 
 /// `parser_errposition(pstate, location)` (parse_node.c) — translate a token
-/// location into the 1-based cursor position recorded on an error. The faithful
-/// body offsets by the source-text start, but the parser records `location`
-/// verbatim into the error machinery (matching the sibling parser ports). A
-/// negative location contributes cursor 0.
-fn parser_errposition(_pstate: &ParseState<'_>, location: i32) -> i32 {
-    if location < 0 {
-        0
-    } else {
-        location
-    }
+/// location into the 1-based cursor position recorded on an error, delegating to
+/// the parse_node.c owner's seam (`backend-parser-small1`). The owner converts
+/// the byte offset to a character index via `pg_mbstrlen_with_len`; it is
+/// infallible (the `PgResult` seam contract always returns `Ok`), so a `0`
+/// fallback is never observed.
+fn parser_errposition(pstate: &ParseState<'_>, location: i32) -> i32 {
+    backend_parser_small1_seams::parser_errposition::call(pstate, location).unwrap_or(0)
 }
 
 /// Move the inner raw `Node` out of a `Option<NodePtr>` child by value (the C

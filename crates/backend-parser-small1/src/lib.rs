@@ -1,0 +1,729 @@
+//! Port of the `backend-parser-small1` unit (PostgreSQL 18.3): the small parser
+//! support files bundled together —
+//!
+//! * `parser/parse_enr.c` — ephemeral-named-relation lookup helpers.
+//! * `parser/scansup.c` — scanner support (identifier downcasing/truncation,
+//!   the flex `{space}` predicate).
+//! * `parser/parse_node.c` — `ParseState` lifecycle, `parser_errposition`, the
+//!   error-position callback shim, container-subscript transforms, `make_const`.
+//! * `parser/parse_param.c` — the fixed-parameter parser hook plus the
+//!   post-analysis parameter checks and the extern-param probe (the F2 leg).
+//! * `parser/parse_merge.c` — `transformMergeStmt` (sibling parser deps
+//!   unported; mirror-PG-and-panic).
+//!
+//! # Seams installed (inward)
+//!
+//! * `backend_parser_small1_seams::parser_errposition` — the cursor-position
+//!   helper (consumed by define / cluster / explain-state).
+//! * `backend_parser_scansup_seams::truncate_identifier` — reconciled to live
+//!   here (the parser-driver's lexer is the consumer).
+//! * `backend_parser_analyze_seams::make_parsestate` — `ParseState` allocator.
+//!
+//! # Variable-parameter (F3) is keystone-blocked
+//!
+//! `setup_parse_variable_parameters` / `variable_paramref_hook` /
+//! `variable_coerce_param_hook` / `check_parameter_resolution_walker` MUTATE the
+//! caller's `Oid *` parameter-type array in place through a `VarParamState`
+//! carrier (`Oid **paramTypes`, `int *numParams`). That two-level
+//! caller-array-aliasing carrier has no owned-model home yet (a `ParamHookState`
+//! keystone). These functions mirror-PG-and-panic until that keystone lands.
+
+#![no_std]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(clippy::result_large_err)]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+use mcx::{Mcx, PgBox, PgVec};
+
+use types_core::fmgr::FLOAT8PASSBYVAL;
+use types_core::{InvalidOid, Oid, OidIsValid};
+use types_error::error::{
+    ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR, ERRCODE_NAME_TOO_LONG,
+    ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_PARAMETER,
+};
+use types_error::{ErrorLocation, PgResult, SoftErrorContext, ERROR, NOTICE};
+use types_tuple::Datum;
+
+use types_nodes::nodes::Node;
+use types_nodes::params::ParamRef;
+use types_nodes::parsestmt::{ParseState};
+use types_nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
+use types_nodes::rawnodes::{A_Const, A_Indices};
+use types_nodes::queryenvironment::EphemeralNamedRelationMetadataData;
+use types_nodes::copy_query::Query;
+
+use types_tuple::heaptuple::{
+    BITOID, BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, MaxTupleAttributeNumber,
+    NUMERICOID, OIDARRAYOID, OIDVECTOROID, UNKNOWNOID,
+};
+
+use types_storage::lock::NoLock;
+
+use backend_utils_error::ereport;
+use backend_nodes_core::makefuncs::make_const as makeConst;
+use backend_nodes_core::nodefuncs::expr_location;
+
+use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_mb_mbutils_seams as mb;
+use backend_utils_misc_queryenvironment as queryenv;
+
+/// `ErrorLocation` for an `ereport` in this unit (parser/parse_node.c et al.).
+fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("../src/backend/parser/scansup.c", lineno, funcname)
+}
+
+// ===========================================================================
+// parse_enr.c — ephemeral named relations
+// ===========================================================================
+
+/// `name_matches_visible_ENR(pstate, refname)` (parse_enr.c) — true if an ENR
+/// named `refname` is visible in the parse state's query environment.
+pub fn name_matches_visible_ENR(pstate: &ParseState<'_>, refname: &str) -> bool {
+    get_visible_ENR_metadata_of(pstate, refname).is_some()
+}
+
+/// `get_visible_ENR(pstate, refname)` (parse_enr.c) — the ENR metadata visible
+/// under `refname`, or `None`.
+///
+/// The C returns a `EphemeralNamedRelationMetadata` pointer aliasing the env's
+/// metadata; here we hand back the borrowed `&EphemeralNamedRelationMetadataData`
+/// tied to the parse state.
+pub fn get_visible_ENR<'e, 'mcx>(
+    pstate: &'e ParseState<'mcx>,
+    refname: &str,
+) -> Option<&'e EphemeralNamedRelationMetadataData<'mcx>> {
+    get_visible_ENR_metadata_of(pstate, refname)
+}
+
+/// `get_visible_ENR_metadata(pstate->p_queryEnv, refname)` — shared by both
+/// public wrappers (C calls the queryenvironment helper directly with the env).
+fn get_visible_ENR_metadata_of<'e, 'mcx>(
+    pstate: &'e ParseState<'mcx>,
+    refname: &str,
+) -> Option<&'e EphemeralNamedRelationMetadataData<'mcx>> {
+    queryenv::get_visible_ENR_metadata(pstate.p_queryEnv.as_deref(), refname)
+}
+
+// ===========================================================================
+// scansup.c — scanner support
+// ===========================================================================
+
+/// `NAMEDATALEN` (pg_config_manual.h) — identifier byte limit.
+const NAMEDATALEN: usize = 64;
+
+/// `downcase_truncate_identifier(ident, len, warn)` (scansup.c) — downcase and
+/// truncate an unquoted identifier (with truncation enabled). Returns the
+/// palloc'd `char *` bytes (no trailing NUL — the carrier supplies it).
+pub fn downcase_truncate_identifier<'mcx>(
+    mcx: Mcx<'mcx>,
+    ident: &[u8],
+    warn: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    downcase_identifier(mcx, ident, warn, true)
+}
+
+/// `downcase_identifier(ident, len, warn, truncate)` (scansup.c) — the
+/// downcasing workhorse. ASCII `A-Z` is folded unconditionally; high-bit bytes
+/// are `tolower`'d only in a single-byte server encoding (matching the C
+/// `enc_is_single_byte && IS_HIGHBIT_SET && isupper` guard). When `truncate`
+/// and the result is at least `NAMEDATALEN` bytes, it is truncated.
+pub fn downcase_identifier<'mcx>(
+    mcx: Mcx<'mcx>,
+    ident: &[u8],
+    warn: bool,
+    truncate: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let len = ident.len();
+    // result = palloc(len + 1)
+    let mut result: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    result.try_reserve(len + 1).map_err(|_| mcx.oom(len + 1))?;
+
+    // enc_is_single_byte = pg_database_encoding_max_length() == 1;
+    let enc_is_single_byte = mb::pg_database_encoding_max_length::call() == 1;
+
+    for &b in ident.iter() {
+        let mut ch = b;
+        if ch.is_ascii_uppercase() {
+            ch += b'a' - b'A';
+        } else if enc_is_single_byte && is_highbit_set(ch) && locale_isupper(ch) {
+            // tolower() for high-bit bytes (locale-aware), matching the repo's
+            // libc convention (port-pgstrcasecmp::fold_to_lower).
+            ch = locale_tolower(ch);
+        }
+        result.push(ch);
+    }
+
+    // if (i >= NAMEDATALEN && truncate) truncate_identifier(result, i, warn);
+    if len >= NAMEDATALEN && truncate {
+        let clipped = truncate_to_clip(&result, warn)?;
+        result.truncate(clipped);
+    }
+
+    Ok(result)
+}
+
+/// `IS_HIGHBIT_SET(ch)` (c.h).
+#[inline]
+fn is_highbit_set(ch: u8) -> bool {
+    ch & 0x80 != 0
+}
+
+/// `isupper((unsigned char) ch)` — the locale-aware C predicate, via `libc`
+/// (the same direct-libc convention as `port-pgstrcasecmp::fold_to_lower`; no
+/// seam, exactly as the C makes a direct `isupper` call).
+#[inline]
+fn locale_isupper(ch: u8) -> bool {
+    unsafe { libc::isupper(i32::from(ch)) != 0 }
+}
+
+/// `tolower((unsigned char) ch)` — the locale-aware C fold, via `libc`.
+#[inline]
+fn locale_tolower(ch: u8) -> u8 {
+    unsafe { libc::tolower(i32::from(ch)) as u8 }
+}
+
+/// `truncate_identifier(ident, len, warn)` (scansup.c) — truncate an identifier
+/// to `NAMEDATALEN - 1` bytes on a multibyte-character boundary, emitting a
+/// `NOTICE` if `warn` is set. Returns the (possibly truncated) bytes in `mcx`.
+///
+/// The seam contract (consumed by the parser-driver's lexer) and this in-crate
+/// entry share the same logic.
+pub fn truncate_identifier<'mcx>(
+    mcx: Mcx<'mcx>,
+    ident: &[u8],
+    warn: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    out.try_reserve(ident.len()).map_err(|_| mcx.oom(ident.len()))?;
+    for &b in ident.iter() {
+        out.push(b);
+    }
+    if ident.len() >= NAMEDATALEN {
+        let clipped = truncate_to_clip(ident, warn)?;
+        out.truncate(clipped);
+    }
+    Ok(out)
+}
+
+/// Shared clip-length computation (`pg_mbcliplen` + optional NOTICE) for a string
+/// already known to be at least `NAMEDATALEN` bytes; returns the truncated byte
+/// length.
+fn truncate_to_clip(ident: &[u8], warn: bool) -> PgResult<usize> {
+    let len = ident.len();
+    // len = pg_mbcliplen(ident, len, NAMEDATALEN - 1);
+    let clipped =
+        mb::pg_mbcliplen::call(ident, len as i32, (NAMEDATALEN - 1) as i32) as usize;
+    if warn {
+        // ereport(NOTICE, ERRCODE_NAME_TOO_LONG,
+        //   "identifier \"%s\" will be truncated to \"%.*s\"")
+        let full = alloc::string::String::from_utf8_lossy(ident);
+        let short = alloc::string::String::from_utf8_lossy(&ident[..clipped]);
+        ereport(NOTICE)
+            .errcode(ERRCODE_NAME_TOO_LONG)
+            .errmsg(alloc::format!(
+                "identifier \"{}\" will be truncated to \"{}\"",
+                full, short
+            ))
+            .finish(errloc(99, "truncate_identifier"))?;
+    }
+    Ok(clipped)
+}
+
+/// `scanner_isspace(ch)` (scansup.c) — true if the flex scanner treats `ch` as
+/// whitespace. Must match scan.l's `{space}` list.
+pub fn scanner_isspace(ch: u8) -> bool {
+    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+// ===========================================================================
+// parse_node.c — ParseState lifecycle, errposition, subscripts, make_const
+// ===========================================================================
+
+/// `make_parsestate(parentParseState)` (parse_node.c) — allocate and initialize
+/// a new `ParseState`. The `palloc0` image with the two nonzero starts; when a
+/// parent is given, the source text, parser hooks, ref-hook state and query
+/// environment are inherited from it.
+pub fn make_parsestate<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent: Option<&ParseState<'mcx>>,
+) -> PgResult<PgBox<'mcx, ParseState<'mcx>>> {
+    let mut pstate = ParseState::new(mcx)?;
+
+    if let Some(parent) = parent {
+        // pstate->p_sourcetext = parentParseState->p_sourcetext;
+        pstate.p_sourcetext = match parent.p_sourcetext.as_ref() {
+            Some(s) => Some(s.clone_in(mcx)?),
+            None => None,
+        };
+        // all hooks are copied from parent (fn pointers — Copy).
+        pstate.p_pre_columnref_hook = parent.p_pre_columnref_hook;
+        pstate.p_post_columnref_hook = parent.p_post_columnref_hook;
+        pstate.p_paramref_hook = parent.p_paramref_hook;
+        pstate.p_coerce_param_hook = parent.p_coerce_param_hook;
+        // pstate->p_ref_hook_state = parentParseState->p_ref_hook_state;
+        // pstate->p_queryEnv = parentParseState->p_queryEnv;
+        //
+        // C aliases these two pointers into the child state. The owned model
+        // (unique PgBox ownership) cannot share a pointer, and no in-repo caller
+        // builds a sub-statement ParseState yet (every parent-passing caller
+        // lives in unported analyze.c). The aliasing follow-on (a shared
+        // env/ref-hook carrier) is the prerequisite — mirror-PG-and-panic until
+        // it lands rather than silently dropping or deep-copying these.
+        if parent.p_ref_hook_state.is_some() || parent.p_queryEnv.is_some() {
+            panic!(
+                "make_parsestate(parent) with an inherited query-environment / \
+                 ref-hook-state needs the owned-model shared-carrier follow-on \
+                 (no sub-statement ParseState caller has landed)"
+            );
+        }
+    }
+
+    PgBox::try_new_in(pstate, mcx).map_err(|_| mcx.oom(core::mem::size_of::<ParseState>()))
+}
+
+/// `free_parsestate(pstate)` (parse_node.c) — release a `ParseState` and its
+/// subsidiary resources.
+///
+/// In the owned model the `ParseState` value is dropped (C's `pfree`); the only
+/// subsidiary resource is the target relation, which is closed `NoLock`.
+pub fn free_parsestate(pstate: PgBox<'_, ParseState<'_>>) -> PgResult<()> {
+    let mut pstate = PgBox::into_inner(pstate);
+
+    // Check that we did not produce too many resnos.
+    if pstate.p_next_resno - 1 > MaxTupleAttributeNumber {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg(alloc::format!(
+                "target lists can have at most {} entries",
+                MaxTupleAttributeNumber
+            ))
+            .into_error());
+    }
+
+    if let Some(rel) = pstate.p_target_relation.take() {
+        backend_access_table_table::table_close(rel, NoLock)?;
+    }
+
+    // pfree(pstate) — the value drops here.
+    Ok(())
+}
+
+/// `parser_errposition(pstate, location)` (parse_node.c) — a parse-analysis-time
+/// cursor position. Converts a byte offset into the source string into a 1-based
+/// character index for reporting; 0 if no location or no source text.
+pub fn parser_errposition(pstate: &ParseState<'_>, location: i32) -> i32 {
+    // No-op if location was not provided.
+    if location < 0 {
+        return 0;
+    }
+    // Can't do anything if source text is not available.
+    let sourcetext = match pstate.p_sourcetext.as_ref() {
+        Some(s) => s,
+        None => return 0,
+    };
+    // pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
+    mb::pg_mbstrlen_with_len::call(sourcetext.as_bytes(), location) + 1
+}
+
+/// `setup_parser_errposition_callback` / `cancel_parser_errposition_callback` /
+/// `pcb_error_callback` (parse_node.c) — the error-context shim that tags
+/// non-parser errors thrown by callees with a parse error position.
+///
+/// `error_context_stack` is retired repo-wide (docs/query-lifecycle-raii.md):
+/// error context attaches on propagation, not through an ambient callback chain.
+/// These functions therefore have no ambient chain to push/pop — the location
+/// tagging happens where the fallible callee returns (the seam carrying the
+/// location, e.g. `numeric_in`/`bit_in`). They are retained as the (no-op)
+/// C-structure image; the skipped `ERRCODE_QUERY_CANCELED` case of
+/// `pcb_error_callback` likewise has no counterpart (no callback fires).
+pub fn setup_parser_errposition_callback(_pstate: &ParseState<'_>, _location: i32) {}
+
+/// See [`setup_parser_errposition_callback`].
+pub fn cancel_parser_errposition_callback() {}
+
+/// `transformContainerType(containerType, containerTypmod)` (parse_node.c) —
+/// identify the actual container type for a subscripting operation, smashing any
+/// domain to its base type and treating `int2vector`/`oidvector` as domains over
+/// `int2[]`/`oid[]`.
+pub fn transformContainerType(
+    container_type: &mut Oid,
+    container_typmod: &mut i32,
+) -> PgResult<()> {
+    // *containerType = getBaseTypeAndTypmod(*containerType, containerTypmod);
+    let (base, typmod) = lsyscache::get_base_type_and_typmod::call(*container_type)?;
+    *container_type = base;
+    *container_typmod = typmod;
+
+    // int2vector / oidvector are treated as domains over int2[] / oid[].
+    if *container_type == INT2VECTOROID {
+        *container_type = INT2ARRAYOID;
+    } else if *container_type == OIDVECTOROID {
+        *container_type = OIDARRAYOID;
+    }
+    Ok(())
+}
+
+/// `transformContainerSubscripts(pstate, containerBase, containerType,
+/// containerTypMod, indirection, isAssignment)` (parse_node.c) — transform
+/// container (array, etc) subscripting into a `SubscriptingRef`.
+pub fn transformContainerSubscripts<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'mcx>,
+    container_base: Expr,
+    mut container_type: Oid,
+    mut container_typmod: i32,
+    indirection: &[A_Indices<'mcx>],
+    is_assignment: bool,
+) -> PgResult<SubscriptingRef> {
+    // Determine the actual container type, smashing any domain. In the
+    // assignment case the caller already did this.
+    if !is_assignment {
+        transformContainerType(&mut container_type, &mut container_typmod)?;
+    }
+
+    // Verify that the container type is subscriptable, and get its support
+    // functions and typelem.
+    let routines = lsyscache::get_subscripting_routines::call(container_type)?;
+    let element_type = match routines {
+        Some((_sbsroutines, element_type)) => element_type,
+        None => {
+            // ereport(ERROR, DATATYPE_MISMATCH, "cannot subscript type %s ...")
+            let tname =
+                backend_utils_adt_format_type::format_type_be_owned(container_type)?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(alloc::format!(
+                    "cannot subscript type {} because it does not support subscripting",
+                    tname
+                ))
+                .errposition(parser_errposition(
+                    pstate,
+                    expr_location(Some(&container_base))?,
+                ))
+                .into_error());
+        }
+    };
+
+    // Detect whether any of the indirection items are slice specifiers.
+    let mut is_slice = false;
+    for ai in indirection.iter() {
+        if ai.is_slice {
+            is_slice = true;
+            break;
+        }
+    }
+
+    // Ready to build the SubscriptingRef node.
+    let sbsref = SubscriptingRef {
+        refcontainertype: container_type,
+        refelemtype: element_type,
+        // refrestype is to be set by container-specific logic.
+        refrestype: InvalidOid,
+        reftypmod: container_typmod,
+        // refcollid will be set by parse_collate.c.
+        refcollid: InvalidOid,
+        // refupperindexpr, reflowerindexpr are set by container logic.
+        refupperindexpr: Vec::new(),
+        reflowerindexpr: Vec::new(),
+        refexpr: Some(alloc::boxed::Box::new(container_base)),
+        // caller will fill if it's an assignment.
+        refassgnexpr: None,
+    };
+
+    // Call the container-type-specific logic (sbsroutines->transform) to
+    // transform the subscripts and determine the subscripting result type. The
+    // per-type subscript handler is unported — reach it through its outward seam.
+    let sbsref = backend_parser_small1_seams::subscripting_transform::call(
+        mcx,
+        sbsref,
+        indirection,
+        pstate,
+        is_slice,
+        is_assignment,
+    )?;
+
+    // Verify we got a valid type.
+    if !OidIsValid(sbsref.refrestype) {
+        let tname = backend_utils_adt_format_type::format_type_be_owned(container_type)?;
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(alloc::format!(
+                "cannot subscript type {} because it does not support subscripting",
+                tname
+            ))
+            .into_error());
+    }
+
+    Ok(sbsref)
+}
+
+/// `make_const(pstate, aconst)` (parse_node.c) — convert an `A_Const` grammar
+/// node to a `Const` node of the "natural" type for the constant.
+///
+/// The integer / float-fits-int / boolean / NULL arms are pure. The string,
+/// bitstring and numeric (oversize-float) arms call `DirectFunctionCall` of
+/// `numeric_in` / `bit_in` / `CStringGetDatum` which produce a by-reference
+/// `Datum` — that by-reference Datum bridge is unported workspace-wide (no
+/// pointer lane on the canonical `Datum`), so those arms mirror-PG-and-panic.
+///
+/// Takes `mcx` explicitly: C's `make_const` allocates the `Const` in the
+/// caller's current context; the owned `ParseState` carries no arena field.
+pub fn make_const<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &ParseState<'mcx>,
+    aconst: &A_Const<'mcx>,
+) -> PgResult<Const> {
+    if aconst.isnull {
+        // return a null const: makeConst(UNKNOWNOID, -1, InvalidOid, -2,
+        //   (Datum) 0, true, false); con->location = aconst->location;
+        return makeConst(mcx, UNKNOWNOID, -1, InvalidOid, -2, Datum::from_usize(0), true, false);
+    }
+
+    let val_node = aconst
+        .val
+        .as_deref()
+        .expect("A_Const.val present when !isnull");
+
+    let (val, typeid, typelen, typebyval): (Datum<'mcx>, Oid, i32, bool) = match val_node {
+        Node::Integer(i) => {
+            // val = Int32GetDatum(intVal(&aconst->val));
+            (Datum::from_i32(i.ival), INT4OID, 4, true)
+        }
+        Node::Float(f) => {
+            // could be an oversize integer as well as a float ...
+            // val64 = pg_strtoint64_safe(fval, &escontext);
+            match pg_strtoint64_safe(f.fval.as_str()) {
+                Some(val64) => {
+                    // It might actually fit in int32.
+                    let val32 = val64 as i32;
+                    if val64 == val32 as i64 {
+                        (Datum::from_i32(val32), INT4OID, 4, true)
+                    } else {
+                        (Datum::from_i64(val64), INT8OID, 8, FLOAT8PASSBYVAL != 0)
+                    }
+                }
+                None => {
+                    // numeric_in() via DirectFunctionCall3 returns a by-ref Datum.
+                    panic!(
+                        "make_const: T_Float numeric arm calls DirectFunctionCall3(numeric_in) \
+                         returning a by-reference Datum (numeric varlena); the by-reference \
+                         Datum bridge is unported workspace-wide (parse_node.c:418)"
+                    );
+                }
+            }
+        }
+        Node::Boolean(b) => {
+            // val = BoolGetDatum(boolVal(&aconst->val));
+            (Datum::from_bool(b.boolval), BOOLOID, 1, true)
+        }
+        Node::String(_s) => {
+            // val = CStringGetDatum(strVal(&aconst->val)); UNKNOWN is cstring-like.
+            // CStringGetDatum yields a by-reference (cstring pointer) Datum.
+            panic!(
+                "make_const: T_String arm builds an UNKNOWN const from \
+                 CStringGetDatum(strVal), a by-reference (cstring pointer) Datum; \
+                 the by-reference Datum bridge is unported workspace-wide \
+                 (parse_node.c:445)"
+            );
+        }
+        Node::BitString(_b) => {
+            // bit_in() via DirectFunctionCall3 returns a by-ref Datum.
+            panic!(
+                "make_const: T_BitString arm calls DirectFunctionCall3(bit_in) \
+                 returning a by-reference Datum (bit varlena); the by-reference \
+                 Datum bridge is unported workspace-wide (parse_node.c:455)"
+            );
+        }
+        other => {
+            // elog(ERROR, "unrecognized node type: %d", nodeTag)
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg_internal(alloc::format!(
+                    "unrecognized node type: {}",
+                    other.node_tag().0
+                ))
+                .into_error());
+        }
+    };
+
+    // Reference the OID constants only the (currently-panicking) by-ref arms
+    // would use, so the unused-import lint stays quiet without dead `use`s.
+    let _ = (BITOID, NUMERICOID);
+
+    // con = makeConst(typeid, -1, InvalidOid, typelen, val, false, typebyval);
+    // con->location = aconst->location;  (location not modeled on Const)
+    makeConst(mcx, typeid, -1, InvalidOid, typelen, val, false, typebyval)
+}
+
+/// `pg_strtoint64_safe(str, escontext)` (numutils.c) — parse an integer that may
+/// overflow `int64`; `None` on any (soft) parse failure (the C tests
+/// `escontext.error_occurred`).
+fn pg_strtoint64_safe(s: &str) -> Option<i64> {
+    let mut escontext = SoftErrorContext::new(false);
+    match backend_utils_adt_numutils::pg_strtoint64_safe(s, Some(&mut escontext)) {
+        Ok(v) if !escontext.error_occurred() => Some(v),
+        _ => None,
+    }
+}
+
+// ===========================================================================
+// parse_param.c (F2: fixed parameters + read-only post-analysis checks)
+// ===========================================================================
+
+/// `FixedParamState` (parse_param.c) — the fixed-parameter hook's reference
+/// state: a fixed list of parameter type OIDs.
+#[derive(Clone)]
+pub struct FixedParamState<'a> {
+    /// `const Oid *paramTypes` — array of parameter type OIDs.
+    pub param_types: &'a [Oid],
+}
+
+/// `setup_parse_fixed_parameters(pstate, paramTypes, numParams)` (parse_param.c)
+/// — set up to process a query referencing a fixed list of parameter types.
+///
+/// C stores a `FixedParamState *` in `pstate->p_ref_hook_state` and installs
+/// `fixed_paramref_hook`. The owned model returns the carrier; the caller drives
+/// the hook with it (see [`fixed_paramref_hook`]) since the owned `ParseState`
+/// hook fields take a bare `fn` and the ref-hook state has no typed home.
+pub fn setup_parse_fixed_parameters(param_types: &[Oid]) -> FixedParamState<'_> {
+    FixedParamState { param_types }
+}
+
+/// `fixed_paramref_hook(pstate, pref)` (parse_param.c) — transform a `ParamRef`
+/// using fixed parameter types.
+pub fn fixed_paramref_hook<'mcx>(
+    pstate: &ParseState<'mcx>,
+    parstate: &FixedParamState<'_>,
+    pref: &ParamRef,
+) -> PgResult<Param> {
+    let paramno = pref.number;
+
+    // Check parameter number is valid.
+    if paramno <= 0
+        || paramno as usize > parstate.param_types.len()
+        || !OidIsValid(parstate.param_types[(paramno - 1) as usize])
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_PARAMETER)
+            .errmsg(alloc::format!("there is no parameter ${}", paramno))
+            .errposition(parser_errposition(pstate, pref.location))
+            .into_error());
+    }
+
+    let paramtype = parstate.param_types[(paramno - 1) as usize];
+    Ok(Param {
+        paramkind: PARAM_EXTERN,
+        paramid: paramno,
+        paramtype,
+        paramtypmod: -1,
+        paramcollid: lsyscache::get_typcollation::call(paramtype)?,
+        // location: pref->location — not modeled on Param.
+    })
+}
+
+/// `check_variable_parameters(pstate, query)` (parse_param.c, F3) — verify
+/// consistent variable-parameter type assignment after parsing.
+///
+/// Reads through the `VarParamState` carrier that aliases the caller's mutable
+/// `Oid *paramTypes` / `int *numParams`. That carrier is the F3 keystone — this
+/// mirror-PG-and-panics until the `ParamHookState` aliasing carrier lands.
+pub fn check_variable_parameters(_pstate: &ParseState<'_>, _query: &Query<'_>) -> PgResult<()> {
+    panic!(
+        "check_variable_parameters reads a VarParamState aliasing the caller's \
+         mutable Oid* paramTypes / int* numParams; the variable-parameter (F3) \
+         ParamHookState carrier keystone is not built (parse_param.c:269)"
+    )
+}
+
+/// `query_contains_extern_params(query)` (parse_param.c) — true if a
+/// fully-parsed query tree contains any `PARAM_EXTERN` `Param`.
+pub fn query_contains_extern_params(query: &Query<'_>) -> bool {
+    query_contains_extern_params_walker_query(query)
+}
+
+/// `query_contains_extern_params_walker(node, context)` (parse_param.c, static)
+/// — over a `Node`. Returns true to abort the walk (found one).
+fn query_contains_extern_params_walker(node: &Node<'_>) -> bool {
+    if let Some(param) = node_as_param(node) {
+        // if (param->paramkind == PARAM_EXTERN) return true;
+        return param.paramkind == PARAM_EXTERN;
+    }
+    if let Some(q) = node_as_query(node) {
+        // Recurse into RTE subquery or not-yet-planned sublink subquery.
+        return query_contains_extern_params_walker_query(q);
+    }
+    backend_nodes_core::node_walker::expression_tree_walker(
+        node,
+        &mut query_contains_extern_params_walker,
+    )
+}
+
+/// The `query_tree_walker(query, query_contains_extern_params_walker, ...)`
+/// entry from a `Query`.
+fn query_contains_extern_params_walker_query(query: &Query<'_>) -> bool {
+    backend_nodes_core::node_walker::query_tree_walker(
+        query,
+        &mut query_contains_extern_params_walker,
+        0,
+    )
+}
+
+/// `IsA(node, Param)` projection over the `Node` universe.
+fn node_as_param<'a>(node: &'a Node<'_>) -> Option<&'a Param> {
+    match node {
+        Node::Expr(Expr::Param(p)) => Some(p),
+        _ => None,
+    }
+}
+
+/// `IsA(node, Query)` projection over the `Node` universe.
+fn node_as_query<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Query<'mcx>> {
+    match node {
+        Node::Query(q) => Some(q),
+        _ => None,
+    }
+}
+
+// ===========================================================================
+// parse_merge.c — transformMergeStmt (sibling parser deps unported)
+// ===========================================================================
+
+/// `transformMergeStmt(pstate, stmt)` (parse_merge.c) — analyze a MERGE
+/// statement into a `Query`.
+///
+/// Its body orchestrates `transformFromClause` / `setTargetTable` /
+/// `transformWhereClause` / `transformTargetList` / `transformExpr` and the CTE
+/// machinery — every one of those owners (parse_clause.c, parse_relation.c,
+/// parse_target.c, parse_expr.c's full path, analyze.c) is unported. Faithful
+/// mirror-PG-and-panic until that sibling parser layer lands.
+pub fn transformMergeStmt() -> PgResult<()> {
+    panic!(
+        "transformMergeStmt (parse_merge.c) orchestrates the unported sibling \
+         parser layer (parse_clause/parse_relation/parse_target/analyze); \
+         mirror-PG-and-panic until those owners land"
+    )
+}
+
+// ===========================================================================
+// Seam installation
+// ===========================================================================
+
+/// Convert the infallible C `parser_errposition` into the seam's `PgResult<i32>`
+/// contract (the C never errors here, so this always succeeds).
+fn parser_errposition_seam(pstate: &ParseState<'_>, location: i32) -> PgResult<i32> {
+    Ok(parser_errposition(pstate, location))
+}
+
+/// Install this unit's inward seams.
+pub fn init_seams() {
+    backend_parser_small1_seams::parser_errposition::set(parser_errposition_seam);
+    backend_parser_scansup_seams::truncate_identifier::set(truncate_identifier);
+    backend_parser_analyze_seams::make_parsestate::set(make_parsestate);
+}
+
+#[cfg(test)]
+mod tests;

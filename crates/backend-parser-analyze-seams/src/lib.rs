@@ -70,11 +70,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `make_parsestate(NULL)` (parser/parse_node.c) — a fresh ParseState. The
-    /// EXPLAIN-EXECUTE driver builds one only to carry `p_sourcetext`; this
-    /// returns the source-text-bearing minimal state. Allocates.
+    /// `make_parsestate(parentParseState)` (parser/parse_node.c) — allocate and
+    /// initialize a new `ParseState`. `palloc0` image with the two nonzero
+    /// starts (`p_next_resno = 1`, `p_resolve_unknowns = true`); when `parent`
+    /// is `Some`, the source text, the five parser hooks (+ ref-hook state), and
+    /// the query environment are copied from it. `None` is the C `NULL`. The
+    /// EXPLAIN-EXECUTE driver builds a top-level state (`None` parent) and then
+    /// sets `p_sourcetext` itself. Allocates.
     pub fn make_parsestate<'mcx>(
         mcx: Mcx<'mcx>,
-        source_text: &str,
+        parent: Option<&types_nodes::parsestmt::ParseState<'mcx>>,
     ) -> PgResult<mcx::PgBox<'mcx, types_nodes::parsestmt::ParseState<'mcx>>>
 );

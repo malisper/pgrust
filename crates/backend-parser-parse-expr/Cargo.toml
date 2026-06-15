@@ -27,6 +27,7 @@ backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" 
 # Outward dependency seams (catalog / cache / sibling-parser callees).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 
 # Merged sibling owners called directly (cycle-free).
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
