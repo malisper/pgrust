@@ -1428,6 +1428,8 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-scan",
+ "backend-access-brin-validate",
+ "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
@@ -7804,6 +7806,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-init-subselect-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7822,6 +7833,37 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-allpaths",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -9685,6 +9727,20 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-replication-logical-reorderbuffer"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-reorderbuffer-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-snapshot",
  "types-storage",
  "types-tuple",
 ]

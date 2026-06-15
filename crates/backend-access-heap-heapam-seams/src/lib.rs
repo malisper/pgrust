@@ -17,7 +17,7 @@ use types_core::primitive::{OffsetNumber, TransactionId};
 use types_nbtree::TmIndexDeleteOp;
 use types_snapshot::SnapshotData;
 use types_storage::Buffer;
-use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
 use types_core::xact::CommandId;
 use types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
@@ -190,8 +190,13 @@ pub struct HotSearchResult<'mcx> {
     pub found: bool,
     /// C's updated `*tid` (only meaningful when `found`).
     pub tid: ItemPointerData,
-    /// C's `*heapTuple` output (only meaningful when `found`).
-    pub heap_tuple: HeapTupleData<'mcx>,
+    /// C's `*heapTuple` output — the materialized on-page tuple (header +
+    /// user-data area) as a [`FormedTuple`], so the caller can store it into a
+    /// `BufferHeapTupleTableSlot` via `ExecStoreBufferHeapTuple`. `None` is the
+    /// C "not found" sentinel (`t_data == NULL`); on a found match it is
+    /// `Some`. C leaves `*heapTuple->t_data` aliasing the still-pinned page; the
+    /// owned model materializes the full tuple while the pin is held.
+    pub heap_tuple: Option<FormedTuple<'mcx>>,
     /// C's `*all_dead` output, when the caller requested it (`all_dead != NULL`).
     pub all_dead: Option<bool>,
 }
@@ -205,9 +210,14 @@ pub struct HeapFetchResult<'mcx> {
     /// C's `*userbuf` — the buffer pinned (and, on success, holding the tuple).
     /// `InvalidBuffer` when the page could not be read.
     pub userbuf: Buffer,
-    /// C's `*tuple` — the filled `HeapTupleData` (t_self / t_data / t_len /
-    /// t_tableOid). Only meaningful when `found`.
-    pub tuple: HeapTupleData<'mcx>,
+    /// C's `*tuple` — the materialized on-page tuple (header + user-data area)
+    /// as a [`FormedTuple`], so `heapam_fetch_row_version` can store it into a
+    /// `BufferHeapTupleTableSlot` via `ExecStorePinnedBufferHeapTuple`. `None`
+    /// is the C "not found" sentinel (`t_data == NULL`). On a `keep_buf` miss
+    /// the buffer is still pinned but `tuple` may be `Some` (the caller can
+    /// inspect the materialized tuple) — match C, which fills `*tuple` then
+    /// returns `false`.
+    pub tuple: Option<FormedTuple<'mcx>>,
 }
 
 seam_core::seam!(
