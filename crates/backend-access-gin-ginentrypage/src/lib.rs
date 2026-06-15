@@ -892,13 +892,14 @@ fn entryExecPlaceToPage<'mcx>(
     bufmgr::mark_buffer_dirty::call(buf);
 
     if ws.want_wal {
-        // ginxlogInsertEntry { OffsetNumber offset; bool isDelete; char tuple[]; }
-        // offsetof(ginxlogInsertEntry, tuple): { bool(1) OffsetNumber(2) pad(1) }
-        // C struct order is { bool isDelete; OffsetNumber offset; char tuple[]; }
-        // — bool at 0, OffsetNumber at SHORTALIGN(1)==2, tuple at 4.
+        // ginxlogInsertEntry { OffsetNumber offset; bool isDelete; IndexTupleData tuple; }
+        // (ginxlog.h:57-62). Field layout: offset@[0..2] (OffsetNumber, 2 bytes),
+        // isDelete@[2] (bool, 1 byte), pad@[3], tuple@4 == offsetof(.., tuple).
+        // The redo reader reads data->offset then data->isDelete (ginxlog.c:73-86),
+        // so the header bytes must match this order exactly.
         let mut data = [0u8; 4];
-        data[0] = insertData.isDelete as u8;
-        data[2..4].copy_from_slice(&off.to_ne_bytes());
+        data[0..2].copy_from_slice(&off.to_ne_bytes());
+        data[2] = insertData.isDelete as u8;
 
         xlog_register_buffer(0, buf, REGBUF_STANDARD)?;
         xlog_register_buf_data(0, &data)?;

@@ -281,13 +281,14 @@ pub fn advance_transition_function<'mcx>(
     //   aggstate->curpertrans = NULL;
     //
     // FunctionCallInvoke + InitFunctionCallInfoData ARE ported (fmgr-core, #52)
-    // and a fastpath invoke seam exists. The genuine blocker is the per-trans
-    // fcinfo *carrier*: `AggStatePerTransData.transfn_fcinfo` (the args[]/isnull
-    // payload + the fcinfo->context back-reference to the AggState) is not yet
-    // modeled in types-nodes, and `ExecAggCopyTransValue` (the by-ref transValue
-    // reparent/copy) is owned by the not-yet-ported execExpr by-ref path. Until
-    // that fcinfo carrier + ExecAggCopyTransValue land, this path panics loudly
-    // (mirror-PG-and-panic).
+    // and the shared FunctionCallInfoBaseData now carries args[]/isnull/fncollation
+    // (#296). The genuine blocker is NOT the shared call frame but the nodeAgg-owned
+    // per-trans fcinfo *carrier* `AggStatePerTransData.transfn_fcinfo` (the
+    // long-lived per-trans args[]/isnull payload + the fcinfo->context back-reference
+    // to the AggState) which this crate does not yet model, plus
+    // `ExecAggCopyTransValue` (the by-ref transValue reparent/copy) owned by the
+    // not-yet-ported execExpr by-ref path. Until that per-trans fcinfo carrier +
+    // ExecAggCopyTransValue land, this path panics loudly (mirror-PG-and-panic).
     //
     //   if (!pertrans->transtypeByVal &&
     //       DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
@@ -718,27 +719,32 @@ fn pfree_datum(_d: types_tuple::backend_access_common_heaptuple::Datum<'_>) {
 }
 
 /// `pertrans->transfn.fn_strict` — whether the transition function is strict.
-/// `fn_strict` is part of the `FmgrInfo` the fmgr lookup fills in; the trimmed
-/// `FmgrInfo` here carries only the lookup key, so the strict flag must be read
-/// off the resolved fmgr info the fmgr owner produces.
+/// `FmgrInfo.fn_strict` IS modeled (fmgr #52); the blocker is reaching the
+/// resolved per-trans transfn FmgrInfo on the nodeAgg-owned `AggStatePerTransData`,
+/// which the unported `ExecInitAgg`/build_pertrans path has not yet populated.
 fn transfn_is_strict(pertrans: &AggStatePerTransData<'_>) -> bool {
     let _ = &pertrans.transfn;
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: pertrans->transfn.fn_strict \
-         comes from the resolved FmgrInfo, owned by the not-yet-ported fmgr unit; the \
-         trimmed FmgrInfo carries only fn_oid"
+        "backend-executor-nodeAgg::advance_transition_function: FmgrInfo.fn_strict is \
+         modeled (fmgr #52), but the per-trans transfn FmgrInfo \
+         (AggStatePerTransData.transfn) is not yet populated by the unported \
+         ExecInitAgg/build_pertrans path"
     );
 }
 
 /// `fcinfo->args[i].isnull` — the transfn call frame's argument null flag.
-/// The fcinfo args payload is part of the fmgr call frame, owned by the fmgr
-/// unit; the trimmed `FunctionCallInfoBaseData` does not carry `args` yet.
+/// The shared `FunctionCallInfoBaseData` now carries `args[]` (#296); the blocker
+/// is that this crate has not yet modeled the nodeAgg-owned *per-trans* call frame
+/// `AggStatePerTransData.transfn_fcinfo` as a populated args carrier — it is a
+/// long-lived per-trans frame set up by the unported `build_pertrans_for_aggref`
+/// / `ExecInitAgg` path, so there is no populated `args[]` here to read.
 fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, _i: i32) -> bool {
     let _ = pertrans.transfn_fcinfo.as_ref();
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: fcinfo->args[].isnull is part \
-         of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
-         FunctionCallInfoBaseData carries no args"
+        "backend-executor-nodeAgg::advance_transition_function: the shared call frame \
+         carries args[] (#296), but the nodeAgg-owned per-trans frame \
+         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
+         unported ExecInitAgg/build_pertrans path; nothing to read"
     );
 }
 
@@ -749,9 +755,10 @@ fn fcinfo_arg_value<'mcx>(
 ) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
     let _ = pertrans.transfn_fcinfo.as_ref();
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: fcinfo->args[].value is part \
-         of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
-         FunctionCallInfoBaseData carries no args"
+        "backend-executor-nodeAgg::advance_transition_function: the shared call frame \
+         carries args[] (#296), but the nodeAgg-owned per-trans frame \
+         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
+         unported ExecInitAgg/build_pertrans path; nothing to read"
     );
 }
 
@@ -765,9 +772,10 @@ fn fcinfo_set_arg(
 ) {
     let _ = pertrans.transfn_fcinfo.as_mut();
     panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate: writing fcinfo->args[] is part \
-         of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
-         FunctionCallInfoBaseData carries no args"
+        "backend-executor-nodeAgg::process_ordered_aggregate: the shared call frame \
+         carries args[] (#296), but the nodeAgg-owned per-trans frame \
+         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
+         unported ExecInitAgg/build_pertrans path; nothing to write into"
     );
 }
 

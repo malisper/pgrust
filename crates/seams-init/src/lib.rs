@@ -11,12 +11,16 @@ pub fn init_all() {
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
+    backend_access_common_next::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginget::init_seams();
+    backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
+    backend_access_gin_ginvacuum::init_seams();
     backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
@@ -1170,6 +1174,32 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
+        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable, now ported
+        // into backend-access-transam-xlogrecovery::pageread) reaches these
+        // still-unported owners on its streaming-source and stats legs:
+        //   * prefetcher_compute_stats — XLogPrefetcherComputeStats(prefetcher)
+        //     operates on the LIVE prefetcher instance the startup process owns;
+        //     that instance + InitWalRecovery allocation is the page-read holder
+        //     keystone (not yet landed), so the merged xlogprefetcher (stats-shmem
+        //     only) cannot install it without the held reader/prefetcher. Reached
+        //     only on the XLOG_FROM_STREAM no-data sleep path.
+        //   * walreceiverfuncs streaming control (wal_rcv_streaming /
+        //     xlog_shutdown_wal_rcv / request_xlog_streaming /
+        //     set+reset_install_xlog_file_segment_active /
+        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is unported
+        //     (the merged walreceiver bundle covers only walreceiver.c); these are
+        //     the sanctioned walreceiver-fetch panic legs of the standby state
+        //     machine, reachable only once recovery actually streams.
+        // All become real installs when walreceiverfuncs.c lands and the
+        // reader/prefetcher holder keystone is built. See DESIGN_DEBT.md.
+        ("backend_access_transam_xlogprefetcher", "prefetcher_compute_stats"),
+        ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
+        ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
+        ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),
+        ("backend_replication_walreceiverfuncs", "set_install_xlog_file_segment_active"),
+        ("backend_replication_walreceiverfuncs", "reset_install_xlog_file_segment_active"),
+        ("backend_replication_walreceiverfuncs", "get_wal_rcv_flush_rec_ptr_full"),
         // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
         // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
         // and extracts the single `TypeName` node. The owner of `raw_parser`
@@ -1231,13 +1261,28 @@ mod recurrence_guard {
         let mut i = 0;
         while i < src.len() {
             if i + needle.len() <= bytes.len() && &bytes[i..i + needle.len()] == needle {
-                // Skip to the first '{' and drop the balanced block.
+                // Scan forward to whichever comes first: a ';' (a block-less
+                // item DECL such as `#[cfg(test)] mod tests;`, which has no body
+                // to strip) or a '{' (an inline item with a balanced body to
+                // drop). Stopping at ';' first is essential: a bare module decl
+                // is terminated by ';' BEFORE the next item's '{', so naively
+                // scanning to the first '{' would erase the body of the NEXT
+                // item (e.g. `pub fn init_seams() {...}`) instead.
                 let mut j = i + needle.len();
-                while j < bytes.len() && bytes[j] as char != '{' {
+                while j < bytes.len()
+                    && bytes[j] as char != '{'
+                    && bytes[j] as char != ';'
+                {
                     j += 1;
                 }
                 if j >= bytes.len() {
                     break;
+                }
+                if bytes[j] as char == ';' {
+                    // Block-less decl: drop only the attribute + decl up to and
+                    // including the ';'. Nothing else to strip.
+                    i = j + 1;
+                    continue;
                 }
                 let mut depth = 0i32;
                 while j < bytes.len() {

@@ -190,12 +190,12 @@ fn SpGistPageGetFreeSpace(page: &[u8], n: usize) -> PgResult<usize> {
 
 /// `SGLT_GET_NEXTOFFSET(tup)` — low 14 bits of `t_info` (the uint16 @4).
 #[inline]
-fn lt_get_next_offset(tup: &[u8]) -> OffsetNumber {
+pub(crate) fn lt_get_next_offset(tup: &[u8]) -> OffsetNumber {
     u16::from_ne_bytes([tup[4], tup[5]]) & 0x3FFF
 }
 /// `SGLT_GET_HASNULLMASK(tup)` — bit 0x8000 of `t_info`.
 #[inline]
-fn lt_get_has_null_mask(tup: &[u8]) -> bool {
+pub(crate) fn lt_get_has_null_mask(tup: &[u8]) -> bool {
     u16::from_ne_bytes([tup[4], tup[5]]) & 0x8000 != 0
 }
 /// `SGLT_SET_NEXTOFFSET(tup, off)` — preserve the two high flag bits of `t_info`.
@@ -207,7 +207,7 @@ fn lt_set_next_offset(tup: &mut [u8], off: OffsetNumber) {
 }
 /// A leaf/dead tuple's `tupstate` (low 2 bits of the packed `bits` word @0).
 #[inline]
-fn lt_tupstate(tup: &[u8]) -> u32 {
+pub(crate) fn lt_tupstate(tup: &[u8]) -> u32 {
     u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]) & 0x3
 }
 /// A leaf/dead/inner tuple's `size`. For leaf/dead: `bits >> 2`. For an inner
@@ -226,17 +226,17 @@ fn it_size(tup: &[u8]) -> usize {
 }
 /// An inner tuple's `nNodes:13`.
 #[inline]
-fn it_n_nodes(tup: &[u8]) -> u32 {
+pub(crate) fn it_n_nodes(tup: &[u8]) -> u32 {
     (u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]) >> 3) & 0x1FFF
 }
 /// An inner tuple's `prefixSize:16`.
 #[inline]
-fn it_prefix_size(tup: &[u8]) -> usize {
+pub(crate) fn it_prefix_size(tup: &[u8]) -> usize {
     ((u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]) >> 16) & 0xFFFF) as usize
 }
 /// An inner tuple's `allTheSame:1`.
 #[inline]
-fn it_all_the_same(tup: &[u8]) -> bool {
+pub(crate) fn it_all_the_same(tup: &[u8]) -> bool {
     (u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]) >> 2) & 0x1 != 0
 }
 /// Set an inner tuple's `allTheSame:1` bit (on the on-disk image).
@@ -255,7 +255,7 @@ fn it_node_ptr_off(tup: &[u8]) -> usize {
 
 /// `SGITDATUM(x, s)` (spgist_private.h): the prefix datum of an inner tuple, or
 /// `(Datum) 0` if it has no prefix.
-fn it_datum<'mcx>(
+pub(crate) fn it_datum<'mcx>(
     mcx: Mcx<'mcx>,
     state: &SpGistState<'mcx>,
     tup: &[u8],
@@ -269,7 +269,7 @@ fn it_datum<'mcx>(
 
 /// `SGLTDATUM(x, s)` (spgist_private.h): the (single) key datum of a leaf tuple,
 /// `fetch_att(SGLTDATAPTR, attLeafType.attbyval, attLeafType.attlen)`.
-fn lt_datum<'mcx>(
+pub(crate) fn lt_datum<'mcx>(
     mcx: Mcx<'mcx>,
     state: &SpGistState<'mcx>,
     tup: &[u8],
@@ -309,7 +309,7 @@ fn fetch_att<'mcx>(
 // ===========================================================================
 
 /// `SGITITERATE` — collect the byte offset of each node tuple inside `inner`.
-fn node_offsets(inner: &[u8]) -> Vec<usize> {
+pub(crate) fn node_offsets(inner: &[u8]) -> Vec<usize> {
     let n = it_n_nodes(inner) as usize;
     let mut offs = Vec::with_capacity(n);
     let mut off = it_node_ptr_off(inner);
@@ -321,7 +321,7 @@ fn node_offsets(inner: &[u8]) -> Vec<usize> {
 }
 
 /// Read a node tuple's `t_tid` (the 6-byte ItemPointerData @0).
-fn node_t_tid(node: &[u8]) -> ItemPointerData {
+pub(crate) fn node_t_tid(node: &[u8]) -> ItemPointerData {
     ItemPointerData {
         ip_blkid: types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([node[0], node[1]]),

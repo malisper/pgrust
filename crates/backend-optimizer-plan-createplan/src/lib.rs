@@ -35,6 +35,16 @@
 //! [`Node<'mcx>`](types_nodes::nodes::Node) allocated in `mcx`, so the dispatch
 //! threads `Mcx<'mcx>` exactly where the C `palloc`s the new `Plan`.
 //!
+//! Because [`PlannerInfo`] is lifetime-free it cannot hold the `'mcx` query /
+//! range-table values, so [`create_plan`] / [`create_plan_recurse`] take
+//! `run: &PlannerRun<'mcx>` as an additive parameter alongside
+//! `&mut PlannerInfo` and forward it to every converter seam. This is the
+//! safe-Rust rendering of `root` reaching `simple_rte_array`: a scan converter
+//! resolves its `RangeTblEntry` with
+//! [`planner_rt_fetch`](types_pathnodes::planner_run::planner_rt_fetch)`(run,
+//! root, scanrelid)`, exactly as C dereferences `planner_rt_fetch(scanrelid,
+//! root)`.
+//!
 //! ## Scope (F1)
 //!
 //! Only the dispatch + the four helpers above. `create_scan_plan` /
@@ -56,6 +66,7 @@ use types_error::{PgError, PgResult};
 use types_nodes::nodeindexscan::Plan;
 use types_nodes::nodes::{Node, NodeTag};
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, Path, PathId, PathNode, PlannerInfo, RinfoId};
 
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
@@ -377,6 +388,7 @@ fn replace_nestloop_params_mutator(
 pub fn create_plan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     best_path: PathId,
 ) -> PgResult<Node<'mcx>> {
     // Assert(root->plan_params == NIL);
@@ -387,7 +399,7 @@ pub fn create_plan<'mcx>(
     root.curOuterParams = Vec::new();
 
     // Recursively process the path tree, demanding the correct tlist result.
-    let mut plan = create_plan_recurse(mcx, root, best_path, CP_EXACT_TLIST)?;
+    let mut plan = create_plan_recurse(mcx, root, run, best_path, CP_EXACT_TLIST)?;
 
     // Make sure the topmost plan node's targetlist exposes the original column
     // names and other decorative info. Targetlists generated within the planner
@@ -424,6 +436,7 @@ pub fn create_plan<'mcx>(
 pub fn create_plan_recurse<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     best_path: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
@@ -436,52 +449,52 @@ pub fn create_plan_recurse<'mcx>(
         T_SeqScan | T_SampleScan | T_IndexScan | T_IndexOnlyScan | T_BitmapHeapScan | T_TidScan
         | T_TidRangeScan | T_SubqueryScan | T_FunctionScan | T_TableFuncScan | T_ValuesScan
         | T_CteScan | T_WorkTableScan | T_NamedTuplestoreScan | T_ForeignScan | T_CustomScan => {
-            cp_seam::create_scan_plan::call(mcx, root, best_path, flags)
+            cp_seam::create_scan_plan::call(mcx, root, run, best_path, flags)
         }
         T_HashJoin | T_MergeJoin | T_NestLoop => {
-            cp_seam::create_join_plan::call(mcx, root, best_path)
+            cp_seam::create_join_plan::call(mcx, root, run, best_path)
         }
-        T_Append => cp_seam::create_append_plan::call(mcx, root, best_path, flags),
-        T_MergeAppend => cp_seam::create_merge_append_plan::call(mcx, root, best_path, flags),
+        T_Append => cp_seam::create_append_plan::call(mcx, root, run, best_path, flags),
+        T_MergeAppend => cp_seam::create_merge_append_plan::call(mcx, root, run, best_path, flags),
         T_Result => {
             // IsA(best_path, ProjectionPath) / MinMaxAggPath / GroupResultPath /
             // else simple RTE_RESULT base relation (Path).
             match root.path(best_path) {
                 PathNode::ProjectionPath(_) => {
-                    cp_seam::create_projection_plan::call(mcx, root, best_path, flags)
+                    cp_seam::create_projection_plan::call(mcx, root, run, best_path, flags)
                 }
                 PathNode::MinMaxAggPath(_) => {
-                    cp_seam::create_minmaxagg_plan::call(mcx, root, best_path)
+                    cp_seam::create_minmaxagg_plan::call(mcx, root, run, best_path)
                 }
                 PathNode::GroupResultPath(_) => {
-                    cp_seam::create_group_result_plan::call(mcx, root, best_path)
+                    cp_seam::create_group_result_plan::call(mcx, root, run, best_path)
                 }
                 // Simple RTE_RESULT base relation — Assert(IsA(best_path, Path)).
-                _ => cp_seam::create_scan_plan::call(mcx, root, best_path, flags),
+                _ => cp_seam::create_scan_plan::call(mcx, root, run, best_path, flags),
             }
         }
-        T_ProjectSet => cp_seam::create_project_set_plan::call(mcx, root, best_path),
-        T_Material => cp_seam::create_material_plan::call(mcx, root, best_path, flags),
-        T_Memoize => cp_seam::create_memoize_plan::call(mcx, root, best_path, flags),
+        T_ProjectSet => cp_seam::create_project_set_plan::call(mcx, root, run, best_path),
+        T_Material => cp_seam::create_material_plan::call(mcx, root, run, best_path, flags),
+        T_Memoize => cp_seam::create_memoize_plan::call(mcx, root, run, best_path, flags),
         // IsA(best_path, UpperUniquePath) vs UniquePath — the sub-discrimination
         // is internal to the Unique family; route the whole T_Unique pathtype.
-        T_Unique => cp_seam::create_unique_dispatch_plan::call(mcx, root, best_path, flags),
-        T_Gather => cp_seam::create_gather_plan::call(mcx, root, best_path),
-        T_Sort => cp_seam::create_sort_plan::call(mcx, root, best_path, flags),
+        T_Unique => cp_seam::create_unique_dispatch_plan::call(mcx, root, run, best_path, flags),
+        T_Gather => cp_seam::create_gather_plan::call(mcx, root, run, best_path),
+        T_Sort => cp_seam::create_sort_plan::call(mcx, root, run, best_path, flags),
         T_IncrementalSort => {
-            cp_seam::create_incrementalsort_plan::call(mcx, root, best_path, flags)
+            cp_seam::create_incrementalsort_plan::call(mcx, root, run, best_path, flags)
         }
-        T_Group => cp_seam::create_group_plan::call(mcx, root, best_path),
+        T_Group => cp_seam::create_group_plan::call(mcx, root, run, best_path),
         // IsA(best_path, GroupingSetsPath) vs AggPath — internal to the Agg
         // family; route the whole T_Agg pathtype.
-        T_Agg => cp_seam::create_agg_dispatch_plan::call(mcx, root, best_path),
-        T_WindowAgg => cp_seam::create_windowagg_plan::call(mcx, root, best_path),
-        T_SetOp => cp_seam::create_setop_plan::call(mcx, root, best_path, flags),
-        T_RecursiveUnion => cp_seam::create_recursiveunion_plan::call(mcx, root, best_path),
-        T_LockRows => cp_seam::create_lockrows_plan::call(mcx, root, best_path, flags),
-        T_ModifyTable => cp_seam::create_modifytable_plan::call(mcx, root, best_path),
-        T_Limit => cp_seam::create_limit_plan::call(mcx, root, best_path, flags),
-        T_GatherMerge => cp_seam::create_gather_merge_plan::call(mcx, root, best_path),
+        T_Agg => cp_seam::create_agg_dispatch_plan::call(mcx, root, run, best_path),
+        T_WindowAgg => cp_seam::create_windowagg_plan::call(mcx, root, run, best_path),
+        T_SetOp => cp_seam::create_setop_plan::call(mcx, root, run, best_path, flags),
+        T_RecursiveUnion => cp_seam::create_recursiveunion_plan::call(mcx, root, run, best_path),
+        T_LockRows => cp_seam::create_lockrows_plan::call(mcx, root, run, best_path, flags),
+        T_ModifyTable => cp_seam::create_modifytable_plan::call(mcx, root, run, best_path),
+        T_Limit => cp_seam::create_limit_plan::call(mcx, root, run, best_path, flags),
+        T_GatherMerge => cp_seam::create_gather_merge_plan::call(mcx, root, run, best_path),
         other => Err(PgError::error(alloc::format!(
             "unrecognized node type: {}",
             other.0

@@ -14,6 +14,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
+# bufmgr (bufmgr.c) — ReleaseBuffer for posting-tree pins in ginFreeScanKeys.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 types-tuple = { path = "../types-tuple" }
 types-scan = { path = "../types-scan" }
 types-gin = { path = "../types-gin" }

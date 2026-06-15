@@ -375,6 +375,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `close(fd)` — close a bare kernel fd (the `BasicOpenFile` return value,
+    /// e.g. the recovery WAL segment fd). Returns 0 on success or `-errno`. The
+    /// recovery page-read driver (`XLogPageRead`) calls `close()` on its
+    /// `readFile` directly, not the VFD layer.
+    pub fn close_fd(fd: i32) -> i32
+);
+
+seam_core::seam!(
     /// `void fsync_fname(const char *fname, bool isdir)` (`fd.c`). Errors are
     /// handled internally at `data_sync_elevel(ERROR)`, carried on `Err`.
     pub fn fsync_fname(fname: &str, isdir: bool) -> types_error::PgResult<()>

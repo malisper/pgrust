@@ -100,6 +100,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `KnownAssignedTransactionIdsIdleMaintenance()` (procarray.c) — compress
+    /// the KnownAssignedXids array during idle periods; called by the recovery
+    /// page-read driver while waiting for WAL. (Defined in procarray.c.)
+    pub fn known_assigned_transaction_ids_idle_maintenance()
+);
+
+seam_core::seam!(
     /// `GetRunningTransactionData()` — C returns with `ProcArrayLock` and
     /// `XidGenLock` held and the caller releases them by hand. Here the
     /// owner acquires the locks, builds the snapshot, and runs `f` with both

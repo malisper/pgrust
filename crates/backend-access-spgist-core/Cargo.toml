@@ -69,8 +69,13 @@ backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 
 # --- spgdoinsert.c WAL-emit + dispatch deps ---
 
-# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert.
+# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert,
+# plus log_newpage_range for the spgbuild post-build WAL emit.
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# table-AM heap-scan provider (tableam.c): table_index_build_scan for spgbuild.
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+# bulk page writer (bulk_write.c): smgr_bulk_* for spgbuildempty.
+backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 # REGBUF_* flag constants + spgxlog record write-side serializers.
 types-wal = { path = "../types-wal" }
 types-xlog-records = { path = "../types-xlog-records" }
@@ -94,5 +99,19 @@ backend-access-common-detoast-seams = { path = "../backend-access-common-detoast
 
 # Datum vocabulary for canonical per-attribute values.
 types-datum = { path = "../types-datum" }
+
+# --- spgscan.c scan-driver deps ---
+
+# Unified index AM vtable / scan descriptor + AmOpaque carrier (SPGIST_SCAN tag)
+# + IndexOrderByDistance + TIDBitmap.
+types-tableam = { path = "../types-tableam" }
+# The concrete TIDBitmap behind the amgetbitmap AmTIDBitmap payload.
+types-tidbitmap = { path = "../types-tidbitmap" }
+# The scan queue (pairingheap.c): SpGistSearchItem priority queue.
+backend-lib-pairingheap = { path = "../backend-lib-pairingheap" }
+# pgstat_count_index_scan (pgstat.c).
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+# tbm_add_tuples (tidbitmap.c).
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 
 [dev-dependencies]

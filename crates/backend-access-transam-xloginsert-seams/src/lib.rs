@@ -125,6 +125,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `log_newpage_range(rel, forknum, startblk, endblk, page_std)`
+    /// (xloginsert.c:1269) — WAL-log a `[startblk, endblk)` range of blocks in
+    /// relation `rel`'s `forknum` fork by writing a full-page image of every
+    /// non-empty page (batched into `XLR_MAX_BLOCK_ID`-page records). The index
+    /// AM build paths (`spgbuild`, etc.) use it to log a freshly built index
+    /// when it wrote no WAL during the build. `Err` carries the WAL insertion
+    /// `ereport(ERROR)`s.
+    pub fn log_newpage_range<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        forknum: ForkNumber,
+        startblk: BlockNumber,
+        endblk: BlockNumber,
+        page_std: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `XLogSaveBufferForHint(buffer, buffer_std)` (xloginsert.c:1064) — emit an
     /// `XLOG_FPI_FOR_HINT` full-page image of a buffer about to receive a
     /// hint-bit change, returning the record's end LSN (or `InvalidXLogRecPtr`

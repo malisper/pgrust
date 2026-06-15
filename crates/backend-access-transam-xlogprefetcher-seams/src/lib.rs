@@ -40,3 +40,10 @@ seam_core::seam!(
     /// message). `record == RecordRef(0)` is end-of-WAL / no record decoded.
     pub fn prefetcher_read_record() -> types_wal::xlogrecovery_carriers::ReadRecordResult
 );
+
+seam_core::seam!(
+    /// `XLogPrefetcherComputeStats(prefetcher)` (xlogprefetcher.c) — publish the
+    /// prefetcher's distance/depth gauges to shared memory before the recovery
+    /// driver sleeps waiting for streamed WAL.
+    pub fn prefetcher_compute_stats()
+);
