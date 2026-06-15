@@ -305,22 +305,68 @@ fn build_list_body(
     let mut ctlist: Vec<CtIdx> = Vec::new();
     let mut ordered = false;
 
-    // Run the catalog scan, populate ctlist with member handles each holding a
-    // temp refcount. A scan/relation error is mapped into the PG_CATCH return.
-    match scan_members(
-        cache_id,
-        cache_idx,
-        nkeys,
-        cc_reloid,
-        cc_indexoid,
-        cc_nbuckets,
-        cur_skey,
-        arguments,
-        &mut ctlist,
-        &mut ordered,
-    ) {
-        Ok(()) => {}
-        Err(err) => return Err((ctlist, err)),
+    // Scan the table for matching entries.  If an invalidation arrives
+    // mid-build, we loop back here to retry (C wraps the scan in
+    //   do { ... } while (in_progress_ent.dead); ).
+    loop {
+        // If we are retrying, release the temp refcounts on any items created on
+        // the previous iteration.  We dare not try to free them if they're now
+        // unreferenced, since an error while doing that would result in the
+        // PG_CATCH below doing extra refcount decrements.  Besides, we'll likely
+        // re-adopt those items in the next iteration, so it's not worth
+        // complicating matters to try to get rid of them.
+        //   foreach(ctlist_item, ctlist) {
+        //       ct = lfirst(ctlist_item);
+        //       Assert(ct->c_list == NULL);
+        //       Assert(ct->refcount > 0);
+        //       ct->refcount--;
+        //   }
+        if !ctlist.is_empty() {
+            with_arena(|arena| {
+                for &ct_idx in &ctlist {
+                    let ct = arena.caches[cache_idx.0].tuples[ct_idx.0]
+                        .as_mut()
+                        .expect("member tuple");
+                    assert!(ct.c_list.is_none());
+                    assert!(ct.refcount > 0);
+                    ct.refcount -= 1;
+                }
+            });
+        }
+        // Reset ctlist in preparation for new try; in_progress_ent.dead = false.
+        ctlist.clear();
+        with_arena(|arena| {
+            crate::graph_machinery::reset_in_progress_top_dead(arena);
+        });
+
+        // Run the catalog scan, populating ctlist with member handles each
+        // holding a temp refcount. A scan/relation error is mapped into the
+        // PG_CATCH return. (The repo's `scan_members` does table_open /
+        // beginscan / the loop / endscan / table_close per call, so a restart
+        // re-opens and re-scans the relation from scratch — the same observable
+        // "retry the whole scan" outcome as the C do/while.)
+        match scan_members(
+            cache_id,
+            cache_idx,
+            nkeys,
+            cc_reloid,
+            cc_indexoid,
+            cc_nbuckets,
+            cur_skey,
+            arguments,
+            &mut ctlist,
+            &mut ordered,
+        ) {
+            Ok(()) => {}
+            Err(err) => return Err((ctlist, err)),
+        }
+
+        // } while (in_progress_ent.dead);  — restart if a concurrent
+        // invalidation marked the in-progress list build dead during the scan.
+        let dead = with_arena(|arena| crate::graph_machinery::in_progress_top_dead(arena));
+        if !dead {
+            break;
+        }
     }
 
     // Now we can build the CatCList entry.  First we need a dummy tuple
@@ -474,13 +520,30 @@ fn scan_members(
     // ordered = (scandesc->irel != NULL);
     *ordered = index_ok;
 
-    // while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
+    // while (HeapTupleIsValid(ntp = systable_getnext(scandesc)) &&
+    //        !in_progress_ent.dead)
+    //
+    // The `&& !in_progress_ent.dead` guard terminates the scan early if a
+    // concurrent invalidation marked the in-progress list build dead (e.g. via
+    // ResetCatalogCache / CatCacheInvalidate marking the top in-progress entry,
+    // or CatalogCacheCreateEntry failing because the tuple went stale during
+    // toast access). The caller's do/while then restarts the scan from scratch.
     loop {
         let ntp = genam::systable_getnext::call(scan_mcx, guard.desc_mut())?;
         let ntp = match ntp {
             Some(t) => t,
             None => break,
         };
+
+        // `&& !in_progress_ent.dead`: the C `while` short-circuits — getnext is
+        // evaluated first, then the dead flag is checked, and a dead in-progress
+        // entry exits the loop *without* processing this tuple. (The flag is the
+        // top of the create-in-progress stack we pushed in
+        // `search_cat_cache_list_miss`; a concurrent invalidation — including a
+        // tuple going stale during toast access mid-getnext — marks it.)
+        if with_arena(|arena| crate::graph_machinery::in_progress_top_dead(arena)) {
+            break;
+        }
 
         // Build the carrier the entry-reuse helper consumes (the C inline
         // CatalogCacheComputeTupleHashValue + key extraction).

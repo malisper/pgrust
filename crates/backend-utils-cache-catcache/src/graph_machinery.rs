@@ -697,6 +697,26 @@ pub(crate) fn push_in_progress(
     arena.in_progress.len()
 }
 
+/// Peek at the top create-in-progress entry's `dead` flag (C reads
+/// `in_progress_ent.dead`). The top entry is the one the current build pushed.
+pub(crate) fn in_progress_top_dead(arena: &CatCacheArena) -> bool {
+    arena
+        .in_progress
+        .last()
+        .expect("in_progress_top_dead: empty in-progress stack")
+        .dead
+}
+
+/// Clear the top create-in-progress entry's `dead` flag (C
+/// `in_progress_ent.dead = false;` at the top of each scan retry).
+pub(crate) fn reset_in_progress_top_dead(arena: &mut CatCacheArena) {
+    arena
+        .in_progress
+        .last_mut()
+        .expect("reset_in_progress_top_dead: empty in-progress stack")
+        .dead = false;
+}
+
 /// Pop the top create-in-progress entry, returning whether it was marked dead.
 pub(crate) fn pop_in_progress(arena: &mut CatCacheArena) -> bool {
     /* C asserts `catcache_in_progress_stack == &in_progress_ent` before pop. */
