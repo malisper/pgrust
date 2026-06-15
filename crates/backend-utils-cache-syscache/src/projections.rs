@@ -14,12 +14,19 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_datum::Datum as KeyDatum;
 
 use crate::{
-    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList,
-    SearchSysCacheList1, SysCacheGetAttr, SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM,
-    ATTNUM, CASTSOURCETARGET, CLAOID, FOREIGNDATAWRAPPERNAME, FOREIGNDATAWRAPPEROID,
-    FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, PROCOID, RELOID, USERMAPPINGOID,
-    USERMAPPINGUSERSERVER,
+    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheAttName,
+    SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
+    SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPERNAME,
+    FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGOID,
+    PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
+use backend_utils_cache_lsyscache_seams as lsyscache_seams;
+use types_core::AttrNumber;
+use types_fmgr::LangInfo;
+use backend_utils_cache_syscache_seams::{PgClassFullForm, PgProcForm};
+use types_cache::AuthIdRow;
+use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use backend_nodes_read_seams as nodes_read_seams;
@@ -626,4 +633,501 @@ pub(crate) fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Opti
     };
     ReleaseSysCache(tup);
     Ok(Some(row))
+}
+
+/* ---------------------------------------------------------------------------
+ * Additional fixed-width / name projection seams (lsyscache.c, fmgr.c,
+ * superuser.c, acl.c, ri_triggers.c, relcache.c, tupdesc.c, catalog.c
+ * consumers). Each mirrors the C `SearchSysCache*` + GETSTRUCT/SysCacheGetAttr
+ * + project + ReleaseSysCache pattern.
+ * ------------------------------------------------------------------------- */
+
+// `catalog/pg_class.h` attribute numbers (1-based; PG 18 column order).
+const Anum_pg_class_relname: i32 = 2;
+const Anum_pg_class_relnamespace: i32 = 3;
+const Anum_pg_class_reltype: i32 = 4;
+const Anum_pg_class_relowner: i32 = 6;
+const Anum_pg_class_relfilenode: i32 = 8;
+const Anum_pg_class_reltablespace: i32 = 9;
+const Anum_pg_class_relpages: i32 = 10;
+const Anum_pg_class_reltuples: i32 = 11;
+const Anum_pg_class_relallvisible: i32 = 12;
+const Anum_pg_class_reltoastrelid: i32 = 14;
+const Anum_pg_class_relhasindex: i32 = 15;
+const Anum_pg_class_relisshared: i32 = 16;
+const Anum_pg_class_relpersistence: i32 = 17;
+const Anum_pg_class_relkind: i32 = 18;
+const Anum_pg_class_relnatts: i32 = 19;
+const Anum_pg_class_relchecks: i32 = 20;
+const Anum_pg_class_relhasrules: i32 = 21;
+const Anum_pg_class_relhastriggers: i32 = 22;
+const Anum_pg_class_relhassubclass: i32 = 23;
+const Anum_pg_class_relrowsecurity: i32 = 24;
+const Anum_pg_class_relforcerowsecurity: i32 = 25;
+const Anum_pg_class_relispopulated: i32 = 26;
+const Anum_pg_class_relreplident: i32 = 27;
+const Anum_pg_class_relispartition: i32 = 28;
+const Anum_pg_class_relrewrite: i32 = 29;
+const Anum_pg_class_relfrozenxid: i32 = 30;
+const Anum_pg_class_relminmxid: i32 = 31;
+
+// `catalog/pg_type.h` attribute numbers.
+const Anum_pg_type_typlen: i32 = 5;
+const Anum_pg_type_typbyval: i32 = 6;
+const Anum_pg_type_typalign: i32 = 23;
+const Anum_pg_type_typstorage: i32 = 24;
+const Anum_pg_type_typcollation: i32 = 29;
+
+// `catalog/pg_proc.h` attribute numbers.
+const Anum_pg_proc_proname: i32 = 2;
+const Anum_pg_proc_pronamespace: i32 = 3;
+const Anum_pg_proc_provariadic: i32 = 8;
+const Anum_pg_proc_prosupport: i32 = 9;
+const Anum_pg_proc_prokind: i32 = 10;
+const Anum_pg_proc_proleakproof: i32 = 12;
+const Anum_pg_proc_proisstrict: i32 = 13;
+const Anum_pg_proc_proretset: i32 = 14;
+const Anum_pg_proc_provolatile: i32 = 15;
+const Anum_pg_proc_proparallel: i32 = 16;
+const Anum_pg_proc_pronargs: i32 = 17;
+const Anum_pg_proc_prorettype: i32 = 19;
+
+// `catalog/pg_authid.h` attribute numbers.
+const Anum_pg_authid_oid: i32 = 1;
+const Anum_pg_authid_rolname: i32 = 2;
+const Anum_pg_authid_rolsuper: i32 = 3;
+const Anum_pg_authid_rolcanlogin: i32 = 7;
+const Anum_pg_authid_rolreplication: i32 = 8;
+const Anum_pg_authid_rolconnlimit: i32 = 10;
+
+// `catalog/pg_language.h` attribute numbers.
+const Anum_pg_language_lanname: i32 = 2;
+const Anum_pg_language_lanplcallfoid: i32 = 6;
+const Anum_pg_language_lanvalidator: i32 = 8;
+
+// `catalog/pg_collation.h` attribute numbers.
+const Anum_pg_collation_collname: i32 = 2;
+const Anum_pg_collation_collnamespace: i32 = 3;
+
+// `catalog/pg_index.h` attribute numbers.
+const Anum_pg_index_indpred: i32 = 21;
+
+// `catalog/pg_attribute.h` attribute numbers.
+const Anum_pg_attribute_attnum: i32 = 5;
+const Anum_pg_attribute_atttypid: i32 = 3;
+
+// `catalog/pg_opclass.h` `oid` for `get_opclass_oid`.
+const Anum_pg_opclass_oid: i32 = 1;
+
+/// A padding key for the unused key slots of [`SearchSysCache`]/[`GetSysCacheOid`]
+/// (the catcache ignores keys beyond `cc_nkeys`).
+const UNUSED_KEY: SysCacheKey<'static> = SysCacheKey::Value(KeyDatum::null());
+
+/* ---------------------------------------------------------------------------
+ * pg_constraint projections for backend-catalog-pg-constraint
+ * ------------------------------------------------------------------------- */
+
+use types_catalog::pg_constraint::{
+    ConstraintFormCopy, FormData_pg_constraint, Anum_pg_constraint_conname,
+    Anum_pg_constraint_connamespace, Anum_pg_constraint_contype, Anum_pg_constraint_condeferrable,
+    Anum_pg_constraint_condeferred, Anum_pg_constraint_conenforced, Anum_pg_constraint_convalidated,
+    Anum_pg_constraint_conrelid, Anum_pg_constraint_contypid, Anum_pg_constraint_conindid,
+    Anum_pg_constraint_conparentid, Anum_pg_constraint_confrelid, Anum_pg_constraint_confupdtype,
+    Anum_pg_constraint_confdeltype, Anum_pg_constraint_confmatchtype, Anum_pg_constraint_conislocal,
+    Anum_pg_constraint_coninhcount, Anum_pg_constraint_connoinherit, Anum_pg_constraint_conperiod,
+};
+
+/// `Anum_pg_constraint_oid` (`catalog/pg_constraint.h`).
+const Anum_pg_constraint_oid: i32 = 1;
+/// `NAMEDATALEN` (`pg_config_manual.h`).
+const NAMEDATALEN: usize = 64;
+
+/// A `name` attribute (`NameData` bytes) as the NUL-padded fixed 64-byte image
+/// (`(Form_pg_constraint)->conname`). The deformed `name` column is a 64-byte
+/// by-reference value; we copy up to `NAMEDATALEN` into a zero-padded buffer.
+fn getattr_namedata(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<[u8; NAMEDATALEN]> {
+    let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
+    let mut n = [0u8; NAMEDATALEN];
+    if let Datum::ByRef(b) = &value {
+        let take = core::cmp::min(NAMEDATALEN, b.len());
+        n[..take].copy_from_slice(&b[..take]);
+    }
+    Ok(n)
+}
+
+/// `(Form_pg_constraint) GETSTRUCT(tup)` — the fixed-width scalar columns
+/// (Anum 1..=20) projected off a held `pg_constraint` `FormedTuple` via the
+/// `CONSTROID` cache tuple descriptor (`heap_getattr`).
+fn deform_constraint_form(
+    mcx: Mcx<'_>,
+    tup: &FormedTuple<'_>,
+) -> PgResult<FormData_pg_constraint> {
+    Ok(FormData_pg_constraint {
+        oid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_oid)?,
+        conname: getattr_namedata(mcx, CONSTROID, tup, Anum_pg_constraint_conname as i32)?,
+        connamespace: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_connamespace as i32)?,
+        contype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_contype as i32)?,
+        condeferrable: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_condeferrable as i32)?,
+        condeferred: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_condeferred as i32)?,
+        conenforced: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conenforced as i32)?,
+        convalidated: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_convalidated as i32)?,
+        conrelid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conrelid as i32)?,
+        contypid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_contypid as i32)?,
+        conindid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conindid as i32)?,
+        conparentid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conparentid as i32)?,
+        confrelid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_confrelid as i32)?,
+        confupdtype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confupdtype as i32)?,
+        confdeltype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confdeltype as i32)?,
+        confmatchtype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confmatchtype as i32)?,
+        conislocal: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conislocal as i32)?,
+        coninhcount: getattr_i16(mcx, CONSTROID, tup, Anum_pg_constraint_coninhcount as i32)?,
+        connoinherit: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_connoinherit as i32)?,
+        conperiod: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conperiod as i32)?,
+    })
+}
+
+/// `bool` attribute (`as_bool` of the by-value datum).
+fn getattr_bool(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<bool> {
+    Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_bool())
+}
+
+fn getattr_i32(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<i32> {
+    Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_i32())
+}
+
+fn getattr_u32(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<u32> {
+    Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_u32())
+}
+
+fn getattr_f32(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<f32> {
+    Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_f32())
+}
+
+/// A `name` attribute (`NameStr` bytes) as raw bytes in `mcx` (no trailing NUL),
+/// matching the C `pstrdup(NameStr(..))` consumers that want the bytes.
+fn getattr_name_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
+    let bytes = match &value {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_) => {
+            return Err(PgError::error("syscache projection: name attribute is by-value"))
+        }
+    };
+    let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    mcx::slice_in(mcx, &bytes[..len])
+}
+
+/// `RelationSupportsSysCache(relid)` (syscache.c).
+pub(crate) fn relation_supports_syscache(relid: Oid) -> bool {
+    crate::RelationSupportsSysCache(relid)
+}
+
+/// `InitCatalogCachePhase2()` (syscache.c).
+pub(crate) fn init_catalog_cache_phase2() -> PgResult<()> {
+    crate::InitCatalogCachePhase2()
+}
+
+/// `SearchSysCacheExists1(RELOID, indexOid)` (syscache.c).
+pub(crate) fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache exists reloid");
+    let mcx = scratch.mcx();
+    SearchSysCacheExists(
+        mcx,
+        RELOID,
+        SysCacheKey::Value(KeyDatum::from_oid(reloid)),
+        UNUSED_KEY,
+        UNUSED_KEY,
+        UNUSED_KEY,
+    )
+}
+
+/// `SearchSysCache1(RELOID, relid)` -> `Form_pg_class.relkind` (`get_rel_relkind`).
+pub(crate) fn rel_relkind(relid: Oid) -> PgResult<Option<u8>> {
+    let scratch = MemoryContext::new("syscache relkind projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relkind = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8;
+    ReleaseSysCache(tup);
+    Ok(Some(relkind))
+}
+
+/// `GetSysCacheHashValue1(CONSTROID, ObjectIdGetDatum(oid))` — the catcache
+/// hash value for a `pg_constraint` row.
+pub(crate) fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue1(CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(oid)))
+}
+
+/// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` projected to the
+/// scalar [`FormData_pg_constraint`] columns plus the heap TID (`tup->t_self`),
+/// then `ReleaseSysCache`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+/// the caller raises `cache lookup failed for constraint %u`.
+///
+/// The `conkey` array column is not materialized here: none of this seam's
+/// consumers (`RemoveConstraintById` / `RenameConstraintById` /
+/// `ConstraintSetParentConstraint` / `get_ri_constraint_root` /
+/// `constraint_type_oids`) read `conkey`, and C never detoasts it on these
+/// paths — so `conkey` is `None`, matching the C reads and avoiding spurious
+/// detoast `ereport`s the C code never performs.
+pub(crate) fn search_constraint_form_by_oid(
+    conoid: Oid,
+) -> PgResult<Option<ConstraintFormCopy>> {
+    let scratch = MemoryContext::new("syscache pg_constraint form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = deform_constraint_form(mcx, &tup)?;
+    let tid = tup.tuple.t_self;
+    ReleaseSysCache(tup);
+    Ok(Some(ConstraintFormCopy {
+        form,
+        conkey: None,
+        tid,
+    }))
+}
+
+/// `relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` +
+/// `((Form_pg_class) GETSTRUCT(relTup))->relchecks` (RemoveConstraintById).
+/// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises `cache
+/// lookup failed for relation %u`.
+pub(crate) fn fetch_relchecks(relid: Oid) -> PgResult<Option<i16>> {
+    let scratch = MemoryContext::new("syscache pg_class relchecks projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relchecks = getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relchecks)?;
+    ReleaseSysCache(tup);
+    Ok(Some(relchecks))
+}
+
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` of the fixed-width
+/// `Form_pg_proc` columns the scalar lsyscache helpers read (`get_func_*`).
+pub(crate) fn pg_proc_form<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgProcForm>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+    let form = PgProcForm {
+        proname: proname.as_str().to_owned(),
+        pronamespace: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_pronamespace)?,
+        provariadic: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_provariadic)?,
+        prosupport: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prosupport)?,
+        prokind: getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?,
+        proleakproof: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proleakproof)?,
+        proisstrict: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proisstrict)?,
+        proretset: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?,
+        provolatile: getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_provolatile)?,
+        proparallel: getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_proparallel)?,
+        pronargs: getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?,
+        prorettype: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
+/// `SearchSysCache1(TYPEOID, oidtypeid)` projected to the type-dependent
+/// attribute fields `TupleDescInitEntry` stamps (`tupdesc.c`).
+pub(crate) fn search_type_attr_info(oidtypeid: Oid) -> PgResult<Option<PgTypeInfo>> {
+    let scratch = MemoryContext::new("syscache pg_type projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(oidtypeid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let info = PgTypeInfo {
+        typlen: getattr_i16(mcx, TYPEOID, &tup, Anum_pg_type_typlen)?,
+        typbyval: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typbyval)?,
+        typalign: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typalign)?,
+        typstorage: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typstorage)?,
+        typcollation: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typcollation)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(info))
+}
+
+/// `GetSysCacheOid3(CLAAMNAMENSP, Anum_pg_opclass_oid, amid, opcname, nsp)`.
+pub(crate) fn get_opclass_oid(amid: Oid, opcname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_opclass_oid");
+    let mcx = scratch.mcx();
+    GetSysCacheOid(
+        mcx,
+        CLAAMNAMENSP,
+        Anum_pg_opclass_oid as AttrNumber,
+        SysCacheKey::Value(KeyDatum::from_oid(amid)),
+        SysCacheKey::Str(opcname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        UNUSED_KEY,
+    )
+}
+
+/// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` -> `(attnum, atttypid)`.
+pub(crate) fn search_syscache_attname(
+    relid: Oid,
+    attname: &str,
+) -> PgResult<Option<(AttrNumber, Oid)>> {
+    let scratch = MemoryContext::new("syscache attname projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCacheAttName(mcx, relid, attname)?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let attnum = getattr_i16(mcx, ATTNAME, &tup, Anum_pg_attribute_attnum)? as AttrNumber;
+    let atttypid = getattr_oid(mcx, ATTNAME, &tup, Anum_pg_attribute_atttypid)?;
+    ReleaseSysCache(tup);
+    Ok(Some((attnum, atttypid)))
+}
+
+/// `SearchSysCache1(AUTHOID, roleid)` projected to the role-identity fields.
+pub(crate) fn lookup_authid_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+) -> PgResult<Option<AuthIdRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_authid(mcx, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache1(AUTHNAME, rolename)` projected to the role-identity fields.
+pub(crate) fn lookup_authid_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    rolename: &str,
+) -> PgResult<Option<AuthIdRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, AUTHNAME, SysCacheKey::Str(rolename))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_authid(mcx, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthIdRow<'mcx>> {
+    Ok(AuthIdRow {
+        oid: getattr_oid(mcx, AUTHOID, tup, Anum_pg_authid_oid)?,
+        rolname: getattr_name(mcx, AUTHOID, tup, Anum_pg_authid_rolname)?,
+        rolsuper: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolsuper)?,
+        rolcanlogin: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolcanlogin)?,
+        rolreplication: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolreplication)?,
+        rolconnlimit: getattr_i32(mcx, AUTHOID, tup, Anum_pg_authid_rolconnlimit)?,
+    })
+}
+
+/// `SearchSysCache1(LANGOID, language_id)` projected to the language facts
+/// `fmgr_info_other_lang` / `CheckFunctionValidatorAccess` read.
+pub(crate) fn lookup_language<'mcx>(
+    mcx: Mcx<'mcx>,
+    language_id: Oid,
+) -> PgResult<Option<LangInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, LANGOID, SysCacheKey::Value(KeyDatum::from_oid(language_id)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let info = LangInfo {
+        lanplcallfoid: getattr_oid(mcx, LANGOID, &tup, Anum_pg_language_lanplcallfoid)?,
+        lanvalidator: getattr_oid(mcx, LANGOID, &tup, Anum_pg_language_lanvalidator)?,
+        lanname: getattr_name(mcx, LANGOID, &tup, Anum_pg_language_lanname)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(info))
+}
+
+/// `SearchSysCache1(INDEXRELID, index_oid)` then whether `indpred` is non-null
+/// (`!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)`).
+pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache indpred projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let (_value, is_null) = SysCacheGetAttr(mcx, INDEXRELID, &tup, Anum_pg_index_indpred)?;
+    ReleaseSysCache(tup);
+    Ok(Some(!is_null))
+}
+
+/// `SearchSysCache1(COLLOID, collation)` then
+/// `(get_namespace_name(collnamespace), NameStr(collname))`, both as raw name
+/// bytes copied into `mcx` (`ri_GenerateQualCollation`).
+pub(crate) fn collation_qualified_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    collation: Oid,
+) -> PgResult<Option<(PgVec<'mcx, u8>, PgVec<'mcx, u8>)>> {
+    let tuple = SearchSysCache1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(collation)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let collnamespace = getattr_oid(mcx, COLLOID, &tup, Anum_pg_collation_collnamespace)?;
+    let collname = getattr_name_bytes(mcx, COLLOID, &tup, Anum_pg_collation_collname)?;
+    ReleaseSysCache(tup);
+    let nspname = match lsyscache_seams::get_namespace_name::call(mcx, collnamespace)? {
+        Some(s) => mcx::slice_in(mcx, s.as_str().as_bytes())?,
+        None => return Ok(None),
+    };
+    Ok(Some((nspname, collname)))
+}
+
+/// `SearchSysCache1(RELOID, relid)` + `GETSTRUCT` of the full `Form_pg_class`
+/// tuple (relcache Phase3 nailed-entry refill).
+pub(crate) fn search_pg_class_full_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<PgClassFullForm<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = PgClassFullForm {
+        relname: getattr_name(mcx, RELOID, &tup, Anum_pg_class_relname)?,
+        relnamespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?,
+        reltype: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltype)?,
+        reloftype: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reloftype)?,
+        relowner: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relowner)?,
+        relam: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?,
+        relfilenode: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relfilenode)?,
+        reltablespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltablespace)?,
+        relpages: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relpages)?,
+        reltuples: getattr_f32(mcx, RELOID, &tup, Anum_pg_class_reltuples)?,
+        relallvisible: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallvisible)?,
+        reltoastrelid: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltoastrelid)?,
+        relhasindex: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhasindex)?,
+        relisshared: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?,
+        relpersistence: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence)?,
+        relkind: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)?,
+        relnatts: getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relnatts)?,
+        relchecks: getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relchecks)?,
+        relhasrules: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhasrules)?,
+        relhastriggers: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhastriggers)?,
+        relhassubclass: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhassubclass)?,
+        relrowsecurity: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relrowsecurity)?,
+        relforcerowsecurity: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relforcerowsecurity)?,
+        relispopulated: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispopulated)?,
+        relreplident: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relreplident)?,
+        relispartition: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispartition)?,
+        relrewrite: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relrewrite)?,
+        relfrozenxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relfrozenxid)?,
+        relminmxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relminmxid)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
 }
