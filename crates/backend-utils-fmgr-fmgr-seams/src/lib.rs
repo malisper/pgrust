@@ -757,3 +757,14 @@ seam_core::seam!(
         args: &[types_datum::NullableDatum],
     ) -> PgResult<(DatumWord, bool)>
 );
+
+seam_core::seam!(
+    /// `construct_array_builtin(datums, n, CSTRINGOID)` +
+    /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
+    /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to
+    /// the cstring array distilled from a `TypeName`'s typmod expressions,
+    /// returning the resolved typmod. `location` is the parse location used to
+    /// tag a failure (the C `setup_parser_errposition_callback` around the
+    /// call). `Err` carries whatever the `typmodin` function raises.
+    pub fn typmodin(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<i32>
+);

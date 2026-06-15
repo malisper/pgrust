@@ -139,6 +139,7 @@ pub fn init_all() {
     backend_nodes_core::init_seams();
     backend_nodes_extensible::init_seams();
     backend_parser_parse_oper::init_seams();
+    backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -646,6 +647,9 @@ mod recurrence_guard {
         // so the name-keyed guard sees them as satisfied (they are equally
         // uninstalled at runtime — same blocker).
         ("backend_access_common_tupdesc", "free_tuple_desc"),
+        // RETIRED (task #161): `heap_tuple_header_get_datum`
+        // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
+        // The composite/record-Datum carrier bridge landed.
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
@@ -1012,6 +1016,8 @@ mod recurrence_guard {
         // seams declared alongside it ARE installed in miscinit's init_seams by
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
+        // RETIRED (task #161): `record_from_values` is now installed by funcapi's
+        // init_seams(). The composite/record-Datum carrier bridge landed.
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
         // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
         // in `srf_support::value_srf_unported` and panics loudly naming the missing
@@ -1079,6 +1085,16 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
+        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
+        // and extracts the single `TypeName` node. The owner of `raw_parser`
+        // (backend-parser-driver, audited) cannot install this seam yet because
+        // the bison grammar it drives (`base_yyparse`, gram.y) is not ported —
+        // any raw-parse call reaches the still-unported grammar and panics
+        // (mirror-pg-and-panic). Becomes a real install once gram.y lands and
+        // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
+        // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
+        ("backend_parser_driver", "raw_parse_type_name"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
