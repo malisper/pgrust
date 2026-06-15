@@ -67,7 +67,7 @@ use backend_storage_lmgr_condition_variable_seams as condvar;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_utils_adt_datum_seams as datumser;
 use backend_nodes_core_seams::tbm_add_tuple;
-use backend_storage_aio_seams as readstream;
+use backend_storage_aio_read_stream as readstream;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_storage_freespace_seams as indexfsm;
 use backend_storage_lmgr_lmgr_seams as lmgr;
@@ -1548,8 +1548,31 @@ fn btvacuumscan<'mcx>(
     // the relation-extension lock while doing so (skipped for new/temp rels).
     let needlock = !relcache::relation_is_local::call(rel);
 
+    // The block-range callback iterates [current_blocknum, last_exclusive).
+    // Shared between the closure and this loop, exactly as the C function holds
+    // a single `BlockRangeReadStreamPrivate p` on the stack and updates
+    // `p.last_exclusive` / reads `p.current_blocknum` across passes.
+    let p = std::rc::Rc::new(std::cell::RefCell::new(
+        readstream::BlockRangeReadStreamPrivate {
+            current_blocknum: BTREE_METAPAGE + 1,
+            last_exclusive: 0,
+        },
+    ));
+
     // It is safe to use batchmode as block_range_read_stream_cb takes no locks.
-    let stream = readstream::read_stream_begin::call(rel, BTREE_METAPAGE + 1)?;
+    // (info->strategy: the nbtree vacuum port reads through the default buffer
+    // pool — no ring strategy is threaded into NbtVacuumInfo — so the stream
+    // uses the NULL strategy, matching the read_buffer_extended path above.)
+    let mut stream = readstream::read_stream_begin_relation(
+        readstream::READ_STREAM_MAINTENANCE
+            | readstream::READ_STREAM_FULL
+            | readstream::READ_STREAM_USE_BATCHING,
+        types_storage::buf::BufferAccessStrategy::NONE,
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        readstream::block_range_read_stream_cb(p.clone()),
+        0,
+    )?;
 
     let mut num_pages: BlockNumber = 0;
     loop {
@@ -1575,18 +1598,18 @@ fn btvacuumscan<'mcx>(
         }
 
         // Quit if we've scanned the whole relation.
-        if readstream::read_stream_current_blocknum::call(stream) >= num_pages {
+        if p.borrow().current_blocknum >= num_pages {
             break;
         }
 
-        readstream::read_stream_set_last_exclusive::call(stream, num_pages);
+        p.borrow_mut().last_exclusive = num_pages;
 
         // Iterate over pages, then loop back to recheck relation length.
         loop {
             // call vacuum_delay_point while not holding any buffer lock
             backend_commands_vacuum_seams::vacuum_delay_point::call()?;
 
-            let buf = readstream::read_stream_next_buffer::call(stream)?;
+            let (buf, _pbd) = stream.read_stream_next_buffer()?;
             if !BufferIsValid(buf) {
                 break;
             }
@@ -1612,10 +1635,10 @@ fn btvacuumscan<'mcx>(
         }
 
         // Reset the read stream to use it again.
-        readstream::read_stream_reset::call(stream);
+        stream.read_stream_reset()?;
     }
 
-    readstream::read_stream_end::call(stream);
+    readstream::read_stream_end(stream)?;
 
     // Set statistics num_pages field to final size of index.
     vstate.stats.num_pages = num_pages;

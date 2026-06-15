@@ -23,60 +23,13 @@ seam_core::seam!(
 );
 
 // === read_stream (read_stream.c) ===========================================
-
-/// Opaque token standing in for C's `ReadStream *` while the read-stream
-/// runtime (read_stream.c) owns the live stream state. Valid from
-/// `read_stream_begin_relation` until `read_stream_end`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReadStreamHandle(pub u64);
-
-seam_core::seam!(
-    /// `read_stream_begin_relation(READ_STREAM_MAINTENANCE | READ_STREAM_FULL
-    /// | READ_STREAM_USE_BATCHING, info->strategy, rel, MAIN_FORKNUM,
-    /// block_range_read_stream_cb, &p, 0)` (read_stream.c): begin a physical
-    /// block-range scan starting at `first_block`. `Err` carries setup
-    /// ereports/OOM.
-    pub fn read_stream_begin<'mcx>(
-        rel: &types_rel::Relation<'mcx>,
-        first_block: types_core::primitive::BlockNumber,
-    ) -> types_error::PgResult<ReadStreamHandle>
-);
-
-seam_core::seam!(
-    /// `p.last_exclusive = num_pages` — set the stream's exclusive upper block
-    /// bound before iterating.
-    pub fn read_stream_set_last_exclusive(
-        stream: ReadStreamHandle,
-        num_pages: types_core::primitive::BlockNumber,
-    )
-);
-
-seam_core::seam!(
-    /// `p.current_blocknum` — the stream's current (next-to-return) block.
-    pub fn read_stream_current_blocknum(
-        stream: ReadStreamHandle,
-    ) -> types_core::primitive::BlockNumber
-);
-
-seam_core::seam!(
-    /// `read_stream_next_buffer(stream, NULL)` (read_stream.c): the next
-    /// pinned buffer, or `InvalidBuffer` at the end of the current range.
-    /// `Err` carries the smgr read ereports.
-    pub fn read_stream_next_buffer(
-        stream: ReadStreamHandle,
-    ) -> types_error::PgResult<types_storage::storage::Buffer>
-);
-
-seam_core::seam!(
-    /// `read_stream_reset(stream)` (read_stream.c): rewind so the callback is
-    /// invoked again after a full range was consumed.
-    pub fn read_stream_reset(stream: ReadStreamHandle)
-);
-
-seam_core::seam!(
-    /// `read_stream_end(stream)` (read_stream.c): finish and free the stream.
-    pub fn read_stream_end(stream: ReadStreamHandle)
-);
+//
+// read_stream.c is now ported in the `backend-storage-aio-read-stream` owner
+// crate. It sits directly above the buffer manager (it drives StartReadBuffers/
+// WaitReadBuffers + the buffer accessors), so its consumers (e.g. nbtree's
+// `btvacuumscan`) depend on it directly and own a real `ReadStream<'mcx>` value
+// with a real `ReadStreamBlockNumberCB` callback. There is no seam and no
+// `ReadStreamHandle` stand-in: those were removed when the owner landed.
 
 // --- backend-utils-init-postinit consumer (aio_init.c) ---
 

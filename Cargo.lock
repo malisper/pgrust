@@ -32,6 +32,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-bloom"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-access-brin-entry-seams"
 version = "0.0.0"
 dependencies = [
@@ -119,6 +141,7 @@ dependencies = [
 name = "backend-access-brin-minmax"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-bloom",
  "backend-access-brin-entry-seams",
  "backend-access-brin-inclusion",
  "backend-access-index-indexam-seams",
@@ -1409,7 +1432,7 @@ dependencies = [
  "backend-access-nbtree-nbtree-seams",
  "backend-commands-vacuum-seams",
  "backend-nodes-core-seams",
- "backend-storage-aio-seams",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-lmgr-condition-variable-seams",
@@ -7496,9 +7519,12 @@ name = "backend-optimizer-prep-prepjointree"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
  "backend-rewrite-core",
+ "backend-tcop-postgres-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -9679,6 +9705,24 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-startup",
+]
+
+[[package]]
+name = "backend-storage-aio-read-stream"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-catalog",
+ "backend-storage-buffer-bufmgr",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-smgr-smgr",
+ "backend-utils-cache-spccache",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -14618,6 +14662,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",

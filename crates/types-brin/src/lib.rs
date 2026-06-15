@@ -81,6 +81,10 @@ pub const RT_MAX_STRATEGY_NUMBER: usize = 30;
 /// cached in [`InclusionOpaque::extra_procinfos`].
 pub const INCLUSION_MAX_PROCNUMS: usize = 4;
 
+/// `BLOOM_MAX_PROCNUMS` (`brin_bloom.c`): the number of bloom support procedures
+/// (just `PROCNUM_HASH`), cached in [`BloomOpaque::extra_procinfos`].
+pub const BLOOM_MAX_PROCNUMS: usize = 1;
+
 /// Payload for `BrinOpcInfo::oi_opaque` — the opclass-private blob (C
 /// `void *oi_opaque`). In C each opclass `palloc0`s its own private struct in
 /// the tail of the `BrinOpcInfo` allocation (`MinmaxOpaque`, `InclusionOpaque`,
@@ -100,6 +104,8 @@ pub enum OpaqueOpcInfo {
     /// `brin_inclusion.c` `InclusionOpaque` — the per-attribute support- and
     /// strategy-procinfo cache.
     Inclusion(InclusionOpaque),
+    /// `brin_bloom.c` `BloomOpaque` — the per-attribute hash-procinfo cache.
+    Bloom(BloomOpaque),
 }
 
 /// `MinmaxOpaque` (`brin_minmax.c`): the per-attribute strategy-procinfo cache.
@@ -150,6 +156,22 @@ pub struct InclusionOpaque {
     /// `strategy_procinfos[RTMaxStrategyNumber]`: each slot's resolved
     /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
     pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; RT_MAX_STRATEGY_NUMBER],
+}
+
+/// `BloomOpaque` (`brin_bloom.c`): the per-attribute hash-procinfo cache.
+///
+/// C: `{ FmgrInfo extra_procinfos[BLOOM_MAX_PROCNUMS]; }`. As in
+/// [`MinmaxOpaque`] / [`InclusionOpaque`] each cached `FmgrInfo` is reduced to
+/// the resolved function's `Oid` (the BRIN fmgr-call seam re-resolves by OID).
+/// An `Oid` of `InvalidOid` (0) marks an uninitialized slot, exactly as
+/// `palloc0` leaves it. The `Cell` gives interior mutability so the cache fills
+/// lazily through the `&BrinDesc` the AM passes (C mutates the same struct
+/// through a pointer).
+#[derive(Debug, Default)]
+pub struct BloomOpaque {
+    /// `extra_procinfos[BLOOM_MAX_PROCNUMS]`: the resolved hash function `Oid`
+    /// (`InvalidOid` marks an uninitialized slot).
+    pub extra_procinfos: [core::cell::Cell<types_core::primitive::Oid>; BLOOM_MAX_PROCNUMS],
 }
 
 /// `BrinDesc` (`brin_internal.h`): descriptor that enables decoding a BRIN

@@ -97,6 +97,60 @@ pub struct SubPlan<'mcx> {
     pub per_call_cost: f64,
 }
 
+impl SubPlan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over a `SubPlan`). The `testexpr`
+    /// and `args` carry `Expr` children, which deep-copy through
+    /// [`Expr::clone_in`] (a plain `.clone()` would panic on
+    /// `Aggref`/`SubLink`/`SubPlan` children); the integer/cost fields copy
+    /// directly. The executable subplan tree itself lives in
+    /// `PlannedStmt.subplans` (addressed by `plan_id`), so only the node's own
+    /// fields are copied here.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SubPlan<'b>> {
+        let testexpr = match &self.testexpr {
+            Some(e) => Some(alloc_in(mcx, e.clone_in(mcx)?)?),
+            None => None,
+        };
+        let mut paramIds = mcx::vec_with_capacity_in(mcx, self.paramIds.len())?;
+        for x in self.paramIds.iter() {
+            paramIds.push(*x);
+        }
+        let plan_name = match &self.plan_name {
+            Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        };
+        let mut setParam = mcx::vec_with_capacity_in(mcx, self.setParam.len())?;
+        for x in self.setParam.iter() {
+            setParam.push(*x);
+        }
+        let mut parParam = mcx::vec_with_capacity_in(mcx, self.parParam.len())?;
+        for x in self.parParam.iter() {
+            parParam.push(*x);
+        }
+        let mut args = mcx::vec_with_capacity_in(mcx, self.args.len())?;
+        for e in self.args.iter() {
+            args.push(alloc_in(mcx, e.clone_in(mcx)?)?);
+        }
+        Ok(SubPlan {
+            subLinkType: self.subLinkType,
+            testexpr,
+            paramIds,
+            plan_id: self.plan_id,
+            plan_name,
+            firstColType: self.firstColType,
+            firstColTypmod: self.firstColTypmod,
+            firstColCollation: self.firstColCollation,
+            useHashTable: self.useHashTable,
+            unknownEqFalse: self.unknownEqFalse,
+            parallel_safe: self.parallel_safe,
+            setParam,
+            parParam,
+            args,
+            startup_cost: self.startup_cost,
+            per_call_cost: self.per_call_cost,
+        })
+    }
+}
+
 /// `OnCommitAction` (nodes/primnodes.h) — what to do at transaction commit
 /// for a temporary table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,7 +281,9 @@ fn clone_opt_expr<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<PgBox<'b, Expr>>> {
     match e {
-        Some(b) => Ok(Some(alloc_in(mcx, (**b).clone())?)),
+        // Deep copy via `Expr::clone_in` (a shallow `.clone()` panics on
+        // `Aggref`/`SubLink`/`SubPlan` children).
+        Some(b) => Ok(Some(alloc_in(mcx, b.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -240,7 +296,7 @@ fn clone_expr_list<'b>(
         Some(v) => {
             let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
             for e in v.iter() {
-                out.push(alloc_in(mcx, (**e).clone())?);
+                out.push(alloc_in(mcx, e.clone_in(mcx)?)?);
             }
             Ok(Some(out))
         }
@@ -1875,6 +1931,509 @@ impl Expr {
     }
 }
 
+// ===========================================================================
+// `Expr::clone_in` — the sanctioned deep-copy path for the lifetime-free Expr
+// tree (C: `copyObject` over an `Expr *`).
+//
+// The lifetime-free `Expr` enum derives `Clone`, but that derived `clone()` is
+// only a shallow copy and PANICS for the `Aggref`/`WindowFunc`/`SubLink`/
+// `SubPlan`/`AlternativeSubPlan` payloads (their `Clone` impls / embedded
+// children deliberately panic — see those structs). `clone_in` is the deep path
+// the planner uses to store owned copies of analyzed nodes into the lifetime-
+// free planner arena: it recurses field-by-field, allocating every child into
+// `mcx`, and never calls a panicking `.clone()`.
+//
+// The handful of children that carry the `'static` notional lifetime of the
+// Expr tree (Aggref::args is `Vec<TargetEntry<'static>>`, SubLink::subselect is
+// `PgBox<'static, Query<'static>>`, SubPlanExpr is `Box<SubPlan<'static>>`) are
+// deep-cloned into `mcx` then their lifetime parameter is erased back to
+// `'static` — the same convention used by `tlist_into_static` /
+// `query_into_static` in the parser (the data is fully owned in `mcx`; the
+// arena outlives the planner run in practice).
+// ===========================================================================
+
+/// Deep-clone a `&Box<Expr>` child into a freshly allocated `Box<Expr>` (the
+/// global-allocator boxes that make up the Expr tree), recursing via
+/// [`Expr::clone_in`].
+fn clone_box_expr<'b>(e: &Box<Expr>, mcx: Mcx<'b>) -> PgResult<Box<Expr>> {
+    Ok(Box::new(e.clone_in(mcx)?))
+}
+
+/// Deep-clone an optional `Box<Expr>` child.
+fn clone_opt_box_expr<'b>(
+    e: &Option<Box<Expr>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<Box<Expr>>> {
+    match e {
+        Some(b) => Ok(Some(clone_box_expr(b, mcx)?)),
+        None => Ok(None),
+    }
+}
+
+/// Deep-clone a `Vec<Expr>` child list.
+fn clone_vec_expr<'b>(v: &[Expr], mcx: Mcx<'b>) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::with_capacity(v.len());
+    for e in v.iter() {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
+/// Deep-clone a `Vec<Option<Expr>>` child list (slice-subscript index lists may
+/// hold NULL elements).
+fn clone_vec_opt_expr<'b>(
+    v: &[Option<Expr>],
+    mcx: Mcx<'b>,
+) -> PgResult<Vec<Option<Expr>>> {
+    let mut out = Vec::with_capacity(v.len());
+    for e in v.iter() {
+        out.push(match e {
+            Some(x) => Some(x.clone_in(mcx)?),
+            None => None,
+        });
+    }
+    Ok(out)
+}
+
+/// Deep-clone a `CaseWhen` arm (carried inline in [`CaseExpr`]).
+fn clone_case_when<'b>(w: &CaseWhen, mcx: Mcx<'b>) -> PgResult<CaseWhen> {
+    Ok(CaseWhen {
+        expr: clone_opt_box_expr(&w.expr, mcx)?,
+        result: clone_opt_box_expr(&w.result, mcx)?,
+        location: w.location,
+    })
+}
+
+/// Deep-clone a `JsonBehavior` (ON ERROR / ON EMPTY) node.
+fn clone_json_behavior<'b>(
+    b: &JsonBehavior,
+    mcx: Mcx<'b>,
+) -> PgResult<JsonBehavior> {
+    Ok(JsonBehavior {
+        btype: b.btype,
+        expr: clone_opt_box_expr(&b.expr, mcx)?,
+        coerce: b.coerce,
+        location: b.location,
+    })
+}
+
+impl Expr {
+    /// Deep copy this expression into `mcx` (C: `copyObject` over an `Expr *`).
+    ///
+    /// The sanctioned deep-copy path for the lifetime-free `Expr` tree:
+    /// recurses field-by-field through every variant, allocating each child into
+    /// `mcx`, and never calls a panicking shallow `.clone()` on an
+    /// `Aggref`/`WindowFunc`/`SubLink`/`SubPlan` payload.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Expr> {
+        Ok(match self {
+            // --- trivial / Copy / no Expr children: shallow `.clone()` is safe.
+            Expr::Var(v) => Expr::Var(v.clone()),
+            Expr::Const(c) => Expr::Const(c.clone()),
+            Expr::Param(p) => Expr::Param(p.clone()),
+            Expr::CaseTestExpr(c) => Expr::CaseTestExpr(*c),
+            Expr::SQLValueFunction(s) => Expr::SQLValueFunction(*s),
+            Expr::CoerceToDomainValue(c) => Expr::CoerceToDomainValue(*c),
+            Expr::SetToDefault(s) => Expr::SetToDefault(*s),
+            Expr::CurrentOfExpr(c) => Expr::CurrentOfExpr(c.clone()),
+            Expr::NextValueExpr(n) => Expr::NextValueExpr(*n),
+            Expr::MergeSupportFunc(m) => Expr::MergeSupportFunc(*m),
+            Expr::RestrictInfo(r) => Expr::RestrictInfo(*r),
+
+            // --- variants whose only children are scalar/Copy lists: the
+            //     derived `.clone()` recurses into no panicking node, so it is a
+            //     correct deep copy.
+            Expr::GroupingFunc(g) => Expr::GroupingFunc(GroupingFunc {
+                args: clone_vec_expr(&g.args, mcx)?,
+                refs: g.refs.clone(),
+                cols: g.cols.clone(),
+                agglevelsup: g.agglevelsup,
+                location: g.location,
+            }),
+
+            // --- variants with Box<Expr> / Vec<Expr> children: recurse.
+            Expr::OpExpr(o) => Expr::OpExpr(clone_opexpr(o, mcx)?),
+            Expr::DistinctExpr(o) => Expr::DistinctExpr(clone_opexpr(o, mcx)?),
+            Expr::NullIfExpr(o) => Expr::NullIfExpr(clone_opexpr(o, mcx)?),
+            Expr::ScalarArrayOpExpr(s) => Expr::ScalarArrayOpExpr(ScalarArrayOpExpr {
+                opno: s.opno,
+                opfuncid: s.opfuncid,
+                hashfuncid: s.hashfuncid,
+                negfuncid: s.negfuncid,
+                useOr: s.useOr,
+                inputcollid: s.inputcollid,
+                args: clone_vec_expr(&s.args, mcx)?,
+                location: s.location,
+            }),
+            Expr::BoolExpr(b) => Expr::BoolExpr(BoolExpr {
+                boolop: b.boolop,
+                args: clone_vec_expr(&b.args, mcx)?,
+                location: b.location,
+            }),
+            Expr::FuncExpr(f) => Expr::FuncExpr(FuncExpr {
+                funcid: f.funcid,
+                funcresulttype: f.funcresulttype,
+                funcretset: f.funcretset,
+                funcvariadic: f.funcvariadic,
+                funcformat: f.funcformat,
+                funccollid: f.funccollid,
+                inputcollid: f.inputcollid,
+                args: clone_vec_expr(&f.args, mcx)?,
+                location: f.location,
+            }),
+            Expr::NamedArgExpr(n) => Expr::NamedArgExpr(NamedArgExpr {
+                arg: clone_opt_box_expr(&n.arg, mcx)?,
+                name: n.name.clone(),
+                argnumber: n.argnumber,
+                location: n.location,
+            }),
+            Expr::SubscriptingRef(s) => Expr::SubscriptingRef(SubscriptingRef {
+                refcontainertype: s.refcontainertype,
+                refelemtype: s.refelemtype,
+                refrestype: s.refrestype,
+                reftypmod: s.reftypmod,
+                refcollid: s.refcollid,
+                refupperindexpr: clone_vec_opt_expr(&s.refupperindexpr, mcx)?,
+                reflowerindexpr: clone_vec_opt_expr(&s.reflowerindexpr, mcx)?,
+                refexpr: clone_opt_box_expr(&s.refexpr, mcx)?,
+                refassgnexpr: clone_opt_box_expr(&s.refassgnexpr, mcx)?,
+            }),
+            Expr::FieldSelect(f) => Expr::FieldSelect(FieldSelect {
+                arg: clone_opt_box_expr(&f.arg, mcx)?,
+                fieldnum: f.fieldnum,
+                resulttype: f.resulttype,
+                resulttypmod: f.resulttypmod,
+                resultcollid: f.resultcollid,
+            }),
+            Expr::FieldStore(f) => Expr::FieldStore(FieldStore {
+                arg: clone_opt_box_expr(&f.arg, mcx)?,
+                newvals: clone_vec_expr(&f.newvals, mcx)?,
+                fieldnums: f.fieldnums.clone(),
+                resulttype: f.resulttype,
+            }),
+            Expr::RelabelType(r) => Expr::RelabelType(RelabelType {
+                arg: clone_opt_box_expr(&r.arg, mcx)?,
+                resulttype: r.resulttype,
+                resulttypmod: r.resulttypmod,
+                resultcollid: r.resultcollid,
+                relabelformat: r.relabelformat,
+                location: r.location,
+            }),
+            Expr::CoerceViaIO(c) => Expr::CoerceViaIO(CoerceViaIO {
+                arg: clone_opt_box_expr(&c.arg, mcx)?,
+                resulttype: c.resulttype,
+                resultcollid: c.resultcollid,
+                coerceformat: c.coerceformat,
+                location: c.location,
+            }),
+            Expr::ArrayCoerceExpr(a) => Expr::ArrayCoerceExpr(ArrayCoerceExpr {
+                arg: clone_opt_box_expr(&a.arg, mcx)?,
+                elemexpr: clone_opt_box_expr(&a.elemexpr, mcx)?,
+                resulttype: a.resulttype,
+                resulttypmod: a.resulttypmod,
+                resultcollid: a.resultcollid,
+                coerceformat: a.coerceformat,
+                location: a.location,
+            }),
+            Expr::ConvertRowtypeExpr(c) => Expr::ConvertRowtypeExpr(ConvertRowtypeExpr {
+                arg: clone_opt_box_expr(&c.arg, mcx)?,
+                resulttype: c.resulttype,
+                convertformat: c.convertformat,
+                location: c.location,
+            }),
+            Expr::CollateExpr(c) => Expr::CollateExpr(CollateExpr {
+                arg: clone_opt_box_expr(&c.arg, mcx)?,
+                collOid: c.collOid,
+                location: c.location,
+            }),
+            Expr::CaseExpr(c) => {
+                let mut args = Vec::with_capacity(c.args.len());
+                for w in c.args.iter() {
+                    args.push(clone_case_when(w, mcx)?);
+                }
+                Expr::CaseExpr(CaseExpr {
+                    casetype: c.casetype,
+                    casecollid: c.casecollid,
+                    arg: clone_opt_box_expr(&c.arg, mcx)?,
+                    args,
+                    defresult: clone_opt_box_expr(&c.defresult, mcx)?,
+                    location: c.location,
+                })
+            }
+            Expr::ArrayExpr(a) => Expr::ArrayExpr(ArrayExpr {
+                array_typeid: a.array_typeid,
+                array_collid: a.array_collid,
+                element_typeid: a.element_typeid,
+                elements: clone_vec_expr(&a.elements, mcx)?,
+                multidims: a.multidims,
+                location: a.location,
+            }),
+            Expr::RowExpr(r) => Expr::RowExpr(RowExpr {
+                args: clone_vec_expr(&r.args, mcx)?,
+                row_typeid: r.row_typeid,
+                row_format: r.row_format,
+                colnames: r.colnames.clone(),
+                location: r.location,
+            }),
+            Expr::RowCompareExpr(r) => Expr::RowCompareExpr(RowCompareExpr {
+                cmptype: r.cmptype,
+                opnos: r.opnos.clone(),
+                opfamilies: r.opfamilies.clone(),
+                inputcollids: r.inputcollids.clone(),
+                largs: clone_vec_expr(&r.largs, mcx)?,
+                rargs: clone_vec_expr(&r.rargs, mcx)?,
+            }),
+            Expr::CoalesceExpr(c) => Expr::CoalesceExpr(CoalesceExpr {
+                coalescetype: c.coalescetype,
+                coalescecollid: c.coalescecollid,
+                args: clone_vec_expr(&c.args, mcx)?,
+                location: c.location,
+            }),
+            Expr::MinMaxExpr(m) => Expr::MinMaxExpr(MinMaxExpr {
+                minmaxtype: m.minmaxtype,
+                minmaxcollid: m.minmaxcollid,
+                inputcollid: m.inputcollid,
+                op: m.op,
+                args: clone_vec_expr(&m.args, mcx)?,
+                location: m.location,
+            }),
+            Expr::XmlExpr(x) => Expr::XmlExpr(XmlExpr {
+                op: x.op,
+                name: x.name.clone(),
+                named_args: clone_vec_expr(&x.named_args, mcx)?,
+                arg_names: x.arg_names.clone(),
+                args: clone_vec_expr(&x.args, mcx)?,
+                xmloption: x.xmloption,
+                indent: x.indent,
+                r#type: x.r#type,
+                typmod: x.typmod,
+                location: x.location,
+            }),
+            Expr::JsonValueExpr(j) => Expr::JsonValueExpr(JsonValueExpr {
+                raw_expr: clone_opt_box_expr(&j.raw_expr, mcx)?,
+                formatted_expr: clone_opt_box_expr(&j.formatted_expr, mcx)?,
+                format: j.format,
+            }),
+            Expr::JsonConstructorExpr(j) => Expr::JsonConstructorExpr(JsonConstructorExpr {
+                r#type: j.r#type,
+                args: clone_vec_expr(&j.args, mcx)?,
+                func: clone_opt_box_expr(&j.func, mcx)?,
+                coercion: clone_opt_box_expr(&j.coercion, mcx)?,
+                returning: j.returning,
+                absent_on_null: j.absent_on_null,
+                unique: j.unique,
+                location: j.location,
+            }),
+            Expr::JsonIsPredicate(j) => Expr::JsonIsPredicate(JsonIsPredicate {
+                expr: clone_opt_box_expr(&j.expr, mcx)?,
+                format: j.format,
+                item_type: j.item_type,
+                unique_keys: j.unique_keys,
+                location: j.location,
+            }),
+            Expr::JsonExpr(j) => {
+                let mut passing_values = Vec::with_capacity(j.passing_values.len());
+                for e in j.passing_values.iter() {
+                    passing_values.push(e.clone_in(mcx)?);
+                }
+                let on_empty = match &j.on_empty {
+                    Some(b) => Some(Box::new(clone_json_behavior(b, mcx)?)),
+                    None => None,
+                };
+                let on_error = match &j.on_error {
+                    Some(b) => Some(Box::new(clone_json_behavior(b, mcx)?)),
+                    None => None,
+                };
+                Expr::JsonExpr(JsonExpr {
+                    op: j.op,
+                    column_name: j.column_name.clone(),
+                    formatted_expr: clone_opt_box_expr(&j.formatted_expr, mcx)?,
+                    format: j.format,
+                    path_spec: clone_opt_box_expr(&j.path_spec, mcx)?,
+                    returning: j.returning,
+                    passing_names: j.passing_names.clone(),
+                    passing_values,
+                    on_empty,
+                    on_error,
+                    use_io_coercion: j.use_io_coercion,
+                    use_json_coercion: j.use_json_coercion,
+                    wrapper: j.wrapper,
+                    omit_quotes: j.omit_quotes,
+                    collation: j.collation,
+                    location: j.location,
+                })
+            }
+            Expr::NullTest(n) => Expr::NullTest(NullTest {
+                arg: clone_opt_box_expr(&n.arg, mcx)?,
+                nulltesttype: n.nulltesttype,
+                argisrow: n.argisrow,
+                location: n.location,
+            }),
+            Expr::BooleanTest(b) => Expr::BooleanTest(BooleanTest {
+                arg: clone_opt_box_expr(&b.arg, mcx)?,
+                booltesttype: b.booltesttype,
+                location: b.location,
+            }),
+            Expr::CoerceToDomain(c) => Expr::CoerceToDomain(CoerceToDomain {
+                arg: clone_opt_box_expr(&c.arg, mcx)?,
+                resulttype: c.resulttype,
+                resulttypmod: c.resulttypmod,
+                resultcollid: c.resultcollid,
+                coercionformat: c.coercionformat,
+                location: c.location,
+            }),
+            Expr::InferenceElem(i) => Expr::InferenceElem(InferenceElem {
+                expr: clone_opt_box_expr(&i.expr, mcx)?,
+                infercollid: i.infercollid,
+                inferopclass: i.inferopclass,
+            }),
+            Expr::ReturningExpr(r) => Expr::ReturningExpr(ReturningExpr {
+                retlevelsup: r.retlevelsup,
+                retold: r.retold,
+                retexpr: clone_opt_box_expr(&r.retexpr, mcx)?,
+            }),
+            Expr::PlaceHolderVar(p) => Expr::PlaceHolderVar(PlaceHolderVar {
+                phexpr: clone_opt_box_expr(&p.phexpr, mcx)?,
+                phrels: p.phrels.clone(),
+                phnullingrels: p.phnullingrels.clone(),
+                phid: p.phid,
+                phlevelsup: p.phlevelsup,
+            }),
+
+            // --- the panicking-Clone variants: deep-copy via their owned-child
+            //     paths (never `.clone()`), erasing the `'static` notional
+            //     lifetime back after the in-mcx clone (cf. tlist_into_static /
+            //     query_into_static).
+            Expr::Aggref(a) => Expr::Aggref(clone_aggref(a, mcx)?),
+            Expr::WindowFunc(w) => Expr::WindowFunc(WindowFunc {
+                winfnoid: w.winfnoid,
+                wintype: w.wintype,
+                wincollid: w.wincollid,
+                inputcollid: w.inputcollid,
+                args: clone_vec_expr(&w.args, mcx)?,
+                aggfilter: clone_opt_box_expr(&w.aggfilter, mcx)?,
+                runCondition: clone_vec_expr(&w.runCondition, mcx)?,
+                winref: w.winref,
+                winstar: w.winstar,
+                winagg: w.winagg,
+                location: w.location,
+            }),
+            Expr::SubLink(s) => Expr::SubLink(clone_sublink(s, mcx)?),
+            Expr::SubPlan(s) => Expr::SubPlan(SubPlanExpr(clone_subplan_static(&s.0, mcx)?)),
+            Expr::AlternativeSubPlan(a) => {
+                let mut subplans: Vec<PgBox<'static, SubPlan<'static>>> =
+                    Vec::with_capacity(a.0.subplans.len());
+                for sp in a.0.subplans.iter() {
+                    // Deep-clone each SubPlan into mcx, then erase to 'static
+                    // (same convention as the SubPlanExpr / SubLink children).
+                    let owned: SubPlan<'b> = sp.clone_in(mcx)?;
+                    let boxed: PgBox<'b, SubPlan<'b>> = alloc_in(mcx, owned)?;
+                    // SAFETY: fully owned in mcx; lifetime-parameter-only erase
+                    // to the Expr tree's 'static notional lifetime (the arena
+                    // outlives the planner run; cf. query_into_static).
+                    let boxed_static: PgBox<'static, SubPlan<'static>> =
+                        unsafe { core::mem::transmute(boxed) };
+                    subplans.push(boxed_static);
+                }
+                Expr::AlternativeSubPlan(AlternativeSubPlanExpr(Box::new(
+                    AlternativeSubPlan { subplans },
+                )))
+            }
+        })
+    }
+}
+
+/// Deep-clone an [`OpExpr`] payload (shared by `OpExpr`/`DistinctExpr`/
+/// `NullIfExpr`, which carry the same struct).
+fn clone_opexpr<'b>(o: &OpExpr, mcx: Mcx<'b>) -> PgResult<OpExpr> {
+    Ok(OpExpr {
+        opno: o.opno,
+        opfuncid: o.opfuncid,
+        opresulttype: o.opresulttype,
+        opretset: o.opretset,
+        opcollid: o.opcollid,
+        inputcollid: o.inputcollid,
+        args: clone_vec_expr(&o.args, mcx)?,
+        location: o.location,
+    })
+}
+
+/// Deep-clone an [`Aggref`]: `args` is a `TargetEntry` list deep-copied via the
+/// existing [`TargetEntry::clone_in`], and the result is re-erased to `'static`
+/// to match the lifetime-free Expr tree (cf. `tlist_into_static`).
+fn clone_aggref<'b>(a: &Aggref, mcx: Mcx<'b>) -> PgResult<Aggref> {
+    let mut args: Vec<TargetEntry<'static>> = Vec::with_capacity(a.args.len());
+    for te in a.args.iter() {
+        let cloned: TargetEntry<'b> = te.clone_in(mcx)?;
+        // SAFETY: TargetEntry's children (expr/resname) are fully owned in mcx
+        // after clone_in; this erases the 'mcx lifetime to the Expr tree's
+        // 'static notional lifetime — a lifetime-parameter-only transmute (cf.
+        // tlist_into_static in backend-parser-agg).
+        let cloned_static: TargetEntry<'static> = unsafe { core::mem::transmute(cloned) };
+        args.push(cloned_static);
+    }
+    Ok(Aggref {
+        aggfnoid: a.aggfnoid,
+        aggtype: a.aggtype,
+        aggcollid: a.aggcollid,
+        inputcollid: a.inputcollid,
+        aggtranstype: a.aggtranstype,
+        aggargtypes: a.aggargtypes.clone(),
+        aggdirectargs: clone_vec_expr(&a.aggdirectargs, mcx)?,
+        args,
+        aggorder: a.aggorder.clone(),
+        aggdistinct: a.aggdistinct.clone(),
+        aggfilter: clone_opt_box_expr(&a.aggfilter, mcx)?,
+        aggstar: a.aggstar,
+        aggvariadic: a.aggvariadic,
+        aggkind: a.aggkind,
+        aggpresorted: a.aggpresorted,
+        agglevelsup: a.agglevelsup,
+        aggsplit: a.aggsplit,
+        aggno: a.aggno,
+        aggtransno: a.aggtransno,
+        location: a.location,
+    })
+}
+
+/// Deep-clone a [`SubLink`]: `subselect` is an embedded owned `Query` deep-cloned
+/// via [`crate::copy_query::Query::clone_in`] then re-erased to `'static` (cf.
+/// `query_into_static`); `testexpr` recurses via [`Expr::clone_in`].
+fn clone_sublink<'b>(s: &SubLink, mcx: Mcx<'b>) -> PgResult<SubLink> {
+    let subselect = match &s.subselect {
+        Some(q) => {
+            let owned: crate::copy_query::Query<'b> = q.clone_in(mcx)?;
+            let boxed: PgBox<'b, crate::copy_query::Query<'b>> = alloc_in(mcx, owned)?;
+            // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only
+            // erase to the Expr tree's 'static notional lifetime (cf.
+            // query_into_static in backend-parser-parse-expr).
+            let boxed_static: PgBox<'static, crate::copy_query::Query<'static>> =
+                unsafe { core::mem::transmute(boxed) };
+            Some(boxed_static)
+        }
+        None => None,
+    };
+    Ok(SubLink {
+        subLinkType: s.subLinkType,
+        subLinkId: s.subLinkId,
+        testexpr: clone_opt_box_expr(&s.testexpr, mcx)?,
+        subselect,
+        location: s.location,
+    })
+}
+
+/// Deep-clone a `Box<SubPlan<'static>>` (the [`SubPlanExpr`] payload) into mcx,
+/// re-erasing to `'static` to match the lifetime-free Expr tree.
+fn clone_subplan_static<'b>(
+    sp: &SubPlan<'static>,
+    mcx: Mcx<'b>,
+) -> PgResult<Box<SubPlan<'static>>> {
+    let owned: SubPlan<'b> = sp.clone_in(mcx)?;
+    // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only erase
+    // to the Expr tree's 'static notional lifetime (cf. query_into_static).
+    let owned_static: SubPlan<'static> = unsafe { core::mem::transmute(owned) };
+    Ok(Box::new(owned_static))
+}
+
 /// Owned-tree form of `SubPlan` for embedding directly in the [`Expr`] enum.
 ///
 /// The canonical [`SubPlan`] struct carries an `'mcx` lifetime (its `testexpr`
@@ -1942,7 +2501,10 @@ impl TargetEntry<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TargetEntry<'b>> {
         Ok(TargetEntry {
             expr: match &self.expr {
-                Some(e) => Some(alloc_in(mcx, (**e).clone())?),
+                // Deep copy via `Expr::clone_in` (a shallow `.clone()` panics on
+                // `Aggref`/`SubLink`/`SubPlan` children, which a TargetEntry's
+                // expr can be — e.g. an aggregate's argument tlist).
+                Some(e) => Some(alloc_in(mcx, e.clone_in(mcx)?)?),
                 None => None,
             },
             resno: self.resno,
@@ -1955,5 +2517,165 @@ impl TargetEntry<'_> {
             resorigcol: self.resorigcol,
             resjunk: self.resjunk,
         })
+    }
+}
+
+#[cfg(test)]
+mod clone_in_tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    /// Build a trivial `Expr::Var` for use as a leaf child.
+    fn a_var(varattno: AttrNumber) -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno,
+            vartype: 23,
+            vartypmod: -1,
+            varnosyn: 1,
+            varattnosyn: varattno,
+            ..Default::default()
+        })
+    }
+
+    /// Round-trip `Expr::clone_in` on a list of `TargetEntry`s whose `expr` is an
+    /// `Aggref` — exercises the panicking-`Clone` `Aggref` deep-copy path (its
+    /// `args` is itself a `TargetEntry` list). Asserts structural equality
+    /// field-by-field (the `equal()` engine lives downstream of this crate, so a
+    /// direct call would form a dependency cycle).
+    #[test]
+    fn clone_in_aggref_bearing_target_entry_list() {
+        let ctx = MemoryContext::new("clone_in_test");
+        let mcx = ctx.mcx();
+
+        // Aggref with one aggregated arg (a TargetEntry wrapping a Var) and a
+        // FILTER expression.
+        let inner_te = TargetEntry {
+            expr: Some(mcx::alloc_in(mcx, a_var(2)).unwrap()),
+            resno: 1,
+            resname: None,
+            ressortgroupref: 0,
+            resorigtbl: 0,
+            resorigcol: 0,
+            resjunk: false,
+        };
+        // Erase the inner TargetEntry to 'static (Aggref::args convention).
+        let inner_te_static: TargetEntry<'static> =
+            unsafe { core::mem::transmute(inner_te) };
+
+        let aggref = Aggref {
+            aggfnoid: 2147,
+            aggtype: 20,
+            aggcollid: 0,
+            inputcollid: 0,
+            aggtranstype: 20,
+            aggargtypes: alloc::vec![23],
+            aggdirectargs: Vec::new(),
+            args: alloc::vec![inner_te_static],
+            aggorder: Vec::new(),
+            aggdistinct: Vec::new(),
+            aggfilter: Some(Box::new(a_var(3))),
+            aggstar: false,
+            aggvariadic: false,
+            aggkind: b'n' as i8,
+            aggpresorted: false,
+            agglevelsup: 0,
+            aggsplit: crate::nodeagg::AggSplit::default(),
+            aggno: 0,
+            aggtransno: 0,
+            location: 42,
+        };
+
+        let tlist = alloc::vec![TargetEntry {
+            expr: Some(mcx::alloc_in(mcx, Expr::Aggref(aggref)).unwrap()),
+            resno: 5,
+            resname: None,
+            ressortgroupref: 7,
+            resorigtbl: 0,
+            resorigcol: 0,
+            resjunk: false,
+        }];
+
+        // Deep-copy every TargetEntry (whose expr is an Aggref). A shallow
+        // `.clone()` would panic here.
+        let cloned: Vec<TargetEntry<'_>> =
+            tlist.iter().map(|te| te.clone_in(mcx).unwrap()).collect();
+
+        assert_eq!(cloned.len(), 1);
+        let ce = &cloned[0];
+        assert_eq!(ce.resno, 5);
+        assert_eq!(ce.ressortgroupref, 7);
+        let agg = ce.expr.as_ref().unwrap().as_aggref().expect("Aggref");
+        assert_eq!(agg.aggfnoid, 2147);
+        assert_eq!(agg.aggtype, 20);
+        assert_eq!(agg.location, 42);
+        assert_eq!(agg.aggargtypes, alloc::vec![23]);
+        // The aggregated-arg TargetEntry list was deep-copied.
+        assert_eq!(agg.args.len(), 1);
+        let arg_var = agg.args[0]
+            .expr
+            .as_ref()
+            .unwrap()
+            .as_var()
+            .expect("Var arg");
+        assert_eq!(arg_var.varattno, 2);
+        // The FILTER expression was deep-copied.
+        let filter_var = agg
+            .aggfilter
+            .as_ref()
+            .unwrap()
+            .as_var()
+            .expect("Var filter");
+        assert_eq!(filter_var.varattno, 3);
+    }
+
+    /// Round-trip `Expr::clone_in` on a `SubLink`-bearing expression — exercises
+    /// the panicking-`Clone` `SubLink` deep-copy path (its `subselect` is an
+    /// embedded owned `Query`). Asserts the structure survives the deep copy.
+    #[test]
+    fn clone_in_sublink_bearing_expr() {
+        let ctx = MemoryContext::new("clone_in_test");
+        let mcx = ctx.mcx();
+
+        // An analyzed sub-Query (minimal: default fields). Erase to 'static to
+        // match SubLink.subselect's notional lifetime.
+        let q = crate::copy_query::Query::new(mcx);
+        let q_boxed = mcx::alloc_in(mcx, q).unwrap();
+        let q_static: PgBox<'static, crate::copy_query::Query<'static>> =
+            unsafe { core::mem::transmute(q_boxed) };
+
+        let sublink = SubLink {
+            subLinkType: SubLinkType::Any,
+            subLinkId: 0,
+            testexpr: Some(Box::new(a_var(4))),
+            subselect: Some(q_static),
+            location: 99,
+        };
+        // Wrap the SubLink in a BoolExpr to exercise recursion through a parent
+        // node into the panicking-Clone child.
+        let expr = Expr::BoolExpr(BoolExpr {
+            boolop: BoolExprType::AND_EXPR,
+            args: alloc::vec![Expr::SubLink(sublink), a_var(5)],
+            location: -1,
+        });
+
+        // A shallow `.clone()` would panic on the SubLink child; clone_in deep-
+        // copies it.
+        let cloned = expr.clone_in(mcx).unwrap();
+
+        let be = cloned.as_boolexpr().expect("BoolExpr");
+        assert_eq!(be.args.len(), 2);
+        let sl = be.args[0].as_sublink().expect("SubLink");
+        assert_eq!(sl.subLinkType, SubLinkType::Any);
+        assert_eq!(sl.location, 99);
+        // testexpr deep-copied.
+        assert_eq!(
+            sl.testexpr.as_ref().unwrap().as_var().unwrap().varattno,
+            4
+        );
+        // subselect deep-copied (present, owned).
+        assert!(sl.subselect.is_some());
+        // Sibling Var deep-copied.
+        assert_eq!(be.args[1].as_var().unwrap().varattno, 5);
     }
 }

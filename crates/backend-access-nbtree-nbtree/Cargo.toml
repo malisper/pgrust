@@ -32,7 +32,9 @@ backend-access-common-indextuple-seams = { path = "../backend-access-common-inde
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
-backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+# btvacuumscan drives the real look-ahead read stream directly (the owner is
+# below nbtree in the dep graph; no seam, no handle).
+backend-storage-aio-read-stream = { path = "../backend-storage-aio-read-stream" }
 backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

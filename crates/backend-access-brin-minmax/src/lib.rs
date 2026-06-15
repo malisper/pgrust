@@ -14,8 +14,9 @@
 //! `backend-access-brin-entry-seams` opclass-dispatch seams, which this crate
 //! installs (resolving the column's support-procedure OID via
 //! `index_getprocinfo` and dispatching the built-in `brin_minmax_*` OIDs here;
-//! the inclusion opclass dispatches into `backend-access-brin-inclusion`; bloom
-//! / minmax-multi panic until their stage lands). This is the
+//! the inclusion opclass dispatches into `backend-access-brin-inclusion`, the
+//! bloom opclass into `backend-access-brin-bloom`; minmax-multi panics until its
+//! stage lands). This is the
 //! BRIN F0-opclass S1-minmax stage; S2-S4 (inclusion/bloom/minmax-multi) reuse
 //! the same [`types_brin::OpaqueOpcInfo`] carrier and the same dispatch
 //! installer pattern.
@@ -52,6 +53,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use backend_utils_error::ereport;
 
 use backend_access_brin_entry_seams as opclass;
+use backend_access_brin_bloom as bloom;
 use backend_access_brin_inclusion as inclusion;
 use backend_access_index_indexam_seams as indexam;
 use backend_utils_adt_scalar_seams as scalar;
@@ -448,9 +450,10 @@ fn minmax_get_strategy_procinfo(
 // installer resolves the column's support-procedure OID via `index_getprocinfo`
 // (the same `BRIN_PROCNUM_*` lookup `brin_build_desc`/`bringetbitmap` do) and
 // dispatches the built-in `brin_minmax_*` OIDs to the bodies above and the
-// `brin_inclusion_*` OIDs into `backend-access-brin-inclusion`. The remaining
-// built-in opclasses (bloom/minmax-multi) panic until their stage lands —
-// `seam-and-panic`, never a silent stub.
+// `brin_inclusion_*` OIDs into `backend-access-brin-inclusion` and the
+// `brin_bloom_*` OIDs into `backend-access-brin-bloom`. The remaining built-in
+// opclass (minmax-multi) panics until its stage lands — `seam-and-panic`, never
+// a silent stub.
 
 /// `index_getprocinfo(index, keyno + 1, procnum).fn_oid` — the OID of the
 /// opclass support procedure registered for indexed column `keyno` (0-based).
@@ -475,6 +478,7 @@ fn dispatch_opcinfo<'mcx>(
     match oid {
         F_BRIN_MINMAX_OPCINFO => brin_minmax_opcinfo(mcx, atttypid),
         inclusion::F_BRIN_INCLUSION_OPCINFO => inclusion::brin_inclusion_opcinfo(mcx, atttypid),
+        bloom::F_BRIN_BLOOM_OPCINFO => bloom::brin_bloom_opcinfo(mcx, atttypid),
         _ => unported_opclass("OpcInfo", oid),
     }
 }
@@ -498,6 +502,23 @@ fn dispatch_addvalue<'mcx>(
         inclusion::F_BRIN_INCLUSION_ADD_VALUE => {
             inclusion::brin_inclusion_add_value(mcx, bdesc, bval, value, isnull, collation)
         }
+        bloom::F_BRIN_BLOOM_ADD_VALUE => {
+            // C `brin_bloom_add_value` reads PG_GET_OPCLASS_OPTIONS() and
+            // BrinGetPagesPerRange(bdesc->bd_index); the relcache trim carries
+            // neither yet, so we pass the behaviour-preserving defaults (the
+            // bloom defaults / BRIN_DEFAULT_PAGES_PER_RANGE) — the same trim-gap
+            // convention as brin-insert-vacuum::brin_get_auto_summarize.
+            bloom::brin_bloom_add_value(
+                mcx,
+                bdesc,
+                bval,
+                value,
+                isnull,
+                collation,
+                bloom::PAGES_PER_RANGE_DEFAULT,
+                None,
+            )
+        }
         _ => unported_opclass("AddValue", oid),
     }
 }
@@ -517,6 +538,7 @@ fn dispatch_union<'mcx>(
         inclusion::F_BRIN_INCLUSION_UNION => {
             inclusion::brin_inclusion_union(mcx, bdesc, col_a, col_b, collation)
         }
+        bloom::F_BRIN_BLOOM_UNION => bloom::brin_bloom_union(mcx, col_a, col_b),
         _ => unported_opclass("Union", oid),
     }
 }
@@ -527,6 +549,9 @@ fn dispatch_consistent_is_multi(index: &Relation<'_>, attno: usize) -> PgResult<
         // Both minmax's and inclusion's Consistent use the old 3-arg signature
         // (fn_nargs < 4), so neither selects the multi-key form.
         F_BRIN_MINMAX_CONSISTENT | inclusion::F_BRIN_INCLUSION_CONSISTENT => Ok(false),
+        // bloom's Consistent takes the 4-arg (keys, nkeys) signature, so it
+        // selects the multi-key form.
+        bloom::F_BRIN_BLOOM_CONSISTENT => Ok(true),
         _ => unported_opclass("Consistent", oid),
     }
 }
@@ -547,6 +572,8 @@ fn dispatch_consistent_single<'mcx>(
         inclusion::F_BRIN_INCLUSION_CONSISTENT => {
             inclusion::brin_inclusion_consistent(mcx, bdesc, bval, key, collation)
         }
+        // bloom uses the multi-key form, so single-key dispatch is unreachable
+        // for it (brin_consistent_is_multi returns true).
         _ => unported_opclass("Consistent", oid),
     }
 }
@@ -556,15 +583,20 @@ fn dispatch_consistent_multi<'mcx>(
     _mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     attno: usize,
-    _collation: Oid,
-    _bdesc: &BrinDesc<'mcx>,
-    _bval: &BrinValues<'mcx>,
-    _keys: &[ScanKeyData<'mcx>],
+    collation: Oid,
+    bdesc: &BrinDesc<'mcx>,
+    bval: &BrinValues<'mcx>,
+    keys: &[ScanKeyData<'mcx>],
 ) -> PgResult<bool> {
-    // minmax never selects the multi-key form (Consistent is 3-arg), so this
-    // arm is only reachable for an opclass whose stage has not landed.
+    // minmax/inclusion never select the multi-key form (Consistent is 3-arg);
+    // bloom does (its Consistent is 4-arg).
     let oid = support_proc_oid(index, attno, BRIN_PROCNUM_CONSISTENT)?;
-    unported_opclass("Consistent (multi)", oid)
+    match oid {
+        bloom::F_BRIN_BLOOM_CONSISTENT => {
+            bloom::brin_bloom_consistent(bdesc, bval, keys, collation)
+        }
+        _ => unported_opclass("Consistent (multi)", oid),
+    }
 }
 
 /// Install the BRIN opclass-dispatch seams owned by the built-in opclasses.

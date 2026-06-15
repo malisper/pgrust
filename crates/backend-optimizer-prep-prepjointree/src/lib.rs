@@ -12,16 +12,18 @@
 //! three top-level `subquery_planner` entry-point seams
 //! ([`backend_optimizer_prep_prepjointree_seams`]):
 //!
-//! * `reduce_outer_joins` — ported here, installed by [`init_seams`].
-//! * `pull_up_sublinks` (FAMILY 1) — deferred to the SubLink owned-Query carrier
-//!   keystone (#273); installed as a seam-and-panic body.
+//! * `reduce_outer_joins` — FAMILY 4, ported here, installed by [`init_seams`].
+//! * `remove_useless_result_rtes` — FAMILY 5, ported here (see [`result_rtes`]).
+//! * `pull_up_sublinks` — FAMILY 1, **ported here** (see [`sublinks`]) now that
+//!   the SubLink owned-`Query` carrier keystone (#273) has landed; installed by
+//!   [`init_seams`].
 //! * `pull_up_subqueries` (FAMILY 2) — deferred to FAMILY 5 +
 //!   the `AppendRelInfo.translated_vars` walkable-carrier keystone (#274);
 //!   installed as a seam-and-panic body.
 //!
-//! `subquery_planner` (planner.c, still unported) calls all three, so all three
-//! are declared and installed; FAMILY 1/2 panic loudly until their keystones
-//! land (the sanctioned seam-and-panic contract).
+//! `subquery_planner` (planner.c, still unported) calls all of them, so all are
+//! declared and installed; only FAMILY 2 panics loudly until its keystone lands
+//! (the sanctioned seam-and-panic contract).
 //!
 //! ## Model notes (`reduce_outer_joins`)
 //!
@@ -64,6 +66,9 @@
 extern crate alloc;
 
 mod result_rtes;
+mod sublinks;
+
+pub use sublinks::pull_up_sublinks;
 
 // FAMILY 5 helpers re-exported for FAMILY 2 (`pull_up_subqueries`, still
 // seam-and-panicked): `get_nullingrels` builds the per-RTE nullingrel table the
@@ -752,20 +757,8 @@ pub fn init_seams() {
     backend_optimizer_prep_prepjointree_seams::remove_useless_result_rtes::set(
         result_rtes::remove_useless_result_rtes,
     );
-    backend_optimizer_prep_prepjointree_seams::pull_up_sublinks::set(pull_up_sublinks_panic);
+    backend_optimizer_prep_prepjointree_seams::pull_up_sublinks::set(sublinks::pull_up_sublinks);
     backend_optimizer_prep_prepjointree_seams::pull_up_subqueries::set(pull_up_subqueries_panic);
-}
-
-/// FAMILY 1 — deferred to the SubLink owned-Query carrier keystone (#273).
-fn pull_up_sublinks_panic<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-) -> PgResult<()> {
-    panic!(
-        "pull_up_sublinks: prepjointree FAMILY 1 not yet ported — deferred to the \
-         SubLink owned-Query carrier keystone (#273)"
-    )
 }
 
 /// FAMILY 2 — deferred to FAMILY 5 + the AppendRelInfo.translated_vars
