@@ -260,20 +260,10 @@ impl IntoClause<'_> {
     }
 }
 
-/// `ExplainState *` (`commands/explain_state.h`), trimmed to the flags the
-/// EXPLAIN EXECUTE driver reads. The full struct is owned by the explain unit;
-/// the driver only reads `memory` / `buffers` and threads the rest through the
-/// explain seams.
-#[derive(Debug)]
-pub struct ExplainState<'mcx> {
-    /// `bool memory` — print planner memory consumption.
-    pub memory: bool,
-    /// `bool buffers` — print buffer usage.
-    pub buffers: bool,
-    /// The remaining ExplainState the explain unit owns, threaded as an opaque
-    /// handle the explain seams resolve.
-    pub node: PgBox<'mcx, Node<'mcx>>,
-}
+// The EXPLAIN output state (`ExplainState`, `commands/explain_state.h`) lives in
+// the `types-explain` crate, now with the full node-tree fields the
+// `backend-commands-explain` unit fills. The previously-trimmed placeholder that
+// lived here has been retired onto that canonical type.
 
 /// A prepared statement's stored data (`commands/prepare.h`
 /// `PreparedStatement`). `stmt_name[NAMEDATALEN]` is the per-backend hash key;

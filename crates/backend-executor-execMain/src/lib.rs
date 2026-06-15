@@ -589,6 +589,39 @@ pub fn FreeQueryDesc(query_desc: QueryDesc) -> PgResult<()> {
     Ok(())
 }
 
+/// The EXPLAIN side of `ExplainOnePlan` (explain.c): `CreateQueryDesc` (with the
+/// already-pushed active snapshot, the discard receiver `None_Receiver`, and the
+/// caller's `instrument_option`) followed by `ExecutorStart(queryDesc, eflags)`.
+/// Returns the started [`QueryDesc`] whose plan-state tree the explain unit
+/// walks. Installed for `backend_executor_execMain_seams::
+/// create_query_desc_and_start_explain`.
+#[allow(clippy::too_many_arguments)]
+pub fn CreateQueryDescAndStartExplain(
+    parent: &MemoryContext,
+    plan: &PlannedStmt<'_>,
+    source_text: &str,
+    snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
+    params: ParamListInfoHandle,
+    instrument_option: i32,
+    eflags: i32,
+) -> PgResult<QueryDesc> {
+    // queryDesc = CreateQueryDesc(plannedstmt, queryString, GetActiveSnapshot(),
+    //     InvalidSnapshot, None_Receiver, params, queryEnv, instrument_option);
+    let mut query_desc = CreateQueryDesc(
+        parent,
+        plan,
+        source_text,
+        snapshot,
+        None, // InvalidSnapshot crosscheck_snapshot
+        DestReceiverHandle::NULL, // None_Receiver (discard)
+        params,
+        instrument_option,
+    )?;
+    // ExecutorStart(queryDesc, eflags);
+    ExecutorStart(&mut query_desc, eflags)?;
+    Ok(query_desc)
+}
+
 // ===========================================================================
 // Result tupdesc helper (queryDesc->tupDesc)
 // ===========================================================================
@@ -917,4 +950,5 @@ pub fn init_seams() {
     seams::executor_finish::set(ExecutorFinish);
     seams::executor_end::set(ExecutorEnd);
     seams::free_query_desc::set(FreeQueryDesc);
+    seams::create_query_desc_and_start_explain::set(CreateQueryDescAndStartExplain);
 }

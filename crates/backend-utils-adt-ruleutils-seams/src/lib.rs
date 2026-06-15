@@ -4,9 +4,19 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::nodeindexscan::PlannedStmt;
+use types_nodes::nodes::Node;
+use types_nodes::planstate::PlanStateNode;
+
+/// One element of a deparse context `List *` (`deparse_context_for_plan_tree`
+/// result), a ruleutils-private `deparse_namespace`. Carried as the generic C
+/// `List`-of-`Node` element so the EXPLAIN unit can thread the context list
+/// through `set_deparse_context_plan` / `deparse_expression` without inventing a
+/// type; ruleutils materialises the real `deparse_namespace` when it lands.
+pub type DeparseContext<'mcx> = PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>;
 
 seam_core::seam!(
     /// `pg_get_partkeydef_columns(relid, pretty)` (ruleutils.c): the
@@ -80,4 +90,69 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         pk_relid: types_core::Oid,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `select_rtable_names_for_explain(rtable, rels_used)` (ruleutils.c):
+    /// choose the unique alias name to display for each RTE actually referenced
+    /// in the plan (`rels_used`), returning a `List *` of `char *` (a `None`
+    /// element means "use the RTE's eref alias"). Reads the catalog, so it can
+    /// `ereport(ERROR)`. Allocated in `mcx`.
+    pub fn select_rtable_names_for_explain<'mcx>(
+        mcx: Mcx<'mcx>,
+        rtable: &PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry<'mcx>>,
+        rels_used: &types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `deparse_context_for_plan_tree(pstmt, rtable_names)` (ruleutils.c): build
+    /// the deparse-namespace context list for an entire plan tree, so plan-node
+    /// expressions can be deparsed. Reads the catalog; can `ereport(ERROR)`.
+    pub fn deparse_context_for_plan_tree<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstmt: &PlannedStmt<'mcx>,
+        rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+    ) -> PgResult<DeparseContext<'mcx>>
+);
+
+seam_core::seam!(
+    /// `set_deparse_context_plan(dpcontext, plan, ancestors)` (ruleutils.c):
+    /// point the head deparse namespace at a specific plan node (and its
+    /// ancestor list) so `PARAM_EXEC`/`Var` references resolve. Returns the
+    /// updated context list. Can `ereport(ERROR)`.
+    pub fn set_deparse_context_plan<'mcx, 'p>(
+        mcx: Mcx<'mcx>,
+        dpcontext: &DeparseContext<'mcx>,
+        plan: &PlanStateNode<'p>,
+        ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+    ) -> PgResult<DeparseContext<'mcx>>
+);
+
+seam_core::seam!(
+    /// `deparse_expression(expr, dpcontext, forceprefix, showimplicit)`
+    /// (ruleutils.c): deparse a single expression tree to SQL text using the
+    /// deparse context. Reads the catalog; can `ereport(ERROR)`. Allocated in
+    /// `mcx`.
+    pub fn deparse_expression<'mcx>(
+        mcx: Mcx<'mcx>,
+        expr: &Node<'mcx>,
+        dpcontext: &DeparseContext<'mcx>,
+        forceprefix: bool,
+        showimplicit: bool,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `get_rule_expr(expr, context, showimplicit)` (ruleutils.c): the
+    /// lower-level expression deparser `deparse_expression` wraps, appending the
+    /// SQL text for `expr` to the context's output buffer. Carried here because
+    /// some EXPLAIN show_* helpers reach it directly. Can `ereport(ERROR)`;
+    /// returns the rendered text in `mcx`.
+    pub fn get_rule_expr<'mcx>(
+        mcx: Mcx<'mcx>,
+        expr: &Node<'mcx>,
+        dpcontext: &DeparseContext<'mcx>,
+        showimplicit: bool,
+    ) -> PgResult<PgString<'mcx>>
 );

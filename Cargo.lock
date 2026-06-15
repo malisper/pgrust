@@ -2675,8 +2675,8 @@ name = "backend-catalog-pg-db-role-setting"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-pg-db-role-setting-seams",
- "backend-commands-functioncmds-seams",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -3395,6 +3395,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-explain"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-explain-format",
+ "backend-commands-explain-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-instrument",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "portability-instr-time",
+ "types-core",
+ "types-error",
+ "types-explain",
+ "types-nodes",
+ "types-scan",
+ "types-snapshot",
+]
+
+[[package]]
 name = "backend-commands-explain-dr"
 version = "0.0.0"
 dependencies = [
@@ -3427,6 +3447,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-explain",
  "types-nodes",
 ]
 
@@ -3517,6 +3538,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-acl",
@@ -3720,6 +3742,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-explain",
  "types-nodes",
  "types-scan",
  "types-tuple",
@@ -4152,6 +4175,7 @@ dependencies = [
  "types-parsenodes",
  "types-rel",
  "types-scan",
+ "types-snapshot",
  "types-tableam",
  "types-tuple",
 ]
@@ -9910,6 +9934,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -11108,6 +11133,7 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-guc-tables-seams",
+ "backend-utils-misc-superuser-seams",
  "mcx",
  "seam-core",
  "types-acl",
@@ -12209,6 +12235,7 @@ dependencies = [
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-dropcmds",
+ "backend-commands-explain",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
  "backend-commands-matview",
@@ -12637,6 +12664,7 @@ name = "types-explain"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-nodes",
 ]
 
 [[package]]
