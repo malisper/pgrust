@@ -11,6 +11,10 @@
 //! the C pointer to the owner-defined struct. These resolve to the real type
 //! when their owning unit lands.
 
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid, TimestampTz, INVALID_OID};
 use types_error::PgResult;
@@ -233,17 +237,82 @@ pub type ParseParamRefHook<'mcx> =
 pub type CoerceParamHook<'mcx> =
     fn(&mut ParseState<'mcx>, &Param, Oid, i32, i32) -> PgResult<Option<NodePtr<'mcx>>>;
 
-/// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
-/// for the parser hook functions above. Owned by the hook installer; opaque to
-/// everyone else. `None` is the C `NULL`.
+/// `VarParamState` (`parser/parse_param.c`) — the variable-parameter hook's
+/// reference state. In C this is `{ Oid **paramTypes; int *numParams; }`, two
+/// pointers that *alias the caller's* mutable `Oid *` type array and its element
+/// count; `variable_paramref_hook` / `variable_coerce_param_hook` re-`palloc`
+/// and write through them so the caller (e.g. `PrepareQuery`) reads the resolved
+/// types back after parse analysis.
 ///
-/// Inherited opacity: the C field is a bare `void *` whose pointee is whatever
-/// the hook installer (SPI / PL / extension) chose. The owning unit threads its
-/// own state through it; until such an installer lands in the repo it is carried
-/// as a typed-but-empty box. (No stand-in is introduced — the pointee remains
-/// the installer's private type, mirrored by `Node` here as the universal
-/// parse-time payload the hooks already traffic in.)
-pub type ParseRefHookState<'mcx> = Option<PgBox<'mcx, Node<'mcx>>>;
+/// The owned model keeps the caller-aliasing semantics safely: the type array
+/// lives in a single `Rc<RefCell<Vec<Oid>>>` that the caller constructs, hands
+/// to [`setup_parse_variable_parameters`], and then inspects after analysis. The
+/// `Vec`'s length is the C `*numParams` (the two-level `int *numParams` pointer
+/// collapses to the shared vector's own length). Cloning the carrier clones the
+/// `Rc` (the same shared array), matching C's pointer aliasing exactly.
+#[derive(Clone)]
+pub struct VarParamState {
+    /// The shared, growable parameter-type array (`Oid **paramTypes`, with
+    /// `*numParams == param_types.borrow().len()`). A zero (`InvalidOid`) entry
+    /// means that parameter number hasn't been seen; `UNKNOWNOID` means it has
+    /// been used but its type is not yet known.
+    pub param_types: Rc<RefCell<Vec<Oid>>>,
+}
+
+impl VarParamState {
+    /// Build a `VarParamState` over a freshly shared, empty type array.
+    pub fn new() -> VarParamState {
+        VarParamState {
+            param_types: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// Build a `VarParamState` sharing the caller's existing type array. The
+    /// caller retains its `Rc` clone to read the resolved types back.
+    pub fn from_shared(param_types: Rc<RefCell<Vec<Oid>>>) -> VarParamState {
+        VarParamState { param_types }
+    }
+}
+
+impl Default for VarParamState {
+    fn default() -> VarParamState {
+        VarParamState::new()
+    }
+}
+
+/// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
+/// for the parser hook functions above. Owned by the hook installer.
+///
+/// The C field is a bare `void *` whose pointee is whatever the hook installer
+/// chose; in the core backend the concrete installer whose state must survive in
+/// `ParseState` for a later pass is `setup_parse_variable_parameters` (its
+/// [`VarParamState`] is read back by the post-analysis `check_variable_parameters`
+/// pass). The fixed-parameter installer's `FixedParamState` borrows the caller's
+/// `const Oid *` and is carried by the parser unit directly (it is consumed
+/// during, not after, the walk). Additional installers are modeled here as they
+/// land; no opaque stand-in is introduced.
+#[derive(Clone)]
+pub enum ParseRefHookState {
+    /// C `NULL` — no ref-hook state installed.
+    None,
+    /// `setup_parse_variable_parameters`' shared, growable type array.
+    VarParams(VarParamState),
+}
+
+impl ParseRefHookState {
+    /// True if a ref-hook state is installed (C `p_ref_hook_state != NULL`).
+    pub fn is_some(&self) -> bool {
+        !matches!(self, ParseRefHookState::None)
+    }
+
+    /// The installed [`VarParamState`], if this is the variable-parameter case.
+    pub fn as_var_params(&self) -> Option<&VarParamState> {
+        match self {
+            ParseRefHookState::VarParams(v) => Some(v),
+            _ => None,
+        }
+    }
+}
 
 /// `ParseState` (`parser/parse_node.h`) — the working state threaded through
 /// parse analysis. The full ~36-field struct; this is the single canonical home
@@ -328,7 +397,7 @@ pub struct ParseState<'mcx> {
     /// `CoerceParamHook p_coerce_param_hook` — optional.
     pub p_coerce_param_hook: Option<CoerceParamHook<'mcx>>,
     /// `void *p_ref_hook_state` — common passthrough state for the hooks above.
-    pub p_ref_hook_state: ParseRefHookState<'mcx>,
+    pub p_ref_hook_state: ParseRefHookState,
 }
 
 impl<'mcx> ParseState<'mcx> {
@@ -372,7 +441,7 @@ impl<'mcx> ParseState<'mcx> {
             p_post_columnref_hook: None,
             p_paramref_hook: None,
             p_coerce_param_hook: None,
-            p_ref_hook_state: None,
+            p_ref_hook_state: ParseRefHookState::None,
         })
     }
 }

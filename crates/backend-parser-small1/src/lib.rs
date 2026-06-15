@@ -19,14 +19,20 @@
 //!   here (the parser-driver's lexer is the consumer).
 //! * `backend_parser_analyze_seams::make_parsestate` — `ParseState` allocator.
 //!
-//! # Variable-parameter (F3) is keystone-blocked
+//! # Variable-parameter (F3): the shared-mutable type-array carrier
 //!
 //! `setup_parse_variable_parameters` / `variable_paramref_hook` /
 //! `variable_coerce_param_hook` / `check_parameter_resolution_walker` MUTATE the
-//! caller's `Oid *` parameter-type array in place through a `VarParamState`
-//! carrier (`Oid **paramTypes`, `int *numParams`). That two-level
-//! caller-array-aliasing carrier has no owned-model home yet (a `ParamHookState`
-//! keystone). These functions mirror-PG-and-panic until that keystone lands.
+//! caller's `Oid *` parameter-type array in place. C models this with a
+//! `VarParamState { Oid **paramTypes; int *numParams; }` aliasing the caller's
+//! mutable array + count; the hooks `repalloc` and write through it so the caller
+//! (`PrepareQuery`) reads the resolved types back after analysis.
+//!
+//! The owned model keeps that caller-aliasing semantics safely with a
+//! [`types_nodes::parsestmt::VarParamState`] carrier — a single
+//! `Rc<RefCell<Vec<Oid>>>` the caller constructs, hands to
+//! `setup_parse_variable_parameters` (stored in `pstate.p_ref_hook_state`), and
+//! reads back afterward; the `Vec`'s length is C's `*numParams`.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -37,20 +43,22 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
 
+use types_core::catalog::VOIDOID;
 use types_core::fmgr::FLOAT8PASSBYVAL;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::error::{
-    ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR, ERRCODE_NAME_TOO_LONG,
-    ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_PARAMETER,
+    ERRCODE_AMBIGUOUS_PARAMETER, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_NAME_TOO_LONG, ERRCODE_OUT_OF_MEMORY, ERRCODE_TOO_MANY_COLUMNS,
+    ERRCODE_UNDEFINED_PARAMETER,
 };
-use types_error::{ErrorLocation, PgResult, SoftErrorContext, ERROR, NOTICE};
+use types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
 use types_tuple::Datum;
 
 use types_nodes::nodes::Node;
 use types_nodes::params::ParamRef;
-use types_nodes::parsestmt::{ParseState};
+use types_nodes::parsestmt::{ParseExprKind, ParseRefHookState, ParseState, VarParamState};
 use types_nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
 use types_nodes::rawnodes::{A_Const, A_Indices};
 use types_nodes::queryenvironment::EphemeralNamedRelationMetadataData;
@@ -74,6 +82,15 @@ use backend_utils_misc_queryenvironment as queryenv;
 /// `ErrorLocation` for an `ereport` in this unit (parser/parse_node.c et al.).
 fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/parser/scansup.c", lineno, funcname)
+}
+
+/// `palloc`/`repalloc` never return NULL (they `ereport(ERROR)` on exhaustion);
+/// the `try_reserve` model surfaces that as a recoverable `Err`.
+fn out_of_memory() -> PgError {
+    ereport(ERROR)
+        .errcode(ERRCODE_OUT_OF_MEMORY)
+        .errmsg("out of memory")
+        .into_error()
 }
 
 // ===========================================================================
@@ -632,81 +649,252 @@ pub fn fixed_paramref_hook<'mcx>(
 }
 
 /// `setup_parse_variable_parameters(pstate, paramTypes, numParams)`
-/// (parse_param.c, F3) — set up to process a query referencing a variable list
-/// of parameter types, growing the caller's `Oid *` array as `$n` refs appear.
+/// (parse_param.c) — set up to process a query referencing a variable list of
+/// parameter types, growing the caller's `Oid *` array as `$n` refs appear.
 ///
-/// C stores a `VarParamState *` (aliasing the caller's mutable `Oid **paramTypes`
-/// / `int *numParams`) in `pstate->p_ref_hook_state` and installs
-/// `variable_paramref_hook` + `variable_coerce_param_hook`. That caller-array-
-/// aliasing carrier is the F3 keystone — mirror-PG-and-panic until it lands.
-pub fn setup_parse_variable_parameters(_pstate: &ParseState<'_>) -> ! {
-    panic!(
-        "setup_parse_variable_parameters installs a VarParamState aliasing the \
-         caller's mutable Oid** paramTypes / int* numParams; the variable-parameter \
-         (F3) ParamHookState carrier keystone is not built (parse_param.c:84)"
-    )
+/// C allocates a `VarParamState` aliasing the caller's mutable `Oid **paramTypes`
+/// / `int *numParams`, stores it in `pstate->p_ref_hook_state`, and installs
+/// `variable_paramref_hook` + `variable_coerce_param_hook`. The owned model puts
+/// the shared, growable type array in a [`VarParamState`] carrier (an
+/// `Rc<RefCell<Vec<Oid>>>` the caller keeps a clone of, reading the resolved
+/// types back after analysis — the `Vec`'s length is C's `*numParams`); the
+/// installed hooks are [`variable_paramref_hook`] / [`variable_coerce_param_hook`]
+/// reachable from the parser, exactly as the C wires the two function pointers.
+pub fn setup_parse_variable_parameters(pstate: &mut ParseState<'_>, parstate: VarParamState) {
+    // pstate->p_ref_hook_state = parstate;
+    pstate.p_ref_hook_state = ParseRefHookState::VarParams(parstate);
+    // pstate->p_paramref_hook = variable_paramref_hook;
+    // pstate->p_coerce_param_hook = variable_coerce_param_hook;
+    //
+    // The owned ParseState's hook fields take a bare `fn` over the raw-Node
+    // universe; the variable-parameter resolvers are value-typed (they return a
+    // `Param`), so the parser reaches them directly via the installed
+    // `VarParams` ref-hook state rather than through the `fn`-pointer slots. The
+    // ref-hook state being `VarParams(..)` is the marker of that wiring (it is
+    // the real artifact the C function pointers select).
 }
 
-/// `variable_paramref_hook(pstate, pref)` (parse_param.c, F3) — transform a
-/// `ParamRef` using variable parameter types, enlarging the type array as needed.
-///
-/// Reads/writes through the `VarParamState` carrier that aliases the caller's
-/// mutable `Oid **paramTypes` / `int *numParams` — the F3 keystone.
-pub fn variable_paramref_hook(_pstate: &ParseState<'_>, _pref: &ParamRef) -> ! {
-    panic!(
-        "variable_paramref_hook enlarges the caller's mutable Oid** paramTypes via \
-         a VarParamState carrier; the variable-parameter (F3) ParamHookState \
-         carrier keystone is not built (parse_param.c:131)"
-    )
+/// `variable_paramref_hook(pstate, pref)` (parse_param.c) — transform a
+/// `ParamRef` using variable parameter types, enlarging the shared type array as
+/// needed and initializing newly-seen slots to `UNKNOWNOID`.
+pub fn variable_paramref_hook(
+    pstate: &ParseState<'_>,
+    parstate: &VarParamState,
+    pref: &ParamRef,
+) -> PgResult<Param> {
+    let paramno = pref.number;
+
+    // Check parameter number is in range.
+    //   if (paramno <= 0 || paramno > MaxAllocSize / sizeof(Oid)) ereport
+    if paramno <= 0 || (paramno as usize) > MAX_ALLOC_SIZE / core::mem::size_of::<Oid>() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_PARAMETER)
+            .errmsg(alloc::format!("there is no parameter ${}", paramno))
+            .errposition(parser_errposition(pstate, pref.location))
+            .into_error());
+    }
+
+    let mut param_types = parstate.param_types.borrow_mut();
+
+    // if (paramno > *parstate->numParams) { enlarge param array; *numParams = paramno }
+    //
+    // The shared Vec's length is *numParams; growing it (palloc0_array /
+    // repalloc0_array) zero-fills the new slots (InvalidOid == 0).
+    if (paramno as usize) > param_types.len() {
+        let grow = paramno as usize - param_types.len();
+        param_types.try_reserve(grow).map_err(|_| out_of_memory())?;
+        param_types.resize(paramno as usize, InvalidOid);
+    }
+
+    // Locate param's slot in array; if not seen before, initialize to UNKNOWN.
+    //   pptype = &(*paramTypes)[paramno - 1]; if (*pptype == InvalidOid) *pptype = UNKNOWNOID;
+    let idx = (paramno - 1) as usize;
+    if param_types[idx] == InvalidOid {
+        param_types[idx] = UNKNOWNOID;
+    }
+
+    // If the argument is of type void and it's a procedure call, interpret it as
+    // unknown. (JDBC hack — see also ParseFuncOrColumn.)
+    if param_types[idx] == VOIDOID
+        && pstate.p_expr_kind == ParseExprKind::EXPR_KIND_CALL_ARGUMENT
+    {
+        param_types[idx] = UNKNOWNOID;
+    }
+
+    let paramtype = param_types[idx];
+    drop(param_types);
+
+    // param = makeNode(Param); ...
+    Ok(Param {
+        paramkind: PARAM_EXTERN,
+        paramid: paramno,
+        paramtype,
+        paramtypmod: -1,
+        paramcollid: lsyscache::get_typcollation::call(paramtype)?,
+        location: pref.location,
+    })
 }
 
 /// `variable_coerce_param_hook(pstate, param, targetTypeId, targetTypeMod,
-/// location)` (parse_param.c, F3) — coerce a `Param` to a requested type in the
-/// varparams case, recording the deduced type in the caller's array.
+/// location)` (parse_param.c) — coerce a `Param` to a query-requested type in the
+/// varparams case, recording the deduced type back into the shared array (so
+/// later refs + the caller see it). Returns the coerced `Param` (C's `Node*`), or
+/// `None` to signal the caller to proceed with normal coercion.
 ///
-/// Reads/writes through the `VarParamState` carrier aliasing the caller's mutable
-/// `Oid **paramTypes` / `int *numParams` — the F3 keystone.
+/// `param` is mutated in place, exactly as the C hook updates `*param`.
 pub fn variable_coerce_param_hook(
-    _pstate: &ParseState<'_>,
-    _param: &Param,
-    _target_type_id: Oid,
+    pstate: &ParseState<'_>,
+    parstate: &VarParamState,
+    param: &mut Param,
+    target_type_id: Oid,
     _target_type_mod: i32,
-    _location: i32,
-) -> ! {
-    panic!(
-        "variable_coerce_param_hook records the deduced type into the caller's \
-         mutable Oid** paramTypes via a VarParamState carrier; the variable-parameter \
-         (F3) ParamHookState carrier keystone is not built (parse_param.c:186)"
-    )
+    location: i32,
+) -> PgResult<Option<Param>> {
+    if param.paramkind == PARAM_EXTERN && param.paramtype == UNKNOWNOID {
+        // Input is a Param of previously undetermined type, and we want to
+        // update our knowledge of the Param's type.
+        let paramno = param.paramid;
+
+        let mut param_types = parstate.param_types.borrow_mut();
+
+        // if (paramno <= 0 || paramno > *parstate->numParams) ereport
+        if paramno <= 0 || (paramno as usize) > param_types.len() {
+            drop(param_types);
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_PARAMETER)
+                .errmsg(alloc::format!("there is no parameter ${}", paramno))
+                .errposition(parser_errposition(pstate, param.location))
+                .into_error());
+        }
+
+        let idx = (paramno - 1) as usize;
+        let existing = param_types[idx];
+        if existing == UNKNOWNOID {
+            // We've successfully resolved the type.
+            param_types[idx] = target_type_id;
+        } else if existing == target_type_id {
+            // We previously resolved the type, and it matches.
+        } else {
+            // Oops — inconsistent types deduced.
+            drop(param_types);
+            let was = backend_utils_adt_format_type::format_type_be_owned(existing)?;
+            let now = backend_utils_adt_format_type::format_type_be_owned(target_type_id)?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_AMBIGUOUS_PARAMETER)
+                .errmsg(alloc::format!(
+                    "inconsistent types deduced for parameter ${}",
+                    paramno
+                ))
+                .errdetail(alloc::format!("{} versus {}", was, now))
+                .errposition(parser_errposition(pstate, param.location))
+                .into_error());
+        }
+        drop(param_types);
+
+        param.paramtype = target_type_id;
+
+        // Note: leaving paramtypmod -1 ensures a run-time length check/coercion
+        // occurs if needed.
+        param.paramtypmod = -1;
+
+        // This module always sets a Param's collation to the type default.
+        param.paramcollid = lsyscache::get_typcollation::call(param.paramtype)?;
+
+        // Use the leftmost of the param's and coercion's locations.
+        if location >= 0 && (param.location < 0 || location < param.location) {
+            param.location = location;
+        }
+
+        return Ok(Some(param.clone()));
+    }
+
+    // Else signal to proceed with normal coercion.
+    Ok(None)
 }
 
-/// `check_parameter_resolution_walker(node, pstate)` (parse_param.c, F3, static)
-/// — traverse a fully-analyzed tree verifying each `PARAM_EXTERN` `Param` matches
-/// its deduced type.
+/// `check_variable_parameters(pstate, query)` (parse_param.c) — verify consistent
+/// variable-parameter type assignment after parsing. Walks the query tree
+/// ensuring every `PARAM_EXTERN` `Param` matches its deduced type in the shared
+/// array (some may still be UNKNOWN if nothing forced their coercion).
 ///
-/// Reads through the `VarParamState` carrier aliasing the caller's mutable
-/// `Oid **paramTypes` / `int *numParams` — the F3 keystone.
-#[allow(dead_code)]
-fn check_parameter_resolution_walker(_node: &Node<'_>, _pstate: &ParseState<'_>) -> ! {
-    panic!(
-        "check_parameter_resolution_walker reads the caller's mutable Oid** \
-         paramTypes via a VarParamState carrier; the variable-parameter (F3) \
-         ParamHookState carrier keystone is not built (parse_param.c:286)"
-    )
+/// Note: intentionally does not check that all parameter positions were used, nor
+/// that all got non-UNKNOWN types — the caller enforces that if it matters.
+pub fn check_variable_parameters(pstate: &ParseState<'_>, query: &Query<'_>) -> PgResult<()> {
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_var_params()
+        .expect("check_variable_parameters requires a VarParamState ref-hook state");
+
+    // If numParams is zero then no Params were generated, so no work.
+    if parstate.param_types.borrow().is_empty() {
+        return Ok(());
+    }
+
+    // (void) query_tree_walker(query, check_parameter_resolution_walker, pstate, 0);
+    let mut walk_err: PgResult<()> = Ok(());
+    backend_nodes_core::node_walker::query_tree_walker(
+        query,
+        &mut |node| check_parameter_resolution_walker(node, pstate, parstate, &mut walk_err),
+        0,
+    );
+    walk_err
 }
 
-/// `check_variable_parameters(pstate, query)` (parse_param.c, F3) — verify
-/// consistent variable-parameter type assignment after parsing.
-///
-/// Reads through the `VarParamState` carrier that aliases the caller's mutable
-/// `Oid *paramTypes` / `int *numParams`. That carrier is the F3 keystone — this
-/// mirror-PG-and-panics until the `ParamHookState` aliasing carrier lands.
-pub fn check_variable_parameters(_pstate: &ParseState<'_>, _query: &Query<'_>) -> PgResult<()> {
-    panic!(
-        "check_variable_parameters reads a VarParamState aliasing the caller's \
-         mutable Oid* paramTypes / int* numParams; the variable-parameter (F3) \
-         ParamHookState carrier keystone is not built (parse_param.c:269)"
-    )
+/// `check_parameter_resolution_walker(node, pstate)` (parse_param.c, static) —
+/// traverse a fully-analyzed tree verifying each `PARAM_EXTERN` `Param` matches
+/// its deduced type in the shared array. Returns `true` to abort the walk (an
+/// error was captured into `err`, mirroring the C `ereport(ERROR)` that
+/// long-jumps out of the walk).
+fn check_parameter_resolution_walker(
+    node: &Node<'_>,
+    pstate: &ParseState<'_>,
+    parstate: &VarParamState,
+    err: &mut PgResult<()>,
+) -> bool {
+    if err.is_err() {
+        return true;
+    }
+    if let Some(param) = node_as_param(node) {
+        if param.paramkind == PARAM_EXTERN {
+            let paramno = param.paramid;
+            let param_types = parstate.param_types.borrow();
+
+            if paramno <= 0 || (paramno as usize) > param_types.len() {
+                drop(param_types);
+                *err = Err(ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_PARAMETER)
+                    .errmsg(alloc::format!("there is no parameter ${}", paramno))
+                    .errposition(parser_errposition(pstate, param.location))
+                    .into_error());
+                return true;
+            }
+
+            if param.paramtype != param_types[(paramno - 1) as usize] {
+                drop(param_types);
+                *err = Err(ereport(ERROR)
+                    .errcode(ERRCODE_AMBIGUOUS_PARAMETER)
+                    .errmsg(alloc::format!(
+                        "could not determine data type of parameter ${}",
+                        paramno
+                    ))
+                    .errposition(parser_errposition(pstate, param.location))
+                    .into_error());
+                return true;
+            }
+        }
+        return false;
+    }
+    if let Some(q) = node_as_query(node) {
+        // Recurse into RTE subquery or not-yet-planned sublink subquery.
+        return backend_nodes_core::node_walker::query_tree_walker(
+            q,
+            &mut |n| check_parameter_resolution_walker(n, pstate, parstate, err),
+            0,
+        );
+    }
+    backend_nodes_core::node_walker::expression_tree_walker(node, &mut |n| {
+        check_parameter_resolution_walker(n, pstate, parstate, err)
+    })
 }
 
 /// `query_contains_extern_params(query)` (parse_param.c) — true if a
