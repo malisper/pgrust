@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod buf_lock;
 mod mgr;
 mod ops;
 mod refcount;
@@ -83,6 +84,48 @@ fn buffer_is_permanent(buf: Buffer) -> types_error::PgResult<bool> {
     BufferManager::global_expect().BufferIsPermanent(buf)
 }
 
+// --- F1c: content-lock + cleanup-lock + hint-dirty seams (bufmgr.c) -------
+
+/// `LockBuffer(buffer, mode)` installed seam (bufmgr.c) — acquire/release the
+/// buffer's content lock (direct lwlock dep).
+fn lock_buffer(buffer: Buffer, mode: i32) -> types_error::PgResult<()> {
+    BufferManager::global_expect().LockBuffer(buffer, mode)
+}
+
+/// `LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)` installed seam (bufmgr.c).
+fn lock_buffer_exclusive(buffer: Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect()
+        .LockBuffer(buffer, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+}
+
+/// `LockBufferForCleanup(buffer)` installed seam (bufmgr.c) — acquire a cleanup
+/// (super-exclusive) lock.
+fn lock_buffer_for_cleanup(buffer: Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect().LockBufferForCleanup(buffer)
+}
+
+/// `ConditionalLockBufferForCleanup(buffer)` installed seam (bufmgr.c) — try to
+/// take a cleanup lock without blocking.
+fn conditional_lock_buffer_for_cleanup(buffer: Buffer) -> types_error::PgResult<bool> {
+    BufferManager::global_expect().ConditionalLockBufferForCleanup(buffer)
+}
+
+/// `IsBufferCleanupOK(buffer)` installed seam (bufmgr.c) — does the already-held
+/// exclusive lock happen to be a cleanup lock?
+fn is_buffer_cleanup_ok(buffer: Buffer) -> types_error::PgResult<bool> {
+    BufferManager::global_expect().IsBufferCleanupOK(buffer)
+}
+
+/// `MarkBufferDirtyHint(buffer, buffer_std)` installed seam (bufmgr.c) — mark a
+/// buffer dirty for a hint-bit-only change. The seam contract is infallible
+/// (the consumers call it bare); the rare `bad buffer ID` / WAL-FPI
+/// `ereport(ERROR)` path becomes a loud panic here.
+fn mark_buffer_dirty_hint(buf: Buffer, buffer_std: bool) {
+    BufferManager::global_expect()
+        .MarkBufferDirtyHint(buf, buffer_std)
+        .expect("MarkBufferDirtyHint: bad buffer ID or WAL hint-FPI failed");
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -98,4 +141,13 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::set(unlock_release_buffer);
     backend_storage_buffer_bufmgr_seams::incr_buffer_ref_count::set(incr_buffer_ref_count);
     backend_storage_buffer_bufmgr_seams::buffer_is_permanent::set(buffer_is_permanent);
+    // F1c
+    backend_storage_buffer_bufmgr_seams::lock_buffer::set(lock_buffer);
+    backend_storage_buffer_bufmgr_seams::lock_buffer_exclusive::set(lock_buffer_exclusive);
+    backend_storage_buffer_bufmgr_seams::lock_buffer_for_cleanup::set(lock_buffer_for_cleanup);
+    backend_storage_buffer_bufmgr_seams::conditional_lock_buffer_for_cleanup::set(
+        conditional_lock_buffer_for_cleanup,
+    );
+    backend_storage_buffer_bufmgr_seams::is_buffer_cleanup_ok::set(is_buffer_cleanup_ok);
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty_hint::set(mark_buffer_dirty_hint);
 }

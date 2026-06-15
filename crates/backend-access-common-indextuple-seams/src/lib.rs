@@ -50,3 +50,25 @@ seam_core::seam!(
         itupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
     ) -> types_error::PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>>
 );
+
+seam_core::seam!(
+    /// `index_getattr(itup, attnum, tupdesc, &isnull)` (access/itup.h): deform a
+    /// *single* (1-based) attribute out of an index tuple's on-disk byte image,
+    /// walking only as far as the target column (the `nocache_index_getattr`
+    /// path; for the common cached-offset / no-nulls case C's `index_getattr`
+    /// macro short-circuits, but the result is identical).
+    ///
+    /// `itup` is the contiguous byte image exactly as `index_form_tuple`
+    /// produces it (the 8-byte `IndexTupleData` header, the null bitmap when
+    /// present, then the `MAXALIGN`-padded user data). Used by nbtree's
+    /// `_bt_compare` / scankey value extraction, which carry index tuples as
+    /// byte slices rather than `FormedIndexTuple`. Returns the canonical
+    /// `(value, isnull)`; a by-ref value is copied into `mcx`. Fallible on
+    /// detoast / `ereport(ERROR)`.
+    pub fn nocache_index_getattr<'mcx>(
+        mcx: Mcx<'mcx>,
+        itup: &[u8],
+        attnum: i32,
+        itupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    ) -> types_error::PgResult<(Datum<'mcx>, bool)>
+);
