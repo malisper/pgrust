@@ -4,8 +4,7 @@
 //!
 //! After #169 these are all driven over the executor's **owned** plan-state
 //! tree (`&mut PlanStateNode`) and `EState` (`&mut EStateData`); the
-//! handle-space (`PlanStateHandle`/`EStateHandle`/`QueryDescHandle`) entry
-//! points were retired. `execParallel` installs every one of these from its
+//! handle-space entry points were retired. `execParallel` installs every one of these from its
 //! `init_seams()`.
 
 #![allow(unused_doc_comments)]

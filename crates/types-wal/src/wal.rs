@@ -47,6 +47,9 @@ pub const CLOG_TRUNCATE: u8 = 0x10;
 /// `RM_DBASE_ID` — the Database resource manager (rmgrlist.h entry 4).
 pub const RM_DBASE_ID: RmgrId = 4;
 
+/// `RM_MULTIXACT_ID` — the MultiXact resource manager (rmgrlist.h entry 5).
+pub const RM_MULTIXACT_ID: RmgrId = 5;
+
 /// `RM_RELMAP_ID` — the RelMap resource manager (rmgrlist.h entry 7).
 pub const RM_RELMAP_ID: RmgrId = 7;
 

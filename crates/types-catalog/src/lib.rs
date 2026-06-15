@@ -9,7 +9,11 @@
 
 pub mod catalog;
 pub mod catalog_dependency;
+pub mod pg_cast;
 pub mod pg_constraint;
+pub mod pg_conversion;
+pub mod pg_enum;
+pub mod pg_range;
 pub mod object_access;
 pub mod catalog_shdepend;
 pub mod opclasscmds_catalog;

@@ -17,13 +17,12 @@ use crate::rawnodes::{FromExpr, OnConflictExpr};
 /// `CURSOR_OPT_PARALLEL_OK` (`nodes/parsenodes.h`) — parallel mode OK.
 pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 
-/// `ParseState` (`parser/parse_node.h`), trimmed to the one field the COPY
-/// drivers read (`pstate->p_sourcetext`, the original query string passed to
-/// analysis and planning). The parser unit owns the full structure.
-pub struct ParseState<'mcx> {
-    /// `const char *p_sourcetext` — source text of the query.
-    pub p_sourcetext: PgString<'mcx>,
-}
+/// `ParseState` (`parser/parse_node.h`). Unified (K1 phase 4) onto the single
+/// canonical full struct in [`crate::parsestmt`]; the COPY drivers read only
+/// `p_sourcetext` (the original query string passed to analysis and planning),
+/// which is now an `Option<PgString>` (the C field is a possibly-NULL
+/// `const char *`). Re-exported for type identity — no behavior change.
+pub use crate::parsestmt::ParseState;
 
 /// `QuerySource` (`nodes/parsenodes.h`) — where a rewritten query came from.
 /// Values are PostgreSQL 18.3's enumeration order.
