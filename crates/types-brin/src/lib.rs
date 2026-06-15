@@ -53,9 +53,9 @@ pub struct BrinOpcInfo<'mcx> {
     pub oi_nstored: u16,
     /// `oi_regular_nulls`: regular processing of NULLs in `BrinValues`?
     pub oi_regular_nulls: bool,
-    /// `void *oi_opaque`: opaque pointer for the opclass' private use. A
-    /// genuinely heterogeneous extension slot (C `void *`); `None` when unset.
-    pub oi_opaque: Option<PgBox<'mcx, OpaqueOpcInfo>>,
+    /// `void *oi_opaque`: opaque pointer for the opclass' private use. The
+    /// opclass support procedures own the value; `None` when unset.
+    pub oi_opaque: Option<OpaqueOpcInfo>,
     /// `oi_typcache[oi_nstored]`: the type-cache entries of the stored columns.
     pub oi_typcache: PgVec<'mcx, TypeCacheEntry>,
 }
@@ -68,10 +68,46 @@ impl BrinOpcInfo<'_> {
     }
 }
 
-/// Placeholder payload for `BrinOpcInfo::oi_opaque` — the opclass-private blob
-/// (C `void *`). The opclass that allocates it (e.g. `brin_bloom.c`) owns its
-/// real shape; until those land it is an opaque byte buffer.
-pub type OpaqueOpcInfo = [u8];
+/// `BTMaxStrategyNumber` (`stratnum.h`): the number of B-tree strategies that
+/// the minmax/inclusion opclasses cache a comparison procinfo for.
+pub const BT_MAX_STRATEGY_NUMBER: usize = 5;
+
+/// Payload for `BrinOpcInfo::oi_opaque` — the opclass-private blob (C
+/// `void *oi_opaque`). In C each opclass `palloc0`s its own private struct in
+/// the tail of the `BrinOpcInfo` allocation (`MinmaxOpaque`, `InclusionOpaque`,
+/// the bloom/minmax-multi caches). Modeled here as a closed typed enum, one
+/// variant per built-in opclass; the genuinely heterogeneous `void *` of an
+/// extension opclass is not representable and is not used by the built-ins.
+///
+/// The per-strategy procinfo caches are lazily filled by the opclass support
+/// procedures, which the BRIN AM dispatches through a `&BrinDesc` (immutable);
+/// the cache slots therefore use `Cell`/[`MinmaxOpaque`]-interior mutability so
+/// the lazy fill matches C's mutation through `bdesc->bd_info[]->oi_opaque`.
+#[derive(Debug)]
+pub enum OpaqueOpcInfo {
+    /// `brin_minmax.c` `MinmaxOpaque` — the per-attribute strategy-procinfo
+    /// cache.
+    Minmax(MinmaxOpaque),
+}
+
+/// `MinmaxOpaque` (`brin_minmax.c`): the per-attribute strategy-procinfo cache.
+///
+/// C: `{ Oid cached_subtype; FmgrInfo strategy_procinfos[BTMaxStrategyNumber]; }`.
+/// Each cached `FmgrInfo` is represented by the resolved comparison function's
+/// `Oid` (its `fn_oid`); the BRIN fmgr-call seam re-resolves by OID, so the
+/// `Oid` is the whole callable identity. An `Oid` of `InvalidOid` (0) marks an
+/// uninitialized slot, exactly as `palloc0` leaves it.
+///
+/// `Cell`s give interior mutability so the cache fills lazily through the
+/// `&BrinDesc` the AM passes (C mutates the same struct through a pointer).
+#[derive(Debug, Default)]
+pub struct MinmaxOpaque {
+    /// `cached_subtype`.
+    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    /// `strategy_procinfos[BTMaxStrategyNumber]`: each slot's resolved
+    /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
+    pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
+}
 
 /// `BrinDesc` (`brin_internal.h`): descriptor that enables decoding a BRIN
 /// tuple from on-disk to in-memory and back.
