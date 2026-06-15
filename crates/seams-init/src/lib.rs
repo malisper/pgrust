@@ -16,6 +16,8 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginget::init_seams();
+    backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
@@ -29,6 +31,7 @@ pub fn init_all() {
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
     backend_access_spg_quadtree::init_seams();
+    backend_access_gist_proc::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
@@ -208,6 +211,7 @@ pub fn init_all() {
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_slotsync::init_seams();
+    backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
@@ -691,19 +695,6 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
-        // DESIGN_DEBT (TD-SRF-INLINE-QUERY): `inline_set_returning_function` is the
-        // full SET-returning-function inliner (clauses.c:5134) that
-        // `preprocess_function_rtes` (prepjointree.c:931) calls to turn a FUNCTION
-        // RTE into a subquery RTE. The owner is clauses.c, but the inline leg
-        // (LANGUAGE SQL prosrc parse + rewrite + single-SELECT querytree
-        // validation, returning an owned `Query`) is gated on the SQL-function
-        // parse/rewrite path, which is unported — the same gap as the sibling
-        // `inline_set_returning_function_core` (the scalar-SQL inline leg, also
-        // uninstalled). The FuncExpr node universe + SQL-function querytree are not
-        // reachable as a walkable `Query` here, so the seam loud-panics (a wrong-
-        // plan-class change, never a silent skip) until the inliner leg lands.
-        // DELETE this entry when clauses.c's SRF-inliner is ported.
-        ("backend_optimizer_util_clauses", "inline_set_returning_function"),
         // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
         // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
         // `init_local_reloptions(&relopts, 0)` +
@@ -728,21 +719,6 @@ mod recurrence_guard {
         // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
         // when allpaths.c lands.
         ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
-        // DESIGN_DEBT (TD-ADD-FUNCTION-COST-XOWNER): `add_function_cost`
-        // (costsize.c) is declared in `backend-optimizer-path-costsize-seams` but
-        // its install lives in `backend-optimizer-util-plancat`
-        // (`seam_add_function_cost`, plancat lib.rs) because the body reads
-        // `pg_proc.procost` (+ the support-function cost hook) through the relcache
-        // /catalog machinery plancat owns — costsize.c itself only *calls* it. The
-        // seam IS installed at runtime (plancat::init_seams runs in init_all); this
-        // is purely the owner-strict guard not detecting a cross-crate install (the
-        // guard checks only the dir-owner costsize's own source). It is a genuine,
-        // working install — NOT a runtime panic. prepagg's `get_agg_clause_costs`
-        // is the first non-test caller, which is why it only now surfaces. Re-home
-        // the install into costsize's own init_seams (or onto a shared path-seam
-        // owner) and DELETE this entry when the add_function_cost body's catalog
-        // dependency is restructured to live with costsize.
-        ("backend_optimizer_path_costsize", "add_function_cost"),
         // DESIGN_DEBT (TD-GIN-EXTRACT-QUERY): `gin_extract_query` is the GIN
         // `extractQueryFn` fmgr dispatch (`FunctionCall7Coll(...)` with by-pointer
         // out-params) that `ginscan.c`'s `ginNewScanKey` invokes. Its real owner
@@ -756,17 +732,6 @@ mod recurrence_guard {
         // not fire. It is genuinely uninstalled / loud-panic (mirror-pg-and-panic)
         // until the fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_extract_query"),
-        // DESIGN_DEBT (TD-GIN-COMPARE-PARTIAL): `gin_compare_partial` is the GIN
-        // `comparePartialFn` fmgr dispatch (`DatumGetInt32(FunctionCall4Coll(...))`)
-        // that `ginget.c`'s `collectMatchBitmap` / `matchPartialInPendingList`
-        // invoke. Its real owner is the fmgr GIN-call dispatcher (still unported)
-        // — the SAME owner as `gin_extract_query` / `gin_extract_value` /
-        // `gin_compare_entries`. It is declared in `backend-access-gin-ginutil-seams`
-        // (the GIN substrate seam crate) so the guard attributes it to the COMPLETE
-        // `ginutil` owner; but ginutil does not call it (ginget does). Genuinely
-        // uninstalled / loud-panic (mirror-pg-and-panic) until the fmgr GIN
-        // dispatcher lands. DELETE this entry when it does.
-        ("backend_access_gin_ginutil", "gin_compare_partial"),
         // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
         // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
         // ported in the otherwise-complete `backend-optimizer-util-pathnode`
@@ -919,6 +884,8 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
+        ("backend_executor_execTuples", "execute_attr_map_slot"),
+        ("backend_executor_execTuples", "pad_name_cstring_columns"),
         ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams

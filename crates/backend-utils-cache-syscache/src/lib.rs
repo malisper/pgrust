@@ -581,7 +581,7 @@ pub fn SearchSysCacheCopyAttNum<'mcx>(
 /// composed from the heaptuple unit's pieces: system attributes via
 /// `heap_getsysattr`, attributes past the tuple's natts via `getmissingattr`,
 /// NULLs via the bitmap check, everything else via `nocachegetattr`.
-fn heap_getattr<'mcx>(
+pub(crate) fn heap_getattr<'mcx>(
     mcx: Mcx<'mcx>,
     tup: &FormedTuple<'_>,
     attnum: i32,
@@ -951,4 +951,20 @@ pub fn init_seams() {
         projections::search_constraint_form_by_oid,
     );
     backend_utils_cache_syscache_seams::fetch_relchecks::set(projections::fetch_relchecks);
+    backend_utils_cache_syscache_seams::lookup_proc::set(projections::lookup_proc);
+    backend_utils_cache_syscache_seams::lookup_proc_result_info::set(
+        projections::lookup_proc_result_info,
+    );
+    backend_utils_cache_syscache_seams::pg_index_indclass::set(projections::pg_index_indclass);
+    backend_utils_cache_syscache_seams::read_constraint_form::set(
+        projections::read_constraint_form,
+    );
+    backend_utils_cache_syscache_seams::get_conkey_array::set(projections::get_conkey_array);
+    backend_utils_cache_syscache_seams::heap_get_conkey::set(projections::heap_get_conkey);
+    backend_utils_cache_syscache_seams::deconstruct_fk_arrays::set(
+        projections::deconstruct_fk_arrays,
+    );
+    backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::set(
+        projections::search_constraint_tuple_by_oid,
+    );
 }
