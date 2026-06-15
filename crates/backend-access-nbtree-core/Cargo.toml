@@ -45,6 +45,7 @@ backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" 
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 types-datum = { path = "../types-datum" }
 

@@ -30,7 +30,6 @@
 //! * `GetFreeIndexPage` (indexfsm.c) — no seam (only `record_free_index_page`).
 //! * `PredicateLockPageCombine` (predicate.c) — no seam.
 //! * `table_index_delete_tuples` (tableam dispatch) — no seam crate exposes it.
-//! * `_bt_getstackbuf` (nbtinsert.c, sibling module not yet present in-crate).
 //! * `smgr` bulk-write for `build_empty_metapage` is fully wired (the bulkwrite
 //!   seam crate exists).
 
@@ -1650,7 +1649,7 @@ pub fn bt_pagedel<'mcx>(
                 }
 
                 debug_assert!(P_ISLEAF(&opaque) && !P_IGNORE(&opaque));
-                if !_bt_mark_page_halfdead(mcx, rel, heaprel, leafbuf, &stack)? {
+                if !_bt_mark_page_halfdead(mcx, rel, heaprel, leafbuf, &mut stack)? {
                     _bt_relbuf(rel, leafbuf);
                     return Ok(());
                 }
@@ -1706,11 +1705,11 @@ pub fn bt_pagedel<'mcx>(
 // ---------------------------------------------------------------------------
 
 fn _bt_mark_page_halfdead<'mcx>(
-    mcx: Mcx<'_>,
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,
     leafbuf: Buffer,
-    stack: &BTStack,
+    stack: &mut BTStack,
 ) -> PgResult<bool> {
     let (opaque, maxoff) = {
         let page_bytes = bufmgr::buffer_get_page::call(mcx, leafbuf)?;
@@ -2310,11 +2309,11 @@ fn bt_page_set_deleted(page: &mut [u8], safexid: FullTransactionId) -> PgResult<
 // ---------------------------------------------------------------------------
 
 fn _bt_lock_subtree_parent<'mcx>(
-    mcx: Mcx<'_>,
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,
     child: BlockNumber,
-    stack: &BTStack,
+    stack: &mut BTStack,
     subtreeparent: &mut Buffer,
     poffset: &mut OffsetNumber,
     topparent: &mut BlockNumber,
@@ -2322,9 +2321,10 @@ fn _bt_lock_subtree_parent<'mcx>(
 ) -> PgResult<bool> {
     /*
      * Locate the pivot tuple whose downlink points to "child", write-locking
-     * the parent page.  _bt_getstackbuf (nbtinsert.c) has no seam yet.
+     * the parent page.
      */
-    let pbuf = _bt_getstackbuf(mcx, rel, heaprel, stack, child)?;
+    let (pbuf, _stackoffset) =
+        crate::insert::_bt_getstackbuf(mcx, rel, heaprel, stack, child)?;
     if pbuf == InvalidBuffer {
         log_message(&format!(
             "failed to re-find parent key in index \"{}\" for deletion target page {}",
@@ -2335,7 +2335,7 @@ fn _bt_lock_subtree_parent<'mcx>(
         return Ok(false);
     }
 
-    let (parent, parentoffset) = match stack {
+    let (parent, parentoffset) = match stack.as_ref() {
         Some(s) => (s.bts_blkno, s.bts_offset),
         None => {
             return Err(PgError::error(
@@ -2374,9 +2374,10 @@ fn _bt_lock_subtree_parent<'mcx>(
         return Ok(false);
     }
 
-    let grandparent = match stack {
-        Some(s) => &s.bts_parent,
-        None => &None,
+    let mut empty: BTStack = None;
+    let grandparent: &mut BTStack = match stack.as_mut() {
+        Some(s) => &mut s.bts_parent,
+        None => &mut empty,
     };
     _bt_lock_subtree_parent(
         mcx,
@@ -2389,19 +2390,6 @@ fn _bt_lock_subtree_parent<'mcx>(
         topparent,
         topparentrightsib,
     )
-}
-
-/// `_bt_getstackbuf(rel, heaprel, stack, child)` (nbtinsert.c) — re-find the
-/// pivot tuple whose downlink == child on the parent page, completing any
-/// incomplete split.  Sibling module not yet present in-crate, no seam.
-fn _bt_getstackbuf<'mcx>(
-    _mcx: Mcx<'_>,
-    _rel: &Relation<'mcx>,
-    _heaprel: &Relation<'mcx>,
-    _stack: &BTStack,
-    _child: BlockNumber,
-) -> PgResult<Buffer> {
-    panic!("_bt_lock_subtree_parent: _bt_getstackbuf (nbtinsert.c) not yet ported")
 }
 
 // ---------------------------------------------------------------------------

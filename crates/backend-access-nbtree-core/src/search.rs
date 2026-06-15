@@ -36,11 +36,6 @@
 //!   * `index_getattr` (single-attribute index-tuple deform over a byte slice):
 //!     no producer exists — the same blocker `utils.rs`/`preprocesskeys.rs`
 //!     documented. `_bt_compare`'s value extraction reaches it.
-//!   * `index_getprocinfo` (cached ORDER-proc OID handle): no producer; the
-//!     cached-proc path of `_bt_first`'s scankey build reaches it (the
-//!     cross-type path uses the real `get_opfamily_proc` seam).
-//!   * `_bt_finish_split` (nbtinsert.c, sibling `crate::insert`): referenced for
-//!     write-mode incomplete-split completion; lands concurrently.
 //!   * `_bt_parallel_*` (nbtree.c): parallel-scan branches only.
 
 #![allow(non_snake_case)]
@@ -83,6 +78,7 @@ use backend_storage_page::{
     PageGetSpecialPointer, PageRef,
 };
 
+use backend_access_index_indexam_seams as indexam;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams::function_call2_coll;
@@ -419,26 +415,6 @@ fn index_getattr(_tuple: &[u8], _attno: AttrNumber, _rel: &Relation) -> (Datum<'
     panic!("_bt_compare: index_getattr (single-attribute index-tuple deform) not yet ported")
 }
 
-/// `index_getprocinfo(rel, attno, BTORDER_PROC)` materialised as the ORDER-proc
-/// OID the cached-proc path of `_bt_first`'s scankey build needs. No producer
-/// for the cached fmgr handle exists (same blocker
-/// `utils::index_getprocinfo` / `preprocesskeys::index_getprocinfo` document).
-fn index_getprocinfo_oid(_rel: &Relation, _attno: AttrNumber, _procnum: i16) -> Oid {
-    panic!("_bt_first: index_getprocinfo (cached ORDER proc handle) not yet ported")
-}
-
-/// `_bt_finish_split(rel, heaprel, buf, stack)` (nbtinsert.c) — complete an
-/// incomplete page split encountered during write-mode descent. Lives in the
-/// sibling `crate::insert` module (nbtinsert.c), which lands concurrently.
-fn bt_finish_split<'mcx>(
-    _rel: &Relation<'mcx>,
-    _heaprel: &Relation<'mcx>,
-    _buf: Buffer,
-    _stack: &BTStack,
-) -> PgResult<()> {
-    panic!("_bt_moveright: _bt_finish_split (nbtinsert.c, crate::insert) not yet ported")
-}
-
 // --- Predicate locking / pgstat / instrument: behaviour-preserving no-ops ---
 //
 // The bt_first/bt_next seams do not carry the IndexScanDesc, so `xs_snapshot`,
@@ -709,7 +685,13 @@ fn _bt_moveright_inner<'mcx>(
                 P_INCOMPLETE_SPLIT(&opaque_from_bytes(&page_bytes)?)
             };
             if still_incomplete {
-                bt_finish_split(rel, heaprel, buf, stack)?;
+                crate::insert::_bt_finish_split(
+                    mcx,
+                    rel,
+                    heaprel,
+                    buf,
+                    crate::insert::clone_stack(stack),
+                )?;
             } else {
                 page_bt_relbuf(rel, buf);
             }
@@ -1495,15 +1477,15 @@ pub fn bt_first<'mcx>(
         let opcintype = rel.rd_opcintype[i];
         if bkey.sk_subtype == opcintype || bkey.sk_subtype == InvalidOid {
             /* cached (default) support proc */
-            let proc_oid = index_getprocinfo_oid(rel, bkey.sk_attno, BTORDER_PROC);
+            let procinfo =
+                indexam::index_getprocinfo::call(rel, bkey.sk_attno, BTORDER_PROC as u16)?;
             let mut e = ScanKeyData::empty();
             e.sk_flags = bkey.sk_flags;
             e.sk_attno = bkey.sk_attno;
             e.sk_strategy = InvalidStrategy;
             e.sk_subtype = bkey.sk_subtype;
             e.sk_collation = bkey.sk_collation;
-            e.sk_func = FmgrInfo::empty();
-            e.sk_func.fn_oid = proc_oid;
+            e.sk_func = procinfo;
             e.sk_argument = bkey.sk_argument.clone();
             inskeys[i] = e;
         } else {

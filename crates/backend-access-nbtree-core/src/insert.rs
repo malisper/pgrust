@@ -1414,7 +1414,7 @@ fn _bt_stepright<'mcx>(
 /// Clone a `BTStack` chain (boxed linked list). C passes the same `stack`
 /// pointer to recursive helpers; the owned-Box model needs an explicit clone
 /// when a borrowed stack must be handed to a by-value callee.
-fn clone_stack(stack: &BTStack) -> BTStack {
+pub(crate) fn clone_stack(stack: &BTStack) -> BTStack {
     match stack {
         None => None,
         Some(node) => Some(Box::new(BTStackData {
@@ -2363,7 +2363,7 @@ pub fn _bt_finish_split<'mcx>(
 /// the pivot tuple whose downlink points to `child`. Returns the write-locked
 /// parent buffer (or `InvalidBuffer`), and the (possibly updated) offset; updates
 /// `stack`'s `bts_blkno`/`bts_offset`.
-fn _bt_getstackbuf<'mcx>(
+pub(crate) fn _bt_getstackbuf<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,

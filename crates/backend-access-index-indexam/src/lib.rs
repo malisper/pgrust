@@ -59,6 +59,7 @@ use backend_utils_time_snapmgr_seams as snapmgr;
 /// `backend-access-index-indexam-seams`.
 pub fn init_seams() {
     backend_access_index_indexam_seams::index_open::set(index_open);
+    backend_access_index_indexam_seams::index_getprocinfo::set(index_getprocinfo);
 }
 
 // ===========================================================================
