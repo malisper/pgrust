@@ -62,6 +62,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-validate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-opclass",
+]
+
+[[package]]
 name = "backend-access-brin-xlog"
 version = "0.0.0"
 dependencies = [
@@ -201,12 +219,15 @@ dependencies = [
 name = "backend-access-common-printtup"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
+ "types-nodes",
  "types-stringinfo",
  "types-tuple",
 ]
@@ -4613,6 +4634,7 @@ dependencies = [
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-misc2-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
@@ -14088,6 +14110,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-validate",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
