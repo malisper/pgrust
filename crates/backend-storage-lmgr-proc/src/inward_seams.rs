@@ -12,7 +12,8 @@
 //! panic-through until their owners land.
 
 use backend_storage_lmgr_proc_seams as seams;
-use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId};
+use types_core::xact::XidStatus;
+use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
 use types_storage::storage::{
@@ -676,6 +677,88 @@ fn proc_is_my_proc(procno: ProcNumber) -> bool {
     crate::proc_shmem::my_proc_is_set() && crate::proc_shmem::my_proc_number() == procno
 }
 
+// --- clog.c group XID-status update: ProcGlobal->clogGroupFirst atomic + the
+// per-PGPROC clogGroup{Member,Next,MemberXid,MemberXidStatus,MemberPage,
+// MemberLsn} fields (clog.c `TransactionGroupUpdateXidStatus`). Mirrors the
+// ProcArray group-clear set above. ---
+
+fn set_my_proc_clog_group_member_data(
+    xid: TransactionId,
+    status: XidStatus,
+    pageno: i64,
+    lsn: XLogRecPtr,
+) {
+    with_my_proc(|p| {
+        p.clogGroupMember = true;
+        p.clogGroupMemberXid = xid;
+        p.clogGroupMemberXidStatus = status;
+        p.clogGroupMemberPage = pageno;
+        p.clogGroupMemberLsn = lsn;
+    });
+}
+
+fn my_proc_clog_group_member() -> bool {
+    with_my_proc_ref(|p| p.clogGroupMember)
+}
+
+fn set_my_proc_clog_group_member(value: bool) {
+    with_my_proc(|p| p.clogGroupMember = value);
+}
+
+fn set_proc_clog_group_member(procno: ProcNumber, value: bool) {
+    with_proc_by_number(procno, |p| p.clogGroupMember = value);
+}
+
+fn proc_clog_group_member_page(procno: ProcNumber) -> i64 {
+    with_proc_by_number(procno, |p| p.clogGroupMemberPage)
+}
+
+fn proc_clog_group_member_update(procno: ProcNumber) -> (TransactionId, XidStatus, XLogRecPtr) {
+    with_proc_by_number(procno, |p| {
+        (
+            p.clogGroupMemberXid,
+            p.clogGroupMemberXidStatus,
+            p.clogGroupMemberLsn,
+        )
+    })
+}
+
+fn my_proc_clog_group_next() -> u32 {
+    with_my_proc_ref(|p| p.clogGroupNext.read())
+}
+
+fn set_my_proc_clog_group_next(value: u32) {
+    with_my_proc(|p| {
+        p.clogGroupNext
+            .value
+            .store(value, core::sync::atomic::Ordering::SeqCst)
+    });
+}
+
+fn proc_clog_group_next(procno: ProcNumber) -> u32 {
+    with_proc_by_number(procno, |p| p.clogGroupNext.read())
+}
+
+fn set_proc_clog_group_next(procno: ProcNumber, value: u32) {
+    with_proc_by_number(procno, |p| {
+        p.clogGroupNext
+            .value
+            .store(value, core::sync::atomic::Ordering::SeqCst)
+    });
+}
+
+fn clog_group_first_read() -> u32 {
+    crate::proc_shmem::clog_group_first_read()
+}
+
+fn clog_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32) {
+    crate::proc_shmem::clog_group_first_compare_exchange(expected, newval)
+}
+
+fn clog_group_first_exchange(newval: u32) -> u32 {
+    crate::proc_shmem::clog_group_first_exchange(newval)
+}
+
 // ---- lifecycle / wakeup inward seams (called by other units) ----
 
 fn init_process() -> PgResult<()> {
@@ -830,6 +913,21 @@ pub(crate) fn install() {
     seams::proc_array_group_first_compare_exchange::set(proc_array_group_first_compare_exchange);
     seams::proc_array_group_first_exchange::set(proc_array_group_first_exchange);
     seams::proc_is_my_proc::set(proc_is_my_proc);
+
+    // clog.c group XID-status update atomics + per-PGPROC clog-group fields
+    seams::set_my_proc_clog_group_member_data::set(set_my_proc_clog_group_member_data);
+    seams::my_proc_clog_group_member::set(my_proc_clog_group_member);
+    seams::set_my_proc_clog_group_member::set(set_my_proc_clog_group_member);
+    seams::set_proc_clog_group_member::set(set_proc_clog_group_member);
+    seams::proc_clog_group_member_page::set(proc_clog_group_member_page);
+    seams::proc_clog_group_member_update::set(proc_clog_group_member_update);
+    seams::my_proc_clog_group_next::set(my_proc_clog_group_next);
+    seams::set_my_proc_clog_group_next::set(set_my_proc_clog_group_next);
+    seams::proc_clog_group_next::set(proc_clog_group_next);
+    seams::set_proc_clog_group_next::set(set_proc_clog_group_next);
+    seams::clog_group_first_read::set(clog_group_first_read);
+    seams::clog_group_first_compare_exchange::set(clog_group_first_compare_exchange);
+    seams::clog_group_first_exchange::set(clog_group_first_exchange);
 
     // Pure-wiring install (assemble/seam-wiring-guard): the deadlock-timeout
     // signal handler is an exact match for its declared seam and is installed
