@@ -1281,6 +1281,41 @@ pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Da
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `build_text_array_nullable` — `accumArrayResult`/`makeArrayResult` over
+/// `TEXTOID`, preserving per-element NULLs (the array-build half of
+/// `text_to_array` / `text_to_array_null`, varlena.c:4771-4801).
+pub fn build_text_array_nullable<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Option<&[u8]>],
+) -> PgResult<PgVec<'mcx, u8>> {
+    // C: text_to_array's `tstate.astate == NULL` branch returns
+    // construct_empty_array(TEXTOID) (a zero-element array, not NULL). split_text
+    // produces zero fields only for an empty input set.
+    if elems.is_empty() {
+        return construct_empty_array(mcx, foundation::TEXTOID);
+    }
+
+    // accumArrayResult(astate, CStringGetTextDatum(field), is_null, TEXTOID,...)
+    // per split field, then makeArrayResult, all over TEXTOID.
+    let mut astate: Option<ArrayBuildState> = None;
+    for elem in elems {
+        let (dvalue, disnull) = match elem {
+            Some(bytes) => (cstring_bytes_to_text_datum(mcx, bytes)?, false),
+            // C: split_text_accum_result accumulates (Datum) 0 with disnull set.
+            None => (Datum::null(), true),
+        };
+        astate = Some(accum_array_result(
+            mcx,
+            astate.take(),
+            dvalue,
+            disnull,
+            foundation::TEXTOID,
+        )?);
+    }
+    let astate = astate.expect("non-empty input builds a state");
+    make_array_result(mcx, &astate)
+}
+
 /// Seam `construct_int4_array` — `construct_array_builtin(datums, n, INT4OID)`
 /// (arrayfuncs.c). The `pg_blocking_pids` / `pg_safe_snapshot_blocking_pids`
 /// callers pass an `int32[]` slice; an empty input still yields a valid empty
@@ -1510,6 +1545,20 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {
     // SET_VARSIZE(buf, total): 4-byte header in the natural (non-toasted) form.
     foundation::set_varsize(&mut buf, total);
     buf[VARHDRSZ..].copy_from_slice(s.as_bytes());
+    Ok(datum_from_buf(buf))
+}
+
+/// `cstring_to_text_with_len(bytes, len)` then `PointerGetDatum`: build a text
+/// varlena in `mcx` from raw payload bytes (which may contain embedded NULs, as
+/// `text` is not NUL-terminated) and return its pointer word. The bytes carrier
+/// of `CStringGetTextDatum` for `text_to_array`'s split fields.
+fn cstring_bytes_to_text_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Datum> {
+    use types_datum::varlena::VARHDRSZ;
+    let total = VARHDRSZ + bytes.len();
+    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    buf.resize(total, 0);
+    foundation::set_varsize(&mut buf, total);
+    buf[VARHDRSZ..].copy_from_slice(bytes);
     Ok(datum_from_buf(buf))
 }
 

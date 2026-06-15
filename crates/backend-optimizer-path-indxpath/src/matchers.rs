@@ -1,6 +1,7 @@
 //! The clause-to-index *matcher family* of indxpath.c, ported 1:1 over the
 //! unified node tree + opfamily/opclass catalogs.
 
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -811,7 +812,10 @@ pub fn expand_indexqual_rowcompare(
         } else if op_strategy == BT_GREATER_STRATEGY_NUMBER {
             op_strategy = BT_GREATER_EQUAL_STRATEGY_NUMBER;
         } else {
-            panic!("unexpected strategy number {}", op_strategy);
+            return Err(types_error::PgError::error(format!(
+                "unexpected strategy number {}",
+                op_strategy
+            )));
         }
         let mut ops: Vec<Oid> = Vec::new();
         for ((&opfam, &lefttype), &righttype) in opfamilies
@@ -826,10 +830,10 @@ pub fn expand_indexqual_rowcompare(
                 op_strategy as i16,
             )?;
             if new_op == INVALID_OID {
-                panic!(
+                return Err(types_error::PgError::error(format!(
                     "missing operator {}({},{}) in opfamily {}",
                     op_strategy, lefttype, righttype, opfam
-                );
+                )));
             }
             ops.push(new_op);
         }

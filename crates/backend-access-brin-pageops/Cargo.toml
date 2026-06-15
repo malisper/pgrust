@@ -1,0 +1,46 @@
+[package]
+name = "backend-access-brin-pageops"
+version = "0.1.0"
+edition = "2021"
+
+# Every fallible function here returns the project-wide `types_error::PgResult`.
+# `PgError` is large, so the un-boxed `Err` variant is large; this is the
+# project-wide error contract these ports must match.
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-brin = { path = "../types-brin" }
+types-wal = { path = "../types-wal" }
+
+# ereport / critical-section (miscadmin.h, elog.c).
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Page-byte primitives (bufpage.c).
+backend-storage-page = { path = "../backend-storage-page" }
+
+# BRIN on-disk tuple codec (brin_tuple.c): brin_copy_tuple / brin_tuples_equal.
+backend-access-brin-tuple = { path = "../backend-access-brin-tuple" }
+
+# Buffer manager (bufmgr.c) — pin / lock / page access.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# Relcache accessors (utils/rel.h): RelationNeedsWAL / RELATION_IS_LOCAL.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+# Free-space map (freespace.c): GetPageWithFreeSpace / RecordPageWithFreeSpace /
+# RecordAndGetPageWithFreeSpace / FreeSpaceMapVacuumRange.
+backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+
+# Relation-extension lock (lmgr.c): LockRelationForExtension.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+
+# WAL insertion (xloginsert.c): XLogBeginInsert / XLogRegister* / XLogInsert /
+# log_newpage_buffer.
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+
+[dev-dependencies]

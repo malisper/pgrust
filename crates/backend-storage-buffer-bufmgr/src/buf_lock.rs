@@ -58,7 +58,7 @@ fn buf_state_get_refcount(buf_state: u32) -> u32 {
 
 /// `BufferIsLocal(buffer)` (buf.h) — temp/local buffers carry a NEGATIVE handle.
 #[inline]
-fn buffer_is_local(buffer: Buffer) -> bool {
+pub(crate) fn buffer_is_local(buffer: Buffer) -> bool {
     buffer < 0
 }
 

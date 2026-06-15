@@ -12,6 +12,7 @@ crate-type = ["rlib"]
 [dependencies]
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }

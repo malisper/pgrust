@@ -402,6 +402,10 @@ fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
 /// the C `*start_address` after the writes. The caller is responsible for having
 /// sized the buffer via [`EstimateParamListSpace`].
 ///
+/// `get_typlenbyval` can `ereport(ERROR)`, so per the failure-surface rule this
+/// returns `PgResult<*mut u8>` (the advanced cursor on success); C's `void`
+/// signature relies on `longjmp` to unwind the same error.
+///
 /// # Safety
 ///
 /// `start_address` must point into a writable buffer with at least
@@ -409,7 +413,7 @@ fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
 pub unsafe fn SerializeParamList(
     param_li: ParamListInfoHandle,
     start_address: *mut u8,
-) -> *mut u8 {
+) -> PgResult<*mut u8> {
     let mut cursor = start_address;
 
     // Write number of parameters.
@@ -451,13 +455,7 @@ pub unsafe fn SerializeParamList(
             cursor = cursor.add(SIZEOF_UINT16);
 
             // Write datum/isnull.
-            let (typ_len, typ_byval) = match typlenbyval_or_assumed(type_oid) {
-                Ok(t) => t,
-                // get_typlenbyval ereports; SerializeParamList is `void` in C and
-                // the failure aborts the (de)serialize. Surface as a panic since
-                // the unsafe cursor contract has no PgResult channel.
-                Err(e) => panic!("SerializeParamList: get_typlenbyval failed: {e:?}"),
-            };
+            let (typ_len, typ_byval) = typlenbyval_or_assumed(type_oid)?;
             cursor = datum_seam::datum_serialize_v::call(
                 &prm.value,
                 prm.isnull,
@@ -468,7 +466,7 @@ pub unsafe fn SerializeParamList(
         }
     }
 
-    cursor
+    Ok(cursor)
 }
 
 // ===========================================================================

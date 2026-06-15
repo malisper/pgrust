@@ -186,12 +186,20 @@ pub fn hashagg_recompile_expressions<'mcx>(
 
         // Builds a fresh aggregate-transition expression via ExecBuildAggTrans(),
         // temporarily swapping ss.ps.outerops to &TTSOpsMinimalTuple when
-        // minslot. ExecBuildAggTrans is owned by the unported execExpr unit and
-        // has no seam declaration. Loud panic.
+        // minslot. ExecBuildAggTrans IS ported (execExpr_domain_agg::
+        // exec_build_agg_trans), but it takes `&mut AggStateData<'mcx>` — and
+        // AggStateData lives in this nodeAgg crate, ABOVE types-nodes, so the
+        // backend-executor-execExpr-seams crate (which nodeAgg depends on) cannot
+        // name it without re-introducing the cycle the seam breaks. The
+        // type-erased bridge (`PlanStateNode::as_agg_state`) is also unavailable:
+        // there is no `PlanStateNode::Agg` variant yet (planstate.rs returns None
+        // — the T_Agg keystone). So the owner body exists but is unreachable from
+        // here. Blocked on the same T_Agg/PlanStateNode::Agg carrier keystone.
         let _ = estate;
         panic!(
-            "backend-executor-execExpr: ExecBuildAggTrans not yet ported \
-             (hashagg_recompile_expressions)"
+            "backend-executor-execExpr::ExecBuildAggTrans: owner is ported but unreachable — \
+             takes &mut AggStateData (above types-nodes, can't cross execExpr-seams) and \
+             PlanStateNode has no Agg variant (T_Agg keystone). (hashagg_recompile_expressions)"
         );
     }
 
@@ -212,13 +220,20 @@ pub fn hash_create_memory<'mcx>(aggstate: &mut AggStateData<'mcx>) -> PgResult<(
     //   maxBlockSize = Max(maxBlockSize, ALLOCSET_DEFAULT_INITSIZE);
     //   aggstate->hash_tablecxt = BumpContextCreate(es_query_cxt, "HashAgg table context", ...);
     //
-    // CreateWorkExprContext (execUtils) has no seam, and the work_mem GUC that
-    // sizes the bump block is not a dependency of this unit. Loud panic until
-    // they are reachable.
+    // CreateWorkExprContext IS ported (execUtils::CreateWorkExprContext) and
+    // returns an `EcxtId` into the EState ExprContext pool. But AggStateData
+    // models `hashcontext` as `Option<PgBox<ExprContext>>` (an owned value), not
+    // an `EcxtId` — the SAME ExprContext storage-model carrier gap `ExecInitAgg`
+    // panics on (exec_init_agg.rs): the owned AggState facet carries owned
+    // ExprContext boxes while execUtils owns EcxtId-pooled contexts, and the
+    // hash_metacxt/hash_tablecxt AllocSet/Bump contexts have no owned-model
+    // bridge either. Reconciling the two ExprContext representations is the
+    // keystone here, not the (already ported) owner. Loud panic until it lands.
     let _ = aggstate;
     panic!(
-        "backend-executor-execUtils: CreateWorkExprContext / work_mem sizing not yet \
-         available (hash_create_memory)"
+        "backend-executor-nodeAgg::hash_create_memory: CreateWorkExprContext is ported but its \
+         EcxtId result cannot fill AggState.hashcontext (PgBox<ExprContext>) — same ExprContext \
+         storage-model carrier gap as ExecInitAgg"
     );
 }
 

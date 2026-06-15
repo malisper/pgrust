@@ -26,6 +26,7 @@ pub fn init_all() {
     backend_access_index_amapi::init_seams();
     backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
+    backend_access_spg_proc::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
@@ -166,7 +167,6 @@ pub fn init_all() {
     backend_optimizer_path_small::init_seams();
     backend_optimizer_util_joininfo::init_seams();
     backend_optimizer_util_vars::init_seams();
-    backend_rewrite_core::init_seams();
     backend_parser_parse_expr::init_seams();
     backend_parser_agg::init_seams();
     backend_parser_func::init_seams();
@@ -205,6 +205,7 @@ pub fn init_all() {
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
+    backend_rewrite_core::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
     backend_storage_file_fileset::init_seams();
@@ -985,7 +986,6 @@ mod recurrence_guard {
         ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
-        ("backend_utils_adt_misc2", "make_expanded_object_read_only_internal_v"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
         // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned
