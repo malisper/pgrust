@@ -13,6 +13,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RegisterTwoPhaseRecord(rmid, info, data, len)` — append a resource
+    /// manager's 2PC record (header + optional payload) to the in-flight
+    /// prepare builder set up by `StartPrepare`. Called by the per-RM
+    /// `AtPrepare_*` hooks (e.g. `AtPrepare_MultiXact`) between `StartPrepare`
+    /// and `EndPrepare`.
+    pub fn register_two_phase_record(rmid: u8, info: u16, data: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TwoPhaseGetDummyProcNumber(xid, lock_held)` — the dummy `PGPROC`'s
+    /// `ProcNumber` standing in for a prepared transaction `xid`. `lock_held`
+    /// is true when the caller already holds `TwoPhaseStateLock`.
+    pub fn two_phase_get_dummy_proc_number(
+        xid: TransactionId,
+        lock_held: bool,
+    ) -> PgResult<types_core::ProcNumber>
+);
+
+seam_core::seam!(
     /// `MarkAsPreparing(xid, gid, prepared_at, owner, databaseid)` — reserve
     /// the GID; fails if invalid or already in use.
     pub fn mark_as_preparing(

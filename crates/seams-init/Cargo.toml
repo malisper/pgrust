@@ -37,6 +37,7 @@ backend-access-hash-xlog = { path = "../backend-access-hash-xlog" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }
+backend-access-transam-multixact = { path = "../backend-access-transam-multixact" }
 backend-access-transam-generic-xlog = { path = "../backend-access-transam-generic-xlog" }
 backend-access-transam-commit-ts = { path = "../backend-access-transam-commit-ts" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }

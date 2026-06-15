@@ -34,6 +34,7 @@ pub fn init_all() {
     backend_access_hash_xlog::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
+    backend_access_transam_multixact::init_seams();
     backend_access_transam_generic_xlog::init_seams();
     backend_access_transam_parallel::init_seams();
     backend_access_transam_subtrans::init_seams();
