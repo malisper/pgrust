@@ -885,4 +885,13 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_amproc_list2::set(projections::search_amproc_list2);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
+    backend_utils_cache_syscache_seams::foreign_data_wrapper_options::set(
+        projections::foreign_data_wrapper_options,
+    );
+    backend_utils_cache_syscache_seams::foreign_server_options::set(
+        projections::foreign_server_options,
+    );
+    backend_utils_cache_syscache_seams::user_mapping_options_by_oid::set(
+        projections::user_mapping_options_by_oid,
+    );
 }

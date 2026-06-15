@@ -705,6 +705,497 @@ pub fn GetExistingLocalJoinPath(_joinrel: &types_pathnodes::RelOptInfo) -> ! {
 }
 
 /* ===========================================================================
+ * pg_foreign_* catalog DML + options decode + IMPORT raw-stmt projection.
+ *
+ * These back the catalog-write/DDL seams `commands/foreigncmds.c` issues
+ * against the `pg_foreign_*` catalogs. In PostgreSQL these are inline
+ * `heap_form_tuple` + `CatalogTupleInsert`/`Update` / `SearchSysCacheCopy1` /
+ * `GetNewOidWithIndex` / `SysCacheGetAttr`-decode sequences inside
+ * foreigncmds.c; in the owned tree the C `Datum`/`HeapTuple`/`values[]`/
+ * `nulls[]`/`repl_*[]` plumbing belongs to the catalog-access layer, so each
+ * catalog-row operation is a single by-value seam here. The relation is opened
+ * directly via `backend-access-table-table::table_open` (mirrors the merged
+ * `pg_namespace`/`pg_am` ports); the row OID is assigned via
+ * `GetNewOidWithIndex` (direct call into merged `backend-catalog-catalog`);
+ * the `heap_form_tuple` + `CatalogTupleInsert`/`Update` value layer crosses
+ * the `catalog/indexing.c`-owned `catalog_tuple_{insert,update}_pg_foreign_*`
+ * seams (which panic until `indexing.c` lands, exactly as the merged
+ * `pg_namespace`/`pg_am`/`pg_enum` inserts/updates do — sanctioned
+ * mirror-pg-and-panic).
+ * ======================================================================== */
+
+use mcx::MemoryContext;
+use types_foreigncmds::{
+    DefElem, DefElemArg, ForeignDataWrapperRelationId as FdwRelationId,
+    ForeignServerRelationId as SrvRelationId, ForeignTableRelationId as FtRelationId,
+    UserMappingRelationId as UmRelationId, FdwOwnerRow, FdwUpdateRow, ImportRawStmt, RawStmtHandle,
+    ServerOwnerRow, ServerUpdateRow,
+};
+use types_foreigncmds::{
+    Anum_pg_foreign_data_wrapper_oid, Anum_pg_foreign_server_oid, Anum_pg_user_mapping_oid,
+    ForeignDataWrapperOidIndexId, ForeignServerOidIndexId, PgForeignDataWrapperInsertRow,
+    PgForeignDataWrapperUpdateRow, PgForeignServerInsertRow, PgForeignServerUpdateRow,
+    PgForeignTableInsertRow, PgUserMappingInsertRow, PgUserMappingUpdateRow, UserMappingOidIndexId,
+};
+use types_storage::lock::RowExclusiveLock;
+
+use backend_access_table_table::table_open;
+use backend_catalog_catalog::GetNewOidWithIndex;
+use backend_catalog_indexing_seams as indexing;
+use backend_catalog_pg_depend_seams as pg_depend;
+use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+
+/// `defGetString(def)` (`commands/define.c`) restricted to the value-node
+/// variants a generic FDW option carries. `def->arg == NULL` raises
+/// `ERRCODE_SYNTAX_ERROR` "%s requires a parameter". `T_Integer`/`T_Float`/
+/// `T_Boolean`/`T_String` render exactly as the C; `T_List` (a qualified name)
+/// is `NameListToString` (dotted join), matching the C arm.
+fn def_get_string(def: &DefElem<'_>) -> PgResult<String> {
+    match &def.arg {
+        None => Err(PgError::error(format!(
+            "{} requires a parameter",
+            def.defname.as_str()
+        ))
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR)),
+        Some(arg) => Ok(match &**arg {
+            DefElemArg::Integer(v) => format!("{v}"),
+            DefElemArg::Float(s) => s.as_str().to_string(),
+            DefElemArg::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            DefElemArg::String(s) => s.as_str().to_string(),
+            DefElemArg::NameList(names) => names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        }),
+    }
+}
+
+/// Render a merged option list to the `(name, value)` pairs the catalog-write
+/// carrier stores (the C `optionListToArray` packing of `"name=value"` text
+/// varlenas; `value = defGetString(def)`). An empty / `None` option list is
+/// the C `PointerGetDatum(NULL)` "store SQL NULL" case → `None`.
+fn options_to_pairs(options: Option<&[DefElem<'_>]>) -> PgResult<Option<Vec<(String, String)>>> {
+    match options {
+        None => Ok(None),
+        Some(opts) => {
+            let mut pairs = Vec::with_capacity(opts.len());
+            for def in opts {
+                pairs.push((def.defname.as_str().to_string(), def_get_string(def)?));
+            }
+            Ok(Some(pairs))
+        }
+    }
+}
+
+/// Decode the raw `*options` `text[]` varlena bytes a syscache projection seam
+/// returned into the `DefElem` list `transformGenericOptions` merges against
+/// (the C `untransformRelOptions`). A SQL-NULL column (`None`) is the empty
+/// list. Mirrors the existing `GetForeignTable`/`GetUserMapping` decode in this
+/// crate.
+fn untransform_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    raw: Option<Option<mcx::PgVec<'mcx, u8>>>,
+) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+    // The projection seam returns `Some(bytes)` when the row was present; a
+    // cache miss (`None`) is treated as no options (the caller already validated
+    // the object exists). `Some(None)` is the SQL-NULL column.
+    let pairs = match raw {
+        Some(Some(bytes)) => backend_access_common_reloptions::untransformRelOptions(
+            mcx,
+            Some(bytes.as_slice()),
+        )?,
+        Some(None) | None => Vec::new(),
+    };
+    let mut out = mcx::vec_with_capacity_in(mcx, pairs.len())?;
+    for (name, value) in pairs {
+        out.push(DefElem {
+            defname: PgString::from_str_in(&name, mcx)?,
+            arg: match value {
+                Some(v) => Some(mcx::alloc_in(
+                    mcx,
+                    DefElemArg::String(PgString::from_str_in(&v, mcx)?),
+                )?),
+                None => None,
+            },
+            defaction: types_foreigncmds::DEFELEM_UNSPEC,
+        });
+    }
+    Ok(out)
+}
+
+/* ---- read/lookup seams (syscache projections) ---- */
+
+/// `SearchSysCacheCopy1(FOREIGNDATAWRAPPERNAME, name)` projected to
+/// `(fdwid, fdwvalidator)` (`AlterForeignDataWrapper`'s `fdw_lookup_by_name`).
+fn fdw_lookup_by_name(fdwname: &str) -> PgResult<Option<FdwUpdateRow>> {
+    let fdwid = syscache::foreign_data_wrapper_oid_by_name::call(fdwname)?;
+    if !OidIsValid(fdwid) {
+        return Ok(None);
+    }
+    let ctx = MemoryContext::new("fdw_lookup_by_name");
+    let row = match syscache::foreign_data_wrapper_form::call(ctx.mcx(), fdwid)? {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+    Ok(Some(FdwUpdateRow {
+        fdwid,
+        fdwvalidator: row.fdwvalidator,
+    }))
+}
+
+/// `(fdwid, fdwname, fdwowner)` by FDW name (the FDW owner-change path).
+fn fdw_owner_row_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    fdwname: &str,
+) -> PgResult<Option<FdwOwnerRow<'mcx>>> {
+    let fdwid = syscache::foreign_data_wrapper_oid_by_name::call(fdwname)?;
+    if !OidIsValid(fdwid) {
+        return Ok(None);
+    }
+    fdw_owner_row_by_oid(mcx, fdwid)
+}
+
+/// `(fdwid, fdwname, fdwowner)` by FDW OID.
+fn fdw_owner_row_by_oid<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<Option<FdwOwnerRow<'mcx>>> {
+    let row = match syscache::foreign_data_wrapper_form::call(mcx, fdwid)? {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+    Ok(Some(FdwOwnerRow {
+        fdwid,
+        fdwname: row.fdwname,
+        fdwowner: row.fdwowner,
+    }))
+}
+
+/// `SysCacheGetAttr(FOREIGNDATAWRAPPEROID, fdwid, fdwoptions)` decoded into a
+/// `DefElem` list (NULL → empty).
+fn fdw_options<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+    let raw = syscache::foreign_data_wrapper_options::call(mcx, fdwid)?;
+    untransform_options(mcx, raw)
+}
+
+/// `(serverid, srvfdw)` by server name (`AlterForeignServer`).
+fn server_lookup_by_name(servername: &str) -> PgResult<Option<ServerUpdateRow>> {
+    let serverid = syscache::foreign_server_oid_by_name::call(servername)?;
+    if !OidIsValid(serverid) {
+        return Ok(None);
+    }
+    let ctx = MemoryContext::new("server_lookup_by_name");
+    let row = match syscache::foreign_server_form::call(ctx.mcx(), serverid)? {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+    Ok(Some(ServerUpdateRow {
+        serverid,
+        srvfdw: row.srvfdw,
+    }))
+}
+
+/// `(serverid, srvname, srvowner, srvfdw)` by server name.
+fn server_owner_row_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    servername: &str,
+) -> PgResult<Option<ServerOwnerRow<'mcx>>> {
+    let serverid = syscache::foreign_server_oid_by_name::call(servername)?;
+    if !OidIsValid(serverid) {
+        return Ok(None);
+    }
+    server_owner_row_by_oid(mcx, serverid)
+}
+
+/// `(serverid, srvname, srvowner, srvfdw)` by server OID.
+fn server_owner_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    serverid: Oid,
+) -> PgResult<Option<ServerOwnerRow<'mcx>>> {
+    let row = match syscache::foreign_server_form::call(mcx, serverid)? {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+    Ok(Some(ServerOwnerRow {
+        serverid,
+        srvname: row.srvname,
+        srvowner: row.srvowner,
+        srvfdw: row.srvfdw,
+    }))
+}
+
+/// `SysCacheGetAttr(FOREIGNSERVEROID, serverid, srvoptions)` → `DefElem` list.
+fn server_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    serverid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+    let raw = syscache::foreign_server_options::call(mcx, serverid)?;
+    untransform_options(mcx, raw)
+}
+
+/// `GetSysCacheOid2(USERMAPPINGUSERSERVER, useid, serverid)` → the mapping OID,
+/// or `InvalidOid`.
+fn usermapping_oid(useid: Oid, serverid: Oid) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("usermapping_oid");
+    let found = syscache::user_mapping_form::call(ctx.mcx(), useid, serverid)?;
+    match found {
+        Some((umid, _)) => Ok(umid),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `SysCacheGetAttr(USERMAPPINGUSERSERVER, umid, umoptions)` → `DefElem` list.
+fn usermapping_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    umid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+    let raw = syscache::user_mapping_options_by_oid::call(mcx, umid)?;
+    untransform_options(mcx, raw)
+}
+
+/* ---- FDW options validator (transformGenericOptions tail) ---- */
+
+/// `OidFunctionCall2(fdwvalidator, optionsArray, ObjectIdGetDatum(catalogId))`
+/// — run the FDW options validator on the merged option list. The C builds a
+/// `text[]` `Datum` from the option list (`optionListToArray`, packing
+/// `"name=value"` text varlenas; an empty list → `construct_empty_array(
+/// TEXTOID)`), lowers it to a `Datum` word, and `OidFunctionCall2`s the
+/// validator. Building that `text[]` `Datum` and lowering it to the validator's
+/// argument word both require the pointer-Datum bridge
+/// (`types_datum::Datum` is a bare word with no by-reference array lane), which
+/// is unported; so is the runtime fmgr dispatch of an arbitrary validator OID.
+/// This body therefore seam-and-panics into that unported bridge, matching the
+/// FDW-provider / `DatumGetHeapTupleHeader` precedents (see DESIGN_DEBT.md).
+/// The DDL seam itself is installed (so it leaves CONTRACT_RECONCILE_PENDING);
+/// only the genuinely-unported validator dispatch panics when reached.
+fn validate_options(_fdwvalidator: Oid, _options: &[DefElem<'_>], _catalog_id: Oid) -> PgResult<()> {
+    panic!(
+        "validate_options: the FDW options validator dispatch \
+         (optionListToArray text[] Datum build + OidFunctionCall2(fdwvalidator)) \
+         requires the pointer-Datum array bridge + runtime fmgr validator \
+         dispatch, both unported — seam-and-panic until that bridge lands"
+    );
+}
+
+/* ---- catalog inserts (open rel + GetNewOidWithIndex + indexing insert) ---- */
+
+/// `CreateForeignDataWrapper`'s `pg_foreign_data_wrapper` row insert.
+fn insert_fdw(
+    fdwname: &str,
+    owner: Oid,
+    handler: Oid,
+    validator: Oid,
+    options: Option<&[DefElem<'_>]>,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("insert_fdw");
+    let rel = table_open(ctx.mcx(), FdwRelationId, RowExclusiveLock)?;
+    let fdw_id = GetNewOidWithIndex(
+        &rel,
+        ForeignDataWrapperOidIndexId,
+        Anum_pg_foreign_data_wrapper_oid,
+    )?;
+    let row = PgForeignDataWrapperInsertRow {
+        oid: fdw_id,
+        fdwname: fdwname.to_string(),
+        fdwowner: owner,
+        fdwhandler: handler,
+        fdwvalidator: validator,
+        options: options_to_pairs(options)?,
+    };
+    indexing::catalog_tuple_insert_pg_foreign_data_wrapper::call(&rel, &row)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(fdw_id)
+}
+
+/// `CreateForeignServer`'s `pg_foreign_server` row insert.
+fn insert_server(
+    servername: &str,
+    owner: Oid,
+    fdwid: Oid,
+    servertype: Option<&str>,
+    version: Option<&str>,
+    options: Option<&[DefElem<'_>]>,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("insert_server");
+    let rel = table_open(ctx.mcx(), SrvRelationId, RowExclusiveLock)?;
+    let srv_id = GetNewOidWithIndex(&rel, ForeignServerOidIndexId, Anum_pg_foreign_server_oid)?;
+    let row = PgForeignServerInsertRow {
+        oid: srv_id,
+        srvname: servername.to_string(),
+        srvowner: owner,
+        srvfdw: fdwid,
+        srvtype: servertype.map(|s| s.to_string()),
+        srvversion: version.map(|s| s.to_string()),
+        options: options_to_pairs(options)?,
+    };
+    indexing::catalog_tuple_insert_pg_foreign_server::call(&rel, &row)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(srv_id)
+}
+
+/// `CreateUserMapping`'s `pg_user_mapping` row insert.
+fn insert_usermapping(
+    useid: Oid,
+    serverid: Oid,
+    options: Option<&[DefElem<'_>]>,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("insert_usermapping");
+    let rel = table_open(ctx.mcx(), UmRelationId, RowExclusiveLock)?;
+    let um_id = GetNewOidWithIndex(&rel, UserMappingOidIndexId, Anum_pg_user_mapping_oid)?;
+    let row = PgUserMappingInsertRow {
+        oid: um_id,
+        umuser: useid,
+        umserver: serverid,
+        options: options_to_pairs(options)?,
+    };
+    indexing::catalog_tuple_insert_pg_user_mapping::call(&rel, &row)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(um_id)
+}
+
+/// `CreateForeignTable`'s `pg_foreign_table` row insert + the pg_class →
+/// pg_foreign_server dependency the C records afterwards (the consumer
+/// delegates both into this seam). `pg_foreign_table` has no OID column.
+fn insert_foreign_table(
+    relid: Oid,
+    serverid: Oid,
+    options: Option<&[DefElem<'_>]>,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("insert_foreign_table");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, FtRelationId, RowExclusiveLock)?;
+    let row = PgForeignTableInsertRow {
+        ftrelid: relid,
+        ftserver: serverid,
+        options: options_to_pairs(options)?,
+    };
+    indexing::catalog_tuple_insert_pg_foreign_table::call(&rel, &row)?;
+    rel.close(RowExclusiveLock)?;
+
+    /* Add pg_class dependency on the server. */
+    let myself = ObjectAddress {
+        classId: types_foreigncmds::RelationRelationId,
+        objectId: relid,
+        objectSubId: 0,
+    };
+    let referenced = ObjectAddress {
+        classId: SrvRelationId,
+        objectId: serverid,
+        objectSubId: 0,
+    };
+    pg_depend::recordDependencyOn::call(mcx, &myself, &referenced, DEPENDENCY_NORMAL)?;
+    Ok(())
+}
+
+/* ---- catalog updates (open rel + indexing update seam) ---- */
+
+/// `AlterForeignDataWrapper`'s tuple update.
+fn update_fdw(
+    fdwid: Oid,
+    handler: Option<Oid>,
+    validator: Option<Oid>,
+    options: Option<Option<&[DefElem<'_>]>>,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("update_fdw");
+    let rel = table_open(ctx.mcx(), FdwRelationId, RowExclusiveLock)?;
+    let row = PgForeignDataWrapperUpdateRow {
+        handler,
+        validator,
+        options: match options {
+            None => None,
+            Some(inner) => Some(options_to_pairs(inner)?),
+        },
+    };
+    indexing::catalog_tuple_update_pg_foreign_data_wrapper::call(&rel, fdwid, &row)?;
+    rel.close(RowExclusiveLock)
+}
+
+/// `AlterForeignServer`'s tuple update.
+fn update_server(
+    serverid: Oid,
+    version: Option<Option<&str>>,
+    options: Option<Option<&[DefElem<'_>]>>,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("update_server");
+    let rel = table_open(ctx.mcx(), SrvRelationId, RowExclusiveLock)?;
+    let row = PgForeignServerUpdateRow {
+        version: version.map(|v| v.map(|s| s.to_string())),
+        options: match options {
+            None => None,
+            Some(inner) => Some(options_to_pairs(inner)?),
+        },
+    };
+    indexing::catalog_tuple_update_pg_foreign_server::call(&rel, serverid, &row)?;
+    rel.close(RowExclusiveLock)
+}
+
+/// `AlterUserMapping`'s tuple update.
+fn update_usermapping(umid: Oid, options: Option<Option<&[DefElem<'_>]>>) -> PgResult<()> {
+    let ctx = MemoryContext::new("update_usermapping");
+    let rel = table_open(ctx.mcx(), UmRelationId, RowExclusiveLock)?;
+    let row = PgUserMappingUpdateRow {
+        options: match options {
+            None => None,
+            Some(inner) => Some(options_to_pairs(inner)?),
+        },
+    };
+    indexing::catalog_tuple_update_pg_user_mapping::call(&rel, umid, &row)?;
+    rel.close(RowExclusiveLock)
+}
+
+/// `AlterForeignDataWrapperOwner_internal`'s tuple update.
+fn fdw_set_owner(fdwid: Oid, old_owner: Oid, new_owner: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("fdw_set_owner");
+    let rel = table_open(ctx.mcx(), FdwRelationId, RowExclusiveLock)?;
+    indexing::catalog_tuple_update_owner_pg_foreign_data_wrapper::call(
+        &rel, fdwid, old_owner, new_owner,
+    )?;
+    rel.close(RowExclusiveLock)
+}
+
+/// `AlterForeignServerOwner_internal`'s tuple update.
+fn server_set_owner(serverid: Oid, old_owner: Oid, new_owner: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("server_set_owner");
+    let rel = table_open(ctx.mcx(), SrvRelationId, RowExclusiveLock)?;
+    indexing::catalog_tuple_update_owner_pg_foreign_server::call(
+        &rel, serverid, old_owner, new_owner,
+    )?;
+    rel.close(RowExclusiveLock)
+}
+
+/* ---- IMPORT FOREIGN SCHEMA raw-stmt projection ---- */
+
+/// Project one `RawStmt *` the IMPORT loop received into the fields the command
+/// driver branches on. The raw parse tree (`RawStmtHandle`) is an unported
+/// parser node with no installed field-accessor seam, so this reaches the
+/// unported parser-node accessor and seam-and-panics. It is reached only after
+/// `fdw_import_foreign_schema` (a runtime FDW vtable dispatch, no provider
+/// ported) returns commands, so the path is already unreachable at runtime; the
+/// DDL seam is installed here so it leaves CONTRACT_RECONCILE_PENDING.
+fn import_classify_raw_stmt(_raw: RawStmtHandle) -> PgResult<ImportRawStmt> {
+    panic!(
+        "import_classify_raw_stmt: reading a RawStmt parser node's \
+         nodeTag/relname/stmt_location/stmt_len/stmt requires the unported \
+         parser-node field accessor — seam-and-panic until it lands"
+    );
+}
+
+/// `cstmt->base.relation->schemaname = pstrdup(local_schema)` — mutate the
+/// unported parser node in place. Same unported parser-node accessor as
+/// [`import_classify_raw_stmt`]; seam-and-panic.
+fn import_set_schemaname(_raw: RawStmtHandle, _local_schema: &str) -> PgResult<()> {
+    panic!(
+        "import_set_schemaname: rewriting the embedded \
+         CreateForeignTableStmt's RangeVar schemaname requires the unported \
+         parser-node accessor — seam-and-panic until it lands"
+    );
+}
+
+/* ===========================================================================
  * Inward-seam installers (the foreign.c entry points reached across cycles).
  * ======================================================================== */
 
@@ -783,6 +1274,37 @@ pub fn init_seams() {
         let ctx = mcx::MemoryContext::new("GetFdwRoutineByServerId");
         GetFdwRoutineByServerId(ctx.mcx(), serverid)
     });
+
+    /* ----- pg_foreign_* catalog DML + options decode + IMPORT seams ----- */
+    /* foreigncmds.c issues these against the pg_foreign_* catalogs; the
+     * heap_form_tuple + CatalogTupleInsert/Update value layer crosses the
+     * catalog/indexing.c seams (which panic until indexing.c lands). */
+    inward::insert_fdw::set(insert_fdw);
+    inward::update_fdw::set(update_fdw);
+    inward::fdw_set_owner::set(fdw_set_owner);
+    inward::fdw_lookup_by_name::set(fdw_lookup_by_name);
+    inward::fdw_owner_row_by_name::set(fdw_owner_row_by_name);
+    inward::fdw_owner_row_by_oid::set(fdw_owner_row_by_oid);
+    inward::fdw_options::set(fdw_options);
+
+    inward::insert_server::set(insert_server);
+    inward::update_server::set(update_server);
+    inward::server_set_owner::set(server_set_owner);
+    inward::server_lookup_by_name::set(server_lookup_by_name);
+    inward::server_owner_row_by_name::set(server_owner_row_by_name);
+    inward::server_owner_row_by_oid::set(server_owner_row_by_oid);
+    inward::server_options::set(server_options);
+
+    inward::insert_usermapping::set(insert_usermapping);
+    inward::update_usermapping::set(update_usermapping);
+    inward::usermapping_oid::set(usermapping_oid);
+    inward::usermapping_options::set(usermapping_options);
+
+    inward::insert_foreign_table::set(insert_foreign_table);
+
+    inward::validate_options::set(validate_options);
+    inward::import_classify_raw_stmt::set(import_classify_raw_stmt);
+    inward::import_set_schemaname::set(import_set_schemaname);
 }
 
 /// `RelationGetRelid(node->ss.ss_currentRelation)`.

@@ -171,6 +171,7 @@ pub fn init_all() {
     backend_parser_clause::init_seams();
     backend_parser_parse_target::init_seams();
     backend_optimizer_util_clauses::init_seams();
+    backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_coerce::init_seams();
@@ -840,75 +841,59 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
-        ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "exec_materialize_slot"),
-        ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
-        ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
-        ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
         ("backend_executor_execTuples", "pad_name_cstring_columns"),
         ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
-        ("backend_executor_execTuples", "slot_getattr"),
-        ("backend_executor_execTuples", "slot_getattr_by_id"),
-        ("backend_executor_execTuples", "slot_getsomeattr"),
-        ("backend_executor_execTuples", "slot_natts"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
-        // FDW-routine resolution, which it installs. The remaining seams in
-        // backend-foreign-foreign-seams are name-attributed to this owner but are
-        // NOT foreign.c functions — they belong to two other unported domains and
-        // cannot be installed here without faking (opacity-inherited-never-introduced).
-        // (1) pg_foreign_* catalog DML + options decode + IMPORT + the dynamic
-        //     validator dispatch: these are commands/foreigncmds.c machinery
-        //     (heap_form_tuple + CatalogTupleInsert/Update, SearchSysCacheCopy1,
-        //     GetNewOidWithIndex, SysCacheGetAttr decode, aclnewowner,
-        //     OidFunctionCall2(fdwvalidator), pg_parse_query RawStmt projection),
-        //     all needing the pg_foreign_* catalog-write substrate that is unported.
-        // (2) FDW-provider callbacks (node->fdwroutine->X) dispatch through a
-        //     runtime FDW vtable; no FDW provider (postgres_fdw/contrib) is ported,
-        //     so there is nothing to install. See DESIGN_DEBT.md.
+        // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams
+        // commands/foreigncmds.c issues (insert/update/set_owner/lookup/options
+        // for FDW/SERVER/USER MAPPING/FOREIGN TABLE + validate_options +
+        // import_classify_raw_stmt/import_set_schemaname) — all installed in its
+        // init_seams(). The heap_form_tuple + CatalogTupleInsert/Update value
+        // layer crosses the catalog/indexing.c-owned
+        // catalog_tuple_{insert,update}_pg_foreign_* seams (listed below; they
+        // panic until indexing.c lands — sanctioned mirror-pg-and-panic). Two of
+        // the installed seams are themselves seam-and-panic bodies (still
+        // INSTALLED, so removed from this list): `validate_options` reaches the
+        // unported text[]-Datum array build + OidFunctionCall2(fdwvalidator)
+        // fmgr-dispatch bridge; `import_classify_raw_stmt`/`import_set_schemaname`
+        // reach the unported RawStmt parser-node field accessor (and are only
+        // reachable after fdw_import_foreign_schema, a runtime FDW vtable with no
+        // provider). See DESIGN_DEBT.md.
+        //
+        // What REMAINS here for backend-foreign-foreign are the FDW-provider
+        // runtime-vtable callbacks (node->fdwroutine->X) dispatched through a
+        // runtime FDW vtable: no FDW provider (postgres_fdw/contrib) is ported,
+        // so there is nothing to ::set(). `fdw_import_foreign_schema` likewise
+        // dispatches the provider's ImportForeignSchema vtable callback.
         ("backend_foreign_foreign", "begin_direct_modify"),
         ("backend_foreign_foreign", "begin_foreign_scan"),
         ("backend_foreign_foreign", "end_direct_modify"),
         ("backend_foreign_foreign", "end_foreign_scan"),
         ("backend_foreign_foreign", "estimate_dsm_foreign_scan"),
         ("backend_foreign_foreign", "fdw_import_foreign_schema"),
-        ("backend_foreign_foreign", "fdw_lookup_by_name"),
-        ("backend_foreign_foreign", "fdw_options"),
-        ("backend_foreign_foreign", "fdw_owner_row_by_name"),
-        ("backend_foreign_foreign", "fdw_owner_row_by_oid"),
-        ("backend_foreign_foreign", "fdw_set_owner"),
         ("backend_foreign_foreign", "foreign_async_configure_wait"),
         ("backend_foreign_foreign", "foreign_async_notify"),
         ("backend_foreign_foreign", "foreign_async_request"),
-        ("backend_foreign_foreign", "import_classify_raw_stmt"),
-        ("backend_foreign_foreign", "import_set_schemaname"),
         ("backend_foreign_foreign", "initialize_dsm_foreign_scan"),
         ("backend_foreign_foreign", "initialize_worker_foreign_scan"),
-        ("backend_foreign_foreign", "insert_fdw"),
-        ("backend_foreign_foreign", "insert_foreign_table"),
-        ("backend_foreign_foreign", "insert_server"),
-        ("backend_foreign_foreign", "insert_usermapping"),
         ("backend_foreign_foreign", "iterate_direct_modify"),
         ("backend_foreign_foreign", "iterate_foreign_scan"),
         ("backend_foreign_foreign", "recheck_foreign_scan"),
         ("backend_foreign_foreign", "reinitialize_dsm_foreign_scan"),
         ("backend_foreign_foreign", "rescan_foreign_scan"),
-        ("backend_foreign_foreign", "server_lookup_by_name"),
-        ("backend_foreign_foreign", "server_options"),
-        ("backend_foreign_foreign", "server_owner_row_by_name"),
-        ("backend_foreign_foreign", "server_owner_row_by_oid"),
-        ("backend_foreign_foreign", "server_set_owner"),
         ("backend_foreign_foreign", "shutdown_foreign_scan"),
         ("backend_foreign_foreign", "stamp_scan_slot_tableoid"),
-        ("backend_foreign_foreign", "update_fdw"),
-        ("backend_foreign_foreign", "update_server"),
-        ("backend_foreign_foreign", "update_usermapping"),
-        ("backend_foreign_foreign", "usermapping_oid"),
-        ("backend_foreign_foreign", "usermapping_options"),
-        ("backend_foreign_foreign", "validate_options"),
+        // NOTE: the catalog/indexing.c-owned pg_foreign_* catalog-tuple
+        // insert/update seams the foreigncmds catalog-write seams above delegate
+        // to (catalog_tuple_{insert,update}_pg_foreign_{data_wrapper,server,
+        // user_mapping,table}) are NOT listed here: their owner
+        // backend-catalog-indexing is `todo` (not complete) in CATALOG.tsv, so
+        // the recurrence guard already exempts every indexing-seams seam (same
+        // as the existing catalog_tuple_insert_pg_namespace/pg_am). They panic
+        // until indexing.c lands — sanctioned mirror-pg-and-panic.
         // DESIGN_DEBT: `publish_wtparam_slot` is the *deposit* end of the
         // RecursiveUnion<->WorkTableScan cross-node aliasing channel. In C
         // `ExecInitRecursiveUnion` does `prmdata->value = PointerGetDatum(rustate)`,
@@ -925,7 +910,6 @@ mod recurrence_guard {
         // redesign of the cross-node aliasing channel, not a `::set()`. Pay down
         // alongside the `resolve_rustate` recovery channel.
         ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
-        ("backend_executor_execTuples", "store_virtual_values"),
         // nodes-core re-homes these two cross-unit DESIGN_DEBT seams onto its own
         // -seams crate so the guard can track them (see DESIGN_DEBT.md). Both
         // read the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/

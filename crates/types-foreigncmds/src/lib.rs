@@ -388,6 +388,183 @@ pub struct ServerUpdateRow {
 }
 
 /* ---------------------------------------------------------------------------
+ * pg_foreign_* catalog-write row carriers + catalog Anum/Natts/index-OID
+ * constants (`catalog/pg_foreign_*.h`, `catalog/pg_*_d.h`).
+ *
+ * These are the deformed-row carriers the catalog-DML seams build and hand to
+ * the `catalog/indexing.c`-owned `catalog_tuple_insert_pg_*` /
+ * `catalog_tuple_update_pg_*` seams (which `heap_form_tuple` +
+ * `CatalogTupleInsert`/`Update` against the catalog descriptor). The option
+ * list is rendered to `(name, value)` pairs (the C `optionListToArray` packs
+ * `"name=value"` text varlenas); both halves are non-null because the C
+ * `defGetString` always yields a string. An empty `options` carrier matches
+ * the C `PointerGetDatum(NULL)` "store SQL NULL" case (the seam writes a NULL
+ * `*options` column).
+ * ------------------------------------------------------------------------- */
+
+/// `Natts_pg_foreign_data_wrapper` — `pg_foreign_data_wrapper` has 7 columns
+/// (`oid, fdwname, fdwowner, fdwhandler, fdwvalidator, fdwacl, fdwoptions`).
+pub const Natts_pg_foreign_data_wrapper: usize = 7;
+/// `Anum_pg_foreign_data_wrapper_oid` (column 1).
+pub const Anum_pg_foreign_data_wrapper_oid: i16 = 1;
+/// `Anum_pg_foreign_data_wrapper_fdwname` (column 2).
+pub const Anum_pg_foreign_data_wrapper_fdwname: i16 = 2;
+/// `Anum_pg_foreign_data_wrapper_fdwowner` (column 3).
+pub const Anum_pg_foreign_data_wrapper_fdwowner: i16 = 3;
+/// `Anum_pg_foreign_data_wrapper_fdwhandler` (column 4).
+pub const Anum_pg_foreign_data_wrapper_fdwhandler: i16 = 4;
+/// `Anum_pg_foreign_data_wrapper_fdwvalidator` (column 5).
+pub const Anum_pg_foreign_data_wrapper_fdwvalidator: i16 = 5;
+/// `Anum_pg_foreign_data_wrapper_fdwacl` (column 6).
+pub const Anum_pg_foreign_data_wrapper_fdwacl: i16 = 6;
+/// `Anum_pg_foreign_data_wrapper_fdwoptions` (column 7).
+pub const Anum_pg_foreign_data_wrapper_fdwoptions: i16 = 7;
+/// `ForeignDataWrapperOidIndexId` — `pg_foreign_data_wrapper_oid_index`
+/// (`catalog/pg_foreign_data_wrapper.h`, OID 112).
+pub const ForeignDataWrapperOidIndexId: Oid = 112;
+
+/// `Natts_pg_foreign_server` — `pg_foreign_server` has 8 columns
+/// (`oid, srvname, srvowner, srvfdw, srvtype, srvversion, srvacl, srvoptions`).
+pub const Natts_pg_foreign_server: usize = 8;
+/// `Anum_pg_foreign_server_oid` (column 1).
+pub const Anum_pg_foreign_server_oid: i16 = 1;
+/// `Anum_pg_foreign_server_srvname` (column 2).
+pub const Anum_pg_foreign_server_srvname: i16 = 2;
+/// `Anum_pg_foreign_server_srvowner` (column 3).
+pub const Anum_pg_foreign_server_srvowner: i16 = 3;
+/// `Anum_pg_foreign_server_srvfdw` (column 4).
+pub const Anum_pg_foreign_server_srvfdw: i16 = 4;
+/// `Anum_pg_foreign_server_srvtype` (column 5).
+pub const Anum_pg_foreign_server_srvtype: i16 = 5;
+/// `Anum_pg_foreign_server_srvversion` (column 6).
+pub const Anum_pg_foreign_server_srvversion: i16 = 6;
+/// `Anum_pg_foreign_server_srvacl` (column 7).
+pub const Anum_pg_foreign_server_srvacl: i16 = 7;
+/// `Anum_pg_foreign_server_srvoptions` (column 8).
+pub const Anum_pg_foreign_server_srvoptions: i16 = 8;
+/// `ForeignServerOidIndexId` — `pg_foreign_server_oid_index`
+/// (`catalog/pg_foreign_server.h`, OID 113).
+pub const ForeignServerOidIndexId: Oid = 113;
+
+/// `Natts_pg_user_mapping` — `pg_user_mapping` has 4 columns
+/// (`oid, umuser, umserver, umoptions`).
+pub const Natts_pg_user_mapping: usize = 4;
+/// `Anum_pg_user_mapping_oid` (column 1).
+pub const Anum_pg_user_mapping_oid: i16 = 1;
+/// `Anum_pg_user_mapping_umuser` (column 2).
+pub const Anum_pg_user_mapping_umuser: i16 = 2;
+/// `Anum_pg_user_mapping_umserver` (column 3).
+pub const Anum_pg_user_mapping_umserver: i16 = 3;
+/// `Anum_pg_user_mapping_umoptions` (column 4).
+pub const Anum_pg_user_mapping_umoptions: i16 = 4;
+/// `UserMappingOidIndexId` — `pg_user_mapping_oid_index`
+/// (`catalog/pg_user_mapping.h`, OID 174).
+pub const UserMappingOidIndexId: Oid = 174;
+
+/// `Natts_pg_foreign_table` — `pg_foreign_table` has 3 columns
+/// (`ftrelid, ftserver, ftoptions`); it has no OID column.
+pub const Natts_pg_foreign_table: usize = 3;
+/// `Anum_pg_foreign_table_ftrelid` (column 1).
+pub const Anum_pg_foreign_table_ftrelid: i16 = 1;
+/// `Anum_pg_foreign_table_ftserver` (column 2).
+pub const Anum_pg_foreign_table_ftserver: i16 = 2;
+/// `Anum_pg_foreign_table_ftoptions` (column 3).
+pub const Anum_pg_foreign_table_ftoptions: i16 = 3;
+
+/// Insert carrier for one `pg_foreign_data_wrapper` row
+/// (`CreateForeignDataWrapper`). `oid` is the caller-assigned
+/// `GetNewOidWithIndex` value; `fdwacl` is always SQL NULL on create.
+#[derive(Clone, Debug)]
+pub struct PgForeignDataWrapperInsertRow {
+    /// `oid`.
+    pub oid: Oid,
+    /// `fdwname` (`namein(stmt->fdwname)`).
+    pub fdwname: String,
+    /// `fdwowner`.
+    pub fdwowner: Oid,
+    /// `fdwhandler` (`InvalidOid` if none).
+    pub fdwhandler: Oid,
+    /// `fdwvalidator` (`InvalidOid` if none).
+    pub fdwvalidator: Oid,
+    /// `fdwoptions` as `(name, value)` pairs; `None` ⇒ store SQL NULL.
+    pub options: Option<Vec<(String, String)>>,
+}
+
+/// Update carrier for `AlterForeignDataWrapper`'s tuple update: only the
+/// `Some` columns are replaced (the C `repl_repl[..] = true` columns).
+/// `options = Some(None)` stores SQL NULL.
+#[derive(Clone, Debug)]
+pub struct PgForeignDataWrapperUpdateRow {
+    /// `fdwhandler`.
+    pub handler: Option<Oid>,
+    /// `fdwvalidator`.
+    pub validator: Option<Oid>,
+    /// `fdwoptions`.
+    pub options: Option<Option<Vec<(String, String)>>>,
+}
+
+/// Insert carrier for one `pg_foreign_server` row (`CreateForeignServer`).
+#[derive(Clone, Debug)]
+pub struct PgForeignServerInsertRow {
+    /// `oid`.
+    pub oid: Oid,
+    /// `srvname` (`namein(stmt->servername)`).
+    pub srvname: String,
+    /// `srvowner`.
+    pub srvowner: Oid,
+    /// `srvfdw`.
+    pub srvfdw: Oid,
+    /// `srvtype` (`CStringGetTextDatum`); `None` ⇒ SQL NULL.
+    pub srvtype: Option<String>,
+    /// `srvversion` (`CStringGetTextDatum`); `None` ⇒ SQL NULL.
+    pub srvversion: Option<String>,
+    /// `srvoptions` as `(name, value)` pairs; `None` ⇒ store SQL NULL.
+    /// `srvacl` is always SQL NULL on create.
+    pub options: Option<Vec<(String, String)>>,
+}
+
+/// Update carrier for `AlterForeignServer`'s tuple update.
+#[derive(Clone, Debug)]
+pub struct PgForeignServerUpdateRow {
+    /// `srvversion`; `Some(None)` stores SQL NULL.
+    pub version: Option<Option<String>>,
+    /// `srvoptions`.
+    pub options: Option<Option<Vec<(String, String)>>>,
+}
+
+/// Insert carrier for one `pg_user_mapping` row (`CreateUserMapping`).
+#[derive(Clone, Debug)]
+pub struct PgUserMappingInsertRow {
+    /// `oid`.
+    pub oid: Oid,
+    /// `umuser` (`InvalidOid` for PUBLIC).
+    pub umuser: Oid,
+    /// `umserver`.
+    pub umserver: Oid,
+    /// `umoptions` as `(name, value)` pairs; `None` ⇒ store SQL NULL.
+    pub options: Option<Vec<(String, String)>>,
+}
+
+/// Update carrier for `AlterUserMapping`'s tuple update.
+#[derive(Clone, Debug)]
+pub struct PgUserMappingUpdateRow {
+    /// `umoptions`.
+    pub options: Option<Option<Vec<(String, String)>>>,
+}
+
+/// Insert carrier for one `pg_foreign_table` row (`CreateForeignTable`).
+/// `pg_foreign_table` has no OID column; `ftrelid` is the row key.
+#[derive(Clone, Debug)]
+pub struct PgForeignTableInsertRow {
+    /// `ftrelid`.
+    pub ftrelid: Oid,
+    /// `ftserver`.
+    pub ftserver: Oid,
+    /// `ftoptions` as `(name, value)` pairs; `None` ⇒ store SQL NULL.
+    pub options: Option<Vec<(String, String)>>,
+}
+
+/* ---------------------------------------------------------------------------
  * IMPORT FOREIGN SCHEMA loop carriers.
  *
  * `ImportForeignSchema` parses each FDW-returned command into a list of

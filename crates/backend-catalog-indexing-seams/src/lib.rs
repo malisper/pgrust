@@ -459,6 +459,127 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+/* ---- pg_foreign_* catalog DML (commands/foreigncmds.c) -------------------- */
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, ForeignDataWrapperOidIndexId,
+    /// Anum_pg_foreign_data_wrapper_oid)` is performed by the caller; this seam
+    /// does the `heap_form_tuple(rel->rd_att, values, nulls)` +
+    /// `CatalogTupleInsert(rel, tuple)` + `heap_freetuple` for one
+    /// `pg_foreign_data_wrapper` row (`CreateForeignDataWrapper`). The row's
+    /// columns cross as the deformed [`PgForeignDataWrapperInsertRow`]
+    /// (`fdwacl` is always SQL NULL on create; `options = None` ⇒ `fdwoptions`
+    /// SQL NULL). `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_foreign_data_wrapper(
+        rel: &RelationData<'_>,
+        row: &types_foreigncmds::PgForeignDataWrapperInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterForeignDataWrapper`'s tuple update: `SearchSysCacheCopy1(
+    /// FOREIGNDATAWRAPPEROID, fdwid)`, build `repl_val`/`repl_null`/`repl_repl`
+    /// for the `Some` columns (`fdwhandler`/`fdwvalidator`/`fdwoptions`),
+    /// `heap_modify_tuple` + `CatalogTupleUpdate(rel, &tup->t_self, tup)`. The
+    /// owner locates the on-disk tuple from `fdwid`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_foreign_data_wrapper(
+        rel: &RelationData<'_>,
+        fdwid: Oid,
+        row: &types_foreigncmds::PgForeignDataWrapperUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterForeignDataWrapperOwner_internal`'s tuple update: `SearchSysCacheCopy1(
+    /// FOREIGNDATAWRAPPEROID, fdwid)`, set `fdwowner = new_owner` and
+    /// `aclnewowner(fdwacl, old, new)` when the ACL is non-NULL, then
+    /// `heap_modify_tuple` + `CatalogTupleUpdate`. The ACL rewrite + the
+    /// `heap_getattr(fdwacl)` read live in the owner. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_owner_pg_foreign_data_wrapper(
+        rel: &RelationData<'_>,
+        fdwid: Oid,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// `pg_foreign_server` row (`CreateForeignServer`); the OID is caller-
+    /// assigned (`GetNewOidWithIndex(rel, ForeignServerOidIndexId, ...)`).
+    /// `srvacl` is always SQL NULL on create; `srvtype`/`srvversion` and the
+    /// `srvoptions` honor their `None` ⇒ SQL NULL. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_foreign_server(
+        rel: &RelationData<'_>,
+        row: &types_foreigncmds::PgForeignServerInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterForeignServer`'s tuple update: `SearchSysCacheCopy1(
+    /// FOREIGNSERVEROID, serverid)`, build `repl_*` for the `Some` columns
+    /// (`srvversion`/`srvoptions`), `heap_modify_tuple` + `CatalogTupleUpdate`.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_foreign_server(
+        rel: &RelationData<'_>,
+        serverid: Oid,
+        row: &types_foreigncmds::PgForeignServerUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterForeignServerOwner_internal`'s tuple update: `SearchSysCacheCopy1(
+    /// FOREIGNSERVEROID, serverid)`, set `srvowner = new_owner` and
+    /// `aclnewowner(srvacl, old, new)` when the ACL is non-NULL, then
+    /// `heap_modify_tuple` + `CatalogTupleUpdate`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_owner_pg_foreign_server(
+        rel: &RelationData<'_>,
+        serverid: Oid,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// `pg_user_mapping` row (`CreateUserMapping`); the OID is caller-assigned
+    /// (`GetNewOidWithIndex(rel, UserMappingOidIndexId, ...)`). `options = None`
+    /// ⇒ `umoptions` SQL NULL. `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_user_mapping(
+        rel: &RelationData<'_>,
+        row: &types_foreigncmds::PgUserMappingInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterUserMapping`'s tuple update: `SearchSysCacheCopy1(
+    /// USERMAPPINGOID, umid)`, build `repl_*` for `umoptions`,
+    /// `heap_modify_tuple` + `CatalogTupleUpdate`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_user_mapping(
+        rel: &RelationData<'_>,
+        umid: Oid,
+        row: &types_foreigncmds::PgUserMappingUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// `pg_foreign_table` row (`CreateForeignTable`). `pg_foreign_table` has no
+    /// OID column (`ftrelid` is the key), so no OID is allocated/returned.
+    /// `options = None` ⇒ `ftoptions` SQL NULL. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_foreign_table(
+        rel: &RelationData<'_>,
+        row: &types_foreigncmds::PgForeignTableInsertRow,
+    ) -> PgResult<()>
+);
+
 /* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
 
 seam_core::seam!(
@@ -481,4 +602,55 @@ seam_core::seam!(
         object_id: Oid,
         locktuple: bool,
     ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+/* ---- pg_db_role_setting catalog-tuple decode / mutators ------------------- *
+ *
+ * pg_db_role_setting.c's `setconfig text[]` column crosses as its decoded
+ * `Vec<String>` of `"name=value"` entries (the repo-wide GUC-array
+ * value-model). The relation crosses as the caller's open `&RelationData` and
+ * the addressed tuple as its heap TID, exactly as the pg_depend mutators above.
+ * Owned by the indexing/catalog-form layer (the array deconstruct/detoast and
+ * `heap_form_tuple`/`heap_modify_tuple`/`CatalogTuple*` live below this crate);
+ * declared-unset, so a call panics until that owner lands. */
+
+seam_core::seam!(
+    /// `heap_getattr(tuple, Anum_pg_db_role_setting_setconfig,
+    /// RelationGetDescr(rel), &isnull)` followed by
+    /// `DatumGetArrayTypeP(datum)` decode of the `setconfig text[]` column
+    /// (pg_db_role_setting.c). `None` is the C `isnull` (SQL NULL setconfig);
+    /// `Some(v)` is the array detoasted into a `Vec<String>` of `"name=value"`
+    /// entries. `Err` carries the detoast error surface.
+    pub fn decode_db_role_setting_setconfig<'mcx>(
+        rel: &RelationData<'mcx>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    ) -> PgResult<Option<Vec<String>>>
+);
+
+seam_core::seam!(
+    /// `heap_modify_tuple(tuple, RelationGetDescr(rel), repl_val, repl_null,
+    /// repl_repl)` replacing only `setconfig` with `new_array`, then
+    /// `CatalogTupleUpdate(rel, &tuple->t_self, newtuple)`
+    /// (pg_db_role_setting.c). The addressed row crosses as its heap TID; the
+    /// replacement `setconfig text[]` as its `Vec<String>` form. `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_db_role_setting(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        new_setconfig: Vec<String>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_form_tuple(RelationGetDescr(rel), values, nulls)` with
+    /// `setdatabase = databaseid`, `setrole = roleid`,
+    /// `setconfig = setconfig` (the `text[]` formed from the `Vec<String>`),
+    /// then `CatalogTupleInsert(rel, newtuple)` (pg_db_role_setting.c). `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_db_role_setting(
+        rel: &RelationData<'_>,
+        databaseid: Oid,
+        roleid: Oid,
+        setconfig: Vec<String>,
+    ) -> PgResult<()>
 );
