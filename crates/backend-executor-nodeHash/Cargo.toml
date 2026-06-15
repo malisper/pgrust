@@ -45,6 +45,7 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-ipc-barrier-seams = { path = "../backend-storage-ipc-barrier-seams" }
 backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 
 # Seams: this unit's own parallel-context hooks (installed from init_seams)
 backend-executor-nodeHash-pq-seams = { path = "../backend-executor-nodeHash-pq-seams" }

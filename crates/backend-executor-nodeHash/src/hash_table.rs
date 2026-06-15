@@ -20,6 +20,8 @@ use types_nodes::nodehash::{
     INVALID_SKEW_BUCKET_NO, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD,
 };
 use types_nodes::nodehash::Hash as HashPlan;
+use types_nodes::nodehash::ParallelHashJoinState;
+use backend_utils_mmgr_dsa_seams as dsa;
 use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
@@ -202,14 +204,31 @@ pub fn ExecHashTableCreate<'mcx>(
     let skew_table = hash_node.skewTable;
     let parallel = state.parallel_state.is_some();
     // state->parallel_state->nparticipants - 1 (parallel only); 0 in serial.
-    let parallel_workers = if parallel {
-        // The participant count lives in the DSM-resident ParallelHashJoinState,
-        // reached through the (unported) DSA area; the serial path never needs
-        // it. Defer to the parallel setup below, which panics on the unported
-        // DSA. Pass 0 here so the serial sizing is unaffected.
-        0
-    } else {
-        0
+    // The participant count lives in the DSA-resident ParallelHashJoinState,
+    // reached through the per-query DSA area (es_query_dsa) by resolving the
+    // parallel_state dsa_pointer — exactly as C reads
+    // state->parallel_state->nparticipants (a plain field on the backend-local
+    // mapping of the shared struct). Serial joins (no parallel_state) pass 0.
+    let parallel_workers = match state.parallel_state {
+        Some(dp) => {
+            // area = state->ps.state->es_query_dsa
+            let area = state
+                .ps
+                .state
+                .as_ref()
+                .expect("ExecHashTableCreate: PlanState has no EState")
+                .get()
+                .es_query_dsa
+                .expect("ExecHashTableCreate: parallel hash but es_query_dsa is NULL");
+            let cursor = dsa::dsa_get_address::call(area, dp);
+            // SAFETY: dp resolves to a live ParallelHashJoinState in the
+            // attached DSM segment for the duration of the join (the C
+            // invariant); we only read the scalar nparticipants field.
+            let pstate =
+                unsafe { &*(cursor.0 as *const ParallelHashJoinState) };
+            pstate.nparticipants - 1
+        }
+        None => 0,
     };
 
     let HashTableSize {
@@ -292,12 +311,10 @@ pub fn ExecHashTableCreate<'mcx>(
             v
         };
         // ... but make sure we have temp tablespaces established for them.
-        // PrepareTempTablespaces() is owned by backend-commands-tablespace
-        // (not yet ported); seam-and-panic.
-        panic!(
-            "backend-commands-tablespace: PrepareTempTablespaces not yet ported \
-             (nodeHash.c:569 ExecHashTableCreate, multi-batch spill path)"
-        );
+        //   PrepareTempTablespaces();
+        // Routed through the tablespace owner's seam, exactly as buffile.c /
+        // tuplestore.c (the other in-tree consumers) do.
+        backend_commands_tablespace_seams::prepare_temp_tablespaces::call()?;
     }
 
     if hashtable.parallel_state.is_some() {
@@ -623,16 +640,10 @@ pub fn ExecHashIncreaseNumBatches<'mcx>(
 
         // time to establish the temp tablespaces, too
         //   PrepareTempTablespaces();
-        //
-        // PrepareTempTablespaces is owned by backend-commands-tablespace,
-        // which does not declare it in a seam crate yet. The temp-file arrays
-        // above are the real C effect; this is the seam-boundary panic until
-        // that owner lands.
+        // Routed through the tablespace owner's seam, exactly as buffile.c /
+        // tuplestore.c (the other in-tree consumers) do.
         let _ = mcx;
-        panic!(
-            "backend-commands-tablespace: PrepareTempTablespaces not yet ported \
-             (nodeHash.c:1030 ExecHashIncreaseNumBatches)"
-        );
+        backend_commands_tablespace_seams::prepare_temp_tablespaces::call()?;
     } else {
         // enlarge arrays and zero out added entries
         //   repalloc0_array(innerBatchFile, BufFile *, oldnbatch, nbatch);
