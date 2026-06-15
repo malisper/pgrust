@@ -2185,6 +2185,7 @@ dependencies = [
 name = "backend-access-transam-xlogreader"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-varsup-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
@@ -12728,7 +12729,6 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
- "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",
@@ -12789,7 +12789,6 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
- "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
