@@ -29,7 +29,7 @@
 //! `nodeMemoize`, `nbtree`, …). It is ported with full logic in THIS scaffold
 //! phase so the crate compiles and those consumers get a real implementation.
 //! The remaining families are module skeletons (fixed C-faithful signatures +
-//! `todo!()` bodies) filled in follow-up passes.
+//! stub bodies) filled in follow-up passes.
 //!
 //! The **params** family ([`params`]) is filled: the full `nodes/params.c`
 //! machinery over a handle-keyed `ParamListInfoData` store, with the owned

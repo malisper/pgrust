@@ -19,7 +19,7 @@
 //! * `admin`          — `genfile`/`hbafuncs`/`lockfuncs`/`partitionfuncs`/
 //!   `pg_upgrade_support` SRF / admin glue.
 //!
-//! All families are ported with real bodies (no `todo!()`/`unimplemented!()`);
+//! All families are ported with real bodies (no placeholder/unported stubs);
 //! the keystone `expandeddatum.c` is complete. DESIGN HINT (the adt-infra
 //! SortSupportData / SRF FuncCallContext / pg_prng substrate the window/SRF
 //! families build on) is confirmed available on main, so those families seam

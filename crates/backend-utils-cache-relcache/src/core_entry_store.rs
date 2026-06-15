@@ -4,7 +4,7 @@
 //! `RelationIdCache` store (the C `RelIdCacheEnt` table keyed by `Oid`,
 //! idiomatically a `thread_local` `RefCell<HashMap<Oid, Box<RelationData>>>` —
 //! the `id_cache`), the per-backend `eoxact_list`/`in_progress_list` state, and
-//! the refcount lifecycle. Nothing here is `todo!()`.
+//! the refcount lifecycle. Nothing here is a placeholder stub.
 //!
 //! The C `Relation` pointer becomes a copyable [`Oid`] handle ([`crate::Relation`]).
 //! The store *owns* each descriptor in an `Rc<RefCell<RelationData>>` (the safe

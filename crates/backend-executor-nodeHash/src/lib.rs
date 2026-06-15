@@ -1,7 +1,7 @@
 //! `nodeHash.c` — routines to hash relations for hashjoin (PostgreSQL 18.3).
 //!
 //! SCAFFOLD: every function has its real, C-faithful signature and a
-//! `todo!("decomp")` body. Bodies are filled in per family module by later
+//! decomp-placeholder stub body. Bodies are filled in per family module by later
 //! agents.
 //!
 //! Function families (one module per family, so bodies fill in parallel):

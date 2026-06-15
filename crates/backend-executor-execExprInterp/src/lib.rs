@@ -9,7 +9,7 @@
 //! (`backend-executor-execExpr`).
 //!
 //! Scaffold: every C function has a real, C-faithful signature with a
-//! `todo!("decomp")` body. Bodies are filled per-family in parallel.
+//! decomp-placeholder stub body. Bodies are filled per-family in parallel.
 //!
 //! Family split (one module per coherent group; see CATALOG notes):
 //! - [`dispatch`]  — interpreter core: ready/dispatch/step-op/validity checks.
