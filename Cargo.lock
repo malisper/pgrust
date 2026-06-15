@@ -871,6 +871,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-ginvacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gin-core-probe",
+ "backend-access-gin-ginbtree",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginentrypage",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-gin-ginvacuum-seams",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-commands-vacuum-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginvacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+]
+
+[[package]]
 name = "backend-access-gist-core"
 version = "0.1.0"
 dependencies = [
@@ -2050,6 +2094,39 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-spgist-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
+ "backend-access-common-reloptions-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-index-amvalidate-seams",
+ "backend-access-spg-core-seams",
+ "backend-access-transam-xact-seams",
+ "backend-parser-coerce-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-page",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-amvalidate",
+ "types-cache",
+ "types-core",
+ "types-error",
+ "types-opclass",
+ "types-rel",
+ "types-scan",
+ "types-spgist",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -14849,8 +14926,10 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-gin-ginget",
+ "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
- "backend-access-gist-core",
+ "backend-access-gin-ginvacuum",
  "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",

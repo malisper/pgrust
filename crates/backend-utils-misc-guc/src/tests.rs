@@ -142,6 +142,66 @@ fn unified_store_boot_read_set_round_trip() {
 }
 
 #[test]
+fn guc_stack_save_rollback_and_commit() {
+    // The transactional GUC stack (guc_stack.c): a GUC_ACTION_SAVE set inside a
+    // nest level is rolled back by AtEOXact_GUC(isCommit=false) and kept by
+    // AtEOXact_GUC(isCommit=true) at the same level (GUC_SAVE always restores
+    // prior on commit too — it's the function-scoped form). work_mem is a
+    // PGC_USERSET int with literal bounds, so a PGC_S_SESSION set applies.
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    let boot = get_int("work_mem").expect("work_mem present");
+
+    // Open a nest level (NewGUCNestLevel -> 1+).
+    let save_level = crate::NewGUCNestLevel();
+    assert!(save_level >= 1);
+
+    // SAVE-set work_mem (the proconfig / SET LOCAL-style transient form).
+    let rc = set_config_option_global(
+        "work_mem",
+        Some("65536"),
+        PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        BOOTSTRAP_SUPERUSERID,
+        crate::GUC_ACTION_SAVE,
+        true,
+        ERROR,
+        false,
+    )
+    .expect("SAVE set work_mem");
+    assert_eq!(rc, 1);
+    assert_eq!(get_int("work_mem"), Some(65536));
+
+    // Abort the nest level: the prior (boot) value is restored.
+    crate::at_eoxact_guc(false, save_level);
+    assert_eq!(get_int("work_mem"), Some(boot), "abort restores prior value");
+
+    // Reopen + SAVE-set + commit: GUC_SAVE restores prior on commit as well.
+    let save_level = crate::NewGUCNestLevel();
+    set_config_option_global(
+        "work_mem",
+        Some("65536"),
+        PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        BOOTSTRAP_SUPERUSERID,
+        crate::GUC_ACTION_SAVE,
+        true,
+        ERROR,
+        false,
+    )
+    .expect("SAVE set work_mem");
+    assert_eq!(get_int("work_mem"), Some(65536));
+    crate::at_eoxact_guc(true, save_level);
+    assert_eq!(
+        get_int("work_mem"),
+        Some(boot),
+        "commit of a GUC_SAVE level restores prior"
+    );
+}
+
+#[test]
 fn apply_config_variables_round_trip() {
     let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     install_once();

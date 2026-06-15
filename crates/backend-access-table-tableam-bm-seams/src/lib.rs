@@ -45,8 +45,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `table_rescan(scan, NULL)` (access/tableam.h): restart the scan,
-    /// releasing any page pin. Fallible — the AM's `scan_rescan` can error.
-    pub fn table_rescan<'mcx>(scan: &mut TableScanDescData<'mcx>) -> PgResult<()>
+    /// releasing any page pin. The leading `mcx` (convention A) is the arena the
+    /// AM reinitializes the scan in. Fallible — the AM's `scan_rescan` can error.
+    pub fn table_rescan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

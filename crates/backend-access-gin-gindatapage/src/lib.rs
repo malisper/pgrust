@@ -42,6 +42,7 @@ pub mod datatree;
 pub use datatree::{
     createPostingTree, ginInsertItemPointers, ginPrepareDataScan, ginScanBeginPostingTree,
     ginVacuumPostingTreeLeaf, GinDataLeafPageGetItems, GinDataLeafPageGetItemsToTbm,
+    GinPageDeletePostingItem,
 };
 
 // Re-export the PostingItem carrier so consumers of the data-page substrate get

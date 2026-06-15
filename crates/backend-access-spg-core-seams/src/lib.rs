@@ -104,3 +104,24 @@ seam_core::seam!(
         out: &mut spgLeafConsistentOut<'mcx>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `getBaseType(exprType((Node *) lfirst(indexpr_item)))` for the
+    /// polymorphic + EXPRESSION-key branch of `GetIndexInputType` (spgutils.c:146)
+    /// — the nominal input type of an SP-GiST index whose (single) key column is
+    /// an expression over a polymorphic opclass.
+    ///
+    /// This path needs `RelationGetIndexExpressions(index)` (the relcache's
+    /// cached index-expression list, built in relcache `derived.rs` but not yet
+    /// seamed) and `exprType` over that node — neither reachable from the
+    /// SP-GiST core, so the leg is seam-and-panic per repo idiom. `index_oid` is
+    /// `RelationGetRelid(index)`; `indexcol` is the 1-based key column. The
+    /// SP-GiST simple-column polymorphic path (`indkey != 0`) is handled inline
+    /// in the core and never reaches this seam. relcache/plancat installs the
+    /// body once `RelationGetIndexExpressions` lands. `Err` carries the
+    /// `elog(ERROR, "wrong number of index expressions")` surface.
+    pub fn get_index_input_type_expr(
+        index_oid: Oid,
+        indexcol: types_core::primitive::AttrNumber,
+    ) -> PgResult<Oid>
+);

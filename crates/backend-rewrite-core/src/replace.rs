@@ -653,7 +653,7 @@ pub fn ReplaceVarsFromTargetList<'mcx>(
         )?;
         if var.varlevelsup > 0 {
             let mut wrapped = Node::Expr(newexpr);
-            crate::increment::IncrementVarSublevelsUp(&mut wrapped, var.varlevelsup as i32, 0);
+            crate::increment::IncrementVarSublevelsUp(&mut wrapped, var.varlevelsup as i32, 0)?;
             node_into_expr(wrapped)
         } else {
             Ok(newexpr)
