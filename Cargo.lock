@@ -9524,6 +9524,8 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
  "backend-storage-smgr-smgr",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "mcx",

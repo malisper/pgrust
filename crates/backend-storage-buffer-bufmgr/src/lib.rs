@@ -28,6 +28,7 @@ mod extend;
 mod mgr;
 mod ops;
 mod page;
+mod read;
 mod refcount;
 
 pub use mgr::BufferManager;
@@ -271,6 +272,151 @@ fn extend_buffered_rel_to_vm(
     )
 }
 
+// --- F3: read-path seams (bufmgr.c) ---------------------------------------
+
+/// `ReadBuffer(rel, blkno)` installed seam (bufmgr.c) — MAIN_FORKNUM, RBM_NORMAL,
+/// no strategy.
+fn read_buffer<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBuffer(rel, blkno)
+}
+
+/// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy)` installed
+/// seam (bufmgr.c) — the VACUUM/bulk buffer-access-strategy read of the main
+/// fork. The ring kind collapses to `has_strategy: true`.
+fn read_buffer_extended<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        blkno,
+        types_storage::storage::ReadBufferMode::Normal,
+        true,
+    )
+}
+
+/// `ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL)` installed seam
+/// (bufmgr.c) — an explicit fork, RBM_NORMAL, no strategy (log_newpage_range).
+fn read_buffer_extended_fork<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    forknum: types_core::primitive::ForkNumber,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        forknum,
+        blkno,
+        types_storage::storage::ReadBufferMode::Normal,
+        false,
+    )
+}
+
+/// `ReadBufferExtended(rel, forkNum, blkno, RBM_ZERO_AND_LOCK, NULL)` installed
+/// seam (bufmgr.c) — `_hash_getinitbuf` / the existing-block branch of
+/// `_hash_getnewbuf`.
+fn read_buffer_zero_and_lock<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    fork_num: types_core::primitive::ForkNumber,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        fork_num,
+        blkno,
+        types_storage::storage::ReadBufferMode::ZeroAndLock,
+        false,
+    )
+}
+
+/// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, bstrategy)` installed
+/// seam (bufmgr.c) — an explicit buffer-access strategy (VACUUM:
+/// `_hash_getbuf_with_strategy`). A NULL (`id == 0`) strategy behaves like the
+/// default.
+fn read_buffer_with_strategy<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+    strategy: types_storage::buf::BufferAccessStrategy,
+) -> types_error::PgResult<Buffer> {
+    let has_strategy = strategy.id != 0;
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        blkno,
+        types_storage::storage::ReadBufferMode::Normal,
+        has_strategy,
+    )
+}
+
+/// `ReadBufferExtended(rel, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR, NULL)`
+/// installed seam (bufmgr.c) — the FSM-fork read (`vm_readbuf` analog for FSM).
+fn read_buffer_extended_fsm<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        types_core::primitive::ForkNumber::FSM_FORKNUM,
+        blkno,
+        types_storage::storage::ReadBufferMode::ZeroOnError,
+        false,
+    )
+}
+
+/// `ReadBufferExtended(rel, VISIBILITYMAP_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
+/// NULL)` installed seam (bufmgr.c) — the VM-fork read (`vm_readbuf`).
+fn read_buffer_extended_vm<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
+        blkno,
+        types_storage::storage::ReadBufferMode::ZeroOnError,
+        false,
+    )
+}
+
+/// `PrefetchSharedBuffer(smgropen(rlocator, backend), forkNum, blockNum)`
+/// installed seam (bufmgr.c).
+fn prefetch_shared_buffer(
+    rlocator: types_storage::RelFileLocator,
+    backend: types_core::primitive::ProcNumber,
+    fork_num: types_core::primitive::ForkNumber,
+    block_num: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<types_storage::PrefetchBufferResult> {
+    BufferManager::global_expect().PrefetchSharedBuffer(rlocator, backend, fork_num, block_num)
+}
+
+/// `XLogReadBufferExtended`'s buffer-acquisition body (xlogutils.c) — the
+/// `ReadBufferWithoutRelcache` leg used by recovery redo fetchers. The
+/// recent-buffer fast path + the `ExtendBufferedRelTo` missing-page branch are
+/// the recovery-specific wrapping the xlogutils consumer re-applies; this seam
+/// resolves the core `RBM_*` read of an already-extant block by locator, which
+/// is the bufmgr/smgr operation. The RBM_NORMAL missing-page case (block beyond
+/// EOF) surfaces as the read's own `Err` rather than `InvalidBuffer`, matching
+/// the synchronous core's smgr read error.
+fn xlog_read_buffer_extended(
+    rlocator: types_storage::RelFileLocator,
+    forknum: types_core::primitive::ForkNumber,
+    blkno: types_core::primitive::BlockNumber,
+    mode: types_storage::ReadBufferMode,
+    recent_buffer: Buffer,
+) -> types_error::PgResult<Buffer> {
+    let bm = BufferManager::global_expect();
+    // ReadRecentBuffer fast path (recovery passes the buffer it last saw).
+    if recent_buffer != 0 && bm.ReadRecentBuffer(rlocator, forknum, blkno, recent_buffer)? {
+        return Ok(recent_buffer);
+    }
+    // The relation is always treated as permanent for the redo read (recovery
+    // replays WAL-logged changes); ReadBufferWithoutRelcache reads it in.
+    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, false)
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -314,4 +460,16 @@ pub fn init_seams() {
     // same posture as F1's `count_buffer_dirtied`, until pgstat ports).
     backend_storage_buffer_bufmgr_seams::count_buffer_write::set(|| {});
     backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|_cnt, _bytes| {});
+    // F3: the read-path entry points (the synchronous single-block core; the
+    // explicit StartReadBuffers/WaitReadBuffers pipeline is a public API on
+    // BufferManager + rides the panic-until-owner aio-handle seams).
+    backend_storage_buffer_bufmgr_seams::read_buffer::set(read_buffer);
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended::set(read_buffer_extended);
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended_fork::set(read_buffer_extended_fork);
+    backend_storage_buffer_bufmgr_seams::read_buffer_zero_and_lock::set(read_buffer_zero_and_lock);
+    backend_storage_buffer_bufmgr_seams::read_buffer_with_strategy::set(read_buffer_with_strategy);
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended_fsm::set(read_buffer_extended_fsm);
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended_vm::set(read_buffer_extended_vm);
+    backend_storage_buffer_bufmgr_seams::prefetch_shared_buffer::set(prefetch_shared_buffer);
+    backend_storage_buffer_bufmgr_seams::xlog_read_buffer_extended::set(xlog_read_buffer_extended);
 }
