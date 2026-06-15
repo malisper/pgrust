@@ -2246,6 +2246,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-amvalidate-seams",
  "backend-access-spg-core-seams",
+ "backend-access-table-tableam-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xloginsert-seams",
@@ -2255,6 +2256,7 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
@@ -3090,6 +3092,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
 ]
 
