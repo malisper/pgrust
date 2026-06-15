@@ -46,6 +46,9 @@ use backend_utils_cache_syscache_seams as syscache;
 /// `BTREE_AM_OID` (catalog/pg_am.dat) — the built-in btree access method.
 const BTREE_AM_OID: Oid = 403;
 
+/// `HASH_AM_OID` (catalog/pg_am.dat) — the built-in hash access method.
+const HASH_AM_OID: Oid = 405;
+
 /// `F_BTHANDLER` (pg_proc.dat oid 330) — the btree AM handler function.
 const F_BTHANDLER: Oid = 330;
 /// `F_HASHHANDLER` (pg_proc.dat oid 331) — the hash AM handler function.
@@ -203,6 +206,69 @@ pub fn IndexAmTranslateCompareType(
         )));
     }
 
+    Ok(result)
+}
+
+// ===========================================================================
+// amvalidate (SQL-callable: validate an opclass via its AM)
+// ===========================================================================
+
+/// `amvalidate(PG_FUNCTION_ARGS)` (amapi.c, pg_proc oid 2871) — the SQL-callable
+/// function that asks the appropriate access method to validate the specified
+/// opclass. It looks up the opclass in the `CLAOID` syscache, reads `opcmethod`
+/// (the AM oid), loads the AM's `IndexAmRoutine` via
+/// `GetIndexAmRoutineByAmId(amoid, false)`, then dispatches
+/// `amroutine->amvalidate(opclassoid)` (elog ERROR if the AM has no
+/// `amvalidate`) and `PG_RETURN_BOOL(result)`.
+///
+/// The C `amroutine->amvalidate` callback cannot be carried as a raw fn-ptr in
+/// the unified `IndexAmRoutine` vtable (it returns a soft-error `PgResult` and
+/// needs an `Mcx`, the same reason `amadjustmembers` is reached by name rather
+/// than through the vtable — see `am_has_adjustmembers`; nbtree/hash both stamp
+/// `amvalidate: None`). So the dispatch resolves the AM oid to the built-in
+/// AM's `*validate` routine directly, which is exactly the function the AM's
+/// `bthandler` / `hashhandler` stores in `amvalidate`. An AM oid that is neither
+/// built-in btree nor hash is a future extension AM whose validator is reached
+/// through the (unported) dynamic-fmgr dispatch; that case maps to the C
+/// `function amvalidate is not defined` error.
+pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
+    // classtup = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid));
+    // if (!HeapTupleIsValid(classtup)) elog(ERROR, "cache lookup failed for
+    //     operator class %u", opclassoid);
+    // classform = (Form_pg_opclass) GETSTRUCT(classtup);
+    // amoid = classform->opcmethod;
+    // ReleaseSysCache(classtup);
+    let amoid = match syscache::pg_opclass_form::call(opclassoid)? {
+        // pg_opclass_form projects (opcfamily, opcintype, opcmethod).
+        Some((_opcfamily, _opcintype, opcmethod)) => opcmethod,
+        None => {
+            return Err(PgError::error(format!(
+                "cache lookup failed for operator class {opclassoid}"
+            )));
+        }
+    };
+
+    // amroutine = GetIndexAmRoutineByAmId(amoid, false);
+    // The load validates the AM oid (raising the C `cache lookup failed` /
+    // `does not have a handler` errors).
+    let _amroutine = GetIndexAmRoutineByAmId(amoid)?;
+
+    // if (amroutine->amvalidate == NULL) elog(ERROR, "function amvalidate is
+    //     not defined for index access method %u", amoid);
+    // result = amroutine->amvalidate(opclassoid);
+    // pfree(amroutine);
+    let result = match amoid {
+        BTREE_AM_OID => backend_access_nbt_validate::btvalidate(mcx, opclassoid)?,
+        HASH_AM_OID => backend_access_hashvalidate::hashvalidate(mcx, opclassoid)?,
+        _ => {
+            return Err(PgError::error(format!(
+                "function amvalidate is not defined for index access method \
+                 {amoid}"
+            )));
+        }
+    };
+
+    // PG_RETURN_BOOL(result);
     Ok(result)
 }
 

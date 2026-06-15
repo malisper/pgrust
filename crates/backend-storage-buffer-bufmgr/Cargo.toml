@@ -25,5 +25,22 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 # F1a; the rest in F1b-d).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 # WakePinCountWaiter signals the parked pin-count waiter via its process latch
-# (ProcSendSignal == SetLatch on procLatch) — an outward proc seam.
+# (ProcSendSignal == SetLatch on procLatch) — an outward proc seam. Also
+# my_proc_number / proc_wait_for_signal / my_proc_set_delay_chkpt_start (F1c).
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+# F1c `MarkBufferDirtyHint` writes the page LSN under the header lock via the
+# real `PageSetLSN`/`PageMut` (a direct bufpage dep, no raw byte poke).
+backend-storage-page = { path = "../backend-storage-page" }
+# F1c `MarkBufferDirtyHint` hint-FPI leg: XLogHintBitIsNeeded / RecoveryInProgress
+# (xlog-seams), RelFileLocatorSkippingWAL (catalog-storage-seams),
+# XLogSaveBufferForHint (xloginsert-seams), and the ps-display "waiting" suffix on
+# the cleanup-lock wait (ps-status-seams).
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+
+[dev-dependencies]
+# Test-only: stub HOLD_INTERRUPTS/RESUME_INTERRUPTS for the direct LWLock
+# content-lock path exercised by the F1c lock tests.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

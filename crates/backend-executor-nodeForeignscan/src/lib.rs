@@ -374,11 +374,8 @@ pub fn ExecInitForeignScan<'mcx>(
     // Determine whether to scan the foreign relation asynchronously or not.
     //   scanstate->ss.ps.async_capable = (((Plan *) node)->async_capable &&
     //                                     estate->es_epq_active == NULL);
-    //
-    // (async_capable is not yet carried on the trimmed PlanStateData; the
-    // plan's flag and the EPQ-active test are read here, matching the C, and
-    // stored once the field lands with its first reader.)
-    let _async_capable = plan.scan.plan.async_capable && estate.es_epq_active.is_none();
+    scanstate.ss.ps.async_capable =
+        plan.scan.plan.async_capable && estate.es_epq_active.is_none();
 
     // Initialize FDW-related state.
     //   scanstate->fdwroutine = fdwroutine;
