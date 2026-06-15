@@ -179,6 +179,7 @@ pub fn init_all() {
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
+    backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
@@ -263,6 +264,7 @@ pub fn init_all() {
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
     backend_utils_adt_format_type::init_seams();
+    backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numeric::init_seams();

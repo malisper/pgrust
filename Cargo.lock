@@ -14710,7 +14710,6 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
  "backend-access-gin-ginscan",
  "backend-access-hash-core",
  "backend-access-hash-entry",
