@@ -736,3 +736,85 @@ seam_core::seam!(
         buffer: types_storage::storage::Buffer,
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// AIO engine handle accessors for the explicit multi-block read pipeline
+// (`StartReadBuffers`/`WaitReadBuffers`/`AsyncReadBuffers`, buf_read.rs +
+// buf_aio.rs). The buffer manager models the AIO-shaped read path IN-CRATE
+// (the descriptor staging, the BM_IO_IN_PROGRESS interlock, the run splitting),
+// but the actual pgaio handle lifecycle — `pgaio_io_acquire`, the
+// `pgaio_io_register_callbacks` of the buffer-readv completion vtable, the
+// `smgrstartreadv` submit, and the `pgaio_wref_wait` — lives in the AIO engine
+// (backend-storage-aio-*). These seams cross that boundary by `Buffer`
+// id/run + `PgAioWaitRef`; the aio-sync method stage installs them AFTER this
+// F3 read layer lands (panic-until-owner — sanctioned, the single-block
+// synchronous `ReadBuffer*` core does NOT touch them and stays fully live).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `pgaio_io_acquire(CurrentResourceOwner, &operation->io_return)`
+    /// (aio.c) — acquire an AIO handle for one in-flight buffer read, returning
+    /// its wait reference (`pgaio_io_get_wref`). The handle's `io_return` slot is
+    /// the issuer-owned result the completion path writes back. `Err` carries the
+    /// AIO `ereport(ERROR)` surface (handle exhaustion). Installed by the AIO
+    /// engine; panics until then.
+    pub fn pgaio_io_acquire() -> types_error::PgResult<types_storage::buf::PgAioWaitRef>
+);
+
+seam_core::seam!(
+    /// `pgaio_io_register_callbacks(ioh, PGAIO_HCB_{SHARED,LOCAL}_BUFFER_READV,
+    /// cb_data)` + `pgaio_io_set_handle_data_32(ioh, io_buffers, len)`
+    /// (bufmgr.c `AsyncReadBuffers`) — bind the buffer-readv completion vtable
+    /// (with `cb_data` == the `READ_BUFFERS_*` flag bitmask) to the acquired
+    /// handle and record the run of 0-based buf_ids it covers. `is_temp` selects
+    /// the LOCAL vs SHARED completion callback. `Err` carries the AIO
+    /// `ereport(ERROR)` surface. Installed by the AIO engine; panics until then.
+    pub fn pgaio_register_callbacks(
+        wref: types_storage::buf::PgAioWaitRef,
+        io_buffers: &[i32],
+        flags: u8,
+        synchronous: bool,
+        is_temp: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `smgrstartreadv(ioh, operation->smgr, forknum, blocknum, BufferGetBlock(..),
+    /// io_buffers_len)` (bufmgr.c `AsyncReadBuffers`) — submit the vectored read
+    /// of `io_buffers_len` consecutive blocks starting at `blocknum` into the run
+    /// previously registered on the handle `wref`. In IOMETHOD_SYNC the read
+    /// happens inline and the shared completion callback runs before this
+    /// returns, so on return the handle's `io_return` slot carries the actual
+    /// blocks-read count + status. `Err` carries the smgr `ereport(ERROR)`
+    /// surface. Installed by the AIO engine; panics until then.
+    pub fn start_read_buffers(
+        wref: types_storage::buf::PgAioWaitRef,
+        rlocator: types_storage::RelFileLocatorBackend,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+        io_buffers_len: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgaio_wref_wait(&operation->io_wref)` (bufmgr.c `WaitReadBuffers`) — block
+    /// until the in-flight read referenced by `wref` completes, returning the
+    /// completed `(result, status)` of the AIO operation: `result` is the actual
+    /// number of blocks SMGR read (negative/zero for an error), `status` is the
+    /// `PgAioResultStatus` (0=UNKNOWN, 1=OK, 2=PARTIAL, 3=WARNING, 4=ERROR — the
+    /// completion path reports/raises on WARNING/ERROR). `Err` carries the AIO
+    /// `ereport(ERROR)` surface. Installed by the AIO engine; panics until then.
+    pub fn wait_read_buffers(
+        wref: types_storage::buf::PgAioWaitRef,
+    ) -> types_error::PgResult<(i32, u32)>
+);
+
+seam_core::seam!(
+    /// `pgaio_wref_check_done(&operation->io_wref)` (bufmgr.c `WaitReadBuffers`) —
+    /// whether the in-flight read referenced by `wref` has already completed
+    /// (so `WaitReadBuffers` can skip the wait-time accounting). Installed by the
+    /// AIO engine; panics until then.
+    pub fn wref_check_done(
+        wref: types_storage::buf::PgAioWaitRef,
+    ) -> types_error::PgResult<bool>
+);
