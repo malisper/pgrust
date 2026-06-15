@@ -145,6 +145,7 @@ backend-access-hash-core = { path = "../backend-access-hash-core" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-port-atomics = { path = "../backend-port-atomics" }
