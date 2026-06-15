@@ -794,6 +794,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` (fmgr.h) — the general arbitrary-`nargs`
+    /// dispatch the executor's `EEOP_FUNCEXPR[_STRICT[_1|_2]]` /
+    /// `EEOP_FUNCEXPR_FUSAGE` and the analogous fmgr-call expression steps drive
+    /// (execExprInterp.c `op->d.func.fn_addr(fcinfo)` over `fcinfo->args[0..nargs]`).
+    /// The resolved `FmgrInfo` the step caches cannot cross a seam, so the owner
+    /// re-resolves by `fn_oid` (as the other `FunctionCallN` seams here do) and
+    /// invokes it under `collation` (`fcinfo->fncollation`) on the built `args`
+    /// frame. The caller (the interpreter) has already applied the strict-null
+    /// short-circuit for the `_STRICT` opcodes, so this is only entered when the
+    /// function is to run; `fcinfo->isnull` is cleared by the owner before the
+    /// call. Returns the raw result `Datum` word and the callee's read-back
+    /// `fcinfo->isnull`. `Err` carries whatever the called function raises.
+    pub fn function_call_invoke(
+        fn_oid: Oid,
+        collation: Oid,
+        args: &[types_datum::NullableDatum],
+    ) -> PgResult<(DatumWord, bool)>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(datums, n, CSTRINGOID)` +
     /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
     /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to

@@ -262,7 +262,7 @@ pub struct FormData_pg_attribute {
     pub attcollation: Oid,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct BlockIdData {
     pub bi_hi: uint16,
     pub bi_lo: uint16,
@@ -285,7 +285,7 @@ impl BlockIdData {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ItemPointerData {
     pub ip_blkid: BlockIdData,
     pub ip_posid: OffsetNumber,

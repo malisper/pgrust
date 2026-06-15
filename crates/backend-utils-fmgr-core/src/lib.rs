@@ -2405,6 +2405,37 @@ fn oid_function_call0_seam(function_id: Oid) -> PgResult<Datum> {
     oid_function_call0_coll(ctx.mcx(), function_id, InvalidOid)
 }
 
+/// `FunctionCallInvoke(fcinfo)` (fmgr.h) — the general arbitrary-`nargs`
+/// dispatch the executor's `EEOP_FUNCEXPR[_STRICT[_1|_2]]` /
+/// `EEOP_FUNCEXPR_FUSAGE` and the analogous fmgr-call expression steps drive.
+/// Unlike the strict `FunctionCallN` leaves, this does NOT apply the
+/// `elog(ERROR, "function returned NULL")` self-test (`null_check`): an
+/// expression-level function call legitimately returns NULL through
+/// `fcinfo->isnull`, which the interpreter reads back and stores. The caller has
+/// already applied the strict-null arg short-circuit, so this is entered only
+/// when the function is to run. The resolved `FmgrInfo` cannot cross the seam,
+/// so the owner re-resolves by `fn_oid` (as the other `FunctionCallN` seams do)
+/// and dispatches over the built `args` frame under `collation`. Both
+/// `function_call_invoke` and `fastpath_function_call_invoke` share this body.
+fn function_call_invoke_seam(
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[NullableDatum],
+) -> PgResult<(Datum, bool)> {
+    let ctx = MemoryContext::new("function_call_invoke");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, fn_oid)?;
+    // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658) — thread
+    // the caller's fn_expr before the FmgrInfo is moved into fcinfo.
+    let fn_expr = resolved.finfo.fn_expr.clone();
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, args.to_vec());
+    // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo);
+    fcinfo.isnull = false;
+    let d = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    // C: *op->resnull = fcinfo->isnull;
+    Ok((d, fcinfo.isnull))
+}
+
 /// `CreateConversionCommand`'s conversion-function empty-input self-test
 /// (conversioncmds.c):
 /// ```c
@@ -2496,6 +2527,8 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::receive_function_call::set(receive_function_call_seam);
     backend_utils_fmgr_fmgr_seams::input_function_call_safe::set(input_function_call_safe_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
+    backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
+    backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::conversion_proc_empty_input_test::set(
         conversion_proc_empty_input_test_seam,
     );
