@@ -96,7 +96,7 @@ fn TableFuncNext<'mcx>(
         .tupstore
         .as_deref_mut()
         .expect("TableFuncNext: tupstore set above");
-    tuplestore::tuplestore_gettupleslot::call(ts, true, false, estate.slot_mut(scanslot))
+    tuplestore::tuplestore_gettupleslot::call(ts, true, false, scanslot, estate)
 }
 
 /// `TableFuncRecheck(node, slot)` — access-method routine to recheck a tuple in
