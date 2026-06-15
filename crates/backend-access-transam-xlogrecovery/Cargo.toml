@@ -30,6 +30,7 @@ backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" 
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
 
 # Recovery-target GUC check/assign hooks (guc.rs): slot-name validation,
 # pg_lsn / timestamp parsing, and the GUC check-error reporting protocol.

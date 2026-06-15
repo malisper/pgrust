@@ -31,6 +31,11 @@ use types_core::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
 use types_storage::latch::{Latch, LatchHandle};
 use types_storage::storage::Spinlock;
 use types_wal::wal::RecoveryPauseState;
+use types_wal::xlogrecovery_carriers::XLogSource;
+
+use backend_storage_ipc_latch as latch;
+use backend_postmaster_startup_seams as startup;
+use backend_replication_walreceiverfuncs_seams as walrcv;
 
 use backend_storage_ipc_shmem_seams as shmem;
 use backend_storage_lmgr_condition_variable_seams as condvar;
@@ -343,8 +348,9 @@ pub fn get_recovery_pause_state() -> RecoveryPauseState {
     state
 }
 
-/// `void SetRecoveryPause(bool recoveryPause)` (xlogrecovery.c:3094) —
-/// request or clear a recovery pause. Written under `info_lck`.
+/// `void SetRecoveryPause(bool recoveryPause)` (xlogrecovery.c:3111) —
+/// request or clear a recovery pause. Written under `info_lck`. When clearing
+/// the pause, broadcasts `recoveryNotPausedCV` so a paused redo loop wakes.
 pub fn set_recovery_pause(recovery_pause: bool) {
     let ctl = ctl();
     spin_lock_acquire(&ctl.info_lck);
@@ -354,16 +360,186 @@ pub fn set_recovery_pause(recovery_pause: bool) {
         ctl_mut().recoveryPauseState = RecoveryPauseState::PauseRequested;
     }
     spin_lock_release(&ctl.info_lck);
+
+    if !recovery_pause {
+        condvar::condition_variable_broadcast::call(&ctl.recoveryNotPausedCV);
+    }
 }
 
-/// `bool HotStandbyActive(void)` (xlogrecovery.c) — reads
-/// `SharedHotStandbyActive` under `info_lck`.
+/// `static void ConfirmRecoveryPaused(void)` (xlogrecovery.c:3131) — once the
+/// redo loop notices a pause request, transition `PauseRequested` -> `Paused`.
+/// Written under `info_lck`.
+pub fn confirm_recovery_paused() {
+    let ctl = ctl();
+    /* If recovery pause is requested then set it paused */
+    spin_lock_acquire(&ctl.info_lck);
+    if ctl.recoveryPauseState == RecoveryPauseState::PauseRequested {
+        ctl_mut().recoveryPauseState = RecoveryPauseState::Paused;
+    }
+    spin_lock_release(&ctl.info_lck);
+}
+
+/// `XLogRecPtr GetXLogReplayRecPtr(NULL)` — the NULL-`replayTLI` form, dropping
+/// the timeline. A thin wrapper over [`get_xlog_replay_rec_ptr`] for the
+/// callers that only want the LSN.
+pub fn get_xlog_replay_recptr_only() -> XLogRecPtr {
+    get_xlog_replay_rec_ptr().0
+}
+
+// ===========================================================================
+// Backend-local file-static globals (xlogrecovery.c:178-261). These are C
+// process-local `static`s that ANY backend connected to shared memory keeps —
+// the cross-backend accessors (`HotStandbyActive`, `PromoteIsTriggered`, …)
+// cache the shared flag into one of these on first read. Modeled as
+// thread-locals (one per backend thread), matching the per-process C statics.
+// They are the canonical home; the corresponding `XLogRecoveryState` mirror
+// fields are the startup process's own copy threaded through replay.
+// ===========================================================================
+
+std::thread_local! {
+    /// `static bool LocalHotStandbyActive = false;` (xlogrecovery.c:178).
+    static LOCAL_HOT_STANDBY_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    /// `static bool LocalPromoteIsTriggered = false;` (xlogrecovery.c:184).
+    static LOCAL_PROMOTE_IS_TRIGGERED: Cell<bool> = const { Cell::new(false) };
+    /// `static bool doRequestWalReceiverReply;` (xlogrecovery.c:187).
+    static DO_REQUEST_WAL_RECEIVER_REPLY: Cell<bool> = const { Cell::new(false) };
+    /// `static XLogSource currentSource = XLOG_FROM_ANY;` (xlogrecovery.c:248).
+    static CURRENT_SOURCE: Cell<XLogSource> = const { Cell::new(XLogSource::Any) };
+    /// `static bool pendingWalRcvRestart = false;` (xlogrecovery.c:250).
+    static PENDING_WAL_RCV_RESTART: Cell<bool> = const { Cell::new(false) };
+    /// `static TimestampTz XLogReceiptTime = 0;` (xlogrecovery.c:260).
+    static XLOG_RECEIPT_TIME: Cell<TimestampTz> = const { Cell::new(0) };
+    /// `static XLogSource XLogReceiptSource = XLOG_FROM_ANY;` (xlogrecovery.c:261).
+    static XLOG_RECEIPT_SOURCE: Cell<XLogSource> = const { Cell::new(XLogSource::Any) };
+}
+
+/// `bool HotStandbyActive(void)` (xlogrecovery.c:4543). We check shared state
+/// each time only until Hot Standby is active; once seen true the local cache
+/// short-circuits (Hot Standby can never be de-activated).
 pub fn hot_standby_active() -> bool {
+    if LOCAL_HOT_STANDBY_ACTIVE.with(Cell::get) {
+        return true;
+    }
+    // spinlock is essential on machines with weak memory ordering!
     let ctl = ctl();
     spin_lock_acquire(&ctl.info_lck);
-    let active = ctl.SharedHotStandbyActive;
+    let v = ctl.SharedHotStandbyActive;
     spin_lock_release(&ctl.info_lck);
-    active
+    LOCAL_HOT_STANDBY_ACTIVE.with(|c| c.set(v));
+    v
+}
+
+/// `bool PromoteIsTriggered(void)` (xlogrecovery.c:4435). Works in any process
+/// connected to shared memory. Caches the shared flag locally; once a promotion
+/// is triggered it can't be triggered again, so we stop re-reading shmem.
+pub fn promote_is_triggered() -> bool {
+    if LOCAL_PROMOTE_IS_TRIGGERED.with(Cell::get) {
+        return true;
+    }
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    let v = ctl.SharedPromoteIsTriggered;
+    spin_lock_release(&ctl.info_lck);
+    LOCAL_PROMOTE_IS_TRIGGERED.with(|c| c.set(v));
+    v
+}
+
+/// `static void SetPromoteIsTriggered(void)` (xlogrecovery.c:4453). Sets the
+/// shared flag, ends any recovery pause, and records the local cache.
+pub(crate) fn set_promote_is_triggered() {
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    ctl_mut().SharedPromoteIsTriggered = true;
+    spin_lock_release(&ctl.info_lck);
+
+    // Mark the recovery pause state as 'not paused' because the paused state
+    // ends and promotion continues if a promotion is triggered while recovery
+    // is paused. Otherwise pg_get_wal_replay_pause_state() can mistakenly
+    // return 'paused' while a promotion is ongoing.
+    set_recovery_pause(false);
+
+    LOCAL_PROMOTE_IS_TRIGGERED.with(|c| c.set(true));
+}
+
+/// `void WakeupRecovery(void)` (xlogrecovery.c:4519) — wake up the startup
+/// process to replay newly arrived WAL, or to notice that failover has been
+/// requested. Sets the shared recovery-wakeup latch.
+pub fn wakeup_recovery() {
+    latch::SetLatchPtr(&ctl().recoveryWakeupLatch);
+}
+
+/// `void XLogRequestWalReceiverReply(void)` (xlogrecovery.c:4528) — schedule a
+/// walreceiver wakeup in the main recovery loop (the redo loop consumes the
+/// flag on its next iteration).
+pub fn xlog_request_wal_receiver_reply() {
+    DO_REQUEST_WAL_RECEIVER_REPLY.with(|c| c.set(true));
+}
+
+/// `void RemovePromoteSignalFiles(void)` (xlogrecovery.c:4495) — remove the
+/// files signaling a standby promotion request. C `unlink(PROMOTE_SIGNAL_FILE)`,
+/// ignoring errors (the file may not exist).
+pub fn remove_promote_signal_files() {
+    let _ = std::fs::remove_file(PROMOTE_SIGNAL_FILE);
+}
+
+/// `bool CheckPromoteSignal(void)` (xlogrecovery.c:4504) — true iff the
+/// promote-signal file exists. C `stat(PROMOTE_SIGNAL_FILE, &stat_buf) == 0`.
+pub fn check_promote_signal() -> bool {
+    std::path::Path::new(PROMOTE_SIGNAL_FILE).exists()
+}
+
+/// `static bool CheckForStandbyTrigger(void)` (xlogrecovery.c:4474) — check
+/// whether a promote request has arrived. Crate-internal: called by the replay
+/// loop and `RecoveryRequiresIntParameter` while paused. Consumes the
+/// promote-signal file via the startup process's signal helpers.
+pub(crate) fn check_for_standby_trigger() -> bool {
+    if LOCAL_PROMOTE_IS_TRIGGERED.with(Cell::get) {
+        return true;
+    }
+
+    if startup::is_promote_signaled::call() && check_promote_signal() {
+        // ereport(LOG, errmsg("received promote request"))
+        let _ = backend_utils_error::elog(types_error::LOG, "received promote request");
+        remove_promote_signal_files();
+        startup::reset_promote_signaled::call();
+        set_promote_is_triggered();
+        return true;
+    }
+
+    false
+}
+
+/// `PROMOTE_SIGNAL_FILE` (access/xlog.h) — relative to `$PGDATA`.
+const PROMOTE_SIGNAL_FILE: &str = "promote";
+
+/// `void GetXLogReceiptTime(TimestampTz *rtime, bool *fromStream)`
+/// (xlogrecovery.c:4683) — time of receipt of the current chunk of XLOG data,
+/// and whether it arrived via streaming replication. Returns
+/// `(rtime, from_stream)`. Must run in the startup process (this state is not
+/// exported to shared memory); the C `Assert(InRecovery)` is the startup-process
+/// invariant.
+pub fn get_xlog_receipt_time() -> (TimestampTz, bool) {
+    let rtime = XLOG_RECEIPT_TIME.with(Cell::get);
+    let from_stream = XLOG_RECEIPT_SOURCE.with(Cell::get) == XLogSource::Stream;
+    (rtime, from_stream)
+}
+
+/// `void StartupRequestWalReceiverRestart(void)` (xlogrecovery.c:4416) — if we
+/// are streaming and the walreceiver is up, flag that it must be restarted
+/// because a critical option changed. `void` in C: the `WalRcvRunning` read is
+/// infallible at this point (its `PgResult` models a shmem state-write that
+/// never `ereport`s here), so a `false` reading short-circuits as "not running".
+pub fn startup_request_wal_receiver_restart() {
+    if CURRENT_SOURCE.with(Cell::get) == XLogSource::Stream
+        && walrcv::wal_rcv_running::call().unwrap_or(false)
+    {
+        // ereport(LOG, errmsg("WAL receiver process shutdown requested"))
+        let _ = backend_utils_error::elog(
+            types_error::LOG,
+            "WAL receiver process shutdown requested",
+        );
+        PENDING_WAL_RCV_RESTART.with(|c| c.set(true));
+    }
 }
 
 /// Suppress an unused-import warning for `TransactionId` should later families

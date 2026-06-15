@@ -30,12 +30,24 @@
 //! `RTEPermissionInfo` also unported, a plain SELECT's `permInfos` is empty and
 //! the check is a no-op).
 //!
+//! `InitPlan` now allocates `es_param_exec_vals` from `plannedstmt->paramExecTypes`
+//! and runs the per-`SubPlan` `ExecInitNode` loop over `plannedstmt->subplans`,
+//! populating `es_subplanstates` (the executor-owned per-init-plan state list);
+//! `ExecEndPlan` tears those subplan states down in turn. The top-level subplan
+//! list build is faithful; the *consumer* of `es_subplanstates` —
+//! `ExecInitSubPlan` reached through a node's `Plan.initPlan` list — is still
+//! gated behind the unported `Plan.initPlan` field (a `execProcnode` panic) plus
+//! the `SubPlanState.planstate` two-owner re-model, so the two
+//! `SubPlanState`-resolving PARAM_EXEC seams (`link_subplan_planstate`,
+//! `exec_set_param_plan_for_pending`) stay seam-and-panic until that keystone
+//! lands (see `DESIGN_DEBT.md`).
+//!
 //! The remaining branches a plain `DestNone` `SELECT` does not exercise —
 //! `EXPLAIN`-only read-only/parallel gating, `parallelModeNeeded`, `rowMarks`,
-//! `subplans`, partition pruning, RETURNING, and non-`SELECT` command types —
-//! `panic!` with a precise message (mirror-pg-and-panic on a live frontier); the
-//! unit stays CATALOG `needs-decomp` so the seam-install recurrence guard
-//! exempts the still-open surface.
+//! partition pruning, RETURNING, and non-`SELECT` command types — `panic!` with a
+//! precise message (mirror-pg-and-panic on a live frontier); the unit stays
+//! CATALOG `needs-decomp` so the seam-install recurrence guard exempts the
+//! still-open surface.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -78,7 +90,9 @@ use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
 // EState eflags (executor/executor.h). Mirrored locally; there is no canonical
 // shared constant yet (other node crates likewise define them locally).
+const EXEC_FLAG_REWIND: i32 = 0x0004;
 const EXEC_FLAG_BACKWARD: i32 = 0x0008;
+const EXEC_FLAG_MARK: i32 = 0x0010;
 const EXEC_FLAG_SKIP_TRIGGERS: i32 = 0x0020;
 
 /// `CreateQueryDesc(plannedstmt, sourceText, snapshot, crosscheck_snapshot,
@@ -189,17 +203,25 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
         w.estate.es_top_eflags = eflags;
         w.estate.es_instrument = instrument;
         w.estate.es_jit_flags = w.plannedstmt.jitFlags;
-        if w.plannedstmt
-            .paramExecTypes
-            .as_ref()
-            .is_some_and(|p| !p.is_empty())
-        {
-            panic!(
-                "execMain standard_ExecutorStart: paramExecTypes != NIL needs es_param_exec_vals \
-                 allocation (PARAM_EXEC slots) — #167 F0d"
-            );
+        // if (queryDesc->plannedstmt->paramExecTypes != NIL) {
+        //     int nParamExec = list_length(...paramExecTypes);
+        //     estate->es_param_exec_vals = palloc0(nParamExec * sizeof(ParamExecData));
+        // }
+        // The PARAM_EXEC value array is sized from the planner's paramExecTypes
+        // list and zero-initialized (each slot's execPlan/value/isnull cleared);
+        // the initplan loop (InitPlan) and the param-fetch machinery poke into it
+        // by paramid.
+        if let Some(param_exec_types) = w.plannedstmt.paramExecTypes.as_ref() {
+            let n_param_exec = param_exec_types.len();
+            let mcx = w.estate.es_query_cxt;
+            let mut vals = mcx::vec_with_capacity_in(mcx, n_param_exec)?;
+            for _ in 0..n_param_exec {
+                vals.push(types_nodes::ParamExecData::default());
+            }
+            w.estate.es_param_exec_vals = vals;
         }
-    });
+        Ok::<(), types_error::PgError>(())
+    })?;
 
     // AfterTriggerBeginQuery() unless SKIP_TRIGGERS / EXPLAIN_ONLY — SKIP_TRIGGERS
     // is set for the plain SELECT above, so it is elided (faithful no-op).
@@ -264,12 +286,55 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
         // estate->es_tupleTable = NIL;  (CreateExecutorState left it empty.)
         // estate->es_epq_active = NULL; (default None.)
 
-        // Initialize per-SubPlan state before ExecInitNode on the main tree.
-        if plannedstmt.subplans.as_ref().is_some_and(|s| !s.is_empty()) {
-            panic!(
-                "execMain InitPlan: per-SubPlan ExecInitNode loop over plannedstmt->subplans not \
-                 wired (es_subplanstates build) — #167 F0d"
-            );
+        // Initialize private state information for each SubPlan.  We must do this
+        // before running ExecInitNode on the main query tree, since
+        // ExecInitSubPlan expects to be able to find these entries.
+        //   Assert(estate->es_subplanstates == NIL);
+        //   i = 1;                       /* subplan indices count from 1 */
+        //   foreach(l, plannedstmt->subplans) {
+        //       Plan *subplan = (Plan *) lfirst(l);
+        //       sp_eflags = eflags & ~(EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD|EXEC_FLAG_MARK);
+        //       if (bms_is_member(i, plannedstmt->rewindPlanIDs)) sp_eflags |= EXEC_FLAG_REWIND;
+        //       subplanstate = ExecInitNode(subplan, estate, sp_eflags);
+        //       estate->es_subplanstates = lappend(estate->es_subplanstates, subplanstate);
+        //       i++;
+        //   }
+        debug_assert!(estate.es_subplanstates.is_empty());
+        // A subplan will never need BACKWARD scan nor MARK/RESTORE; we also strip
+        // REWIND and only re-add it for parameterless subplans the planner flagged
+        // in `rewindPlanIDs`. The trimmed `PlannedStmt` does not model the
+        // `rewindPlanIDs` Bitmapset, so no subplan is suggested REWIND here (the
+        // common case: initplans/correlated subplans are never in rewindPlanIDs).
+        let sp_eflags = eflags & !(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
+        if let Some(subplans) = plannedstmt.subplans.take() {
+            for subplan in subplans {
+                // lfirst(l) — a `Plan *`; an entry can be NULL (a pruned/unused
+                // subplan slot), in which case ExecInitNode(NULL, ...) yields a
+                // NULL plan-state. Leak the owning box into an honest `&'mcx Node`
+                // (it lives until the per-query context drops, faithful to C's
+                // "plan freed with its context"), exactly like the main planTree.
+                let subnode: Option<&types_nodes::nodes::Node<'_>> =
+                    subplan.map(|tree| &*mcx::leak_in(tree));
+                let subplanstate =
+                    procnode::exec_init_node::call(mcx, subnode, estate, sp_eflags)?;
+                match subplanstate {
+                    Some(ps) => estate.es_subplanstates.push(ps),
+                    None => {
+                        // ExecInitNode(NULL, ...) → NULL: C lappends the NULL onto
+                        // es_subplanstates (preserving the 1-based plan_id index).
+                        // The owned `es_subplanstates` is a vec of owning boxes
+                        // with no NULL element; a degenerate NULL subplan would
+                        // break the plan_id → slot indexing the link seam relies
+                        // on. The planner never emits a NULL subplan slot on the
+                        // ported frontier, so this is a guard-and-panic.
+                        panic!(
+                            "execMain InitPlan: NULL subplan in plannedstmt->subplans (lappend of \
+                             a NULL PlanState into es_subplanstates) — the owned es_subplanstates \
+                             has no NULL slot for plan_id indexing — #166 F0d"
+                        );
+                    }
+                }
+            }
         }
 
         // planstate = ExecInitNode(plan, estate, eflags).
@@ -500,6 +565,25 @@ pub fn ExecutorRun(
     standard_ExecutorRun(query_desc, direction, count)
 }
 
+/// `ExecutorRewind(queryDesc)` (execMain.c) — rewind the executor to the start of
+/// the query so it can be re-run. It's not sensible to rescan an updating query,
+/// so the C asserts `operation == CMD_SELECT`; the work is `ExecReScan(planstate)`
+/// in the per-query memory context (the owned bundle's context is already current
+/// when the plan-state tree is touched).
+pub fn ExecutorRewind(query_desc: &mut QueryDesc) -> PgResult<()> {
+    // Assert(queryDesc->operation == CMD_SELECT).
+    debug_assert!(query_desc.operation == CmdType::CMD_SELECT);
+    // ExecReScan(queryDesc->planstate) — a degenerate (NULL planstate) plan has
+    // nothing to rescan (the C dereferences a real planstate; a started SELECT
+    // always has one).
+    query_desc.with_estate_and_planstate_mut(|estate, planstate| {
+        if let Some(planstate) = planstate {
+            backend_executor_execAmi_seams::exec_re_scan::call(planstate, estate)?;
+        }
+        Ok::<(), types_error::PgError>(())
+    })
+}
+
 // ===========================================================================
 // ExecutorEnd / ExecEndPlan
 // ===========================================================================
@@ -529,14 +613,20 @@ fn ExecEndPlan(query_desc: &mut QueryDesc) -> PgResult<()> {
         if let Some(planstate) = planstate {
             procnode::exec_end_node::call(planstate, estate)?;
         }
-        // for subplans too: foreach es_subplanstates { ExecEndNode }. InitPlan
-        // guards subplans empty on this frontier, so es_subplanstates is empty;
-        // guard-and-panic if a subplan state is ever present.
-        if !estate.es_subplanstates.is_empty() {
-            panic!(
-                "execMain ExecEndPlan: ExecEndNode loop over es_subplanstates not wired \
-                 (subplans are guarded out of InitPlan) — #167 F0d"
-            );
+        // for subplans too:
+        //   foreach(l, estate->es_subplanstates) {
+        //       PlanState *subplanstate = (PlanState *) lfirst(l);
+        //       ExecEndNode(subplanstate);
+        //   }
+        // es_subplanstates owns each subplan's plan-state tree (the owned model's
+        // teardown owner). Move the vec out so each child box can be ended with a
+        // live `&mut estate` borrow (no self-alias), then drop the emptied vec.
+        let subplanstates = core::mem::replace(
+            &mut estate.es_subplanstates,
+            mcx::PgVec::new_in(estate.es_query_cxt),
+        );
+        for mut subplanstate in subplanstates {
+            procnode::exec_end_node::call(&mut subplanstate, estate)?;
         }
         Ok::<(), types_error::PgError>(())
     })?;
@@ -949,6 +1039,7 @@ pub fn init_seams() {
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);
     seams::executor_end::set(ExecutorEnd);
+    seams::executor_rewind::set(ExecutorRewind);
     seams::free_query_desc::set(FreeQueryDesc);
     seams::create_query_desc_and_start_explain::set(CreateQueryDescAndStartExplain);
 

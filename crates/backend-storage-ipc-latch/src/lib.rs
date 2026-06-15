@@ -390,6 +390,16 @@ pub fn SetLatch(latch: LatchHandle) {
     with_latch(latch, set_latch);
 }
 
+/// `SetLatch(Latch *latch)` for a latch reached by reference rather than by
+/// [`LatchHandle`]. Some latches live embedded inside another subsystem's
+/// shared-memory struct (e.g. `XLogRecoveryCtl->recoveryWakeupLatch`,
+/// `PGPROC->procLatch`) instead of in this unit's handle registry; those
+/// owners hold the `&Latch` directly and call this. Behaviour is identical to
+/// [`SetLatch`].
+pub fn SetLatchPtr(latch: &Latch) {
+    set_latch(latch);
+}
+
 fn set_latch(latch: &Latch) {
     // The memory barrier has to be placed here to ensure that any flag
     // variables possibly changed by this process have been flushed to main

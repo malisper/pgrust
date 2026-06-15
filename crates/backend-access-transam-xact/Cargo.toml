@@ -49,7 +49,7 @@ backend-replication-logical-origin-seams = { path = "../backend-replication-logi
 backend-replication-logical-snapbuild-seams = { path = "../backend-replication-logical-snapbuild-seams" }
 backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }
 backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }
-backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

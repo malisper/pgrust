@@ -287,6 +287,43 @@ impl BufferManager {
         self.states[buf_id].value.load(Ordering::Acquire)
     }
 
+    /// `pg_atomic_compare_exchange_u32(&buf->state, &expected, new)` — the
+    /// lock-free pin/unpin/mark CAS substrate. C `pg_atomic_compare_exchange_u32`
+    /// has FULL barrier semantics (atomics.h:370); `SeqCst` on both the success
+    /// and failure orderings is the Rust match (`AcqRel`/`Acquire` would be
+    /// genuinely weaker). Returns `Ok(())` on success or `Err(actual)` with the
+    /// observed value on failure, mirroring the C in/out `expected` pointer.
+    #[allow(dead_code)]
+    pub(crate) fn state_compare_exchange(
+        &self,
+        buf_id: usize,
+        expected: u32,
+        new: u32,
+    ) -> Result<u32, u32> {
+        self.states[buf_id].value.compare_exchange_weak(
+            expected,
+            new,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+    }
+
+    /// `GetBufferDescriptor(buf_id)->wait_backend_pgprocno` — the backend parked
+    /// as the `BM_PIN_COUNT_WAITER`. Read under the header spinlock by the caller
+    /// (`WakePinCountWaiter`).
+    #[allow(dead_code)]
+    pub(crate) fn wait_backend_pgprocno(&self, buf_id: usize) -> i32 {
+        self.fields.borrow()[buf_id].wait_backend_pgprocno
+    }
+
+    /// `GetBufferDescriptor(buf_id)->wait_backend_pgprocno = procno` — record the
+    /// backend parked as the `BM_PIN_COUNT_WAITER`. Written under the header
+    /// spinlock by `LockBufferForCleanup`.
+    #[allow(dead_code)]
+    pub(crate) fn set_wait_backend_pgprocno(&self, buf_id: usize, procno: i32) {
+        self.fields.borrow_mut()[buf_id].wait_backend_pgprocno = procno;
+    }
+
     // -- buffer-id <-> Buffer helpers --------------------------------------
 
     /// `BufferIsValid` — true iff `buffer` is a valid shared (1..=NBuffers)
@@ -294,6 +331,24 @@ impl BufferManager {
     #[allow(dead_code)]
     pub fn buffer_is_valid(&self, buffer: Buffer) -> bool {
         buffer != INVALID_BUFFER && buffer > 0 && (buffer as i64) <= self.nbuffers as i64
+    }
+
+    /// `buffer - 1` for a valid shared buffer, with the `BufferIsValid`
+    /// `elog(ERROR, "bad buffer ID")` surface. Crate-internal helper shared by
+    /// the lock family (F1c).
+    #[allow(dead_code)]
+    pub(crate) fn buffer_to_buf_id_pub(&self, buffer: Buffer) -> types_error::PgResult<usize> {
+        if !self.buffer_is_valid(buffer) {
+            return Err(types_error::PgError::error(format!("bad buffer ID: {buffer}")));
+        }
+        Ok((buffer - 1) as usize)
+    }
+
+    /// Test-only: take one pin on a buffer via the F1b `pin_buffer`. Mirrors the
+    /// F1b test wiring (the resource-owner stubs are installed by the caller).
+    #[cfg(test)]
+    pub(crate) fn pin_buffer_for_test(&self, buf_id: usize, has_strategy: bool) -> bool {
+        self.pin_buffer(buf_id, has_strategy)
     }
 
     /// `GetBufferDescriptor(buf_id)->freeNext` (buf_internals.h). Raw read —
@@ -317,11 +372,38 @@ impl BufferManager {
     }
 
     /// Raw view of buffer `buf_id`'s page bytes for in-place read/write under a
-    /// caller-held content lock (F1d `with_buffer_page`).
+    /// caller-held content lock (F1d `with_buffer_page`); also used by F1c
+    /// `MarkBufferDirtyHint` to stamp the page LSN under the header lock.
     #[allow(dead_code)]
     pub(crate) fn with_block_mut<R>(&self, buf_id: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
         let mut blocks = self.blocks.borrow_mut();
         let start = buf_id * BLCKSZ;
         f(&mut blocks[start..start + BLCKSZ])
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_seams {
+    use std::sync::Once;
+
+    static ONCE: Once = Once::new();
+
+    /// Install every outward seam the F1b/F1c unit tests reach, exactly ONCE for
+    /// the whole test binary (`<fn>::set` panics on a second install, and the
+    /// test harness runs tests in parallel within one process). The resource
+    /// owner pin bookkeeping is a no-op; `my_proc_number` is a lone test backend
+    /// (0); `nbuffers` matters only for the strategy path (unused here).
+    pub(crate) fn install() {
+        ONCE.call_once(|| {
+            use backend_storage_buffer_bufmgr_seams as sb;
+            sb::remember_buffer::set(|_b| {});
+            sb::forget_buffer::set(|_b| {});
+            sb::resowner_enlarge::set(|| Ok(()));
+            backend_storage_lmgr_proc_seams::my_proc_number::set(|| 0);
+            // The direct LWLock content-lock path brackets each acquire/release
+            // with HOLD_INTERRUPTS/RESUME_INTERRUPTS (globals.c); stub them.
+            backend_utils_init_small_seams::hold_interrupts::set(|| {});
+            backend_utils_init_small_seams::resume_interrupts::set(|| {});
+        });
     }
 }

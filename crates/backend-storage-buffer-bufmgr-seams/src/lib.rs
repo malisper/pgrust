@@ -571,3 +571,132 @@ seam_core::seam!(
         smgrs: &[types_storage::RelFileLocatorBackend],
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// ResourceOwner buffer-pin bookkeeping (bufmgr.c:244).
+//
+// In C `ResourceOwnerRememberBuffer` / `ResourceOwnerForgetBuffer` are bufmgr.c
+// macros over the generic `ResourceOwnerRemember/Forget(owner, Int32GetDatum(b),
+// &buffer_pin_resowner_desc)`, where `buffer_pin_resowner_desc` and its
+// `ResOwnerReleaseBufferPin` callback are DEFINED IN bufmgr.c. The bufmgr core
+// (pin/unpin/incr) consumes these to keep the current resource owner's pin list
+// in sync; the resowner crate (backend-utils-resowner-resowner, still `todo`)
+// installs them when it lands. Until then a call panics loudly (a real pin
+// cannot be resource-owner-tracked before resowner ports — sanctioned
+// panic-until-owner).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberBuffer(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// record one buffer pin on the current resource owner so a transaction/
+    /// portal abort can release the leaked pin. Infallible in C (the enlarge
+    /// that may `ereport` is a separate, earlier call).
+    pub fn remember_buffer(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// drop the record of one buffer pin from the current resource owner.
+    /// Infallible in C.
+    pub fn forget_buffer(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerEnlarge(CurrentResourceOwner)` (bufmgr.c) — ensure the
+    /// current resource owner has room to remember one more buffer pin before
+    /// the pin is taken (so the remember below cannot fail). `Err` carries the
+    /// `ereport(ERROR)` on memory exhaustion.
+    pub fn resowner_enlarge() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgBufferUsage.shared_blks_dirtied++` / `pgstat_count_buffer_dirtied`-
+    /// style accounting (bufmgr.c) — note that this backend just dirtied a
+    /// previously-clean shared buffer. Owned by the per-backend buffer-usage
+    /// statistics (pgstat) when it ports; infallible.
+    pub fn count_buffer_dirtied()
+);
+
+// ---------------------------------------------------------------------------
+// LockBufferForCleanup recovery-conflict (InHotStandby) deep leg (bufmgr.c).
+//
+// In C the InHotStandby branch of LockBufferForCleanup performs a multi-step
+// recovery-conflict wait: ps-display "waiting" suffix, deadlock-timeout
+// LogRecoveryConflict logging, publishing the bufid the Startup process waits
+// on (SetStartupBufferPinWaitBufId), the ResolveRecoveryConflictWithBufferPin
+// alarm-and-park, and resetting the published bufid. Every step touches the
+// startup/recovery subsystem (in_hot_standby / startup-buffer-pin-wait-bufid /
+// the recovery-conflict resolver), which is not reachable from this core; the
+// whole branch is bundled into the seams below, installed by the recovery owner
+// when it ports (panic-until-owner — sanctioned deep standby leg).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `InHotStandby` (xlogutils.h) — is this backend serving queries while the
+    /// server is in hot-standby recovery? Gates the recovery-conflict wait leg.
+    pub fn in_hot_standby() -> bool
+);
+
+seam_core::seam!(
+    /// `GetStartupBufferPinWaitBufId()` (proc.c) — the 0-based buffer id the
+    /// Startup process published as the one it is waiting on, or `-1` if none.
+    pub fn startup_buffer_pin_wait_buf_id() -> i32
+);
+
+seam_core::seam!(
+    /// The whole `InHotStandby` recovery-conflict wait of
+    /// `LockBufferForCleanup` (bufmgr.c:5751-5794): ps-display suffix on first
+    /// wait, deadlock-timeout `LogRecoveryConflict`, publish-bufid,
+    /// `ResolveRecoveryConflictWithBufferPin` alarm+park, reset bufid. Takes the
+    /// loop-carried `(wait_start, waiting, logged_recovery_conflict)` and returns
+    /// their updated values. `Err` carries the recovery-conflict
+    /// `ereport(ERROR)` surface.
+    pub fn lock_buffer_for_cleanup_recovery_wait_park(
+        buffer: types_storage::storage::Buffer,
+        wait_start: types_core::primitive::TimestampTz,
+        waiting: bool,
+        logged_recovery_conflict: bool,
+    ) -> types_error::PgResult<(types_core::primitive::TimestampTz, bool, bool)>
+);
+
+seam_core::seam!(
+    /// `LogRecoveryConflict(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN, waitStart,
+    /// GetCurrentTimestamp(), NULL, false)` (bufmgr.c:5725) — the
+    /// "resolved after deadlock_timeout" recovery-conflict log emitted from
+    /// `LockBufferForCleanup` once the cleanup lock is finally acquired. Only
+    /// reachable after the park leg above set `logged_recovery_conflict`. `Err`
+    /// carries its `ereport` surface.
+    pub fn lock_buffer_for_cleanup_recovery_wait(
+        buffer: types_storage::storage::Buffer,
+        wait_start: types_core::primitive::TimestampTz,
+        waiting: bool,
+        logged_recovery_conflict: bool,
+        resolved: bool,
+    ) -> types_error::PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
+// Local-buffer (localbuf.c) dispatch consumed by the F1c content-lock surface.
+//
+// bufmgr.c's content-lock functions test `BufferIsLocal(buffer)` (a negative id)
+// and dispatch to the local-buffer manager for the temp-relation pool. The local
+// pool is owned by `backend-storage-buffer-support` (localbuf.c), but its ambient
+// per-backend `LocalBufferManager` handle is not yet established, so these are
+// bufmgr-OUTWARD seams installed by the local-buffer owner when that ambient
+// handle lands (panic-until-owner — sanctioned, like the F1b pin dispatch).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `LocalRefCount[-buffer - 1]` (localbuf.c) — this backend's local pin count
+    /// for a local (temp) buffer.
+    pub fn local_ref_count(buffer: types_storage::storage::Buffer) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `MarkLocalBufferDirty(buffer)` (localbuf.c) — mark a local (temp) buffer's
+    /// contents dirty (the `BufferIsLocal` arm of `MarkBufferDirtyHint` /
+    /// `MarkBufferDirty`).
+    pub fn mark_local_buffer_dirty(
+        buffer: types_storage::storage::Buffer,
+    ) -> types_error::PgResult<()>
+);

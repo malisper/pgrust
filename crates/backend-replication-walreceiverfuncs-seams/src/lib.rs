@@ -70,7 +70,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `XLogRequestWalReceiverReply()` — ask walreceiver to send a reply
-    /// immediately (remote_apply feedback during redo).
-    pub fn xlog_request_wal_receiver_reply()
+    /// `bool WalRcvRunning(void)` (walreceiverfuncs.c) — whether the
+    /// walreceiver is running or starting up. May lazily transition a stuck
+    /// `STARTING` state to `STOPPED` (a shmem state-write), which is why it
+    /// is fallible here even though the C return is a plain `bool`.
+    pub fn wal_rcv_running() -> types_error::PgResult<bool>
 );

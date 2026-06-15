@@ -60,6 +60,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogRequestWalReceiverReply()` (xlogrecovery.c:4528) — schedule a
+    /// walreceiver wakeup in the main recovery loop (sets the backend-local
+    /// `doRequestWalReceiverReply` flag the redo loop consumes). Consumed by
+    /// xact redo for `remote_apply` feedback during replay.
+    pub fn xlog_request_wal_receiver_reply()
+);
+
+seam_core::seam!(
     /// `reachedConsistency` (xlogrecovery.c global) — true once recovery has
     /// reached a consistent state. Pure read of backend-local/shared state.
     pub fn reached_consistency() -> bool
