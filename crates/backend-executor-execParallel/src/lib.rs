@@ -666,7 +666,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     // Store serialized ParamListInfo.
     let paramlistinfo_chunk = parallel::shm_toc_allocate::call(toc, paramlistinfo_len as Size);
     parallel::shm_toc_insert::call(toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_chunk);
-    sup::serialize_param_list::call(param_li, paramlistinfo_chunk);
+    sup::serialize_param_list::call(param_li, paramlistinfo_chunk)?;
 
     // Allocate space for each worker's BufferUsage; no need to initialize.
     let bufusage_chunk =
