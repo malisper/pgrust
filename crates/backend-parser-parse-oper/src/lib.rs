@@ -115,14 +115,14 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 /// The parse state's `p_sourcetext`, used for error positioning. `None` when
 /// `pstate == NULL`.
 #[inline]
-fn source_text(pstate: Option<&ParseState>) -> Option<&str> {
+fn source_text<'a>(pstate: Option<&'a ParseState<'_>>) -> Option<&'a str> {
     pstate.and_then(|p| p.p_sourcetext.as_deref())
 }
 
 /// `parser_errposition(pstate, location)` — the cursor position to attach to an
 /// ereport. A no-op returning 0 when `location < 0` or `pstate == NULL`.
 #[inline]
-fn errpos(pstate: Option<&ParseState>, location: i32) -> i32 {
+fn errpos(pstate: Option<&ParseState<'_>>, location: i32) -> i32 {
     if location < 0 || pstate.is_none() {
         return 0;
     }
@@ -193,7 +193,7 @@ pub enum FuncDetailCode {
 /// the operator. Pass `oprleft = InvalidOid` for a prefix op. If the operator is
 /// not found, returns `InvalidOid` if `no_error` is true, else raises an error.
 pub fn LookupOperName(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     opername: &[String],
     oprleft: Oid,
     oprright: Oid,
@@ -512,7 +512,7 @@ fn search_oper_row(oper_oid: Oid) -> PgResult<Option<ResolvedOper>> {
 
 /// `oper()` (parse_oper.c:370): search for a binary operator.
 pub fn oper(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     opname: &[String],
     mut ltype_id: Oid,
     mut rtype_id: Oid,
@@ -587,7 +587,7 @@ pub fn oper(
 
 /// `compatible_oper()` (parse_oper.c:450)
 pub fn compatible_oper(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     op: &[String],
     arg1: Oid,
     arg2: Oid,
@@ -635,7 +635,7 @@ pub fn compatible_oper_opid(op: &[String], arg1: Oid, arg2: Oid, no_error: bool)
 
 /// `left_oper()` (parse_oper.c:518): search for a unary left (prefix) operator.
 pub fn left_oper(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     op: &[String],
     arg: Oid,
     no_error: bool,
@@ -746,7 +746,7 @@ pub fn op_signature_string(op: &[String], arg1: Oid, arg2: Oid) -> PgResult<Stri
 
 /// `op_error()` (parse_oper.c:622): complain about an unresolvable operator.
 fn op_error(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     op: &[String],
     arg1: Oid,
     arg2: Oid,
@@ -798,7 +798,7 @@ fn op_error(
 /// operator's arguments. `ltree == None` denotes a prefix operator;
 /// `rtree == None` is a (rejected) postfix operator. Returns the built `OpExpr`.
 pub fn make_op(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     opname: &[String],
     ltree: Option<Expr>,
     rtree: Option<Expr>,
@@ -929,7 +929,7 @@ pub fn make_op(
 /// `make_scalar_array_op()` (parse_oper.c:770): build the expression tree for a
 /// `scalar op ANY/ALL (array)` construct.
 pub fn make_scalar_array_op(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     opname: &[String],
     use_or: bool,
     ltree: Expr,
@@ -1124,7 +1124,7 @@ fn strlcpy_namedata(opername: &str) -> [u8; NAMEDATALEN_USZ] {
 /// Fill the lookup key struct given operator name and arg types. Returns true if
 /// successful, false if the search_path overflowed (hence no caching is possible).
 fn make_oper_cache_key(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     key: &mut OprCacheKey,
     opname: &[String],
     ltype_id: Oid,

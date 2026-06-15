@@ -378,12 +378,12 @@ seam!(
     /// `errorConflictingDefElem(defel, pstate)` — always raises a syntax error.
     pub fn error_conflicting_def_elem(
         defel: DefElem,
-        pstate: Option<&ParseState>,
+        pstate: Option<&ParseState<'_>>,
     ) -> PgResult<()>
 );
 seam!(
     /// `parser_errposition(pstate, location)`.
-    pub fn parser_errposition(pstate: Option<&ParseState>, location: i32) -> PgResult<i32>
+    pub fn parser_errposition(pstate: Option<&ParseState<'_>>, location: i32) -> PgResult<i32>
 );
 
 /* --- backend globals (set at startup / by GUC assign hooks) --- */
