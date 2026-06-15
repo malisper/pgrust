@@ -191,17 +191,20 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
 }
 
 /// The `EXPR_SUBLINK`/`ARRAY_SUBLINK`/`MULTIEXPR_SUBLINK`/boolean dispatch of
-/// `exprType` over a `SubLink`. In the layered model `SubLink.subselect` is an
-/// opaque `Query` address (never an in-tree `Query` node — a `SubLink` is
-/// replaced by a `SubPlan` before execution), so the `EXPR/ARRAY` arms that
-/// would read the subselect's first target column are not representable; they
-/// surface as the C "cannot get type for untransformed sublink" error, which is
-/// exactly what C raises when the subselect is not a transformed `Query`.
+/// `exprType` over a `SubLink`. `SubLink.subselect` is now the embedded owned
+/// sub-`Query` (mirroring `RangeTblEntry.subquery`), reached by deref. Until
+/// `transformSubLink` (parse_expr.c) is ported the analyzed-SubLink producer
+/// leaves `subselect` `None`, so the `EXPR/ARRAY` arms that would read the
+/// subselect's first target column surface as the C "cannot get type for
+/// untransformed sublink" error — exactly what C raises when the subselect is
+/// not a transformed `Query`. (When the producer lands, these arms read
+/// `qtree->targetList`'s first non-junk `TargetEntry` like C.)
 fn sublink_result_type(sublink: &SubLink) -> PgResult<Oid> {
     if sublink.subLinkType == SubLinkType::Expr
         || sublink.subLinkType == SubLinkType::Array
     {
-        // Query* not modeled as an in-tree node; matches C's untransformed path.
+        // subselect is None until transformSubLink lands; matches C's
+        // untransformed path.
         Err(untransformed_sublink_error("type")?)
     } else if sublink.subLinkType == SubLinkType::MultiExpr {
         Ok(RECORDOID)

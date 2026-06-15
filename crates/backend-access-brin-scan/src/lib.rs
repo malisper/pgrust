@@ -256,45 +256,69 @@ fn bringetbitmap_am<'mcx>(
     bringetbitmap(mcx, scan, tbm_concrete)
 }
 
-// --- Insert / vacuum adapters: F3 (insert/vacuum) unit, reached by name. ----
+// --- Insert / vacuum adapters: F3 (insert/vacuum) unit, dispatched by name. --
+//
+// These vtable slots are owned by the F3 `backend-access-brin-insert-vacuum`
+// crate; the adapters dispatch through the `brin-insert-vacuum-seams` it
+// installs. The seam crate (not the F3 owner) is this crate's dep, so the
+// scan↔insert/vacuum cycle stays broken.
 
 fn brininsert_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _values: &[Datum<'mcx>],
-    _isnull: &[bool],
-    _heap_tid: &ItemPointerData,
-    _heap_relation: &Relation<'mcx>,
-    _check_unique: IndexUniqueCheck,
-    _index_unchanged: bool,
-    _index_info: &mut IndexInfo,
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    heap_tid: &ItemPointerData,
+    heap_relation: &Relation<'mcx>,
+    check_unique: IndexUniqueCheck,
+    index_unchanged: bool,
+    index_info: &mut IndexInfo,
 ) -> PgResult<bool> {
-    panic!("brininsert: BRIN insert is the F3 insert/vacuum unit (not yet ported)")
+    backend_access_brin_insert_vacuum_seams::brininsert::call(
+        mcx,
+        index_relation,
+        values,
+        isnull,
+        heap_tid,
+        heap_relation,
+        check_unique,
+        index_unchanged,
+        index_info,
+    )
 }
 
 fn brininsertcleanup_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo,
 ) -> PgResult<()> {
-    panic!("brininsertcleanup: BRIN insert is the F3 insert/vacuum unit (not yet ported)")
+    backend_access_brin_insert_vacuum_seams::brininsertcleanup::call(
+        mcx,
+        index_relation,
+        index_info,
+    )
 }
 
 fn brinbulkdelete_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _info: &IndexVacuumInfo<'mcx>,
-    _stats: Option<IndexBulkDeleteResult>,
-    _callback_state: Option<u64>,
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<IndexBulkDeleteResult>,
+    callback_state: Option<u64>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
-    panic!("brinbulkdelete: BRIN vacuum is the F3 insert/vacuum unit (not yet ported)")
+    backend_access_brin_insert_vacuum_seams::brinbulkdelete::call(
+        mcx,
+        info,
+        stats,
+        callback_state,
+    )
 }
 
 fn brinvacuumcleanup_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _info: &IndexVacuumInfo<'mcx>,
-    _stats: Option<IndexBulkDeleteResult>,
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
-    panic!("brinvacuumcleanup: BRIN vacuum is the F3 insert/vacuum unit (not yet ported)")
+    backend_access_brin_insert_vacuum_seams::brinvacuumcleanup::call(mcx, info, stats)
 }
 
 /// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate

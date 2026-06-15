@@ -272,13 +272,31 @@ fn equal_bool_expr(a: &BoolExpr, b: &BoolExpr) -> bool {
 fn equal_sub_link(a: &SubLink, b: &SubLink) -> bool {
     // _equalSubLink: subLinkType, subLinkId, testexpr, operName, subselect.
     // `operName` is a parse-only List<String> that this repo's analyzed SubLink
-    // does not carry; `subselect` here is a `usize` node-arena handle (the
-    // analyzed sub-Query is reached via the resolver, not embedded in the
-    // SubLink), so it is compared as the scalar handle.
+    // does not carry; `subselect` is the embedded owned sub-`Query`, compared
+    // with `COMPARE_NODE_FIELD(subselect)`.
     a.subLinkType == b.subLinkType
         && a.subLinkId == b.subLinkId
         && equal_opt_expr(a.testexpr.as_deref(), b.testexpr.as_deref())
-        && a.subselect == b.subselect
+        && equal_opt_subselect(a.subselect.as_deref(), b.subselect.as_deref())
+}
+
+/// `COMPARE_NODE_FIELD(subselect)` over the embedded `Query`. Both `None` is
+/// equal; both `Some` defers to the per-node `Query` comparator. `_equalQuery`
+/// is not yet reachable through `equal()` in the ported layer (the analyzed
+/// SubLink with an embedded `Query` is only produced once `transformSubLink` is
+/// ported), so this seam-and-panics rather than returning a silent wrong answer.
+fn equal_opt_subselect(
+    a: Option<&types_nodes::copy_query::Query<'_>>,
+    b: Option<&types_nodes::copy_query::Query<'_>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(_), Some(_)) => panic!(
+            "equalfuncs: _equalQuery (SubLink.subselect) not yet ported for \
+             equal()"
+        ),
+        _ => false,
+    }
 }
 
 fn equal_field_select(a: &FieldSelect, b: &FieldSelect) -> bool {
