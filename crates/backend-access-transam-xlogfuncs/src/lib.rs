@@ -695,8 +695,8 @@ pub fn pg_promote(wait: bool, wait_seconds: i32) -> PgResult<bool> {
     // server did not promote within N second(s): a WARNING (non-throwing).
     ereport(WARNING)
         .errmsg_plural(
-            "server did not promote within %d second",
-            "server did not promote within %d seconds",
+            format!("server did not promote within {wait_seconds} second"),
+            format!("server did not promote within {wait_seconds} seconds"),
             wait_seconds as u64,
         )
         .finish(here("pg_promote"))?;
