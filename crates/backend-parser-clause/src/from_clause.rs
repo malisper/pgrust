@@ -101,7 +101,7 @@ use backend_parser_relation::{
 };
 use backend_access_table_table::table_close;
 
-use backend_commands_functioncmds_seams as parse_func;
+use backend_parser_parse_func_seams as parse_func;
 use backend_executor_nodeSamplescan_seams as tsmapi;
 use backend_parser_analyze_seams as analyze;
 use backend_parser_target_seams as parse_target;
@@ -760,11 +760,17 @@ fn transformRangeTableSample<'mcx>(
      * has the same name, one dummy INTERNAL argument, and a result type of
      * tsm_handler.
      */
-    let method_names = name_list_strings(&rts.method);
-    let funcargtypes: Vec<Oid> = alloc::vec![INTERNALOID];
+    let method_names: Vec<mcx::PgString<'mcx>> = {
+        let mut v = Vec::with_capacity(rts.method.len());
+        for n in rts.method.iter() {
+            v.push(mcx::PgString::from_str_in(str_val(n).unwrap_or(""), mcx)?);
+        }
+        v
+    };
+    let funcargtypes: [Oid; 1] = [INTERNALOID];
 
     let handler_oid =
-        parse_func::lookup_func_name::call(method_names.clone(), 1, funcargtypes, true)?;
+        parse_func::lookup_func_name::call(&method_names, 1, &funcargtypes, true)?;
 
     /* we want error to complain about no-such-method, not no-such-function */
     if !OidIsValid(handler_oid) {
