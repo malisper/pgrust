@@ -938,6 +938,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-nbt-compare"
+version = "0.0.0"
+dependencies = [
+ "backend-access-nbt-compare-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-sortsupport",
+]
+
+[[package]]
+name = "backend-access-nbt-compare-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-sortsupport",
+]
+
+[[package]]
 name = "backend-access-nbt-dedup"
 version = "0.0.0"
 dependencies = [
@@ -955,6 +974,25 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-nbt-validate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-access-transam-xact-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nbtree",
 ]
 
 [[package]]
@@ -985,6 +1023,58 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-nbtree-build-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nbtree",
+ "types-rel",
+]
+
+[[package]]
+name = "backend-access-nbtree-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-nbt-dedup",
+ "backend-access-nbtree-core-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-error-elog-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "pg-prng",
+ "types-amapi",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-nbtree",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -1045,6 +1135,27 @@ dependencies = [
  "types-error",
  "types-nbtree",
  "types-rel",
+]
+
+[[package]]
+name = "backend-access-nbtree-nbtsort"
+version = "0.0.0"
+dependencies = [
+ "backend-access-nbtree-build-seams",
+ "backend-access-nbtree-core-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-utils-activity-small",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nbtree",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9246,6 +9357,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-smgr-bulkwrite-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-storage-smgr-md-seams"
 version = "0.0.0"
 dependencies = [
@@ -12740,9 +12862,13 @@ dependencies = [
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-indexam",
+ "backend-access-nbt-compare",
  "backend-access-nbt-dedup",
+ "backend-access-nbt-validate",
  "backend-access-nbt-xlog",
+ "backend-access-nbtree-core",
  "backend-access-nbtree-nbtree",
+ "backend-access-nbtree-nbtsort",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
@@ -13635,6 +13761,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-datum",
 ]
 
 [[package]]

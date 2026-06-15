@@ -96,6 +96,9 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
         rd_options: None,
         rd_index: None,
         rd_opcintype: mcx::PgVec::new_in(mcx),
+        rd_opfamily: mcx::PgVec::new_in(mcx),
+        rd_indoption: mcx::PgVec::new_in(mcx),
+        rd_indcollation: mcx::PgVec::new_in(mcx),
     }
 }
 
