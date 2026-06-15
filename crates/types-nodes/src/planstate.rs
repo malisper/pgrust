@@ -72,6 +72,8 @@ pub enum PlanStateNode<'mcx> {
     Unique(PgBox<'mcx, crate::nodeunique::UniqueStateData<'mcx>>),
     /// `T_SortState`.
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
+    /// `T_WindowAggState`.
+    WindowAgg(PgBox<'mcx, crate::nodewindowagg::WindowAggState<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
     /// `T_ValuesScanState`.
@@ -128,6 +130,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Unique(_) => T_UniqueState,
             PlanStateNode::Sort(_) => T_SortState,
+            PlanStateNode::WindowAgg(_) => crate::nodewindowagg::T_WindowAggState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::ValuesScan(_) => crate::nodevaluesscan::T_ValuesScanState,
             PlanStateNode::CteScan(_) => crate::nodectescan::T_CteScanState,
@@ -171,6 +174,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Unique(u) => &u.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
+            PlanStateNode::WindowAgg(w) => &w.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::ValuesScan(v) => &v.ss.ps,
             PlanStateNode::CteScan(c) => &c.ss.ps,
@@ -211,6 +215,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Unique(u) => &mut u.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
+            PlanStateNode::WindowAgg(w) => &mut w.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::ValuesScan(v) => &mut v.ss.ps,
             PlanStateNode::CteScan(c) => &mut c.ss.ps,
@@ -237,6 +242,8 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             // `GroupState` begins with a `ScanState`.
             PlanStateNode::Group(g) => Some(&g.ss),
+            // `WindowAggState` begins with a `ScanState`.
+            PlanStateNode::WindowAgg(w) => Some(&w.ss),
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `TidScanState` begins with a `ScanState`.
