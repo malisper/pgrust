@@ -146,10 +146,18 @@ pub fn ExecEvalParamExec<'mcx>(
     //
     // ecxt_param_exec_vals aliases the EState's es_param_exec_vals (the owned
     // model threads the EState explicitly; see ExprContext docs), so the param
-    // is read from estate.es_param_exec_vals directly. ParamExecData is trimmed
-    // (no execPlan link — that arrives with the nodeSubplan unit), so the
-    // not-yet-evaluated subplan branch (ExecSetParamPlan) is genuinely absent
-    // here; when the subplan owner threads execPlan it will add that branch.
+    // is read from estate.es_param_exec_vals directly. The `execPlan` link is now
+    // modeled on `ParamExecData` (an `ExecPlanLink` identity into
+    // `es_subplanstates`), so `prm.execPlan.is_some()` is the C
+    // `prm->execPlan != NULL` not-yet-evaluated test. The lazy-evaluation
+    // re-entry (`ExecSetParamPlan(prm->execPlan, econtext)`) resolves that
+    // identity back to its `SubPlanState` and runs the initplan; that resolution
+    // is the executor's `exec_set_param_plan_for_pending` seam, still
+    // seam-and-panic until nodeSubplan's `SubPlanState`-reachability wiring lands
+    // (the `SubPlanState`s are owned by the parent plan-state's `initPlan` list,
+    // not directly addressable from the param array yet). So for a PARAM_EXEC
+    // whose value is already valid (`execPlan == None`) this reads straight
+    // through; a pending one would need that unported re-entry.
     let _ = econtext;
     let paramid = match &step_data(state, op) {
         ExprEvalStepData::Param { paramid, .. } => *paramid,

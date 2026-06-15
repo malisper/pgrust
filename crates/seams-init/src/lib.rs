@@ -835,11 +835,21 @@ mod recurrence_guard {
         // (or are re-homed to their proper -seams crates).
         ("backend_commands_functioncmds", "aclcheck_error_type"),
         ("backend_commands_functioncmds", "get_language_oid"),
-        ("backend_executor_execProcnode", "clear_param_execplan"),
-        ("backend_executor_execProcnode", "exec_set_param_plan_for_pending"),
-        ("backend_executor_execProcnode", "link_subplan_planstate"),
-        ("backend_executor_execProcnode", "mark_param_execplan_pending"),
-        ("backend_executor_execProcnode", "param_execplan_pending"),
+        // NOTE: the PARAM_EXEC `execPlan`-link seams formerly listed here under
+        // backend_executor_execProcnode were RELOCATED to execMain-seams (their
+        // real owner: they operate on the executor-owned `es_param_exec_vals` /
+        // `es_subplanstates`, not on any execProcnode.c function). The
+        // `ParamExecData.execPlan` field is now modeled (an `ExecPlanLink`
+        // identity into `es_subplanstates`), so the three field-level ops
+        // (mark/clear/pending-test) are INSTALLED by
+        // backend-executor-execMain::init_seams. The two still genuinely blocked
+        // (`exec_set_param_plan_for_pending` = the `ExecSetParamPlan` re-entry,
+        // `link_subplan_planstate` = `sstate->planstate = list_nth(...)`) need
+        // nodeSubplan's SubPlanState-reachability wiring (the InitPlan
+        // `SubPlanState`s are owned by the parent plan-state's `initPlan` list, not
+        // addressable from the param array yet) — but execMain is CATALOG
+        // `needs-decomp`, so the seam-install guard already exempts its unfinished
+        // surface; no allowlist entry is required.
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),

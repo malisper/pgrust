@@ -12,6 +12,7 @@ path = "src/lib.rs"
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping-seams" }
