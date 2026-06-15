@@ -915,6 +915,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gist-core"
+version = "0.1.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-gist-dispatch-seams",
+ "backend-access-index-indexam-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gist-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -2074,6 +2094,39 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-spgist-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
+ "backend-access-common-reloptions-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-index-amvalidate-seams",
+ "backend-access-spg-core-seams",
+ "backend-access-transam-xact-seams",
+ "backend-parser-coerce-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-page",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-amvalidate",
+ "types-cache",
+ "types-core",
+ "types-error",
+ "types-opclass",
+ "types-rel",
+ "types-scan",
+ "types-spgist",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10114,6 +10167,7 @@ dependencies = [
  "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-buffer-support",
+ "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lmgr-seams",
@@ -10129,6 +10183,7 @@ dependencies = [
  "types-condvar",
  "types-core",
  "types-error",
+ "types-fsm",
  "types-rel",
  "types-storage",
  "types-tuple",
@@ -15488,6 +15543,7 @@ dependencies = [
 name = "types-gist"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-pairingheap",
  "mcx",
  "types-core",
  "types-datum",

@@ -1,0 +1,41 @@
+[package]
+name = "backend-access-gist-core"
+version = "0.1.0"
+edition = "2021"
+
+# Every fallible function here returns the project-wide `types_error::PgResult`.
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-gist = { path = "../types-gist" }
+
+# ereport / elog (miscadmin.h, elog.c).
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Page-byte primitives (bufpage.c): PageInit / PageAddItemExtended /
+# PageGetSpecialPointer / PageGetSpecialSize / PageIsNew / PageXLogRecPtr*.
+backend-storage-page = { path = "../backend-storage-page" }
+
+# Buffer manager (bufmgr.c): with_buffer_page / buffer_get_block_number.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# Index-tuple formation (indextuple.c): index_form_tuple_desc.
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+
+# Tuple-descriptor truncation (tupdesc.c): CreateTupleDescTruncatedCopy.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+
+# Index AM support-procedure resolution (indexam.c): index_getprocinfo /
+# index_getprocid (resolved FmgrInfo / proc OID per index column).
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+
+# GiST opclass support-procedure dispatch (per-opclass typed seams installed by
+# backend-access-gist-proc): gist_compress / gist_decompress / gist_union ...
+backend-access-gist-dispatch-seams = { path = "../backend-access-gist-dispatch-seams" }
+
+[dev-dependencies]

@@ -633,6 +633,22 @@ pub fn index_form_tuple_seam<'mcx>(
     itup.on_disk_image(mcx)
 }
 
+/// Body for the `index_form_tuple_desc` seam consumed by GiST
+/// (`gistFormTuple`): `index_form_tuple(tupdesc, values, isnull)` against a
+/// caller-supplied descriptor (the leaf or truncated non-leaf descriptor),
+/// returning the formed on-disk bytes. Unlike [`index_form_tuple_seam`] it does
+/// not stamp `t_tid` (the caller — `gistFormTuple` — sets the offset to
+/// `0xffff` on its own copy).
+pub fn index_form_tuple_desc_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let itup = index_form_tuple(mcx, tupdesc, values, isnull)?;
+    itup.on_disk_image(mcx)
+}
+
 /// Body for the `index_deform_tuple` seam consumed by nodeIndexonlyscan
 /// (`StoreIndexTuple`): deform the on-disk index-tuple byte image `itup`
 /// against `itupdesc` into per-attribute `(value, isnull)` pairs.
@@ -702,6 +718,7 @@ pub fn nocache_index_getattr_seam<'mcx>(
 /// `backend-access-common-indextuple-seams`) to their real bodies.
 pub fn init_seams() {
     backend_access_common_indextuple_seams::index_form_tuple::set(index_form_tuple_seam);
+    backend_access_common_indextuple_seams::index_form_tuple_desc::set(index_form_tuple_desc_seam);
     backend_access_common_indextuple_seams::index_deform_tuple::set(index_deform_tuple_seam);
     backend_access_common_indextuple_seams::nocache_index_getattr::set(nocache_index_getattr_seam);
 }

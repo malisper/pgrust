@@ -422,12 +422,20 @@ impl BufferManager {
 
         let mut extend_by = extend_by;
         let first_block = if bmr.relpersistence == RELPERSISTENCE_TEMP {
-            // ExtendBufferedRelLocal — the temp/local-buffer extend path lives in
-            // localbuf.c, a separate subsystem not modelled by this shared core.
-            return Err(PgError::error(
-                "ExtendBufferedRelCommon: temp-relation extension (ExtendBufferedRelLocal) \
-                 is not implemented by the shared buffer core",
-            ));
+            // ExtendBufferedRelLocal (bufmgr.c:2580) — the temp/local-buffer
+            // extend path lives in localbuf.c, owned by the local-buffer manager
+            // (panic-until-owner; its ambient per-backend handle is not yet
+            // established). Dispatch through the outward seam, mirroring C.
+            let (first_block, ext) = sb::extend_buffered_rel_local::call(
+                bmr.rlocator,
+                fork,
+                flags,
+                extend_by,
+                extend_upto,
+                buffers,
+            )?;
+            extend_by = ext;
+            first_block
         } else {
             self.ExtendBufferedRelShared(
                 bmr,
