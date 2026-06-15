@@ -79,3 +79,43 @@ seam_core::seam!(
         key: &types_scan::scankey::ScanKeyData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `FunctionCall4Coll(addValue, collation, bdesc, bval, value, isnull)`
+    /// (brin.c `add_values_to_range`): the opclass `BRIN_PROCNUM_ADDVALUE`
+    /// support procedure — incorporate a new heap value into the range summary
+    /// `bval` for indexed column `attno` (0-based). The procedure may modify
+    /// `bval` in place (its by-reference output rides `mcx`); returns whether
+    /// the summary tuple changed (the C `DatumGetBool(result)`). Owned by the
+    /// opclass (`brin_minmax` / `brin_inclusion` / `brin_bloom` /
+    /// `brin_minmax_multi`); panics until it lands. `Err` carries its
+    /// `ereport(ERROR)`.
+    pub fn brin_addvalue<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        attno: usize,
+        collation: types_core::primitive::Oid,
+        bdesc: &types_brin::BrinDesc<'mcx>,
+        bval: &mut types_brin::BrinValues<'mcx>,
+        value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        isnull: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `FunctionCall3Coll(unionFn, collation, bdesc, col_a, col_b)` (brin.c
+    /// `union_tuples`): the opclass `BRIN_PROCNUM_UNION` support procedure —
+    /// merge the summary of column `attno` (0-based) so that `col_a` becomes
+    /// consistent with both `col_a` and `col_b`. The procedure modifies `col_a`
+    /// in place (its by-reference output rides `mcx`). Owned by the opclass;
+    /// panics until it lands. `Err` carries its `ereport(ERROR)`.
+    pub fn brin_union<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+        attno: usize,
+        collation: types_core::primitive::Oid,
+        bdesc: &types_brin::BrinDesc<'mcx>,
+        col_a: &mut types_brin::BrinValues<'mcx>,
+        col_b: &types_brin::BrinValues<'mcx>,
+    ) -> types_error::PgResult<()>
+);

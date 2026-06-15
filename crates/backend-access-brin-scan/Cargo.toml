@@ -28,6 +28,7 @@ backend-access-brin-tuple = { path = "../backend-access-brin-tuple" }
 
 # cross-owner seam crates
 backend-access-brin-entry-seams = { path = "../backend-access-brin-entry-seams" }
+backend-access-brin-insert-vacuum-seams = { path = "../backend-access-brin-insert-vacuum-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }

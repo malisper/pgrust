@@ -53,6 +53,42 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `table_index_build_range_scan(table_rel, index_rel, index_info,
+    /// allow_sync, anyvisible, progress, start_blockno, numblocks, callback,
+    /// callback_state, scan=NULL)` (tableam.h): scan a `[start_blockno,
+    /// start_blockno + numblocks)` block range of the table once during a BRIN
+    /// range summarization, invoking `callback` per qualifying tuple with
+    /// `(heap_tid, values, isnull, tuple_is_alive)`. `anyvisible` selects the
+    /// "any visible" snapshot mode BRIN requires (so in-progress inserts are
+    /// summarized). The per-tuple callback (`brinbuildCallback`) crosses the
+    /// seam as a closure the heap AM invokes (mirroring the C
+    /// `IndexBuildCallback` function pointer + `state`). Returns the number of
+    /// heap tuples scanned (C `double`). `Err` carries the scan / callback
+    /// `ereport(ERROR)` surface.
+    ///
+    /// Owned by the heap AM (`access/heap/heapam_handler.c`, unported); a call
+    /// panics until the heap scan layer lands — exactly like
+    /// [`table_index_build_scan`], the sanctioned build-path seam.
+    #[allow(clippy::type_complexity)]
+    pub fn table_index_build_range_scan<'mcx>(
+        table_rel: &types_rel::Relation<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        index_info: &mut types_nodes::execnodes::IndexInfo,
+        allow_sync: bool,
+        anyvisible: bool,
+        progress: bool,
+        start_blockno: types_core::primitive::BlockNumber,
+        numblocks: types_core::primitive::BlockNumber,
+        callback: &mut dyn FnMut(
+            types_tuple::heaptuple::ItemPointerData,
+            &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+            &[bool],
+            bool,
+        ) -> PgResult<()>,
+    ) -> PgResult<f64>
+);
+
+seam_core::seam!(
     /// `GetTableAmRoutine(amhandler)` (access/table/tableamapi.c): call the
     /// table AM's handler function (`OidFunctionCall0(amhandler)` returning a
     /// `const TableAmRoutine*`) and hand back the vtable for the relcache to
