@@ -42,17 +42,14 @@ seam_core::seam!(
     /// arrays live in the slot itself). Deforming can detoast/allocate, so
     /// the call is fallible.
     ///
-    /// STANDALONE-SLOT FORM: this header-only `&TupleTableSlot` contract is for
-    /// callers whose slot is NOT in the `EState` tuple-table pool (no `SlotId`
-    /// exists) — `CopyOneRowTo`'s `table_slot_create` scan slot and logical
-    /// replication's `logicalrep_write_tuple` slot. Those slots are header-only
-    /// in the current model (`make_single_tuple_table_slot` builds no payload
-    /// arrays), so this form stays seam-and-panic until the *standalone*
-    /// `SlotData` carrier lands. Pool-resident callers use
-    /// [`slot_getallattrs_by_id`] instead.
+    /// STANDALONE-SLOT FORM: for callers whose slot is NOT in the `EState`
+    /// tuple-table pool (no `SlotId`) — `CopyOneRowTo`'s `table_slot_create`
+    /// scan slot and logical replication's `logicalrep_write_tuple` slot. The
+    /// slot is the unified payload-bearing [`SlotData`], so this runs the real
+    /// deform. Pool-resident callers use [`slot_getallattrs_by_id`] instead.
     pub fn slot_getallattrs<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        slot: &types_nodes::TupleTableSlot,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
     ) -> types_error::PgResult<
         mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>>,
     >
@@ -271,15 +268,15 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
         tts_ops: types_nodes::TupleSlotKind,
-    ) -> types_error::PgResult<types_nodes::TupleTableSlot>
+    ) -> types_error::PgResult<types_nodes::tuptable::SlotData<'mcx>>
 );
 
 seam_core::seam!(
     /// `ExecDropSingleTupleTableSlot(slot)` (execTuples.c): release a slot
     /// made with `MakeSingleTupleTableSlot`. Clearing the slot can release a
     /// buffer pin, whose bookkeeping can `elog(ERROR)`, carried on `Err`.
-    pub fn exec_drop_single_tuple_table_slot(
-        slot: types_nodes::TupleTableSlot,
+    pub fn exec_drop_single_tuple_table_slot<'mcx>(
+        slot: types_nodes::tuptable::SlotData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -324,14 +321,12 @@ seam_core::seam!(
     /// image is copied into `mcx`.
     ///
     /// STANDALONE-SLOT FORM: the only caller (`GetTupleTransactionInfo` in the
-    /// logical-replication conflict path) holds a header-only `&TupleTableSlot`
-    /// outside any `EState` pool (no `SlotId`), and that standalone slot carries
-    /// no payload in the current model, so this stays seam-and-panic until the
-    /// standalone-`SlotData` carrier lands. Pool-resident callers would use a
-    /// `_by_id` form (none exists yet — there are no pool-resident callers).
+    /// logical-replication conflict path) holds a standalone payload-bearing
+    /// [`SlotData`] outside any `EState` pool (no `SlotId`); this dispatches the
+    /// real `tts_ops->getsysattr` against the slot's stored tuple.
     pub fn slot_getsysattr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        slot: &types_nodes::TupleTableSlot,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
         attnum: types_core::AttrNumber,
     ) -> types_error::PgResult<(
         types_tuple::backend_access_common_heaptuple::Datum<'mcx>,

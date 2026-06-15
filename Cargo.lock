@@ -14263,7 +14263,9 @@ version = "0.0.0"
 name = "types-slot"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
+ "types-storage",
  "types-tuple",
 ]
 

@@ -7,52 +7,28 @@
 //! **This family owns and installs `backend-executor-execTuples-seams`** — the
 //! 16 declarations the executor node units call back into.
 //!
-//! # Slot model: trimmed header vs. payload model
+//! # Slot model
 //!
-//! `EState::es_tupleTable` is the `SlotId`-addressed pool of the trimmed
-//! [`TupleTableSlot`] header (`tts_flags`/`tts_ops`/`tts_tid`/`tts_tableOid`).
-//! The per-attribute `tts_values`/`tts_isnull` arrays, `tts_tupleDescriptor`,
-//! `tts_nvalid` and the slot's own context — the payload model carried by
-//! [`types_nodes::tuptable::SlotData`] — are not yet woven into the pool (the
-//! scaffold's deferred header/`SlotBase` convergence). The slot-*creation*
-//! routines below build and install the header (flags + ops identity) exactly
-//! as `MakeTupleTableSlot` does for those fields; the routines that *operate on
-//! a slot's stored tuple* (clear/copy/getsysattr/getallattrs, the all-null
-//! store, and the descriptor-install array allocation) genuinely require the
-//! payload arrays and stay seam-and-panic until the payload model lands.
+//! `EState::es_tupleTable` is the `SlotId`-addressed pool of the unified
+//! payload-bearing [`types_nodes::tuptable::SlotData`] (one `TupleTableSlot`
+//! carrying `tts_flags`/`tts_ops`/`tts_tid`/`tts_tableOid` AND the per-attribute
+//! `tts_values`/`tts_isnull`/`tts_nvalid`/`tts_tupleDescriptor` payload). The
+//! standalone (non-pool) creation routines (`MakeSingleTupleTableSlot`) build
+//! the same payload-bearing slot; the operating routines (clear/copy/
+//! getsysattr/getallattrs/all-null store/set-descriptor) run the real slot ops.
 
 use mcx::Mcx;
 use types_core::primitive::AttrNumber;
 use types_error::PgResult;
 use types_nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
-use types_nodes::executor::{TTS_FLAG_EMPTY, TTS_FLAG_FIXED};
 use types_nodes::tuptable::SlotData;
-use types_nodes::{SlotId, TupleSlotKind, TupleTableSlot};
+use types_nodes::{SlotId, TupleSlotKind};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 
 // ===========================================================================
-//  MakeTupleTableSlot header construction
+//  ExecAllocTableSlot
 // ===========================================================================
-
-/// The header-field portion of `MakeTupleTableSlot(tupleDesc, tts_ops)`
-/// (execTuples.c): build a fresh, empty slot of the given kind. When a fixed
-/// descriptor is supplied the slot is marked `TTS_FLAG_FIXED`. The payload
-/// arrays / descriptor pin (`tts_values`/`tts_isnull`/`tts_tupleDescriptor`/
-/// `PinTupleDesc`) and the kind's `init` callback belong to the payload model
-/// and land at convergence; the pool only carries the header today.
-fn make_tuple_table_slot_header(has_descriptor: bool, tts_ops: TupleSlotKind) -> TupleTableSlot {
-    let mut slot = TupleTableSlot::default();
-    // slot->tts_ops = tts_ops; slot->type = T_TupleTableSlot;
-    slot.tts_ops = tts_ops;
-    // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.tts_flags |= TTS_FLAG_EMPTY;
-    // if (tupleDesc != NULL) slot->tts_flags |= TTS_FLAG_FIXED;
-    if has_descriptor {
-        slot.tts_flags |= TTS_FLAG_FIXED;
-    }
-    slot
-}
 
 /// `ExecAllocTableSlot(&estate->es_tupleTable, desc, tts_ops)` (execTuples.c):
 /// build a slot (`MakeTupleTableSlot`) and append it to the per-query tuple
@@ -110,18 +86,25 @@ pub fn ExecDropSingleTupleTableSlot(slot: SlotData<'_>) -> PgResult<()> {
 
 /// Seam `slot_getallattrs` (STANDALONE-SLOT form; see seam doc).
 ///
-/// The two callers (`CopyOneRowTo`'s `table_slot_create` scan slot and logical
-/// replication's `logicalrep_write_tuple` slot) hold a header-only
-/// `&TupleTableSlot` that is NOT in any `EState` pool, and `table_slot_create`
-/// / `MakeSingleTupleTableSlot` build no payload arrays in the current model, so
-/// there is no `tts_values`/`tts_isnull` to return. Stays seam-and-panic until
-/// the *standalone* `SlotData` carrier lands. Pool-resident callers use the
-/// implemented [`seam_slot_getallattrs_by_id`].
+/// The callers (`CopyOneRowTo`'s `table_slot_create` scan slot and logical
+/// replication's `logicalrep_write_tuple` slot) hold a standalone (non-pool)
+/// payload-bearing [`SlotData`]; this runs the real `slot_getallattrs` deform
+/// and copies the per-attribute `(value, isnull)` array out into `mcx`.
 fn seam_slot_getallattrs<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &TupleTableSlot,
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
-    panic!("execTuples.c slot_getallattrs — standalone (non-pool) slot carries no payload model (tts_values/tts_isnull)")
+    // slot_getallattrs(slot): deform every column into tts_values/tts_isnull.
+    crate::slot_deform::slot_getallattrs(mcx, slot)?;
+    // Copy out (value, isnull) per attribute (C reads slot->tts_values[i]).
+    let base = slot.base();
+    let nvalid = base.tts_nvalid as usize;
+    let mut cols: mcx::PgVec<'mcx, DeformedColumn<'mcx>> = mcx::vec_with_capacity_in(mcx, nvalid)?;
+    for i in 0..nvalid {
+        let value = base.tts_values[i].clone_in(mcx)?;
+        cols.push((value, base.tts_isnull[i]));
+    }
+    Ok(cols)
 }
 
 /// Seam `slot_getallattrs_by_id` — `slot_getallattrs` resolving the pool
@@ -280,12 +263,12 @@ fn seam_exec_store_all_null_tuple<'mcx>(
 
 /// Seam `make_single_tuple_table_slot` — `MakeSingleTupleTableSlot`.
 fn seam_make_single_tuple_table_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     tupdesc: TupleDesc<'mcx>,
     tts_ops: TupleSlotKind,
-) -> PgResult<TupleTableSlot> {
+) -> PgResult<SlotData<'mcx>> {
     // TupleTableSlot *slot = MakeTupleTableSlot(tupdesc, tts_ops); return slot;
-    Ok(make_tuple_table_slot_header(tupdesc.is_some(), tts_ops))
+    MakeSingleTupleTableSlot(mcx, tupdesc, tts_ops)
 }
 
 /// Seam `exec_drop_single_tuple_table_slot` — `ExecDropSingleTupleTableSlot`.
@@ -296,27 +279,25 @@ fn seam_make_single_tuple_table_slot<'mcx>(
 /// no separately-`palloc`'d value arrays, so clear/release/free reduce to
 /// dropping the owned header value, which Rust does when `slot` falls out of
 /// scope here.
-fn seam_exec_drop_single_tuple_table_slot(slot: TupleTableSlot) -> PgResult<()> {
-    drop(slot);
-    Ok(())
+fn seam_exec_drop_single_tuple_table_slot(slot: SlotData<'_>) -> PgResult<()> {
+    // ExecClearTuple(slot); slot->tts_ops->release(slot); ReleaseTupleDesc(...);
+    // pfree(slot). The owned SlotData carries the value arrays, descriptor pin
+    // and any stored tuple; clear/release/free reduce to dropping the value.
+    ExecDropSingleTupleTableSlot(slot)
 }
 
 /// Seam `slot_getsysattr` — `slot_getsysattr` (STANDALONE-SLOT form; see seam
 /// doc).
 ///
 /// The only caller (`GetTupleTransactionInfo`, logical-replication conflict
-/// detection) holds a header-only `&TupleTableSlot` outside any `EState` pool
-/// (no `SlotId`), and that standalone slot carries no payload in the current
-/// model, so `tts_ops->getsysattr` has no stored tuple to dispatch against.
-/// Stays seam-and-panic until the *standalone* `SlotData` carrier lands. (When
-/// a pool-resident caller appears, add a `_by_id` form resolving the `SlotId`
-/// and delegating to `crate::slot_ops_vtables::slot_getsysattr`.)
+/// detection) holds a standalone (non-pool) payload-bearing [`SlotData`]; this
+/// dispatches the real `tts_ops->getsysattr` against the slot's stored tuple.
 fn seam_slot_getsysattr<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &TupleTableSlot,
-    _attnum: AttrNumber,
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    attnum: AttrNumber,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
-    panic!("execTuples.c slot_getsysattr — standalone (non-pool) slot carries no payload model (tts_ops->getsysattr)")
+    crate::slot_ops_vtables::slot_getsysattr(mcx, &*slot, attnum)
 }
 
 /// Seam `exec_init_null_tuple_slot` — `ExecInitNullTupleSlot`.

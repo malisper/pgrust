@@ -357,7 +357,7 @@ fn tid_range_next_begins_scan_then_fetches() {
     push_eval(&[(5, 1, false)]);
     push_getnext(&[true]);
     let mut st = empty_state(&mut estate);
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
 
@@ -376,7 +376,7 @@ fn tid_range_next_exhausted_clears_slot_and_resets_inscan() {
     push_eval(&[(5, 1, false)]);
     push_getnext(&[false]);
     let mut st = empty_state(&mut estate);
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
 
@@ -393,7 +393,7 @@ fn tid_range_next_returns_false_when_range_empty() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(0, 0, true)]);
     let mut st = empty_state(&mut estate);
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
 
@@ -412,7 +412,7 @@ fn tid_range_recheck_in_range_true() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(1, 1, false), (9, 9, false)]);
     let mut st = empty_state(&mut estate);
-    let mut slot = TupleTableSlot::default();
+    let mut slot = TupleTableSlot::new_in(estate.es_query_cxt);
     slot.tts_tid = ItemPointerData::new(5, 5);
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(slot).unwrap());
     set_bounds(
@@ -433,7 +433,7 @@ fn tid_range_recheck_out_of_range_false() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(1, 1, false), (9, 9, false)]);
     let mut st = empty_state(&mut estate);
-    let mut slot = TupleTableSlot::default();
+    let mut slot = TupleTableSlot::new_in(estate.es_query_cxt);
     slot.tts_tid = ItemPointerData::new(20, 1);
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(slot).unwrap());
     set_bounds(
@@ -457,7 +457,7 @@ fn exec_tid_range_scan_no_qual_no_proj_returns_tuple() {
     push_eval(&[(5, 1, false)]);
     push_getnext(&[true]);
     let mut st = empty_state(&mut estate);
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
     let have = ExecTidRangeScan(&mut st, &mut estate).unwrap();

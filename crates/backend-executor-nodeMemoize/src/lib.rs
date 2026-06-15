@@ -1789,14 +1789,14 @@ fn init_hashkeydesc_and_slots<'mcx>(
         let desc_copy = clone_hashkeydesc(&hashkeydesc, mcx)?;
         let slot =
             execTuples::make_single_tuple_table_slot::call(mcx, desc_copy, TupleSlotKind::MinimalTuple)?;
-        estate.make_slot(slot)?
+        estate.push_slot_data(slot)?
     };
     // mstate->probeslot = MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsVirtual);
     let probeslot = {
         let desc_copy = clone_hashkeydesc(&hashkeydesc, mcx)?;
         let slot =
             execTuples::make_single_tuple_table_slot::call(mcx, desc_copy, TupleSlotKind::Virtual)?;
-        estate.make_slot(slot)?
+        estate.push_slot_data(slot)?
     };
     mstate.tableslot = Some(tableslot);
     mstate.probeslot = Some(probeslot);

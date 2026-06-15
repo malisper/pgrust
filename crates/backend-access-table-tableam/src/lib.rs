@@ -126,9 +126,9 @@ fn table_beginscan_seam<'mcx>(
 /// Adapter for `backend-access-table-tableam-seams::table_scan_getnextslot` —
 /// the forward-direction `table_scan_getnextslot(scan, ForwardScanDirection,
 /// slot)` form (COPY TO's scan loop).
-fn table_scan_getnextslot_fwd(
-    scan: &mut TableScanDescData<'_>,
-    slot: &mut TupleTableSlot,
+fn table_scan_getnextslot_fwd<'mcx>(
+    scan: &mut TableScanDescData<'mcx>,
+    slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     table_scan_getnextslot(scan, types_scan::sdir::ScanDirection::ForwardScanDirection, slot)
 }
@@ -136,10 +136,10 @@ fn table_scan_getnextslot_fwd(
 /// `table_scan_getnextslot(scan, direction, slot)` (access/tableam.h inline) —
 /// fetch the next tuple of the in-progress scan into `slot`. The direction-
 /// carrying form (`nodeSeqscan.c`'s `SeqNext` passes `estate->es_direction`).
-pub fn table_scan_getnextslot(
-    scan: &mut TableScanDescData<'_>,
+pub fn table_scan_getnextslot<'mcx>(
+    scan: &mut TableScanDescData<'mcx>,
     direction: types_scan::sdir::ScanDirection,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     let routine = am(&scan.rs_rd);
     (routine.scan_getnextslot)(scan, direction, slot)
@@ -311,7 +311,7 @@ pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
 pub fn table_slot_create<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'_>,
-) -> PgResult<TupleTableSlot> {
+) -> PgResult<types_nodes::tuptable::SlotData<'mcx>> {
     let tts_cb = table_slot_callbacks(relation);
     let tupdesc = Some(mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?);
     backend_executor_execTuples_seams::make_single_tuple_table_slot::call(mcx, tupdesc, tts_cb)
@@ -448,11 +448,11 @@ pub fn table_index_fetch_end(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>
 
 /// `table_index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
 /// (tableam.h inline).
-pub fn table_index_fetch_tuple(
-    scan: &mut IndexFetchTableData<'_>,
+pub fn table_index_fetch_tuple<'mcx>(
+    scan: &mut IndexFetchTableData<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
     call_again: &mut bool,
     all_dead: Option<&mut bool>,
 ) -> PgResult<bool> {
@@ -482,7 +482,7 @@ pub fn table_index_fetch_tuple(
 /// heap's HOT).
 pub fn table_index_fetch_tuple_check<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'_>,
+    rel: &Relation<'mcx>,
     tid: &mut ItemPointerData,
     snapshot: Snapshot,
     all_dead: Option<&mut bool>,
@@ -495,7 +495,7 @@ pub fn table_index_fetch_tuple_check<'mcx>(
         &mut scan,
         tid,
         &snapshot,
-        &mut slot,
+        slot.base_mut(),
         &mut call_again,
         all_dead,
     )?;
@@ -579,11 +579,11 @@ pub fn table_tuple_tid_valid(
 /// `table_tuple_fetch_row_version(rel, tid, snapshot, slot)` (tableam.h inline)
 /// — fetch the tuple at `tid` into `slot`, after a visibility test against
 /// `snapshot`.
-pub fn table_tuple_fetch_row_version(
-    rel: &Relation<'_>,
+pub fn table_tuple_fetch_row_version<'mcx>(
+    rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     // We don't expect direct calls to table_tuple_fetch_row_version with valid
     // CheckXidAlive for catalog or regular tables. See detailed comments in
@@ -602,9 +602,9 @@ pub fn table_tuple_fetch_row_version(
 // ===========================================================================
 
 /// `table_tuple_insert(rel, slot, cid, options, bistate)` (tableam.h inline).
-pub fn table_tuple_insert(
-    rel: &Relation<'_>,
-    slot: &mut TupleTableSlot,
+pub fn table_tuple_insert<'mcx>(
+    rel: &Relation<'mcx>,
+    slot: &mut TupleTableSlot<'mcx>,
     cid: types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
@@ -630,10 +630,10 @@ pub fn table_tuple_delete(
 /// `table_tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait,
 /// tmfd, lockmode, update_indexes)` (tableam.h inline).
 #[allow(clippy::too_many_arguments)]
-pub fn table_tuple_update(
-    rel: &Relation<'_>,
+pub fn table_tuple_update<'mcx>(
+    rel: &Relation<'mcx>,
     otid: &ItemPointerData,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
     cid: types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
@@ -659,11 +659,11 @@ pub fn table_tuple_update(
 /// `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, wait_policy, flags,
 /// tmfd)` (tableam.h inline).
 #[allow(clippy::too_many_arguments)]
-pub fn table_tuple_lock(
-    rel: &Relation<'_>,
+pub fn table_tuple_lock<'mcx>(
+    rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
     cid: types_core::xact::CommandId,
     mode: LockTupleMode,
     wait_policy: types_tableam::tableam::LockWaitPolicy,
@@ -682,7 +682,10 @@ pub fn table_tuple_lock(
 /// Currently, this routine differs from `table_tuple_insert` only in
 /// supplying a default command ID and not allowing access to the speedup
 /// options.
-pub fn simple_table_tuple_insert(rel: &Relation<'_>, slot: &mut TupleTableSlot) -> PgResult<()> {
+pub fn simple_table_tuple_insert<'mcx>(
+    rel: &Relation<'mcx>,
+    slot: &mut TupleTableSlot<'mcx>,
+) -> PgResult<()> {
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
     table_tuple_insert(rel, slot, cid, 0, None)
 }
@@ -733,10 +736,10 @@ pub fn simple_table_tuple_delete(
 /// target tuple are not expected (for example, because we have a lock on the
 /// relation associated with the tuple). Any failure is reported via
 /// `ereport()`.
-pub fn simple_table_tuple_update(
-    rel: &Relation<'_>,
+pub fn simple_table_tuple_update<'mcx>(
+    rel: &Relation<'mcx>,
     otid: &ItemPointerData,
-    slot: &mut TupleTableSlot,
+    slot: &mut TupleTableSlot<'mcx>,
     snapshot: &Snapshot,
     update_indexes: &mut TU_UpdateIndexes,
 ) -> PgResult<()> {

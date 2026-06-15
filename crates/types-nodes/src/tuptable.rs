@@ -1,23 +1,18 @@
 //! Tuple-table-slot payload model (executor/tuptable.h) — the runtime slot
 //! data carrier that `backend-executor-execTuples` owns and mutates.
 //!
-//! # Why this lives alongside the trimmed [`crate::executor::TupleTableSlot`]
-//!
-//! [`crate::executor::TupleTableSlot`] is the *header* projection that 70+
-//! ports already consume (`TTS_EMPTY`/`TTS_FIXED` tests, the `tts_ops`
-//! identity token, `tts_tid`, `tts_tableOid`). C's real `TupleTableSlot`
-//! additionally carries the per-attribute `tts_values`/`tts_isnull` arrays,
-//! the `tts_nvalid` deform watermark, the `tts_tupleDescriptor`, and the
-//! slot's own `tts_mcxt`. Those payload fields, and the four concrete
-//! `Virtual/Heap/Minimal/BufferHeap` superstructures that downcast off the
-//! base, land here as [`SlotData`] — the live slot type the executor stores
-//! in `EState::es_tupleTable`.
+//! The unified [`TupleTableSlot`] (`types-slot`) carries both the header bits
+//! and the per-attribute payload (`tts_values`/`tts_isnull`/`tts_nvalid`/
+//! `tts_tupleDescriptor`), exactly as C does — there is no header-vs-payload
+//! split. This module owns the four concrete `Virtual/Heap/Minimal/BufferHeap`
+//! superstructures that embed that base, the [`SlotData`] enum that selects
+//! among them (the idiomatic `TupleTableSlot *` that may point at any subtype),
+//! and the sizing/ops metadata. [`SlotBase`] is a thin alias of the unified
+//! base so the superstructures' `base` field keeps its name.
 //!
 //! Mirroring C exactly (tuptable.h); the body-bearing `HeapTuple`/`MinimalTuple`
 //! fields are carried as the [`FormedTuple`]/[`FormedMinimalTuple`] carriers
-//! (header + owned data-area bytes) the form/deform owner already produces, and
-//! the `tts_values` array element is the [`Datum`] by-value/by-reference
-//! enum (so a by-reference `Datum` is faithfully a pointer into owned bytes):
+//! (header + owned data-area bytes) the form/deform owner already produces:
 //!
 //! * `VirtualTupleTableSlot { TupleTableSlot base; char *data; }`
 //! * `HeapTupleTableSlot   { TupleTableSlot base; HeapTuple tuple; uint32 off;
@@ -26,91 +21,28 @@
 //! * `MinimalTupleTableSlot { TupleTableSlot base; HeapTuple tuple;
 //!    MinimalTuple mintuple; HeapTupleData minhdr; uint32 off; }`
 //!
-//! The `tts_values`/`tts_isnull`/`tts_nvalid`/`tts_tupleDescriptor`/`tts_mcxt`
-//! fields that C puts directly in `TupleTableSlot` are carried here in
-//! [`SlotBase`] (paired with the trimmed header) so the existing header type
-//! can stay unchanged for its current consumers. When the slot payload model
-//! is fully assembled the header and [`SlotBase`] re-converge.
-//!
-//! SCAFFOLD: data carrier only. The per-kind dispatch callbacks
-//! (clear/materialize/getsomeattrs/copyslot/store/…) live in
-//! `backend-executor-execTuples`; this crate is `#![no_std]` and seam-free, so
-//! only the owned structs + pure accessors live here.
+//! The per-kind dispatch callbacks (clear/materialize/getsomeattrs/copyslot/
+//! store/…) live in `backend-executor-execTuples`; this crate carries only the
+//! owned structs + pure accessors.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{AttrNumber, Oid, Size};
+use types_core::primitive::{Oid, Size};
 use types_error::PgResult;
 use types_storage::buf::Buffer;
-use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
+use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple};
 use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
-use types_slot::{TupleSlotKind, TupleTableSlot, TTS_FLAG_EMPTY};
+use types_slot::{TupleSlotKind, TupleTableSlot};
+// Re-export the slot flag constants from their owning crate so the executor's
+// slot ops keep importing them from `tuptable`.
+pub use types_slot::{TTS_FLAG_EMPTY, TTS_FLAG_FIXED, TTS_FLAG_SHOULDFREE, TTS_FLAG_SLOW};
 
-/// `TTS_FLAG_SHOULDFREE` (tuptable.h) — true if we should `pfree` the slot's
-/// stored tuple on clear.
-pub const TTS_FLAG_SHOULDFREE: u16 = 1 << 0;
-/// `TTS_FLAG_SLOW` (tuptable.h) — saved state for `slot_deform_heap_tuple`.
-pub const TTS_FLAG_SLOW: u16 = 1 << 2;
-/// `TTS_FLAG_FIXED` (tuptable.h) — fixed tuple descriptor.
-pub const TTS_FLAG_FIXED: u16 = 1 << 4;
-
-/// The payload C carries directly in `TupleTableSlot` but which the trimmed
-/// [`TupleTableSlot`] header omits: the per-attribute value/null arrays, the
-/// deform watermark, the slot's descriptor, and the memory context the slot
-/// lives in (`tts_mcxt`). Paired with the header to form the full base slot.
-///
-/// SCAFFOLD: shape mirrors tuptable.h field-for-field; bodies that fill it land
-/// in `backend-executor-execTuples`.
-#[derive(Debug)]
-pub struct SlotBase<'mcx> {
-    /// `TupleTableSlot` header bits (the projection ports already share):
-    /// `tts_flags`, `tts_ops`, `tts_tid`, `tts_tableOid`.
-    pub header: TupleTableSlot,
-    /// `AttrNumber tts_nvalid` — # of valid values in `tts_values`.
-    pub tts_nvalid: AttrNumber,
-    /// `TupleDesc tts_tupleDescriptor` — slot's tuple descriptor.
-    pub tts_tupleDescriptor: TupleDesc<'mcx>,
-    /// `Datum *tts_values` — current per-attribute values. Each element is a
-    /// [`Datum`] (`ByVal(word)` / `ByRef(bytes)`), faithfully modelling C's
-    /// `Datum *` where a by-reference `Datum` is a pointer into owned bytes:
-    /// `ByRef` carries the verbatim on-disk bytes (the same model the form/deform
-    /// owner produces/consumes), so the array can hold a by-reference column.
-    /// `slot_getattr`/`slot_getsysattr` project a single `Datum` back out
-    /// (`ByVal` directly, `ByRef` via the owner's pointer-bytes convention).
-    pub tts_values: PgVec<'mcx, Datum<'mcx>>,
-    /// `bool *tts_isnull` — current per-attribute isnull flags.
-    pub tts_isnull: PgVec<'mcx, bool>,
-}
-
-impl<'mcx> SlotBase<'mcx> {
-    /// `TTS_EMPTY(slot)`.
-    pub fn is_empty(&self) -> bool {
-        self.header.tts_flags & TTS_FLAG_EMPTY != 0
-    }
-
-    /// `TTS_SHOULDFREE(slot)`.
-    pub fn should_free(&self) -> bool {
-        self.header.tts_flags & TTS_FLAG_SHOULDFREE != 0
-    }
-
-    /// `TTS_FIXED(slot)`.
-    pub fn is_fixed(&self) -> bool {
-        self.header.tts_flags & TTS_FLAG_FIXED != 0
-    }
-
-    /// `slot->tts_flags |= TTS_EMPTY; slot->tts_flags &= ~TTS_SHOULDFREE;
-    /// slot->tts_nvalid = 0;` (the `*_clear` callback tail).
-    pub fn mark_empty(&mut self) {
-        self.header.tts_flags |= TTS_FLAG_EMPTY;
-        self.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
-        self.tts_nvalid = 0;
-    }
-
-    /// `slot->tts_flags &= ~TTS_EMPTY;`
-    pub fn mark_not_empty(&mut self) {
-        self.header.tts_flags &= !TTS_FLAG_EMPTY;
-    }
-}
+/// `SlotBase<'mcx>` is now exactly the unified [`TupleTableSlot`] (tuptable.h):
+/// the header bits and the per-attribute value/null payload (`tts_nvalid`,
+/// `tts_tupleDescriptor`, `tts_values`, `tts_isnull`) live in one type, as in
+/// C. Retained as an alias so the four superstructures' `base` field and the
+/// executor's `slot.base()`/`slot.base_mut()` flows keep their names.
+pub type SlotBase<'mcx> = TupleTableSlot<'mcx>;
 
 /// `VirtualTupleTableSlot` (tuptable.h).
 #[derive(Debug)]

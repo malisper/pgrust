@@ -44,7 +44,6 @@ fn hash_arg_word(v: &Datum<'_>) -> types_datum::Datum {
 }
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
-use types_nodes::executor::TupleTableSlot;
 use types_nodes::{EStateData, SlotId};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 
@@ -135,7 +134,7 @@ pub fn ExecJustVarImpl<'mcx>(
 /// — shared body for the single-Var-assigned-to-resultslot fast paths.
 pub fn ExecJustAssignVarImpl<'mcx>(
     state: &mut ExprState<'mcx>,
-    inslot: &TupleTableSlot,
+    inslot_id: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[1];
@@ -152,6 +151,7 @@ pub fn ExecJustAssignVarImpl<'mcx>(
     };
 
     // CheckOpSlotCompatibility(&state->steps[0], inslot);
+    let inslot = estate.slot(inslot_id);
     CheckOpSlotCompatibility(&steps[0], inslot)?;
 
     // We do not need CheckVarSlotCompatibility here; that was taken care of at
@@ -170,12 +170,11 @@ pub fn ExecJustAssignVarImpl<'mcx>(
     // ported yet. slot_getattr() on the source likewise routes through the
     // execTuples slot_getallattrs seam, which panics first. Faithful as soon as
     // execTuples lands the slot value-array model.
-    let _ = (inslot, estate);
+    let _ = inslot;
     panic!(
         "ExecJustAssignVarImpl: writing into state->resultslot->tts_values/\
-         tts_isnull[resultnum] needs the execTuples slot payload model (the \
-         trimmed TupleTableSlot has no value arrays); blocked until execTuples \
-         lands"
+         tts_isnull[resultnum] needs the result-slot value-array write path \
+         (execGrouping/result-slot model), not yet wired"
     )
 }
 
@@ -214,7 +213,7 @@ pub fn ExecJustVarVirtImpl<'mcx>(
 /// `ExecJustAssignVarVirtImpl` — shared body for the virtual-slot assign paths.
 pub fn ExecJustAssignVarVirtImpl<'mcx>(
     state: &mut ExprState<'mcx>,
-    inslot: &TupleTableSlot,
+    inslot_id: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[0];
@@ -239,11 +238,11 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
     // writes state->resultslot->tts_values/tts_isnull[resultnum]; both arrays
     // are execTuples-owned and absent from the trimmed shared TupleTableSlot.
     // Faithful as soon as execTuples lands the slot value-array model.
-    let _ = (inslot, estate);
+    let _ = (inslot_id, estate);
     panic!(
         "ExecJustAssignVarVirtImpl: the inslot->outslot value-array copy needs \
-         the execTuples slot payload model (the trimmed TupleTableSlot has no \
-         value arrays); blocked until execTuples lands"
+         the result-slot value-array write path (execGrouping/result-slot \
+         model), not yet wired"
     )
 }
 
@@ -401,8 +400,7 @@ pub fn ExecJustAssignInnerVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarImpl(state, &slot, estate)
+    ExecJustAssignVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignOuterVar` — assign one outer Var to the result slot.
@@ -413,8 +411,7 @@ pub fn ExecJustAssignOuterVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarImpl(state, &slot, estate)
+    ExecJustAssignVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignScanVar` — assign one scan Var to the result slot.
@@ -425,8 +422,7 @@ pub fn ExecJustAssignScanVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarImpl(state, &slot, estate)
+    ExecJustAssignVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustApplyFuncToCase` — single strict function over a CaseTest input.
@@ -587,8 +583,7 @@ pub fn ExecJustAssignInnerVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarVirtImpl(state, &slot, estate)
+    ExecJustAssignVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignOuterVarVirt` — assign one virtual outer Var.
@@ -599,8 +594,7 @@ pub fn ExecJustAssignOuterVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarVirtImpl(state, &slot, estate)
+    ExecJustAssignVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignScanVarVirt` — assign one virtual scan Var.
@@ -611,8 +605,7 @@ pub fn ExecJustAssignScanVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustAssignVarVirtImpl(state, &slot, estate)
+    ExecJustAssignVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustHashInnerVarWithIV` — hash one inner Var, seeded with an init value.

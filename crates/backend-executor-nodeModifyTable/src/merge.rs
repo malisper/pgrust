@@ -397,7 +397,7 @@ pub fn ExecInitMerge<'mcx>(
                                 .alias();
                             let root_slot =
                                 backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-                            let root_slot_id = estate.make_slot(root_slot)?;
+                            let root_slot_id = estate.push_slot_data(root_slot)?;
                             mtstate.mt_root_tuple_slot = Some(root_slot_id);
 
                             // mtstate->mt_partition_tuple_routing =
@@ -439,7 +439,7 @@ pub fn ExecInitMerge<'mcx>(
                                 .alias();
                             let new_slot =
                                 backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-                            let new_slot_id = estate.make_slot(new_slot)?;
+                            let new_slot_id = estate.push_slot_data(new_slot)?;
                             estate.result_rel_mut(root_rel_info).ri_newTupleSlot =
                                 Some(new_slot_id);
                         }
@@ -606,9 +606,9 @@ pub fn ExecInitMergeTupleSlots<'mcx>(
         .expect("MERGE target ResultRelInfo has an open relation")
         .alias();
     let old_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-    let old_id = estate.make_slot(old_slot)?;
+    let old_id = estate.push_slot_data(old_slot)?;
     let new_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-    let new_id = estate.make_slot(new_slot)?;
+    let new_id = estate.push_slot_data(new_slot)?;
     let rri = estate.result_rel_mut(result_rel_info);
     rri.ri_oldTupleSlot = Some(old_id);
     rri.ri_newTupleSlot = Some(new_id);

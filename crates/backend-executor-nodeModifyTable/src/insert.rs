@@ -538,7 +538,7 @@ pub fn ExecInitInsertProjection<'mcx>(
         .expect("ExecInitInsertProjection: result relation must be open")
         .alias();
     let new_tuple_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-    let new_id = estate.make_slot(new_tuple_slot)?;
+    let new_id = estate.push_slot_data(new_tuple_slot)?;
     estate.result_rel_mut(result_rel_info).ri_newTupleSlot = Some(new_id);
 
     // Build ProjectionInfo if needed (it probably isn't).

@@ -1041,7 +1041,7 @@ pub struct ExprState<'mcx> {
     pub resvalue: Datum<'mcx>,
     /// `TupleTableSlot *resultslot` — holds the result if projecting a tuple,
     /// else NULL.
-    pub resultslot: Option<PgBox<'mcx, TupleTableSlot>>,
+    pub resultslot: Option<PgBox<'mcx, TupleTableSlot<'mcx>>>,
     /// `struct ExprEvalStep *steps` — instructions computing the return value.
     pub steps: Option<PgVec<'mcx, ExprEvalStep<'mcx>>>,
     /// Per-step result-cell arena (the owned-model replacement for the C
@@ -1208,7 +1208,7 @@ pub struct SetExprState<'mcx> {
     pub funcResultStore: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
     /// `TupleTableSlot *funcResultSlot` — the row currently being returned
     /// (`None` = the C `NULL`).
-    pub funcResultSlot: Option<PgBox<'mcx, TupleTableSlot>>,
+    pub funcResultSlot: Option<PgBox<'mcx, TupleTableSlot<'mcx>>>,
     /// `TupleDesc funcResultDesc` — tuple descriptor for the function's output
     /// (`None` = the C `NULL`).
     pub funcResultDesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,

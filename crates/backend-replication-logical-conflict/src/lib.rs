@@ -96,7 +96,7 @@ pub fn init_seams() {}
 /// `track_commit_timestamp` is the commit_ts.c GUC global, passed explicitly.
 pub fn GetTupleTransactionInfo<'mcx>(
     mcx: Mcx<'mcx>,
-    localslot: &types_nodes::TupleTableSlot,
+    localslot: &mut types_nodes::tuptable::SlotData<'mcx>,
     track_commit_timestamp: bool,
     xmin: &mut TransactionId,
     localorigin: &mut RepOriginId,
@@ -604,7 +604,7 @@ fn build_index_value_desc<'b, 'mcx>(
         // in the executor slot pool (query context).
         let query_cxt = estate.es_query_cxt;
         let new_slot = backend_access_table_tableam::table_slot_create(query_cxt, localrel)?;
-        tableslot = estate.make_slot(new_slot)?;
+        tableslot = estate.push_slot_data(new_slot)?;
 
         // tableslot = ExecCopySlot(tableslot, slot);
         execTuples_seams::exec_copy_slot::call(estate, tableslot, slot)?;

@@ -167,9 +167,11 @@ fn supply_rows<'mcx>(
         return Ok(None);
     }
     SUPPLY.with(|c| c.set(remaining - 1));
-    let id = estate.make_slot(TupleTableSlot {
-        tts_flags: 0,
-        ..Default::default()
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot({
+        let mut slot = TupleTableSlot::new_in(qcxt);
+        slot.tts_flags = 0;
+        slot
     })?;
     Ok(Some(id))
 }
@@ -218,7 +220,8 @@ fn mock_init_result_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
-    let id = estate.make_slot(TupleTableSlot::default())?;
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot(TupleTableSlot::new_in(qcxt))?;
     planstate.ps_ResultTupleSlot = Some(id);
     Ok(())
 }
@@ -246,7 +249,8 @@ fn mock_create_scan_slot<'mcx>(
     scanstate: &mut ScanStateData<'mcx>,
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
-    let id = estate.make_slot(TupleTableSlot::default())?;
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot(TupleTableSlot::new_in(qcxt))?;
     scanstate.ss_ScanTupleSlot = Some(id);
     Ok(())
 }
@@ -504,7 +508,7 @@ fn estate_slot_pool_is_context_allocated() {
     {
         let mut estate = EStateData::new_in(ctx.mcx());
         assert_eq!(ctx.used(), 0, "an empty executor state allocates nothing");
-        let id = estate.make_slot(TupleTableSlot::default()).unwrap();
+        let id = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
         assert!(estate.slot(id).is_empty());
         assert_eq!(
             ctx.used(),

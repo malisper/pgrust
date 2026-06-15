@@ -443,27 +443,27 @@ pub fn CheckExprStillValid<'mcx>(
             ExprEvalOp::EEOP_INNER_VAR => {
                 let (attnum, vartype) = var_attnum_type(op);
                 let slot = slot_for(estate, innerslot, "ecxt_innertuple");
-                CheckVarSlotCompatibility(&slot, attnum + 1, vartype)?;
+                CheckVarSlotCompatibility(slot, attnum + 1, vartype)?;
             }
             ExprEvalOp::EEOP_OUTER_VAR => {
                 let (attnum, vartype) = var_attnum_type(op);
                 let slot = slot_for(estate, outerslot, "ecxt_outertuple");
-                CheckVarSlotCompatibility(&slot, attnum + 1, vartype)?;
+                CheckVarSlotCompatibility(slot, attnum + 1, vartype)?;
             }
             ExprEvalOp::EEOP_SCAN_VAR => {
                 let (attnum, vartype) = var_attnum_type(op);
                 let slot = slot_for(estate, scanslot, "ecxt_scantuple");
-                CheckVarSlotCompatibility(&slot, attnum + 1, vartype)?;
+                CheckVarSlotCompatibility(slot, attnum + 1, vartype)?;
             }
             ExprEvalOp::EEOP_OLD_VAR => {
                 let (attnum, vartype) = var_attnum_type(op);
                 let slot = slot_for(estate, oldslot, "ecxt_oldtuple");
-                CheckVarSlotCompatibility(&slot, attnum + 1, vartype)?;
+                CheckVarSlotCompatibility(slot, attnum + 1, vartype)?;
             }
             ExprEvalOp::EEOP_NEW_VAR => {
                 let (attnum, vartype) = var_attnum_type(op);
                 let slot = slot_for(estate, newslot, "ecxt_newtuple");
-                CheckVarSlotCompatibility(&slot, attnum + 1, vartype)?;
+                CheckVarSlotCompatibility(slot, attnum + 1, vartype)?;
             }
             // default: break;
             _ => {}
@@ -488,13 +488,13 @@ fn var_attnum_type(op: &ExprEvalStep<'_>) -> (i32, Oid) {
 /// per-tuple slot ids (`ecxt_innertuple` etc.). The compiler only emits a
 /// `EEOP_*_VAR` step against a slot that is present, so a `None` link is a caller
 /// bug (mirrors C dereferencing the non-NULL `econtext->ecxt_*tuple`).
-fn slot_for<'mcx>(
-    estate: &EStateData<'mcx>,
+fn slot_for<'a, 'mcx>(
+    estate: &'a EStateData<'mcx>,
     slot: Option<types_nodes::execnodes::SlotId>,
     which: &str,
-) -> TupleTableSlot {
+) -> &'a TupleTableSlot<'mcx> {
     let id = slot.unwrap_or_else(|| panic!("CheckExprStillValid: econtext->{which} is NULL"));
-    estate.slot(id).clone()
+    estate.slot(id)
 }
 
 /// `CheckVarSlotCompatibility(TupleTableSlot *slot, int attnum, Oid vartype)` —

@@ -485,7 +485,7 @@ pub struct PartitionDispatchData<'mcx> {
     pub partdesc: Option<PgBox<'mcx, PartitionDescData<'mcx>>>,
     /// `TupleTableSlot *tupslot` — standalone slot for this table's tupdesc, or
     /// `None` if no tuple conversion from the parent is required.
-    pub tupslot: Option<TupleTableSlot>,
+    pub tupslot: Option<crate::tuptable::SlotData<'mcx>>,
     /// `AttrMap *tupmap` — parent→this-table rowtype map, or `None` if no
     /// conversion is required.
     pub tupmap: Option<PgBox<'mcx, AttrMap<'mcx>>>,
