@@ -27,9 +27,13 @@ backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
+backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
+backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
 backend-access-nbt-xlog = { path = "../backend-access-nbt-xlog" }
+backend-access-nbtree-core = { path = "../backend-access-nbtree-core" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
+backend-access-nbtree-nbtsort = { path = "../backend-access-nbtree-nbtsort" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
@@ -74,6 +78,7 @@ backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
+backend-common-relpath = { path = "../backend-common-relpath" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-comment = { path = "../backend-commands-comment" }
@@ -149,7 +154,6 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-access-hash-core = { path = "../backend-access-hash-core" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
-backend-common-relpath = { path = "../backend-common-relpath" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
 backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }
