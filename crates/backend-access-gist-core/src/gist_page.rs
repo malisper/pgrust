@@ -299,6 +299,12 @@ pub fn GistClearPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
     set_gist_page_flags(page, f & !types_gist::F_HAS_GARBAGE)
 }
 
+/// `GistMarkPageHasGarbage(page)` (gist.h:182): `flags |= F_HAS_GARBAGE`.
+pub fn GistMarkPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f | types_gist::F_HAS_GARBAGE)
+}
+
 // ===========================================================================
 // PageXLogRecPtr split-word codec (bufpage.h PageXLogRecPtrGet/Set).
 // ===========================================================================
