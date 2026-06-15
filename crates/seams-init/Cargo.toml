@@ -18,6 +18,8 @@ backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
+backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }

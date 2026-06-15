@@ -794,6 +794,7 @@ dependencies = [
  "types-gin",
  "types-rel",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -14779,6 +14780,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-gin-ginget",
+ "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
  "backend-access-hash-core",
  "backend-access-hash-entry",
