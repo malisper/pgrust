@@ -514,6 +514,21 @@ pub fn init_seams() {
         let _ = smgrclose(rlocator);
     });
     smgr_seam::smgrinit::set(smgrinit);
+    // localbuf.c temp-relation I/O consumers (smgr.c static-inline helpers).
+    smgr_seam::smgr_read::set(|rlocator, backend, forknum, blocknum, dst| {
+        smgrread(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, dst)
+    });
+    smgr_seam::smgr_write::set(|rlocator, backend, forknum, blocknum, src| {
+        // smgrwrite(reln, forknum, blocknum, buffer, /*skipFsync*/ false).
+        smgrwrite(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, src, false)
+    });
+    smgr_seam::smgr_zeroextend::set(|rlocator, backend, forknum, blocknum, nblocks, skip_fsync| {
+        smgrzeroextend(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, nblocks as i32, skip_fsync)
+    });
+    smgr_seam::smgr_prefetch::set(|rlocator, backend, forknum, blocknum| {
+        // smgrprefetch(reln, forknum, blocknum, 1).
+        smgrprefetch(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, 1)
+    });
 }
 
 #[cfg(test)]
