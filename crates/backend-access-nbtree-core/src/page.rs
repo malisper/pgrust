@@ -1320,7 +1320,7 @@ pub fn bt_delitems_delete_check<'mcx>(
          */
         let snapshot_conflict_horizon: TransactionId =
             table_index_delete_tuples(heap_rel, &mut delstate)?;
-        let is_catalog_rel = relation_is_accessible_in_logical_decoding(heap_rel);
+        let is_catalog_rel = relation_is_accessible_in_logical_decoding(heap_rel)?;
 
         /* Should not WAL-log snapshotConflictHorizon unless it's required. */
         let snapshot_conflict_horizon =
@@ -1495,15 +1495,14 @@ fn table_index_delete_tuples<'mcx>(
     panic!("_bt_delitems_delete_check: table_index_delete_tuples (tableam index deletion dispatch) not yet ported")
 }
 
-/// `RelationIsAccessibleInLogicalDecoding(rel)`.
-fn relation_is_accessible_in_logical_decoding<'mcx>(_rel: &Relation<'mcx>) -> bool {
-    /*
-     * No seam exposes RelationIsAccessibleInLogicalDecoding to this crate (it
-     * depends on wal_level + rd_options + IsCatalogRelation).  Reached only on
-     * the deletion WAL leg; the surrounding physical-delete + WAL logic is
-     * fully ported.
-     */
-    panic!("_bt_delitems_delete_check: RelationIsAccessibleInLogicalDecoding not yet ported")
+/// `RelationIsAccessibleInLogicalDecoding(rel)` (utils/rel.h):
+/// `XLogLogicalInfoActive() && RelationNeedsWAL(rel) && (IsCatalogRelation(rel)
+/// || RelationIsUsedAsCatalogTable(rel))`. Resolved by the relcache owner,
+/// which holds wal_level + rd_options + the catalog-relation predicate.
+fn relation_is_accessible_in_logical_decoding<'mcx>(
+    rel: &Relation<'mcx>,
+) -> PgResult<bool> {
+    relcache::relation_is_accessible_in_logical_decoding::call(rel)
 }
 
 // ---------------------------------------------------------------------------

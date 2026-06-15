@@ -26,6 +26,7 @@ pub fn init_seams() {
     sx::relation_rd_tableam::set(relation_rd_tableam);
     sx::relation_rd_tableam_by_oid::set(relation_rd_tableam_by_oid);
     sx::relation_needs_wal::set(relation_needs_wal);
+    sx::relation_is_accessible_in_logical_decoding::set(relation_is_accessible_in_logical_decoding);
     sx::relation_is_local::set(relation_is_local);
     sx::relation_rd_indam::set(relation_rd_indam);
     sx::relation_increment_reference_count::set(relation_increment_reference_count);
@@ -158,6 +159,41 @@ fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {
                     && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId))
     })
     .unwrap_or(false)
+}
+
+fn relation_is_accessible_in_logical_decoding(
+    rel: &types_rel::Relation<'_>,
+) -> PgResult<bool> {
+    // RelationIsAccessibleInLogicalDecoding(relation) (utils/rel.h):
+    //   XLogLogicalInfoActive() && RelationNeedsWAL(relation) &&
+    //   (IsCatalogRelation(relation) || RelationIsUsedAsCatalogTable(relation))
+    // expanded exactly as the C macros. XLogLogicalInfoActive() is
+    // `wal_level >= WAL_LEVEL_LOGICAL`; RelationNeedsWAL is the permanent &&
+    // (XLogIsNeeded() || not-newly-created) test; RelationIsUsedAsCatalogTable
+    // is `rd_options && (relkind r|m) && user_catalog_table`. rd_createSubid /
+    // rd_firstRelfilelocatorSubid / rd_options are owned-store fields, so
+    // resolve the live entry (Err propagates a cache miss).
+    use types_core::xact::InvalidSubTransactionId;
+    use types_wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
+    const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
+    const RELKIND_RELATION: i8 = b'r' as i8;
+    const RELKIND_MATVIEW: i8 = b'm' as i8;
+    let wal = backend_access_transam_xlog_seams::wal_level::call();
+    let xlog_logical_info_active = wal >= WAL_LEVEL_LOGICAL;
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| {
+        let relation_needs_wal = rd.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+            && (wal >= WAL_LEVEL_REPLICA
+                || (rd.rd_createSubid == InvalidSubTransactionId
+                    && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId));
+        let used_as_catalog_table = rd.rd_options.as_ref().is_some_and(|o| {
+            (rd.rd_rel.relkind == RELKIND_RELATION || rd.rd_rel.relkind == RELKIND_MATVIEW)
+                && o.user_catalog_table
+        });
+        xlog_logical_info_active
+            && relation_needs_wal
+            && (backend_catalog_catalog_seams::is_catalog_relation_oid::call(rd.rd_id)
+                || used_as_catalog_table)
+    })
 }
 
 fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool {
