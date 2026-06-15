@@ -14,6 +14,7 @@ types-storage = { path = "../types-storage" }
 types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }
 types-tidbitmap = { path = "../types-tidbitmap" }
+types-tableam = { path = "../types-tableam" }
 types-error = { path = "../types-error" }
 types-xlog-records = { path = "../types-xlog-records" }
 mcx = { path = "../mcx" }

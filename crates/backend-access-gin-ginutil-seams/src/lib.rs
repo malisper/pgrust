@@ -137,6 +137,47 @@ seam_core::seam!(
     ) -> PgResult<i32>
 );
 
+/// The de-pointered outputs of the GIN `extractQueryFn`
+/// (`FunctionCall7Coll(&ginstate->extractQueryFn[attno-1], ...)`, ginscan.c
+/// `ginNewScanKey`). The C function returns `Datum *queryValues` and fills the
+/// by-pointer out-params `&nentries`, `&partial_matches`, `&extra_data`,
+/// `&nullFlags`, `&searchMode`; here they are returned as owned vectors. An
+/// empty `query_values` (`None`/`nentries <= 0` in C) is the unsatisfiable /
+/// placeholder case `ginNewScanKey` interprets. The `null_flags` /
+/// `partial_matches` vectors are empty when the opclass returned a NULL array
+/// (the C `NULL`, which `ginNewScanKey` then treats as "all non-null" / "no
+/// partial match"). `extra_data` carries one entry per query value, each `None`
+/// where the opclass slot was NULL.
+pub struct GinExtractQueryResult<'mcx> {
+    /// `Datum *queryValues` — the extracted query key datums.
+    pub query_values: mcx::PgVec<'mcx, Datum<'mcx>>,
+    /// `bool *nullFlags` — per-key null flags (empty == C `NULL`).
+    pub null_flags: mcx::PgVec<'mcx, bool>,
+    /// `bool *partial_matches` — per-key partial-match flags (empty == C `NULL`).
+    pub partial_matches: mcx::PgVec<'mcx, bool>,
+    /// `Pointer *extra_data` — per-key opclass-private data (`None` == C `NULL`).
+    pub extra_data: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, u8>>>,
+    /// `int32 searchMode` — the GIN search mode the opclass selected.
+    pub search_mode: i32,
+}
+
+seam_core::seam!(
+    /// `FunctionCall7Coll(&ginstate->extractQueryFn[attno-1], collation,
+    /// sk_argument, &nentries, sk_strategy, &partial_matches, &extra_data,
+    /// &nullFlags, &searchMode)` (ginscan.c `ginNewScanKey`): invoke the opclass
+    /// `extractQueryFn` for one scan-key argument. The fmgr GIN extract-query
+    /// dispatch (with its by-pointer out-params) is genuinely external — the same
+    /// owner as `gin_extract_value` / the consistent-call seams. `Err` carries
+    /// its `ereport(ERROR)`.
+    pub fn gin_extract_query<'mcx>(
+        mcx: Mcx<'mcx>,
+        flinfo: &FmgrInfo,
+        collation: Oid,
+        query: Datum<'mcx>,
+        strategy: u16,
+    ) -> PgResult<GinExtractQueryResult<'mcx>>
+);
+
 // ===========================================================================
 // Buffer-cache / WAL substrate (GinNewBuffer / ginGetStats / ginUpdateStats).
 // ===========================================================================

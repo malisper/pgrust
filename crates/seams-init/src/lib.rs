@@ -16,6 +16,7 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginscan::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
     backend_access_heap_heapam_visibility::init_seams();
@@ -710,6 +711,19 @@ mod recurrence_guard {
         // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
         // when allpaths.c lands.
         ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
+        // DESIGN_DEBT (TD-GIN-EXTRACT-QUERY): `gin_extract_query` is the GIN
+        // `extractQueryFn` fmgr dispatch (`FunctionCall7Coll(...)` with by-pointer
+        // out-params) that `ginscan.c`'s `ginNewScanKey` invokes. Its real owner
+        // is the fmgr GIN-call dispatcher (still unported) — the SAME owner as the
+        // already-uninstalled `gin_extract_value` / `gin_compare_entries` /
+        // `gin_consistent_call_{bool,tri}` substrate seams. It is declared in
+        // `backend-access-gin-ginutil-seams` (the GIN substrate seam crate, the
+        // first cyclic GIN caller) so the guard attributes it to the COMPLETE
+        // `ginutil` owner; but ginutil does not call it (ginscan does), so the
+        // OUTWARD-seam exclusion that covers the sibling gin substrate seams does
+        // not fire. It is genuinely uninstalled / loud-panic (mirror-pg-and-panic)
+        // until the fmgr GIN dispatcher lands. DELETE this entry when it does.
+        ("backend_access_gin_ginutil", "gin_extract_query"),
         // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
         // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
         // ported in the otherwise-complete `backend-optimizer-util-pathnode`

@@ -814,3 +814,15 @@ pub struct GinScanOpaqueData<'mcx> {
     /// `bool isVoidRes` — true if the query is unsatisfiable.
     pub isVoidRes: bool,
 }
+
+/// `GinScanOpaqueData` is the concrete type the GIN AM stores in C's `void
+/// *opaque` (`IndexScanDescData.opaque`); it rides the A0 [`AmOpaque`] carrier
+/// via the [`tags::GIN_SCAN`] tag. The impl lives here, on the carrier-keystone
+/// crate that owns the type, because the orphan rule forbids the scan owner
+/// (`ginscan`) from implementing a foreign trait for this foreign type.
+///
+/// [`AmOpaque`]: types_tableam::amopaque::AmOpaque
+/// [`tags::GIN_SCAN`]: types_tableam::amopaque::tags::GIN_SCAN
+impl<'mcx> types_tableam::amopaque::AmOpaqueType<'mcx> for GinScanOpaqueData<'mcx> {
+    const TAG: types_tableam::amopaque::AmOpaqueTag = types_tableam::amopaque::tags::GIN_SCAN;
+}
