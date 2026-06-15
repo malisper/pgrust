@@ -882,6 +882,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gist-dispatch-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gist-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gist-dispatch-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-hash-core"
 version = "0.0.0"
 dependencies = [
@@ -13054,6 +13082,7 @@ dependencies = [
 name = "backend-utils-cache-syscache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
@@ -13071,6 +13100,7 @@ dependencies = [
  "types-fmgr",
  "types-hash",
  "types-nodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -14783,6 +14813,7 @@ dependencies = [
  "backend-access-gin-ginget",
  "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
+ "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hash-xlog",
