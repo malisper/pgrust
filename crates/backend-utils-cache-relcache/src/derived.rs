@@ -31,14 +31,7 @@ use crate::core_entry_store::entry::{FormPgIndex, RelationData};
 use crate::core_entry_store::{with_rel, with_rel_mut};
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute-bitmap to fetch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IndexAttrBitmapKind {
-    Keys,
-    PrimaryKey,
-    Identity,
-    HotBlocking,
-    Summarized,
-}
+pub use types_relcache_entry::IndexAttrBitmapKind;
 
 /* ==========================================================================
  * RelationGetFKeyList -- foreign-key cache-info list (rd_fkeylist).

@@ -51,18 +51,8 @@ pub struct RangeIOData {
 }
 
 /// `IOFuncSelector` (fmgr.h): which element I/O direction `get_range_io_data`
-/// resolves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IOFuncSelector {
-    /// `IOFunc_input`.
-    Input,
-    /// `IOFunc_output`.
-    Output,
-    /// `IOFunc_receive`.
-    Receive,
-    /// `IOFunc_send`.
-    Send,
-}
+/// resolves. Canonical definition in `types-core::fmgr`.
+pub use types_core::fmgr::IOFuncSelector;
 
 /// `TYPECACHE_RANGE_INFO` (typcache.h): the flag selecting the range-info fields
 /// (`rngelemtype` / `rng_collation` / `rng_cmp_proc_finfo` /

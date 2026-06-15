@@ -67,20 +67,7 @@ fn has_multiple_ones(w: bitmapword) -> bool {
     w & w.wrapping_neg() != w
 }
 
-/// `BMS_Comparison` (nodes/bitmapset.h) — result of [`bms_subset_compare`].
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum BMS_Comparison {
-    /// sets are equal
-    BMS_EQUAL = 0,
-    /// first set is a subset of the second
-    BMS_SUBSET1 = 1,
-    /// second set is a subset of the first
-    BMS_SUBSET2 = 2,
-    /// neither set is a subset of the other
-    BMS_DIFFERENT = 3,
-}
+pub use types_nodes::bitmapset::BMS_Comparison;
 
 /// `BMS_Membership` (nodes/bitmapset.h) — result of [`bms_membership`].
 #[allow(non_camel_case_types)]
