@@ -154,6 +154,46 @@ pub const T_CreatedbStmt: NodeTag = NodeTag(232);
 pub const T_CreateTableAsStmt: NodeTag = NodeTag(242);
 pub const T_CreateConversionStmt: NodeTag = NodeTag(249);
 pub const T_CreateCastStmt: NodeTag = NodeTag(250);
+// raw-grammar DDL "ALTER/DROP" family tags (nodes/nodetags.h, PostgreSQL 18.3).
+pub const T_PartitionCmd: NodeTag = NodeTag(100);
+pub const T_AlterTableStmt: NodeTag = NodeTag(146);
+pub const T_AlterTableCmd: NodeTag = NodeTag(147);
+pub const T_ATAlterConstraint: NodeTag = NodeTag(148);
+pub const T_ReplicaIdentityStmt: NodeTag = NodeTag(149);
+pub const T_AlterCollationStmt: NodeTag = NodeTag(150);
+pub const T_AlterDomainStmt: NodeTag = NodeTag(151);
+pub const T_AlterDefaultPrivilegesStmt: NodeTag = NodeTag(156);
+pub const T_AlterTableSpaceOptionsStmt: NodeTag = NodeTag(164);
+pub const T_AlterTableMoveAllStmt: NodeTag = NodeTag(165);
+pub const T_AlterExtensionStmt: NodeTag = NodeTag(167);
+pub const T_AlterExtensionContentsStmt: NodeTag = NodeTag(168);
+pub const T_AlterFdwStmt: NodeTag = NodeTag(170);
+pub const T_AlterForeignServerStmt: NodeTag = NodeTag(172);
+pub const T_AlterUserMappingStmt: NodeTag = NodeTag(175);
+pub const T_AlterPolicyStmt: NodeTag = NodeTag(179);
+pub const T_AlterRoleStmt: NodeTag = NodeTag(186);
+pub const T_AlterRoleSetStmt: NodeTag = NodeTag(187);
+pub const T_AlterSeqStmt: NodeTag = NodeTag(190);
+pub const T_AlterOpFamilyStmt: NodeTag = NodeTag(196);
+pub const T_DropStmt: NodeTag = NodeTag(197);
+pub const T_AlterStatsStmt: NodeTag = NodeTag(207);
+pub const T_AlterFunctionStmt: NodeTag = NodeTag(210);
+pub const T_RenameStmt: NodeTag = NodeTag(215);
+pub const T_AlterObjectDependsStmt: NodeTag = NodeTag(216);
+pub const T_AlterObjectSchemaStmt: NodeTag = NodeTag(217);
+pub const T_AlterOwnerStmt: NodeTag = NodeTag(218);
+pub const T_AlterOperatorStmt: NodeTag = NodeTag(219);
+pub const T_AlterTypeStmt: NodeTag = NodeTag(220);
+pub const T_AlterEnumStmt: NodeTag = NodeTag(229);
+pub const T_AlterDatabaseStmt: NodeTag = NodeTag(233);
+pub const T_AlterDatabaseRefreshCollStmt: NodeTag = NodeTag(234);
+pub const T_AlterDatabaseSetStmt: NodeTag = NodeTag(235);
+pub const T_DropOwnedStmt: NodeTag = NodeTag(255);
+pub const T_ReassignOwnedStmt: NodeTag = NodeTag(256);
+pub const T_AlterTSDictionaryStmt: NodeTag = NodeTag(257);
+pub const T_AlterTSConfigurationStmt: NodeTag = NodeTag(258);
+pub const T_AlterPublicationStmt: NodeTag = NodeTag(262);
+pub const T_AlterSubscriptionStmt: NodeTag = NodeTag(264);
 pub const T_RangeTblEntry: NodeTag = NodeTag(101);
 pub const T_RTEPermissionInfo: NodeTag = NodeTag(102);
 pub const T_RangeTblFunction: NodeTag = NodeTag(103);
@@ -521,6 +561,47 @@ pub enum Node<'mcx> {
     CreateTableSpaceStmt(crate::ddlnodes::CreateTableSpaceStmt<'mcx>),
     CreateConversionStmt(crate::ddlnodes::CreateConversionStmt<'mcx>),
     CreateAmStmt(crate::ddlnodes::CreateAmStmt<'mcx>),
+
+    // --- raw-grammar DDL "ALTER/DROP" family nodes (crate::ddlnodes) ---
+    PartitionCmd(crate::ddlnodes::PartitionCmd<'mcx>),
+    ReplicaIdentityStmt(crate::ddlnodes::ReplicaIdentityStmt<'mcx>),
+    ATAlterConstraint(crate::ddlnodes::ATAlterConstraint<'mcx>),
+    AlterTableStmt(crate::ddlnodes::AlterTableStmt<'mcx>),
+    AlterTableCmd(crate::ddlnodes::AlterTableCmd<'mcx>),
+    AlterCollationStmt(crate::ddlnodes::AlterCollationStmt<'mcx>),
+    AlterDomainStmt(crate::ddlnodes::AlterDomainStmt<'mcx>),
+    AlterEnumStmt(crate::ddlnodes::AlterEnumStmt<'mcx>),
+    AlterStatsStmt(crate::ddlnodes::AlterStatsStmt<'mcx>),
+    AlterSeqStmt(crate::ddlnodes::AlterSeqStmt<'mcx>),
+    AlterOpFamilyStmt(crate::ddlnodes::AlterOpFamilyStmt<'mcx>),
+    AlterFunctionStmt(crate::ddlnodes::AlterFunctionStmt<'mcx>),
+    DropStmt(crate::ddlnodes::DropStmt<'mcx>),
+    RenameStmt(crate::ddlnodes::RenameStmt<'mcx>),
+    AlterObjectDependsStmt(crate::ddlnodes::AlterObjectDependsStmt<'mcx>),
+    AlterObjectSchemaStmt(crate::ddlnodes::AlterObjectSchemaStmt<'mcx>),
+    AlterOwnerStmt(crate::ddlnodes::AlterOwnerStmt<'mcx>),
+    AlterOperatorStmt(crate::ddlnodes::AlterOperatorStmt<'mcx>),
+    AlterTypeStmt(crate::ddlnodes::AlterTypeStmt<'mcx>),
+    AlterDefaultPrivilegesStmt(crate::ddlnodes::AlterDefaultPrivilegesStmt<'mcx>),
+    AlterRoleStmt(crate::ddlnodes::AlterRoleStmt<'mcx>),
+    AlterRoleSetStmt(crate::ddlnodes::AlterRoleSetStmt<'mcx>),
+    DropOwnedStmt(crate::ddlnodes::DropOwnedStmt<'mcx>),
+    ReassignOwnedStmt(crate::ddlnodes::ReassignOwnedStmt<'mcx>),
+    AlterTableSpaceOptionsStmt(crate::ddlnodes::AlterTableSpaceOptionsStmt<'mcx>),
+    AlterTableMoveAllStmt(crate::ddlnodes::AlterTableMoveAllStmt<'mcx>),
+    AlterExtensionStmt(crate::ddlnodes::AlterExtensionStmt<'mcx>),
+    AlterExtensionContentsStmt(crate::ddlnodes::AlterExtensionContentsStmt<'mcx>),
+    AlterFdwStmt(crate::ddlnodes::AlterFdwStmt<'mcx>),
+    AlterForeignServerStmt(crate::ddlnodes::AlterForeignServerStmt<'mcx>),
+    AlterUserMappingStmt(crate::ddlnodes::AlterUserMappingStmt<'mcx>),
+    AlterPolicyStmt(crate::ddlnodes::AlterPolicyStmt<'mcx>),
+    AlterDatabaseStmt(crate::ddlnodes::AlterDatabaseStmt<'mcx>),
+    AlterDatabaseRefreshCollStmt(crate::ddlnodes::AlterDatabaseRefreshCollStmt<'mcx>),
+    AlterDatabaseSetStmt(crate::ddlnodes::AlterDatabaseSetStmt<'mcx>),
+    AlterTSDictionaryStmt(crate::ddlnodes::AlterTSDictionaryStmt<'mcx>),
+    AlterTSConfigurationStmt(crate::ddlnodes::AlterTSConfigurationStmt<'mcx>),
+    AlterPublicationStmt(crate::ddlnodes::AlterPublicationStmt<'mcx>),
+    AlterSubscriptionStmt(crate::ddlnodes::AlterSubscriptionStmt<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -822,6 +903,46 @@ impl<'mcx> Node<'mcx> {
             Node::CreateTableSpaceStmt(_) => T_CreateTableSpaceStmt,
             Node::CreateConversionStmt(_) => T_CreateConversionStmt,
             Node::CreateAmStmt(_) => T_CreateAmStmt,
+            // raw-grammar DDL "ALTER/DROP" family nodes.
+            Node::PartitionCmd(_) => T_PartitionCmd,
+            Node::ReplicaIdentityStmt(_) => T_ReplicaIdentityStmt,
+            Node::ATAlterConstraint(_) => T_ATAlterConstraint,
+            Node::AlterTableStmt(_) => T_AlterTableStmt,
+            Node::AlterTableCmd(_) => T_AlterTableCmd,
+            Node::AlterCollationStmt(_) => T_AlterCollationStmt,
+            Node::AlterDomainStmt(_) => T_AlterDomainStmt,
+            Node::AlterEnumStmt(_) => T_AlterEnumStmt,
+            Node::AlterStatsStmt(_) => T_AlterStatsStmt,
+            Node::AlterSeqStmt(_) => T_AlterSeqStmt,
+            Node::AlterOpFamilyStmt(_) => T_AlterOpFamilyStmt,
+            Node::AlterFunctionStmt(_) => T_AlterFunctionStmt,
+            Node::DropStmt(_) => T_DropStmt,
+            Node::RenameStmt(_) => T_RenameStmt,
+            Node::AlterObjectDependsStmt(_) => T_AlterObjectDependsStmt,
+            Node::AlterObjectSchemaStmt(_) => T_AlterObjectSchemaStmt,
+            Node::AlterOwnerStmt(_) => T_AlterOwnerStmt,
+            Node::AlterOperatorStmt(_) => T_AlterOperatorStmt,
+            Node::AlterTypeStmt(_) => T_AlterTypeStmt,
+            Node::AlterDefaultPrivilegesStmt(_) => T_AlterDefaultPrivilegesStmt,
+            Node::AlterRoleStmt(_) => T_AlterRoleStmt,
+            Node::AlterRoleSetStmt(_) => T_AlterRoleSetStmt,
+            Node::DropOwnedStmt(_) => T_DropOwnedStmt,
+            Node::ReassignOwnedStmt(_) => T_ReassignOwnedStmt,
+            Node::AlterTableSpaceOptionsStmt(_) => T_AlterTableSpaceOptionsStmt,
+            Node::AlterTableMoveAllStmt(_) => T_AlterTableMoveAllStmt,
+            Node::AlterExtensionStmt(_) => T_AlterExtensionStmt,
+            Node::AlterExtensionContentsStmt(_) => T_AlterExtensionContentsStmt,
+            Node::AlterFdwStmt(_) => T_AlterFdwStmt,
+            Node::AlterForeignServerStmt(_) => T_AlterForeignServerStmt,
+            Node::AlterUserMappingStmt(_) => T_AlterUserMappingStmt,
+            Node::AlterPolicyStmt(_) => T_AlterPolicyStmt,
+            Node::AlterDatabaseStmt(_) => T_AlterDatabaseStmt,
+            Node::AlterDatabaseRefreshCollStmt(_) => T_AlterDatabaseRefreshCollStmt,
+            Node::AlterDatabaseSetStmt(_) => T_AlterDatabaseSetStmt,
+            Node::AlterTSDictionaryStmt(_) => T_AlterTSDictionaryStmt,
+            Node::AlterTSConfigurationStmt(_) => T_AlterTSConfigurationStmt,
+            Node::AlterPublicationStmt(_) => T_AlterPublicationStmt,
+            Node::AlterSubscriptionStmt(_) => T_AlterSubscriptionStmt,
         }
     }
 
@@ -1045,6 +1166,56 @@ impl<'mcx> Node<'mcx> {
             Node::CreateTableSpaceStmt(n) => Ok(Node::CreateTableSpaceStmt(n.clone_in(mcx)?)),
             Node::CreateConversionStmt(n) => Ok(Node::CreateConversionStmt(n.clone_in(mcx)?)),
             Node::CreateAmStmt(n) => Ok(Node::CreateAmStmt(n.clone_in(mcx)?)),
+            // raw-grammar DDL "ALTER/DROP" family nodes.
+            Node::PartitionCmd(n) => Ok(Node::PartitionCmd(n.clone_in(mcx)?)),
+            Node::ReplicaIdentityStmt(n) => Ok(Node::ReplicaIdentityStmt(n.clone_in(mcx)?)),
+            Node::ATAlterConstraint(n) => Ok(Node::ATAlterConstraint(n.clone_in(mcx)?)),
+            Node::AlterTableStmt(n) => Ok(Node::AlterTableStmt(n.clone_in(mcx)?)),
+            Node::AlterTableCmd(n) => Ok(Node::AlterTableCmd(n.clone_in(mcx)?)),
+            Node::AlterCollationStmt(n) => Ok(Node::AlterCollationStmt(n.clone_in(mcx)?)),
+            Node::AlterDomainStmt(n) => Ok(Node::AlterDomainStmt(n.clone_in(mcx)?)),
+            Node::AlterEnumStmt(n) => Ok(Node::AlterEnumStmt(n.clone_in(mcx)?)),
+            Node::AlterStatsStmt(n) => Ok(Node::AlterStatsStmt(n.clone_in(mcx)?)),
+            Node::AlterSeqStmt(n) => Ok(Node::AlterSeqStmt(n.clone_in(mcx)?)),
+            Node::AlterOpFamilyStmt(n) => Ok(Node::AlterOpFamilyStmt(n.clone_in(mcx)?)),
+            Node::AlterFunctionStmt(n) => Ok(Node::AlterFunctionStmt(n.clone_in(mcx)?)),
+            Node::DropStmt(n) => Ok(Node::DropStmt(n.clone_in(mcx)?)),
+            Node::RenameStmt(n) => Ok(Node::RenameStmt(n.clone_in(mcx)?)),
+            Node::AlterObjectDependsStmt(n) => Ok(Node::AlterObjectDependsStmt(n.clone_in(mcx)?)),
+            Node::AlterObjectSchemaStmt(n) => Ok(Node::AlterObjectSchemaStmt(n.clone_in(mcx)?)),
+            Node::AlterOwnerStmt(n) => Ok(Node::AlterOwnerStmt(n.clone_in(mcx)?)),
+            Node::AlterOperatorStmt(n) => Ok(Node::AlterOperatorStmt(n.clone_in(mcx)?)),
+            Node::AlterTypeStmt(n) => Ok(Node::AlterTypeStmt(n.clone_in(mcx)?)),
+            Node::AlterDefaultPrivilegesStmt(n) => {
+                Ok(Node::AlterDefaultPrivilegesStmt(n.clone_in(mcx)?))
+            }
+            Node::AlterRoleStmt(n) => Ok(Node::AlterRoleStmt(n.clone_in(mcx)?)),
+            Node::AlterRoleSetStmt(n) => Ok(Node::AlterRoleSetStmt(n.clone_in(mcx)?)),
+            Node::DropOwnedStmt(n) => Ok(Node::DropOwnedStmt(n.clone_in(mcx)?)),
+            Node::ReassignOwnedStmt(n) => Ok(Node::ReassignOwnedStmt(n.clone_in(mcx)?)),
+            Node::AlterTableSpaceOptionsStmt(n) => {
+                Ok(Node::AlterTableSpaceOptionsStmt(n.clone_in(mcx)?))
+            }
+            Node::AlterTableMoveAllStmt(n) => Ok(Node::AlterTableMoveAllStmt(n.clone_in(mcx)?)),
+            Node::AlterExtensionStmt(n) => Ok(Node::AlterExtensionStmt(n.clone_in(mcx)?)),
+            Node::AlterExtensionContentsStmt(n) => {
+                Ok(Node::AlterExtensionContentsStmt(n.clone_in(mcx)?))
+            }
+            Node::AlterFdwStmt(n) => Ok(Node::AlterFdwStmt(n.clone_in(mcx)?)),
+            Node::AlterForeignServerStmt(n) => Ok(Node::AlterForeignServerStmt(n.clone_in(mcx)?)),
+            Node::AlterUserMappingStmt(n) => Ok(Node::AlterUserMappingStmt(n.clone_in(mcx)?)),
+            Node::AlterPolicyStmt(n) => Ok(Node::AlterPolicyStmt(n.clone_in(mcx)?)),
+            Node::AlterDatabaseStmt(n) => Ok(Node::AlterDatabaseStmt(n.clone_in(mcx)?)),
+            Node::AlterDatabaseRefreshCollStmt(n) => {
+                Ok(Node::AlterDatabaseRefreshCollStmt(n.clone_in(mcx)?))
+            }
+            Node::AlterDatabaseSetStmt(n) => Ok(Node::AlterDatabaseSetStmt(n.clone_in(mcx)?)),
+            Node::AlterTSDictionaryStmt(n) => Ok(Node::AlterTSDictionaryStmt(n.clone_in(mcx)?)),
+            Node::AlterTSConfigurationStmt(n) => {
+                Ok(Node::AlterTSConfigurationStmt(n.clone_in(mcx)?))
+            }
+            Node::AlterPublicationStmt(n) => Ok(Node::AlterPublicationStmt(n.clone_in(mcx)?)),
+            Node::AlterSubscriptionStmt(n) => Ok(Node::AlterSubscriptionStmt(n.clone_in(mcx)?)),
         }
     }
 }
