@@ -177,7 +177,6 @@ backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }
 backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
-backend-access-gist-validate = { path = "../backend-access-gist-validate" }
 backend-access-nbtree-core = { path = "../backend-access-nbtree-core" }
 backend-access-nbtree-nbtsort = { path = "../backend-access-nbtree-nbtsort" }
 backend-common-relpath = { path = "../backend-common-relpath" }
@@ -198,6 +197,7 @@ backend-optimizer-prep-prepjointree = { path = "../backend-optimizer-prep-prepjo
 backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
 backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
+backend-optimizer-plan-analyzejoins = { path = "../backend-optimizer-plan-analyzejoins" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }

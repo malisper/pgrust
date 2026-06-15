@@ -173,7 +173,6 @@ pub fn init_all() {
     backend_optimizer_path_pathkeys::init_seams();
     backend_access_nbt_compare::init_seams();
     backend_access_nbt_validate::init_seams();
-    backend_access_gist_validate::init_seams();
     backend_access_nbtree_core::init_seams();
     backend_access_nbtree_nbtsort::init_seams();
     backend_common_relpath::init_seams();
@@ -194,6 +193,7 @@ pub fn init_all() {
     backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
+    backend_optimizer_plan_analyzejoins::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_coerce::init_seams();

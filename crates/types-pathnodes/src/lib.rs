@@ -1834,6 +1834,42 @@ pub struct PlaceHolderInfo {
     pub ph_width: i32,
 }
 
+/// `UniqueRelInfo` (pathnodes.h) — caches the fact that a relation is unique
+/// (returns at most one matching row) when being joined with a particular set
+/// of other relations. Stored in [`RelOptInfo::unique_for_rels`] by
+/// `innerrel_is_unique_ext` (analyzejoins.c).
+///
+/// Field-for-field vs the C struct:
+///
+/// ```c
+/// typedef struct UniqueRelInfo
+/// {
+///     NodeTag     type;
+///     Relids      outerrelids;    /* unique when joined with this rel set */
+///     bool        self_join;      /* unique considering only self-join quals */
+///     List       *extra_clauses;  /* baserestrictinfo clauses used in proof */
+/// } UniqueRelInfo;
+/// ```
+///
+/// CARRIER (`extra_clauses`): the C `extra_clauses` is a `List *` of the
+/// `RestrictInfo *`s from a baserestrictinfo list that were used to prove
+/// uniqueness (`relation_has_unique_index_ext` does `exprs = lappend(exprs,
+/// rinfo)`); rendered here as a [`Vec<RinfoId>`] of arena handles, matching the
+/// `relation_has_unique_index_ext` seam's `Vec<RinfoId>` extra-clauses output.
+#[derive(Clone, Debug, Default)]
+pub struct UniqueRelInfo {
+    /// `Relids outerrelids` — the relation is unique when joined with this set
+    /// of other relation(s).
+    pub outerrelids: Relids,
+    /// `bool self_join` — unique considering only clauses suitable for self-join
+    /// (those that passed `split_selfjoin_quals()`).
+    pub self_join: bool,
+    /// `List *extra_clauses` — additional baserestrictinfo `RestrictInfo`s used
+    /// to prove the uniqueness; cached for the self-join checking procedure.
+    /// Arena handles.
+    pub extra_clauses: Vec<RinfoId>,
+}
+
 /* ==========================================================================
  * RelOptInfo (pathnodes.h)
  * ======================================================================== */
@@ -1927,9 +1963,9 @@ pub struct RelOptInfo {
     pub fdwroutine: Option<Box<FdwRoutine>>,
     /// `void *fdw_private` — private FDW state (opaque node handle; 0 = NULL).
     pub fdw_private: NodeId,
-    /// `List *unique_for_rels` — UniqueRelInfos: other-rel sets this rel is
-    /// proven unique for (opaque node handles).
-    pub unique_for_rels: Vec<NodeId>,
+    /// `List *unique_for_rels` — [`UniqueRelInfo`]s: other-rel sets this rel is
+    /// proven unique for (populated by `innerrel_is_unique_ext`).
+    pub unique_for_rels: Vec<UniqueRelInfo>,
     /// `List *non_unique_for_rels` — Relid sets this rel was tried-and-failed to
     /// prove unique for.
     pub non_unique_for_rels: Vec<Relids>,
