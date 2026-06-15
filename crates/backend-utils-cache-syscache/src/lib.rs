@@ -877,6 +877,8 @@ fn set_locktag_tuple(tag: &mut LOCKTAG, dboid: Oid, reloid: Oid, blocknum: u32, 
 /// in `backend-utils-cache-syscache-seams`).
 pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
+    backend_utils_cache_syscache_seams::search_relation_reloftype::set(projections::search_relation_reloftype);
+    backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);
     backend_utils_cache_syscache_seams::search_opclass::set(projections::search_opclass);
     backend_utils_cache_syscache_seams::search_amop_list::set(projections::search_amop_list);
     backend_utils_cache_syscache_seams::search_amproc_list::set(projections::search_amproc_list);

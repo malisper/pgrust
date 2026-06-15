@@ -14,12 +14,21 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_datum::Datum as KeyDatum;
 
 use crate::{
-    ReleaseSysCache, SearchSysCache1, SearchSysCacheList1, SysCacheGetAttrNotNull, AMOPSTRATEGY,
-    AMPROCNUM, CLAOID, RELOID,
+    ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList1, SysCacheGetAttrNotNull,
+    AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, RELOID,
 };
+use backend_utils_cache_syscache_seams::CastRow;
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
 const Anum_pg_class_relam: i32 = 7;
+/// `Anum_pg_class_reloftype` (`catalog/pg_class.h`).
+const Anum_pg_class_reloftype: i32 = 5;
+
+// `catalog/pg_cast.h` attribute numbers.
+const Anum_pg_cast_oid: i32 = 1;
+const Anum_pg_cast_castfunc: i32 = 4;
+const Anum_pg_cast_castcontext: i32 = 5;
+const Anum_pg_cast_castmethod: i32 = 6;
 
 // `catalog/pg_opclass.h` attribute numbers.
 const Anum_pg_opclass_opcname: i32 = 3;
@@ -95,6 +104,48 @@ pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let relam = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?;
     ReleaseSysCache(tup);
     Ok(Some(relam))
+}
+
+/// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+/// `Form_pg_class.reloftype` field (the OF-type for a typed table; `InvalidOid`
+/// otherwise). `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
+pub(crate) fn search_relation_reloftype(relid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache reloftype projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let reloftype = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reloftype)?;
+    ReleaseSysCache(tup);
+    Ok(Some(reloftype))
+}
+
+/// `SearchSysCache2(CASTSOURCETARGET, srctype, targettype)` projected to the
+/// [`CastRow`] fields (`Form_pg_cast`). `Ok(None)` on a cache miss (no cast).
+pub(crate) fn cast_by_source_target(
+    sourcetypeid: Oid,
+    targettypeid: Oid,
+) -> PgResult<Option<CastRow>> {
+    let scratch = MemoryContext::new("syscache pg_cast projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        CASTSOURCETARGET,
+        SysCacheKey::Value(KeyDatum::from_oid(sourcetypeid)),
+        SysCacheKey::Value(KeyDatum::from_oid(targettypeid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = CastRow {
+        oid: getattr_oid(mcx, CASTSOURCETARGET, &tup, Anum_pg_cast_oid)?,
+        castfunc: getattr_oid(mcx, CASTSOURCETARGET, &tup, Anum_pg_cast_castfunc)?,
+        castcontext: getattr_char(mcx, CASTSOURCETARGET, &tup, Anum_pg_cast_castcontext)?,
+        castmethod: getattr_char(mcx, CASTSOURCETARGET, &tup, Anum_pg_cast_castmethod)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
 }
 
 /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the

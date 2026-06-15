@@ -20,6 +20,8 @@ pub type IndexAttributeBitMap<'mcx> = Option<PgBox<'mcx, IndexAttributeBitMapDat
 pub type TupleDesc<'mcx> = Option<PgBox<'mcx, TupleDescData<'mcx>>>;
 
 pub const RECORDOID: Oid = 2249;
+/// `RECORDARRAYOID` — `record[]` array type OID (`pg_type_d.h`).
+pub const RECORDARRAYOID: Oid = 2287;
 /// `VOIDOID` — `void` pseudo-type (`pg_type_d.h:228`).
 pub const VOIDOID: Oid = 2278;
 pub const BOOLOID: Oid = 16;

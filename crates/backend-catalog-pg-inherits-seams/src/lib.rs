@@ -18,3 +18,13 @@ seam_core::seam!(
         lockmode: LOCKMODE,
     ) -> PgResult<PgVec<'mcx, Oid>>
 );
+
+seam_core::seam!(
+    /// `typeInheritsFrom(subclassTypeId, superclassTypeId)` (pg_inherits.c) —
+    /// whether the relation type `subclassTypeId` is an inheritance child of
+    /// the relation type `superclassTypeId` (walking the pg_inherits graph).
+    pub fn type_inherits_from(
+        subclass_type_id: Oid,
+        superclass_type_id: Oid,
+    ) -> PgResult<bool>
+);

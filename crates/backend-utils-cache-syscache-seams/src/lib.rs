@@ -92,6 +92,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+    /// `Form_pg_class.reloftype` field (the OF-type of a typed table, else
+    /// `InvalidOid`). `Ok(None)` on a cache miss; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn search_relation_reloftype(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid))`: whether a
     /// `pg_class` row exists for `relid`.
     pub fn reloid_exists(relid: Oid) -> PgResult<bool>
@@ -1606,6 +1614,33 @@ seam_core::seam!(
     /// `GETSTRUCT` projected to `(castsource, casttarget)`
     /// (`Form_pg_cast`). `Ok(None)` on a scan miss.
     pub fn cast_source_target(castid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+/// `((Form_pg_cast) GETSTRUCT(tup))` fields the parser coercion-pathway logic
+/// reads (parse_coerce.c `find_coercion_pathway` / `IsBinaryCoercibleWithCast` /
+/// `find_typmod_coercion_function`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CastRow {
+    /// `oid` — the pg_cast row's own OID.
+    pub oid: Oid,
+    /// `castfunc` — coercion function OID (`InvalidOid` if none).
+    pub castfunc: Oid,
+    /// `castcontext` — one of `COERCION_CODE_{IMPLICIT,ASSIGNMENT,EXPLICIT}`
+    /// (`'i'`/`'a'`/`'e'`).
+    pub castcontext: i8,
+    /// `castmethod` — one of `COERCION_METHOD_{FUNCTION,BINARY,INOUT}`
+    /// (`'f'`/`'b'`/`'i'`).
+    pub castmethod: i8,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache2(CASTSOURCETARGET, srctype, targettype)` +
+    /// `GETSTRUCT` projected to the [`CastRow`] fields (`Form_pg_cast`).
+    /// `Ok(None)` on a scan miss (no pg_cast entry).
+    pub fn cast_by_source_target(
+        sourcetypeid: Oid,
+        targettypeid: Oid,
+    ) -> PgResult<Option<CastRow>>
 );
 
 seam_core::seam!(
