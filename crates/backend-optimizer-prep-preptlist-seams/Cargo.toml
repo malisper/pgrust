@@ -1,0 +1,17 @@
+[package]
+name = "backend-optimizer-prep-preptlist-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_prep_preptlist_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+mcx = { path = "../mcx" }
