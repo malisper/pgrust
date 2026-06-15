@@ -96,6 +96,7 @@ pub fn init_all() {
     backend_commands_opclasscmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
+    backend_commands_trigger::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
     backend_executor_execExpr::init_seams();
@@ -763,7 +764,6 @@ mod recurrence_guard {
         // crate; joinrels.c (backend-optimizer-path-joinrels) calls them through
         // the pathnode-seams decls and seam-and-panics until pathnode ports them.
         ("backend_optimizer_util_pathnode", "can_create_unique_path"),
-        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
         // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
         // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
@@ -876,7 +876,6 @@ mod recurrence_guard {
         // allowlist. They become real installs when aclchk.c / proclang.c land
         // (or are re-homed to their proper -seams crates).
         ("backend_commands_functioncmds", "aclcheck_error_type"),
-        ("backend_commands_functioncmds", "get_language_oid"),
         // NOTE: the PARAM_EXEC `execPlan`-link seams formerly listed here under
         // backend_executor_execProcnode were RELOCATED to execMain-seams (their
         // real owner: they operate on the executor-owned `es_param_exec_vals` /
@@ -1012,7 +1011,6 @@ mod recurrence_guard {
         // those 13 seams are now installed by inward_seams over ProcGlobal->
         // clogGroupFirst + the per-PGPROC clogGroup* fields.)
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
-        ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
