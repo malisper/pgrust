@@ -48,6 +48,7 @@ extern crate alloc;
 pub mod core;
 pub mod desc;
 pub mod guc;
+pub mod pageread;
 pub mod promote;
 pub mod readrecord;
 pub mod replay;

@@ -605,6 +605,19 @@ pub fn pg_pread(fd: i32, buf: &mut [u8], offset: i64) -> isize {
     }
 }
 
+/// `close(fd)` on a bare kernel fd (the `BasicOpenFile` return value). Returns
+/// `0` on success or `-errno`. Mirrors C `close(readFile)` in the recovery
+/// page-read driver, which manages its WAL segment fd directly (not via VFD).
+pub fn close_fd(fd: i32) -> i32 {
+    // SAFETY: `fd` is a live bare kernel fd owned by the caller.
+    let r = unsafe { libc::close(fd) };
+    if r < 0 {
+        -errno_now()
+    } else {
+        0
+    }
+}
+
 /// `pg_pwrite(fd, buf, offset)` — positioned write against a bare kernel fd (a
 /// WAL segment opened via `BasicOpenFile`/`XLogFileInit`). Bytes written
 /// (`>= 0`) or `-errno`. Mirrors the C `pg_pwrite` used by `xlog.c`'s
