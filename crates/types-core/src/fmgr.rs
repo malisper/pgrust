@@ -6,6 +6,21 @@
 pub const INDEX_MAX_KEYS: i32 = 32;
 pub const NAMEDATALEN: i32 = 64;
 
+/// `IOFuncSelector` (`fmgr.h` / `utils/lsyscache.h`) — which I/O direction a
+/// type's I/O function lookup (`get_type_io_data`, `get_range_io_data`,
+/// `get_multirange_io_data`) resolves a proc for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IOFuncSelector {
+    /// `IOFunc_input`
+    Input,
+    /// `IOFunc_output`
+    Output,
+    /// `IOFunc_receive`
+    Receive,
+    /// `IOFunc_send`
+    Send,
+}
+
 /// `PG_VERSION_NUM` (`pg_config.h`) — numeric server version, 180003 for
 /// PostgreSQL 18.3.
 pub const PG_VERSION_NUM: i32 = 180_003;

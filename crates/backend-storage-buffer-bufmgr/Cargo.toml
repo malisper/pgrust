@@ -24,3 +24,6 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 # This crate OWNS and installs the bufmgr seams (the 4 header/freelist seams in
 # F1a; the rest in F1b-d).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# WakePinCountWaiter signals the parked pin-count waiter via its process latch
+# (ProcSendSignal == SetLatch on procLatch) — an outward proc seam.
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }

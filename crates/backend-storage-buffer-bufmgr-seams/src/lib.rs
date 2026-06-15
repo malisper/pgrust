@@ -571,3 +571,48 @@ seam_core::seam!(
         smgrs: &[types_storage::RelFileLocatorBackend],
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// ResourceOwner buffer-pin bookkeeping (bufmgr.c:244).
+//
+// In C `ResourceOwnerRememberBuffer` / `ResourceOwnerForgetBuffer` are bufmgr.c
+// macros over the generic `ResourceOwnerRemember/Forget(owner, Int32GetDatum(b),
+// &buffer_pin_resowner_desc)`, where `buffer_pin_resowner_desc` and its
+// `ResOwnerReleaseBufferPin` callback are DEFINED IN bufmgr.c. The bufmgr core
+// (pin/unpin/incr) consumes these to keep the current resource owner's pin list
+// in sync; the resowner crate (backend-utils-resowner-resowner, still `todo`)
+// installs them when it lands. Until then a call panics loudly (a real pin
+// cannot be resource-owner-tracked before resowner ports — sanctioned
+// panic-until-owner).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberBuffer(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// record one buffer pin on the current resource owner so a transaction/
+    /// portal abort can release the leaked pin. Infallible in C (the enlarge
+    /// that may `ereport` is a separate, earlier call).
+    pub fn remember_buffer(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// drop the record of one buffer pin from the current resource owner.
+    /// Infallible in C.
+    pub fn forget_buffer(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerEnlarge(CurrentResourceOwner)` (bufmgr.c) — ensure the
+    /// current resource owner has room to remember one more buffer pin before
+    /// the pin is taken (so the remember below cannot fail). `Err` carries the
+    /// `ereport(ERROR)` on memory exhaustion.
+    pub fn resowner_enlarge() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgBufferUsage.shared_blks_dirtied++` / `pgstat_count_buffer_dirtied`-
+    /// style accounting (bufmgr.c) — note that this backend just dirtied a
+    /// previously-clean shared buffer. Owned by the per-backend buffer-usage
+    /// statistics (pgstat) when it ports; infallible.
+    pub fn count_buffer_dirtied()
+);

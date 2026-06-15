@@ -26,6 +26,17 @@ use types_error::PgResult;
 use types_storage::lock::LockRelId;
 use types_storage::RelFileLocator;
 
+/// `IndexAttrBitmapKind` (`utils/relcache.h`) — which attribute bitmap
+/// `RelationGetIndexAttrBitmap` should return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexAttrBitmapKind {
+    Keys,
+    PrimaryKey,
+    Identity,
+    HotBlocking,
+    Summarized,
+}
+
 /// `LockInfoData` (`utils/rel.h`) — the lock-manager info embedded in a
 /// relcache entry (`rd_lockInfo`). Just the `LockRelId`.
 #[derive(Clone, Debug, Default)]

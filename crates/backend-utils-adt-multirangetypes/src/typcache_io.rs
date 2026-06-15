@@ -40,18 +40,8 @@ pub struct MultirangeIOData {
 }
 
 /// `IOFuncSelector` (fmgr.h): which I/O direction `get_multirange_io_data`
-/// resolves a proc for.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum IOFuncSelector {
-    /// `IOFunc_input`
-    Input,
-    /// `IOFunc_output`
-    Output,
-    /// `IOFunc_receive`
-    Receive,
-    /// `IOFunc_send`
-    Send,
-}
+/// resolves a proc for. Canonical definition in `types-core::fmgr`.
+pub use types_core::fmgr::IOFuncSelector;
 
 /// `MultirangeParseState` (multirangetypes.c:56): the `multirange_in` parser's
 /// state machine.

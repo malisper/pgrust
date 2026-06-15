@@ -15,7 +15,7 @@
 //! Allocating functions take `Mcx<'mcx>` and return `RegResult`. The colormap
 //! engine ([`crate::regex_foundation`]), NFA machinery ([`crate::regex_nfa`]),
 //! and locale probes ([`crate::regex_locale`]) are reached through the other
-//! families in this same unit (direct calls; they loud-panic via `todo!()`
+//! families in this same unit (direct calls; they loud-panic as unported stubs
 //! until those family modules land).
 
 extern crate alloc;

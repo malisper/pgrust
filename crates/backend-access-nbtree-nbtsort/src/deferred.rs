@@ -2,7 +2,7 @@
 //! parallel build coordination.
 //!
 //! These are NOT silently stubbed: they panic loudly (sanctioned
-//! mirror-and-panic, never a `todo!()`). They are blocked on prerequisites the
+//! mirror-and-panic, never a placeholder stub-panic). They are blocked on prerequisites the
 //! repo does not yet provide, and grounding them now would be a false-green or
 //! require a cross-subsystem port out of this crate's scope:
 //!

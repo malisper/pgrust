@@ -87,18 +87,8 @@ seam_core::seam!(
 );
 
 /// `IOFuncSelector` (`lsyscache.h`): which I/O function `get_type_io_data`
-/// resolves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IOFuncSelector {
-    /// `IOFunc_input`
-    Input,
-    /// `IOFunc_output`
-    Output,
-    /// `IOFunc_receive`
-    Receive,
-    /// `IOFunc_send`
-    Send,
-}
+/// resolves. Canonical definition in `types-core::fmgr`.
+pub use types_core::fmgr::IOFuncSelector;
 
 /// The output of `get_type_io_data` (lsyscache.c): the `pg_type` storage
 /// parameters plus the resolved I/O proc OID and its I/O parameter OID.

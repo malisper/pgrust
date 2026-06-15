@@ -10,7 +10,7 @@
 // mirror-PG-and-panic on unported owners / not-yet-expanded shared-model structs
 // (ScalarArrayOp/MinMax/ArrayExpr primnodes; nodeAgg ds_fcinfo; execTuples slot
 // model #113; typcache #58; JsonExprState; nodeSubplan/subscripting) — no
-// `todo!()` in own logic. dead_code/unused_variables allowed for the threaded
+// placeholder stub in own logic. dead_code/unused_variables allowed for the threaded
 // args those still-blocked arms hold.
 #![allow(dead_code)]
 #![allow(unused_variables)]
