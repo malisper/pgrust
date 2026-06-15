@@ -47,16 +47,59 @@ seam_core::seam!(
     /// `bms_nonempty_difference(a, b)` — `a \ b` is non-empty.
     pub fn relids_nonempty_difference(a: &Relids, b: &Relids) -> bool
 );
-
-/* ==========================================================================
- * Additional `bms_*` ops consumed by joinrels.c that the original set above
- * did not expose (additive — appended for the join-relation enumerator).
- * ======================================================================== */
-
 seam_core::seam!(
-    /// `bms_add_member(a, x)` — `a ∪ {x}`; `a` is recycled into the result.
+    /// `bms_next_member(a, prevbit)` — the next member of `a` greater than
+    /// `prevbit` (start with -1), or -2 when there are none left. Note: callers
+    /// that loop `while ((i = …) >= 0)` treat any negative result as "done".
+    pub fn relids_next_member(a: &Relids, prevbit: i32) -> i32
+);
+seam_core::seam!(
+    /// `bms_get_singleton_member(a, &member)` — if `a` has exactly one member,
+    /// return `Some(member)`; otherwise `None`.
+    pub fn relids_get_singleton_member(a: &Relids) -> Option<i32>
+);
+seam_core::seam!(
+    /// `bms_int_members(a, b)` — `a ∩ b`; `a` is recycled into the result, `b`
+    /// unchanged.
+    pub fn relids_int_members(a: Relids, b: &Relids) -> Relids
+);
+seam_core::seam!(
+    /// `bms_union(a, b)` — a fresh set `a ∪ b` (inputs unchanged).
+    pub fn relids_union(a: &Relids, b: &Relids) -> Relids
+);
+seam_core::seam!(
+    /// `bms_difference(a, b)` — a fresh set `a \ b` (inputs unchanged).
+    pub fn relids_difference(a: &Relids, b: &Relids) -> Relids
+);
+seam_core::seam!(
+    /// `bms_add_member(a, x)` — add member `x` to `a` (recycled), returning the
+    /// result.
     pub fn relids_add_member(a: Relids, x: i32) -> Relids
 );
+seam_core::seam!(
+    /// `bms_add_range(a, lower, upper)` — add members `lower..=upper` to `a`
+    /// (recycled), returning the result.
+    pub fn relids_add_range(a: Relids, lower: i32, upper: i32) -> Relids
+);
+seam_core::seam!(
+    /// `bms_make_singleton(x)` — a fresh set `{x}`.
+    pub fn relids_make_singleton(x: i32) -> Relids
+);
+seam_core::seam!(
+    /// `bms_equal(a, b)` — `a` and `b` contain the same members (empty == empty).
+    pub fn relids_equal(a: &Relids, b: &Relids) -> bool
+);
+seam_core::seam!(
+    /// `bms_membership(a)` — `BMS_EMPTY_SET` (0) / `BMS_SINGLETON` (1) /
+    /// `BMS_MULTIPLE` (2).
+    pub fn relids_membership(a: &Relids) -> i32
+);
+
+/* ==========================================================================
+ * Additional `bms_*` ops consumed by joinrels.c that the sets above did not
+ * expose (additive — appended for the join-relation enumerator).
+ * ======================================================================== */
+
 seam_core::seam!(
     /// `bms_num_members(a)` — the number of members in `a`.
     pub fn relids_num_members(a: &Relids) -> i32

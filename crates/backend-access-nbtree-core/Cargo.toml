@@ -1,0 +1,57 @@
+[package]
+name = "backend-access-nbtree-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Port of the mutually-recursive B-tree core cluster: nbtsearch.c +
+# nbtinsert.c + nbtpage.c + nbtutils.c + nbtsplitloc.c + nbtpreprocesskeys.c
+# (PostgreSQL 18.3). Installs the seams declared in
+# backend-access-nbtree-core-seams (except bt_form_posting, owned by nbtdedup).
+
+[lib]
+name = "backend_access_nbtree_core"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+pg-prng = { path = "../pg-prng" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nbtree = { path = "../types-nbtree" }
+types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }
+types-fmgr = { path = "../types-fmgr" }
+types-amapi = { path = "../types-amapi" }
+
+backend-storage-page = { path = "../backend-storage-page" }
+backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# This crate owns these seams (installs them in init_seams()).
+backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+
+# Outward seam crates (callees in not-yet-ported owners).
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+types-datum = { path = "../types-datum" }
+
+# nbtpage.c outward seams.
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

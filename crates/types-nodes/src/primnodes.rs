@@ -315,6 +315,18 @@ pub struct Var {
     pub varnullingrels: ExprRelids,
     /// `Index varlevelsup` — subplan levels up; 0 = current query level.
     pub varlevelsup: Index,
+    /// `VarReturningType varreturningtype` — for a Var referencing the OLD/NEW
+    /// pseudo-relations of a RETURNING list, whether it returns OLD or NEW (else
+    /// `VAR_RETURNING_DEFAULT`). Read by `contain_vars_returning_old_or_new`
+    /// (var.c). Added field-for-field vs primnodes.h (the keystone Expr
+    /// expansion left the leaf trimmed); `Default` keeps `Var { .. }`
+    /// construction additive.
+    pub varreturningtype: VarReturningType,
+    /// `ParseLoc location` — token location, or -1 if unknown. Read by
+    /// `locate_var_of_level` (var.c) and preserved across join-alias flattening.
+    /// Added field-for-field vs primnodes.h; `Default` is 0 — explicit
+    /// constructors set -1 where C does.
+    pub location: i32,
 }
 
 /// `Const` (nodes/primnodes.h), trimmed to the fields ports consume.
@@ -1778,6 +1790,18 @@ pub struct TargetEntry<'mcx> {
     pub resno: AttrNumber,
     /// `char *resname` — name of the column (could be NULL).
     pub resname: Option<PgString<'mcx>>,
+    /// `Index ressortgroupref` — nonzero if referenced by a sort/group clause
+    /// (the sort/group operation's `tleSortGroupRef`); 0 if not. Read/written by
+    /// tlist.c (`get_sortgroupref_tle`, `apply_tlist_labeling`,
+    /// `apply_pathtarget_labeling_to_tlist`, `make_tlist_from_pathtarget`,
+    /// `make_pathtarget_from_tlist`). Added field-for-field vs primnodes.h.
+    pub ressortgroupref: Index,
+    /// `Oid resorigtbl` — OID of column's source table, or 0. Copied by
+    /// `apply_tlist_labeling` (tlist.c). Added field-for-field vs primnodes.h.
+    pub resorigtbl: Oid,
+    /// `AttrNumber resorigcol` — column's number in source table, or 0. Copied
+    /// by `apply_tlist_labeling` (tlist.c). Added field-for-field.
+    pub resorigcol: AttrNumber,
     /// `bool resjunk` — set to true to eliminate the attribute from the
     /// final target list.
     pub resjunk: bool,
@@ -1797,6 +1821,9 @@ impl TargetEntry<'_> {
                 Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
                 None => None,
             },
+            ressortgroupref: self.ressortgroupref,
+            resorigtbl: self.resorigtbl,
+            resorigcol: self.resorigcol,
             resjunk: self.resjunk,
         })
     }

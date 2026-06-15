@@ -69,6 +69,7 @@ use types_pathnodes::{
 use backend_optimizer_util_pathnode_seams::PathKeysComparison;
 
 use backend_optimizer_path_equivclass_seams as ec;
+use backend_optimizer_path_equivclass as equivclass;
 use backend_optimizer_util_relnode_seams as bms;
 use backend_nodes_nodeFuncs_seams as nf;
 use backend_utils_cache_lsyscache_seams as lsc;
@@ -617,8 +618,18 @@ pub fn make_pathkey_from_sortinfo(
     // opclass, except in the case of a "default" opclass.  (This is handled by
     // get_eclass_for_sort_expr's call to canonicalize_ec_expression.)
     let eclass = ec::get_eclass_for_sort_expr::call(
-        root, expr, &opfamilies, opcintype, collation, sortref, rel, create_it,
-    )?;
+        root,
+        expr.clone(),
+        opfamilies,
+        opcintype,
+        collation,
+        sortref,
+        rel.clone(),
+        create_it,
+    )
+    .unwrap_or_else(|e| {
+        panic!("make_pathkey_from_sortinfo: get_eclass_for_sort_expr: {e:?}")
+    })?;
 
     // And finally we can find or create a PathKey node.
     Some(make_canonical_pathkey(
@@ -966,14 +977,17 @@ pub fn convert_subquery_pathkeys(
                 // is not volatile in the outer query (just a Var ref).
                 let outer_ec = ec::get_eclass_for_sort_expr::call(
                     root,
-                    &outer_var,
-                    &opfamilies,
+                    outer_var,
+                    opfamilies,
                     em_datatype,
                     ec_collation,
                     0,
-                    &rel_relids,
+                    rel_relids.clone(),
                     false,
-                );
+                )
+                .unwrap_or_else(|e| {
+                    panic!("convert_subquery_pathkeys: get_eclass_for_sort_expr: {e:?}")
+                });
                 if let Some(outer_ec) = outer_ec {
                     best_pathkey = Some(make_canonical_pathkey(
                         root,
@@ -1015,8 +1029,8 @@ pub fn convert_subquery_pathkeys(
                     // canonicalization (sub_expr went through the same process).
                     let tle_expr_id = nf::targetentry_info::call(root, tle).expr;
                     let tle_expr_raw = root.node(tle_expr_id).clone();
-                    let tle_expr = ec::canonicalize_ec_expression::call(
-                        &tle_expr_raw,
+                    let tle_expr = equivclass::canonicalize_ec_expression(
+                        tle_expr_raw,
                         sub_expr_type,
                         sub_expr_coll,
                     );
@@ -1027,14 +1041,17 @@ pub fn convert_subquery_pathkeys(
                     // See if we have a matching EC for the TLE.
                     let outer_ec = ec::get_eclass_for_sort_expr::call(
                         root,
-                        &outer_var,
-                        &opfamilies,
+                        outer_var,
+                        opfamilies.clone(),
                         sub_expr_type,
                         sub_expr_coll,
                         0,
-                        &rel_relids,
+                        rel_relids.clone(),
                         false,
-                    );
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("convert_subquery_pathkeys: get_eclass_for_sort_expr: {e:?}")
+                    });
                     let outer_ec = match outer_ec {
                         Some(e) => e,
                         None => continue,
@@ -1294,27 +1311,34 @@ pub fn initialize_mergeclause_eclasses(root: &mut PlannerInfo, restrictinfo: Rin
     let (lefttype, righttype) = lsc::op_input_types::call(opno)
         .unwrap_or_else(|e| panic!("initialize_mergeclause_eclasses: op_input_types: {e:?}"));
 
-    // Find or create a matching EquivalenceClass for each side.
+    // Find or create a matching EquivalenceClass for each side. With
+    // create_it = true, the C never returns NULL.
     let left_ec = ec::get_eclass_for_sort_expr::call(
         root,
-        &leftop,
-        &mergeopfamilies,
+        leftop,
+        mergeopfamilies.clone(),
         lefttype,
         inputcollid,
         0,
-        &None,
+        None,
         true,
-    );
+    )
+    .unwrap_or_else(|e| {
+        panic!("initialize_mergeclause_eclasses: get_eclass_for_sort_expr: {e:?}")
+    });
     let right_ec = ec::get_eclass_for_sort_expr::call(
         root,
-        &rightop,
-        &mergeopfamilies,
+        rightop,
+        mergeopfamilies,
         righttype,
         inputcollid,
         0,
-        &None,
+        None,
         true,
-    );
+    )
+    .unwrap_or_else(|e| {
+        panic!("initialize_mergeclause_eclasses: get_eclass_for_sort_expr: {e:?}")
+    });
 
     let rinfo = root.rinfo_mut(restrictinfo);
     rinfo.left_ec = left_ec;
@@ -1659,9 +1683,7 @@ fn pathkeys_useful_for_merging(root: &mut PlannerInfo, rel: RelId, pathkeys: &[P
         // mean a mergejoin clause can surely be generated.
         if has_eclass_joins {
             if let Some(ec_id) = pathkey.pk_eclass {
-                let ec_val = root.ec(ec_id).clone();
-                let rel_val = root.rel(rel).clone();
-                if ec::eclass_useful_for_merging::call(root, &ec_val, &rel_val) {
+                if ec::eclass_useful_for_merging::call(root, ec_id, rel) {
                     matched = true;
                 }
             }

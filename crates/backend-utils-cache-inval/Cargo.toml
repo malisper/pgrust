@@ -26,6 +26,7 @@ backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" 
 backend-utils-cache-inval-pc-seams = { path = "../backend-utils-cache-inval-pc-seams" }
 # Outward seams to other owners.
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+common-relpath-seams = { path = "../common-relpath-seams" }
 backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }

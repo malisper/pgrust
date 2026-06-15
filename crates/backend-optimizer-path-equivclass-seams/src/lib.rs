@@ -1,58 +1,136 @@
-//! Seam declarations for `optimizer/path/equivclass.c` — the EquivalenceClass
-//! engine. `equivclass.c` is **not yet ported**; the handful of entry points
-//! that `optimizer/path/pathkeys.c` (and other planner leaves) reach across into
-//! it are declared here, arena-shaped over [`types_pathnodes::PlannerInfo`]
-//! (`EcId` handles + `NodeId` expression handles into `PlannerInfo::node_arena`,
-//! resolved with `root.node(id) -> &Expr`).
+//! Inward seam declarations OWNED by `optimizer/path/equivclass.c` — the public
+//! EquivalenceClass API that the rest of the optimizer (initsplan, indxpath,
+//! planner, joinrels, createplan, …) reaches through. The owning crate
+//! `backend-optimizer-path-equivclass` installs every one of these from its
+//! `init_seams()` at single-threaded startup. Functions whose C path `palloc`s
+//! (and so can `ereport(ERROR)`) return [`PgResult`]; pure predicates / scalar
+//! reads return bare values.
 //!
-//! Each seam defaults to a loud panic until the owning crate (the future
-//! `backend-optimizer-path-equivclass`) installs a real implementation at
-//! single-threaded startup. Pathkeys' `make_pathkey_from_sortinfo`,
-//! `initialize_mergeclause_eclasses`, and `convert_subquery_pathkeys` call
-//! `get_eclass_for_sort_expr`/`canonicalize_ec_expression`; its
-//! `pathkeys_useful_for_merging` calls `eclass_useful_for_merging`.
+//! The outward seams equivclass.c *calls* into not-yet-ported externals
+//! (node operators, initsplan/restrictinfo/appendinfo clause machinery) live in
+//! the sibling consumer-side crate
+//! `backend-optimizer-path-equivclass-ext-seams`, whose owners install them once
+//! they land.
+//!
+//! Every cross-arena expression is an [`Expr`] value (the lifetime-free
+//! `types_pathnodes::Expr`); relation/EC/EM/clause references are
+//! `RelId`/`EcId`/`EmId`/`RinfoId` handles.
+
+extern crate alloc;
+
+use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
+use types_error::PgResult;
 use types_nodes::primnodes::Expr;
-use types_pathnodes::{EcId, EquivalenceClass, PlannerInfo, RelOptInfo, Relids};
+use types_pathnodes::{EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
+
+/* ======================================================================
+ * Family 1: inward seams OWNED by equivclass.c.
+ * ==================================================================== */
 
 seam_core::seam!(
-    /// `canonicalize_ec_expression(expr, req_type, req_collation)`
-    /// (equivclass.c) — wrap the expression in a `RelabelType`/`CollateExpr` as
-    /// needed so it exposes the requested type and collation. Returns the
-    /// (possibly wrapped) expression value.
-    pub fn canonicalize_ec_expression(
-        expr: &Expr,
-        req_type: Oid,
-        req_collation: Oid,
-    ) -> Expr
+    /// `process_equivalence(root, &restrictinfo, jdomain)` (equivclass.c:179) —
+    /// the union-find merge core. May rewrite `*p_restrictinfo` (the X=X →
+    /// X IS NOT NULL conversion), so the (possibly new) [`RinfoId`] is returned
+    /// alongside the bool. Can `palloc`/`ereport`.
+    pub fn process_equivalence(
+        root: &mut PlannerInfo,
+        restrictinfo: RinfoId,
+        jdomain: Relids,
+    ) -> PgResult<(bool, RinfoId)>
 );
-
 seam_core::seam!(
-    /// `get_eclass_for_sort_expr(root, expr, opfamilies, opcintype, collation,
-    /// sortref, rel, create_it)` (equivclass.c) — find or (optionally) create
-    /// the canonical `EquivalenceClass` for a sort/group expression. `expr` is
-    /// the sort key. Returns the canonical `EcId`, or `None` when no match and
-    /// `create_it` is false.
+    /// `get_eclass_for_sort_expr(...)` (equivclass.c:736) — find or build the EC
+    /// for a sort/group expression. Returns the matched/created [`EcId`], or
+    /// `None` when `create_it` is false and there is no match.
     pub fn get_eclass_for_sort_expr(
         root: &mut PlannerInfo,
-        expr: &Expr,
-        opfamilies: &[Oid],
+        expr: Expr,
+        opfamilies: Vec<Oid>,
         opcintype: Oid,
         collation: Oid,
         sortref: Index,
-        rel: &Relids,
+        rel: Relids,
         create_it: bool,
-    ) -> Option<EcId>
+    ) -> PgResult<Option<EcId>>
 );
-
 seam_core::seam!(
-    /// `eclass_useful_for_merging(root, eclass, rel)` (equivclass.c) — does the
-    /// EquivalenceClass have members not yet joined to `rel` (so a fresh
-    /// mergejoin clause could be generated)?
+    /// `generate_base_implied_equalities(root)` (equivclass.c:1188).
+    pub fn generate_base_implied_equalities(root: &mut PlannerInfo) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `generate_join_implied_equalities(...)` (equivclass.c:1550) — returns the
+    /// derived join [`RinfoId`]s.
+    pub fn generate_join_implied_equalities(
+        root: &mut PlannerInfo,
+        join_relids: Relids,
+        outer_relids: Relids,
+        inner_rel: RelId,
+        sjinfo: Option<SpecialJoinInfo>,
+    ) -> PgResult<Vec<RinfoId>>
+);
+seam_core::seam!(
+    /// `generate_join_implied_equalities_for_ecs(...)` (equivclass.c:1650).
+    pub fn generate_join_implied_equalities_for_ecs(
+        root: &mut PlannerInfo,
+        eclasses: Vec<EcId>,
+        join_relids: Relids,
+        outer_relids: Relids,
+        inner_rel: RelId,
+    ) -> PgResult<Vec<RinfoId>>
+);
+seam_core::seam!(
+    /// `exprs_known_equal(root, item1, item2, opfamily)` (equivclass.c:2648).
+    pub fn exprs_known_equal(
+        root: &PlannerInfo,
+        item1: Expr,
+        item2: Expr,
+        opfamily: Oid,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `reconsider_outer_join_clauses(root)` (equivclass.c:2135).
+    pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `rebuild_eclass_attr_needed(root)` (equivclass.c:2574).
+    pub fn rebuild_eclass_attr_needed(root: &mut PlannerInfo) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `have_relevant_eclass_joinclause(root, rel1, rel2)` (equivclass.c:3370).
+    pub fn have_relevant_eclass_joinclause(
+        root: &PlannerInfo,
+        rel1: RelId,
+        rel2: RelId,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `has_relevant_eclass_joinclause(root, rel1)` (equivclass.c:3446).
+    pub fn has_relevant_eclass_joinclause(root: &PlannerInfo, rel1: RelId) -> bool
+);
+seam_core::seam!(
+    /// `eclass_useful_for_merging(root, eclass, rel)` (equivclass.c:3490).
     pub fn eclass_useful_for_merging(
         root: &PlannerInfo,
-        eclass: &EquivalenceClass,
-        rel: &RelOptInfo,
+        eclass: EcId,
+        rel: RelId,
     ) -> bool
+);
+seam_core::seam!(
+    /// `is_redundant_derived_clause(rinfo, clauselist)` (equivclass.c:3550).
+    pub fn is_redundant_derived_clause(
+        root: &PlannerInfo,
+        rinfo: RinfoId,
+        clauselist: Vec<RinfoId>,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `add_child_rel_equivalences(...)` (equivclass.c:2833).
+    pub fn add_child_rel_equivalences(
+        root: &mut PlannerInfo,
+        appinfo: RelId,
+        parent_rel: RelId,
+        child_rel: RelId,
+    ) -> PgResult<()>
 );

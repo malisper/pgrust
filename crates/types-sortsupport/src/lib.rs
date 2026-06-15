@@ -15,6 +15,7 @@
 
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Oid};
+use types_datum::Datum;
 
 /// `int BTORDER_PROC` (access/nbtree.h) — opfamily support-function number of
 /// the btree comparison (`cmp`) function.
@@ -88,5 +89,58 @@ impl<'mcx> SortSupportData<'mcx> {
             abbreviate: false,
             comparator: None,
         }
+    }
+}
+
+/// The resolved `decrement` / `increment` function pointer in the owned model
+/// (C's `SkipSupportIncDec`, a `Datum (*)(Relation, Datum, bool *overflow)`): a
+/// `Copy` token the skip-support owner (`PrepareSkipSupportFromOpclass`, not yet
+/// ported) hands back / interprets when it runs the increment / decrement.
+/// `None` is the C `decrement == NULL` / `increment == NULL` (no callback
+/// installed yet — a `BTSKIPSUPPORT_PROC` must set both).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SkipSupportIncDecId(pub u32);
+
+/// `SkipSupportData` (`utils/skipsupport.h`).
+///
+/// State/callbacks used by skip arrays to procedurally generate elements. A
+/// `BTSKIPSUPPORT_PROC` function must set each and every field when called
+/// (there are no optional fields).
+///
+/// `low_elem` / `high_elem` are plain boundary [`Datum`]s the strategy routine
+/// computes and stores directly. The C `decrement` / `increment` function
+/// pointers are held as [`SkipSupportIncDecId`] tokens the skip-support owner
+/// interprets (the owner is not yet ported; the install path is a seam).
+#[derive(Clone, Copy, Debug)]
+pub struct SkipSupportData {
+    /// `Datum low_elem` — lowest sorting / leftmost non-NULL value (assuming
+    /// ascending order).
+    pub low_elem: Datum,
+    /// `Datum high_elem` — highest sorting / rightmost non-NULL value.
+    pub high_elem: Datum,
+    /// `SkipSupportIncDec decrement` — returns a decremented copy of the
+    /// caller's datum (or sets `*overflow` at `low_elem`). Held as a token.
+    pub decrement: Option<SkipSupportIncDecId>,
+    /// `SkipSupportIncDec increment` — returns an incremented copy of the
+    /// caller's datum (or sets `*overflow` at `high_elem`). Held as a token.
+    pub increment: Option<SkipSupportIncDecId>,
+}
+
+impl SkipSupportData {
+    /// A zeroed `SkipSupportData` (the C `palloc0` of a `SkipSupportData` before
+    /// the `BTSKIPSUPPORT_PROC` fills every field).
+    pub fn new() -> Self {
+        SkipSupportData {
+            low_elem: Datum::null(),
+            high_elem: Datum::null(),
+            decrement: None,
+            increment: None,
+        }
+    }
+}
+
+impl Default for SkipSupportData {
+    fn default() -> Self {
+        Self::new()
     }
 }

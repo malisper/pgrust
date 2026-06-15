@@ -24,9 +24,13 @@ pub fn init_all() {
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_indexam::init_seams();
+    backend_access_nbt_compare::init_seams();
     backend_access_nbt_dedup::init_seams();
+    backend_access_nbt_validate::init_seams();
     backend_access_nbt_xlog::init_seams();
+    backend_access_nbtree_core::init_seams();
     backend_access_nbtree_nbtree::init_seams();
+    backend_access_nbtree_nbtsort::init_seams();
     backend_access_rmgrdesc_small::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();
     backend_access_table_table::init_seams();
@@ -71,6 +75,7 @@ pub fn init_all() {
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
+    backend_common_relpath::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_comment::init_seams();
@@ -146,10 +151,15 @@ pub fn init_all() {
     backend_access_hash_core::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_path_equivclass::init_seams();
     backend_optimizer_path_joinrels::init_seams();
     backend_optimizer_path_pathkeys::init_seams();
+    backend_optimizer_path_small::init_seams();
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_util_pathnode::init_seams();
+    backend_optimizer_util_vars::init_seams();
+    backend_optimizer_path_costsize::init_seams();
+    backend_parser_parse_expr::init_seams();
     backend_parser_parse_oper::init_seams();
     backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
@@ -645,6 +655,13 @@ mod recurrence_guard {
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
+        // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
+        // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
+        // ported in the otherwise-complete `backend-optimizer-util-pathnode`
+        // crate; joinrels.c (backend-optimizer-path-joinrels) calls them through
+        // the pathnode-seams decls and seam-and-panics until pathnode ports them.
+        ("backend_optimizer_util_pathnode", "can_create_unique_path"),
+        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
         // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
         // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
@@ -721,18 +738,6 @@ mod recurrence_guard {
         // hashbuild / hashbuildempty call it; it becomes a real install once
         // heapam_handler.c lands. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "table_index_build_scan"),
-        // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
-        // is `common/relpath.c`'s function, not catalog.c's — the seam was
-        // mis-homed onto backend-catalog-catalog-seams (this owner's stable
-        // contract, `(db_oid, spc_oid) -> PgResult<String>`, owned String, no
-        // mcx). Its genuine owner crate `backend-common-relpath` (relpath.c) is
-        // unported; the canonical seam already has a value-shaped home in
-        // `backend-common-relpath-seams` (mcx -> PgString). Installing the path
-        // arithmetic here would re-home relpath.c's logic into the wrong TU
-        // (and the two seam contracts diverge: owned String vs Mcx/PgString).
-        // Install once relpath.c lands as its own owner; consumers (inval.c
-        // at_eoxact, relmapper relmap_redo) then move to the relpath seam.
-        ("backend_catalog_catalog", "get_database_path"),
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the
@@ -900,19 +905,6 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "rescan_custom_scan"),
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
-        // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
-        // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
-        // ported in the COMPLETE backend-optimizer-util-pathnode crate (their
-        // bodies pull in create_unique_path / create_append_path + the
-        // GetMemoryChunkContext recost dance that the pathnode port has not
-        // reached). joinrels.c (join_is_legal / mark_dummy_rel /
-        // populate_joinrel_with_paths) `::call`s them through
-        // backend-optimizer-util-pathnode-seams and seam-and-panics until the
-        // owner ports the two functions and installs the seams. Pay down by
-        // porting both fns into pathnode, installing them in its init_seams(),
-        // and DELETING these two entries.
-        ("backend_optimizer_util_pathnode", "can_create_unique_path"),
-        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
         // resolve another backend's PGPROC-embedded `procLatch` to a
