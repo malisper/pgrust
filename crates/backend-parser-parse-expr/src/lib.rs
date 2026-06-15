@@ -337,14 +337,19 @@ fn expr_to_node(e: Expr) -> Node<'static> {
 /// `make_const(pstate, (A_Const *) expr)` — build a typed `Const` from a grammar
 /// `A_Const` literal value node.
 ///
-/// `make_const` lives in `parse_node.c`, an unported sibling crate; the literal
-/// decode reaches the type-input functions through the catalog. Routed through
-/// the `make_const` seam (panic-until-landed).
+/// `make_const` lives in `parse_node.c`, owned by the merged `backend-parser-
+/// small1` unit (landed, cycle-free); called directly. The resulting `Const`
+/// carries a `Datum<'static>` (by-value literals; the by-ref string/numeric/
+/// bitstring arms panic inside the owner pending the canonical Datum carrier),
+/// so a scratch context for the decode is faithful (the parse-collate /
+/// parse-type precedent).
 fn transform_a_const<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Const<'mcx>,
 ) -> PgResult<Expr> {
-    seam_make_const(pstate, Node::A_Const(a))
+    let scratch = MemoryContext::new("make_const");
+    let con = backend_parser_small1::make_const(scratch.mcx(), &*pstate, &a)?;
+    Ok(Expr::Const(con))
 }
 
 // ===========================================================================
@@ -1779,14 +1784,6 @@ fn format_type_be(typid: Oid) -> PgResult<String> {
 // a panic-until-landed seam declared in the matching sibling `*-seams` crate.
 // ===========================================================================
 
-fn seam_make_const<'mcx>(_pstate: &mut ParseState<'mcx>, _node: Node<'mcx>) -> PgResult<Expr> {
-    // make_const lives in parse_node.c (unported). Mirror-PG-and-panic.
-    panic!(
-        "make_const (parse_node.c) is not yet ported; T_A_Const literal decode \
-         reaches the still-unported parse_node.c make_const."
-    )
-}
-
 fn seam_transform_column_ref<'mcx>(
     _pstate: &mut ParseState<'mcx>,
     _cref: Node<'mcx>,
@@ -1970,24 +1967,88 @@ fn assign_expr_collations<'mcx>(
 use backend_parser_parse_expr_seams as me;
 
 fn analyze_one_exec_param_impl<'mcx>(
-    _mcx: mcx::Mcx<'mcx>,
-    _source_text: &str,
-    _raw_param: &Node<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    source_text: &str,
+    raw_param: &Node<'mcx>,
     _param_index: i32,
-    _expected_type_id: Oid,
+    expected_type_id: Oid,
 ) -> PgResult<me::AnalyzedExecParam<'mcx>> {
-    // The per-parameter body of EvaluateParams:
-    //   expr = transformExpr(pstate, raw_param, EXPR_KIND_EXECUTE_PARAMETER);
+    // The per-parameter body of EvaluateParams (prepare.c:311-341):
+    //   expr = transformExpr(pstate, expr, EXPR_KIND_EXECUTE_PARAMETER);
     //   given_type_id = exprType(expr);
-    //   expr = coerce_to_target_type(..., COERCION_ASSIGNMENT, COERCE_IMPLICIT_CAST);
+    //   expr = coerce_to_target_type(pstate, expr, given_type_id, expected_type_id,
+    //              -1, COERCION_ASSIGNMENT, COERCE_IMPLICIT_CAST, -1);
+    //   if (expr == NULL) ereport(...);  -- driver raises it (coercion_failed)
     //   assign_expr_collations(pstate, expr);
-    // The transform + coercion + collation legs reach `coerce_to_target_type`
-    // (parse_coerce.c, unported) — mirror-PG-and-panic until parse_coerce lands,
-    // matching the rest of this crate's coercion-dependent arms.
-    panic!(
-        "analyze_one_exec_param: the EvaluateParams per-parameter coercion leg \
-         reaches coerce_to_target_type (parse_coerce.c, unported)."
-    )
+    //   lfirst(l) = expr;
+    //
+    // The C runs this on the EvaluateParams caller's pstate; an EXECUTE-parameter
+    // expression cannot reference range-table columns, so a fresh parse state
+    // carrying only p_sourcetext is faithful. C `copyObject(params)` first
+    // (the parser scribbles on its input) — `clone_in` is copyObject here.
+    let mut pstate_box = backend_parser_small1::make_parsestate(mcx, None)?;
+    pstate_box.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    let pstate: &mut ParseState<'mcx> = &mut pstate_box;
+
+    let raw = raw_param.clone_in(mcx)?;
+    // exprLocation(lfirst(l)) — the original parser node's location, captured
+    // before transform for the cannot-be-coerced error position.
+    let expr_location = node_location(&raw);
+
+    let expr = transformExpr(
+        pstate,
+        Some(raw),
+        ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER,
+    )?;
+    let expr = expr.ok_or_else(|| {
+        PgError::error("analyze_one_exec_param: EXECUTE parameter transformed to NULL")
+    })?;
+
+    let given_type_id = expr_type(Some(&expr))?;
+
+    let coerced = coerce::coerce_to_target_type::call(
+        pstate,
+        expr,
+        given_type_id,
+        expected_type_id,
+        -1,
+        CoercionContext::COERCION_ASSIGNMENT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )?;
+
+    let Some(mut coerced) = coerced else {
+        // coerce_to_target_type returned NULL — the driver raises the
+        // cannot-be-coerced ereport with C's exact branch order.
+        return Ok(me::AnalyzedExecParam {
+            expr: None,
+            coercion_failed: true,
+            given_type_id,
+            expr_location,
+        });
+    };
+
+    assign_expr_collations(pstate, &mut coerced)?;
+
+    Ok(me::AnalyzedExecParam {
+        expr: Some(mcx::alloc_in(mcx, coerced)?),
+        coercion_failed: false,
+        given_type_id,
+        expr_location,
+    })
+}
+
+/// `exprLocation(node)` for a raw-grammar [`Node`] — the parser location used in
+/// the EXECUTE-parameter cannot-be-coerced error. The trimmed model drops most
+/// raw-node locations; the A_Const literal carries one, and an already-typed
+/// `Node::Expr` defers to `exprLocation`. Other raw nodes report -1 (cursor 0).
+fn node_location(n: &Node<'_>) -> i32 {
+    match n {
+        Node::A_Const(a) => a.location,
+        Node::A_Expr(a) => a.location,
+        Node::Expr(e) => expr_location(Some(e)).unwrap_or(-1),
+        _ => -1,
+    }
 }
 
 fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {

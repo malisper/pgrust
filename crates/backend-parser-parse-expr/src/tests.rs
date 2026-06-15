@@ -57,3 +57,52 @@ fn parser_errposition_clamps() {
     assert_eq!(parser_errposition_impl("select 1", -1).unwrap(), 0);
     assert_eq!(parser_errposition_impl("select 1", 7).unwrap(), 7);
 }
+
+/// The `T_A_Const` arm wires directly to `parse_node.c` `make_const`
+/// (`backend-parser-small1`): an integer literal decodes to an `INT4` `Const`.
+#[test]
+fn a_const_integer_dispatches_to_make_const() {
+    use mcx::MemoryContext;
+    use types_tuple::heaptuple::INT4OID;
+
+    let ctx = MemoryContext::new("a_const_test");
+    let mcx = ctx.mcx();
+    let mut pstate = types_nodes::parsestmt::ParseState::new(mcx).unwrap();
+
+    let ival = Node::Integer(types_nodes::value::Integer { ival: 42 });
+    let aconst = Node::A_Const(A_Const {
+        val: Some(mcx::alloc_in(mcx, ival).unwrap()),
+        isnull: false,
+        location: -1,
+    });
+
+    let out = transformExprRecurse(&mut pstate, Some(aconst)).unwrap();
+    match out {
+        Some(Expr::Const(c)) => {
+            assert_eq!(c.consttype, INT4OID);
+            assert!(!c.constisnull);
+        }
+        other => panic!("expected Const, got {other:?}"),
+    }
+}
+
+/// A bare NULL `A_Const` decodes to an UNKNOWN null `Const`.
+#[test]
+fn a_const_null_dispatches_to_make_const() {
+    use mcx::MemoryContext;
+    use types_tuple::heaptuple::UNKNOWNOID;
+
+    let ctx = MemoryContext::new("a_const_null_test");
+    let mcx = ctx.mcx();
+    let mut pstate = types_nodes::parsestmt::ParseState::new(mcx).unwrap();
+
+    let aconst = Node::A_Const(A_Const { val: None, isnull: true, location: -1 });
+    let out = transformExprRecurse(&mut pstate, Some(aconst)).unwrap();
+    match out {
+        Some(Expr::Const(c)) => {
+            assert_eq!(c.consttype, UNKNOWNOID);
+            assert!(c.constisnull);
+        }
+        other => panic!("expected null Const, got {other:?}"),
+    }
+}
