@@ -426,6 +426,16 @@ pub(crate) fn itup_block_number(itup: &[u8]) -> BlockNumber {
     (bi_hi << 16) | bi_lo
 }
 
+/// `itup->t_tid` over an on-disk image: the full leading `ItemPointerData`
+/// (`BlockIdData ip_blkid` [bytes 0..4] then `OffsetNumber ip_posid`
+/// [bytes 4..6]). Used by the scan layer to report a matching heap TID.
+#[inline]
+pub(crate) fn itup_heap_ptr(itup: &[u8]) -> types_tuple::heaptuple::ItemPointerData {
+    let blkno = itup_block_number(itup);
+    let ip_posid = u16::from_ne_bytes([itup[4], itup[5]]);
+    types_tuple::heaptuple::ItemPointerData::new(blkno, ip_posid)
+}
+
 /// `ItemPointerSetBlockNumber(&itup->t_tid, blkno)` over an on-disk image: store
 /// the block number into the leading `BlockIdData` (`bi_hi`, `bi_lo` halves).
 #[inline]
