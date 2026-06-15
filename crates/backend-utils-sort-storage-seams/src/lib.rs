@@ -220,6 +220,14 @@ seam_core::seam!(
     ) -> types_error::PgResult<bool>
 );
 
+seam_core::seam!(
+    /// `tuplestore_in_memory(state)` (tuplestore.c): true while the tuplestore
+    /// has not yet spilled to disk (`state->status == TSS_INMEM`). nodeWindowAgg
+    /// uses it to decide whether to force the whole partition to be spooled in
+    /// one go (alternating reads and writes is expensive once spilled).
+    pub fn tuplestore_in_memory(state: &types_nodes::Tuplestorestate<'_>) -> bool
+);
+
 // ---------------------------------------------------------------------------
 // logtape.c — the logical-tape spill surface the hash-agg spill path drives.
 // `LogicalTapeSet *` / `LogicalTape *` cross as the opaque handles from
