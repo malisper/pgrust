@@ -9218,6 +9218,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-core"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -14219,6 +14235,7 @@ dependencies = [
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
+ "backend-rewrite-core",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
