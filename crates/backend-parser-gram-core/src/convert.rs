@@ -31,6 +31,7 @@ use backend_nodes_types::parsenodes as cp; // c2rust clause structs
 use backend_nodes_types::primnodes as cpr; // c2rust primnode structs
 
 use types_nodes::rawnodes as tn; // owned raw-grammar target types
+use types_nodes::rawexprnodes as tn_re; // owned raw-grammar Expr-deriving nodes
 use types_nodes::primnodes as tn_prim;
 use types_nodes::value as tn_val;
 
@@ -255,22 +256,27 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         tags::T_String => Ok(conv_value_node(mcx, n)?),
         tags::T_BitString => Ok(conv_value_node(mcx, n)?),
 
-        // --- grammar-produced Expr leaves ---
-        tags::T_CaseExpr
-        | tags::T_CoalesceExpr
-        | tags::T_MinMaxExpr
-        | tags::T_SubLink
-        | tags::T_BooleanTest
-        | tags::T_NullTest
-        | tags::T_XmlExpr
-        | tags::T_RowExpr
-        | tags::T_GroupingFunc
-        | tags::T_CollateExpr
-        | tags::T_SetToDefault
-        | tags::T_CurrentOfExpr
-        | tags::T_NamedArgExpr
-        | tags::T_BoolExpr
-        | tags::T_SQLValueFunction => Ok(Node::Expr(conv_expr(mcx, n, tag)?)),
+        // --- grammar-produced raw `Expr`-deriving nodes (rawexprnodes) ---
+        tags::T_BoolExpr => Ok(Node::BoolExpr(conv_boolexpr(mcx, n.cast())?)),
+        tags::T_CaseExpr => Ok(Node::CaseExpr(conv_caseexpr(mcx, n.cast())?)),
+        tags::T_CaseWhen => Ok(Node::CaseWhen(conv_casewhen(mcx, n.cast())?)),
+        tags::T_CoalesceExpr => Ok(Node::CoalesceExpr(conv_coalesceexpr(mcx, n.cast())?)),
+        tags::T_MinMaxExpr => Ok(Node::MinMaxExpr(conv_minmaxexpr(mcx, n.cast())?)),
+        tags::T_SubLink => Ok(Node::SubLink(conv_sublink(mcx, n.cast())?)),
+        tags::T_NullTest => Ok(Node::NullTest(conv_nulltest(mcx, n.cast())?)),
+        tags::T_BooleanTest => Ok(Node::BooleanTest(conv_booleantest(mcx, n.cast())?)),
+        tags::T_RowExpr => Ok(Node::RowExpr(conv_rowexpr(mcx, n.cast())?)),
+        tags::T_GroupingFunc => Ok(Node::GroupingFunc(conv_groupingfunc(mcx, n.cast())?)),
+        tags::T_CollateExpr => Ok(Node::CollateExpr(conv_collateexpr(mcx, n.cast())?)),
+        tags::T_SetToDefault => Ok(Node::SetToDefault(conv_settodefault(n.cast()))),
+        tags::T_CurrentOfExpr => {
+            Ok(Node::CurrentOfExpr(conv_currentofexpr(mcx, n.cast())?))
+        }
+        tags::T_NamedArgExpr => Ok(Node::NamedArgExpr(conv_namedargexpr(mcx, n.cast())?)),
+        tags::T_SQLValueFunction => {
+            Ok(Node::SQLValueFunction(conv_sqlvaluefunction(n.cast())))
+        }
+        tags::T_XmlExpr => Ok(Node::XmlExpr(conv_xmlexpr(mcx, n.cast())?)),
 
         // --- anything else: the absent DDL/utility node families (F2+) ---
         other => unported(other, node_tag_name(other)),

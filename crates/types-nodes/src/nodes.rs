@@ -359,6 +359,49 @@ pub enum Node<'mcx> {
     MergeWhenClause(crate::rawnodes::MergeWhenClause<'mcx>),
     /// `T_ReturningClause`.
     ReturningClause(crate::rawnodes::ReturningClause<'mcx>),
+    // --- raw-grammar `Expr`-deriving expression nodes (rawexprnodes) ---
+    // In C, these `Expr`-deriving node types are the same struct in the raw
+    // grammar output and the post-analysis tree, but the grammar fills their
+    // `Node *`/`List *` children with RAW parse-tree nodes
+    // (`ColumnRef`/`A_Expr`/…). The owned model's post-analysis
+    // [`crate::primnodes::Expr`] enum carries `Expr` children, so it cannot hold
+    // the raw children; the raw counterparts live in
+    // [`crate::rawexprnodes`] and ride as their own `Node` arms (no conflation
+    // with `Node::Expr`). `transformExpr` (analyze.c) turns these into
+    // post-analysis `Expr`. Additive (`#[non_exhaustive]`); tags verified vs
+    // nodes/nodetags.h.
+    /// `T_BoolExpr` (raw).
+    BoolExpr(crate::rawexprnodes::BoolExpr<'mcx>),
+    /// `T_CaseExpr` (raw).
+    CaseExpr(crate::rawexprnodes::CaseExpr<'mcx>),
+    /// `T_CaseWhen` (raw).
+    CaseWhen(crate::rawexprnodes::CaseWhen<'mcx>),
+    /// `T_CoalesceExpr` (raw).
+    CoalesceExpr(crate::rawexprnodes::CoalesceExpr<'mcx>),
+    /// `T_MinMaxExpr` (raw).
+    MinMaxExpr(crate::rawexprnodes::MinMaxExpr<'mcx>),
+    /// `T_SubLink` (raw).
+    SubLink(crate::rawexprnodes::SubLink<'mcx>),
+    /// `T_NullTest` (raw).
+    NullTest(crate::rawexprnodes::NullTest<'mcx>),
+    /// `T_BooleanTest` (raw).
+    BooleanTest(crate::rawexprnodes::BooleanTest<'mcx>),
+    /// `T_RowExpr` (raw).
+    RowExpr(crate::rawexprnodes::RowExpr<'mcx>),
+    /// `T_GroupingFunc` (raw).
+    GroupingFunc(crate::rawexprnodes::GroupingFunc<'mcx>),
+    /// `T_CollateExpr` (raw).
+    CollateExpr(crate::rawexprnodes::CollateExpr<'mcx>),
+    /// `T_SetToDefault` (raw).
+    SetToDefault(crate::rawexprnodes::SetToDefault),
+    /// `T_CurrentOfExpr` (raw).
+    CurrentOfExpr(crate::rawexprnodes::CurrentOfExpr<'mcx>),
+    /// `T_NamedArgExpr` (raw).
+    NamedArgExpr(crate::rawexprnodes::NamedArgExpr<'mcx>),
+    /// `T_SQLValueFunction` (raw).
+    SQLValueFunction(crate::rawexprnodes::SQLValueFunction),
+    /// `T_XmlExpr` (raw).
+    XmlExpr(crate::rawexprnodes::XmlExpr<'mcx>),
     // --- value nodes (nodes/value.h) — leaf literals ---
     // The lexer/grammar emits these `Value`-family leaves (`A_Const.val`,
     // operator-name `list_make1(makeString(name))`, etc.) as `Node *`, so they
@@ -632,6 +675,25 @@ impl<'mcx> Node<'mcx> {
             Node::OnConflictClause(_) => T_OnConflictClause,
             Node::MergeWhenClause(_) => T_MergeWhenClause,
             Node::ReturningClause(_) => T_ReturningClause,
+            // raw-grammar `Expr`-deriving nodes — share the C tag values of the
+            // executor `Expr` run (nodes/nodetags.h); the same tag is correct
+            // pre- and post-analysis.
+            Node::BoolExpr(_) => T_BoolExpr,
+            Node::CaseExpr(_) => T_CaseExpr,
+            Node::CaseWhen(_) => T_CaseWhen,
+            Node::CoalesceExpr(_) => T_CoalesceExpr,
+            Node::MinMaxExpr(_) => T_MinMaxExpr,
+            Node::SubLink(_) => T_SubLink,
+            Node::NullTest(_) => T_NullTest,
+            Node::BooleanTest(_) => T_BooleanTest,
+            Node::RowExpr(_) => T_RowExpr,
+            Node::GroupingFunc(_) => T_GroupingFunc,
+            Node::CollateExpr(_) => T_CollateExpr,
+            Node::SetToDefault(_) => T_SetToDefault,
+            Node::CurrentOfExpr(_) => T_CurrentOfExpr,
+            Node::NamedArgExpr(_) => T_NamedArgExpr,
+            Node::SQLValueFunction(_) => T_SQLValueFunction,
+            Node::XmlExpr(_) => T_XmlExpr,
             Node::Integer(_) => T_Integer,
             Node::Float(_) => T_Float,
             Node::Boolean(_) => T_Boolean,
@@ -787,6 +849,23 @@ impl<'mcx> Node<'mcx> {
             Node::OnConflictClause(o) => Ok(Node::OnConflictClause(o.clone_in(mcx)?)),
             Node::MergeWhenClause(m) => Ok(Node::MergeWhenClause(m.clone_in(mcx)?)),
             Node::ReturningClause(r) => Ok(Node::ReturningClause(r.clone_in(mcx)?)),
+            // raw-grammar `Expr`-deriving nodes — real per-struct `copyObject`.
+            Node::BoolExpr(b) => Ok(Node::BoolExpr(b.clone_in(mcx)?)),
+            Node::CaseExpr(c) => Ok(Node::CaseExpr(c.clone_in(mcx)?)),
+            Node::CaseWhen(c) => Ok(Node::CaseWhen(c.clone_in(mcx)?)),
+            Node::CoalesceExpr(c) => Ok(Node::CoalesceExpr(c.clone_in(mcx)?)),
+            Node::MinMaxExpr(m) => Ok(Node::MinMaxExpr(m.clone_in(mcx)?)),
+            Node::SubLink(s) => Ok(Node::SubLink(s.clone_in(mcx)?)),
+            Node::NullTest(n) => Ok(Node::NullTest(n.clone_in(mcx)?)),
+            Node::BooleanTest(b) => Ok(Node::BooleanTest(b.clone_in(mcx)?)),
+            Node::RowExpr(r) => Ok(Node::RowExpr(r.clone_in(mcx)?)),
+            Node::GroupingFunc(g) => Ok(Node::GroupingFunc(g.clone_in(mcx)?)),
+            Node::CollateExpr(c) => Ok(Node::CollateExpr(c.clone_in(mcx)?)),
+            Node::SetToDefault(s) => Ok(Node::SetToDefault(s.clone_in(mcx)?)),
+            Node::CurrentOfExpr(c) => Ok(Node::CurrentOfExpr(c.clone_in(mcx)?)),
+            Node::NamedArgExpr(n) => Ok(Node::NamedArgExpr(n.clone_in(mcx)?)),
+            Node::SQLValueFunction(s) => Ok(Node::SQLValueFunction(s.clone_in(mcx)?)),
+            Node::XmlExpr(x) => Ok(Node::XmlExpr(x.clone_in(mcx)?)),
             // Value nodes (nodes/value.h) — real per-struct `copyObject`.
             Node::Integer(i) => Ok(Node::Integer(i.clone_in(mcx)?)),
             Node::Float(f) => Ok(Node::Float(f.clone_in(mcx)?)),
@@ -839,6 +918,7 @@ const T_ArrayCoerceExpr: NodeTag = NodeTag(29);
 const T_ConvertRowtypeExpr: NodeTag = NodeTag(30);
 const T_CollateExpr: NodeTag = NodeTag(31);
 const T_CaseExpr: NodeTag = NodeTag(32);
+const T_CaseWhen: NodeTag = NodeTag(33);
 const T_CaseTestExpr: NodeTag = NodeTag(34);
 const T_ArrayExpr: NodeTag = NodeTag(35);
 const T_RowExpr: NodeTag = NodeTag(36);

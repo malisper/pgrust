@@ -184,7 +184,7 @@ pub use A_Expr_Kind::{
 // ---------------------------------------------------------------------------
 
 /// Deep-copy an `Option<NodePtr>` (`Node *` field) into `mcx`.
-fn copy_opt_node<'b>(
+pub(crate) fn copy_opt_node<'b>(
     n: &Option<NodePtr<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<Option<NodePtr<'b>>> {
@@ -195,7 +195,7 @@ fn copy_opt_node<'b>(
 }
 
 /// Deep-copy a `PgVec<NodePtr>` (`List *` of nodes) into `mcx`.
-fn copy_node_vec<'b>(
+pub(crate) fn copy_node_vec<'b>(
     v: &PgVec<'_, NodePtr<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, NodePtr<'b>>> {
@@ -207,7 +207,7 @@ fn copy_node_vec<'b>(
 }
 
 /// Deep-copy an `Option<PgString>` (`char *`) into `mcx`.
-fn copy_opt_str<'b>(s: &Option<PgString<'_>>, mcx: Mcx<'b>) -> PgResult<Option<PgString<'b>>> {
+pub(crate) fn copy_opt_str<'b>(s: &Option<PgString<'_>>, mcx: Mcx<'b>) -> PgResult<Option<PgString<'b>>> {
     match s {
         Some(s) => Ok(Some(s.clone_in(mcx)?)),
         None => Ok(None),

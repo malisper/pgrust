@@ -43,34 +43,314 @@ fn conv_a_const<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::A_Const) -> PgResult<Node<'mcx
 }
 
 // ---------------------------------------------------------------------------
-// Grammar-produced `Expr` leaves.
+// Grammar-produced raw `Expr`-deriving nodes (rawexprnodes).
 //
-// MODEL GAP (not missing converter code): the raw grammar builds these
-// `Expr`-derived nodes (`makeBoolExpr`, `CaseExpr`, `CoalesceExpr`, …) with
-// *raw* `Node *` children (ColumnRef/A_Expr/A_Const/…). But `types_nodes`'
-// `primnodes::Expr` is the *post-analysis* form: e.g. `BoolExpr.args: Vec<Expr>`
-// and `CaseExpr.arg: Option<Box<Expr>>` — children are `Expr`, and `Expr` has
-// no `ColumnRef`/`A_Expr`/`A_Const` arm (those are `Node` arms). So a raw
-// grammar `BoolExpr(args=[ColumnRef, A_Expr])` is NOT representable in the
-// current model without misrepresenting its children.
+// In C, these `Expr`-deriving nodes (`makeBoolExpr`, `CaseExpr`, `CoalesceExpr`,
+// …) are the same struct in the raw grammar output and the post-analysis tree,
+// but the grammar fills their `Node *`/`List *` children with *raw* parse-tree
+// nodes (ColumnRef/A_Expr/A_Const/…). The owned post-analysis
+// `primnodes::Expr` enum carries `Expr` children and so cannot hold those raw
+// children; the *raw* counterparts live in `types_nodes::rawexprnodes` (the
+// raw-expression node-model keystone) and ride as their own `Node` arms. These
+// converters target those raw types directly; analyze.c's `transformExpr`
+// later turns them into post-analysis `Expr`.
 //
-// Faithfully converting these therefore needs a raw-expression node model in
-// `types-nodes` that does not exist yet (the "parser/planner emit owned values"
-// campaign keystone). Until that lands, each such arm is a loud
-// mirror-PG-and-panic. The operator/column/function/constant expression core
-// the grammar emits as top-level `Node` arms (`A_Expr`/`ColumnRef`/`FuncCall`/
-// `A_Const`/`A_ArrayExpr`/`TypeCast`/`A_Indirection`/…) IS fully converted.
+// The c2rust `*mut Expr` child fields are `Node`-headed; cast to `*mut RawNode`
+// for the uniform `node_opt`/`node_list` helpers.
 // ---------------------------------------------------------------------------
 
-fn conv_expr<'mcx>(_mcx: Mcx<'mcx>, _n: *mut RawNode, tag: u32) -> PgResult<tn_prim::Expr> {
-    let name = node_tag_name(tag);
-    panic!(
-        "gram converter: grammar-produced Expr node tag {tag} ({name}) is not yet \
-         representable in types_nodes::primnodes::Expr (the post-analysis Expr \
-         model has `Expr` children; the raw grammar builds raw `Node` children). \
-         Needs the raw-expression node-model keystone (parser/planner owned-values \
-         campaign); parser grammar F1.5+"
-    );
+fn conv_boolexpr<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::BoolExpr) -> PgResult<tn_re::BoolExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::BoolExpr {
+        boolop: bool_expr_type(e.boolop),
+        args: node_list(mcx, e.args)?,
+        location: e.location,
+    })
+}
+
+fn conv_caseexpr<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::CaseExpr) -> PgResult<tn_re::CaseExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::CaseExpr {
+        casetype: e.casetype,
+        casecollid: e.casecollid,
+        arg: node_opt(mcx, e.arg.cast())?,
+        args: node_list(mcx, e.args)?,
+        defresult: node_opt(mcx, e.defresult.cast())?,
+        location: e.location,
+    })
+}
+
+fn conv_casewhen<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::CaseWhen) -> PgResult<tn_re::CaseWhen<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::CaseWhen {
+        expr: node_opt(mcx, e.expr.cast())?,
+        result: node_opt(mcx, e.result.cast())?,
+        location: e.location,
+    })
+}
+
+fn conv_coalesceexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::CoalesceExpr,
+) -> PgResult<tn_re::CoalesceExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::CoalesceExpr {
+        coalescetype: e.coalescetype,
+        coalescecollid: e.coalescecollid,
+        args: node_list(mcx, e.args)?,
+        location: e.location,
+    })
+}
+
+fn conv_minmaxexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::MinMaxExpr,
+) -> PgResult<tn_re::MinMaxExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::MinMaxExpr {
+        minmaxtype: e.minmaxtype,
+        minmaxcollid: e.minmaxcollid,
+        inputcollid: e.inputcollid,
+        op: min_max_op(e.op),
+        args: node_list(mcx, e.args)?,
+        location: e.location,
+    })
+}
+
+fn conv_sublink<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::SubLink) -> PgResult<tn_re::SubLink<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::SubLink {
+        sub_link_type: sub_link_type(e.sub_link_type),
+        sub_link_id: e.sub_link_id,
+        testexpr: node_opt(mcx, e.testexpr)?,
+        oper_name: node_list(mcx, e.oper_name)?,
+        subselect: node_opt(mcx, e.subselect)?,
+        location: e.location,
+    })
+}
+
+fn conv_nulltest<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::NullTest) -> PgResult<tn_re::NullTest<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::NullTest {
+        arg: node_opt(mcx, e.arg.cast())?,
+        nulltesttype: null_test_type(e.nulltesttype),
+        argisrow: e.argisrow,
+        location: e.location,
+    })
+}
+
+fn conv_booleantest<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::BooleanTest,
+) -> PgResult<tn_re::BooleanTest<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::BooleanTest {
+        arg: node_opt(mcx, e.arg.cast())?,
+        booltesttype: bool_test_type(e.booltesttype),
+        location: e.location,
+    })
+}
+
+fn conv_rowexpr<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::RowExpr) -> PgResult<tn_re::RowExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::RowExpr {
+        args: node_list(mcx, e.args)?,
+        row_typeid: e.row_typeid,
+        row_format: coercion_form(e.row_format),
+        colnames: node_list(mcx, e.colnames)?,
+        location: e.location,
+    })
+}
+
+fn conv_groupingfunc<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::GroupingFunc,
+) -> PgResult<tn_re::GroupingFunc<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::GroupingFunc {
+        args: node_list(mcx, e.args)?,
+        refs: int_list(mcx, e.refs)?,
+        cols: int_list(mcx, e.cols)?,
+        agglevelsup: e.agglevelsup,
+        location: e.location,
+    })
+}
+
+fn conv_collateexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::CollateExpr,
+) -> PgResult<tn_re::CollateExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::CollateExpr {
+        arg: node_opt(mcx, e.arg.cast())?,
+        coll_oid: e.coll_oid,
+        location: e.location,
+    })
+}
+
+fn conv_settodefault(p: *mut cpr::SetToDefault) -> tn_re::SetToDefault {
+    let e = unsafe { &*p };
+    tn_re::SetToDefault {
+        type_id: e.type_id,
+        type_mod: e.type_mod,
+        collation: e.collation,
+        location: e.location,
+    }
+}
+
+fn conv_currentofexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::CurrentOfExpr,
+) -> PgResult<tn_re::CurrentOfExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::CurrentOfExpr {
+        cvarno: e.cvarno,
+        cursor_name: cstr_opt(mcx, e.cursor_name)?,
+        cursor_param: e.cursor_param,
+    })
+}
+
+fn conv_namedargexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cpr::NamedArgExpr,
+) -> PgResult<tn_re::NamedArgExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::NamedArgExpr {
+        arg: node_opt(mcx, e.arg.cast())?,
+        name: cstr_opt(mcx, e.name)?,
+        argnumber: e.argnumber,
+        location: e.location,
+    })
+}
+
+fn conv_sqlvaluefunction(p: *mut cpr::SQLValueFunction) -> tn_re::SQLValueFunction {
+    let e = unsafe { &*p };
+    tn_re::SQLValueFunction {
+        op: sql_value_function_op(e.op),
+        type_: e.type_,
+        typmod: e.typmod,
+        location: e.location,
+    }
+}
+
+fn conv_xmlexpr<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::XmlExpr) -> PgResult<tn_re::XmlExpr<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::XmlExpr {
+        op: xml_expr_op(e.op),
+        name: cstr_opt(mcx, e.name)?,
+        named_args: node_list(mcx, e.named_args)?,
+        arg_names: node_list(mcx, e.arg_names)?,
+        args: node_list(mcx, e.args)?,
+        xmloption: xml_option_type(e.xmloption),
+        indent: e.indent,
+        type_: e.type_,
+        typmod: e.typmod,
+        location: e.location,
+    })
+}
+
+// --- small-enum discriminant mappers for the raw `Expr`-deriving nodes ---
+
+fn bool_expr_type(v: cpr::BoolExprType) -> tn_prim::BoolExprType {
+    use tn_prim::BoolExprType::*;
+    match v {
+        cpr::AND_EXPR => AND_EXPR,
+        cpr::OR_EXPR => OR_EXPR,
+        cpr::NOT_EXPR => NOT_EXPR,
+        other => panic!("gram converter: invalid BoolExprType {other}"),
+    }
+}
+
+fn sub_link_type(v: cpr::SubLinkType) -> tn_prim::SubLinkType {
+    use tn_prim::SubLinkType::*;
+    match v {
+        cpr::EXISTS_SUBLINK => Exists,
+        cpr::ALL_SUBLINK => All,
+        cpr::ANY_SUBLINK => Any,
+        cpr::ROWCOMPARE_SUBLINK => RowCompare,
+        cpr::EXPR_SUBLINK => Expr,
+        cpr::MULTIEXPR_SUBLINK => MultiExpr,
+        cpr::ARRAY_SUBLINK => Array,
+        cpr::CTE_SUBLINK => Cte,
+        other => panic!("gram converter: invalid SubLinkType {other}"),
+    }
+}
+
+fn min_max_op(v: cpr::MinMaxOp) -> tn_prim::MinMaxOp {
+    use tn_prim::MinMaxOp::*;
+    match v {
+        cpr::IS_GREATEST => IS_GREATEST,
+        cpr::IS_LEAST => IS_LEAST,
+        other => panic!("gram converter: invalid MinMaxOp {other}"),
+    }
+}
+
+fn null_test_type(v: cpr::NullTestType) -> tn_prim::NullTestType {
+    use tn_prim::NullTestType::*;
+    match v {
+        cpr::IS_NULL => IS_NULL,
+        cpr::IS_NOT_NULL => IS_NOT_NULL,
+        other => panic!("gram converter: invalid NullTestType {other}"),
+    }
+}
+
+fn bool_test_type(v: cpr::BoolTestType) -> tn_prim::BoolTestType {
+    use tn_prim::BoolTestType::*;
+    match v {
+        cpr::IS_TRUE => IS_TRUE,
+        cpr::IS_NOT_TRUE => IS_NOT_TRUE,
+        cpr::IS_FALSE => IS_FALSE,
+        cpr::IS_NOT_FALSE => IS_NOT_FALSE,
+        cpr::IS_UNKNOWN => IS_UNKNOWN,
+        cpr::IS_NOT_UNKNOWN => IS_NOT_UNKNOWN,
+        other => panic!("gram converter: invalid BoolTestType {other}"),
+    }
+}
+
+fn sql_value_function_op(v: cpr::SQLValueFunctionOp) -> tn_prim::SQLValueFunctionOp {
+    use tn_prim::SQLValueFunctionOp::*;
+    match v {
+        cpr::SVFOP_CURRENT_DATE => SVFOP_CURRENT_DATE,
+        cpr::SVFOP_CURRENT_TIME => SVFOP_CURRENT_TIME,
+        cpr::SVFOP_CURRENT_TIME_N => SVFOP_CURRENT_TIME_N,
+        cpr::SVFOP_CURRENT_TIMESTAMP => SVFOP_CURRENT_TIMESTAMP,
+        cpr::SVFOP_CURRENT_TIMESTAMP_N => SVFOP_CURRENT_TIMESTAMP_N,
+        cpr::SVFOP_LOCALTIME => SVFOP_LOCALTIME,
+        cpr::SVFOP_LOCALTIME_N => SVFOP_LOCALTIME_N,
+        cpr::SVFOP_LOCALTIMESTAMP => SVFOP_LOCALTIMESTAMP,
+        cpr::SVFOP_LOCALTIMESTAMP_N => SVFOP_LOCALTIMESTAMP_N,
+        cpr::SVFOP_CURRENT_ROLE => SVFOP_CURRENT_ROLE,
+        cpr::SVFOP_CURRENT_USER => SVFOP_CURRENT_USER,
+        cpr::SVFOP_USER => SVFOP_USER,
+        cpr::SVFOP_SESSION_USER => SVFOP_SESSION_USER,
+        cpr::SVFOP_CURRENT_CATALOG => SVFOP_CURRENT_CATALOG,
+        cpr::SVFOP_CURRENT_SCHEMA => SVFOP_CURRENT_SCHEMA,
+        other => panic!("gram converter: invalid SQLValueFunctionOp {other}"),
+    }
+}
+
+fn xml_expr_op(v: cpr::XmlExprOp) -> tn_prim::XmlExprOp {
+    use tn_prim::XmlExprOp::*;
+    match v {
+        cpr::IS_XMLCONCAT => IS_XMLCONCAT,
+        cpr::IS_XMLELEMENT => IS_XMLELEMENT,
+        cpr::IS_XMLFOREST => IS_XMLFOREST,
+        cpr::IS_XMLPARSE => IS_XMLPARSE,
+        cpr::IS_XMLPI => IS_XMLPI,
+        cpr::IS_XMLROOT => IS_XMLROOT,
+        cpr::IS_XMLSERIALIZE => IS_XMLSERIALIZE,
+        cpr::IS_DOCUMENT => IS_DOCUMENT,
+        other => panic!("gram converter: invalid XmlExprOp {other}"),
+    }
+}
+
+fn xml_option_type(v: cpr::XmlOptionType) -> tn_prim::XmlOptionType {
+    use tn_prim::XmlOptionType::*;
+    match v {
+        cpr::XMLOPTION_DOCUMENT => XMLOPTION_DOCUMENT,
+        cpr::XMLOPTION_CONTENT => XMLOPTION_CONTENT,
+        other => panic!("gram converter: invalid XmlOptionType {other}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
