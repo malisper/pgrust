@@ -551,7 +551,7 @@ pub fn ExecPrepareTupleRouting<'mcx>(
     mcx: Mcx<'mcx>,
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    proute: &mut PartitionTupleRouting,
+    proute: &mut PartitionTupleRouting<'mcx>,
     target_rel_info: RriId,
     slot: SlotId,
     part_rel_info: &mut Option<RriId>,

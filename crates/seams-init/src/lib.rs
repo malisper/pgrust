@@ -795,9 +795,6 @@ mod recurrence_guard {
         // (or are re-homed to their proper -seams crates).
         ("backend_commands_functioncmds", "aclcheck_error_type"),
         ("backend_commands_functioncmds", "get_language_oid"),
-        ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
-        ("backend_executor_execPartition", "exec_find_partition"),
-        ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
         ("backend_executor_execProcnode", "clear_param_execplan"),
         ("backend_executor_execProcnode", "exec_set_param_plan_for_pending"),
         ("backend_executor_execProcnode", "link_subplan_planstate"),
