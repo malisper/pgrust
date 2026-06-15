@@ -2675,8 +2675,8 @@ name = "backend-catalog-pg-db-role-setting"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-pg-db-role-setting-seams",
- "backend-commands-functioncmds-seams",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -3538,6 +3538,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-acl",
@@ -11132,6 +11133,7 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-guc-tables-seams",
+ "backend-utils-misc-superuser-seams",
  "mcx",
  "seam-core",
  "types-acl",

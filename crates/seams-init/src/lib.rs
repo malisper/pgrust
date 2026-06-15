@@ -751,12 +751,9 @@ mod recurrence_guard {
         //     (task #163 W2) via that crate's init_seams() — a cross-crate re-home
         //     install the dir-owner guard cannot see, so the allowlist entry stays
         //     to suppress the false "functioncmds didn't install it" flag.
-        //   * GUCArrayAdd/Delete/Reset (guc.c) still have NO impl: the GUC array
-        //     helpers live in guc.c, not yet ported. Consumed by functioncmds
-        //     (ddl_core) + pg-db-role-setting.
-        ("backend_commands_functioncmds", "guc_array_add"),
-        ("backend_commands_functioncmds", "guc_array_delete"),
-        ("backend_commands_functioncmds", "guc_array_reset"),
+        //   * GUCArrayAdd/Delete/Reset (guc_array.c) are now genuinely INSTALLED
+        //     by their real owner backend-utils-misc-guc (cross-crate re-home),
+        //     so their allowlist entries were removed (they no longer fire).
         // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED): aclcheck_error_type (aclchk.c) and
         // get_language_oid (proclang.c) are declared in
         // backend-commands-functioncmds-seams because functioncmds was their
