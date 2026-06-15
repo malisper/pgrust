@@ -876,8 +876,6 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "execute_attr_map_slot"),
-        ("backend_executor_execTuples", "pad_name_cstring_columns"),
         ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams
