@@ -38,10 +38,6 @@
 //!
 //! Genuinely-unported callees (no producer exists in this repo yet) reach an
 //! honest `panic!` (never `todo!`/`unimplemented!`):
-//!   * `index_getattr(itup_bytes, attno, tupdesc, &isnull)` — there is no
-//!     producer that deforms a single attribute out of an index tuple's *byte*
-//!     slice (the only `index_deform_tuple` seam targets an executor slot). This
-//!     is the same blocker `nbtpreprocesskeys` hit.
 //!   * `index_getprocinfo` / `fmgr_info` materialisation into the `u64` ORDER
 //!     proc handles `so->orderProcs[]` carries — no handle producer exists.
 //!   * `rd_indoption[]` / `rd_indcollation[]` per-column arrays — the trimmed
@@ -50,8 +46,8 @@
 //!   * `datumCopy` / `pfree` of by-ref skip-array `sk_argument`s, and the
 //!     opclass skip-support increment/decrement callbacks — no producer.
 //!   * the `btvacinfo` shared-memory array (only the surrounding cycle-id
-//!     arithmetic is portable); `_bt_getbuf`/`_bt_unlockbuf`; the parallel-scan
-//!     `_bt_parallel_*` helpers (owned by nbtree.c).
+//!     arithmetic is portable); the parallel-scan `_bt_parallel_*` helpers
+//!     (owned by nbtree.c).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -490,12 +486,20 @@ fn max_heap_tid(tuple: &[u8]) -> ItemPointerData {
 // ===========================================================================
 
 /// `index_getattr(tuple, attno, tupdesc, &isnull)` (access/itup.h) — deform a
-/// single attribute out of an index tuple. There is no producer in this repo
-/// that extracts one attribute from an index tuple's *byte* slice (the only
-/// `index_deform_tuple` seam targets an executor slot by pool id). Returns the
-/// canonical `(Datum, isnull)`. Same blocker as `nbtpreprocesskeys`.
-fn index_getattr(_tuple: &[u8], _attno: AttrNumber, _rel: &Relation) -> (Datum<'static>, bool) {
-    panic!("nbtutils: index_getattr (single-attribute index-tuple deform) not yet ported")
+/// single attribute out of an index tuple's on-disk byte image, against
+/// `RelationGetDescr(rel)`. Backed by the now-ported
+/// `backend-access-common-indextuple` `nocache_index_getattr` seam (the
+/// byte-slice variant); the scan-lifetime `Mcx` (into which a by-ref value is
+/// copied) is the index relation's allocator, exactly as `rel_mcx` and the
+/// `index_deform_tuple` seam thread it elsewhere. `Err` propagates the
+/// detoast / `ereport(ERROR)` surface.
+fn index_getattr<'mcx>(
+    tuple: &[u8],
+    attno: AttrNumber,
+    rel: &Relation<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mcx = *rel.rd_opcintype.allocator();
+    indextuple::nocache_index_getattr::call(mcx, tuple, attno as i32, rel.rd_att.as_ref())
 }
 
 /// `index_getprocinfo(rel, attno, BTORDER_PROC)` materialised as the `u64`
@@ -549,12 +553,13 @@ fn bt_parallel_primscan_schedule(_so: &mut BTScanOpaqueData, _curr_page: BlockNu
     panic!("_bt_advance_array_keys: _bt_parallel_primscan_schedule (nbtree.c) not yet ported")
 }
 
-/// `_bt_getbuf(rel, blkno, BT_READ)` (nbtpage.c) — pin+lock a block. There is
-/// no nbtpage.c-owned getbuf seam declared yet (only `_bt_lockbuf`/`_bt_relbuf`
-/// for an already-pinned buffer); the so->dropPin `_bt_killitems` path needs to
-/// re-pin the current page by block number.
-fn bt_getbuf(_rel: &Relation, _blkno: BlockNumber, _access: i32) -> PgResult<Buffer> {
-    panic!("_bt_killitems: _bt_getbuf (re-pin current page, nbtpage.c) not yet ported")
+/// `_bt_getbuf(rel, blkno, BT_READ)` (nbtpage.c) — pin+lock a block. Delegates
+/// to the in-crate `page::_bt_getbuf` (nbtpage.c lives in this same crate); the
+/// scan-lifetime `Mcx` is the index relation's allocator (same source as
+/// `rel_mcx`). The `so->dropPin` `_bt_killitems` path re-pins the current page
+/// by block number through it.
+fn bt_getbuf<'mcx>(rel: &Relation<'mcx>, blkno: BlockNumber, access: i32) -> PgResult<Buffer> {
+    crate::page::_bt_getbuf(rel_mcx(rel), rel, blkno, access)
 }
 
 // ===========================================================================
@@ -645,7 +650,7 @@ pub fn bt_mkscankey<'mcx>(
         // provides no tuple) are defensively represented as NULL values.
         let (arg, null) = if i < tupnatts {
             // SAFETY: itup is Some here, since tupnatts == 0 when None.
-            let (d, n) = index_getattr(itup.unwrap(), (i + 1) as AttrNumber, rel);
+            let (d, n) = index_getattr(itup.unwrap(), (i + 1) as AttrNumber, rel)?;
             (d, n)
         } else {
             (Datum::null(), true)
@@ -1410,7 +1415,7 @@ fn bt_tuple_before_array_skeys<'mcx>(
             continue;
         }
 
-        let (tupdatum, tupnull) = index_getattr(tuple, cur_attno, rel);
+        let (tupdatum, tupnull) = index_getattr(tuple, cur_attno, rel)?;
         let result: i32;
 
         if (cur_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) == 0 {
@@ -1672,7 +1677,7 @@ fn bt_advance_array_keys<'mcx>(
         }
 
         // Search in the scankey's array for the tuple attribute value.
-        let (tupdatum, tupnull) = index_getattr(tuple, cur_attno, rel);
+        let (tupdatum, tupnull) = index_getattr(tuple, cur_attno, rel)?;
 
         if has_array {
             let cur_elem_trig = sktrig_required && ikey == sktrig;
@@ -2210,8 +2215,8 @@ pub fn bt_set_startikey<'mcx>(
             }
 
             let (firstdatum, firstnull) =
-                index_getattr(firsttup, key_attno as AttrNumber, rel);
-            let (lastdatum, lastnull) = index_getattr(lasttup, key_attno as AttrNumber, rel);
+                index_getattr(firsttup, key_attno as AttrNumber, rel)?;
+            let (lastdatum, lastnull) = index_getattr(lasttup, key_attno as AttrNumber, rel)?;
 
             if (key_flags & SK_ISNULL) != 0 {
                 // IS NOT NULL key.
@@ -2247,7 +2252,7 @@ pub fn bt_set_startikey<'mcx>(
             }
 
             let (firstdatum, firstnull) =
-                index_getattr(firsttup, key_attno as AttrNumber, rel);
+                index_getattr(firsttup, key_attno as AttrNumber, rel)?;
             if (key_flags & SK_ISNULL) != 0 {
                 // IS NULL key.
                 debug_assert!((key_flags & SK_SEARCHNULL) != 0);
@@ -2274,7 +2279,7 @@ pub fn bt_set_startikey<'mcx>(
                 break; // unsafe
             }
             let (firstdatum, firstnull) =
-                index_getattr(firsttup, key_attno as AttrNumber, rel);
+                index_getattr(firsttup, key_attno as AttrNumber, rel)?;
             let orderproc = so.orderProcs[startikey as usize];
             let (_se, result) = bt_binsrch_array_skey(
                 orderproc,
@@ -2305,8 +2310,8 @@ pub fn bt_set_startikey<'mcx>(
         if key_attno > firstchangingattnum {
             break; // unsafe
         }
-        let (firstdatum, firstnull) = index_getattr(firsttup, key_attno as AttrNumber, rel);
-        let (lastdatum, lastnull) = index_getattr(lasttup, key_attno as AttrNumber, rel);
+        let (firstdatum, firstnull) = index_getattr(firsttup, key_attno as AttrNumber, rel)?;
+        let (lastdatum, lastnull) = index_getattr(lasttup, key_attno as AttrNumber, rel)?;
 
         let r1 = bt_binsrch_skiparray_skey(
             false,
@@ -2429,7 +2434,7 @@ fn bt_check_compare<'mcx>(
             return Ok(false);
         }
 
-        let (datum, is_null) = index_getattr(tuple, key_attno, rel);
+        let (datum, is_null) = index_getattr(tuple, key_attno, rel)?;
 
         if (key_flags & SK_ISNULL) != 0 {
             // Handle IS NULL/NOT NULL tests.
@@ -2555,7 +2560,7 @@ fn bt_check_rowcompare<'mcx>(
             return Ok(true);
         }
 
-        let (datum, is_null) = index_getattr(tuple, subkey.sk_attno, rel);
+        let (datum, is_null) = index_getattr(tuple, subkey.sk_attno, rel)?;
 
         if is_null {
             if forcenonrequired {
@@ -2852,18 +2857,21 @@ fn bt_killitems_inner<'mcx>(rel: &Relation<'mcx>, so: &mut BTScanOpaqueData<'mcx
     Ok(())
 }
 
-/// `BufferGetPage` memory context source: the scan workspace context. The
-/// `Relation` doesn't carry an `mcx`; the bufmgr `buffer_get_page` seam needs
-/// one. There is no plumbed scan-context here, so this is a gap.
-fn rel_mcx<'mcx>(_rel: &Relation<'mcx>) -> Mcx<'mcx> {
-    panic!("_bt_killitems: scan memory context for BufferGetPage not threaded through the seam")
+/// `BufferGetPage` memory context source: the scan/index workspace context.
+/// The `Relation` does not carry an explicit `mcx`, but its `'mcx` `PgVec`
+/// metadata is allocated in the scan-lifetime context, so its allocator is the
+/// genuine context (identical to the `rel_mcx` search.rs threads for page
+/// reads). Page snapshots read through it are owned `PgVec`s freed at the end
+/// of the call, mirroring C reading pages into `CurrentMemoryContext`.
+fn rel_mcx<'mcx>(rel: &Relation<'mcx>) -> Mcx<'mcx> {
+    *rel.rd_opcintype.allocator()
 }
 
 /// `_bt_unlockbuf(rel, buf)` (nbtpage.c) — release the content lock kept by a
-/// prior `_bt_lockbuf`, without dropping the pin. No nbtpage.c-owned seam exists
-/// (only `bt_relbuf`, which also drops the pin).
-fn bt_unlockbuf(_rel: &Relation, _buf: Buffer) {
-    panic!("_bt_killitems: _bt_unlockbuf (release lock, keep pin; nbtpage.c) not yet ported")
+/// prior `_bt_lockbuf`, without dropping the pin. Delegates to the in-crate
+/// `page::_bt_unlockbuf` (nbtpage.c is in this same crate).
+fn bt_unlockbuf<'mcx>(rel: &Relation<'mcx>, buf: Buffer) {
+    crate::page::_bt_unlockbuf(rel, buf);
 }
 
 /// `PageGetItemId(page, offnum)` reading from a mutable byte buffer.
@@ -3167,8 +3175,8 @@ fn bt_keep_natts<'mcx>(
     for attnum in 1..=nkeyatts {
         let scankey = &itup_key.scankeys[(attnum - 1) as usize];
 
-        let (datum1, is_null1) = index_getattr(lastleft, attnum as AttrNumber, rel);
-        let (datum2, is_null2) = index_getattr(firstright, attnum as AttrNumber, rel);
+        let (datum1, is_null1) = index_getattr(lastleft, attnum as AttrNumber, rel)?;
+        let (datum2, is_null2) = index_getattr(firstright, attnum as AttrNumber, rel)?;
 
         if is_null1 != is_null2 {
             break;
@@ -3217,8 +3225,8 @@ fn bt_keep_natts_fast_inner<'mcx>(
     let keysz = rel_nkeyatts(rel);
     let mut keepnatts = 1;
     for attnum in 1..=keysz {
-        let (datum1, is_null1) = index_getattr(lastleft, attnum as AttrNumber, rel);
-        let (datum2, is_null2) = index_getattr(firstright, attnum as AttrNumber, rel);
+        let (datum1, is_null1) = index_getattr(lastleft, attnum as AttrNumber, rel)?;
+        let (datum2, is_null2) = index_getattr(firstright, attnum as AttrNumber, rel)?;
         let (attbyval, attlen) = compact_attr(rel, attnum - 1);
 
         if is_null1 != is_null2 {
