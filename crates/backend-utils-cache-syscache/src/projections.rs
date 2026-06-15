@@ -728,14 +728,19 @@ const UNUSED_KEY: SysCacheKey<'static> = SysCacheKey::Value(KeyDatum::null());
  * ------------------------------------------------------------------------- */
 
 use types_catalog::pg_constraint::{
-    ConstraintFormCopy, FormData_pg_constraint, Anum_pg_constraint_conname,
+    ConKeyArray, ConstraintFormCopy, FkArrayProjection, FormData_pg_constraint, OidArray,
+    Anum_pg_constraint_conname,
     Anum_pg_constraint_connamespace, Anum_pg_constraint_contype, Anum_pg_constraint_condeferrable,
     Anum_pg_constraint_condeferred, Anum_pg_constraint_conenforced, Anum_pg_constraint_convalidated,
     Anum_pg_constraint_conrelid, Anum_pg_constraint_contypid, Anum_pg_constraint_conindid,
     Anum_pg_constraint_conparentid, Anum_pg_constraint_confrelid, Anum_pg_constraint_confupdtype,
     Anum_pg_constraint_confdeltype, Anum_pg_constraint_confmatchtype, Anum_pg_constraint_conislocal,
     Anum_pg_constraint_coninhcount, Anum_pg_constraint_connoinherit, Anum_pg_constraint_conperiod,
+    Anum_pg_constraint_conkey, Anum_pg_constraint_confkey, Anum_pg_constraint_conpfeqop,
+    Anum_pg_constraint_conppeqop, Anum_pg_constraint_conffeqop, Anum_pg_constraint_confdelsetcols,
 };
+use types_tuple::heaptuple::{INT2OID, OIDOID};
+use backend_access_common_detoast_seams as detoast_seams;
 
 /// `Anum_pg_constraint_oid` (`catalog/pg_constraint.h`).
 const Anum_pg_constraint_oid: i32 = 1;
@@ -898,6 +903,232 @@ pub(crate) fn search_constraint_form_by_oid(
         conkey: None,
         tid,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// `pg_constraint` array-column reads (`DatumGetArrayTypeP` + `ARR_*`).
+//
+// The smallint / oid array columns of a `pg_constraint` row are 1-D inline
+// catalog arrays. The deformed by-reference column value is the verbatim array
+// varlena (header included); `DatumGetArrayTypeP` (C) detoasts it first. We
+// mirror that with `detoast_attr`, then read the `ArrayType` header fields
+// (`array.h` accessor macros) straight off the bytes.
+// ---------------------------------------------------------------------------
+
+/// `sizeof(ArrayType)` — `vl_len_`(4) + `ndim`(4) + `dataoffset`(4) +
+/// `elemtype`(4).
+const ARRAYTYPE_HDRSZ: usize = 16;
+/// `MAXIMUM_ALIGNOF` (`pg_config.h`): 8 on all supported platforms.
+const MAXIMUM_ALIGNOF: usize = 8;
+
+#[inline]
+fn arr_read_i32(a: &[u8], off: usize) -> i32 {
+    i32::from_ne_bytes([a[off], a[off + 1], a[off + 2], a[off + 3]])
+}
+
+#[inline]
+fn arr_maxalign(len: usize) -> usize {
+    (len + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
+}
+
+/// `ARR_DATA_OFFSET(a)` — `ARR_HASNULL ? dataoffset : MAXALIGN(sizeof(ArrayType)
+/// + 2*sizeof(int)*ndim)`.
+fn arr_data_offset(_a: &[u8], ndim: i32, dataoffset: i32) -> usize {
+    if dataoffset != 0 {
+        dataoffset as usize
+    } else {
+        arr_maxalign(ARRAYTYPE_HDRSZ + 2 * 4 * ndim as usize)
+    }
+}
+
+/// Common decode of an array varlena into `(ndim, hasnull, elemtype, dim0,
+/// data_offset)`. `DatumGetArrayTypeP` (detoast) then `ARR_NDIM` / `ARR_HASNULL`
+/// / `ARR_ELEMTYPE` / `ARR_DIMS(arr)[0]` / `ARR_DATA_PTR`.
+fn detoast_array_header<'mcx>(
+    mcx: Mcx<'mcx>,
+    raw: &[u8],
+) -> PgResult<(PgVec<'mcx, u8>, i32, bool, Oid, i32, usize)> {
+    let arr = detoast_seams::detoast_attr::call(mcx, raw)?;
+    let ndim = arr_read_i32(&arr, 4);
+    let dataoffset = arr_read_i32(&arr, 8);
+    let hasnull = dataoffset != 0;
+    let elemtype = u32::from_ne_bytes([arr[12], arr[13], arr[14], arr[15]]);
+    // ARR_DIMS(arr)[0] is the first int after the fixed header.
+    let dim0 = if ndim >= 1 {
+        arr_read_i32(&arr, ARRAYTYPE_HDRSZ)
+    } else {
+        0
+    };
+    let data_off = arr_data_offset(&arr, ndim, dataoffset);
+    Ok((arr, ndim, hasnull, elemtype, dim0, data_off))
+}
+
+/// Read a 1-D `int2[]` array column into a [`ConKeyArray`]. No validation
+/// (1-D / elemtype / hasnull) is performed here — the caller (pg_constraint)
+/// raises the C error messages; we faithfully report whatever the header says,
+/// and the element data is read only when the header is a non-null 1-D array.
+fn read_conkey_array(mcx: Mcx<'_>, raw: &[u8]) -> PgResult<ConKeyArray> {
+    let (arr, ndim, hasnull, elemtype, dim0, data_off) = detoast_array_header(mcx, raw)?;
+    let mut data: Vec<i16> = Vec::new();
+    if ndim == 1 && !hasnull {
+        let n = dim0.max(0) as usize;
+        data.reserve(n);
+        for i in 0..n {
+            let off = data_off + i * 2;
+            data.push(i16::from_ne_bytes([arr[off], arr[off + 1]]));
+        }
+    }
+    Ok(ConKeyArray {
+        ndim,
+        hasnull,
+        elemtype,
+        dim0,
+        data,
+    })
+}
+
+/// Read a 1-D `oid[]` array column into an [`OidArray`].
+fn read_oid_array(mcx: Mcx<'_>, raw: &[u8]) -> PgResult<OidArray> {
+    let (arr, ndim, hasnull, elemtype, dim0, data_off) = detoast_array_header(mcx, raw)?;
+    let mut data: Vec<Oid> = Vec::new();
+    if ndim == 1 && !hasnull {
+        let n = dim0.max(0) as usize;
+        data.reserve(n);
+        for i in 0..n {
+            let off = data_off + i * 4;
+            data.push(u32::from_ne_bytes([
+                arr[off],
+                arr[off + 1],
+                arr[off + 2],
+                arr[off + 3],
+            ]));
+        }
+    }
+    Ok(OidArray {
+        ndim,
+        hasnull,
+        elemtype,
+        dim0,
+        data,
+    })
+}
+
+/// `(Form_pg_constraint) GETSTRUCT(tup)` of a held `pg_constraint` tuple
+/// (`read_constraint_form` seam — `AdjustNotNullInheritance`).
+pub(crate) fn read_constraint_form(
+    tup: &FormedTuple<'_>,
+) -> PgResult<FormData_pg_constraint> {
+    let scratch = MemoryContext::new("syscache read_constraint_form");
+    deform_constraint_form(scratch.mcx(), tup)
+}
+
+/// `SysCacheGetAttrNotNull(CONSTROID, tup, Anum_pg_constraint_conkey)` +
+/// `DatumGetArrayTypeP` (`get_conkey_array` seam — `extractNotNullColumn`).
+pub(crate) fn get_conkey_array(tup: &FormedTuple<'_>) -> PgResult<ConKeyArray> {
+    let scratch = MemoryContext::new("syscache get_conkey_array");
+    let mcx = scratch.mcx();
+    let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, Anum_pg_constraint_conkey as i32)?;
+    match &value {
+        Datum::ByRef(b) => read_conkey_array(mcx, b),
+        Datum::ByVal(_) => Err(PgError::error("conkey is not a by-reference array")),
+    }
+}
+
+/// `heap_getattr(tup, Anum_pg_constraint_conkey, RelationGetDescr(pg_constraint),
+/// &isNull)` + `DatumGetArrayTypeP` (`heap_get_conkey` seam —
+/// `get_primary_key_attnos`). `Ok(None)` when the column is SQL NULL.
+pub(crate) fn heap_get_conkey(
+    rel: &types_rel::RelationData<'_>,
+    tup: &FormedTuple<'_>,
+) -> PgResult<Option<ConKeyArray>> {
+    let scratch = MemoryContext::new("syscache heap_get_conkey");
+    let mcx = scratch.mcx();
+    let (value, isnull) = crate::heap_getattr(
+        mcx,
+        tup,
+        Anum_pg_constraint_conkey as i32,
+        &rel.rd_att,
+    )?;
+    if isnull {
+        return Ok(None);
+    }
+    match &value {
+        Datum::ByRef(b) => Ok(Some(read_conkey_array(mcx, b)?)),
+        Datum::ByVal(_) => Err(PgError::error("conkey is not a by-reference array")),
+    }
+}
+
+/// `DeconstructFkConstraintRow`'s `SysCacheGetAttrNotNull` / `SysCacheGetAttr`
+/// reads of the six FK array columns + `DatumGetArrayTypeP`
+/// (`deconstruct_fk_arrays` seam). `confdelsetcols` is `None` for a SQL NULL.
+pub(crate) fn deconstruct_fk_arrays(
+    tup: &FormedTuple<'_>,
+) -> PgResult<FkArrayProjection> {
+    let scratch = MemoryContext::new("syscache deconstruct_fk_arrays");
+    let mcx = scratch.mcx();
+
+    let read_conkey = |attnum: i16| -> PgResult<ConKeyArray> {
+        let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, attnum as i32)?;
+        match &value {
+            Datum::ByRef(b) => read_conkey_array(mcx, b),
+            Datum::ByVal(_) => Err(PgError::error("FK array column is not by-reference")),
+        }
+    };
+    let read_oid = |attnum: i16| -> PgResult<OidArray> {
+        let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, attnum as i32)?;
+        match &value {
+            Datum::ByRef(b) => read_oid_array(mcx, b),
+            Datum::ByVal(_) => Err(PgError::error("FK array column is not by-reference")),
+        }
+    };
+
+    let conkey = read_conkey(Anum_pg_constraint_conkey)?;
+    let confkey = read_conkey(Anum_pg_constraint_confkey)?;
+    let conpfeqop = read_oid(Anum_pg_constraint_conpfeqop)?;
+    let conppeqop = read_oid(Anum_pg_constraint_conppeqop)?;
+    let conffeqop = read_oid(Anum_pg_constraint_conffeqop)?;
+
+    // confdelsetcols may be SQL NULL.
+    let (value, isnull) =
+        SysCacheGetAttr(mcx, CONSTROID, tup, Anum_pg_constraint_confdelsetcols as i32)?;
+    let confdelsetcols = if isnull {
+        None
+    } else {
+        match &value {
+            Datum::ByRef(b) => Some(read_conkey_array(mcx, b)?),
+            Datum::ByVal(_) => {
+                return Err(PgError::error("confdelsetcols is not a by-reference array"))
+            }
+        }
+    };
+
+    let _ = (INT2OID, OIDOID); // element types validated by the caller.
+
+    Ok(FkArrayProjection {
+        conkey,
+        confkey,
+        conpfeqop,
+        conppeqop,
+        conffeqop,
+        confdelsetcols,
+    })
+}
+
+/// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` + `heap_copytuple`
+/// (`search_constraint_tuple_by_oid` seam — `DeconstructFkConstraintRow` via
+/// `FindFkPeriodOpersForConstraint`). `Ok(None)` on a cache miss; the returned
+/// tuple is the held `FormedTuple` copied into `mcx`.
+pub(crate) fn search_constraint_tuple_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some(copy))
 }
 
 /// `relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` +
