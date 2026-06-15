@@ -24,6 +24,10 @@ pub const ACL_ALTER_SYSTEM: AclMode = 1 << 13;
 pub const ACL_MAINTAIN: AclMode = 1 << 14;
 pub const ACL_NO_RIGHTS: AclMode = 0;
 
+/// `ACL_SELECT_FOR_UPDATE` (`nodes/parsenodes.h`) — privilege required for
+/// SELECT FOR UPDATE/SHARE (an alias of `ACL_UPDATE`).
+pub const ACL_SELECT_FOR_UPDATE: AclMode = ACL_UPDATE;
+
 /// `ACL_ID_PUBLIC` (`utils/acl.h`) — placeholder grantee id for a PUBLIC item.
 pub const ACL_ID_PUBLIC: Oid = 0;
 

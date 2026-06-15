@@ -256,6 +256,7 @@ pub const T_SortGroupClause: NodeTag = NodeTag(106);
 pub const T_GroupingSet: NodeTag = NodeTag(107);
 pub const T_WindowClause: NodeTag = NodeTag(108);
 pub const T_RowMarkClause: NodeTag = NodeTag(109);
+pub const T_LockingClause: NodeTag = NodeTag(94);
 pub const T_WithClause: NodeTag = NodeTag(110);
 pub const T_InferClause: NodeTag = NodeTag(111);
 pub const T_OnConflictClause: NodeTag = NodeTag(112);
@@ -422,6 +423,8 @@ pub enum Node<'mcx> {
     WindowClause(crate::rawnodes::WindowClause<'mcx>),
     /// `T_RowMarkClause`.
     RowMarkClause(crate::rawnodes::RowMarkClause),
+    /// `T_LockingClause`.
+    LockingClause(crate::rawnodes::LockingClause<'mcx>),
     /// `T_WithCheckOption`.
     WithCheckOption(crate::rawnodes::WithCheckOption<'mcx>),
     /// `T_CommonTableExpr`.
@@ -913,6 +916,7 @@ impl<'mcx> Node<'mcx> {
             Node::GroupingSet(_) => T_GroupingSet,
             Node::WindowClause(_) => T_WindowClause,
             Node::RowMarkClause(_) => T_RowMarkClause,
+            Node::LockingClause(_) => T_LockingClause,
             Node::WithCheckOption(_) => T_WithCheckOption,
             Node::CommonTableExpr(_) => T_CommonTableExpr,
             Node::SetOperationStmt(_) => T_SetOperationStmt,
@@ -1222,6 +1226,7 @@ impl<'mcx> Node<'mcx> {
             Node::GroupingSet(g) => Ok(Node::GroupingSet(g.clone_in(mcx)?)),
             Node::WindowClause(w) => Ok(Node::WindowClause(w.clone_in(mcx)?)),
             Node::RowMarkClause(r) => Ok(Node::RowMarkClause(r.clone_in(mcx)?)),
+            Node::LockingClause(l) => Ok(Node::LockingClause(l.clone_in(mcx)?)),
             Node::WithCheckOption(w) => Ok(Node::WithCheckOption(w.clone_in(mcx)?)),
             Node::CommonTableExpr(c) => Ok(Node::CommonTableExpr(c.clone_in(mcx)?)),
             Node::SetOperationStmt(s) => Ok(Node::SetOperationStmt(s.clone_in(mcx)?)),

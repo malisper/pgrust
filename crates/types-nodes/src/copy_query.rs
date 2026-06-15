@@ -163,7 +163,65 @@ pub struct Query<'mcx> {
     pub _marker: core::marker::PhantomData<&'mcx ()>,
 }
 
-impl Query<'_> {
+impl<'mcx> Query<'mcx> {
+    /// `makeNode(Query)` — a zero-initialized `Query` (C `palloc0`). All scalar
+    /// fields take their `0`/`false`/enum-zero default; all `List *` start `NIL`
+    /// (empty `PgVec`); all `Node *`/`PgBox` start `NULL` (`None`). The
+    /// statement-location fields start at `0` (the C struct image), as in
+    /// `makeNode`; `transformTopLevelStmt` overwrites them from the `RawStmt`.
+    pub fn new(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        Query {
+            commandType: CmdType::CMD_UNKNOWN,
+            querySource: QuerySource::QSRC_ORIGINAL,
+            queryId: 0,
+            canSetTag: false,
+            utilityStmt: None,
+            resultRelation: 0,
+            hasAggs: false,
+            hasWindowFuncs: false,
+            hasTargetSRFs: false,
+            hasSubLinks: false,
+            hasDistinctOn: false,
+            hasRecursive: false,
+            hasModifyingCTE: false,
+            hasForUpdate: false,
+            hasRowSecurity: false,
+            hasGroupRTE: false,
+            isReturn: false,
+            cteList: PgVec::new_in(mcx),
+            rtable: PgVec::new_in(mcx),
+            rteperminfos: PgVec::new_in(mcx),
+            jointree: None,
+            mergeActionList: PgVec::new_in(mcx),
+            mergeTargetRelation: 0,
+            mergeJoinCondition: None,
+            targetList: PgVec::new_in(mcx),
+            r#override: crate::modifytable::OverridingKind::OVERRIDING_NOT_SET,
+            onConflict: None,
+            returningOldAlias: None,
+            returningNewAlias: None,
+            returningList: PgVec::new_in(mcx),
+            has_returning_list: false,
+            groupClause: PgVec::new_in(mcx),
+            groupDistinct: false,
+            groupingSets: PgVec::new_in(mcx),
+            havingQual: None,
+            windowClause: PgVec::new_in(mcx),
+            distinctClause: PgVec::new_in(mcx),
+            sortClause: PgVec::new_in(mcx),
+            limitOffset: None,
+            limitCount: None,
+            limitOption: LimitOption::LIMIT_OPTION_COUNT,
+            rowMarks: PgVec::new_in(mcx),
+            setOperations: None,
+            constraintDeps: PgVec::new_in(mcx),
+            withCheckOptions: PgVec::new_in(mcx),
+            stmt_location: 0,
+            stmt_len: 0,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
     /// Deep copy into `mcx` (C: `copyObject` over `Query`). Every `Node`/`List`
     /// subtree is re-homed onto the target context; fallible since copying
     /// allocates.
