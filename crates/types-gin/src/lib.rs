@@ -127,6 +127,63 @@ pub const GIN_LIST_FULLROW: u16 = 1 << 5;
 pub const GIN_INCOMPLETE_SPLIT: u16 = 1 << 6;
 pub const GIN_COMPRESSED: u16 = 1 << 7;
 
+/// `sizeof(GinPageOpaqueData)` (ginblock.h) — `{BlockNumber rightlink;
+/// OffsetNumber maxoff; uint16 flags;}` = 4 + 2 + 2, naturally 4-aligned, 8
+/// bytes. A literal matching the C struct layout (the Rust struct above uses
+/// the default repr); used by [`GinMaxItemSize`] and the data-page sizing
+/// macros.
+pub const SIZEOF_GIN_PAGE_OPAQUE_DATA: usize = 8;
+
+/// `sizeof(PostingItem)` (ginblock.h) — `{BlockIdData child_blkno;
+/// ItemPointerData key;}` = 4 + 6, 2-aligned, 10 bytes. Re-exported from the
+/// crate that owns the [`PostingItem`] struct.
+pub use types_xlog_records::ginxlog::SIZEOF_POSTING_ITEM;
+
+/// `MAXALIGN(LEN)` (`c.h`) — round up to `MAXIMUM_ALIGNOF` (8 on supported
+/// platforms).
+const fn maxalign(len: usize) -> usize {
+    (len + 7) & !7
+}
+
+/// `MAXALIGN_DOWN(LEN)` (`c.h`) — round down to `MAXIMUM_ALIGNOF`.
+const fn maxalign_down(len: usize) -> usize {
+    len & !7
+}
+
+/// `GinMaxItemSize` (ginblock.h) — maximum size of an item on an entry tree
+/// page. Sized so that at least three items fit on each page:
+/// `Min(INDEX_SIZE_MASK, MAXALIGN_DOWN((BLCKSZ - MAXALIGN(SizeOfPageHeaderData
+/// + 3 * sizeof(ItemIdData)) - MAXALIGN(sizeof(GinPageOpaqueData))) / 3))`.
+pub const GinMaxItemSize: usize = {
+    let raw = maxalign_down(
+        (types_core::primitive::BLCKSZ
+            - maxalign(
+                types_storage::bufpage::SizeOfPageHeaderData
+                    + 3 * core::mem::size_of::<types_storage::bufpage::ItemIdData>(),
+            )
+            - maxalign(SIZEOF_GIN_PAGE_OPAQUE_DATA))
+            / 3,
+    );
+    let mask = types_tuple::heaptuple::INDEX_SIZE_MASK as usize;
+    if raw < mask {
+        raw
+    } else {
+        mask
+    }
+};
+
+// ginxlog.h — GIN posting-list segment recompression action codes.
+/// `GIN_SEGMENT_UNMODIFIED` — no action (not used in WAL records).
+pub const GIN_SEGMENT_UNMODIFIED: u8 = 0;
+/// `GIN_SEGMENT_DELETE` — a whole segment is removed.
+pub const GIN_SEGMENT_DELETE: u8 = 1;
+/// `GIN_SEGMENT_INSERT` — a whole segment is added.
+pub const GIN_SEGMENT_INSERT: u8 = 2;
+/// `GIN_SEGMENT_REPLACE` — a segment is replaced.
+pub const GIN_SEGMENT_REPLACE: u8 = 3;
+/// `GIN_SEGMENT_ADDITEMS` — items are added to an existing segment.
+pub const GIN_SEGMENT_ADDITEMS: u8 = 4;
+
 /// `GIN_METAPAGE_BLKNO` (ginblock.h) — fixed location of the meta page.
 pub const GIN_METAPAGE_BLKNO: BlockNumber = 0;
 /// `GIN_ROOT_BLKNO` (ginblock.h) — fixed location of the entry-tree root.
