@@ -112,13 +112,6 @@ fn is_polymorphic_type(typid: Oid) -> bool {
     )
 }
 
-/// The parse state's `p_sourcetext`, used for error positioning. `None` when
-/// `pstate == NULL`.
-#[inline]
-fn source_text<'a>(pstate: Option<&'a ParseState<'_>>) -> Option<&'a str> {
-    pstate.and_then(|p| p.p_sourcetext.as_deref())
-}
-
 /// `parser_errposition(pstate, location)` — the cursor position to attach to an
 /// ereport. A no-op returning 0 when `location < 0` or `pstate == NULL`.
 #[inline]
@@ -797,8 +790,8 @@ fn op_error(
 /// should be a copy of `pstate->p_last_srf` from just before transforming the
 /// operator's arguments. `ltree == None` denotes a prefix operator;
 /// `rtree == None` is a (rejected) postfix operator. Returns the built `OpExpr`.
-pub fn make_op(
-    pstate: Option<&ParseState<'_>>,
+pub fn make_op<'mcx>(
+    mut pstate: Option<&mut ParseState<'mcx>>,
     opname: &[String],
     ltree: Option<Expr>,
     rtree: Option<Expr>,
@@ -826,14 +819,14 @@ pub fn make_op(
             /* prefix operator */
             rtype_id = exprType(Some(&rtree))?;
             ltype_id = InvalidOid;
-            opform = left_oper(pstate, opname, rtype_id, false, location)?
+            opform = left_oper(pstate.as_deref(), opname, rtype_id, false, location)?
                 .ok_or_else(|| internal_error("left_oper(noError=false)"))?;
         }
         Some(ltree) => {
             /* otherwise, binary operator */
             ltype_id = exprType(Some(ltree))?;
             rtype_id = exprType(Some(&rtree))?;
-            opform = oper(pstate, opname, ltype_id, rtype_id, false, location)?
+            opform = oper(pstate.as_deref(), opname, ltype_id, rtype_id, false, location)?
                 .ok_or_else(|| internal_error("oper(noError=false)"))?;
         }
     }
@@ -847,7 +840,7 @@ pub fn make_op(
                 "operator is only a shell: {}",
                 op_signature_string(opname, opform.oprleft, opform.oprright)?
             ))
-            .errposition(errpos(pstate, location))
+            .errposition(errpos(pstate.as_deref(), location))
             .into_error());
     }
 
@@ -891,7 +884,7 @@ pub fn make_op(
 
     /* perform the necessary typecasting of arguments */
     make_fn_arguments::call(
-        source_text(pstate),
+        pstate.as_deref_mut(),
         &mut args,
         &actual_arg_types[..nargs],
         &declared_arg_types[..nargs],
@@ -914,11 +907,18 @@ pub fn make_op(
 
     /* if it returns a set, check that's OK */
     if opretset {
-        check_srf_call_placement::call(source_text(pstate), last_srf, location)?;
+        /*
+         * C's make_op dereferences pstate in this SRF path
+         * (check_srf_call_placement reads pstate->p_expr_kind and writes
+         * pstate->p_hasTargetSRFs), so a set-returning operator necessarily has
+         * a non-NULL pstate.
+         */
+        let pstate = pstate
+            .as_deref_mut()
+            .ok_or_else(|| internal_error("make_op: set-returning operator with NULL pstate"))?;
+        check_srf_call_placement::call(pstate, last_srf, location)?;
         /* ... and remember it for error checks at higher levels */
-        if pstate.is_some() {
-            set_last_srf::call(source_text(pstate), &result)?;
-        }
+        set_last_srf::call(pstate, &result)?;
     }
 
     /* C ReleaseSysCache(tup) here; owned value, nothing to release. */
@@ -928,8 +928,8 @@ pub fn make_op(
 
 /// `make_scalar_array_op()` (parse_oper.c:770): build the expression tree for a
 /// `scalar op ANY/ALL (array)` construct.
-pub fn make_scalar_array_op(
-    pstate: Option<&ParseState<'_>>,
+pub fn make_scalar_array_op<'mcx>(
+    mut pstate: Option<&mut ParseState<'mcx>>,
     opname: &[String],
     use_or: bool,
     ltree: Expr,
@@ -955,13 +955,13 @@ pub fn make_scalar_array_op(
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg("op ANY/ALL (array) requires array on right side")
-                .errposition(errpos(pstate, location))
+                .errposition(errpos(pstate.as_deref(), location))
                 .into_error());
         }
     }
 
     /* Now resolve the operator */
-    let opform = oper(pstate, opname, ltype_id, rtype_id, false, location)?
+    let opform = oper(pstate.as_deref(), opname, ltype_id, rtype_id, false, location)?
         .ok_or_else(|| internal_error("oper(noError=false)"))?;
 
     /* Check it's not a shell */
@@ -973,7 +973,7 @@ pub fn make_scalar_array_op(
                 "operator is only a shell: {}",
                 op_signature_string(opname, opform.oprleft, opform.oprright)?
             ))
-            .errposition(errpos(pstate, location))
+            .errposition(errpos(pstate.as_deref(), location))
             .into_error());
     }
 
@@ -1002,7 +1002,7 @@ pub fn make_scalar_array_op(
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("op ANY/ALL (array) requires operator to yield boolean")
-            .errposition(errpos(pstate, location))
+            .errposition(errpos(pstate.as_deref(), location))
             .into_error());
     }
     if get_func_retset::call(opform.oprcode)? {
@@ -1010,7 +1010,7 @@ pub fn make_scalar_array_op(
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("op ANY/ALL (array) requires operator not to return a set")
-            .errposition(errpos(pstate, location))
+            .errposition(errpos(pstate.as_deref(), location))
             .into_error());
     }
 
@@ -1036,7 +1036,7 @@ pub fn make_scalar_array_op(
                     "could not find array type for data type {}",
                     format_type_be(declared_arg_types[1])?
                 ))
-                .errposition(errpos(pstate, location))
+                .errposition(errpos(pstate.as_deref(), location))
                 .into_error());
         }
     }
@@ -1045,7 +1045,7 @@ pub fn make_scalar_array_op(
 
     /* perform the necessary typecasting of arguments */
     make_fn_arguments::call(
-        source_text(pstate),
+        pstate.as_deref_mut(),
         &mut args,
         &actual_arg_types,
         &declared_arg_types,

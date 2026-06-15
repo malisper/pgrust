@@ -7422,18 +7422,12 @@ dependencies = [
 name = "backend-parser-clause"
 version = "0.0.0"
 dependencies = [
- "backend-access-table-table",
- "backend-catalog-namespace",
- "backend-commands-functioncmds-seams",
- "backend-executor-nodeSamplescan-seams",
  "backend-nodes-copyfuncs-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
  "backend-optimizer-util-vars",
- "backend-parser-analyze-seams",
  "backend-parser-coerce",
  "backend-parser-parse-agg-seams",
- "backend-parser-parse-collate",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-relation",
@@ -7444,14 +7438,10 @@ dependencies = [
  "backend-utils-error",
  "mcx",
  "seam-core",
- "types-acl",
  "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
- "types-rel",
- "types-samplescan",
- "types-storage",
  "types-tuple",
 ]
 
@@ -7668,6 +7658,36 @@ dependencies = [
  "types-error",
  "types-opclass",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-target"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-commands-dbcommands-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-type",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-parser-small1-seams",
+ "backend-parser-target-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -13803,6 +13823,7 @@ dependencies = [
  "backend-parser-gram-core",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
+ "backend-parser-parse-target",
  "backend-parser-parse-type",
  "backend-parser-relation",
  "backend-parser-small1",

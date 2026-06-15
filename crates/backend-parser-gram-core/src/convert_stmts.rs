@@ -34,19 +34,14 @@ fn conv_select<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::SelectStmt) -> PgResult<tn::Sel
     })
 }
 
-/// `intoClause` rides the trimmed `parsestmt::IntoClause { skipData, node }`:
-/// the createas unit owns the rest, carried opaquely inside `node`.
+/// `intoClause` — surfaced as the full owned `ddlnodes::IntoClause` carried as
+/// a `Node::IntoClause` (F2). The grammar reinterprets the `IntoClause *` like
+/// any tagged sub-node, so it routes through `convert_node`.
 fn into_clause_opt<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     p: *mut cpr::IntoClause,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
-    if p.is_null() {
-        return Ok(None);
-    }
-    // The IntoClause is a full createas node we cannot yet author; surfacing it
-    // is F2+. SELECT ... INTO appears only with createas, so reaching this for a
-    // plain DML SELECT means a corrupt tree.
-    unported(tags::T_IntoClause, "IntoClause")
+    child_node_opt(mcx, p)
 }
 
 // ---------------------------------------------------------------------------

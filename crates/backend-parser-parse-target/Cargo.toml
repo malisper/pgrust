@@ -1,0 +1,46 @@
+[package]
+name = "backend-parser-parse-target"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_parse_target"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-acl = { path = "../types-acl" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+
+# Merged sibling owners called directly (cycle-free): parse_relation,
+# parse_coerce, parse_type, plus the parse_node.c helpers in small1 and the
+# funcapi / lsyscache / format-type catalog support.
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+
+# Owner of the inward seams this crate installs.
+backend-parser-target-seams = { path = "../backend-parser-target-seams" }
+
+# Outward dependency seams.
+backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
+[dev-dependencies]
