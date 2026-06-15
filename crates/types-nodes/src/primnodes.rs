@@ -315,6 +315,18 @@ pub struct Var {
     pub varnullingrels: ExprRelids,
     /// `Index varlevelsup` — subplan levels up; 0 = current query level.
     pub varlevelsup: Index,
+    /// `VarReturningType varreturningtype` — for a Var referencing the OLD/NEW
+    /// pseudo-relations of a RETURNING list, whether it returns OLD or NEW (else
+    /// `VAR_RETURNING_DEFAULT`). Read by `contain_vars_returning_old_or_new`
+    /// (var.c). Added field-for-field vs primnodes.h (the keystone Expr
+    /// expansion left the leaf trimmed); `Default` keeps `Var { .. }`
+    /// construction additive.
+    pub varreturningtype: VarReturningType,
+    /// `ParseLoc location` — token location, or -1 if unknown. Read by
+    /// `locate_var_of_level` (var.c) and preserved across join-alias flattening.
+    /// Added field-for-field vs primnodes.h; `Default` is 0 — explicit
+    /// constructors set -1 where C does.
+    pub location: i32,
 }
 
 /// `Const` (nodes/primnodes.h), trimmed to the fields ports consume.
@@ -1511,6 +1523,229 @@ impl Expr {
     }
 }
 
+// ===========================================================================
+// Borrowing / owning accessors used by the optimizer (clauses.c et al.).
+//
+// These mirror C's `IsA(node, X)` (the `is_*`), `castNode(X, node)` (the
+// `as_*` borrows), and the owned-tree "take the payload out of the node"
+// pattern (`expect_into_*`) used by the const-folding mutator, where C reuses
+// the node's storage in place. Added field-for-field as the optimizer
+// consumers landed; one accessor per modeled variant the optimizer dispatches.
+// ===========================================================================
+
+/// Generate `is_x`/`as_x`/`as_x_mut`/`expect_into_x` for a single-payload
+/// `Expr` variant.
+macro_rules! expr_accessors {
+    ($variant:ident, $ty:ty, $is:ident, $as:ident, $as_mut:ident, $into:ident) => {
+        impl Expr {
+            #[doc = concat!("`IsA(node, ", stringify!($variant), ")`.")]
+            #[inline]
+            pub fn $is(&self) -> bool {
+                matches!(self, Expr::$variant(_))
+            }
+            #[doc = concat!("`castNode(", stringify!($variant), ", node)` — borrow the payload, or `None`.")]
+            #[inline]
+            pub fn $as(&self) -> Option<&$ty> {
+                match self {
+                    Expr::$variant(x) => Some(x),
+                    _ => None,
+                }
+            }
+            #[doc = concat!("Mutable borrow of the [`", stringify!($variant), "`] payload, or `None`.")]
+            #[inline]
+            pub fn $as_mut(&mut self) -> Option<&mut $ty> {
+                match self {
+                    Expr::$variant(x) => Some(x),
+                    _ => None,
+                }
+            }
+            #[doc = concat!("Consume the node and return its [`", stringify!($variant), "`] payload (C reuses the node's storage in place); panics on a wrong tag (a caller bug).")]
+            #[inline]
+            pub fn $into(self) -> $ty {
+                match self {
+                    Expr::$variant(x) => x,
+                    _ => panic!(concat!("Expr::", stringify!($into), ": node is not a ", stringify!($variant))),
+                }
+            }
+        }
+    };
+}
+
+expr_accessors!(Const, Const, is_const, as_const, as_const_mut, expect_into_const);
+expr_accessors!(Param, Param, is_param, as_param, as_param_mut, expect_into_param);
+expr_accessors!(Aggref, Aggref, is_aggref, as_aggref, as_aggref_mut, expect_into_aggref);
+expr_accessors!(GroupingFunc, GroupingFunc, is_groupingfunc, as_groupingfunc, as_groupingfunc_mut, expect_into_groupingfunc);
+expr_accessors!(WindowFunc, WindowFunc, is_windowfunc, as_windowfunc, as_windowfunc_mut, expect_into_windowfunc);
+expr_accessors!(SubscriptingRef, SubscriptingRef, is_subscriptingref, as_subscriptingref, as_subscriptingref_mut, expect_into_subscriptingref);
+expr_accessors!(FuncExpr, FuncExpr, is_funcexpr, as_funcexpr, as_funcexpr_mut, expect_into_funcexpr);
+expr_accessors!(NamedArgExpr, NamedArgExpr, is_namedargexpr, as_namedargexpr, as_namedargexpr_mut, expect_into_namedargexpr);
+expr_accessors!(ScalarArrayOpExpr, ScalarArrayOpExpr, is_scalararrayopexpr, as_scalararrayopexpr, as_scalararrayopexpr_mut, expect_into_scalararrayopexpr);
+expr_accessors!(BoolExpr, BoolExpr, is_boolexpr, as_boolexpr, as_boolexpr_mut, expect_into_boolexpr);
+expr_accessors!(SubLink, SubLink, is_sublink, as_sublink, as_sublink_mut, expect_into_sublink);
+expr_accessors!(FieldSelect, FieldSelect, is_fieldselect, as_fieldselect, as_fieldselect_mut, expect_into_fieldselect);
+expr_accessors!(FieldStore, FieldStore, is_fieldstore, as_fieldstore, as_fieldstore_mut, expect_into_fieldstore);
+expr_accessors!(RelabelType, RelabelType, is_relabeltype, as_relabeltype, as_relabeltype_mut, expect_into_relabeltype);
+expr_accessors!(CoerceViaIO, CoerceViaIO, is_coerceviaio, as_coerceviaio, as_coerceviaio_mut, expect_into_coerceviaio);
+expr_accessors!(ArrayCoerceExpr, ArrayCoerceExpr, is_arraycoerceexpr, as_arraycoerceexpr, as_arraycoerceexpr_mut, expect_into_arraycoerceexpr);
+expr_accessors!(ConvertRowtypeExpr, ConvertRowtypeExpr, is_convertrowtypeexpr, as_convertrowtypeexpr, as_convertrowtypeexpr_mut, expect_into_convertrowtypeexpr);
+expr_accessors!(CollateExpr, CollateExpr, is_collateexpr, as_collateexpr, as_collateexpr_mut, expect_into_collateexpr);
+expr_accessors!(CaseExpr, CaseExpr, is_caseexpr, as_caseexpr, as_caseexpr_mut, expect_into_caseexpr);
+expr_accessors!(ArrayExpr, ArrayExpr, is_arrayexpr, as_arrayexpr, as_arrayexpr_mut, expect_into_arrayexpr);
+expr_accessors!(RowExpr, RowExpr, is_rowexpr, as_rowexpr, as_rowexpr_mut, expect_into_rowexpr);
+expr_accessors!(RowCompareExpr, RowCompareExpr, is_rowcompareexpr, as_rowcompareexpr, as_rowcompareexpr_mut, expect_into_rowcompareexpr);
+expr_accessors!(CoalesceExpr, CoalesceExpr, is_coalesceexpr, as_coalesceexpr, as_coalesceexpr_mut, expect_into_coalesceexpr);
+expr_accessors!(MinMaxExpr, MinMaxExpr, is_minmaxexpr, as_minmaxexpr, as_minmaxexpr_mut, expect_into_minmaxexpr);
+expr_accessors!(SQLValueFunction, SQLValueFunction, is_sqlvaluefunction, as_sqlvaluefunction, as_sqlvaluefunction_mut, expect_into_sqlvaluefunction);
+expr_accessors!(XmlExpr, XmlExpr, is_xmlexpr, as_xmlexpr, as_xmlexpr_mut, expect_into_xmlexpr);
+expr_accessors!(JsonValueExpr, JsonValueExpr, is_jsonvalueexpr, as_jsonvalueexpr, as_jsonvalueexpr_mut, expect_into_jsonvalueexpr);
+expr_accessors!(JsonConstructorExpr, JsonConstructorExpr, is_jsonconstructorexpr, as_jsonconstructorexpr, as_jsonconstructorexpr_mut, expect_into_jsonconstructorexpr);
+expr_accessors!(JsonExpr, JsonExpr, is_jsonexpr, as_jsonexpr, as_jsonexpr_mut, expect_into_jsonexpr);
+expr_accessors!(NullTest, NullTest, is_nulltest, as_nulltest, as_nulltest_mut, expect_into_nulltest);
+expr_accessors!(BooleanTest, BooleanTest, is_booleantest, as_booleantest, as_booleantest_mut, expect_into_booleantest);
+expr_accessors!(CoerceToDomain, CoerceToDomain, is_coercetodomain, as_coercetodomain, as_coercetodomain_mut, expect_into_coercetodomain);
+expr_accessors!(CaseTestExpr, CaseTestExpr, is_casetestexpr, as_casetestexpr, as_casetestexpr_mut, expect_into_casetestexpr);
+expr_accessors!(NextValueExpr, NextValueExpr, is_nextvalueexpr, as_nextvalueexpr, as_nextvalueexpr_mut, expect_into_nextvalueexpr);
+expr_accessors!(CurrentOfExpr, CurrentOfExpr, is_currentofexpr, as_currentofexpr, as_currentofexpr_mut, expect_into_currentofexpr);
+
+impl Expr {
+    /// `IsA(node, Var)`.
+    #[inline]
+    pub fn is_var(&self) -> bool {
+        matches!(self, Expr::Var(_))
+    }
+    /// `castNode(Var, node)` borrow (mirrors [`Expr::expect_var`], named `as_var`
+    /// for parity with the other `as_*` accessors).
+    #[inline]
+    pub fn as_var(&self) -> Option<&Var> {
+        self.expect_var()
+    }
+    /// `IsA(node, DistinctExpr)`.
+    #[inline]
+    pub fn is_distinctexpr(&self) -> bool {
+        matches!(self, Expr::DistinctExpr(_))
+    }
+    /// `IsA(node, NullIfExpr)`.
+    #[inline]
+    pub fn is_nullifexpr(&self) -> bool {
+        matches!(self, Expr::NullIfExpr(_))
+    }
+    /// `castNode(OpExpr, node)` for a `DistinctExpr` payload (struct-equal to
+    /// `OpExpr`).
+    #[inline]
+    pub fn as_distinctexpr(&self) -> Option<&OpExpr> {
+        match self {
+            Expr::DistinctExpr(o) => Some(o),
+            _ => None,
+        }
+    }
+    /// `castNode(OpExpr, node)` for a `NullIfExpr` payload.
+    #[inline]
+    pub fn as_nullifexpr(&self) -> Option<&OpExpr> {
+        match self {
+            Expr::NullIfExpr(o) => Some(o),
+            _ => None,
+        }
+    }
+    /// Consume a `DistinctExpr` node, returning its `OpExpr` payload.
+    #[inline]
+    pub fn expect_into_distinctexpr(self) -> OpExpr {
+        match self {
+            Expr::DistinctExpr(o) => o,
+            _ => panic!("Expr::expect_into_distinctexpr: not a DistinctExpr"),
+        }
+    }
+    /// Consume a `NullIfExpr` node, returning its `OpExpr` payload.
+    #[inline]
+    pub fn expect_into_nullifexpr(self) -> OpExpr {
+        match self {
+            Expr::NullIfExpr(o) => o,
+            _ => panic!("Expr::expect_into_nullifexpr: not a NullIfExpr"),
+        }
+    }
+    /// `IsA(node, PlaceHolderVar)`.
+    #[inline]
+    pub fn is_placeholdervar(&self) -> bool {
+        matches!(self, Expr::PlaceHolderVar(_))
+    }
+    /// `castNode(PlaceHolderVar, node)` borrow (parity alias).
+    #[inline]
+    pub fn as_placeholdervar(&self) -> Option<&PlaceHolderVar> {
+        self.expect_placeholdervar()
+    }
+    /// Consume a `PlaceHolderVar` node, returning its payload.
+    #[inline]
+    pub fn expect_into_placeholdervar(self) -> PlaceHolderVar {
+        match self {
+            Expr::PlaceHolderVar(p) => p,
+            _ => panic!("Expr::expect_into_placeholdervar: not a PlaceHolderVar"),
+        }
+    }
+    /// `castNode(Const, node)` — borrow the [`Const`] payload, panicking on a
+    /// wrong tag (C `castNode` elogs). Used where C dereferences a node it has
+    /// already proven is a Const.
+    #[inline]
+    pub fn expect_const(&self) -> &Const {
+        match self {
+            Expr::Const(c) => c,
+            _ => panic!("Expr::expect_const: node is not a Const"),
+        }
+    }
+
+    /// `IsA(node, OpExpr)`.
+    #[inline]
+    pub fn is_opexpr(&self) -> bool {
+        matches!(self, Expr::OpExpr(_))
+    }
+    /// `castNode(OpExpr, node)` borrow (parity alias for [`Expr::expect_opexpr`]).
+    #[inline]
+    pub fn as_opexpr(&self) -> Option<&OpExpr> {
+        self.expect_opexpr()
+    }
+    /// Mutable borrow of the [`OpExpr`] payload, or `None`.
+    #[inline]
+    pub fn as_opexpr_mut(&mut self) -> Option<&mut OpExpr> {
+        match self {
+            Expr::OpExpr(o) => Some(o),
+            _ => None,
+        }
+    }
+    /// Consume an `OpExpr` node, returning its payload.
+    #[inline]
+    pub fn expect_into_opexpr(self) -> OpExpr {
+        match self {
+            Expr::OpExpr(o) => o,
+            _ => panic!("Expr::expect_into_opexpr: not an OpExpr"),
+        }
+    }
+
+    /// `IsA(node, SubPlan)`.
+    #[inline]
+    pub fn is_subplan(&self) -> bool {
+        matches!(self, Expr::SubPlan(_))
+    }
+    /// `castNode(SubPlan, node)` — borrow the [`SubPlanExpr`] payload, or `None`.
+    #[inline]
+    pub fn as_subplan(&self) -> Option<&SubPlanExpr> {
+        match self {
+            Expr::SubPlan(s) => Some(s),
+            _ => None,
+        }
+    }
+    /// `IsA(node, AlternativeSubPlan)`.
+    #[inline]
+    pub fn is_alternativesubplan(&self) -> bool {
+        matches!(self, Expr::AlternativeSubPlan(_))
+    }
+    /// `castNode(AlternativeSubPlan, node)` — borrow the payload, or `None`.
+    #[inline]
+    pub fn as_alternativesubplan(&self) -> Option<&AlternativeSubPlanExpr> {
+        match self {
+            Expr::AlternativeSubPlan(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
 /// Owned-tree form of `SubPlan` for embedding directly in the [`Expr`] enum.
 ///
 /// The canonical [`SubPlan`] struct carries an `'mcx` lifetime (its `testexpr`
@@ -1555,6 +1790,18 @@ pub struct TargetEntry<'mcx> {
     pub resno: AttrNumber,
     /// `char *resname` — name of the column (could be NULL).
     pub resname: Option<PgString<'mcx>>,
+    /// `Index ressortgroupref` — nonzero if referenced by a sort/group clause
+    /// (the sort/group operation's `tleSortGroupRef`); 0 if not. Read/written by
+    /// tlist.c (`get_sortgroupref_tle`, `apply_tlist_labeling`,
+    /// `apply_pathtarget_labeling_to_tlist`, `make_tlist_from_pathtarget`,
+    /// `make_pathtarget_from_tlist`). Added field-for-field vs primnodes.h.
+    pub ressortgroupref: Index,
+    /// `Oid resorigtbl` — OID of column's source table, or 0. Copied by
+    /// `apply_tlist_labeling` (tlist.c). Added field-for-field vs primnodes.h.
+    pub resorigtbl: Oid,
+    /// `AttrNumber resorigcol` — column's number in source table, or 0. Copied
+    /// by `apply_tlist_labeling` (tlist.c). Added field-for-field.
+    pub resorigcol: AttrNumber,
     /// `bool resjunk` — set to true to eliminate the attribute from the
     /// final target list.
     pub resjunk: bool,
@@ -1574,6 +1821,9 @@ impl TargetEntry<'_> {
                 Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
                 None => None,
             },
+            ressortgroupref: self.ressortgroupref,
+            resorigtbl: self.resorigtbl,
+            resorigcol: self.resorigcol,
             resjunk: self.resjunk,
         })
     }

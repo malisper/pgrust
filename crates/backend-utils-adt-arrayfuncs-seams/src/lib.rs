@@ -254,3 +254,17 @@ seam_core::seam!(
         arraydatum: Datum,
     ) -> PgResult<PgVec<'mcx, f32>>
 );
+
+seam_core::seam!(
+    /// `ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval))` (array.h /
+    /// arrayfuncs.c) on the array value held by a non-NULL `Const`'s
+    /// `constvalue`: the total element count of the constant array. `clauses.c`
+    /// uses it (`is_strict_saop`, `convert_saop_to_hashed_saop`,
+    /// `estimate_array_length`) to test whether a folded `IN`-list array is
+    /// non-empty / large enough for a hashed SAOP. The C reads the varlena
+    /// array header directly; the owned model takes the `Const.constvalue`
+    /// `Datum` and detoasts as needed. `Err` carries the `ArrayGetNItems`
+    /// overflow `ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED)` and the
+    /// detoast surface.
+    pub fn array_const_nitems(constvalue: Datum) -> PgResult<i32>
+);

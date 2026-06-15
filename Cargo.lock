@@ -2185,6 +2185,7 @@ dependencies = [
 name = "backend-access-transam-xlogreader"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-varsup-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
@@ -4197,6 +4198,19 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-common-relpath"
+version = "0.0.0"
+dependencies = [
+ "backend-common-relpath-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -6456,6 +6470,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-extensible"
 version = "0.0.0"
 dependencies = [
@@ -6628,12 +6650,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-optimizer-util-clauses-seams"
+name = "backend-optimizer-prep-prepqual-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-rte-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-clauses"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-prep-prepqual-seams",
+ "backend-optimizer-util-clauses-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-util-clauses-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6689,6 +6751,21 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-vars"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-var-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -10650,6 +10727,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-time-snapmgr-seams",
+ "common-relpath-seams",
  "mcx",
  "types-cache",
  "types-cluster",
@@ -10923,7 +11001,6 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
- "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-lmgr-lwlock-seams",
@@ -10934,6 +11011,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "common-relpath-seams",
  "port-crc32c-seams",
  "seam-core",
  "types-core",
