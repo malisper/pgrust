@@ -49,11 +49,41 @@ const OID_MAX: Oid = Oid::MAX;
 /// `UCHAR_MAX` (`<limits.h>`).
 const UCHAR_MAX: u8 = u8::MAX;
 
-/// This crate owns no inward seams: every comparison function is reached through
-/// fmgr dispatch (not a cross-crate seam call), and the sort/skip install seams
-/// are OUTWARD (owned by the substrate). The empty `init_seams()` keeps the
-/// uniform per-crate startup contract.
-pub fn init_seams() {}
+// OIDs of the in-core btree `*sortsupport` functions (catalog/pg_proc.dat).
+/// `Oid` of `btint2sortsupport`.
+const F_BTINT2SORTSUPPORT: Oid = 3129;
+/// `Oid` of `btint4sortsupport`.
+const F_BTINT4SORTSUPPORT: Oid = 3130;
+/// `Oid` of `btint8sortsupport`.
+const F_BTINT8SORTSUPPORT: Oid = 3131;
+/// `Oid` of `btoidsortsupport`.
+const F_BTOIDSORTSUPPORT: Oid = 3134;
+
+/// The owned-model stand-in for `OidFunctionCall1(sortfunc,
+/// PointerGetDatum(ssup))` over an in-core btree `*sortsupport` routine: an
+/// owned `Datum` cannot carry the `SortSupport` pointer, so the dispatch crosses
+/// as `&mut SortSupportData`. Returns whether `sortfunc` named one of this
+/// crate's sortsupport functions (so the caller knows whether to fall through to
+/// its fmgr path for an as-yet-unported sortsupport builtin).
+fn run_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData) -> bool {
+    match sortfunc {
+        F_BTINT2SORTSUPPORT => btint2sortsupport(ssup),
+        F_BTINT4SORTSUPPORT => btint4sortsupport(ssup),
+        F_BTINT8SORTSUPPORT => btint8sortsupport(ssup),
+        F_BTOIDSORTSUPPORT => btoidsortsupport(ssup),
+        _ => return false,
+    }
+    true
+}
+
+/// This crate owns one inward seam ([`run_sortsupport`](sort::run_sortsupport)),
+/// the by-OID sortsupport dispatch the sort substrate calls in lieu of the
+/// pointer-carrying `OidFunctionCall1`. The comparison kernels are reached
+/// through fmgr dispatch (not a cross-crate seam call), and the sort/skip
+/// install seams are OUTWARD (owned by the substrate).
+pub fn init_seams() {
+    sort::run_sortsupport::set(run_sortsupport);
+}
 
 // ---------------------------------------------------------------------------
 // Datum (un)packing helpers, mirroring DatumGetXxx / XxxGetDatum.  The
@@ -179,7 +209,7 @@ pub fn btint2fastcmp(x: Datum, y: Datum) -> i32 {
 /// `btint2sortsupport`
 pub fn btint2sortsupport(ssup: &mut SortSupportData) {
     // ssup->comparator = btint2fastcmp;
-    sort::install_sortsupport_int2::call(ssup);
+    sort::install_sortsupport_int2::call(ssup, btint2fastcmp);
 }
 
 /// `int2_decrement` — returns the decremented value paired with `*underflow`.
@@ -247,7 +277,7 @@ pub fn ssup_datum_int32_cmp(x: Datum, y: Datum) -> i32 {
 /// `btint4sortsupport`
 pub fn btint4sortsupport(ssup: &mut SortSupportData) {
     // ssup->comparator = ssup_datum_int32_cmp;
-    sort::install_sortsupport_int4::call(ssup);
+    sort::install_sortsupport_int4::call(ssup, ssup_datum_int32_cmp);
 }
 
 /// `int4_decrement` — returns the decremented value paired with `*underflow`.
@@ -318,7 +348,7 @@ pub fn ssup_datum_signed_cmp(x: Datum, y: Datum) -> i32 {
 /// target) this installs `ssup_datum_signed_cmp`.
 pub fn btint8sortsupport(ssup: &mut SortSupportData) {
     // #if SIZEOF_DATUM >= 8: ssup->comparator = ssup_datum_signed_cmp;
-    sort::install_sortsupport_int8::call(ssup);
+    sort::install_sortsupport_int8::call(ssup, ssup_datum_signed_cmp);
 }
 
 /// `int8_decrement` — returns the decremented value paired with `*underflow`.
@@ -461,7 +491,7 @@ pub fn btoidfastcmp(x: Datum, y: Datum) -> i32 {
 /// `btoidsortsupport`
 pub fn btoidsortsupport(ssup: &mut SortSupportData) {
     // ssup->comparator = btoidfastcmp;
-    sort::install_sortsupport_oid::call(ssup);
+    sort::install_sortsupport_oid::call(ssup, btoidfastcmp);
 }
 
 /// `oid_decrement` — returns the decremented value paired with `*underflow`.
