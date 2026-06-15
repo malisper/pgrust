@@ -1339,6 +1339,16 @@ where
     node
 }
 
+/// `pub(crate)` entry to [`for_each_child_mut`] for the `Node`-level in-place
+/// walker (`node_walker::expression_tree_walker_mut`), which drives the mutating
+/// recursion over an embedded `Expr`'s immediate children.
+pub(crate) fn for_each_expr_child_mut<F>(node: &mut Expr, f: &mut F)
+where
+    F: FnMut(&mut Expr),
+{
+    for_each_child_mut(node, f)
+}
+
 /// Drive `mutator` over the immediate `Box<Expr>`/`Vec<Expr>` children of a
 /// node in place (the in-place analogue used by `fix_opfuncids_walker`, where
 /// the recursion reads-and-writes the same tree rather than rebuilding it).

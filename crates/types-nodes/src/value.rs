@@ -30,7 +30,8 @@
 //! `pg_node_attr` in C beyond `special_read_write`, which only affects the
 //! deferred OUT/READ stage — copy/equal copy/compare every field).
 
-use mcx::PgString;
+use mcx::{Mcx, PgString};
+use types_error::PgResult;
 
 use backend_nodes_macros::PgNode;
 
@@ -41,6 +42,14 @@ use backend_nodes_macros::PgNode;
 pub struct Integer {
     /// `int ival`.
     pub ival: i32,
+}
+
+impl Integer {
+    /// Deep copy into `mcx` (C: `copyObject` over `Integer`). Lifetime-free, so
+    /// the copy is a plain field clone.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<Integer> {
+        Ok(Integer { ival: self.ival })
+    }
 }
 
 /// `typedef struct Float` (`nodes/value.h`). A numeric literal kept as its
@@ -54,12 +63,30 @@ pub struct Float<'mcx> {
     pub fval: PgString<'mcx>,
 }
 
+impl Float<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `Float` — `COPY_STRING_FIELD`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Float<'b>> {
+        Ok(Float {
+            fval: self.fval.clone_in(mcx)?,
+        })
+    }
+}
+
 /// `typedef struct Boolean` (`nodes/value.h`). A boolean literal. Lifetime-free
 /// (its sole payload is a flat `bool`).
 #[derive(Debug, Clone, PartialEq, Eq, PgNode)]
 pub struct Boolean {
     /// `bool boolval`.
     pub boolval: bool,
+}
+
+impl Boolean {
+    /// Deep copy into `mcx` (C: `copyObject` over `Boolean`). Lifetime-free.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<Boolean> {
+        Ok(Boolean {
+            boolval: self.boolval,
+        })
+    }
 }
 
 /// `typedef struct String` (`nodes/value.h`) — named `StringNode` so it does not
@@ -71,6 +98,15 @@ pub struct StringNode<'mcx> {
     pub sval: PgString<'mcx>,
 }
 
+impl StringNode<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `String` — `COPY_STRING_FIELD`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<StringNode<'b>> {
+        Ok(StringNode {
+            sval: self.sval.clone_in(mcx)?,
+        })
+    }
+}
+
 /// `typedef struct BitString` (`nodes/value.h`). A bit-string literal kept as its
 /// source string (`char *bsval`); context-allocated, carries the allocator
 /// lifetime.
@@ -78,4 +114,13 @@ pub struct StringNode<'mcx> {
 pub struct BitString<'mcx> {
     /// `char *bsval` — the bit-string text. `COPY_STRING_FIELD`.
     pub bsval: PgString<'mcx>,
+}
+
+impl BitString<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `BitString` — `COPY_STRING_FIELD`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<BitString<'b>> {
+        Ok(BitString {
+            bsval: self.bsval.clone_in(mcx)?,
+        })
+    }
 }
