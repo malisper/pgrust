@@ -203,6 +203,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetDataDir(dir)` (miscinit.c:440): set the `DataDir` global to the
+    /// absolute form of `dir` (via `make_absolute_path`). `Err` carries the
+    /// `make_absolute_path` OOM/FATAL surface.
+    pub fn set_data_dir(dir: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `make_absolute_path(path)` (`src/port/path.c`): if `path` is relative,
+    /// prepend the current working directory; otherwise return it unchanged. The
+    /// owner (port/path.c) declares it in `backend-port-path-seams`; this is the
+    /// miscinit-side re-export so consumers that already depend on miscinit-seams
+    /// reach it without a separate dep. `Err` carries the OOM/`getcwd` FATAL.
+    pub fn make_absolute_path(path: &str) -> PgResult<String>
+);
+
+seam_core::seam!(
     /// `ChangeToDataDir()` (miscinit.c): `chdir()` into the data directory,
     /// `ereport(FATAL)` on failure.
     pub fn change_to_data_dir() -> PgResult<()>

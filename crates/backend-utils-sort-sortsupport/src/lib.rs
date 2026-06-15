@@ -37,6 +37,12 @@ use types_fmgr::ResolvedFmgrInfo;
 
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_relcache_seams as relcache;
+// The nbtcompare `*sortsupport` seams: `run_sortsupport` (INWARD to nbtcompare,
+// the by-OID dispatch we call) and the `install_sortsupport_*` seams (OUTWARD,
+// owned + installed by this sort substrate, called by nbtcompare to mint the
+// fast-comparator token and write it into `ssup.comparator`).
+use backend_access_nbt_compare_seams as nbtcompare_seams;
+use nbtcompare_seams as nbtcompare; // `FastComparator` type alias lives here.
 
 /// `OidIsValid(oid)` — `InvalidOid` is 0.
 #[inline]
@@ -59,25 +65,41 @@ fn elog(message: String) -> PgError {
 // the token, in per-backend (thread_local) state.
 // ===========================================================================
 
-/// The resolved comparison machinery a [`SortComparatorId`] denotes: the C
-/// `SortShimExtra` (`flinfo` + reusable `fcinfo` for two args in `collation`).
-struct ShimState {
-    /// The `fmgr_info_cxt(cmpFunc, &extra->flinfo, ...)` lookup.
-    resolved: ResolvedFmgrInfo,
-    /// `ssup->ssup_collation` — the `InitFunctionCallInfoData` collation.
-    collation: Oid,
+/// The resolved comparison machinery a [`SortComparatorId`] denotes.
+///
+/// C's `comparator` is a single `int (*)(Datum, Datum, SortSupport)` pointer.
+/// Two flavors install it:
+///
+/// * [`Comparator::Shim`] — `PrepareSortSupportComparisonShim` set
+///   `ssup->comparator = comparison_shim`, where `comparison_shim` reaches the
+///   old-style btree `cmp` function through the C `SortShimExtra` (`flinfo` +
+///   reusable `fcinfo`). Held here as the [`ResolvedFmgrInfo`] + collation.
+/// * [`Comparator::Native`] — a type's `*sortsupport` routine set
+///   `ssup->comparator = <fastcmp>` directly (`ssup_datum_int32_cmp`,
+///   `btoidfastcmp`, ...). Held here as the kernel function pointer the
+///   type-specific unit handed us through its install seam.
+enum Comparator {
+    /// `comparison_shim` over a `SortShimExtra` (old-style btree `cmp`).
+    Shim {
+        /// The `fmgr_info_cxt(cmpFunc, &extra->flinfo, ...)` lookup.
+        resolved: ResolvedFmgrInfo,
+        /// `ssup->ssup_collation` — the `InitFunctionCallInfoData` collation.
+        collation: Oid,
+    },
+    /// A type's fast comparator installed directly by its `*sortsupport`.
+    Native(nbtcompare::FastComparator),
 }
 
 thread_local! {
-    /// Token -> shim state, indexed by `SortComparatorId.0`. A fresh push gives
+    /// Token -> comparator, indexed by `SortComparatorId.0`. A fresh push gives
     /// out the next index; the registry lives for the backend (the C state
     /// lived in `ssup_cxt`, freed when that context resets — here a reset is the
     /// process lifetime, matching how merge join keeps its `ssup` for the scan).
-    static SHIMS: RefCell<Vec<ShimState>> = const { RefCell::new(Vec::new()) };
+    static SHIMS: RefCell<Vec<Comparator>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register a resolved comparator and hand back its token.
-fn register_shim(state: ShimState) -> SortComparatorId {
+fn register_shim(state: Comparator) -> SortComparatorId {
     SHIMS.with(|s| {
         let mut v = s.borrow_mut();
         let id = v.len() as u32;
@@ -98,29 +120,44 @@ fn register_shim(state: ShimState) -> SortComparatorId {
 /// result came back null. [`function_call2_coll`] performs the invoke and that
 /// exact NULL check.
 fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_>) -> PgResult<i32> {
-    // Snapshot the resolved lookup and release the registry borrow before the
-    // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
-    // not trip a RefCell double-borrow.
-    let (resolution, finfo, collation) = SHIMS.with(|s| {
-        let shims = s.borrow();
-        let shim = &shims[id.0 as usize];
-        (
-            shim.resolved.resolution.clone(),
-            shim.resolved.finfo.clone(),
-            shim.collation,
-        )
-    });
-    // Bridge the canonical by-value words across the fmgr layer, which still
-    // speaks the transitional bare-word `types_datum::Datum` (fmgr-core is not
-    // in this migration batch — established sibling pattern is
+    // Bridge the canonical by-value words across the fmgr/kernel layer, which
+    // still speaks the transitional bare-word `types_datum::Datum` (fmgr-core is
+    // not in this migration batch — established sibling pattern is
     // `types_datum::Datum::from_usize(canonical.as_usize())`). The comparator
     // args are scalar Datum words exactly as C passes them.
     let x = types_datum::Datum::from_usize(x.as_usize());
     let y = types_datum::Datum::from_usize(y.as_usize());
-    let result = function_call2_coll(mcx, &resolution, finfo, collation, x, y)?;
-    // C: `comparison_shim` returns the `Datum` result as an `int`
-    // (`DatumGetInt32`).
-    Ok(result.as_i32())
+
+    // Snapshot the resolved lookup and release the registry borrow before the
+    // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
+    // not trip a RefCell double-borrow.
+    enum Resolved {
+        Shim(types_fmgr::FmgrResolution, types_fmgr::FmgrInfo, Oid),
+        Native(nbtcompare::FastComparator),
+    }
+    let resolved = SHIMS.with(|s| {
+        let shims = s.borrow();
+        match &shims[id.0 as usize] {
+            Comparator::Shim { resolved, collation } => Resolved::Shim(
+                resolved.resolution.clone(),
+                resolved.finfo.clone(),
+                *collation,
+            ),
+            Comparator::Native(cmp) => Resolved::Native(*cmp),
+        }
+    });
+
+    match resolved {
+        Resolved::Shim(resolution, finfo, collation) => {
+            let result = function_call2_coll(mcx, &resolution, finfo, collation, x, y)?;
+            // C: `comparison_shim` returns the `Datum` result as an `int`
+            // (`DatumGetInt32`).
+            Ok(result.as_i32())
+        }
+        // A native fast comparator (e.g. `ssup_datum_int32_cmp`): a pure
+        // function of the two packed `Datum`s, infallible (no fmgr ereport).
+        Resolved::Native(cmp) => Ok(cmp(x, y)),
+    }
 }
 
 // ===========================================================================
@@ -141,7 +178,7 @@ pub fn PrepareSortSupportComparisonShim(
     ssup: &mut SortSupportData<'_>,
 ) -> PgResult<()> {
     let resolved = fmgr_info_cxt(ssup.ssup_cxt, cmpFunc)?;
-    let id = register_shim(ShimState {
+    let id = register_shim(Comparator::Shim {
         resolved,
         collation: ssup.ssup_collation,
     });
@@ -192,15 +229,30 @@ fn FinishSortSupportFunction(
 // GIST_SORTSUPPORT entry point.
 //
 // The type-specific sortsupport function receives the `SortSupport` and fills
-// `ssup->comparator` (and the abbreviation hooks). Those functions are not yet
-// ported and cannot receive the `SortSupportData` through the owned `Datum`
-// (which carries no raw pointer), so the call is routed through fmgr's
-// `OidFunctionCall1`: a registered builtin runs, otherwise the catalog path
-// fails loudly — exactly the "not yet ported" surface.
+// `ssup->comparator` (and the abbreviation hooks). An owned `Datum` carries no
+// raw pointer, so the live `SortSupportData` cannot cross the fmgr boundary as
+// `PointerGetDatum(ssup)`; instead the dispatch is routed by OID to the typed
+// `*sortsupport` routine through `nbtcompare`'s `run_sortsupport` seam, which
+// receives `&mut SortSupportData` directly and sets `ssup.comparator`.
+//
+// For a sortsupport function `nbtcompare` does not implement (e.g.
+// float4/float8, or a future type's BTSORTSUPPORT not yet ported), the seam
+// returns `false`; we then fall back to the fmgr `OidFunctionCall1` path, which
+// loud-fails for the as-yet-unported builtin — the faithful "not yet ported"
+// surface (C would reach the registered function once it exists).
 // ===========================================================================
 fn oid_function_call1_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>) -> PgResult<()> {
-    // C: OidFunctionCall1(sortfunc, PointerGetDatum(ssup)). The collation is
-    // the function's default (InvalidOid), as in OidFunctionCall1.
+    // C: OidFunctionCall1(sortfunc, PointerGetDatum(ssup)) — invoke the type's
+    // sortsupport routine on the live SortSupport. Routed by OID to the typed
+    // routine (the owned `Datum` cannot carry the SortSupport pointer).
+    if nbtcompare_seams::run_sortsupport::call(sortfunc, ssup) {
+        return Ok(());
+    }
+
+    // Not one of nbtcompare's in-core sortsupport routines: fall back to the
+    // fmgr path. The SortSupport pointer argument cannot be represented in the
+    // pointer-less owned `Datum`; an unported sortsupport builtin loud-fails
+    // here, exactly the "function not yet ported" surface.
     oid_function_call1_coll(ssup.ssup_cxt, sortfunc, 0, types_datum::Datum::null())?;
     Ok(())
 }
@@ -328,10 +380,28 @@ fn apply_sort_comparator(
 }
 
 // ===========================================================================
+// install_sortsupport_* — the substrate side of `ssup->comparator = <fastcmp>`.
+//
+// These seams are OWNED by this sort substrate (declared in nbt-compare-seams,
+// documented as substrate-owned) and installed here. A type's `*sortsupport`
+// routine in nbtcompare calls them with its native fast comparator; we mint a
+// `SortComparatorId` token denoting that kernel and write it into
+// `ssup.comparator`, exactly as C's `ssup->comparator = ssup_datum_int32_cmp`.
+// ===========================================================================
+
+/// Common body for all four `install_sortsupport_*` seams: register the native
+/// fast comparator and store its token in `ssup.comparator`.
+fn install_native_comparator(ssup: &mut SortSupportData<'_>, cmp: nbtcompare::FastComparator) {
+    let id = register_shim(Comparator::Native(cmp));
+    ssup.comparator = Some(id);
+}
+
+// ===========================================================================
 // Seam installation.
 // ===========================================================================
 
-/// Install every `backend-utils-sort-sortsupport-seams` slot.
+/// Install every `backend-utils-sort-sortsupport-seams` slot, plus the
+/// substrate-owned `install_sortsupport_*` slots declared in nbt-compare-seams.
 pub fn init_seams() {
     use backend_utils_sort_sortsupport_seams as sx;
 
@@ -339,6 +409,12 @@ pub fn init_seams() {
     sx::prepare_sort_support_comparison_shim::set(PrepareSortSupportComparisonShim);
     sx::apply_sort_comparator::set(apply_sort_comparator);
     sx::prepare_sort_support_from_ordering_op::set(PrepareSortSupportFromOrderingOp);
+
+    // The fast-comparator install seams (owned by this substrate).
+    nbtcompare_seams::install_sortsupport_int2::set(install_native_comparator);
+    nbtcompare_seams::install_sortsupport_int4::set(install_native_comparator);
+    nbtcompare_seams::install_sortsupport_int8::set(install_native_comparator);
+    nbtcompare_seams::install_sortsupport_oid::set(install_native_comparator);
 }
 
 #[cfg(test)]

@@ -28,10 +28,13 @@
 //! missing database, the relkind whitelist for column comments, and the
 //! shared-catalog routing for databases/tablespaces/roles.
 //!
-//! Only genuine cross-subsystem primitives cross the seams in
-//! [`backend_commands_comment_seams`]: `get_object_address` /
-//! `check_object_ownership` (objectaddress.c), the `strVal` accessor for the
-//! opaque parser object node, the relation `relkind`/name/close reads, the
+//! `get_object_address` / `check_object_ownership` (objectaddress.c) are called
+//! through the canonical [`backend_catalog_objectaddress_seams`] (installed by
+//! the merged owner `backend-catalog-objectaddress`); the relation they open is
+//! a real [`types_rel::Relation`], so `strVal(stmt->object)`, the relation
+//! `relkind`/name reads, and `relation_close` are done directly in-crate. Only
+//! genuine cross-subsystem primitives cross the seams in
+//! [`backend_commands_comment_seams`]: the
 //! decomposed `pg_description`/`pg_shdescription` catalog primitives
 //! (`table_open`/`table_close`, the `systable` scans, and the
 //! `CatalogTupleDelete`/`heap_modify_tuple`+`CatalogTupleUpdate`/
@@ -41,6 +44,7 @@
 //! (`backend-catalog-pg-class`) called directly. `GetUserId` is the canonical
 //! miscinit seam.
 
+use backend_catalog_objectaddress_seams as oaddr;
 use backend_commands_comment_seams as seam;
 use backend_utils_error::ereport;
 use backend_utils_init_miscinit_seams::get_user_id;
@@ -101,7 +105,13 @@ pub fn CommentObject<'mcx>(
      */
     if stmt.objtype == OBJECT_DATABASE {
         // char *database = strVal(stmt->object);
-        let database = seam::database_name::call(stmt);
+        let database = stmt
+            .object
+            .as_deref()
+            .and_then(|o| o.as_string())
+            .and_then(|s| s.sval.as_deref())
+            .expect("CommentObject: OBJECT_DATABASE object must be a String value node")
+            .to_string();
 
         // get_database_oid(database, true) — missing_ok, so InvalidOid (not an
         // error) when the database is gone.
@@ -123,12 +133,32 @@ pub fn CommentObject<'mcx>(
      * does not exist, and will also acquire a lock on the target to guard
      * against concurrent DROP operations.
      */
-    let resolved = seam::get_object_address::call(stmt, ShareUpdateExclusiveLock)?;
+    // get_object_address(stmt->objtype, stmt->object, &relation,
+    //                     ShareUpdateExclusiveLock, false);
+    let object = stmt
+        .object
+        .as_deref()
+        .expect("CommentObject: stmt->object must be set");
+    let resolved = oaddr::get_object_address::call(
+        mcx,
+        stmt.objtype,
+        object,
+        ShareUpdateExclusiveLock,
+        false,
+    )?;
     address = resolved.address;
     let relation = resolved.relation;
 
     /* Require ownership of the target object. */
-    seam::check_object_ownership::call(get_user_id::call(), stmt, address, relation)?;
+    // check_object_ownership(GetUserId(), stmt->objtype, address, stmt->object,
+    //                        relation);
+    oaddr::check_object_ownership::call(
+        get_user_id::call(),
+        stmt.objtype,
+        address,
+        object,
+        relation.as_ref(),
+    )?;
 
     /* Perform other integrity checks as needed. */
     #[allow(clippy::single_match)]
@@ -144,10 +174,11 @@ pub fn CommentObject<'mcx>(
              */
             // The C dereferences `relation` here unconditionally — for an
             // OBJECT_COLUMN, get_object_address always opened the table.
-            let rel = relation.expect(
+            let rel = relation.as_ref().expect(
                 "CommentObject: OBJECT_COLUMN must have opened a relation (get_object_address)",
             );
-            let relkind = seam::relation_get_relkind::call(rel)?;
+            // relation->rd_rel->relkind
+            let relkind = rel.rd_rel.relkind;
             if relkind != RELKIND_RELATION
                 && relkind != RELKIND_VIEW
                 && relkind != RELKIND_MATVIEW
@@ -155,7 +186,8 @@ pub fn CommentObject<'mcx>(
                 && relkind != RELKIND_FOREIGN_TABLE
                 && relkind != RELKIND_PARTITIONED_TABLE
             {
-                let relname = seam::relation_get_relation_name::call(rel)?;
+                // RelationGetRelationName(relation)
+                let relname = rel.name().to_string();
                 let detail = backend_catalog_pg_class::errdetail_relkind_not_supported(relkind)?;
                 ereport(ERROR)
                     .errcode(ERRCODE_WRONG_OBJECT_TYPE)
@@ -194,7 +226,8 @@ pub fn CommentObject<'mcx>(
      * activity.
      */
     if let Some(rel) = relation {
-        seam::relation_close::call(rel, NoLock)?;
+        // relation_close(relation, NoLock);
+        rel.close(NoLock)?;
     }
 
     Ok(address)

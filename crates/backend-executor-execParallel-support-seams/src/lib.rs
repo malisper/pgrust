@@ -99,8 +99,10 @@ seam_core::seam!(pub fn exec_set_param_plan_multi(
 
 /// `EstimateParamListSpace(paramLI)`.
 seam_core::seam!(pub fn estimate_param_list_space(param_li: types_nodes::parsestmt::ParamListInfoHandle) -> Size);
-/// `SerializeParamList(paramLI, &start_address)` into the chunk.
-seam_core::seam!(pub fn serialize_param_list(param_li: types_nodes::parsestmt::ParamListInfoHandle, chunk: SerializeCursor));
+/// `SerializeParamList(paramLI, &start_address)` into the chunk. Its
+/// `get_typlenbyval` path can `ereport(ERROR)`, so the seam is fallible
+/// (returns the advanced cursor on success).
+seam_core::seam!(pub fn serialize_param_list(param_li: types_nodes::parsestmt::ParamListInfoHandle, chunk: SerializeCursor) -> PgResult<SerializeCursor>);
 /// `RestoreParamList(&start_address)`.
 seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> types_nodes::parsestmt::ParamListInfoHandle);
 /// `estate->es_param_exec_vals[paramid]` value/isnull + resolved type metadata.

@@ -84,6 +84,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-validate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-opclass",
+]
+
+[[package]]
 name = "backend-access-brin-xlog"
 version = "0.0.0"
 dependencies = [
@@ -223,12 +241,15 @@ dependencies = [
 name = "backend-access-common-printtup"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
+ "types-nodes",
  "types-stringinfo",
  "types-tuple",
 ]
@@ -1043,6 +1064,8 @@ name = "backend-access-nbt-compare-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-sortsupport",
 ]
 
@@ -1527,10 +1550,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-spg-kdtree"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-spg-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-spg-proc-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-spg-quadtree"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
  "types-core",
  "types-error",
 ]
@@ -3614,6 +3667,7 @@ dependencies = [
 name = "backend-commands-comment"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-class",
  "backend-commands-comment-seams",
  "backend-commands-dbcommands-seams",
@@ -3625,6 +3679,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -3890,13 +3945,19 @@ dependencies = [
 name = "backend-commands-explain-dr"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-instrument",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
+ "portability-instr-time",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
  "types-explain",
+ "types-nodes",
+ "types-slot",
  "types-stringinfo",
  "types-tuple",
 ]
@@ -9245,6 +9306,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-core"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -12982,6 +13059,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-funcs-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-acl",
  "types-catalog",
@@ -13356,6 +13434,7 @@ dependencies = [
 name = "backend-utils-sort-sortsupport"
 version = "0.0.0"
 dependencies = [
+ "backend-access-nbt-compare-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-fmgr-core",
@@ -14057,6 +14136,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-validate",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
@@ -14088,6 +14168,7 @@ dependencies = [
  "backend-access-nbtree-nbtsort",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
+ "backend-access-spg-proc",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
@@ -14253,6 +14334,7 @@ dependencies = [
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
+ "backend-rewrite-core",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
