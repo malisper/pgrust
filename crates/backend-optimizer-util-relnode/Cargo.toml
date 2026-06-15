@@ -9,6 +9,7 @@ name = "backend_optimizer_util_relnode"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

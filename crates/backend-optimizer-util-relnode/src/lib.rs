@@ -150,10 +150,28 @@ fn relids_to_exprrelids(r: &Relids) -> ExprRelids {
  * setup_simple_rel_arrays
  * ======================================================================== */
 
-/// `setup_simple_rel_arrays(root)` (relnode.c) — prepare the per-RTE arrays.
-pub fn setup_simple_rel_arrays(root: &mut PlannerInfo) {
+/// `setup_simple_rel_arrays(run, root, mcx)` (relnode.c) — prepare the per-RTE
+/// arrays.
+///
+/// C walks the top-level `parse->rtable` (a `List *` of `RangeTblEntry *`) and
+/// fills `root->simple_rte_array[rti] = rt_fetch(rti, parse->rtable)`. In this
+/// repo the top `Query`'s `rtable` lives in the [`PlannerRun`] store, keyed by
+/// `root.parse` ([`QueryId`]); `simple_rte_array` carries opaque
+/// [`RangeTblEntryId`] handles into the same store (#300). To fill it we copy
+/// each top-level `RangeTblEntry` into the run's RTE store and record the handle.
+///
+/// Two phases are required because `run.rtable(...)` borrows `run` immutably
+/// while `run.intern_rte(...)` borrows it mutably: phase 1 clones every entry
+/// out from under the shared borrow into owned `RangeTblEntry<'mcx>` locals,
+/// phase 2 interns each (the now-released shared borrow lets `intern_rte` take
+/// `&mut self`).
+pub fn setup_simple_rel_arrays<'mcx>(
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<()> {
     /* Arrays are accessed using RT indexes (1..N) */
-    let size = rte::parse_rtable_len::call(root) + 1;
+    let size = run.rtable(root.parse).len() as i32 + 1;
     root.simple_rel_array_size = size;
 
     /*
@@ -162,18 +180,34 @@ pub fn setup_simple_rel_arrays(root: &mut PlannerInfo) {
      */
     root.simple_rel_array = alloc::vec![None; size as usize];
 
-    /* simple_rte_array is an array equivalent of the rtable list (1..N) */
+    /*
+     * simple_rte_array is an array equivalent of the rtable list (1..N).
+     *
+     * Phase 1: clone every top-level RTE into `mcx`-owned values. We cannot
+     * call `intern_rte` (which needs `&mut run`) while holding the `&run`
+     * borrow that `rtable()` returns, so collect first.
+     */
+    let mut cloned: Vec<types_nodes::parsenodes::RangeTblEntry<'mcx>> =
+        Vec::with_capacity((size as usize).saturating_sub(1));
+    for rte in run.rtable(root.parse).iter() {
+        cloned.push(rte.clone_in(mcx)?);
+    }
+
+    /*
+     * Phase 2: intern each cloned RTE into the run store, recording the
+     * returned RangeTblEntryId at its RT index (slot 0 is unused).
+     */
     let mut simple_rte_array: Vec<types_pathnodes::RangeTblEntryId> =
         alloc::vec![types_pathnodes::RangeTblEntryId(0); size as usize];
-    for rti in 1..size {
-        simple_rte_array[rti as usize] = rte::parse_rte::call(root, rti as u32);
+    for (i, rte) in cloned.into_iter().enumerate() {
+        simple_rte_array[i + 1] = run.intern_rte(rte);
     }
     root.simple_rte_array = simple_rte_array;
 
     /* append_rel_array is not needed if there are no AppendRelInfos */
     if root.append_rel_list.is_empty() {
         root.append_rel_array = Vec::new();
-        return;
+        return Ok(());
     }
 
     let mut append_rel_array: Vec<Option<AppendRelInfo>> = alloc::vec![None; size as usize];
@@ -194,6 +228,7 @@ pub fn setup_simple_rel_arrays(root: &mut PlannerInfo) {
         append_rel_array[child_relid as usize] = Some(appinfo.clone());
     }
     root.append_rel_array = append_rel_array;
+    Ok(())
 }
 
 /* ==========================================================================

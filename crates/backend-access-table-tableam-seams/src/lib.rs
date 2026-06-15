@@ -74,7 +74,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         table_rel: &types_rel::Relation<'mcx>,
         index_rel: &types_rel::Relation<'mcx>,
-        index_info: &mut types_nodes::execnodes::IndexInfo,
+        index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         anyvisible: bool,
         progress: bool,

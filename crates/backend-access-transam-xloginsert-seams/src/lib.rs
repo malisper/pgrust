@@ -129,9 +129,9 @@ seam_core::seam!(
     /// (xloginsert.c:1269) — WAL-log a `[startblk, endblk)` range of blocks in
     /// relation `rel`'s `forknum` fork by writing a full-page image of every
     /// non-empty page (batched into `XLR_MAX_BLOCK_ID`-page records). The index
-    /// AM build paths (`spgbuild`, etc.) use it to log a freshly built index
-    /// when it wrote no WAL during the build. `Err` carries the WAL insertion
-    /// `ereport(ERROR)`s.
+    /// AM build paths (`ginbuild`, `spgbuild`, etc.) use it to log a freshly
+    /// built index when it wrote no WAL during the build. `Err` carries the WAL
+    /// insertion `ereport(ERROR)`s.
     pub fn log_newpage_range<'mcx>(
         rel: &types_rel::Relation<'mcx>,
         forknum: ForkNumber,

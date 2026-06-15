@@ -55,6 +55,7 @@ pub mod replay;
 pub mod shmem;
 pub mod startupxlog;
 pub mod stop;
+pub mod walrecovery;
 
 #[cfg(test)]
 mod shmem_tests;
@@ -109,4 +110,12 @@ pub fn init_seams() {
     // lives in this unit's own -seams crate (moved off walreceiverfuncs-seams,
     // where it had been parked as a layering convenience + allowlist debt).
     seams::xlog_request_wal_receiver_reply::set(shmem::xlog_request_wal_receiver_reply);
+
+    // The recovery reader/prefetcher holder (InitWalRecovery's reader leg)
+    // installs the 5 record/prefetcher seams the `ReadRecord` retry loop drives.
+    // Their declarations live in `xlogreader-seams` / `xlogprefetcher-seams` (the
+    // C owners of the decoded record / the prefetcher), but only this holder can
+    // resolve the recovery driver's `RecordRef` against the live reader, so it is
+    // the installer (a sanctioned cross-crate install).
+    walrecovery::init_holder_seams();
 }
