@@ -714,6 +714,83 @@ fn seam_execute_attr_map_slot_explicit<'mcx>(
     Ok(out_slot)
 }
 
+/// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c) with the
+/// conversion map read off the source `ResultRelInfo`'s `ri_ChildToRootMap`
+/// (the `RriId` form `ExecCrossPartitionUpdate` uses after
+/// `ExecGetChildToRootMap` has computed it). The transpose itself is identical
+/// to [`seam_execute_attr_map_slot_explicit`]; this wrapper just resolves the
+/// map from the pooled `ResultRelInfo` before applying it.
+fn seam_execute_attr_map_slot<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    in_slot: SlotId,
+    out_slot: SlotId,
+) -> PgResult<SlotId> {
+    // The map lives on the pooled ResultRelInfo (ri_ChildToRootMap); take an
+    // owned copy of its AttrMap so the estate can be re-borrowed mutably by the
+    // transpose (mirrors execPartition's clone_attrmap dance).
+    let mcx = estate.es_query_cxt;
+    let attr_map = {
+        let map = estate
+            .result_rel(result_rel_info)
+            .ri_ChildToRootMap
+            .as_ref()
+            .expect("execute_attr_map_slot: ri_ChildToRootMap is NULL (caller must run ExecGetChildToRootMap first)");
+        types_tuple::attmap::AttrMap {
+            attnums: mcx::slice_in(mcx, &map.attrMap.attnums)?,
+        }
+    };
+    seam_execute_attr_map_slot_explicit(estate, &attr_map, in_slot, out_slot)
+}
+
+/// Slot-payload op for `StoreIndexTuple`'s name-cstring fix-up
+/// (nodeIndexonlyscan.c): for each attribute index in `attnums` whose slot
+/// value is non-null, read the cstring `Datum` and copy it into a
+/// NAMEDATALEN-byte zero-padded `Name` (`namestrcpy`), storing the resulting
+/// `Name` datum back.
+///
+/// C allocates the `Name` in `ps_ExprContext->ecxt_per_tuple_memory`; the owned
+/// value model carries the by-reference bytes inline in the slot's `Datum`
+/// (allocated in the slot pool's `'mcx`), so `per_tuple_ecxt` is not used as an
+/// allocation target here — the lifetime is governed by the carrier, not a raw
+/// context pointer.
+fn seam_pad_name_cstring_columns<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    _per_tuple_ecxt: types_nodes::EcxtId,
+    attnums: &[AttrNumber],
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let base = estate.slot_data_mut(slot).base_mut();
+    for &attnum in attnums {
+        let idx = attnum as usize;
+        // skip null Datums
+        if base.tts_isnull[idx] {
+            continue;
+        }
+        // namestrcpy(name, DatumGetCString(slot->tts_values[attnum])):
+        // the cstring Datum is the by-reference image (NUL-terminated bytes);
+        // copy its NameStr into a NAMEDATALEN-byte zero-padded buffer.
+        let cstr_bytes = base.tts_values[idx].as_ref_bytes();
+        // bytes up to (but not including) the first NUL — DatumGetCString.
+        let end = cstr_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(cstr_bytes.len());
+        let s = String::from_utf8_lossy(&cstr_bytes[..end]);
+        let mut name = types_tuple::heaptuple::NameData::default();
+        name.namestrcpy(&s);
+        // slot->tts_values[attnum] = NameGetDatum(name): a fixed-length
+        // pass-by-reference Name is the NAMEDATALEN-byte image carried as a
+        // by-reference Datum.
+        let name_datum = types_tuple::backend_access_common_heaptuple::Datum::ByRef(
+            mcx::slice_in(mcx, &name.data)?,
+        );
+        base.tts_values[idx] = name_datum;
+    }
+    Ok(())
+}
+
 /// Install every seam this unit owns.
 pub fn init_seams() {
     use backend_executor_execTuples_seams as seams;
@@ -767,4 +844,9 @@ pub fn init_seams() {
     seams::slot_natts::set(seam_slot_natts);
     seams::exec_scan_slot_descriptor::set(seam_exec_scan_slot_descriptor);
     seams::execute_attr_map_slot_explicit::set(seam_execute_attr_map_slot_explicit);
+    // RriId form: reads the conversion map off the ResultRelInfo's
+    // ri_ChildToRootMap (ExecCrossPartitionUpdate path).
+    seams::execute_attr_map_slot::set(seam_execute_attr_map_slot);
+    // Slot-payload name-cstring fix-up (index-only scan over a name column).
+    seams::pad_name_cstring_columns::set(seam_pad_name_cstring_columns);
 }

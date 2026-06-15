@@ -11863,6 +11863,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-geo-ops"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-geo-ops-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-geo-ops-seams"
 version = "0.0.0"
 dependencies = [
@@ -14910,6 +14919,7 @@ dependencies = [
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
