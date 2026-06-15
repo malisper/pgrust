@@ -606,7 +606,8 @@ pub fn ExecReScanIndexScan<'mcx>(
 
     // Reset index scan.
     if node.iss_ScanDesc.is_some() {
-        indexam::index_rescan_is::call(node)?;
+        let mcx: Mcx<'mcx> = estate.es_query_cxt;
+        indexam::index_rescan_is::call(mcx, node)?;
     }
     node.iss_ReachedEnd = false;
 
@@ -621,7 +622,7 @@ pub fn ExecReScanIndexScan<'mcx>(
 /// `ExecEndIndexScan(node)` — release all storage.
 pub fn ExecEndIndexScan<'mcx>(
     node: &mut IndexScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // When ending a parallel worker, accumulate the gathered stats back into
     // shared memory for EXPLAIN ANALYZE.
@@ -633,7 +634,8 @@ pub fn ExecEndIndexScan<'mcx>(
 
     // close the index relation (no-op if we didn't open it)
     if let Some(scandesc) = node.iss_ScanDesc.take() {
-        indexam::index_endscan::call(scandesc)?;
+        let mcx: Mcx<'mcx> = estate.es_query_cxt;
+        indexam::index_endscan::call(mcx, scandesc)?;
     }
     if let Some(index_rel) = node.iss_RelationDesc.take() {
         // index_close(rel, NoLock) — the handle's drop releases with NoLock.
@@ -664,11 +666,12 @@ pub fn ExecIndexMarkPos<'mcx>(
         }
     }
 
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let scandesc = node
         .iss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index scan: mark before scan started"))?;
-    indexam::index_markpos::call(scandesc)
+    indexam::index_markpos::call(mcx, scandesc)
 }
 
 /// `ExecIndexRestrPos(node)` — restore scan position.
@@ -688,11 +691,12 @@ pub fn ExecIndexRestrPos<'mcx>(
         }
     }
 
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let scandesc = node
         .iss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index scan: restore before scan started"))?;
-    indexam::index_restrpos::call(scandesc)
+    indexam::index_restrpos::call(mcx, scandesc)
 }
 
 // ===========================================================================
@@ -1525,7 +1529,7 @@ pub fn ExecIndexScanInitializeDSM<'mcx>(
     node.iss_ScanDesc = Some(scandesc);
 
     if node.iss_NumRuntimeKeys == 0 || node.iss_RuntimeKeysReady {
-        indexam::index_rescan_is::call(node)?;
+        indexam::index_rescan_is::call(mcx, node)?;
     }
 
     Ok(())
@@ -1533,16 +1537,18 @@ pub fn ExecIndexScanInitializeDSM<'mcx>(
 
 /// `ExecIndexScanReInitializeDSM(node, pcxt)` — reset shared state before a
 /// fresh scan.
-pub fn ExecIndexScanReInitializeDSM(
-    node: &mut IndexScanState<'_>,
+pub fn ExecIndexScanReInitializeDSM<'mcx>(
+    node: &mut IndexScanState<'mcx>,
     _pcxt: ParallelContextHandle,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(plan_parallel_aware(node).unwrap_or(true));
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let scandesc = node
         .iss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index parallel rescan before scan started"))?;
-    indexam::index_parallelrescan::call(scandesc)
+    indexam::index_parallelrescan::call(mcx, scandesc)
 }
 
 /// `ExecIndexScanInitializeWorker(node, pwcxt)` — copy info from the TOC into
@@ -1585,7 +1591,7 @@ pub fn ExecIndexScanInitializeWorker<'mcx>(
     node.iss_ScanDesc = Some(scandesc);
 
     if node.iss_NumRuntimeKeys == 0 || node.iss_RuntimeKeysReady {
-        indexam::index_rescan_is::call(node)?;
+        indexam::index_rescan_is::call(mcx, node)?;
     }
 
     Ok(())
@@ -1676,7 +1682,7 @@ fn begin_scan_serial<'mcx>(
 
     // If no run-time keys or they are ready, pass the scankeys to the index AM.
     if node.iss_NumRuntimeKeys == 0 || node.iss_RuntimeKeysReady {
-        indexam::index_rescan_is::call(node)?;
+        indexam::index_rescan_is::call(mcx, node)?;
     }
     Ok(())
 }

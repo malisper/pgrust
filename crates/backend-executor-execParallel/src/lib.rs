@@ -865,12 +865,12 @@ fn ExecParallelReInitializeDSM<'mcx>(
         }
         PlanStateNode::IndexScan(node) => {
             if parallel_aware {
-                nodeIndex::ExecIndexScanReInitializeDSM(node, pcxt)?;
+                nodeIndex::ExecIndexScanReInitializeDSM(node, pcxt, estate)?;
             }
         }
         PlanStateNode::IndexOnlyScan(node) => {
             if parallel_aware {
-                nodeIndexOnly::ExecIndexOnlyScanReInitializeDSM(node, pcxt)?;
+                nodeIndexOnly::ExecIndexOnlyScanReInitializeDSM(node, pcxt, estate)?;
             }
         }
         PlanStateNode::ForeignScan(node) => {

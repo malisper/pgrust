@@ -955,6 +955,7 @@ dependencies = [
  "types-snapshot",
  "types-storage",
  "types-tableam",
+ "types-tidbitmap",
  "types-tuple",
 ]
 

@@ -19,6 +19,7 @@ types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+types-tidbitmap = { path = "../types-tidbitmap" }
 
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }

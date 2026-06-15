@@ -167,15 +167,16 @@ fn IndexOnlyNext<'mcx>(
         // If no run-time keys to calculate or they are ready, pass the scankeys
         // to the index AM.
         if node.ioss_NumRuntimeKeys == 0 || node.ioss_RuntimeKeysReady {
-            indexam::index_rescan::call(node)?;
+            indexam::index_rescan::call(mcx, node)?;
         }
     }
 
     // OK, now that we have what we need, fetch the next tuple.
+    let mcx: Mcx<'_> = estate.es_query_cxt;
     loop {
         let tid = {
             let scandesc = node.ioss_ScanDesc.as_mut().unwrap();
-            match indexam::index_getnext_tid::call(scandesc, direction)? {
+            match indexam::index_getnext_tid::call(mcx, scandesc, direction)? {
                 Some(tid) => tid,
                 None => break,
             }
@@ -453,7 +454,8 @@ pub fn ExecReScanIndexOnlyScan<'mcx>(
 
     // reset index scan
     if node.ioss_ScanDesc.is_some() {
-        indexam::index_rescan::call(node)?;
+        let mcx: Mcx<'_> = estate.es_query_cxt;
+        indexam::index_rescan::call(mcx, node)?;
     }
 
     // ExecScanReScan(&node->ss);
@@ -488,7 +490,8 @@ pub fn ExecEndIndexOnlyScan<'mcx>(
     // close the index relation (no-op if we didn't open it)
     // if (indexScanDesc) index_endscan(indexScanDesc);
     if let Some(scandesc) = node.ioss_ScanDesc.take() {
-        indexam::index_endscan::call(scandesc)?;
+        let mcx: Mcx<'_> = estate.es_query_cxt;
+        indexam::index_endscan::call(mcx, scandesc)?;
     }
     // if (indexRelationDesc) index_close(indexRelationDesc, NoLock);
     if let Some(index_rel) = node.ioss_RelationDesc.take() {
@@ -527,11 +530,12 @@ pub fn ExecIndexOnlyMarkPos<'mcx>(
     }
 
     // index_markpos(node->ioss_ScanDesc);
+    let mcx: Mcx<'_> = estate.es_query_cxt;
     let scandesc = node
         .ioss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index-only scan: mark before scan started"))?;
-    indexam::index_markpos::call(scandesc)
+    indexam::index_markpos::call(mcx, scandesc)
 }
 
 /// `ExecIndexOnlyRestrPos(node)` — restore scan position.
@@ -553,11 +557,12 @@ pub fn ExecIndexOnlyRestrPos<'mcx>(
     }
 
     // index_restrpos(node->ioss_ScanDesc);
+    let mcx: Mcx<'_> = estate.es_query_cxt;
     let scandesc = node
         .ioss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index-only scan: restore before scan started"))?;
-    indexam::index_restrpos::call(scandesc)
+    indexam::index_restrpos::call(mcx, scandesc)
 }
 
 /// `ExecInitIndexOnlyScan(node, estate, eflags)` — initialize the index scan's
@@ -849,7 +854,7 @@ pub fn ExecIndexOnlyScanInitializeDSM<'mcx>(
     node.ioss_VMBuffer = InvalidBuffer;
 
     if node.ioss_NumRuntimeKeys == 0 || node.ioss_RuntimeKeysReady {
-        indexam::index_rescan::call(node)?;
+        indexam::index_rescan::call(mcx, node)?;
     }
 
     Ok(())
@@ -857,16 +862,18 @@ pub fn ExecIndexOnlyScanInitializeDSM<'mcx>(
 
 /// `ExecIndexOnlyScanReInitializeDSM(node, pcxt)` — reset shared state before a
 /// fresh scan.
-pub fn ExecIndexOnlyScanReInitializeDSM(
-    node: &mut IndexOnlyScanState<'_>,
+pub fn ExecIndexOnlyScanReInitializeDSM<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
     _pcxt: ParallelContextHandle,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(plan_parallel_aware(node).unwrap_or(true));
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let scandesc = node
         .ioss_ScanDesc
         .as_mut()
         .ok_or_else(|| elog("index-only parallel rescan before scan started"))?;
-    indexam::index_parallelrescan::call(scandesc)
+    indexam::index_parallelrescan::call(mcx, scandesc)
 }
 
 /// `ExecIndexOnlyScanInitializeWorker(node, pwcxt)` — copy info from the TOC
@@ -931,7 +938,7 @@ pub fn ExecIndexOnlyScanInitializeWorker<'mcx>(
     node.ioss_ScanDesc = Some(scandesc);
 
     if node.ioss_NumRuntimeKeys == 0 || node.ioss_RuntimeKeysReady {
-        indexam::index_rescan::call(node)?;
+        indexam::index_rescan::call(mcx, node)?;
     }
 
     Ok(())

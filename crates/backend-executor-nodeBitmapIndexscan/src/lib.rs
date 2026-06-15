@@ -167,13 +167,14 @@ fn multi_exec_scan_into<'mcx>(
     //       if (doscan) index_rescan(node->biss_ScanDesc, node->biss_ScanKeys,
     //                                node->biss_NumScanKeys, NULL, 0);
     //   }
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     while doscan {
         {
             let scandesc = node
                 .biss_ScanDesc
                 .as_mut()
                 .ok_or_else(|| elog("bitmap index scan has no scan descriptor"))?;
-            n_tuples += indexam::index_getbitmap::call(scandesc, tbm)? as f64;
+            n_tuples += indexam::index_getbitmap::call(mcx, scandesc, tbm)? as f64;
         }
 
         tcop_postgres::check_for_interrupts::call()?;
@@ -181,7 +182,7 @@ fn multi_exec_scan_into<'mcx>(
         doscan = nodeIndexscan::exec_index_advance_array_keys_bis::call(node, estate)?;
         if doscan {
             // reset index scan
-            indexam::index_rescan_bis::call(node)?;
+            indexam::index_rescan_bis::call(mcx, node)?;
         }
     }
 
@@ -249,7 +250,8 @@ pub fn ExecReScanBitmapIndexScan<'mcx>(
     //   if (node->biss_RuntimeKeysReady)
     //       index_rescan(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
     if node.biss_RuntimeKeysReady {
-        indexam::index_rescan_bis::call(node)?;
+        let mcx: Mcx<'mcx> = estate.es_query_cxt;
+        indexam::index_rescan_bis::call(mcx, node)?;
     }
 
     Ok(())
@@ -264,8 +266,9 @@ pub fn ExecReScanBitmapIndexScan<'mcx>(
 /// 1:1 with `void ExecEndBitmapIndexScan(BitmapIndexScanState *node)`.
 pub fn ExecEndBitmapIndexScan<'mcx>(
     node: &mut BitmapIndexScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     // When ending a parallel worker, copy the statistics gathered by the worker
     // back into shared memory so the main process can report them in EXPLAIN
     // ANALYZE.
@@ -288,7 +291,7 @@ pub fn ExecEndBitmapIndexScan<'mcx>(
     // close the index relation (no-op if we didn't open it)
     //   if (indexScanDesc) index_endscan(indexScanDesc);
     if let Some(scandesc) = node.biss_ScanDesc.take() {
-        indexam::index_endscan::call(scandesc)?;
+        indexam::index_endscan::call(mcx, scandesc)?;
     }
     //   if (indexRelationDesc) index_close(indexRelationDesc, NoLock);
     if let Some(index_rel) = node.biss_RelationDesc.take() {
@@ -443,7 +446,7 @@ pub fn ExecInitBitmapIndexScan<'mcx>(
     //       index_rescan(indexstate->biss_ScanDesc, indexstate->biss_ScanKeys,
     //                    indexstate->biss_NumScanKeys, NULL, 0);
     if indexstate.biss_NumRuntimeKeys == 0 && indexstate.biss_NumArrayKeys == 0 {
-        indexam::index_rescan_bis::call(&mut indexstate)?;
+        indexam::index_rescan_bis::call(mcx, &mut indexstate)?;
     }
 
     // all done.

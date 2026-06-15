@@ -67,6 +67,7 @@ seam_core::seam!(
     /// `ioss_OrderByKeys` arrays and `ioss_ScanDesc`. Fallible on
     /// `ereport(ERROR)`.
     pub fn index_rescan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         node: &mut IndexOnlyScanState<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -78,6 +79,7 @@ seam_core::seam!(
     /// node's (possibly recomputed) scan + order-by keys. Fallible on
     /// `ereport(ERROR)`.
     pub fn index_rescan_is<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         node: &mut types_nodes::IndexScanState<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -103,6 +105,7 @@ seam_core::seam!(
     /// `bitmap`, returning the number of TIDs inserted (a double in the caller,
     /// `int64` from the AM). Fallible on `ereport(ERROR)`.
     pub fn index_getbitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
         bitmap: &mut types_tidbitmap::TIDBitmap,
     ) -> types_error::PgResult<i64>
@@ -115,6 +118,7 @@ seam_core::seam!(
     /// recomputed) scan keys. The owned model takes the node so the AM reads its
     /// `biss_ScanKeys` array and `biss_ScanDesc`. Fallible on `ereport(ERROR)`.
     pub fn index_rescan_bis<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -125,6 +129,7 @@ seam_core::seam!(
     /// the scan descriptor's per-tuple result fields as a side effect.
     /// Fallible on `ereport(ERROR)`.
     pub fn index_getnext_tid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
         direction: ScanDirection,
     ) -> types_error::PgResult<Option<ItemPointerData>>
@@ -161,6 +166,7 @@ seam_core::seam!(
     /// `index_endscan(scan)` (indexam.c): end an index scan, releasing its
     /// resources (pins, AM scan state). Fallible on `ereport(ERROR)`.
     pub fn index_endscan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: types_nodes::IndexScanDesc<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -168,6 +174,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `index_markpos(scan)` (indexam.c): mark the current scan position.
     pub fn index_markpos<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -175,6 +182,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `index_restrpos(scan)` (indexam.c): restore the marked scan position.
     pub fn index_restrpos<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
@@ -217,6 +225,7 @@ seam_core::seam!(
     /// `index_parallelrescan(scan)` (indexam.c): reset shared parallel scan
     /// state before beginning a fresh scan. Fallible on `ereport(ERROR)`.
     pub fn index_parallelrescan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );

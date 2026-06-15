@@ -58,8 +58,284 @@ use backend_utils_time_snapmgr_seams as snapmgr;
 /// Install this crate's seam implementations: every seam declared in
 /// `backend-access-index-indexam-seams`.
 pub fn init_seams() {
-    backend_access_index_indexam_seams::index_open::set(index_open);
-    backend_access_index_indexam_seams::index_getprocinfo::set(index_getprocinfo);
+    use backend_access_index_indexam_seams as seams;
+    seams::index_open::set(index_open);
+    seams::index_getprocinfo::set(index_getprocinfo);
+
+    // Scan lifecycle + retrieval seams. The seam decls carry node-/SlotId-shaped
+    // params (so the executor consumers barely change); each `seam_*` wrapper
+    // adapts to the C-faithful `index_*` implementation above.
+    seams::index_beginscan::set(seam_index_beginscan);
+    seams::index_beginscan_bitmap::set(seam_index_beginscan_bitmap);
+    seams::index_beginscan_parallel::set(seam_index_beginscan_parallel);
+    seams::index_rescan::set(seam_index_rescan_ios);
+    seams::index_rescan_is::set(seam_index_rescan_is);
+    seams::index_rescan_bis::set(seam_index_rescan_bis);
+    seams::index_endscan::set(seam_index_endscan);
+    seams::index_markpos::set(seam_index_markpos);
+    seams::index_restrpos::set(seam_index_restrpos);
+    seams::index_getnext_tid::set(seam_index_getnext_tid);
+    seams::index_fetch_heap::set(seam_index_fetch_heap);
+    seams::index_getnext_slot::set(seam_index_getnext_slot);
+    seams::index_getbitmap::set(seam_index_getbitmap);
+    seams::index_parallelscan_estimate::set(seam_index_parallelscan_estimate);
+    seams::index_parallelscan_initialize::set(seam_index_parallelscan_initialize);
+    seams::index_parallelrescan::set(seam_index_parallelrescan);
+}
+
+// ===========================================================================
+// Seam wrappers — adapt the node-/SlotId-shaped seam decls (consumer-friendly)
+// to the C-faithful `index_*` implementations above.
+// ===========================================================================
+
+/// `index_beginscan` seam wrapper: the consumer passes the node-driven
+/// snapshot (`Option<Rc<SnapshotData>>`) and instrument by value; the C-faithful
+/// `index_beginscan` takes a `SnapshotData` value and `Option<IndexScanInstrumentation>`.
+fn seam_index_beginscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: Relation<'mcx>,
+    index_relation: Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<SnapshotData>>,
+    instrument: IndexScanInstrumentation,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let snapshot = snapshot
+        .map(|rc| (*rc).clone())
+        .expect("index_beginscan requires a snapshot (C Assert(snapshot != InvalidSnapshot))");
+    index_beginscan(
+        mcx,
+        &heap_relation,
+        &index_relation,
+        snapshot,
+        Some(instrument),
+        nkeys,
+        norderbys,
+    )
+}
+
+/// `index_beginscan_bitmap` seam wrapper.
+fn seam_index_beginscan_bitmap<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<SnapshotData>>,
+    instrument: IndexScanInstrumentation,
+    nkeys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let snapshot = snapshot
+        .map(|rc| (*rc).clone())
+        .expect("index_beginscan_bitmap requires a snapshot (C Assert(snapshot != InvalidSnapshot))");
+    index_beginscan_bitmap(mcx, &index_relation, snapshot, Some(instrument), nkeys)
+}
+
+/// `index_beginscan_parallel` seam wrapper. The seam passes the shared
+/// descriptor as a `PgBox` (the node-pool carrier); the C-faithful impl takes an
+/// `Arc<ParallelIndexScanDescData>` (the shared-state model). Bridge by cloning
+/// the inner value into a fresh `Arc`.
+fn seam_index_beginscan_parallel<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: Relation<'mcx>,
+    index_relation: Relation<'mcx>,
+    instrument: IndexScanInstrumentation,
+    nkeys: i32,
+    norderbys: i32,
+    pscan: types_nodes::nodeindexonlyscan::ParallelIndexScanDesc<'mcx>,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let pscan = std::sync::Arc::new((*pscan).clone());
+    index_beginscan_parallel(
+        mcx,
+        &heap_relation,
+        &index_relation,
+        Some(instrument),
+        nkeys,
+        norderbys,
+        pscan,
+    )
+}
+
+/// `index_rescan` (index-only scan node) seam wrapper: read the node's
+/// `ioss_ScanKeys`/`ioss_OrderByKeys` + counts, then drive the C-faithful rescan.
+fn seam_index_rescan_ios<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut types_nodes::IndexOnlyScanState<'mcx>,
+) -> PgResult<()> {
+    // Clone the key arrays so the `&mut ioss_ScanDesc` borrow is disjoint from
+    // the `&ioss_ScanKeys`/`&ioss_OrderByKeys` reads.
+    let keys: Vec<ScanKeyData> = node.ioss_ScanKeys.iter().cloned().collect();
+    let nkeys = node.ioss_NumScanKeys;
+    let orderbys: Vec<ScanKeyData> = node.ioss_OrderByKeys.iter().cloned().collect();
+    let norderbys = node.ioss_NumOrderByKeys;
+    let scan = node
+        .ioss_ScanDesc
+        .as_mut()
+        .expect("index_rescan: ioss_ScanDesc not set (C would dereference NULL)");
+    index_rescan(mcx, scan, &keys, nkeys, &orderbys, norderbys)
+}
+
+/// `index_rescan` (plain index scan node) seam wrapper: `iss_*` arrays.
+fn seam_index_rescan_is<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut types_nodes::IndexScanState<'mcx>,
+) -> PgResult<()> {
+    let keys: Vec<ScanKeyData> = node.iss_ScanKeys.iter().cloned().collect();
+    let nkeys = node.iss_NumScanKeys;
+    let orderbys: Vec<ScanKeyData> = node.iss_OrderByKeys.iter().cloned().collect();
+    let norderbys = node.iss_NumOrderByKeys;
+    let scan = node
+        .iss_ScanDesc
+        .as_mut()
+        .expect("index_rescan: iss_ScanDesc not set (C would dereference NULL)");
+    index_rescan(mcx, scan, &keys, nkeys, &orderbys, norderbys)
+}
+
+/// `index_rescan` (bitmap index scan node) seam wrapper: `biss_ScanKeys` +
+/// empty order-bys (C `NULL, 0`).
+fn seam_index_rescan_bis<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+) -> PgResult<()> {
+    let keys: Vec<ScanKeyData> = node.biss_ScanKeys.iter().cloned().collect();
+    let nkeys = node.biss_NumScanKeys;
+    let scan = node
+        .biss_ScanDesc
+        .as_mut()
+        .expect("index_rescan: biss_ScanDesc not set (C would dereference NULL)");
+    index_rescan(mcx, scan, &keys, nkeys, &[], 0)
+}
+
+/// `index_endscan` seam wrapper.
+fn seam_index_endscan<'mcx>(mcx: Mcx<'mcx>, scan: IndexScanDesc<'mcx>) -> PgResult<()> {
+    index_endscan(mcx, scan)
+}
+
+/// `index_markpos` seam wrapper.
+fn seam_index_markpos<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+) -> PgResult<()> {
+    index_markpos(mcx, scan)
+}
+
+/// `index_restrpos` seam wrapper.
+fn seam_index_restrpos<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+) -> PgResult<()> {
+    index_restrpos(mcx, scan)
+}
+
+/// `index_getnext_tid` seam wrapper.
+fn seam_index_getnext_tid<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+) -> PgResult<Option<ItemPointerData>> {
+    index_getnext_tid(mcx, scan, direction)
+}
+
+/// `index_fetch_heap` seam wrapper: resolve `mcx`/`slot` from the EState pool.
+fn seam_index_fetch_heap<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let slot = estate.slot_mut(slot);
+    index_fetch_heap(mcx, scan, slot)
+}
+
+/// `index_getnext_slot` seam wrapper: resolve `mcx`/`slot` from the EState pool.
+fn seam_index_getnext_slot<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let slot = estate.slot_mut(slot);
+    index_getnext_slot(mcx, scan, direction, slot)
+}
+
+/// `index_getbitmap` seam wrapper. The seam carries the concrete
+/// `types_tidbitmap::TIDBitmap`; the C-faithful impl forwards the payload-erased
+/// `types_tableam::amapi::TIDBitmap` to the AM. Round-trip the concrete bitmap
+/// through the erased carrier.
+fn seam_index_getbitmap<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    bitmap: &mut types_tidbitmap::TIDBitmap,
+) -> PgResult<i64> {
+    let owned = core::mem::take(bitmap);
+    let mut am = TIDBitmap {
+        payload: Some(std::boxed::Box::new(owned)),
+    };
+    let r = index_getbitmap(mcx, scan, &mut am)?;
+    *bitmap = *am
+        .payload
+        .expect("index_getbitmap: AM dropped the TIDBitmap payload")
+        .downcast::<types_tidbitmap::TIDBitmap>()
+        .expect("index_getbitmap: AM returned a foreign TIDBitmap payload");
+    Ok(r)
+}
+
+/// `index_parallelscan_estimate` seam wrapper: unwrap the node's
+/// `Option<Rc<SnapshotData>>` to a `&SnapshotData`.
+fn seam_index_parallelscan_estimate<'mcx>(
+    index_relation: Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+    snapshot: Option<std::rc::Rc<SnapshotData>>,
+    instrument: bool,
+    parallel_aware: bool,
+    nworkers: i32,
+) -> PgResult<usize> {
+    let snapshot = snapshot
+        .map(|rc| (*rc).clone())
+        .expect("index_parallelscan_estimate requires a snapshot");
+    index_parallelscan_estimate(
+        &index_relation,
+        nkeys,
+        norderbys,
+        &snapshot,
+        instrument,
+        parallel_aware,
+        nworkers,
+    )
+}
+
+/// `index_parallelscan_initialize` seam wrapper: initialize the supplied
+/// `target` and return it as a `PgBox` (the seam's `ParallelIndexScanDesc`).
+fn seam_index_parallelscan_initialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: Relation<'mcx>,
+    index_relation: Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<SnapshotData>>,
+    instrument: bool,
+    parallel_aware: bool,
+    nworkers: i32,
+    mut target: ParallelIndexScanDescData,
+) -> PgResult<types_nodes::nodeindexonlyscan::ParallelIndexScanDesc<'mcx>> {
+    let snapshot = snapshot
+        .map(|rc| (*rc).clone())
+        .expect("index_parallelscan_initialize requires a snapshot");
+    index_parallelscan_initialize(
+        &heap_relation,
+        &index_relation,
+        &snapshot,
+        instrument,
+        parallel_aware,
+        nworkers,
+        &mut target,
+    )?;
+    mcx::alloc_in(mcx, target)
+}
+
+/// `index_parallelrescan` seam wrapper.
+fn seam_index_parallelrescan<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+) -> PgResult<()> {
+    index_parallelrescan(mcx, scan)
 }
 
 // ===========================================================================

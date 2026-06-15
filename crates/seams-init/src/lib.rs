@@ -744,38 +744,28 @@ mod recurrence_guard {
         // to its seam crate, so it is not seen as "called" and needs no allowlist
         // entry; it remains uninstalled for the same contract reason.)
         ("backend_access_index_amapi", "am_reloptions"),
-        // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
-        // The seam decls (backend-access-index-indexam-seams) are written against
-        // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
-        // ScanDescData`, `Rc<SnapshotData>`, `SlotId`+`EStateData` heap-fetch, and
-        // node-state rescan (`IndexOnlyScanState`/`BitmapIndexScanState`) — and the
-        // live consumers (nodeIndexonlyscan, nodeBitmapIndexscan, nbtree) call them
-        // with those types. The owner crate faithfully ported indexam.c against the
-        // C-faithful `types_tableam::relscan::IndexScanDescData` model (by-value
-        // `SnapshotData`, `&mut TupleTableSlot`, scan-key slices) and dispatches
-        // through the `IndexAmRoutine` vtable typed on that struct. These are two
-        // independent scan-descriptor structs in different crates (plus nbtree's own
-        // `NbtScan` view), never reconciled — no thin adapter can forward between
-        // them. Paying this down is a contract redesign unifying the index-AM
-        // scan-descriptor model across indexam/genam/nodes/nbtree, not seam wiring.
-        // See DESIGN_DEBT.md.
+        // RESOLVED (TOWER-C): the 16 index_* scan-lifecycle / retrieval seams
+        // (index_beginscan{,_bitmap,_parallel}, index_rescan{,_is,_bis},
+        // index_endscan, index_markpos, index_restrpos, index_getnext_tid,
+        // index_fetch_heap, index_getnext_slot, index_getbitmap,
+        // index_parallelscan_estimate, index_parallelscan_initialize,
+        // index_parallelrescan) are now INSTALLED by the indexam owner. After
+        // TOWER-A unified the scan descriptor (types_nodes::nodeindexonlyscan
+        // re-exports the canonical types_tableam::relscan types), the owner's
+        // init_seams() installs thin `seam_*` wrappers that adapt the
+        // node-/SlotId-shaped seam decls to the C-faithful `index_*` bodies:
+        // snapshot Option<Rc<SnapshotData>> -> SnapshotData unwrap; instrument ->
+        // Option; node scan-key arrays -> &[ScanKeyData] (split-borrow); SlotId ->
+        // estate.slot_mut(); the payload-erased TIDBitmap round-trip; and the
+        // parallel-descriptor PgBox<->value bridge.
+        //
+        // STILL PENDING (parallel-scan DSM infrastructure unported): the two
+        // remaining seams resolve pointers into the DSM-resident parallel scan
+        // blob, which the parallel index-scan infrastructure (the AM-specific
+        // `BTParallelScanDescData` / `ps_offset_ins` arithmetic in shared memory)
+        // owns and has not landed. A serial scan never reaches them; they
+        // seam-and-panic (mirror-pg-and-panic). See DESIGN_DEBT.md.
         ("backend_access_index_indexam", "bt_resolve_parallel_scan"),
-        ("backend_access_index_indexam", "index_beginscan"),
-        ("backend_access_index_indexam", "index_beginscan_bitmap"),
-        ("backend_access_index_indexam", "index_beginscan_parallel"),
-        ("backend_access_index_indexam", "index_endscan"),
-        ("backend_access_index_indexam", "index_fetch_heap"),
-        ("backend_access_index_indexam", "index_getbitmap"),
-        ("backend_access_index_indexam", "index_getnext_slot"),
-        ("backend_access_index_indexam", "index_getnext_tid"),
-        ("backend_access_index_indexam", "index_markpos"),
-        ("backend_access_index_indexam", "index_parallelrescan"),
-        ("backend_access_index_indexam", "index_parallelscan_estimate"),
-        ("backend_access_index_indexam", "index_parallelscan_initialize"),
-        ("backend_access_index_indexam", "index_rescan"),
-        ("backend_access_index_indexam", "index_rescan_bis"),
-        ("backend_access_index_indexam", "index_rescan_is"),
-        ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
         // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
         // access method through `rel->rd_tableam` (the TableAmRoutine vtable). The
