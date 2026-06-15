@@ -75,6 +75,7 @@ pub fn init_seams() {
     sx::rd_index_indrelid::set(rd_index_indrelid);
     sx::rd_index_indisvalid::set(rd_index_indisvalid);
     sx::rd_index_has_indpred::set(rd_index_has_indpred);
+    sx::rd_index_indkey::set(rd_index_indkey);
     sx::rd_indam_amclusterable::set(rd_indam_amclusterable);
     sx::relation_is_mapped::set(relation_is_mapped);
     sx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
@@ -558,6 +559,11 @@ fn rd_index_has_indpred(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // to "no predicate".
     Ok(backend_utils_cache_syscache_seams::pg_index_has_predicate::call(index.rd_id)?
         .unwrap_or(false))
+}
+fn rd_index_indkey(index: &types_rel::Relation<'_>) -> PgResult<Option<std::vec::Vec<types_core::primitive::AttrNumber>>> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().map(|i| i.indkey.clone())
+    })
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // `index->rd_indam->amclusterable`: the trimmed in-cache `IndexAmRoutine`

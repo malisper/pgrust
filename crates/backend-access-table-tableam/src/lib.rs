@@ -337,6 +337,30 @@ pub fn table_slot_create<'mcx>(
 // Table scan functions (tableam.c)
 // ===========================================================================
 
+/// `table_beginscan_strat(rel, snapshot, nkeys, key, allow_strat, allow_sync)`
+/// (access/tableam.h inline) — like `table_beginscan`, but lets the caller
+/// control whether a nondefault buffer access strategy may be used and whether
+/// syncscan may be chosen. The snapshot is the caller's (genam registers the
+/// catalog snapshot itself and passes it in); no `SO_TEMP_SNAPSHOT`.
+pub fn table_beginscan_strat<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    snapshot: Snapshot,
+    nkeys: i32,
+    key: mcx::PgVec<'mcx, ScanKeyData>,
+    allow_strat: bool,
+    allow_sync: bool,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
+    if allow_strat {
+        flags |= SO_ALLOW_STRAT;
+    }
+    if allow_sync {
+        flags |= SO_ALLOW_SYNC;
+    }
+    (am(relation).scan_begin)(mcx, relation, snapshot, nkeys, key, None, flags)
+}
+
 /// `table_beginscan_catalog(relation, nkeys, key)`.
 pub fn table_beginscan_catalog<'mcx>(
     mcx: Mcx<'mcx>,
