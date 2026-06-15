@@ -21,18 +21,9 @@ use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 use types_storage::lock::NoLock;
 
 /// `enum CheckEnableRlsResult` (`utils/rls.h`) — the result of
-/// [`check_enable_rls`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(i32)]
-pub enum CheckEnableRlsResult {
-    /// RLS is not on the relation at all.
-    RlsNone = 0,
-    /// RLS is not to be added for this query, but the environment may change
-    /// that.
-    RlsNoneEnv = 1,
-    /// RLS should be implemented for the table.
-    RlsEnabled = 2,
-}
+/// [`check_enable_rls`]. Canonically defined in `types_acl` (which is also the
+/// seam-contract type); re-exported here so the two surfaces share one type.
+pub use types_acl::CheckEnableRlsResult;
 
 /// `row_security` GUC value.
 fn row_security() -> bool {

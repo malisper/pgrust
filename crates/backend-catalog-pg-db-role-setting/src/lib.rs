@@ -362,7 +362,7 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
     ApplySetting(&snapshot, INVALID_OID, INVALID_OID, &relsetting, PGC_S_GLOBAL)?;
 
     // UnregisterSnapshot(snapshot);
-    snapmgr::unregister_snapshot::call(snapshot)?;
+    snapmgr::unregister_snapshot::call(snapshot);
     // table_close(relsetting, AccessShareLock);
     relsetting.close(AccessShareLock)
 }

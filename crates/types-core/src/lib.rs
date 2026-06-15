@@ -8,6 +8,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod catalog;
+pub mod cmdtag;
 pub mod fmgr;
 pub mod geo;
 pub mod init;
@@ -17,6 +18,7 @@ pub mod primitive;
 pub mod xact;
 
 pub use catalog::*;
+pub use cmdtag::*;
 pub use fmgr::*;
 pub use geo::*;
 pub use init::*;
