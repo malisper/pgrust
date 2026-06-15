@@ -13081,6 +13081,7 @@ dependencies = [
 name = "backend-utils-cache-syscache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
@@ -13101,6 +13102,7 @@ dependencies = [
  "types-fmgr",
  "types-hash",
  "types-nodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]

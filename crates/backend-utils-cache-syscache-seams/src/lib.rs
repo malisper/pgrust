@@ -2043,7 +2043,7 @@ seam_core::seam!(
     pub fn search_constraint_tuple_by_oid<'mcx>(
         mcx: Mcx<'mcx>,
         conoid: Oid,
-    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
 );
 
 seam_core::seam!(
@@ -2071,7 +2071,7 @@ seam_core::seam!(
     /// `ARR_*` fields. The caller performs the 1-D/elemtype/hasnull/dim
     /// validation + error message. `Err` carries the detoast `ereport(ERROR)`s.
     pub fn get_conkey_array(
-        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     ) -> PgResult<types_catalog::pg_constraint::ConKeyArray>
 );
 
@@ -2083,7 +2083,7 @@ seam_core::seam!(
     /// performs every dimension/elemtype/null validation + the FK error
     /// messages. `confdelsetcols` is `None` when the column is SQL NULL.
     pub fn deconstruct_fk_arrays(
-        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     ) -> PgResult<types_catalog::pg_constraint::FkArrayProjection>
 );
 
@@ -2097,7 +2097,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn heap_get_conkey(
         rel: &types_rel::RelationData<'_>,
-        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     ) -> PgResult<Option<types_catalog::pg_constraint::ConKeyArray>>
 );
 
@@ -2108,6 +2108,6 @@ seam_core::seam!(
     /// Owned by the heaptuple/syscache layer (GETSTRUCT decode). `Err` carries
     /// any decode `ereport(ERROR)`.
     pub fn read_constraint_form(
-        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     ) -> PgResult<types_catalog::pg_constraint::FormData_pg_constraint>
 );

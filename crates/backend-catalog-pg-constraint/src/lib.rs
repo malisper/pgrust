@@ -51,9 +51,9 @@ use types_nodes::primnodes::Expr;
 use types_rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
-use types_tuple::backend_access_common_heaptuple::Datum;
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::{
-    FirstLowInvalidHeapAttributeNumber, HeapTupleData, ItemPointerData, INT2OID,
+    FirstLowInvalidHeapAttributeNumber, ItemPointerData, INT2OID,
 };
 
 use backend_access_common_heaptuple::heap_deform_tuple;
@@ -236,7 +236,7 @@ fn form_pg_constraint(values: &[Datum<'_>]) -> FormData_pg_constraint {
 /// the array-column reads / `heap_copytuple`) plus the deformed scalar form.
 struct ConScanRow<'mcx> {
     tid: ItemPointerData,
-    htup: HeapTupleData<'mcx>,
+    htup: FormedTuple<'mcx>,
     form: FormData_pg_constraint,
 }
 
@@ -263,10 +263,10 @@ fn systable_scan_foreach(
             values.push(value.clone());
         }
         let form = form_pg_constraint(&values);
-        let htup = tup.tuple.as_ref().clone_in(smcx)?;
+        let tid = tup.tuple.t_self;
         let row = ConScanRow {
-            tid: tup.tuple.t_self,
-            htup,
+            tid,
+            htup: tup,
             form,
         };
         let keep_going = body(&row)?;
@@ -724,8 +724,8 @@ pub fn findNotNullConstraintAttnum<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     attnum: AttrNumber,
-) -> PgResult<Option<HeapTupleData<'mcx>>> {
-    let mut retval: Option<HeapTupleData<'mcx>> = None;
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let mut retval: Option<FormedTuple<'mcx>> = None;
 
     let pg_constraint = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let key = [oid_key(Anum_pg_constraint_conrelid, relid)?];
@@ -763,7 +763,7 @@ pub fn findNotNullConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     colname: &str,
-) -> PgResult<Option<HeapTupleData<'mcx>>> {
+) -> PgResult<Option<FormedTuple<'mcx>>> {
     let attnum = lsyscache_seams::get_attnum::call(relid, colname)?;
     if attnum <= InvalidAttrNumber {
         return Ok(None);
@@ -780,8 +780,8 @@ pub fn findNotNullConstraint<'mcx>(
 pub fn findDomainNotNullConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     typid: Oid,
-) -> PgResult<Option<HeapTupleData<'mcx>>> {
-    let mut retval: Option<HeapTupleData<'mcx>> = None;
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let mut retval: Option<FormedTuple<'mcx>> = None;
 
     let pg_constraint = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let key = [oid_key(Anum_pg_constraint_contypid, typid)?];
@@ -811,7 +811,7 @@ pub fn findDomainNotNullConstraint<'mcx>(
 
 /// Given a `pg_constraint` tuple for a not-null constraint, return the column
 /// number it is for.
-pub fn extractNotNullColumn(constrTup: &HeapTupleData<'_>) -> PgResult<AttrNumber> {
+pub fn extractNotNullColumn(constrTup: &FormedTuple<'_>) -> PgResult<AttrNumber> {
     /* only tuples for not-null constraints should be given (the C Assert) */
 
     let arr: ConKeyArray = syscache_seams::get_conkey_array::call(constrTup)?;
@@ -934,7 +934,7 @@ pub fn AdjustNotNullInheritance(
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &pg_constraint,
-                tup.t_self,
+                tup.tuple.t_self,
                 &fields,
             )?;
         }
@@ -1724,7 +1724,7 @@ pub struct FkArrays {
 /// output groups to fill (the C passes a NULL pointer to skip a group).
 pub fn DeconstructFkConstraintRow(
     mcx: Mcx<'_>,
-    tuple: &HeapTupleData<'_>,
+    tuple: &FormedTuple<'_>,
     want_pf: bool,
     want_pp: bool,
     want_ff: bool,

@@ -18,6 +18,8 @@ types-hash = { path = "../types-hash" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+types-rel = { path = "../types-rel" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
