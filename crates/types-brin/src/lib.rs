@@ -69,8 +69,17 @@ impl BrinOpcInfo<'_> {
 }
 
 /// `BTMaxStrategyNumber` (`stratnum.h`): the number of B-tree strategies that
-/// the minmax/inclusion opclasses cache a comparison procinfo for.
+/// the minmax opclass caches a comparison procinfo for.
 pub const BT_MAX_STRATEGY_NUMBER: usize = 5;
+
+/// `RTMaxStrategyNumber` (`stratnum.h`): the number of R-tree strategies that
+/// the inclusion opclass caches a comparison procinfo for.
+pub const RT_MAX_STRATEGY_NUMBER: usize = 30;
+
+/// `INCLUSION_MAX_PROCNUMS` (`brin_inclusion.c`): the number of optional/required
+/// inclusion support procedures (`PROCNUM_MERGE`/`MERGEABLE`/`CONTAINS`/`EMPTY`),
+/// cached in [`InclusionOpaque::extra_procinfos`].
+pub const INCLUSION_MAX_PROCNUMS: usize = 4;
 
 /// Payload for `BrinOpcInfo::oi_opaque` — the opclass-private blob (C
 /// `void *oi_opaque`). In C each opclass `palloc0`s its own private struct in
@@ -88,6 +97,9 @@ pub enum OpaqueOpcInfo {
     /// `brin_minmax.c` `MinmaxOpaque` — the per-attribute strategy-procinfo
     /// cache.
     Minmax(MinmaxOpaque),
+    /// `brin_inclusion.c` `InclusionOpaque` — the per-attribute support- and
+    /// strategy-procinfo cache.
+    Inclusion(InclusionOpaque),
 }
 
 /// `MinmaxOpaque` (`brin_minmax.c`): the per-attribute strategy-procinfo cache.
@@ -107,6 +119,37 @@ pub struct MinmaxOpaque {
     /// `strategy_procinfos[BTMaxStrategyNumber]`: each slot's resolved
     /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
     pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
+}
+
+/// `InclusionOpaque` (`brin_inclusion.c`): the per-attribute support- and
+/// strategy-procinfo cache.
+///
+/// C: `{ FmgrInfo extra_procinfos[INCLUSION_MAX_PROCNUMS];
+///        bool extra_proc_missing[INCLUSION_MAX_PROCNUMS];
+///        Oid cached_subtype;
+///        FmgrInfo strategy_procinfos[RTMaxStrategyNumber]; }`.
+///
+/// As in [`MinmaxOpaque`] each cached `FmgrInfo` is reduced to the resolved
+/// function's `Oid` (the BRIN fmgr-call seam re-resolves by OID). An `Oid` of
+/// `InvalidOid` (0) marks an uninitialized slot, exactly as `palloc0` leaves it;
+/// `extra_proc_missing[i]` records a support procedure that was looked up and
+/// found absent, so it is not searched again. The `Cell`s give interior
+/// mutability so the cache fills lazily through the `&BrinDesc` the AM passes (C
+/// mutates the same struct through a pointer).
+#[derive(Debug, Default)]
+pub struct InclusionOpaque {
+    /// `extra_procinfos[INCLUSION_MAX_PROCNUMS]`: each optional support
+    /// procedure's resolved function `Oid` (`InvalidOid` marks an
+    /// uninitialized slot).
+    pub extra_procinfos: [core::cell::Cell<types_core::primitive::Oid>; INCLUSION_MAX_PROCNUMS],
+    /// `extra_proc_missing[INCLUSION_MAX_PROCNUMS]`: a support procedure looked
+    /// up and found absent (do not search again).
+    pub extra_proc_missing: [core::cell::Cell<bool>; INCLUSION_MAX_PROCNUMS],
+    /// `cached_subtype`.
+    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    /// `strategy_procinfos[RTMaxStrategyNumber]`: each slot's resolved
+    /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
+    pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; RT_MAX_STRATEGY_NUMBER],
 }
 
 /// `BrinDesc` (`brin_internal.h`): descriptor that enables decoding a BRIN

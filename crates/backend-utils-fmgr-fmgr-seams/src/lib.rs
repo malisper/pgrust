@@ -544,6 +544,41 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCall1Coll(flinfo, collation, arg1)` (fmgr.c) over the canonical
+    /// per-attribute [`Datum`] lane, for callers that hold values as by-value
+    /// scalars OR by-reference byte images (the BRIN inclusion opclass' R-tree
+    /// support procedures over geometric/network/range values). A `ByVal` arg
+    /// crosses as the bare machine word; a `ByRef` arg crosses as its owned
+    /// detoasted bytes through the fmgr by-reference side channel. The result is
+    /// the callee's `Datum` — a by-value scalar (`ByVal`) or a by-reference value
+    /// allocated in `mcx` (`ByRef`). The C strict-null
+    /// `elog(ERROR, "function %u returned NULL")` and whatever the function
+    /// raises are carried on `Err`.
+    pub fn function_call1_coll_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum<'mcx>,
+    ) -> PgResult<Datum<'mcx>>
+);
+
+seam_core::seam!(
+    /// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` (fmgr.c) over the
+    /// canonical per-attribute [`Datum`] lane — see [`function_call1_coll_datum`].
+    /// Used by the BRIN inclusion opclass (`brin_inclusion_add_value` /
+    /// `_consistent` / `_union`) to invoke the cached R-tree comparison and
+    /// `merge`/`mergeable`/`contains` support procedures on by-reference union
+    /// and query values, receiving the merged union (also by-reference) back.
+    pub fn function_call2_coll_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum<'mcx>,
+        arg2: Datum<'mcx>,
+    ) -> PgResult<Datum<'mcx>>
+);
+
+seam_core::seam!(
     /// Render the given (1-based, relation) `attnums` of a violator
     /// `TupleTableSlot` into printable [`ResultColumn`]s for
     /// `ri_ReportViolation` (`getTypeOutputInfo` + `OidOutputFunctionCall`;

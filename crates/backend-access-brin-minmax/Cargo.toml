@@ -20,6 +20,7 @@ types-datum = { path = "../types-datum" }
 types-typcache = { path = "../types-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-brin-entry-seams = { path = "../backend-access-brin-entry-seams" }
+backend-access-brin-inclusion = { path = "../backend-access-brin-inclusion" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }

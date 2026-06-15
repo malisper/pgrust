@@ -46,6 +46,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_getprocid(irel, attnum, procnum)` (indexam.c): the requested
+    /// default support-procedure OID for an indexed attribute, read from the
+    /// relcache `rd_support` array (`InvalidOid` when the opclass does not define
+    /// the optional procedure). Unlike [`index_getprocinfo`] it does not resolve
+    /// or complain on a missing procedure — the BRIN inclusion opclass uses it to
+    /// test for optional support procedures (`missing_ok`).
+    pub fn index_getprocid<'mcx>(
+        irel: &types_rel::Relation<'mcx>,
+        attnum: types_core::primitive::AttrNumber,
+        procnum: u16,
+    ) -> types_error::PgResult<types_core::primitive::RegProcedure>
+);
+
+seam_core::seam!(
     /// `index_beginscan_parallel(heaprel, indexrel, instrument, nkeys,
     /// norderbys, pscan)` (indexam.c): begin a parallel index scan attached to
     /// the shared `ParallelIndexScanDesc`. Fallible on OOM / `ereport(ERROR)`.

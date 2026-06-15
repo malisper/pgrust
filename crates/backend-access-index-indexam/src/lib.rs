@@ -61,6 +61,7 @@ pub fn init_seams() {
     use backend_access_index_indexam_seams as seams;
     seams::index_open::set(index_open);
     seams::index_getprocinfo::set(index_getprocinfo);
+    seams::index_getprocid::set(index_getprocid);
 
     // Scan lifecycle + retrieval seams. The seam decls carry node-/SlotId-shaped
     // params (so the executor consumers barely change); each `seam_*` wrapper

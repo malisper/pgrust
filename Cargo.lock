@@ -46,6 +46,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-inclusion"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-access-brin-insert-vacuum"
 version = "0.0.0"
 dependencies = [
@@ -99,6 +120,7 @@ name = "backend-access-brin-minmax"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-entry-seams",
+ "backend-access-brin-inclusion",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -8088,6 +8110,7 @@ dependencies = [
  "backend-commands-dbcommands-seams",
  "backend-nodes-core",
  "backend-optimizer-util-vars",
+ "backend-parser-analyze-seams",
  "backend-parser-coerce-seams",
  "backend-parser-func",
  "backend-parser-parse-agg-seams",
@@ -14490,6 +14513,7 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
  "backend-optimizer-plan-subselect-pullup",
+ "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",

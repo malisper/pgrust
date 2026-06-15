@@ -23,6 +23,8 @@ extern crate alloc;
 
 #[path = "alloc.rs"]
 mod bufalloc;
+mod buf_drop;
+mod buf_flush;
 mod buf_lock;
 mod extend;
 mod mgr;
@@ -417,6 +419,48 @@ fn xlog_read_buffer_extended(
     bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, false)
 }
 
+// --- F5: flush / drop seams (bufmgr.c) ------------------------------------
+
+/// `FlushOneBuffer(buffer)` installed seam (bufmgr.c) — write a single pinned,
+/// exclusive-locked buffer to storage (keeps an unlogged-relation init fork in
+/// sync; the victim-flush in `GetVictimBuffer` also rides it).
+fn flush_one_buffer(buffer: Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect().FlushOneBuffer(buffer)
+}
+
+/// `DropRelationBuffers(smgr_reln, forkNum, nforks, firstDelBlock)` installed
+/// seam (bufmgr.c) — drop one relation's buffers at/after the per-fork
+/// truncation point without writing them (`smgrtruncate`).
+fn drop_relation_buffers(
+    smgr_reln: types_storage::RelFileLocatorBackend,
+    forknum: &[types_core::primitive::ForkNumber],
+    nblocks: &[types_core::primitive::BlockNumber],
+) -> types_error::PgResult<()> {
+    BufferManager::global_expect().DropRelationBuffers(smgr_reln, forknum, nblocks)
+}
+
+/// `DropRelationsAllBuffers(smgr_reln, nlocators)` installed seam (bufmgr.c) —
+/// drop every buffer of all the given relations without writing them
+/// (`smgrdounlinkall`).
+fn drop_relations_all_buffers(
+    smgr_reln: &[types_storage::RelFileLocatorBackend],
+) -> types_error::PgResult<()> {
+    BufferManager::global_expect().DropRelationsAllBuffers(smgr_reln)
+}
+
+/// `FlushRelationsAllBuffers(smgrs, nrels)` installed seam (bufmgr.c) — write
+/// every dirty buffer of all the given relations to the kernel
+/// (`smgrdosyncall`). The C `SMgrRelation` array is flattened to a
+/// `RelFileLocatorBackend` slice; this shared core flushes by the unbacked
+/// relfilelocator (temp relations don't reach here).
+fn flush_relations_all_buffers(
+    smgrs: &[types_storage::RelFileLocatorBackend],
+) -> types_error::PgResult<()> {
+    let locators: alloc::vec::Vec<types_storage::RelFileLocator> =
+        smgrs.iter().map(|s| s.locator).collect();
+    BufferManager::global_expect().FlushRelationsAllBuffers(&locators)
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -472,4 +516,19 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::read_buffer_extended_vm::set(read_buffer_extended_vm);
     backend_storage_buffer_bufmgr_seams::prefetch_shared_buffer::set(prefetch_shared_buffer);
     backend_storage_buffer_bufmgr_seams::xlog_read_buffer_extended::set(xlog_read_buffer_extended);
+    // F5: flush / drop entry points (the in-crate write core + relation/db drop
+    // + flush sweeps; the disk write rides the landed smgr).
+    backend_storage_buffer_bufmgr_seams::flush_one_buffer::set(flush_one_buffer);
+    backend_storage_buffer_bufmgr_seams::drop_relation_buffers::set(drop_relation_buffers);
+    backend_storage_buffer_bufmgr_seams::drop_relations_all_buffers::set(drop_relations_all_buffers);
+    backend_storage_buffer_bufmgr_seams::flush_relations_all_buffers::set(
+        flush_relations_all_buffers,
+    );
+    // F5: the per-backend checkpoint/bgwriter statistics counters — no-op
+    // installs (behaviour-neutral, same posture as F2's count_buffer_write /
+    // count_io_op_extend until the pgstat owner ports).
+    backend_storage_buffer_bufmgr_seams::count_checkpoint_buffer_written::set(|| {});
+    backend_storage_buffer_bufmgr_seams::report_bgwriter_buf_alloc::set(|_| {});
+    backend_storage_buffer_bufmgr_seams::count_bgwriter_maxwritten_clean::set(|| {});
+    backend_storage_buffer_bufmgr_seams::count_bgwriter_buffer_written_clean::set(|| {});
 }

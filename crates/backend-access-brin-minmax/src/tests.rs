@@ -352,6 +352,7 @@ fn strategy_cache_invalidated_on_subtype_change() {
     let bdesc = brin_desc(mcx, 1);
     let opaque = match bdesc.bd_info[0].oi_opaque.as_ref().unwrap() {
         OpaqueOpcInfo::Minmax(o) => o,
+        _ => unreachable!("test bdesc holds a Minmax opaque"),
     };
 
     // First lookup at subtype 23 caches the LESS slot.
@@ -398,6 +399,7 @@ fn missing_operator_errors() {
     let bdesc = brin_desc(mcx, 1);
     let opaque = match bdesc.bd_info[0].oi_opaque.as_ref().unwrap() {
         OpaqueOpcInfo::Minmax(o) => o,
+        _ => unreachable!("test bdesc holds a Minmax opaque"),
     };
     // strategy 3 (Equal) is not mapped by the get_opfamily_member stub => missing.
     let r = minmax_get_strategy_procinfo(&bdesc, opaque, 1, INT4OID, BT_EQUAL_STRATEGY_NUMBER);

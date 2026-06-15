@@ -251,6 +251,9 @@ pub fn transformExprRecurse<'mcx>(
         Node::FuncCall(f) => transformFuncCall(pstate, f)?,
         Node::MultiAssignRef(m) => transformMultiAssignRef(pstate, m)?,
 
+        // T_SubLink → transformSubLink(pstate, (SubLink *) expr).
+        Node::SubLink(s) => transformSubLink(pstate, s)?,
+
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         Node::Expr(e) => transform_expr_node(pstate, e)?,
 
@@ -292,7 +295,15 @@ fn transform_expr_node<'mcx>(
             Ok(Expr::NamedArgExpr(na))
         }
 
-        Expr::SubLink(_) => seam_transform_sublink(pstate, Node::Expr(e)),
+        // A raw-grammar SubLink reaches the dispatcher as the `Node::SubLink`
+        // arm above (the C `T_SubLink` case); an already-analyzed
+        // `Expr::SubLink` re-entering transformExprRecurse would be a bug
+        // (the C never re-transforms an analyzed SubLink).
+        Expr::SubLink(_) => {
+            return Err(PgError::error(
+                "transformExprRecurse: unexpected already-analyzed SubLink",
+            ))
+        }
         Expr::CaseExpr(c) => transformCaseExpr(pstate, c),
         Expr::RowExpr(r) => transformRowExpr(pstate, r, false),
         Expr::CoalesceExpr(c) => transformCoalesceExpr(pstate, c),
@@ -380,6 +391,7 @@ fn transformAExprOp<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
 ) -> PgResult<Expr> {
+    let mcx = aexpr_clone_ctx(pstate);
     let A_Expr {
         name, lexpr, rexpr, location, ..
     } = a;
@@ -411,11 +423,20 @@ fn transformAExprOp<'mcx>(
     }
 
     // "row op subselect" → ROWCOMPARE sublink: rewrites the SubLink and
-    // recurses; needs SubLink transform machinery — routed through the SubLink
-    // seam (parse_expr.c:953-973).
+    // recurses (parse_expr.c:953-973).
     if is_rowexpr(lexpr.as_ref()) && is_expr_sublink(rexpr.as_ref()) {
-        let sublink = build_rowcompare_sublink(lexpr.unwrap(), rexpr.unwrap())?;
-        return seam_transform_sublink(pstate, sublink);
+        let mut s = match rexpr.unwrap() {
+            Node::SubLink(s) => s,
+            _ => unreachable!("is_expr_sublink guard"),
+        };
+        // s->subLinkType = ROWCOMPARE_SUBLINK; s->testexpr = lexpr;
+        // s->operName = a->name; s->location = a->location;
+        s.sub_link_type = types_nodes::primnodes::SubLinkType::RowCompare;
+        s.testexpr = lexpr.map(|l| mcx::alloc_in(mcx, l)).transpose()?;
+        s.oper_name = name;
+        s.location = location;
+        // result = transformExprRecurse(pstate, (Node *) s);
+        return transformSubLink(pstate, s);
     }
 
     if is_rowexpr(lexpr.as_ref()) && is_rowexpr(rexpr.as_ref()) {
@@ -441,24 +462,6 @@ fn transformAExprOp<'mcx>(
         location,
     )?;
     Ok(res)
-}
-
-/// Build the rewritten `SubLink` node for the "row op subselect" case
-/// (parse_expr.c:953-973): the SubLink is the original `rexpr`; set its
-/// `subLinkType`/`testexpr`. The trimmed [`SubLink`] drops `operName`/`location`
-/// (the row-comparison operator-name and token position the C carries), so only
-/// the structurally-modeled fields are set; the full transform is the
-/// (unported) SubLink seam's responsibility.
-fn build_rowcompare_sublink<'mcx>(
-    lexpr: Node<'mcx>,
-    rexpr: Node<'mcx>,
-) -> PgResult<Node<'mcx>> {
-    let Node::Expr(Expr::SubLink(mut s)) = rexpr else {
-        return Ok(rexpr);
-    };
-    s.subLinkType = types_nodes::primnodes::SubLinkType::RowCompare;
-    s.testexpr = node_into_expr(lexpr).map(Box::new);
-    Ok(Node::Expr(Expr::SubLink(s)))
 }
 
 /// Extract a `RowExpr`'s already-transformed `args` (`castNode(RowExpr,x)->args`).
@@ -2008,17 +2011,20 @@ fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
 fn is_casetestexpr(n: Option<&Node<'_>>) -> bool {
     matches!(n, Some(Node::Expr(Expr::CaseTestExpr(_))))
 }
+/// `IsA(node, RowExpr)` over a *raw-grammar* node — the grammar emits a raw
+/// ROW(...) as [`Node::RowExpr`]. The transformAExprOp arms inspect the
+/// untransformed `a->lexpr`/`a->rexpr`.
 fn is_rowexpr(n: Option<&Node<'_>>) -> bool {
-    matches!(n, Some(Node::Expr(Expr::RowExpr(_))))
+    matches!(n, Some(Node::RowExpr(_)))
 }
 /// `rexpr IsA SubLink && ((SubLink *) rexpr)->subLinkType == EXPR_SUBLINK`
 /// (parse_expr.c:954-955): only a plain expression sublink may be rewritten
-/// into a ROWCOMPARE sublink.
+/// into a ROWCOMPARE sublink. The raw-grammar SubLink is [`Node::SubLink`].
 fn is_expr_sublink(n: Option<&Node<'_>>) -> bool {
     matches!(
         n,
-        Some(Node::Expr(Expr::SubLink(s)))
-            if s.subLinkType == types_nodes::primnodes::SubLinkType::Expr
+        Some(Node::SubLink(s))
+            if s.sub_link_type == types_nodes::primnodes::SubLinkType::Expr
     )
 }
 fn is_rowexpr_expr_opt(e: Option<&Expr>) -> bool {
@@ -2807,14 +2813,12 @@ fn transformRowExpr<'mcx>(
 
 /// `transformMultiAssignRef(pstate, maref)` — first-stage processing of an
 /// UPDATE multi-column assignment (`(a,b) = (...)`).
-///
-/// The EXPR-SubLink source leg requires `parse_sub_analyze` (analyze.c); it is
-/// routed to the SubLink seam (panic-until-landed). The RowExpr source leg and
-/// the per-column extraction are implemented in full.
 fn transformMultiAssignRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
     maref: MultiAssignRef<'mcx>,
 ) -> PgResult<Expr> {
+    use types_nodes::primnodes::{Param, ParamKind, SubLinkType};
+
     let mcx = aexpr_clone_ctx(pstate);
 
     // Should only appear in first-stage processing of UPDATE tlists.
@@ -2826,18 +2830,56 @@ fn transformMultiAssignRef<'mcx>(
     if colno == 1 {
         let src = boxed_node(source)
             .ok_or_else(|| PgError::error("transformMultiAssignRef: NULL source"))?;
-        // We only allow EXPR SubLinks and RowExprs as the source.
+        // We only allow EXPR SubLinks and RowExprs as the source of an UPDATE
+        // multiassignment. The raw-grammar SubLink is `Node::SubLink`; the
+        // RowExpr carrier follows the crate's `Expr::RowExpr` convention
+        // (transformRowExpr consumes the primnodes RowExpr, whose `args` are
+        // the raw field expressions).
         let is_expr_sublink = matches!(
             &src,
-            Node::Expr(Expr::SubLink(s))
-                if s.subLinkType == types_nodes::primnodes::SubLinkType::Expr
+            Node::SubLink(s)
+                if s.sub_link_type == SubLinkType::Expr
         );
         let is_rowexpr = matches!(&src, Node::Expr(Expr::RowExpr(_)));
 
         if is_expr_sublink {
-            // EXPR SubLink → relabel MULTIEXPR and transform: needs
-            // parse_sub_analyze (analyze.c).
-            return seam_transform_sublink(pstate, src);
+            let mut sublink = match src {
+                Node::SubLink(s) => s,
+                _ => unreachable!("is_expr_sublink guard"),
+            };
+            // Relabel it as a MULTIEXPR_SUBLINK, and transform it.
+            sublink.sub_link_type = SubLinkType::MultiExpr;
+            let transformed = transformSubLink(pstate, sublink)?;
+            let mut sublink = match transformed {
+                Expr::SubLink(s) => s,
+                _ => unreachable!("transformSubLink yields SubLink"),
+            };
+
+            // qtree = castNode(Query, sublink->subselect).
+            let ncols = {
+                let qtree = sublink
+                    .subselect
+                    .as_deref()
+                    .ok_or_else(|| PgError::error("MULTIEXPR SubLink has no subselect"))?;
+                count_nonjunk_tlist_entries(&qtree.targetList)
+            };
+            // Check subquery returns required number of columns.
+            if ncols != ncolumns as usize {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("number of columns does not match number of values")
+                    .errposition(parser_errposition(pstate, sublink.location))
+                    .into_error());
+            }
+
+            // Assign a unique-within-this-targetlist ID to the MULTIEXPR
+            // SubLink: its position in p_multiassign_exprs (post-append).
+            sublink.subLinkId = (pstate.p_multiassign_exprs.len() + 1) as i32;
+
+            // Build a resjunk tlist item containing the MULTIEXPR SubLink and
+            // add it to p_multiassign_exprs.
+            let tle = make_target_entry(mcx, Expr::SubLink(sublink), 0, None, true)?;
+            pstate.p_multiassign_exprs.push(tle);
         } else if is_rowexpr {
             let Node::Expr(Expr::RowExpr(rexpr)) = src else {
                 unreachable!()
@@ -2886,11 +2928,20 @@ fn transformMultiAssignRef<'mcx>(
         .ok_or_else(|| PgError::error("transformMultiAssignRef: tle has no expr"))?;
 
     match tle_expr {
-        Expr::SubLink(_) => {
-            // The MULTIEXPR SubLink → Param leg requires analyze.c (the SubLink
-            // is only ever stored by the panic leg above), so it is unreachable
-            // here; route it through the SubLink seam for faithfulness.
-            seam_transform_multiassign_param(pstate)
+        Expr::SubLink(sublink) => {
+            // Build a Param representing the current subquery output column
+            // (PARAM_MULTIEXPR). paramid = (subLinkId << 16) | colno.
+            debug_assert!(sublink.subLinkType == SubLinkType::MultiExpr);
+            let texpr: Option<&Expr> = Some(tle_expr);
+            let param = Param {
+                paramkind: ParamKind::PARAM_MULTIEXPR,
+                paramid: (sublink.subLinkId << 16) | colno,
+                paramtype: expr_type(texpr)?,
+                paramtypmod: expr_typmod(texpr)?,
+                paramcollid: expr_collation(texpr)?,
+                location: expr_location(texpr)?,
+            };
+            Ok(Expr::Param(param))
         }
         Expr::RowExpr(r) => {
             // Extract and return the next element of the RowExpr.
@@ -2908,19 +2959,6 @@ fn transformMultiAssignRef<'mcx>(
         }
         _ => Err(PgError::error("unexpected expr type in multiassign list")),
     }
-}
-
-/// The MULTIEXPR-SubLink → Param extraction leg of `transformMultiAssignRef`.
-/// Reachable only once an EXPR SubLink has been transformed and stored, which
-/// itself needs analyze.c; routed to the SubLink seam (panic-until-landed).
-fn seam_transform_multiassign_param<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-) -> PgResult<Expr> {
-    panic!(
-        "transformMultiAssignRef's MULTIEXPR-SubLink → Param leg requires the \
-         SubLink transform (parse_sub_analyze, analyze.c) to have stored the \
-         MULTIEXPR SubLink first; analyze.c is not yet ported."
-    )
 }
 
 /// The PreParseColumnRefHook leg of `transformColumnRef` — the hook ABI carries
@@ -2976,14 +3014,274 @@ fn seam_transform_param_ref<'mcx>(
     )
 }
 
-fn seam_transform_sublink<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _sublink: Node<'mcx>,
+/// `count_nonjunk_tlist_entries(targetlist)` (parse_node.c) — the number of
+/// non-resjunk entries in a target list.
+fn count_nonjunk_tlist_entries(
+    targetlist: &mcx::PgVec<'_, types_nodes::primnodes::TargetEntry<'_>>,
+) -> usize {
+    targetlist.iter().filter(|tle| !tle.resjunk).count()
+}
+
+/// `transformSubLink(pstate, sublink)` (parse_expr.c:1782) — analyze a
+/// sub-SELECT appearing in an expression. Runs `parse_sub_analyze` (analyze.c)
+/// over the raw `subselect`, embeds the resulting `Query` in the analyzed
+/// `SubLink`, and (for ALL/ANY/ROWCOMPARE) builds the row-comparison
+/// `testexpr`. The output is `(Node *) sublink` — an analyzed
+/// [`Expr::SubLink`].
+fn transformSubLink<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    sublink: types_nodes::rawexprnodes::SubLink<'mcx>,
 ) -> PgResult<Expr> {
-    panic!(
-        "transformSubLink runs parse_sub_analyze (analyze.c) on the subquery and \
-         resolves comparison operators; analyze.c is not yet ported."
-    )
+    use types_nodes::primnodes::{Param, ParamKind, SubLinkType};
+
+    let mcx = aexpr_clone_ctx(pstate);
+
+    // Check to see if the sublink is in an invalid place within the query. We
+    // allow sublinks everywhere in SELECT/INSERT/UPDATE/DELETE/MERGE, but
+    // generally not in utility statements.
+    let err: Option<&str> = match pstate.p_expr_kind {
+        ParseExprKind::EXPR_KIND_NONE => {
+            // Assert(false) — can't happen.
+            debug_assert!(false, "EXPR_KIND_NONE in transformSubLink");
+            None
+        }
+        ParseExprKind::EXPR_KIND_OTHER
+        | ParseExprKind::EXPR_KIND_JOIN_ON
+        | ParseExprKind::EXPR_KIND_JOIN_USING
+        | ParseExprKind::EXPR_KIND_FROM_SUBSELECT
+        | ParseExprKind::EXPR_KIND_FROM_FUNCTION
+        | ParseExprKind::EXPR_KIND_WHERE
+        | ParseExprKind::EXPR_KIND_POLICY
+        | ParseExprKind::EXPR_KIND_HAVING
+        | ParseExprKind::EXPR_KIND_FILTER
+        | ParseExprKind::EXPR_KIND_WINDOW_PARTITION
+        | ParseExprKind::EXPR_KIND_WINDOW_ORDER
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS
+        | ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS
+        | ParseExprKind::EXPR_KIND_SELECT_TARGET
+        | ParseExprKind::EXPR_KIND_INSERT_TARGET
+        | ParseExprKind::EXPR_KIND_UPDATE_SOURCE
+        | ParseExprKind::EXPR_KIND_UPDATE_TARGET
+        | ParseExprKind::EXPR_KIND_MERGE_WHEN
+        | ParseExprKind::EXPR_KIND_GROUP_BY
+        | ParseExprKind::EXPR_KIND_ORDER_BY
+        | ParseExprKind::EXPR_KIND_DISTINCT_ON
+        | ParseExprKind::EXPR_KIND_LIMIT
+        | ParseExprKind::EXPR_KIND_OFFSET
+        | ParseExprKind::EXPR_KIND_RETURNING
+        | ParseExprKind::EXPR_KIND_MERGE_RETURNING
+        | ParseExprKind::EXPR_KIND_VALUES
+        | ParseExprKind::EXPR_KIND_VALUES_SINGLE
+        | ParseExprKind::EXPR_KIND_CYCLE_MARK => None,
+        ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT
+        | ParseExprKind::EXPR_KIND_DOMAIN_CHECK => {
+            Some("cannot use subquery in check constraint")
+        }
+        ParseExprKind::EXPR_KIND_COLUMN_DEFAULT
+        | ParseExprKind::EXPR_KIND_FUNCTION_DEFAULT => {
+            Some("cannot use subquery in DEFAULT expression")
+        }
+        ParseExprKind::EXPR_KIND_INDEX_EXPRESSION => {
+            Some("cannot use subquery in index expression")
+        }
+        ParseExprKind::EXPR_KIND_INDEX_PREDICATE => {
+            Some("cannot use subquery in index predicate")
+        }
+        ParseExprKind::EXPR_KIND_STATS_EXPRESSION => {
+            Some("cannot use subquery in statistics expression")
+        }
+        ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM => {
+            Some("cannot use subquery in transform expression")
+        }
+        ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER => {
+            Some("cannot use subquery in EXECUTE parameter")
+        }
+        ParseExprKind::EXPR_KIND_TRIGGER_WHEN => {
+            Some("cannot use subquery in trigger WHEN condition")
+        }
+        ParseExprKind::EXPR_KIND_PARTITION_BOUND => {
+            Some("cannot use subquery in partition bound")
+        }
+        ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION => {
+            Some("cannot use subquery in partition key expression")
+        }
+        ParseExprKind::EXPR_KIND_CALL_ARGUMENT => {
+            Some("cannot use subquery in CALL argument")
+        }
+        ParseExprKind::EXPR_KIND_COPY_WHERE => {
+            Some("cannot use subquery in COPY FROM WHERE condition")
+        }
+        ParseExprKind::EXPR_KIND_GENERATED_COLUMN => {
+            Some("cannot use subquery in column generation expression")
+        }
+    };
+    if let Some(err) = err {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(err)
+            .errposition(parser_errposition(pstate, sublink.location))
+            .into_error());
+    }
+
+    pstate.p_hasSubLinks = true;
+
+    // Destructure the raw SubLink.
+    let types_nodes::rawexprnodes::SubLink {
+        sub_link_type,
+        sub_link_id,
+        testexpr,
+        oper_name,
+        subselect,
+        location,
+    } = sublink;
+
+    // OK, let's transform the sub-SELECT.
+    let subselect = subselect
+        .ok_or_else(|| PgError::error("transformSubLink: NULL subselect"))?;
+    let qtree_node =
+        backend_parser_analyze_seams::parse_sub_analyze::call(
+            mcx,
+            &subselect,
+            pstate,
+            None,
+            false,
+            true,
+        )?;
+
+    // Check that we got a SELECT. Anything else should be impossible given
+    // restrictions of the grammar, but check anyway.
+    let qtree = match qtree_node.as_ref() {
+        Node::Query(q) if q.commandType == types_nodes::nodes::CmdType::CMD_SELECT => q,
+        _ => {
+            return Err(PgError::error(
+                "unexpected non-SELECT command in SubLink",
+            ))
+        }
+    };
+
+    // Embed the analyzed Query as the SubLink's owned subselect, mirroring
+    // RangeTblEntry.subquery; the Expr tree is lifetime-free, so the embedded
+    // Query carries the 'static notional lifetime (cf. Aggref::args /
+    // SubPlanExpr — see tlist_into_static / query_into_static).
+    let analyzed_subselect = Some(query_into_static(mcx, qtree)?);
+
+    let mut out = types_nodes::primnodes::SubLink {
+        subLinkType: sub_link_type,
+        subLinkId: sub_link_id,
+        testexpr: None,
+        subselect: analyzed_subselect,
+        location,
+    };
+
+    if sub_link_type == SubLinkType::Exists {
+        // EXISTS needs no test expression or combining operator.
+        out.testexpr = None;
+    } else if sub_link_type == SubLinkType::Expr || sub_link_type == SubLinkType::Array {
+        // Make sure the subselect delivers a single column (ignoring resjunk).
+        if count_nonjunk_tlist_entries(&qtree.targetList) != 1 {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("subquery must return only one column")
+                .errposition(parser_errposition(pstate, location))
+                .into_error());
+        }
+        // EXPR and ARRAY need no test expression or combining operator.
+        out.testexpr = None;
+    } else if sub_link_type == SubLinkType::MultiExpr {
+        // Same as EXPR case, except no restriction on number of columns.
+        out.testexpr = None;
+    } else {
+        // ALL, ANY, or ROWCOMPARE: generate row-comparing expression.
+
+        // If the source was "x IN (select)", convert to "x = ANY (select)".
+        let oper_name = if oper_name.is_empty() {
+            let mut v: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+            let str_node = Node::String(types_nodes::value::StringNode {
+                sval: mcx::PgString::from_str_in("=", mcx)?,
+            });
+            v.push(mcx::alloc_in(mcx, str_node)?);
+            v
+        } else {
+            oper_name
+        };
+
+        // Transform lefthand expression, and convert to a list.
+        let lefthand = transformExprRecurse(pstate, testexpr.map(mcx::PgBox::into_inner))?;
+        let left_list: Vec<Expr> = match lefthand {
+            Some(Expr::RowExpr(r)) => r.args,
+            Some(other) => vec![other],
+            None => Vec::new(),
+        };
+
+        // Build a list of PARAM_SUBLINK nodes representing the output columns
+        // of the subquery.
+        let mut right_list: Vec<Expr> = Vec::new();
+        for tent in qtree.targetList.iter() {
+            if tent.resjunk {
+                continue;
+            }
+            let texpr = tent.expr.as_deref();
+            let param = Param {
+                paramkind: ParamKind::PARAM_SUBLINK,
+                paramid: tent.resno as i32,
+                paramtype: expr_type(texpr)?,
+                paramtypmod: expr_typmod(texpr)?,
+                paramcollid: expr_collation(texpr)?,
+                location: -1,
+            };
+            right_list.push(Expr::Param(param));
+        }
+
+        // We could rely on make_row_comparison_op to complain if the list
+        // lengths differ, but we prefer to generate a more specific error.
+        if left_list.len() < right_list.len() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("subquery has too many columns")
+                .errposition(parser_errposition(pstate, location))
+                .into_error());
+        }
+        if left_list.len() > right_list.len() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("subquery has too few columns")
+                .errposition(parser_errposition(pstate, location))
+                .into_error());
+        }
+
+        // Identify the combining operator(s) and generate a suitable
+        // row-comparison expression.
+        let testexpr =
+            make_row_comparison_op(pstate, &oper_name, left_list, right_list, location)?;
+        out.testexpr = Some(Box::new(testexpr));
+    }
+
+    Ok(Expr::SubLink(out))
+}
+
+/// Reinterpret an mcx-allocated `Query<'mcx>` clone as the `'static`-notional
+/// owned sub-`Query` carried inside the lifetime-free `Expr` tree
+/// (`SubLink.subselect`, mirroring `Aggref::args`'s `tlist_into_static`). The
+/// Query is deep-cloned into `mcx` (so it is fully owned), then the lifetime
+/// parameter is erased to `'static`; the data is unchanged and the backing
+/// arena outlives parse analysis in practice.
+fn query_into_static<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    qtree: &types_nodes::copy_query::Query<'mcx>,
+) -> PgResult<mcx::PgBox<'static, types_nodes::copy_query::Query<'static>>> {
+    let owned: types_nodes::copy_query::Query<'mcx> = qtree.clone_in(mcx)?;
+    let boxed: mcx::PgBox<'mcx, types_nodes::copy_query::Query<'mcx>> =
+        mcx::alloc_in(mcx, owned)?;
+    // SAFETY: the embedded sub-Query lives inside the lifetime-free Expr tree
+    // (SubLink.subselect: Option<PgBox<'static, Query<'static>>>, mirroring
+    // SubPlanExpr(Box<SubPlan<'static>>)). The clone above made it fully owned
+    // in `mcx`; this erases the 'mcx lifetime to the 'static notional lifetime
+    // of the Expr tree — a transmute of the lifetime parameter only, the data
+    // is unchanged (same convention as tlist_into_static in backend-parser-agg).
+    let boxed_static: mcx::PgBox<'static, types_nodes::copy_query::Query<'static>> =
+        unsafe { core::mem::transmute(boxed) };
+    Ok(boxed_static)
 }
 
 fn seam_transform_grouping_func<'mcx>(

@@ -63,6 +63,14 @@
 
 extern crate alloc;
 
+mod result_rtes;
+
+// FAMILY 5 helpers re-exported for FAMILY 2 (`pull_up_subqueries`, still
+// seam-and-panicked): `get_nullingrels` builds the per-RTE nullingrel table the
+// `pullup_replace_vars` path reads. Ported now (a leaf read-only walker); its
+// only in-crate consumer lands with FAMILY 2.
+pub use result_rtes::{get_nullingrels, NullingrelInfo};
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -741,6 +749,9 @@ fn empty_mbms<'mcx>(mcx: Mcx<'mcx>) -> MultiBitmapset<'mcx> {
 /// Install this unit's inward seams.
 pub fn init_seams() {
     backend_optimizer_prep_prepjointree_seams::reduce_outer_joins::set(reduce_outer_joins);
+    backend_optimizer_prep_prepjointree_seams::remove_useless_result_rtes::set(
+        result_rtes::remove_useless_result_rtes,
+    );
     backend_optimizer_prep_prepjointree_seams::pull_up_sublinks::set(pull_up_sublinks_panic);
     backend_optimizer_prep_prepjointree_seams::pull_up_subqueries::set(pull_up_subqueries_panic);
 }
