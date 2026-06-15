@@ -6,6 +6,7 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
+    backend_archive_shell_archive::init_seams();
     contrib_amcheck_verify_nbtree::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
