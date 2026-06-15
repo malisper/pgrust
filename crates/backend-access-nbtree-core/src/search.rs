@@ -1195,6 +1195,15 @@ pub fn bt_first<'mcx>(
     if so.numberOfKeys > 0 {
         let mut curattr: AttrNumber = 1;
         let mut bkey: Option<usize> = None; /* index into so.keyData */
+        /*
+         * Skip-array MINVAL/MAXVAL substitution: when bkey is a skip array's
+         * boundary key, C reassigns its local `bkey` pointer to the array's
+         * separately-stored low_compare/high_compare ScanKey without ever
+         * touching so->keyData. We mirror that with a local override that holds
+         * the substituted compare key; so.keyData is left untouched (clobbering
+         * it would corrupt the key set _bt_checkkeys reads for the whole scan).
+         */
+        let mut bkey_override: Option<ScanKeyData<'mcx>> = None;
         let mut implies_nn: Option<usize> = None;
         /* A NOT NULL key materialised from impliesNN, kept alive in start_keys */
 
@@ -1245,12 +1254,17 @@ pub fn bt_first<'mcx>(
                             }
                         }
 
-                        /* Replace bkey with the (possibly NULL) compare key. */
+                        /*
+                         * Reassign the (local) boundary key to the (possibly
+                         * NULL) compare key, mirroring C's `bkey = ...` pointer
+                         * reassignment. so.keyData is NOT modified.
+                         */
                         if let Some(nb) = new_bkey {
-                            so.keyData[bk] = nb;
-                            /* bkey stays pointing at bk (now the compare key) */
+                            bkey_override = Some(nb);
+                            /* bkey stays Some(bk) so bkey.is_some() holds below */
                         } else {
                             bkey = None;
+                            bkey_override = None;
                         }
                     }
                 }
@@ -1293,6 +1307,9 @@ pub fn bt_first<'mcx>(
                  */
                 let chosen: Option<ScanKeyData<'mcx>> = if let Some(nn) = deduced_notnull {
                     Some(nn)
+                } else if let Some(ov) = bkey_override.take() {
+                    /* skip-array compare key substituted in for so.keyData[bk] */
+                    Some(ov)
                 } else if let Some(bk) = bkey {
                     Some(so.keyData[bk].clone())
                 } else {
@@ -1348,6 +1365,7 @@ pub fn bt_first<'mcx>(
                 debug_assert!(so.keyData[i].sk_attno == curattr + 1);
                 curattr = so.keyData[i].sk_attno;
                 bkey = None;
+                bkey_override = None;
                 implies_nn = None;
             }
 

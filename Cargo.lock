@@ -957,6 +957,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "mcx",
+ "pg-prng",
  "types-amapi",
  "types-core",
  "types-datum",

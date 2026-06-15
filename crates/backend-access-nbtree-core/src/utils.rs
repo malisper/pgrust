@@ -669,13 +669,15 @@ pub fn bt_mkscankey<'mcx>(
     }
 
     // In NULLS NOT DISTINCT mode, we pretend that there are no null keys, so
-    // that full uniqueness check is done. The trimmed `FormData_pg_index` in
-    // this repo does not model `indnullsnotdistinct`; with that field absent the
-    // C behaviour for the common `indnullsnotdistinct = false` case (leave
-    // anynullkeys as computed) is preserved, and the NULLS NOT DISTINCT branch
-    // is a genuine relcache-model gap.
-    //   if rel.rd_index.indnullsnotdistinct { key.anynullkeys = false; }
-    let _ = &rel.rd_index;
+    // that full uniqueness check is done (C: nbtutils.c:175-176).
+    if rel
+        .rd_index
+        .as_ref()
+        .map(|ix| ix.indnullsnotdistinct)
+        .unwrap_or(false)
+    {
+        key.anynullkeys = false;
+    }
 
     Ok(Some(Box::new(key)))
 }
@@ -1020,10 +1022,15 @@ pub fn bt_start_array_keys<'mcx>(
     for i in 0..so.numArrayKeys as usize {
         let scan_key = so.arrayKeys[i].scan_key as usize;
         // Split the borrow: copy the array, mutate the key, then write back.
-        let array = so.arrayKeys[i].clone();
+        let mut array = so.arrayKeys[i].clone();
         debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHARRAY) != 0);
         let low_not_high = ScanDirectionIsForward(dir);
         bt_array_set_low_or_high(rel, &mut so.keyData[scan_key], &array, low_not_high);
+        // C sets the SAOP array's cur_elem inside _bt_array_set_low_or_high; the
+        // borrow split means the array's cur_elem is written here (see
+        // array_set_cur_elem). Without this, cur_elem desyncs from sk_argument
+        // on every scan start / array roll-over.
+        array_set_cur_elem(&mut array, low_not_high);
         so.arrayKeys[i] = array;
     }
     so.scanBehind = false;
@@ -2792,7 +2799,10 @@ fn bt_killitems_inner<'mcx>(rel: &Relation<'mcx>, so: &mut BTScanOpaqueData<'mcx
                     if j == nposting {
                         killtuple = true;
                     }
-                } else if ItemPointerEquals(&ithdr.t_tid, &kitem_heaptid) {
+                } else if ItemPointerEquals(&ithdr.t_tid, &kitem) {
+                    // C (nbtutils.c:3429) compares against the moving `kitem`,
+                    // which posting-list read-ahead may have advanced — not the
+                    // fixed original heap TID.
                     killtuple = true;
                 }
 

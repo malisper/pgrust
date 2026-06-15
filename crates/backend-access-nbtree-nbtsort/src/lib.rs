@@ -928,13 +928,12 @@ fn _bt_buildadd<'mcx>(
     let isleaf = state.btps_level == 0;
 
     if itupsz > BTMaxItemSize {
-        // C: _bt_check_third_page(wstate->index, wstate->heap,
-        //    wstate->inskey->heapkeyspace, npage, itup) (nbtsort.c).
-        let heapkeyspace = inskey_heapkeyspace(&wstate.inskey);
+        // C: _bt_check_third_page(wstate->index, wstate->heap, isleaf,
+        //    npage, itup) (nbtsort.c:833).
         buildhelp::bt_check_third_page::call(
             &wstate.index,
             &wstate.heap,
-            heapkeyspace,
+            isleaf,
             &nbuf,
             itup,
         )?;
@@ -1383,12 +1382,6 @@ fn new_load_dedup_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<BTDedupState<'mcx>> {
 }
 
 // --- BTScanInsert read-only field accessors --------------------------------
-
-/// `itup_key->heapkeyspace`.
-#[inline]
-fn inskey_heapkeyspace(inskey: &BTScanInsert<'_>) -> bool {
-    inskey.as_ref().map(|k| k.heapkeyspace).unwrap_or(true)
-}
 
 /// `itup_key->allequalimage`.
 #[inline]

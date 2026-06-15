@@ -128,6 +128,7 @@ fn project_entry<'mcx>(
         indnkeyatts: ix.indnkeyatts,
         indisunique: ix.indisunique,
         indimmediate: ix.indimmediate,
+        indnullsnotdistinct: ix.indnullsnotdistinct,
         indrelid: ix.indrelid,
         indkey0: ix.indkey.first().copied().unwrap_or(0),
     });

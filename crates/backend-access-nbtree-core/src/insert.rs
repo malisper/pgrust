@@ -59,7 +59,8 @@ use alloc::vec::Vec as StdVec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, TransactionId};
-use types_error::{PgError, PgResult};
+use types_core::xact::TransactionIdIsValid;
+use types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use types_nbtree::{
     xl_btree_insert, xl_btree_metadata, xl_btree_newroot, xl_btree_split, BTMetaPageData,
     BTPageOpaqueData, BTInsertStateData, BTScanInsert, BTStack, BTStackData,
@@ -513,17 +514,50 @@ fn bt_get_deduplicate_items(_rel: &Relation) -> bool {
 // Genuinely-unported callees (honest seam-and-panic).
 // ===========================================================================
 
+/// The conflict info `_bt_check_unique` reads back from the `SnapshotDirty`
+/// that `table_index_fetch_tuple_check` populates (C reads `SnapshotDirty.xmin`,
+/// `.xmax`, `.speculativeToken` after the probe). Modelled as out-params on the
+/// probe helper so the in-crate xwait derivation is faithful without depending
+/// on the full snapshot vocabulary.
+#[derive(Default)]
+struct DirtyConflict {
+    xmin: TransactionId,
+    xmax: TransactionId,
+    speculative_token: u32,
+}
+
 /// `table_index_fetch_tuple_check(heapRel, &htid, snapshot, &all_dead)`
 /// (tableam dispatch). No tableam crate is a dependency of nbtree-core and no
 /// nbtree-core seam exposes the dispatch, so `_bt_check_unique`'s single heap
-/// visibility probe is the genuine boundary.
+/// visibility probe is the genuine boundary. When probing with the dirty
+/// snapshot, the conflict info (xmin/xmax/speculativeToken) is filled into
+/// `dirty`; when probing with `SnapshotSelf`, `dirty` is `None`.
 fn table_index_fetch_tuple_check<'mcx>(
     _heap_rel: &Relation<'mcx>,
     _tid: &ItemPointerData,
-    _snapshot_dirty: bool,
+    _snapshot_self: bool,
     _all_dead: Option<&mut bool>,
+    _dirty: Option<&mut DirtyConflict>,
 ) -> bool {
     panic!("_bt_check_unique: table_index_fetch_tuple (tableam dispatch) not yet ported")
+}
+
+/// `index_deform_tuple(itup, RelationGetDescr(rel), values, isnull)` +
+/// `BuildIndexValueDescription(rel, values, isnull)` (genam.c) — the optional
+/// "(key) = (values)" detail for the unique-violation ereport. C makes this
+/// detail optional (`key_desc ? errdetail(...) : 0`): it is NULL when the user
+/// lacks rights to see the key values. Building it here requires deforming the
+/// index tuple into per-attribute datums (the slot-based `index_deform_tuple`
+/// seam) and the genam `build_index_value_description` seam, neither plumbed
+/// into nbtree-core; we therefore omit the detail, exactly matching C's
+/// NULL-key_desc path. The error itself (message + SQLSTATE) is fully reported.
+#[inline]
+fn build_index_value_desc<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _rel: &Relation<'mcx>,
+    _itup_bytes: &[u8],
+) -> Option<alloc::string::String> {
+    None
 }
 
 /// `_bt_allocbuf(rel, heaprel)` (nbtpage.c) — allocate a new write-locked nbtree
@@ -827,6 +861,7 @@ fn _bt_check_unique<'mcx>(
     let mut prevalldead = true;
     let mut curposti: i32 = 0;
     let mut cur_curitemid_dead = false;
+    let mut dirty_conflict = DirtyConflict::default();
 
     /* Assume unique until we find a duplicate */
     *is_unique = true;
@@ -918,14 +953,25 @@ fn _bt_check_unique<'mcx>(
                  * Check if there are table tuples for this index entry satisfying
                  * SnapshotDirty (HOT chains share a single index entry).
                  */
-                else if table_index_fetch_tuple_check(
-                    heap_rel,
-                    &htid,
-                    /*snapshot_dirty=*/ true,
-                    Some(&mut all_dead),
-                ) {
+                else if {
+                    let mut dirty = DirtyConflict::default();
+                    let dup = table_index_fetch_tuple_check(
+                        heap_rel,
+                        &htid,
+                        /*snapshot_self=*/ false,
+                        Some(&mut all_dead),
+                        Some(&mut dirty),
+                    );
+                    dirty_conflict = dirty;
+                    dup
+                } {
                     /* It is a duplicate. */
                     if check_unique == IndexUniqueCheck::Partial {
+                        /*
+                         * Partial check: just report the potential conflict and
+                         * leave the full check for later. Don't invalidate
+                         * binary search bounds.
+                         */
                         if nbuf != InvalidBuffer {
                             page_bt_relbuf(rel, nbuf);
                         }
@@ -934,17 +980,89 @@ fn _bt_check_unique<'mcx>(
                     }
 
                     /*
-                     * If this tuple is being updated by another transaction we
-                     * must wait for its commit/abort. The SnapshotDirty xmin/xmax
-                     * inspection lives below the tableam probe, which is unported;
-                     * the probe panics before reaching here.
+                     * If this tuple is being updated by another transaction then
+                     * we have to wait for its commit/abort.
                      */
-                    // (xwait / speculativeToken handling follows the tableam probe
-                    // in C; unreachable in this repo.)
-                    let _ = (speculative_token, &mut nbuf, &mut found);
-                    return Err(PgError::error(
-                        "_bt_check_unique: SnapshotDirty conflict handling not yet ported",
-                    ));
+                    let xwait = if TransactionIdIsValid(dirty_conflict.xmin) {
+                        dirty_conflict.xmin
+                    } else {
+                        dirty_conflict.xmax
+                    };
+
+                    if TransactionIdIsValid(xwait) {
+                        if nbuf != InvalidBuffer {
+                            page_bt_relbuf(rel, nbuf);
+                        }
+                        /* Tell _bt_doinsert to wait... */
+                        *speculative_token = dirty_conflict.speculative_token;
+                        /* Caller releases lock on buf immediately */
+                        insertstate.bounds_valid = false;
+                        return Ok(xwait);
+                    }
+
+                    /*
+                     * Otherwise we have a definite conflict. But before
+                     * complaining, look to see if the tuple we want to insert is
+                     * itself now committed dead --- if so, don't complain. This
+                     * is necessary to support CREATE INDEX CONCURRENTLY: we must
+                     * follow HOT-chains, and a live tuple anywhere in this chain
+                     * is a unique key conflict.
+                     */
+                    if table_index_fetch_tuple_check(
+                        heap_rel,
+                        &itup_t_tid,
+                        /*snapshot_self=*/ true,
+                        None,
+                        None,
+                    ) {
+                        /* Normal case --- it's still live */
+                    } else {
+                        /*
+                         * It's been deleted, so no error, and no need to
+                         * continue searching
+                         */
+                        break;
+                    }
+
+                    /*
+                     * Check for a conflict-in as we would if we were going to
+                     * write to this page, so SSI conflicts masked by this unique
+                     * constraint violation still get reported.
+                     */
+                    let conflict_blkno =
+                        bufmgr::buffer_get_block_number::call(insertstate.buf);
+                    check_for_serializable_conflict_in(rel, conflict_blkno);
+
+                    /*
+                     * Definite conflict. Release the buffer locks we hold before
+                     * building the value description, which could make catalog
+                     * accesses (worst case touching this same index and
+                     * deadlocking).
+                     */
+                    if nbuf != InvalidBuffer {
+                        page_bt_relbuf(rel, nbuf);
+                    }
+                    page_bt_relbuf(rel, insertstate.buf);
+                    insertstate.buf = InvalidBuffer;
+                    insertstate.bounds_valid = false;
+
+                    /*
+                     * Break the tuple down into datums and report the error. The
+                     * "(key) = (values)" detail is built via the genam
+                     * BuildIndexValueDescription seam; when unavailable (caller
+                     * lacks rights, or seam unported) we omit the detail exactly
+                     * as C does for a NULL key_desc.
+                     */
+                    let key_desc = build_index_value_desc(mcx, rel, itup_bytes);
+                    let mut err = PgError::error(format!(
+                        "duplicate key value violates unique constraint \"{}\"",
+                        rel_name(rel)
+                    ))
+                    .with_sqlstate(ERRCODE_UNIQUE_VIOLATION);
+                    if let Some(kd) = key_desc {
+                        err = err.with_detail(format!("Key {} already exists.", kd));
+                    }
+                    return Err(err);
                 } else if all_dead
                     && (!inposting
                         || (prevalldead
@@ -1162,10 +1280,8 @@ fn _bt_findinsertloc<'mcx>(
     } else {
         /*
          * This is a !heapkeyspace (version 2 or 3) index. Scan right past equal
-         * keys to find free space, with a "get tired" random stop. The
-         * pg_prng_uint32 stop is unported at this layer; we faithfully scan to
-         * the legal limit (conditions (a) and (b)), never randomly giving up.
-         * The random "get tired" is purely a duplicate-key performance heuristic.
+         * keys to find free space, with a "get tired" random stop (condition
+         * (c)) that prevents O(N^2) behaviour with many equal keys.
          */
         while (PageGetFreeSpace(&PageRef::new(&page)?) as usize) < insertstate.itemsz {
             /* Before considering moving right, free LP_DEAD items */
@@ -1203,6 +1319,7 @@ fn _bt_findinsertloc<'mcx>(
                     &page,
                     P_HIKEY,
                 )? != 0
+                || pg_prng::global_prng(|p| p.next_u32()) <= (u32::MAX / 100)
             {
                 break;
             }

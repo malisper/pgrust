@@ -100,6 +100,10 @@ pub struct FormData_pg_index {
     pub indisunique: bool,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
+    /// `bool indnullsnotdistinct` — for a unique index, do NULL key values
+    /// conflict with each other (NULLS NOT DISTINCT)? `false` is the SQL
+    /// default (NULLs are distinct, so multiple NULLs never conflict).
+    pub indnullsnotdistinct: bool,
     /// `Oid indrelid` — the table this index is for.
     pub indrelid: Oid,
     /// `int2vector indkey.values[0]` — the table column number of the index's
