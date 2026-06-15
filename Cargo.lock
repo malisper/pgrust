@@ -1326,7 +1326,7 @@ dependencies = [
  "backend-access-nbtree-nbtree-seams",
  "backend-commands-vacuum-seams",
  "backend-nodes-core-seams",
- "backend-storage-aio-seams",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-lmgr-condition-variable-seams",
@@ -9599,6 +9599,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-aio-read-stream"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-catalog",
+ "backend-storage-buffer-bufmgr",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-smgr-smgr",
+ "backend-utils-cache-spccache",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-aio-seams"
 version = "0.0.0"
 dependencies = [
@@ -14535,6 +14553,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",
