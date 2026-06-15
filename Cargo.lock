@@ -3583,6 +3583,7 @@ dependencies = [
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-catalog",
@@ -6416,6 +6417,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-driver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-parser-gram-seams"
 version = "0.0.0"
 dependencies = [
@@ -6459,6 +6469,31 @@ dependencies = [
  "types-error",
  "types-opclass",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-type"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-parser-driver-seams",
+ "backend-parser-parse-type-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12301,6 +12336,7 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-parser-parse-type",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",

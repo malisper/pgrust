@@ -138,6 +138,7 @@ pub fn init_all() {
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -1092,6 +1093,16 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
+        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
+        // and extracts the single `TypeName` node. The owner of `raw_parser`
+        // (backend-parser-driver, audited) cannot install this seam yet because
+        // the bison grammar it drives (`base_yyparse`, gram.y) is not ported —
+        // any raw-parse call reaches the still-unported grammar and panics
+        // (mirror-pg-and-panic). Becomes a real install once gram.y lands and
+        // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
+        // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
+        ("backend_parser_driver", "raw_parse_type_name"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
