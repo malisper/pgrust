@@ -1,0 +1,27 @@
+[package]
+name = "backend-optimizer-plan-createplan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_plan_createplan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+# expression_tree_mutator over the arena Expr tree (replace_nestloop_params).
+backend-nodes-core = { path = "../backend-nodes-core" }
+# This unit's own per-converter seam decls (the dispatch arms).
+backend-optimizer-plan-createplan-seams = { path = "../backend-optimizer-plan-createplan-seams" }
+# cost_qual_eval + cpu_operator_cost (order_qual_clauses); installed by costsize.
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
+# replace_nestloop_param_var / _placeholdervar (paramassign.c, #297).
+backend-optimizer-util-paramassign-seams = { path = "../backend-optimizer-util-paramassign-seams" }
+# find_placeholder_info (placeholder.c).
+backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-placeholder-seams" }
+# relids_is_member / relids_is_subset over Relids (relnode.c).
+backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
