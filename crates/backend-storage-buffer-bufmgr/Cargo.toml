@@ -13,6 +13,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
+# The FSM page round-trip seam materialises the page body as an owned FSMPageData.
+types-fsm = { path = "../types-fsm" }
 # F2a `BufferAlloc` tests relpersistence against RELPERSISTENCE_PERMANENT;
 # F2b extend reads `rd_rel->relpersistence` (RELPERSISTENCE_TEMP/PERMANENT).
 types-tuple = { path = "../types-tuple" }
@@ -63,6 +65,9 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 # F3 WaitReadBuffers' retry loop runs CHECK_FOR_INTERRUPTS between re-issues.
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+# InitBufferManagerAccess registers the AtProcExit_Buffers cleanup via
+# on_shmem_exit (ipc.c), reached through the ipc seam crate.
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 
 [dev-dependencies]
 # Test-only: stub ShmemInitStruct so BufferManagerShmemInit can stand up the

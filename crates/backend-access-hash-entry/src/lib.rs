@@ -423,7 +423,7 @@ pub fn hashbuild<'mcx>(
 ) -> PgResult<IndexBuildResult> {
     // We expect to be called exactly once for any index relation. If that's
     // not the case, big trouble's what we have.
-    if bufmgr::relation_get_number_of_blocks_in_fork::call(index.rd_id, ForkNumber::MAIN_FORKNUM)?
+    if bufmgr::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)?
         != 0
     {
         return Err(types_error::PgError::error(
@@ -927,7 +927,7 @@ pub fn hashvacuumcleanup<'mcx>(
 
     // update statistics
     let num_pages =
-        bufmgr::relation_get_number_of_blocks_in_fork::call(rel.rd_id, ForkNumber::MAIN_FORKNUM)?;
+        bufmgr::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
     stats.num_pages = num_pages;
 
     Ok(Some(stats))

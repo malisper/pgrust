@@ -438,10 +438,10 @@ impl BufferManager {
                     "cannot access temporary tables of other sessions",
                 ));
             }
-            // PrefetchLocalBuffer — out of this shared core.
-            return Err(PgError::error(
-                "PrefetchBuffer: temp-relation prefetch (PrefetchLocalBuffer) is not implemented by the shared buffer core",
-            ));
+            // PrefetchLocalBuffer (bufmgr.c:665) — the temp/local pool lives in
+            // localbuf.c (panic-until-owner). Dispatch through the outward seam,
+            // mirroring C.
+            return sb::prefetch_local_buffer::call(bmr.rlocator, fork_num, block_num);
         }
         // Pass it to the shared buffer version.
         self.PrefetchSharedBuffer(
@@ -543,10 +543,10 @@ impl BufferManager {
         );
 
         if persistence == RELPERSISTENCE_TEMP {
-            // LocalBufferAlloc — the backend-local temp pool, out of this core.
-            return Err(PgError::error(
-                "PinBufferForBlock: temp-relation pin (LocalBufferAlloc) is not implemented by the shared buffer core",
-            ));
+            // LocalBufferAlloc (bufmgr.c:1148) — the backend-local temp pool lives
+            // in localbuf.c (panic-until-owner). Dispatch through the outward
+            // seam, mirroring C.
+            return sb::local_buffer_alloc::call(rlocator, fork_num, block_num);
         }
 
         // BufferAlloc finds or allocates the buffer in the shared pool. The

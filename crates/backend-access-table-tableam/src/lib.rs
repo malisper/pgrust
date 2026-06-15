@@ -854,7 +854,7 @@ pub fn table_block_parallelscan_initialize(
 ) -> PgResult<usize> {
     pscan.phs_locator = rel.rd_locator;
     let phs_nblocks = backend_storage_buffer_bufmgr_seams::
-        relation_get_number_of_blocks_in_fork::call(rel.rd_id, MAIN_FORKNUM)?;
+        relation_get_number_of_blocks_in_fork::call(rel, MAIN_FORKNUM)?;
     // compare phs_syncscan initialization to similar logic in initscan
     pscan.phs_syncscan = synchronize_seqscans()
         && !rel.uses_local_buffers()
@@ -1130,7 +1130,7 @@ pub fn table_block_relation_estimate_size(
     // it should have storage, so we can call the smgr
     let mut curpages: BlockNumber =
         backend_storage_buffer_bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-            rel.rd_id,
+            rel,
             MAIN_FORKNUM,
         )?;
 

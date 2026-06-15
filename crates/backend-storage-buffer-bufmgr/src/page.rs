@@ -216,6 +216,66 @@ impl BufferManager {
             backend_storage_page::PageIsNew(&page)
         }))
     }
+
+    // -- FSM page round-trip ((FSMPage) PageGetContents, fsm_internals.h) ---
+
+    /// `(FSMPage) PageGetContents(BufferGetPage(buf))` (fsm_internals.h)
+    /// materialised as an owned [`types_fsm::FSMPageData`]. The caller holds the
+    /// appropriate buffer content lock. The FSM struct lives at the page's
+    /// `PageGetContents` offset (`MAXALIGN(SizeOfPageHeaderData)`): a 4-byte
+    /// native-order `int fp_next_slot` followed by `NodesPerPage` one-byte tree
+    /// nodes (`uint8 fp_nodes[]`).
+    pub fn fsm_buffer_get_page(&self, buffer: Buffer) -> PgResult<types_fsm::FSMPageData> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let base = fsm_contents_offset();
+            let fp_next_slot = i32::from_ne_bytes(
+                block[base..base + 4]
+                    .try_into()
+                    .expect("FSM page has room for fp_next_slot"),
+            );
+            let nodes_start = base + types_fsm::OFFSET_OF_FP_NODES;
+            let fp_nodes =
+                block[nodes_start..nodes_start + types_fsm::NodesPerPage].to_vec();
+            types_fsm::FSMPageData {
+                fp_next_slot,
+                fp_nodes,
+            }
+        }))
+    }
+
+    /// Store a mutated FSM page body back into `(FSMPage)
+    /// PageGetContents(BufferGetPage(buf))` (the C in-place page mutation). The
+    /// caller holds the exclusive content lock.
+    pub fn fsm_buffer_set_page(
+        &self,
+        buffer: Buffer,
+        page: types_fsm::FSMPageData,
+    ) -> PgResult<()> {
+        debug_assert_eq!(
+            page.fp_nodes.len(),
+            types_fsm::NodesPerPage,
+            "fsm_buffer_set_page: fp_nodes must be NodesPerPage long"
+        );
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let base = fsm_contents_offset();
+            block[base..base + 4].copy_from_slice(&page.fp_next_slot.to_ne_bytes());
+            let nodes_start = base + types_fsm::OFFSET_OF_FP_NODES;
+            block[nodes_start..nodes_start + types_fsm::NodesPerPage]
+                .copy_from_slice(&page.fp_nodes);
+            Ok(())
+        })
+    }
+}
+
+/// `PageGetContents(page)` byte offset — `MAXALIGN(SizeOfPageHeaderData)`
+/// (bufpage.h), the start of the page's special-purpose contents area.
+#[inline]
+fn fsm_contents_offset() -> usize {
+    const MAXIMUM_ALIGNOF: usize = 8;
+    let len = types_storage::bufpage::SizeOfPageHeaderData;
+    (len + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
 }
 
 #[cfg(test)]
