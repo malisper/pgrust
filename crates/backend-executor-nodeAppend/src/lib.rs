@@ -1371,9 +1371,11 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
     }
 }
 
-/// `estate->es_epq_active == NULL` — whether an EvalPlanQual is in progress.
+/// `estate->es_epq_active != NULL` — whether an EvalPlanQual is currently
+/// active. The C test at nodeAppend.c:204 is `estate->es_epq_active == NULL`,
+/// which the call site spells as `!estate_epq_active(estate)`.
 /// The trimmed `EState` does not carry `es_epq_active` yet (it lands with the
-/// EPQ port); no Append-over-EPQ path reaches here, so it reads as "no EPQ".
+/// EPQ port); no Append-over-EPQ path reaches here, so EPQ is never active.
 fn estate_epq_active(_estate: &EStateData<'_>) -> bool {
     false
 }
