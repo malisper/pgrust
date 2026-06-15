@@ -809,6 +809,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gist-dispatch-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gist-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gist-dispatch-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-hash-core"
 version = "0.0.0"
 dependencies = [
@@ -14637,6 +14665,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-gin-ginscan",
+ "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hash-xlog",
