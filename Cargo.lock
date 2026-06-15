@@ -2185,6 +2185,7 @@ dependencies = [
 name = "backend-access-transam-xlogreader"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-varsup-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
@@ -4197,6 +4198,19 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-common-relpath"
+version = "0.0.0"
+dependencies = [
+ "backend-common-relpath-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -6456,6 +6470,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-extensible"
 version = "0.0.0"
 dependencies = [
@@ -6565,6 +6587,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-equivclass"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-equivclass-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-equivclass-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-joinpath"
 version = "0.0.0"
 dependencies = [
@@ -6592,6 +6652,7 @@ dependencies = [
 name = "backend-optimizer-path-small"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-equalfuncs-seams",
  "backend-optimizer-path-small-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-seams",
@@ -6643,6 +6704,15 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-rte-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -6732,6 +6802,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-vars"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-var-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-parser-analyze-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -6759,6 +6844,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -6812,6 +6899,30 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-expr"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-type",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10690,6 +10801,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-time-snapmgr-seams",
+ "common-relpath-seams",
  "mcx",
  "types-cache",
  "types-cluster",
@@ -10963,7 +11075,6 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
- "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-lmgr-lwlock-seams",
@@ -10974,6 +11085,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "common-relpath-seams",
  "port-crc32c-seams",
  "seam-core",
  "types-core",
@@ -12715,6 +12827,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",
@@ -12775,9 +12888,12 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-equivclass",
  "backend-optimizer-path-small",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-vars",
+ "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
  "backend-port-atomics",

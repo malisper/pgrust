@@ -52,6 +52,7 @@ use types_pathnodes::{
 use types_selfuncs::{DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
 use backend_optimizer_path_small_seams as seam;
+use backend_nodes_equalfuncs_seams as eq;
 use backend_optimizer_util_pathnode_seams as ps;
 use backend_optimizer_util_relnode_seams as bms;
 use backend_utils_cache_lsyscache_seams as lsc;
@@ -208,7 +209,7 @@ fn addRangeClause(
     for rqelem in rqlist.iter_mut() {
         // We use full equal() here because the "var" might be a function of
         // one or more attributes of the same relation...
-        if !seam::equal_expr::call(&var, &rqelem.var) {
+        if !eq::equal_expr::call(&var, &rqelem.var) {
             continue;
         }
         // Found the right group to put this clause in

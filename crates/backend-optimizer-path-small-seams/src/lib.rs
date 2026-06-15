@@ -214,11 +214,10 @@ seam_core::seam!(
  * nodes/equalfuncs.c — structural node equality (unported owner).
  * ==================================================================== */
 
-seam_core::seam!(
-    /// `equal(a, b)` (equalfuncs.c): deep structural equality of two expression
-    /// nodes. Used by `addRangeClause` to group range clauses by common var.
-    pub fn equal_expr(a: &Expr, b: &Expr) -> bool
-);
+/* ======================================================================
+ * nodes/equalfuncs.c — `equal_expr` is the canonical
+ * `backend-nodes-equalfuncs-seams` seam (referenced, not re-declared).
+ * ====================================================================== */
 
 /* ======================================================================
  * optimizer/util/restrictinfo.c — restrictinfo predicates (unported owner).

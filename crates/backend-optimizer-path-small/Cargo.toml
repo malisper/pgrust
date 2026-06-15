@@ -16,6 +16,7 @@ types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }
 
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

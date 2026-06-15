@@ -239,7 +239,7 @@ fn install_estimator_seams(ineq_sel: f64, null_frac: f64) {
             Ok(matches!(clause, Expr::Const(_)))
         });
         // equal() over the range vars: structural Var equality is enough here.
-        seam::equal_expr::set(|a, b| match (a, b) {
+        eq::equal_expr::set(|a, b| match (a, b) {
             (Expr::Var(x), Expr::Var(y)) => {
                 x.varno == y.varno
                     && x.varattno == y.varattno

@@ -1,0 +1,132 @@
+//! `backend/optimizer/path/equivclass.c` — the planner's EquivalenceClass
+//! engine, ported 1:1 over the arena+handle model of
+//! [`types_pathnodes::PlannerInfo`].
+//!
+//! Every `EquivalenceClass *` is an [`EcId`] arena handle, every
+//! `EquivalenceMember *` an [`EmId`], every `RestrictInfo *` a [`RinfoId`], every
+//! `RelOptInfo *` a [`RelId`], and member/clause expressions are interned as
+//! [`NodeId`] handles into the planner node arena. The `Relids` set algebra is
+//! reached through the `backend-optimizer-util-relnode` seams; catalog/lsyscache
+//! reads through `backend-utils-cache-lsyscache`; and the not-yet-ported node
+//! operators (`equal`/`exprType`/…) and initsplan/restrictinfo clause machinery
+//! through this crate's own seam crate (panicking until their owners land).
+//!
+//! Adaptation note on EC merging (`process_equivalence` case 2): C does
+//! `list_delete_nth_cell(root->eq_classes, ec2_idx)` to drop the absorbed EC,
+//! which shifts list positions. Here ECs are referenced by stable [`EcId`] arena
+//! handles (PathKeys, RestrictInfos), and `RelOptInfo::eclass_indexes` bitmaps
+//! index `eq_classes` by position, so we must NOT remove/shift. Instead the
+//! absorbed EC is left in place with `ec_merged = Some(survivor)` and emptied
+//! members/sources, exactly as C leaves the node behind for dangling PathKeys;
+//! every `eq_classes` scan in this crate skips `ec_merged.is_some()` ECs, which
+//! reproduces C's post-delete iteration set.
+
+#![allow(non_snake_case)]
+#![allow(clippy::too_many_arguments)]
+
+extern crate alloc;
+
+pub mod base;
+pub mod child;
+pub mod derives;
+pub mod find;
+pub mod join;
+pub mod merge;
+pub mod relevance;
+
+pub use base::generate_base_implied_equalities;
+pub use child::{
+    add_child_join_rel_equivalences, add_child_rel_equivalences, add_setop_child_rel_equivalences,
+    rebuild_eclass_attr_needed,
+};
+pub use derives::{
+    ec_add_clause_to_derives_hash, ec_add_derived_clause, ec_add_derived_clauses,
+    ec_build_derives_hash, ec_clear_derived_clauses, ec_search_clause_for_ems,
+    ec_search_derived_clause_for_ems, fill_ec_derives_key, find_derived_clause_for_ec_member,
+};
+pub use find::{
+    exprs_known_equal, find_computable_ec_member, find_ec_member_matching_expr,
+    match_eclasses_to_foreign_key_col, relation_can_be_sorted_early,
+};
+pub use join::{
+    create_join_clause, generate_implied_equalities_for_column,
+    generate_join_implied_equalities, generate_join_implied_equalities_for_ecs,
+    reconsider_outer_join_clauses,
+};
+pub use merge::{
+    canonicalize_ec_expression, get_eclass_for_sort_expr, process_equivalence,
+};
+pub use relevance::{
+    eclass_member_iterator_next, eclass_useful_for_merging, find_join_domain,
+    get_common_eclass_indexes, get_eclass_indexes_for_relids, has_relevant_eclass_joinclause,
+    have_relevant_eclass_joinclause, is_redundant_derived_clause, is_redundant_with_indexclauses,
+    select_equality_operator, setup_eclass_member_iterator,
+};
+
+use backend_optimizer_path_equivclass_seams as ec_seam;
+use types_error::PgResult;
+use types_pathnodes::{
+    EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
+};
+
+/// Install the inward seams owned by equivclass.c. Called once at
+/// single-threaded startup from `seams-init::init_all()`.
+pub fn init_seams() {
+    ec_seam::process_equivalence::set(|root, restrictinfo, jdomain| {
+        process_equivalence(root, restrictinfo, jdomain)
+    });
+    ec_seam::get_eclass_for_sort_expr::set(
+        |root, expr, opfamilies, opcintype, collation, sortref, rel, create_it| {
+            get_eclass_for_sort_expr(
+                root, expr, opfamilies, opcintype, collation, sortref, rel, create_it,
+            )
+        },
+    );
+    ec_seam::generate_base_implied_equalities::set(generate_base_implied_equalities);
+    ec_seam::generate_join_implied_equalities::set(
+        |root, join_relids, outer_relids, inner_rel, sjinfo| {
+            generate_join_implied_equalities(root, join_relids, outer_relids, inner_rel, sjinfo)
+        },
+    );
+    ec_seam::generate_join_implied_equalities_for_ecs::set(
+        |root, eclasses, join_relids, outer_relids, inner_rel| {
+            generate_join_implied_equalities_for_ecs(
+                root, eclasses, join_relids, outer_relids, inner_rel,
+            )
+        },
+    );
+    ec_seam::exprs_known_equal::set(|root, item1, item2, opfamily| {
+        exprs_known_equal(root, &item1, &item2, opfamily)
+    });
+    ec_seam::reconsider_outer_join_clauses::set(reconsider_outer_join_clauses);
+    ec_seam::rebuild_eclass_attr_needed::set(rebuild_eclass_attr_needed);
+    ec_seam::have_relevant_eclass_joinclause::set(|root, rel1, rel2| {
+        have_relevant_eclass_joinclause(root, rel1, rel2)
+    });
+    ec_seam::has_relevant_eclass_joinclause::set(|root, rel1| {
+        has_relevant_eclass_joinclause(root, rel1)
+    });
+    ec_seam::eclass_useful_for_merging::set(|root, eclass, rel| {
+        eclass_useful_for_merging(root, eclass, rel)
+    });
+    ec_seam::is_redundant_derived_clause::set(|root, rinfo, clauselist| {
+        is_redundant_derived_clause(root, rinfo, &clauselist)
+    });
+    ec_seam::add_child_rel_equivalences::set(|root, appinfo, parent_rel, child_rel| {
+        add_child_rel_equivalences(root, appinfo, parent_rel, child_rel)
+    });
+}
+
+// Wrapper signatures that the inward seams bind to (some inner ports take refs /
+// slices; the seam contracts pass owned values).
+#[allow(dead_code)]
+fn _seam_shapes_witness(
+    _root: &mut PlannerInfo,
+    _rel: RelId,
+    _ec: EcId,
+    _ri: RinfoId,
+    _r: Relids,
+    _sj: Option<SpecialJoinInfo>,
+) -> PgResult<()> {
+    Ok(())
+}
