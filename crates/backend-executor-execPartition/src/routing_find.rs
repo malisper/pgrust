@@ -421,8 +421,8 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
         if keycol != 0 {
             // Plain column; get the value directly from the heap tuple.
             let (d, n) = backend_executor_execTuples_seams::slot_getattr::call(
-                mcx,
-                estate.slot_mut(slot),
+                estate,
+                slot,
                 keycol,
             )?;
             // slot_getattr now yields the canonical Datum directly.

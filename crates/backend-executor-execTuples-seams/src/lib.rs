@@ -130,11 +130,14 @@ seam_core::seam!(
     /// first `attnum` columns are extracted and return the `(value, isnull)` of
     /// the 1-based `attnum`th. nodeSort's Datum sort reads attribute 1.
     /// Deforming can detoast/allocate, so the call is fallible. The returned
-    /// value is the canonical [`types_tuple::backend_access_common_heaptuple::Datum`];
-    /// a by-reference image is copied into `mcx` (in C it points into the slot).
+    /// value is the canonical [`types_tuple::backend_access_common_heaptuple::Datum`].
+    /// The slot is addressed by its `EState` tuple-table pool [`SlotId`] (the
+    /// payload-bearing [`SlotData`] is not reachable through the header-only
+    /// `&mut TupleTableSlot` projection); a by-reference image is copied out into
+    /// the per-query context.
     pub fn slot_getsomeattr<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        slot: &mut types_nodes::TupleTableSlot,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
         attnum: i32,
     ) -> types_error::PgResult<(
         types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
@@ -345,10 +348,14 @@ seam_core::seam!(
     /// take the `slot_getsysattr` path instead and are never passed here. The
     /// returned value is the canonical
     /// [`types_tuple::backend_access_common_heaptuple::Datum`]; a by-reference
-    /// image is copied into `mcx`.
+    /// image is copied into the per-query context. The slot is addressed by its
+    /// `EState` tuple-table pool [`SlotId`] (the payload-bearing [`SlotData`] is
+    /// not reachable through the header-only `&mut TupleTableSlot` projection);
+    /// this is the same C op as [`slot_getattr_by_id`], returning the bare
+    /// `(value, isnull)` pair the sort/compare callers destructure.
     pub fn slot_getattr<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        slot: &mut types_nodes::TupleTableSlot,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
         attnum: types_core::AttrNumber,
     ) -> types_error::PgResult<(
         types_tuple::backend_access_common_heaptuple::Datum<'mcx>,

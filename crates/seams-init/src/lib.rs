@@ -840,22 +840,22 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "link_subplan_planstate"),
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
+        // cur_tuple_getattr + exec_force_store_heap_tuple stay seam-and-panic:
+        // both carry a header-only `HeapTuple`/`&HeapTupleData` (no user-data
+        // area) where the op body needs the body-bearing `FormedTuple`.
+        // `cur_tuple_getattr` deforms `node.curTuple` (typed header-only
+        // `HeapTuple`, populated only by the still-deferred
+        // `replace_cur_tuple_from_slot`); `exec_force_store_heap_tuple`'s
+        // consumers (nodeIndexonlyscan `xs_hitup`, nodeModifyTable wholerow-junk
+        // `oldtuple`) hold header-only `HeapTuple`s, so the seam cannot be
+        // re-signed to `FormedTuple` without first widening those upstream
+        // carriers (index AM / junk filter). See exectuples-slot-payload note.
         ("backend_executor_execTuples", "cur_tuple_getattr"),
-        ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "exec_materialize_slot"),
-        ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
-        ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
-        ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
         ("backend_executor_execTuples", "pad_name_cstring_columns"),
         ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
-        ("backend_executor_execTuples", "slot_getattr"),
-        ("backend_executor_execTuples", "slot_getattr_by_id"),
-        ("backend_executor_execTuples", "slot_getsomeattr"),
-        ("backend_executor_execTuples", "slot_natts"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution, which it installs. The remaining seams in
         // backend-foreign-foreign-seams are name-attributed to this owner but are
@@ -926,7 +926,6 @@ mod recurrence_guard {
         // redesign of the cross-node aliasing channel, not a `::set()`. Pay down
         // alongside the `resolve_rustate` recovery channel.
         ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
-        ("backend_executor_execTuples", "store_virtual_values"),
         // nodes-core re-homes these two cross-unit DESIGN_DEBT seams onto its own
         // -seams crate so the guard can track them (see DESIGN_DEBT.md). Both
         // read the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/
