@@ -248,16 +248,17 @@ pub fn add_to_array(
 /// `ParseTzFile` — parse one timezone file, recursing for `@INCLUDE`.
 ///
 /// `filename` is user-specified (no path); `depth` is the current recursion
-/// depth. Entries accumulate into `array` (kept sorted). `override_dup` carries
-/// the `@OVERRIDE` flag (C's file-scope `override`, which persists across an
-/// `@INCLUDE`'d child via the shared `bool override`). Returns `Ok(())` or the
-/// soft error.
+/// depth. Entries accumulate into `array` (kept sorted). The `@OVERRIDE` flag is
+/// function-local (C's `bool override = false;` at tzparser.c:287); it is NOT
+/// passed into an `@INCLUDE`'d child, so each file gets its own `override` and
+/// includes do not leak override state. Returns `Ok(())` or the soft error.
 pub fn parse_tz_file(
     filename: &str,
     depth: i32,
     array: &mut Vec<TzEntry>,
-    override_dup: &mut bool,
 ) -> Result<(), TzParseError> {
+    // C: bool override = false; — function-local, reset per ParseTzFile call.
+    let mut override_dup = false;
     // C: enforce all-alpha filename so '/' and the like can't escape the
     // timezonesets directory.
     if !filename.bytes().all(|b| b.is_ascii_alphabetic()) {
@@ -321,18 +322,18 @@ pub fn parse_tz_file(
                     "@INCLUDE without file name in time zone file \"{filename}\", line {lineno}"
                 )));
             };
-            parse_tz_file(include_file, depth + 1, array, override_dup)?;
+            parse_tz_file(include_file, depth + 1, array)?;
             continue;
         }
 
         if starts_with_ci(line, "@OVERRIDE") {
-            *override_dup = true;
+            override_dup = true;
             continue;
         }
 
         let mut entry = split_tz_line(filename, lineno, line)?;
         validate_tz_entry(&mut entry)?;
-        add_to_array(array, entry, *override_dup)?;
+        add_to_array(array, entry, override_dup)?;
     }
 
     Ok(())
@@ -376,9 +377,8 @@ fn open_error_message(open_error: TzFileOpenError, depth: i32) -> TzParseError {
 pub fn load_tzoffsets(filename: &str) -> Result<TimeZoneAbbrevTable, TzParseError> {
     // C: arraysize = 128; array = palloc(...). We grow on demand instead.
     let mut array: Vec<TzEntry> = Vec::new();
-    let mut override_dup = false;
 
-    parse_tz_file(filename, 0, &mut array, &mut override_dup)?;
+    parse_tz_file(filename, 0, &mut array)?;
 
     // C: if (n >= 0) result = ConvertTimeZoneAbbrevs(array, n);
     //    if (!result) GUC_check_errmsg("out of memory");
