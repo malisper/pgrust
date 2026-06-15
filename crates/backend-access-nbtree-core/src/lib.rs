@@ -66,6 +66,7 @@ pub fn init_seams() {
     seams::bt_first::set(search::bt_first);
     seams::bt_next::set(search::bt_next);
     seams::current_heaptid::set(search::current_heaptid);
+    seams::current_itup::set(search::current_itup);
 
     // --- nbtutils.c (11) ---
     seams::bt_mkscankey::set(utils::bt_mkscankey);

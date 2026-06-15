@@ -2612,3 +2612,24 @@ fn _bt_endpoint<'mcx>(
 pub fn current_heaptid<'mcx>(so: &BTScanOpaqueData<'mcx>) -> ItemPointerData {
     so.currPos.items[so.currPos.itemIndex as usize].heapTid
 }
+
+/// `(IndexTuple) (so->currTuples + currItem->tupleOffset)` — the current index
+/// tuple bytes for an index-only scan. `_bt_returnitem` only sets
+/// `scan->xs_itup` when `so->currTuples != NULL`; otherwise this returns `None`.
+/// The on-disk size is read from the tuple header (`IndexTupleSize`); the
+/// contiguous image is copied out of the workspace into `mcx`.
+pub fn current_itup<'mcx>(
+    mcx: Mcx<'mcx>,
+    so: &BTScanOpaqueData<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let Some(curr_tuples) = so.currTuples.as_ref() else {
+        return Ok(None);
+    };
+    let off = so.currPos.items[so.currPos.itemIndex as usize].tupleOffset as usize;
+    // IndexTupleSize(itup) reads the t_info length bits from the header.
+    let hdr = index_tuple_header(&curr_tuples[off..]);
+    let sz = IndexTupleSize(&hdr);
+    let mut out = vec_with_capacity_in(mcx, sz)?;
+    out.extend_from_slice(&curr_tuples[off..off + sz]);
+    Ok(Some(out))
+}

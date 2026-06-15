@@ -14,9 +14,11 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-amapi = { path = "../types-amapi" }
+types-tableam = { path = "../types-tableam" }
 types-nbtree = { path = "../types-nbtree" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-tidbitmap = { path = "../types-tidbitmap" }

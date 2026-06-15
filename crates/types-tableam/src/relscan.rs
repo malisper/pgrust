@@ -253,11 +253,36 @@ pub struct IndexScanDescData<'mcx> {
 /// `IndexScanDesc` — `IndexScanDescData *`.
 pub type IndexScanDesc<'mcx> = Box<IndexScanDescData<'mcx>>;
 
+// Manual `Debug` (the erased `opaque`/`xs_heapfetch` payloads are not `Debug`).
+// Mirrors the trimmed node-pool descriptor's manual impl; prints the scalar
+// scan-state fields the executor inspects.
+impl core::fmt::Debug for IndexScanDescData<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IndexScanDescData")
+            .field("number_of_keys", &self.number_of_keys)
+            .field("number_of_order_bys", &self.number_of_order_bys)
+            .field("xs_want_itup", &self.xs_want_itup)
+            .field("xs_temp_snap", &self.xs_temp_snap)
+            .field("kill_prior_tuple", &self.kill_prior_tuple)
+            .field("ignore_killed_tuples", &self.ignore_killed_tuples)
+            .field("xact_started_in_recovery", &self.xact_started_in_recovery)
+            .field("instrument", &self.instrument)
+            .field("xs_heaptid", &self.xs_heaptid)
+            .field("xs_heap_continue", &self.xs_heap_continue)
+            .field("xs_recheck", &self.xs_recheck)
+            .field("xs_recheckorderby", &self.xs_recheckorderby)
+            .field("has_opaque", &self.opaque.is_some())
+            .field("has_heapfetch", &self.xs_heapfetch.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// `ParallelIndexScanDescData` (`access/relscan.h`) — shared state for a
 /// parallel index scan, living in DSM in C. The serialized snapshot C stores
 /// in the flexible `ps_snapshot_data[]` tail is the byte buffer here; the
 /// instrumentation and AM-specific regions C places at `ps_offset_ins` /
 /// `ps_offset_am` are carried as owned regions.
+#[derive(Clone, Debug)]
 pub struct ParallelIndexScanDescData {
     /// `RelFileLocator ps_locator` — physical table relation to scan.
     pub ps_locator: RelFileLocator,

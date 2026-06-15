@@ -23,6 +23,19 @@ use types_amapi::{
     CompareType, IndexAmRoutine, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID, COMPARE_LE,
     COMPARE_LT, T_IndexAmRoutine,
 };
+// Vtable-facing types (F2/F3): the unified descriptor + the erased AM-opaque
+// carrier (A0) the dispatch layer hands the callbacks. nbtree's `IndexUniqueCheck`
+// / `IndexBulkDeleteResult` (from `types_nbtree`) are structurally identical to
+// the vtable's `types_tableam` ones but distinct types; the adapters convert.
+use types_tableam::amapi::{
+    IndexInfo, IndexUniqueCheck as AmIndexUniqueCheck, TIDBitmap as AmTIDBitmap,
+};
+use types_tableam::amopaque::{tags, AmOpaqueType};
+use types_tableam::genam::{
+    IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
+};
+use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
 use types_core::InvalidOid;
 use types_error::PgResult;
@@ -95,8 +108,15 @@ pub struct NbtScan<'mcx> {
     pub xs_heaptid: ItemPointerData,
 }
 
+/// `NbtScan` is the concrete type stored in `IndexScanDescData.opaque` (C's
+/// `void *opaque`); the A0 carrier downcasts to it in every AM adapter.
+impl<'mcx> AmOpaqueType<'mcx> for NbtScan<'mcx> {
+    const TAG: types_tableam::amopaque::AmOpaqueTag = tags::NBT_SCAN;
+}
+
 /// `IndexVacuumInfo` (`access/genam.h`) — the subset `btvacuumscan` /
-/// `btvacuumpage` read directly.
+/// `btvacuumpage` read directly. Projected out of the unified
+/// [`types_tableam::genam::IndexVacuumInfo`] by the vacuum adapters.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NbtVacuumInfo {
     /// `analyze_only`.
@@ -107,6 +127,67 @@ pub struct NbtVacuumInfo {
     pub estimated_count: bool,
     /// `num_heap_tuples`.
     pub num_heap_tuples: f64,
+}
+
+impl NbtVacuumInfo {
+    /// Project the 4 fields `btvacuumscan`/`btvacuumpage` read out of the
+    /// unified `IndexVacuumInfo`.
+    fn from_info(info: &IndexVacuumInfo<'_>) -> Self {
+        NbtVacuumInfo {
+            analyze_only: info.analyze_only,
+            report_progress: info.report_progress,
+            estimated_count: info.estimated_count,
+            num_heap_tuples: info.num_heap_tuples,
+        }
+    }
+}
+
+/// Convert nbtree's `IndexBulkDeleteResult` (`types_nbtree`) to the vtable's
+/// (`types_tableam::genam`); structurally identical, distinct types.
+fn to_am_bulkdelete(s: IndexBulkDeleteResult) -> AmIndexBulkDeleteResult {
+    AmIndexBulkDeleteResult {
+        num_pages: s.num_pages,
+        estimated_count: s.estimated_count,
+        num_index_tuples: s.num_index_tuples,
+        tuples_removed: s.tuples_removed,
+        pages_newly_deleted: s.pages_newly_deleted,
+        pages_deleted: s.pages_deleted,
+        pages_free: s.pages_free,
+    }
+}
+
+/// Convert the vtable's `IndexBulkDeleteResult` to nbtree's.
+fn from_am_bulkdelete(s: AmIndexBulkDeleteResult) -> IndexBulkDeleteResult {
+    IndexBulkDeleteResult {
+        num_pages: s.num_pages,
+        estimated_count: s.estimated_count,
+        num_index_tuples: s.num_index_tuples,
+        tuples_removed: s.tuples_removed,
+        pages_newly_deleted: s.pages_newly_deleted,
+        pages_deleted: s.pages_deleted,
+        pages_free: s.pages_free,
+    }
+}
+
+/// Convert the vtable's `IndexUniqueCheck` to nbtree's.
+fn from_am_unique_check(c: AmIndexUniqueCheck) -> IndexUniqueCheck {
+    match c {
+        AmIndexUniqueCheck::UNIQUE_CHECK_NO => IndexUniqueCheck::No,
+        AmIndexUniqueCheck::UNIQUE_CHECK_YES => IndexUniqueCheck::Yes,
+        AmIndexUniqueCheck::UNIQUE_CHECK_PARTIAL => IndexUniqueCheck::Partial,
+        AmIndexUniqueCheck::UNIQUE_CHECK_EXISTING => IndexUniqueCheck::Existing,
+    }
+}
+
+/// Downcast `scan.opaque` to the btree's `NbtScan` working state (the A0
+/// tag-checked downcast); panics with a clear message if the descriptor was not
+/// built by `btbeginscan` (a programming error — C would just cast `void *`).
+fn nbt<'a, 'mcx>(scan: &'a mut IndexScanDescData<'mcx>) -> &'a mut NbtScan<'mcx> {
+    scan.opaque
+        .as_deref_mut()
+        .expect("nbtree scan descriptor has no opaque (not built by btbeginscan)")
+        .downcast_mut::<NbtScan<'mcx>>()
+        .expect("nbtree scan opaque is not an NbtScan")
 }
 
 // `pgstat_progress_update_param` index codes (commands/progress.h).
@@ -181,7 +262,296 @@ pub fn bthandler() -> IndexAmRoutine {
         // btvalidate (nbtvalidate.c) returns a soft-error result and so cannot
         // be the raw `fn(Oid) -> bool` ABI pointer; it is reached by name.
         amvalidate: None,
+
+        // Scan / insert / vacuum callbacks (F3): the thin adapters below
+        // translate the unified descriptor <-> nbtree's `NbtScan` working state
+        // (downcast from `scan.opaque`).
+        aminsert: btinsert_am,
+        ambulkdelete: btbulkdelete_am,
+        amvacuumcleanup: btvacuumcleanup_am,
+        ambeginscan: btbeginscan_am,
+        amrescan: btrescan_am,
+        amendscan: btendscan_am,
+        aminsertcleanup: None,
+        amcanreturn: Some(btcanreturn_am),
+        amgettuple: Some(btgettuple_am),
+        amgetbitmap: Some(btgetbitmap_am),
+        ammarkpos: Some(btmarkpos_am),
+        amrestrpos: Some(btrestrpos_am),
+        amestimateparallelscan: Some(btestimateparallelscan_am),
+        aminitparallelscan: None,
+        amparallelrescan: Some(btparallelrescan_am),
     }
+}
+
+// ===========================================================================
+// AM-vtable adapters (F3): unified IndexScanDescData <-> NbtScan
+// ===========================================================================
+//
+// Each adapter has the vtable's signature, downcasts `scan.opaque` to the
+// btree `NbtScan` working state (built in `btbeginscan_am`), syncs the boundary
+// fields the descriptor exposes (kill_prior_tuple / xs_want_itup / xs_recheck
+// IN; xs_heaptid / xs_itup / xs_recheck OUT), and calls the `*_impl` body
+// (whose logic is unchanged from the standalone callbacks).
+
+/// `aminsert` adapter.
+#[allow(clippy::too_many_arguments)]
+fn btinsert_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    heap_tid: &ItemPointerData,
+    heap_relation: &Relation<'mcx>,
+    check_unique: AmIndexUniqueCheck,
+    _index_unchanged: bool,
+    _index_info: &mut IndexInfo,
+) -> PgResult<bool> {
+    btinsert(
+        mcx,
+        index_relation,
+        values,
+        isnull,
+        *heap_tid,
+        heap_relation,
+        from_am_unique_check(check_unique),
+        _index_unchanged,
+    )
+}
+
+/// `ambulkdelete` adapter — folds the split `(info, rel, heaprel, has_callback,
+/// cb_state)` shape onto the unified `IndexVacuumInfo` + `callback_state`.
+fn btbulkdelete_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<AmIndexBulkDeleteResult>,
+    callback_state: Option<u64>,
+) -> PgResult<Option<AmIndexBulkDeleteResult>> {
+    let nbtinfo = NbtVacuumInfo::from_info(info);
+    let res = btbulkdelete(
+        mcx,
+        &nbtinfo,
+        &info.index,
+        &info.heaprel,
+        stats.map(from_am_bulkdelete),
+        callback_state.is_some(),
+        callback_state.unwrap_or(0),
+    )?;
+    Ok(Some(to_am_bulkdelete(res)))
+}
+
+/// `amvacuumcleanup` adapter.
+fn btvacuumcleanup_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<AmIndexBulkDeleteResult>,
+) -> PgResult<Option<AmIndexBulkDeleteResult>> {
+    let nbtinfo = NbtVacuumInfo::from_info(info);
+    let res = btvacuumcleanup(
+        mcx,
+        &nbtinfo,
+        &info.index,
+        &info.heaprel,
+        stats.map(from_am_bulkdelete),
+    )?;
+    Ok(res.map(to_am_bulkdelete))
+}
+
+/// `ambeginscan` adapter — build the unified descriptor with `opaque` holding a
+/// freshly-erased `NbtScan` (the A0 erase pattern).
+fn btbeginscan_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let nbtscan = btbeginscan(mcx, index_relation.alias(), nkeys, norderbys)?;
+    // RelationGetIndexScan(): allocate the generic descriptor; opaque = NbtScan.
+    let mut desc = relation_get_index_scan(mcx, index_relation, nkeys, norderbys)?;
+    desc.opaque = Some(erase_nbtscan(mcx, nbtscan)?);
+    Ok(desc)
+}
+
+/// `amrescan` adapter.
+fn btrescan_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    keys: &[ScanKeyData<'mcx>],
+    _orderbys: &[ScanKeyData<'mcx>],
+) -> PgResult<()> {
+    // Sync the IN boundary fields the AM reads off the descriptor.
+    sync_in(scan);
+    let norderbys = scan.number_of_order_bys;
+    let scankey = if keys.is_empty() { None } else { Some(keys) };
+    btrescan(mcx, nbt(scan), scankey, norderbys)
+}
+
+/// `amendscan` adapter.
+fn btendscan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
+    btendscan(nbt(scan));
+    Ok(())
+}
+
+/// `amcanreturn` adapter.
+fn btcanreturn_am(index_relation: &Relation<'_>, attno: i32) -> PgResult<bool> {
+    Ok(btcanreturn(index_relation, attno))
+}
+
+/// `amgettuple` adapter — sync IN flags, run the impl, then read back
+/// `xs_heaptid` / `xs_itup` / `xs_recheck`.
+fn btgettuple_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+) -> PgResult<bool> {
+    sync_in(scan);
+    let found = btgettuple(mcx, nbt(scan), direction)?;
+    // Read back the position into the descriptor (C: `_bt_returnitem`).
+    scan.xs_recheck = nbt(scan).xs_recheck;
+    if found {
+        scan.xs_heaptid = core::current_heaptid::call(&nbt(scan).opaque);
+        scan.xs_itup = core::current_itup::call(mcx, &nbt(scan).opaque)?;
+    }
+    Ok(found)
+}
+
+/// `amgetbitmap` adapter.
+fn btgetbitmap_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    tbm: &mut AmTIDBitmap,
+) -> PgResult<i64> {
+    // The unified vtable carries the bitmap erased; nbtree's `btgetbitmap` works
+    // over the concrete `types_tidbitmap::TIDBitmap`. Downcast it.
+    let tbm_concrete = tbm
+        .payload
+        .as_mut()
+        .and_then(|p| p.downcast_mut::<types_tidbitmap::TIDBitmap>())
+        .expect("amgetbitmap TIDBitmap payload is not a types_tidbitmap::TIDBitmap");
+    btgetbitmap(nbt(scan), tbm_concrete)
+}
+
+/// `ammarkpos` adapter.
+fn btmarkpos_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
+    btmarkpos(nbt(scan));
+    Ok(())
+}
+
+/// `amrestrpos` adapter.
+fn btrestrpos_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
+    btrestrpos(nbt(scan));
+    Ok(())
+}
+
+/// `amestimateparallelscan` adapter.
+fn btestimateparallelscan_am(
+    index_relation: &Relation<'_>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<usize> {
+    btestimateparallelscan(index_relation, nkeys, norderbys)
+}
+
+/// `amparallelrescan` adapter.
+fn btparallelrescan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
+    btparallelrescan(nbt(scan))
+}
+
+/// Sync the descriptor's IN boundary fields into the `NbtScan` working state
+/// before each scan callback (C: the AM reads these straight off `scan`).
+fn sync_in(scan: &mut IndexScanDescData<'_>) {
+    let kill = scan.kill_prior_tuple;
+    let want_itup = scan.xs_want_itup;
+    let heap_present = scan.heap_relation.is_some();
+    let snap_valid = scan
+        .xs_snapshot
+        .as_ref()
+        .map(IsMVCCSnapshot)
+        .unwrap_or(false);
+    let n = nbt(scan);
+    n.kill_prior_tuple = kill;
+    n.xs_want_itup = want_itup;
+    n.heapRelation = heap_present;
+    n.xs_snapshot_is_valid = snap_valid;
+}
+
+/// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate
+/// and zero-init the generic `IndexScanDescData` the AM extends via `opaque`.
+/// The AM-specific fields (`heap_relation` / `xs_snapshot` / `instrument` /
+/// `parallel_scan` / `xs_heapfetch`) are filled by the `index_beginscan*`
+/// wrappers; here everything starts empty.
+fn relation_get_index_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let key_data = if nkeys > 0 {
+        let mut v = vec_with_capacity_in(mcx, nkeys as usize)?;
+        for _ in 0..nkeys {
+            v.push(ScanKeyData::empty());
+        }
+        v.into_iter().collect()
+    } else {
+        std::vec::Vec::new()
+    };
+    let order_by_data = if norderbys > 0 {
+        let mut v = vec_with_capacity_in(mcx, norderbys as usize)?;
+        for _ in 0..norderbys {
+            v.push(ScanKeyData::empty());
+        }
+        v.into_iter().collect()
+    } else {
+        std::vec::Vec::new()
+    };
+    let xs_orderbyvals = std::vec::from_elem(Datum::null(), norderbys as usize);
+    let xs_orderbynulls = std::vec![false; norderbys as usize];
+    Ok(std::boxed::Box::new(IndexScanDescData {
+        heap_relation: None,
+        index_relation: index_relation.alias(),
+        xs_snapshot: None,
+        number_of_keys: nkeys,
+        number_of_order_bys: norderbys,
+        key_data,
+        order_by_data,
+        xs_want_itup: false,
+        xs_temp_snap: false,
+        kill_prior_tuple: false,
+        ignore_killed_tuples: true,
+        xact_started_in_recovery: false,
+        opaque: None,
+        instrument: None,
+        xs_itup: None,
+        xs_itupdesc: None,
+        xs_hitup: None,
+        xs_hitupdesc: None,
+        xs_heaptid: ItemPointerData::default(),
+        xs_heap_continue: false,
+        xs_heapfetch: None,
+        xs_recheck: false,
+        xs_orderbyvals,
+        xs_orderbynulls,
+        xs_recheckorderby: false,
+        parallel_scan: None,
+    }))
+}
+
+/// Erase an `NbtScan` into the A0 AM-opaque carrier
+/// (`PgBox<dyn AmOpaque + 'mcx>`) for storage in `IndexScanDescData.opaque`.
+fn erase_nbtscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    nbtscan: NbtScan<'mcx>,
+) -> PgResult<mcx::PgBox<'mcx, dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
+    let boxed: mcx::PgBox<'mcx, NbtScan<'mcx>> = mcx::alloc_in(mcx, nbtscan)?;
+    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+    // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
+    // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).
+    Ok(unsafe {
+        mcx::PgBox::from_raw_in(
+            ptr as *mut (dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
+            alloc,
+        )
+    })
 }
 
 // ===========================================================================

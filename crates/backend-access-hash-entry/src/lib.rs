@@ -27,6 +27,14 @@ use mcx::Mcx;
 use types_amapi::{
     CompareType, IndexAmRoutine, IndexBuildResult, COMPARE_EQ, COMPARE_INVALID, T_IndexAmRoutine,
 };
+// Vtable-facing types (F2/F3): unified descriptor + erased AM-opaque carrier (A0).
+use types_tableam::amapi::{
+    IndexInfo, IndexUniqueCheck as AmIndexUniqueCheck, TIDBitmap as AmTIDBitmap,
+};
+use types_tableam::genam::{
+    IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
+};
+use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid};
 use types_core::catalog::RELPERSISTENCE_TEMP;
 use types_core::INT4OID;
@@ -159,7 +167,237 @@ pub fn hashhandler() -> IndexAmRoutine {
         // cannot be the raw `fn(Oid) -> bool` ABI pointer; it is reached by
         // name (mirrors nbtree).
         amvalidate: None,
+
+        // Scan / insert / vacuum callbacks (F3): thin adapters translating the
+        // unified descriptor <-> hash's `HashScan` working state (downcast from
+        // `scan.opaque`). Hash has no index-only scans (amcanreturn = NULL), no
+        // mark/restore, and no parallel scan.
+        aminsert: hashinsert_am,
+        ambulkdelete: hashbulkdelete_am,
+        amvacuumcleanup: hashvacuumcleanup_am,
+        ambeginscan: hashbeginscan_am,
+        amrescan: hashrescan_am,
+        amendscan: hashendscan_am,
+        aminsertcleanup: None,
+        amcanreturn: None,
+        amgettuple: Some(hashgettuple_am),
+        amgetbitmap: Some(hashgetbitmap_am),
+        ammarkpos: None,
+        amrestrpos: None,
+        amestimateparallelscan: None,
+        aminitparallelscan: None,
+        amparallelrescan: None,
     }
+}
+
+// ===========================================================================
+// AM-vtable adapters (F3): unified IndexScanDescData <-> HashScan
+// ===========================================================================
+
+/// Downcast `scan.opaque` to hash's `HashScan` working state (A0 downcast).
+fn hsh<'a, 'mcx>(scan: &'a mut IndexScanDescData<'mcx>) -> &'a mut core::HashScan<'mcx> {
+    scan.opaque
+        .as_deref_mut()
+        .expect("hash scan descriptor has no opaque (not built by hashbeginscan)")
+        .downcast_mut::<core::HashScan<'mcx>>()
+        .expect("hash scan opaque is not a HashScan")
+}
+
+/// Sync the descriptor's IN boundary fields into the `HashScan` working state
+/// before each scan callback (C: the AM reads these straight off `scan`).
+fn sync_in(scan: &mut IndexScanDescData<'_>) {
+    let kill = scan.kill_prior_tuple;
+    let ignore_killed = scan.ignore_killed_tuples;
+    let instrument = scan.instrument.is_some();
+    let snap = scan.xs_snapshot.clone();
+    let h = hsh(scan);
+    h.kill_prior_tuple = kill;
+    h.ignore_killed_tuples = ignore_killed;
+    h.instrument = instrument;
+    h.xs_snapshot = snap.map(std::rc::Rc::new);
+}
+
+/// `aminsert` adapter.
+#[allow(clippy::too_many_arguments)]
+fn hashinsert_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &types_rel::Relation<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    heap_tid: &ItemPointerData,
+    heap_relation: &types_rel::Relation<'mcx>,
+    _check_unique: AmIndexUniqueCheck,
+    _index_unchanged: bool,
+    _index_info: &mut IndexInfo,
+) -> PgResult<bool> {
+    hashinsert(mcx, index_relation, values, isnull, *heap_tid, heap_relation)
+}
+
+/// `ambulkdelete` adapter — folds the split args onto the unified shape.
+fn hashbulkdelete_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<AmIndexBulkDeleteResult>,
+    callback_state: Option<u64>,
+) -> PgResult<Option<AmIndexBulkDeleteResult>> {
+    // C `info->strategy` is a `BufferAccessStrategy` (a small handle, here
+    // `{id:u32}`). The unified `IndexVacuumInfo` carries it erased; downcast it
+    // back, or `NONE` for the C `NULL` strategy.
+    let strategy = info
+        .strategy
+        .as_ref()
+        .and_then(|s| s.payload.as_ref())
+        .and_then(|p| p.downcast_ref::<BufferAccessStrategy>())
+        .copied()
+        .unwrap_or(BufferAccessStrategy::NONE);
+    let hinfo = HashVacuumInfo {
+        analyze_only: info.analyze_only,
+        strategy,
+    };
+    let res = hashbulkdelete(
+        &hinfo,
+        &info.index,
+        stats,
+        callback_state.is_some(),
+        callback_state.unwrap_or(0),
+    )?;
+    Ok(Some(res))
+}
+
+/// `amvacuumcleanup` adapter.
+fn hashvacuumcleanup_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
+    stats: Option<AmIndexBulkDeleteResult>,
+) -> PgResult<Option<AmIndexBulkDeleteResult>> {
+    hashvacuumcleanup(&info.index, stats)
+}
+
+/// `ambeginscan` adapter — build the unified descriptor with `opaque` holding a
+/// freshly-erased `HashScan` (the A0 erase pattern).
+fn hashbeginscan_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &types_rel::Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let hashscan = hashbeginscan(index_relation.alias(), nkeys, norderbys)?;
+    let mut desc = relation_get_index_scan(mcx, index_relation, nkeys, norderbys)?;
+    desc.opaque = Some(erase_hashscan(mcx, hashscan)?);
+    Ok(desc)
+}
+
+/// `amrescan` adapter.
+fn hashrescan_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    keys: &[ScanKeyData<'mcx>],
+    _orderbys: &[ScanKeyData<'mcx>],
+) -> PgResult<()> {
+    sync_in(scan);
+    let norderbys = scan.number_of_order_bys;
+    let scankey = if keys.is_empty() { None } else { Some(keys) };
+    hashrescan(hsh(scan), scankey, norderbys)
+}
+
+/// `amendscan` adapter.
+fn hashendscan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
+    hashendscan(hsh(scan))
+}
+
+/// `amgettuple` adapter.
+fn hashgettuple_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    direction: ScanDirection,
+) -> PgResult<bool> {
+    sync_in(scan);
+    let found = hashgettuple(hsh(scan), direction)?;
+    scan.xs_recheck = hsh(scan).xs_recheck;
+    if found {
+        scan.xs_heaptid = hsh(scan).xs_heaptid;
+    }
+    Ok(found)
+}
+
+/// `amgetbitmap` adapter.
+fn hashgetbitmap_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    tbm: &mut AmTIDBitmap,
+) -> PgResult<i64> {
+    sync_in(scan);
+    let tbm_concrete = tbm
+        .payload
+        .as_mut()
+        .and_then(|p| p.downcast_mut::<types_tidbitmap::TIDBitmap>())
+        .expect("amgetbitmap TIDBitmap payload is not a types_tidbitmap::TIDBitmap");
+    hashgetbitmap(hsh(scan), tbm_concrete)
+}
+
+/// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate
+/// the generic descriptor the hash AM extends via `opaque`.
+fn relation_get_index_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &types_rel::Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+) -> PgResult<IndexScanDesc<'mcx>> {
+    let mut key_data = Vec::with_capacity(nkeys as usize);
+    for _ in 0..nkeys {
+        key_data.push(ScanKeyData::empty());
+    }
+    let mut order_by_data = Vec::with_capacity(norderbys as usize);
+    for _ in 0..norderbys {
+        order_by_data.push(ScanKeyData::empty());
+    }
+    let _ = mcx;
+    Ok(std::boxed::Box::new(IndexScanDescData {
+        heap_relation: None,
+        index_relation: index_relation.alias(),
+        xs_snapshot: None,
+        number_of_keys: nkeys,
+        number_of_order_bys: norderbys,
+        key_data,
+        order_by_data,
+        xs_want_itup: false,
+        xs_temp_snap: false,
+        kill_prior_tuple: false,
+        ignore_killed_tuples: true,
+        xact_started_in_recovery: false,
+        opaque: None,
+        instrument: None,
+        xs_itup: None,
+        xs_itupdesc: None,
+        xs_hitup: None,
+        xs_hitupdesc: None,
+        xs_heaptid: ItemPointerData::default(),
+        xs_heap_continue: false,
+        xs_heapfetch: None,
+        xs_recheck: false,
+        xs_orderbyvals: std::vec::from_elem(Datum::null(), norderbys as usize),
+        xs_orderbynulls: std::vec![false; norderbys as usize],
+        xs_recheckorderby: false,
+        parallel_scan: None,
+    }))
+}
+
+/// Erase a `HashScan` into the A0 AM-opaque carrier for storage in
+/// `IndexScanDescData.opaque`.
+fn erase_hashscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    hashscan: core::HashScan<'mcx>,
+) -> PgResult<mcx::PgBox<'mcx, dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
+    let boxed: mcx::PgBox<'mcx, core::HashScan<'mcx>> = mcx::alloc_in(mcx, hashscan)?;
+    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+    // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
+    // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).
+    Ok(unsafe {
+        mcx::PgBox::from_raw_in(
+            ptr as *mut (dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
+            alloc,
+        )
+    })
 }
 
 // ===========================================================================

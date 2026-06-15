@@ -149,12 +149,13 @@ fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
 
 /// `index_insert(indexRelation, values, isnull, heap_t_ctid, heapRelation,
 /// checkUnique, indexUnchanged, indexInfo)` — insert an index tuple.
-pub fn index_insert(
-    index_relation: &Relation<'_>,
-    values: &[DatumV<'_>],
+pub fn index_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    values: &[DatumV<'mcx>],
     isnull: &[bool],
     heap_t_ctid: &ItemPointerData,
-    heap_relation: &Relation<'_>,
+    heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
     index_info: &mut IndexInfo,
@@ -170,6 +171,7 @@ pub fn index_insert(
     }
 
     (am.aminsert)(
+        mcx,
         index_relation,
         values,
         isnull,
@@ -183,14 +185,15 @@ pub fn index_insert(
 
 /// `index_insert_cleanup(indexRelation, indexInfo)` — clean up after all index
 /// inserts are done. `aminsertcleanup` is optional.
-pub fn index_insert_cleanup(
-    index_relation: &Relation<'_>,
+pub fn index_insert_cleanup<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
     index_info: &mut IndexInfo,
 ) -> PgResult<()> {
     relation_checks(index_relation)?;
 
     if let Some(aminsertcleanup) = indam(index_relation).aminsertcleanup {
-        aminsertcleanup(index_relation, index_info)?;
+        aminsertcleanup(mcx, index_relation, index_info)?;
     }
     Ok(())
 }
@@ -214,7 +217,7 @@ pub fn index_beginscan<'mcx>(
     // value, not the C NULL/Invalid pointer.
 
     let mut scan =
-        index_beginscan_internal(index_relation, nkeys, norderbys, snapshot.clone(), None, false)?;
+        index_beginscan_internal(mcx, index_relation, nkeys, norderbys, snapshot.clone(), None, false)?;
 
     // Save additional parameters into the scandesc; everything else was set up
     // by RelationGetIndexScan (inside ambeginscan).
@@ -231,6 +234,7 @@ pub fn index_beginscan<'mcx>(
 /// `index_beginscan_bitmap(indexRelation, snapshot, instrument, nkeys)` —
 /// start a scan of an index with `amgetbitmap`.
 pub fn index_beginscan_bitmap<'mcx>(
+    mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
     snapshot: SnapshotData,
     instrument: Option<IndexScanInstrumentation>,
@@ -239,7 +243,7 @@ pub fn index_beginscan_bitmap<'mcx>(
     // Assert(snapshot != InvalidSnapshot).
 
     let mut scan =
-        index_beginscan_internal(index_relation, nkeys, 0, snapshot.clone(), None, false)?;
+        index_beginscan_internal(mcx, index_relation, nkeys, 0, snapshot.clone(), None, false)?;
 
     // scan->xs_snapshot = snapshot; scan->instrument = instrument; (no heap rel)
     scan.xs_snapshot = Some(snapshot);
@@ -250,6 +254,7 @@ pub fn index_beginscan_bitmap<'mcx>(
 
 /// `index_beginscan_internal` — common code for the begin variants.
 fn index_beginscan_internal<'mcx>(
+    mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
     nkeys: i32,
     norderbys: i32,
@@ -269,7 +274,7 @@ fn index_beginscan_internal<'mcx>(
     relcache::relation_increment_reference_count::call(index_relation.rd_id)?;
 
     // Tell the AM to open a scan.
-    let mut scan = (am.ambeginscan)(index_relation, nkeys, norderbys)?;
+    let mut scan = (am.ambeginscan)(mcx, index_relation, nkeys, norderbys)?;
 
     // Initialize information for parallel scan.
     scan.parallel_scan = pscan;
@@ -281,11 +286,12 @@ fn index_beginscan_internal<'mcx>(
 /// `index_rescan(scan, keys, nkeys, orderbys, norderbys)` — (re)start a scan.
 /// The key counts must equal what `index_beginscan` was told. To restart
 /// without changing keys, pass empty key arrays (the C `NULL`).
-pub fn index_rescan(
-    scan: &mut IndexScanDescData<'_>,
-    keys: &[ScanKeyData],
+pub fn index_rescan<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    keys: &[ScanKeyData<'mcx>],
     nkeys: i32,
-    orderbys: &[ScanKeyData],
+    orderbys: &[ScanKeyData<'mcx>],
     norderbys: i32,
 ) -> PgResult<()> {
     // SCAN_CHECKS + CHECK_SCAN_PROCEDURE(amrescan): amrescan is required.
@@ -302,11 +308,11 @@ pub fn index_rescan(
     scan.kill_prior_tuple = false; // for safety
     scan.xs_heap_continue = false;
 
-    (am.amrescan)(scan, keys, orderbys)
+    (am.amrescan)(mcx, scan, keys, orderbys)
 }
 
 /// `index_endscan(scan)` — end a scan.
-pub fn index_endscan(mut scan: IndexScanDesc<'_>) -> PgResult<()> {
+pub fn index_endscan<'mcx>(mcx: Mcx<'mcx>, mut scan: IndexScanDesc<'mcx>) -> PgResult<()> {
     // SCAN_CHECKS + CHECK_SCAN_PROCEDURE(amendscan): amendscan is required.
     let am = indam(&scan.index_relation);
 
@@ -317,7 +323,7 @@ pub fn index_endscan(mut scan: IndexScanDesc<'_>) -> PgResult<()> {
     }
 
     // End the AM's scan.
-    (am.amendscan)(&mut scan)?;
+    (am.amendscan)(mcx, &mut scan)?;
     // (note: `scan` is `Box<IndexScanDescData>`; `&mut scan` auto-derefs to
     // `&mut IndexScanDescData` via deref coercion at the call.)
 
@@ -336,16 +342,16 @@ pub fn index_endscan(mut scan: IndexScanDesc<'_>) -> PgResult<()> {
 }
 
 /// `index_markpos(scan)` — mark a scan position.
-pub fn index_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+pub fn index_markpos<'mcx>(mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
     // CHECK_SCAN_PROCEDURE(ammarkpos): optional callback, error if absent.
     let am = indam(&scan.index_relation);
     let ammarkpos = check_scan_procedure(am.ammarkpos, "ammarkpos", &scan.index_relation)?;
-    ammarkpos(scan)
+    ammarkpos(mcx, scan)
 }
 
 /// `index_restrpos(scan)` — restore a scan position. Only restores the index
 /// AM's internal state (see C comments on HOT chains + MVCC snapshots).
-pub fn index_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+pub fn index_restrpos<'mcx>(mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
     // Assert(IsMVCCSnapshot(scan->xs_snapshot)).
     debug_assert!(scan
         .xs_snapshot
@@ -365,7 +371,7 @@ pub fn index_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     scan.kill_prior_tuple = false; // for safety
     scan.xs_heap_continue = false;
 
-    amrestrpos(scan)
+    amrestrpos(mcx, scan)
 }
 
 // ===========================================================================
@@ -507,7 +513,7 @@ pub fn index_parallelscan_initialize(
 }
 
 /// `index_parallelrescan(scan)` — (re)start a parallel scan of an index.
-pub fn index_parallelrescan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+pub fn index_parallelrescan<'mcx>(mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
     // SCAN_CHECKS.
     if let Some(heapfetch) = scan.xs_heapfetch.as_deref_mut() {
         tableam::table_index_fetch_reset(heapfetch)?;
@@ -515,7 +521,7 @@ pub fn index_parallelrescan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
     // amparallelrescan is optional; assume no-op if not provided by the AM.
     if let Some(amparallelrescan) = indam(&scan.index_relation).amparallelrescan {
-        amparallelrescan(scan)?;
+        amparallelrescan(mcx, scan)?;
     }
     Ok(())
 }
@@ -545,7 +551,7 @@ pub fn index_beginscan_parallel<'mcx>(
     let restored = snapmgr::restore_snapshot::call(&pscan.ps_snapshot_data)?;
     let snapshot = snapmgr::register_snapshot::call(restored)?;
     let mut scan =
-        index_beginscan_internal(indexrel, nkeys, norderbys, snapshot.clone(), Some(pscan), true)?;
+        index_beginscan_internal(mcx, indexrel, nkeys, norderbys, snapshot.clone(), Some(pscan), true)?;
 
     // Save additional parameters into the scandesc.
     scan.heap_relation = Some(heaprel.alias());
@@ -565,8 +571,9 @@ pub fn index_beginscan_parallel<'mcx>(
 /// `index_getnext_tid(scan, direction)` — get the next TID satisfying the scan
 /// keys, or `None` when exhausted. On success the TID is `scan->xs_heaptid`
 /// (returned here by value once located).
-pub fn index_getnext_tid(
-    scan: &mut IndexScanDescData<'_>,
+pub fn index_getnext_tid<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
     direction: ScanDirection,
 ) -> PgResult<Option<ItemPointerData>> {
     // CHECK_SCAN_PROCEDURE(amgettuple): optional callback, error if absent.
@@ -581,7 +588,7 @@ pub fn index_getnext_tid(
     // The AM's amgettuple proc finds the next matching index entry and puts
     // the TID into scan->xs_heaptid (plus xs_recheck/xs_itup/xs_hitup, which
     // we ignore here).
-    let found = amgettuple(scan, direction)?;
+    let found = amgettuple(mcx, scan, direction)?;
 
     // Reset kill flag immediately for safety.
     scan.kill_prior_tuple = false;
@@ -659,7 +666,7 @@ pub fn index_getnext_slot<'mcx>(
     loop {
         if !scan.xs_heap_continue {
             // Time to fetch the next TID from the index.
-            let tid = index_getnext_tid(scan, direction)?;
+            let tid = index_getnext_tid(mcx, scan, direction)?;
 
             // If we're out of index entries, we're done.
             if tid.is_none() {
@@ -682,7 +689,11 @@ pub fn index_getnext_slot<'mcx>(
 /// `index_getbitmap(scan, bitmap)` — add the TIDs of all heap tuples
 /// satisfying the scan keys to a bitmap; returns the (possibly approximate)
 /// match count.
-pub fn index_getbitmap(scan: &mut IndexScanDescData<'_>, bitmap: &mut TIDBitmap) -> PgResult<i64> {
+pub fn index_getbitmap<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexScanDescData<'mcx>,
+    bitmap: &mut TIDBitmap,
+) -> PgResult<i64> {
     // CHECK_SCAN_PROCEDURE(amgetbitmap): optional callback, error if absent.
     let am = indam(&scan.index_relation);
     let amgetbitmap = check_scan_procedure(am.amgetbitmap, "amgetbitmap", &scan.index_relation)?;
@@ -691,7 +702,7 @@ pub fn index_getbitmap(scan: &mut IndexScanDescData<'_>, bitmap: &mut TIDBitmap)
     scan.kill_prior_tuple = false;
 
     // have the am's getbitmap proc do all the work.
-    let ntids = amgetbitmap(scan, bitmap)?;
+    let ntids = amgetbitmap(mcx, scan, bitmap)?;
 
     pgstat::pgstat_count_index_tuples::call(scan.index_relation.rd_id, ntids);
 
@@ -706,25 +717,28 @@ pub fn index_getbitmap(scan: &mut IndexScanDescData<'_>, bitmap: &mut TIDBitmap)
 /// of index entries; `info->index` is the index relation. The deletion
 /// callback + its state live in the vacuum substrate, so the whole AM call is
 /// owned by the AM.
-pub fn index_bulk_delete(
-    info: &IndexVacuumInfo<'_>,
+pub fn index_bulk_delete<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
     istat: Option<IndexBulkDeleteResult>,
+    callback_state: Option<u64>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
     let index_relation = &info.index;
     relation_checks(index_relation)?;
     // CHECK_REL_PROCEDURE(ambulkdelete): ambulkdelete is a required callback.
-    (indam(index_relation).ambulkdelete)(info, istat)
+    (indam(index_relation).ambulkdelete)(mcx, info, istat, callback_state)
 }
 
 /// `index_vacuum_cleanup(info, istat)` — post-deletion cleanup of an index.
-pub fn index_vacuum_cleanup(
-    info: &IndexVacuumInfo<'_>,
+pub fn index_vacuum_cleanup<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'mcx>,
     istat: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
     let index_relation = &info.index;
     relation_checks(index_relation)?;
     // CHECK_REL_PROCEDURE(amvacuumcleanup): required callback.
-    (indam(index_relation).amvacuumcleanup)(info, istat)
+    (indam(index_relation).amvacuumcleanup)(mcx, info, istat)
 }
 
 // ===========================================================================

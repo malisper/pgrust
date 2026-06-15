@@ -493,6 +493,7 @@ dependencies = [
  "types-scan",
  "types-snapshot",
  "types-storage",
+ "types-tableam",
  "types-tidbitmap",
  "types-tuple",
 ]
@@ -1142,7 +1143,9 @@ dependencies = [
  "types-nbtree",
  "types-rel",
  "types-scan",
+ "types-snapshot",
  "types-storage",
+ "types-tableam",
  "types-tidbitmap",
  "types-tuple",
 ]
@@ -4467,6 +4470,7 @@ dependencies = [
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-executor-nodeAgg",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -4503,6 +4507,7 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
+ "backend-executor-nodeAgg",
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -14179,9 +14184,7 @@ dependencies = [
 name = "types-amapi"
 version = "0.0.0"
 dependencies = [
- "types-core",
- "types-nodes",
- "types-scan",
+ "types-tableam",
 ]
 
 [[package]]

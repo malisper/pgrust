@@ -96,6 +96,18 @@ seam_core::seam!(
     pub fn current_heaptid<'mcx>(so: &BTScanOpaqueData<'mcx>) -> ItemPointerData
 );
 
+seam_core::seam!(
+    /// `(IndexTuple) (so->currTuples + so->currPos.items[itemIndex].tupleOffset)`
+    /// — the index tuple at the scan's current position, for index-only scans
+    /// (C: `_bt_returnitem` sets `scan->xs_itup` to this pointer-into-workspace).
+    /// Returns the contiguous on-disk byte image (sized by `IndexTupleSize`
+    /// read from the header), copied out of the per-scan `currTuples` workspace.
+    /// `None` when the scan is not index-only (`so->currTuples == NULL`), which
+    /// is the C `scan->xs_itup` left unset.
+    pub fn current_itup<'mcx>(mcx: Mcx<'mcx>, so: &BTScanOpaqueData<'mcx>)
+        -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
 // === btbuildempty / metapage + page helpers (nbtpage.c) ====================
 
 seam_core::seam!(

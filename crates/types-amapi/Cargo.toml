@@ -9,6 +9,4 @@ name = "types_amapi"
 path = "src/lib.rs"
 
 [dependencies]
-types-core = { path = "../types-core" }
-types-scan = { path = "../types-scan" }
-types-nodes = { path = "../types-nodes" }
+types-tableam = { path = "../types-tableam" }

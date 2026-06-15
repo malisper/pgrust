@@ -69,6 +69,7 @@ pub struct IndexScanInstrumentation {
 /// [`IndexScanInstrumentation`], stored in shared memory. The
 /// `FLEXIBLE_ARRAY_MEMBER winstrument[]` becomes a length-`num_workers`
 /// vector.
+#[derive(Clone, Debug, Default)]
 pub struct SharedIndexScanInstrumentation {
     /// `int num_workers`.
     pub num_workers: i32,

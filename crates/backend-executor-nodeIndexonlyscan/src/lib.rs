@@ -197,7 +197,7 @@ fn IndexOnlyNext<'mcx>(
                 .ioss_ScanDesc
                 .as_ref()
                 .unwrap()
-                .heapRelation
+                .heap_relation
                 .as_ref()
                 .map(|r| r.alias())
                 .ok_or_else(|| elog("index-only scan descriptor has no heap relation"))?;
@@ -290,7 +290,7 @@ fn IndexOnlyNext<'mcx>(
         // if (scandesc->numberOfOrderBys > 0 && scandesc->xs_recheckorderby)
         {
             let scandesc = node.ioss_ScanDesc.as_ref().unwrap();
-            if scandesc.numberOfOrderBys > 0 && scandesc.xs_recheckorderby {
+            if scandesc.number_of_order_bys > 0 && scandesc.xs_recheckorderby {
                 return Err(feature(
                     "lossy distance functions are not supported in index-only scans",
                 ));
@@ -304,7 +304,7 @@ fn IndexOnlyNext<'mcx>(
                 .ioss_ScanDesc
                 .as_ref()
                 .unwrap()
-                .heapRelation
+                .heap_relation
                 .as_ref()
                 .map(|r| r.alias())
                 .ok_or_else(|| elog("index-only scan descriptor has no heap relation"))?;

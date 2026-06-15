@@ -103,6 +103,12 @@ pub struct HashScan<'mcx> {
     pub nsearches: i64,
 }
 
+/// `HashScan` is the concrete type stored in `IndexScanDescData.opaque` (C's
+/// `void *opaque`); the A0 carrier downcasts to it in every hash AM adapter.
+impl<'mcx> types_tableam::amopaque::AmOpaqueType<'mcx> for HashScan<'mcx> {
+    const TAG: types_tableam::amopaque::AmOpaqueTag = types_tableam::amopaque::tags::HASH_SCAN;
+}
+
 // ===========================================================================
 // init_seams
 // ===========================================================================

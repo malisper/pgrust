@@ -14,6 +14,7 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-amapi = { path = "../types-amapi" }
+types-tableam = { path = "../types-tableam" }
 types-hash = { path = "../types-hash" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }

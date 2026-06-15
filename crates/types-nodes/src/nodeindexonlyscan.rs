@@ -19,7 +19,6 @@ use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
 use types_sortsupport::SortSupportData;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData, TupleDescData};
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, ScanStateData, SlotId};
@@ -30,101 +29,23 @@ pub use crate::execstate_tags::T_IndexOnlyScanState;
 pub use crate::nodes::T_IndexOnlyScan;
 pub use types_storage::{Buffer, InvalidBuffer};
 
-/// `IndexScanInstrumentation` (access/genam.h) — per-scan instrumentation kept
-/// by the index AMs (the search count incremented by `pgstat_count_index_scan`).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct IndexScanInstrumentation {
-    /// `uint64 nsearches` — index search count.
-    pub nsearches: u64,
-}
+// The index-scan descriptor family (`IndexScanDescData`/`IndexScanDesc`,
+// `ParallelIndexScanDescData`/`ParallelIndexScanDesc`, and the
+// `IndexScanInstrumentation`/`SharedIndexScanInstrumentation` counters) is the
+// canonical one defined in `types_tableam` (F1 of the index-AM tower). The
+// trimmed copies that used to live here are deleted; these re-exports keep the
+// `types_nodes::nodeindexonlyscan::…` paths the executor nodes use. `types-nodes`
+// already depends on `types-tableam`, so there is no dependency cycle.
+pub use types_tableam::genam::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
+pub use types_tableam::relscan::{
+    IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData,
+};
 
-/// `SharedIndexScanInstrumentation` (access/genam.h) — the DSM-resident copy of
-/// the per-worker instrumentation. C's `winstrument[FLEXIBLE_ARRAY_MEMBER]`
-/// becomes an owned `Vec` of `num_workers` entries.
-#[derive(Clone, Debug, Default)]
-pub struct SharedIndexScanInstrumentation {
-    /// `int num_workers`.
-    pub num_workers: i32,
-    /// `IndexScanInstrumentation winstrument[FLEXIBLE_ARRAY_MEMBER]`.
-    pub winstrument: Vec<IndexScanInstrumentation>,
-}
-
-/// `ParallelIndexScanDescData` (access/relscan.h) — the generic parallel
-/// index-scan descriptor that lives in DSM. Trimmed to the offsets the
-/// index-only-scan node and `index_beginscan_parallel` consume; the
-/// `ps_snapshot_data[FLEXIBLE_ARRAY_MEMBER]` serialized snapshot tail is owned
-/// by the parallel-scan setup and not consumed here.
-#[derive(Clone, Debug, Default)]
-pub struct ParallelIndexScanDescData {
-    /// `Size ps_offset_ins` — offset to `SharedIndexScanInstrumentation`.
-    pub ps_offset_ins: usize,
-    /// `Size ps_offset_am` — offset to the am-specific structure.
-    pub ps_offset_am: usize,
-}
-
-/// `ParallelIndexScanDesc` — `ParallelIndexScanDescData *`.
+/// `ParallelIndexScanDesc` — `ParallelIndexScanDescData *`. The canonical
+/// `types_tableam` descriptor carries the shared parallel descriptor as an
+/// `Arc` (DSM-resident); this alias preserves the `PgBox`-shaped name used by
+/// the index-only-scan node's per-backend pool.
 pub type ParallelIndexScanDesc<'mcx> = PgBox<'mcx, ParallelIndexScanDescData>;
-
-/// `IndexScanDescData` (access/relscan.h) — the index-AM scan descriptor,
-/// palloc'd by `index_beginscan` and filled by the AM's `amgettuple`. Trimmed
-/// to the fields the index-only-scan node reads. The AM-private scan state
-/// (`opaque`) and the per-fetch heap state (`xs_heapfetch`) are owned by the
-/// index AM / table AM and ride opaquely.
-#[derive(Debug)]
-pub struct IndexScanDescData<'mcx> {
-    /// `Relation heapRelation` — heap relation descriptor, or `None`.
-    pub heapRelation: Option<Relation<'mcx>>,
-    /// `Relation indexRelation` — index relation descriptor.
-    pub indexRelation: Relation<'mcx>,
-    /// `int numberOfKeys` — number of index qualifier conditions.
-    pub numberOfKeys: i32,
-    /// `int numberOfOrderBys` — number of ordering operators.
-    pub numberOfOrderBys: i32,
-    /// `struct ScanKeyData *keyData` — array of index qualifier descriptors.
-    pub keyData: PgVec<'mcx, ScanKeyData<'mcx>>,
-    /// `struct ScanKeyData *orderByData` — array of ordering-op descriptors.
-    pub orderByData: PgVec<'mcx, ScanKeyData<'mcx>>,
-    /// `bool xs_want_itup` — caller requests index tuples.
-    pub xs_want_itup: bool,
-    /// `bool kill_prior_tuple` — last-returned tuple is dead.
-    pub kill_prior_tuple: bool,
-    /// `struct IndexScanInstrumentation *instrument` — counters maintained by
-    /// the AM; `None` is the C `NULL`.
-    pub instrument: Option<IndexScanInstrumentation>,
-    /// `IndexTuple xs_itup` — index tuple returned by the AM. In C this is a
-    /// pointer aliasing the on-disk index-tuple bytes in the AM's per-scan
-    /// workspace (`(IndexTuple) (so->currTuples + tupleOffset)`); the owned
-    /// model carries the contiguous on-disk byte image (header / null bitmap /
-    /// `MAXALIGN`-padded user data — what `index_form_tuple` produces), since
-    /// the header-only `IndexTupleData` cannot hold the variable-length data
-    /// area. `None` is the C `NULL`.
-    pub xs_itup: Option<PgVec<'mcx, u8>>,
-    /// `struct TupleDescData *xs_itupdesc` — rowtype descriptor of `xs_itup`.
-    pub xs_itupdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
-    /// `HeapTuple xs_hitup` — index data returned by the AM, as a HeapTuple.
-    pub xs_hitup: HeapTuple<'mcx>,
-    /// `struct TupleDescData *xs_hitupdesc` — rowtype descriptor of `xs_hitup`.
-    pub xs_hitupdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
-    /// `ItemPointerData xs_heaptid` — result TID.
-    pub xs_heaptid: ItemPointerData,
-    /// `bool xs_heap_continue` — must keep walking, potential further results.
-    pub xs_heap_continue: bool,
-    /// `bool xs_recheck` — scan keys must be rechecked.
-    pub xs_recheck: bool,
-    /// `bool xs_recheckorderby` — ORDER BY values need recheck.
-    pub xs_recheckorderby: bool,
-    /// `struct ParallelIndexScanDescData *parallel_scan` — parallel index scan
-    /// information, in shared memory; `None` is the C `NULL`.
-    pub parallel_scan: Option<ParallelIndexScanDesc<'mcx>>,
-    /// `Datum *xs_orderbyvals` — the ORDER BY distances the AM returned for the
-    /// current tuple (KNN scans). Empty when the scan has no ordering ops.
-    pub xs_orderbyvals: PgVec<'mcx, Datum<'mcx>>,
-    /// `bool *xs_orderbynulls` — is-null flags for `xs_orderbyvals`.
-    pub xs_orderbynulls: PgVec<'mcx, bool>,
-}
-
-/// `IndexScanDesc` — `IndexScanDescData *`.
-pub type IndexScanDesc<'mcx> = PgBox<'mcx, IndexScanDescData<'mcx>>;
 
 /// `IndexRuntimeKeyInfo` (execnodes.h) — info about a scankey whose value must
 /// be evaluated at runtime. The `scan_key` slot the value is written into is
