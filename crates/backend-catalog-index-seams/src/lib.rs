@@ -10,7 +10,7 @@
 /// `const int16 *coloptions` arrays cross as owned `Vec`s. `opclassOptions`,
 /// `stattargets`, and the `Oid *constraintId` out-parameter are NULL/ignored
 /// at the current call sites and are not carried.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct IndexCreateArgs<'mcx> {
     /// `const char *indexRelationName`.
     pub index_relation_name: std::string::String,
@@ -23,7 +23,7 @@ pub struct IndexCreateArgs<'mcx> {
     /// `RelFileNumber relFileNumber`.
     pub rel_file_number: types_core::primitive::Oid,
     /// `IndexInfo *indexInfo`.
-    pub index_info: types_nodes::execnodes::IndexInfo,
+    pub index_info: types_nodes::execnodes::IndexInfo<'mcx>,
     /// `const List *indexColNames`.
     pub index_col_names: std::vec::Vec<std::string::String>,
     /// `Oid accessMethodId`.
@@ -77,9 +77,9 @@ seam_core::seam!(
     /// describing the open index relation. The owned `IndexInfo` is trimmed
     /// to the fields consumers read, so no allocation crosses the seam yet;
     /// cache lookups can `elog(ERROR)`, carried on `Err`.
-    pub fn build_index_info(
-        index: &types_rel::Relation<'_>,
-    ) -> types_error::PgResult<types_nodes::execnodes::IndexInfo>
+    pub fn build_index_info<'mcx>(
+        index: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<types_nodes::execnodes::IndexInfo<'mcx>>
 );
 
 seam_core::seam!(
@@ -97,7 +97,7 @@ seam_core::seam!(
     /// batch. Migrating the element type here would diverge from that landed
     /// contract; it follows when genam migrates.
     pub fn form_index_datum<'mcx>(
-        index_info: &types_nodes::execnodes::IndexInfo,
+        index_info: &types_nodes::execnodes::IndexInfo<'_>,
         slot: types_nodes::execnodes::SlotId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(
@@ -113,7 +113,7 @@ seam_core::seam!(
     pub fn index_build(
         heap: &types_rel::Relation<'_>,
         index: &types_rel::Relation<'_>,
-        index_info: &types_nodes::execnodes::IndexInfo,
+        index_info: &types_nodes::execnodes::IndexInfo<'_>,
     ) -> types_error::PgResult<()>
 );
 

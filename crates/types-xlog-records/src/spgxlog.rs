@@ -303,7 +303,23 @@ impl spgxlogVacuumLeaf {
             nChain: u16_at(rec, 6),
         }
     }
+
+    /// `XLogRegisterData(&xlrec, SizeOfSpgxlogVacuumLeaf)` image — four uint16
+    /// @0/2/4/6, then `spgxlogState stateSrc` (8 bytes) @8; size 16.
+    pub fn to_bytes(&self, state_src: &spgxlogState) -> Vec<u8> {
+        let mut v = Vec::with_capacity(SIZE_OF_SPGXLOG_VACUUM_LEAF);
+        v.extend_from_slice(&self.nDead.to_ne_bytes());
+        v.extend_from_slice(&self.nPlaceholder.to_ne_bytes());
+        v.extend_from_slice(&self.nMove.to_ne_bytes());
+        v.extend_from_slice(&self.nChain.to_ne_bytes());
+        state_src.write_into(&mut v);
+        v
+    }
 }
+
+/// `SizeOfSpgxlogVacuumLeaf` = `offsetof(spgxlogVacuumLeaf, offsets)` — four
+/// uint16 (8) + `spgxlogState` (8) = 16 bytes.
+pub const SIZE_OF_SPGXLOG_VACUUM_LEAF: usize = 16;
 
 /// `spgxlogVacuumRoot`: `{uint16 nDelete; spgxlogState stateSrc;
 /// OffsetNumber offsets[];}` — trimmed of `stateSrc` and the offsets.
@@ -316,7 +332,21 @@ impl spgxlogVacuumRoot {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self { nDelete: u16_at(rec, 0) }
     }
+
+    /// `XLogRegisterData(&xlrec, SizeOfSpgxlogVacuumRoot)` image — `nDelete`
+    /// uint16 @0, 2 pad to align `spgxlogState` @4..12; size 12.
+    pub fn to_bytes(&self, state_src: &spgxlogState) -> Vec<u8> {
+        let mut v = Vec::with_capacity(SIZE_OF_SPGXLOG_VACUUM_ROOT);
+        v.extend_from_slice(&self.nDelete.to_ne_bytes());
+        v.extend_from_slice(&[0u8; 2]); // pad to 4 (spgxlogState alignment)
+        state_src.write_into(&mut v);
+        v
+    }
 }
+
+/// `SizeOfSpgxlogVacuumRoot` = `offsetof(spgxlogVacuumRoot, offsets)` — uint16
+/// (2) + 2 pad + `spgxlogState` (8) = 12 bytes.
+pub const SIZE_OF_SPGXLOG_VACUUM_ROOT: usize = 12;
 
 /// `spgxlogVacuumRedirect`: `{uint16 nToPlaceholder;
 /// OffsetNumber firstPlaceholder; TransactionId snapshotConflictHorizon;
@@ -338,4 +368,22 @@ impl spgxlogVacuumRedirect {
             isCatalogRel: bool_at(rec, 8),
         }
     }
+
+    /// `XLogRegisterData(&xlrec, SizeOfSpgxlogVacuumRedirect)` image —
+    /// `nToPlaceholder` u16 @0, `firstPlaceholder` u16 @2,
+    /// `snapshotConflictHorizon` u32 @4, `isCatalogRel` bool @8, 1 pad to align
+    /// the trailing `OffsetNumber offsets[]` (u16) @10; size 10.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(SIZE_OF_SPGXLOG_VACUUM_REDIRECT);
+        v.extend_from_slice(&self.nToPlaceholder.to_ne_bytes());
+        v.extend_from_slice(&self.firstPlaceholder.to_ne_bytes());
+        v.extend_from_slice(&self.snapshotConflictHorizon.to_ne_bytes());
+        v.push(self.isCatalogRel as u8);
+        v.push(0u8); // pad to 10 (OffsetNumber alignment)
+        v
+    }
 }
+
+/// `SizeOfSpgxlogVacuumRedirect` = `offsetof(spgxlogVacuumRedirect, offsets)` —
+/// u16 (2) + u16 (2) + u32 (4) + bool (1) + 1 pad = 10 bytes.
+pub const SIZE_OF_SPGXLOG_VACUUM_REDIRECT: usize = 10;

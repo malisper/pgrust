@@ -13,7 +13,10 @@
 //! * `root->parse` is the opaque [`QueryId`]; the jointree it reaches
 //!   (`parse->jointree`, a `FromExpr`) is resolved through the planner-run
 //!   store [`PlannerRun`], passed alongside `&mut PlannerInfo` (the resolver
-//!   model, #264). `query_planner` therefore takes `run: &PlannerRun<'mcx>`.
+//!   model, #264). `query_planner` therefore takes `run: &mut PlannerRun<'mcx>`,
+//!   because `setup_simple_rel_arrays` (relnode.c) now interns the top-level
+//!   `rtable` entries into the run's RTE store (#300), recording each handle in
+//!   `root.simple_rte_array`; all other uses of `run` are immutable reborrows.
 //! * The returned rel is a [`RelId`] handle into `root.rel_arena` (the trivial
 //!   path's rel is registered by `build_simple_rel`; the general path's by
 //!   `make_one_rel`).
@@ -73,12 +76,14 @@ const PROPARALLEL_SAFE: i8 = b's' as i8;
 /// surviving paths.
 ///
 /// `run` resolves `root.parse` (the opaque [`QueryId`]) to its owned
-/// `Query<'mcx>` so the jointree can be walked. `qp_callback` is the C
+/// `Query<'mcx>` so the jointree can be walked, and (via `&mut`)
+/// `setup_simple_rel_arrays` interns its `rtable` into the run's RTE store.
+/// `qp_callback` is the C
 /// `query_pathkeys_callback` upcall (computes `query_pathkeys` once ECs are
 /// canonical); the caller owns the closure.
 pub fn query_planner<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     qp_callback: &mut dyn FnMut(&mut PlannerInfo) -> PgResult<()>,
 ) -> PgResult<RelId> {
@@ -106,7 +111,7 @@ pub fn query_planner<'mcx>(
     /*
      * Set up arrays for accessing base relations and AppendRelInfos.
      */
-    relnode::setup_simple_rel_arrays(root);
+    relnode::setup_simple_rel_arrays(run, root, mcx)?;
 
     /*
      * In the trivial case where the jointree is a single RTE_RESULT relation,

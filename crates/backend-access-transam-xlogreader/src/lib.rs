@@ -406,7 +406,7 @@ pub fn XLogReaderSetDecodeBuffer(state: &mut XLogReaderState<'_>, size: usize) {
 /// `allocate_recordbuf` (xlogreader.c:190). Allocate `readRecordBuf` to fit a
 /// record of at least `reclength`, rounded to a `XLOG_BLCKSZ` multiple and at
 /// least `5*Max(BLCKSZ, XLOG_BLCKSZ)`.
-pub(crate) fn allocate_recordbuf<'mcx>(state: &mut XLogReaderState<'mcx>, reclength: uint32) -> PgResult<()> {
+pub fn allocate_recordbuf<'mcx>(state: &mut XLogReaderState<'mcx>, reclength: uint32) -> PgResult<()> {
     let arena = state.decode_arena.expect("reader has no allocator context");
     let mut new_size: uint32 = reclength;
     new_size = new_size.wrapping_add(XLOG_BLCKSZ as u32 - (new_size % XLOG_BLCKSZ as u32));
@@ -1961,6 +1961,33 @@ fn shortdata_err(state: &mut XLogReaderState<'_>) {
 /// The reader's current record (`reader->record`), or `None`.
 fn current<'a, 'mcx>(state: &'a XLogReaderState<'mcx>) -> Option<&'a DecodedXLogRecord<'mcx>> {
     state.record.as_ref()
+}
+
+/// `XLogRecGetRmid(decoder)` (xlogreader.h) — `(decoder)->record->header.xl_rmid`,
+/// the resource-manager id of the reader's current record. The caller (the
+/// recovery driver's `ReadCheckpointRecord`) guarantees a decoded current
+/// record, exactly as the C macro dereferences `record->record` unconditionally.
+pub fn XLogRecGetRmid(state: &XLogReaderState<'_>) -> RmgrId {
+    current(state)
+        .expect("XLogRecGetRmid requires a decoded current record")
+        .header()
+        .rmid()
+}
+
+/// `XLogRecGetInfo(decoder)` (xlogreader.h) — `(decoder)->record->header.xl_info`.
+pub fn XLogRecGetInfo(state: &XLogReaderState<'_>) -> uint8 {
+    current(state)
+        .expect("XLogRecGetInfo requires a decoded current record")
+        .info()
+}
+
+/// `XLogRecGetTotalLen(decoder)` (xlogreader.h) —
+/// `(decoder)->record->header.xl_tot_len`.
+pub fn XLogRecGetTotalLen(state: &XLogReaderState<'_>) -> uint32 {
+    current(state)
+        .expect("XLogRecGetTotalLen requires a decoded current record")
+        .header()
+        .total_len()
 }
 
 /// `XLogRecHasBlockRef(record, block_id)` (xlogreader.h inline).
