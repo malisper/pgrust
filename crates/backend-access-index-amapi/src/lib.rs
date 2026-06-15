@@ -49,6 +49,12 @@ const BTREE_AM_OID: Oid = 403;
 /// `HASH_AM_OID` (catalog/pg_am.dat) — the built-in hash access method.
 const HASH_AM_OID: Oid = 405;
 
+/// `GIN_AM_OID` (catalog/pg_am.dat) — the built-in GIN access method.
+const GIN_AM_OID: Oid = 2742;
+
+/// `BRIN_AM_OID` (catalog/pg_am.dat) — the built-in BRIN access method.
+const BRIN_AM_OID: Oid = 3580;
+
 /// `F_BTHANDLER` (pg_proc.dat oid 330) — the btree AM handler function.
 const F_BTHANDLER: Oid = 330;
 /// `F_HASHHANDLER` (pg_proc.dat oid 331) — the hash AM handler function.
@@ -233,10 +239,11 @@ pub fn IndexAmTranslateCompareType(
 /// than through the vtable — see `am_has_adjustmembers`; nbtree/hash both stamp
 /// `amvalidate: None`). So the dispatch resolves the AM oid to the built-in
 /// AM's `*validate` routine directly, which is exactly the function the AM's
-/// `bthandler` / `hashhandler` stores in `amvalidate`. An AM oid that is neither
-/// built-in btree nor hash is a future extension AM whose validator is reached
-/// through the (unported) dynamic-fmgr dispatch; that case maps to the C
-/// `function amvalidate is not defined` error.
+/// `bthandler` / `hashhandler` / `ginhandler` / `brinhandler` stores in
+/// `amvalidate`. An AM oid whose validator is not yet ported (SP-GiST / GiST)
+/// or a future extension AM whose validator is reached through the (unported)
+/// dynamic-fmgr dispatch maps to the C `function amvalidate is not defined`
+/// error.
 pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
     // classtup = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid));
     // if (!HeapTupleIsValid(classtup)) elog(ERROR, "cache lookup failed for
@@ -266,6 +273,14 @@ pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
     let result = match amoid {
         BTREE_AM_OID => backend_access_nbt_validate::btvalidate(mcx, opclassoid)?,
         HASH_AM_OID => backend_access_hashvalidate::hashvalidate(mcx, opclassoid)?,
+        GIN_AM_OID => {
+            backend_access_gin_core_probe::ginvalidate::ginvalidate(mcx, opclassoid)?
+        }
+        BRIN_AM_OID => backend_access_brin_validate::brinvalidate(mcx, opclassoid)?,
+        // SP-GiST (4000) / GiST (783) validators are not yet ported (no
+        // `spgvalidate`/`gistvalidate`), so their handlers' `amvalidate` is
+        // unreachable here; that maps to the C `function amvalidate is not
+        // defined for index access method %u` error.
         _ => {
             return Err(PgError::error(format!(
                 "function amvalidate is not defined for index access method \
