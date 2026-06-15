@@ -6767,6 +6767,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-allpaths"
+version = "0.0.0"
+dependencies = [
+ "backend-geqo-all",
+ "backend-geqo-all-seams",
+ "backend-optimizer-path-costsize",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-indxpath",
+ "backend-optimizer-path-joinrels",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-path-pathkeys-seams",
+ "backend-optimizer-path-small",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize"
 version = "0.0.0"
 dependencies = [
@@ -13334,6 +13364,7 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize",
  "backend-optimizer-path-equivclass",
  "backend-optimizer-path-indxpath",
