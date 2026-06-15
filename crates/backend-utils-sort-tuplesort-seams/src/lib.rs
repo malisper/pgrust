@@ -210,14 +210,3 @@ seam_core::seam!(
     ) -> PgResult<Tuplesortstate<'mcx>>
 );
 
-seam_core::seam!(
-    /// `tuplesort_getindextuple(state, forward)` (tuplesortvariants.c): fetch
-    /// the next `IndexTuple` from a btree-index build sort, returned as owned
-    /// on-disk index-tuple bytes in `mcx`. `Ok(None)` at end of sort. Can
-    /// detoast / allocate, fallible.
-    pub fn tuplesort_getindextuple<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        state: &mut Tuplesortstate<'mcx>,
-        forward: bool,
-    ) -> PgResult<Option<mcx::PgVec<'mcx, u8>>>
-);

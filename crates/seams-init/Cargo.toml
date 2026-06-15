@@ -42,6 +42,7 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }
 backend-access-transam-generic-xlog = { path = "../backend-access-transam-generic-xlog" }
+backend-access-transam-multixact = { path = "../backend-access-transam-multixact" }
 backend-access-transam-commit-ts = { path = "../backend-access-transam-commit-ts" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-access-transam-timeline = { path = "../backend-access-transam-timeline" }
@@ -65,10 +66,14 @@ backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
+backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
+backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
 backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
@@ -145,8 +150,14 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-nodes-copyfuncs = { path = "../backend-nodes-copyfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-access-hash-core = { path = "../backend-access-hash-core" }
+backend-access-hash-entry = { path = "../backend-access-hash-entry" }
+backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
@@ -265,6 +276,7 @@ backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
+backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }

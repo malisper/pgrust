@@ -1242,9 +1242,9 @@ fn _bt_load<'mcx>(
         let btspool2 = btspool2.ok_or_else(|| PgError::error("_bt_load: btspool2 is NULL"))?;
         // Merge btspool and btspool2 (the unique-index dead-tuple spool).
         let mut itup =
-            tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool.sortstate, true)?;
+            tuplesort::tuplesort_getindextuple::call(&mut btspool.sortstate, true)?;
         let mut itup2 =
-            tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool2.sortstate, true)?;
+            tuplesort::tuplesort_getindextuple::call(&mut btspool2.sortstate, true)?;
 
         loop {
             let mut load1 = true; // load BTSpool next ?
@@ -1288,13 +1288,13 @@ fn _bt_load<'mcx>(
                 let st = state.as_mut().unwrap();
                 _bt_buildadd(mcx, wstate, st, &it, 0)?;
                 itup =
-                    tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool.sortstate, true)?;
+                    tuplesort::tuplesort_getindextuple::call(&mut btspool.sortstate, true)?;
             } else {
                 let it2 = itup2.take().unwrap();
                 let st = state.as_mut().unwrap();
                 _bt_buildadd(mcx, wstate, st, &it2, 0)?;
                 itup2 =
-                    tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool2.sortstate, true)?;
+                    tuplesort::tuplesort_getindextuple::call(&mut btspool2.sortstate, true)?;
             }
 
             tuples_done += 1;
@@ -1305,7 +1305,7 @@ fn _bt_load<'mcx>(
         let mut dstate = new_load_dedup_state(mcx)?;
 
         while let Some(itup) =
-            tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool.sortstate, true)?
+            tuplesort::tuplesort_getindextuple::call(&mut btspool.sortstate, true)?
         {
             if state.is_none() {
                 state = Some(Box::new(_bt_pagestate(mcx, wstate, 0)?));
@@ -1342,7 +1342,7 @@ fn _bt_load<'mcx>(
     } else {
         // merging and deduplication both unnecessary.
         while let Some(itup) =
-            tuplesort::tuplesort_getindextuple::call(mcx, &mut btspool.sortstate, true)?
+            tuplesort::tuplesort_getindextuple::call(&mut btspool.sortstate, true)?
         {
             if state.is_none() {
                 state = Some(Box::new(_bt_pagestate(mcx, wstate, 0)?));

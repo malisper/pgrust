@@ -7,6 +7,7 @@
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     contrib_amcheck_verify_nbtree::init_seams();
+    backend_archive_shell_archive::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -39,6 +40,7 @@ pub fn init_all() {
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
+    backend_access_transam_multixact::init_seams();
     backend_access_transam_parallel::init_seams();
     backend_access_transam_subtrans::init_seams();
     backend_access_transam_timeline::init_seams();
@@ -61,10 +63,14 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
+    backend_catalog_pg_conversion::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
@@ -141,8 +147,13 @@ pub fn init_all() {
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
+    backend_access_hash_core::init_seams();
+    backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_util_clauses::init_seams();
+    backend_optimizer_util_pathnode::init_seams();
     backend_parser_parse_oper::init_seams();
+    backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -261,6 +272,7 @@ pub fn init_all() {
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
     backend_utils_sort_sortsupport::init_seams();
+    backend_utils_sort_storage::init_seams();
     backend_utils_time_combocid::init_seams();
     backend_utils_time_snapmgr::init_seams();
     common_checksum_helper::init_seams();
@@ -652,11 +664,7 @@ mod recurrence_guard {
         ("backend_access_common_tupdesc", "free_tuple_desc"),
         // RETIRED (task #161): `heap_tuple_header_get_datum`
         // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
-        // The composite/record-Datum carrier bridge landed: the seam carries the
-        // data-bearing `FormedTuple`, and the no-external fast path mints the
-        // `Datum::ByRef` image directly via heap_tuple_to_disk_image while the
-        // external case flattens through toast_flatten_tuple_to_datum +
-        // lookup_rowtype_tupdesc.
+        // The composite/record-Datum carrier bridge landed.
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
@@ -709,6 +717,12 @@ mod recurrence_guard {
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
         ("backend_access_table_tableam", "table_relation_needs_toast_table"),
         ("backend_access_table_tableam", "table_relation_toast_am"),
+        // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
+        // `table_index_build_scan` (tableam.h) dispatches to the heap AM's
+        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`).
+        // hashbuild / hashbuildempty call it; it becomes a real install once
+        // heapam_handler.c lands. See DESIGN_DEBT.md.
+        ("backend_access_table_tableam", "table_index_build_scan"),
         // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
         // is `common/relpath.c`'s function, not catalog.c's — the seam was
         // mis-homed onto backend-catalog-catalog-seams (this owner's stable
@@ -772,16 +786,11 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
-        ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "exec_force_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_materialize_slot"),
         ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
         ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "exec_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
         ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
@@ -1029,11 +1038,7 @@ mod recurrence_guard {
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
         // RETIRED (task #161): `record_from_values` is now installed by funcapi's
-        // init_seams(). The composite/record-Datum carrier bridge landed: the
-        // terminal `HeapTupleGetDatum` step crosses the formed tuple as a
-        // by-reference composite `Datum::ByRef` (a varlena-wrapped HeapTupleHeader
-        // image) via `backend_access_common_heaptuple::HeapTupleGetDatum` — no new
-        // Datum variant, no forged pointer (datum-redesign-plan Option A).
+        // init_seams(). The composite/record-Datum carrier bridge landed.
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
         // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
         // in `srf_support::value_srf_unported` and panics loudly naming the missing
@@ -1101,6 +1106,16 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
+        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
+        // and extracts the single `TypeName` node. The owner of `raw_parser`
+        // (backend-parser-driver, audited) cannot install this seam yet because
+        // the bison grammar it drives (`base_yyparse`, gram.y) is not ported —
+        // any raw-parse call reaches the still-unported grammar and panics
+        // (mirror-pg-and-panic). Becomes a real install once gram.y lands and
+        // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
+        // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
+        ("backend_parser_driver", "raw_parse_type_name"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
