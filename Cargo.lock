@@ -46,6 +46,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-inclusion"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-access-brin-insert-vacuum"
 version = "0.0.0"
 dependencies = [
@@ -99,6 +120,7 @@ name = "backend-access-brin-minmax"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-entry-seams",
+ "backend-access-brin-inclusion",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -599,6 +621,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-ginutil"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions",
+ "backend-access-common-tupdesc",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-index-indexam-seams",
+ "backend-storage-page",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginutil-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gist-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1034,6 +1096,7 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-scan",
+ "backend-access-gin-ginutil",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
@@ -1326,7 +1389,7 @@ dependencies = [
  "backend-access-nbtree-nbtree-seams",
  "backend-commands-vacuum-seams",
  "backend-nodes-core-seams",
- "backend-storage-aio-seams",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-lmgr-condition-variable-seams",
@@ -9602,6 +9665,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-aio-read-stream"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-catalog",
+ "backend-storage-buffer-bufmgr",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-smgr-smgr",
+ "backend-utils-cache-spccache",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-aio-seams"
 version = "0.0.0"
 dependencies = [
@@ -14538,6 +14619,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",

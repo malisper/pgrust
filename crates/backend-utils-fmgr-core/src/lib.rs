@@ -2088,6 +2088,93 @@ fn function_call2_coll_seam(
     oid_function_call2_coll(ctx.mcx(), function_id, collation, arg1, arg2)
 }
 
+/// Marshal a canonical per-attribute [`Datum`] into the `(arg-word, ref-arg)`
+/// pair `function_call_coll_ref_args_out` expects: a by-value scalar is the bare
+/// word with no referent; a by-reference value is the null word plus its owned
+/// detoasted bytes as a `Varlena` referent (the `struct varlena *` C would pass).
+fn datum_to_ref_arg(
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> (NullableDatum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match val {
+        CanonDatum::ByVal(d) => (NullableDatum::value(Datum::from_usize(*d)), None),
+        CanonDatum::ByRef(b) => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Varlena(b.as_slice().to_vec())),
+        ),
+    }
+}
+
+/// Map a `function_call_coll_ref_args_out` `(word, ref_result)` pair back onto a
+/// canonical [`Datum`]: a by-reference result materializes its referent bytes
+/// into `mcx` (`ByRef`); otherwise the bare word is the by-value scalar (`ByVal`).
+fn ref_out_to_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    word: Datum,
+    ref_result: Option<RefPayload>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match ref_result {
+        // A by-reference result: materialize the (flattened, for an expanded
+        // object) referent bytes into `mcx`. A cstring crosses NUL-terminated.
+        Some(RefPayload::Cstring(s)) => {
+            let mut bytes = s.into_bytes();
+            bytes.push(0);
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+        Some(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+        None => Ok(CanonDatum::ByVal(canon_word(&canon_byval(word)).as_usize())),
+    }
+}
+
+/// `FunctionCall1Coll(flinfo, collation, arg1)` over the canonical `Datum` lane
+/// (re-resolve by OID); see the seam doc. By-reference args/result cross via the
+/// fmgr by-reference side channel.
+fn function_call1_coll_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    collation: Oid,
+    arg1: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = datum_to_ref_arg(&arg1);
+    let (word, ref_result) = function_call_coll_ref_args_out(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1],
+        vec![r1],
+    )?;
+    ref_out_to_datum(mcx, word, ref_result)
+}
+
+/// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` over the canonical `Datum`
+/// lane (re-resolve by OID); see the seam doc.
+fn function_call2_coll_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    collation: Oid,
+    arg1: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    arg2: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = datum_to_ref_arg(&arg1);
+    let (a2, r2) = datum_to_ref_arg(&arg2);
+    let (word, ref_result) = function_call_coll_ref_args_out(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1, a2],
+        vec![r1, r2],
+    )?;
+    ref_out_to_datum(mcx, word, ref_result)
+}
+
 /// `FunctionCall3(flinfo, arg1, arg2, arg3)` seam: three non-collation arguments
 /// under the default (invalid) collation (C: `FunctionCall3Coll(flinfo,
 /// InvalidOid, ...)`), re-resolved by OID.
@@ -2393,6 +2480,8 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::function_call1_coll::set(function_call1_coll_seam);
     backend_utils_fmgr_fmgr_seams::function_call2_coll::set(function_call2_coll_seam);
+    backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::set(function_call1_coll_datum_seam);
+    backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::set(function_call2_coll_datum_seam);
     backend_utils_fmgr_fmgr_seams::function_call3::set(function_call3_seam);
     backend_utils_fmgr_fmgr_seams::output_function_call::set(output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::send_function_call::set(send_function_call_seam);

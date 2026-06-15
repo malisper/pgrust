@@ -145,6 +145,8 @@ pub mod tags {
     pub const HEAP_INDEX_FETCH: AmOpaqueTag = AmOpaqueTag(0x6865_6170_5f69_6678); // "heap_ifx"
     /// `brin`'s `BrinOpaque<'mcx>` (`BrinScan<'mcx>`) scan state.
     pub const BRIN_SCAN: AmOpaqueTag = AmOpaqueTag(0x6272_696e_5f73_636e); // "brin_scn"
+    /// `gin`'s `GinScanOpaqueData<'mcx>` scan state (`IndexScanDescData.opaque`).
+    pub const GIN_SCAN: AmOpaqueTag = AmOpaqueTag(0x6769_6e5f_7363_6e00); // "gin_scn\0"
 }
 
 #[cfg(test)]

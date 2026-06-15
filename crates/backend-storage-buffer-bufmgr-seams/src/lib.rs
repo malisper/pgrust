@@ -520,6 +520,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `maintenance_io_concurrency` (GUC) — the configured degree of I/O
+    /// concurrency for maintenance work (VACUUM/CREATE INDEX), consulted by a
+    /// `READ_STREAM_MAINTENANCE` stream. May be 0.
+    pub fn maintenance_io_concurrency() -> i32
+);
+
+seam_core::seam!(
+    /// `io_method == IOMETHOD_SYNC` (aio.c GUC) — whether the synchronous I/O
+    /// method is in use, which enables read-ahead advice in a read stream.
+    pub fn io_method_sync() -> bool
+);
+
+seam_core::seam!(
     /// `GetAccessStrategy(btype)` (freelist.c): allocate a ring buffer of the
     /// kind appropriate for `btype` and return its handle. `Err` carries the
     /// allocation `ereport(ERROR)` surface.
