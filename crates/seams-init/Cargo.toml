@@ -21,6 +21,7 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
 backend-access-gin-ginvacuum = { path = "../backend-access-gin-ginvacuum" }
+backend-access-gin-ginxlog = { path = "../backend-access-gin-ginxlog" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }

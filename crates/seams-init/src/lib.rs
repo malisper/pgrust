@@ -18,6 +18,7 @@ pub fn init_all() {
     backend_access_gin_core_probe::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_gin_ginvacuum::init_seams();
+    backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heapam::init_seams();
     backend_access_heap_heapam_visibility::init_seams();
