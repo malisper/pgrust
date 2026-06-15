@@ -421,7 +421,7 @@ fn transformAExprOp<'mcx>(
     let last_srf = last_srf_expr(pstate);
     let opname = opname_strings(&name);
     let res = backend_parser_parse_oper::make_op(
-        Some(&*pstate),
+        Some(pstate),
         &opname,
         lexpr_t,
         rexpr_t,
@@ -471,7 +471,7 @@ fn transformAExprOpAny<'mcx>(
         .ok_or_else(|| PgError::error("transformAExprOpAny: righthand is NULL"))?;
     let opname = opname_strings(&name);
     backend_parser_parse_oper::make_scalar_array_op(
-        Some(&*pstate),
+        Some(pstate),
         &opname,
         true,
         lexpr,
@@ -494,7 +494,7 @@ fn transformAExprOpAll<'mcx>(
         .ok_or_else(|| PgError::error("transformAExprOpAll: righthand is NULL"))?;
     let opname = opname_strings(&name);
     backend_parser_parse_oper::make_scalar_array_op(
-        Some(&*pstate),
+        Some(pstate),
         &opname,
         false,
         lexpr,
@@ -580,7 +580,7 @@ fn transformAExprNullIf<'mcx>(
     let opname = opname_strings(&name);
     let last_srf = last_srf_expr(pstate);
     let result = backend_parser_parse_oper::make_op(
-        Some(&*pstate),
+        Some(pstate),
         &opname,
         lexpr,
         rexpr,
@@ -994,7 +994,7 @@ fn transformCaseExpr<'mcx>(
             let eqname = vec![String::from("=")];
             let last_srf = last_srf_expr(pstate);
             let res = backend_parser_parse_oper::make_op(
-                Some(&*pstate),
+                Some(pstate),
                 &eqname,
                 Some(Expr::CaseTestExpr(ph.clone())),
                 warg_t,
@@ -1102,7 +1102,7 @@ fn make_row_comparison_op<'mcx>(
     for (larg, rarg) in largs.into_iter().zip(rargs.into_iter()) {
         let last_srf = last_srf_expr(pstate);
         let cmp_node = backend_parser_parse_oper::make_op(
-            Some(&*pstate),
+            Some(pstate),
             &opname_s,
             Some(larg),
             Some(rarg),
@@ -1287,7 +1287,7 @@ fn make_distinct_op<'mcx>(
     let opname_s = opname_strings(opname);
     let last_srf = last_srf_expr(pstate);
     let result = backend_parser_parse_oper::make_op(
-        Some(&*pstate),
+        Some(pstate),
         &opname_s,
         ltree,
         rtree,

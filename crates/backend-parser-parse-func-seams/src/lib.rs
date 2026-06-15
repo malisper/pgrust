@@ -12,6 +12,7 @@ use types_nodes::parsenodes::ObjectType;
 use types_nodes::primnodes::Expr;
 use types_opclass::ObjectWithArgs;
 use types_parsenodes::ObjectWithArgs as ParseObjectWithArgs;
+use types_parsenodes::ParseState;
 
 seam_core::seam!(
     /// `LookupFuncName(funcname, nargs, argtypes, missing_ok)`
@@ -88,11 +89,12 @@ seam_core::seam!(
     /// (parse_func.c): coerce each argument expression in `fargs` from its
     /// `actual_arg_types[i]` to the corresponding `declared_arg_types[i]`,
     /// applying the necessary cast/relabel in place (the C scribbles the coerced
-    /// nodes back into the `fargs` list cells). `source_text` is the parse
-    /// state's `p_sourcetext` (`None` when `pstate == NULL`), used for error
-    /// positioning. `Err` carries the cannot-coerce `ereport(ERROR)` surface.
-    pub fn make_fn_arguments(
-        source_text: Option<&str>,
+    /// nodes back into the `fargs` list cells). `pstate` is the parse state
+    /// (`None` when the C `pstate == NULL`); the C `coerce_type` calls reach it
+    /// for error positioning via `p_sourcetext`. `Err` carries the
+    /// cannot-coerce `ereport(ERROR)` surface.
+    pub fn make_fn_arguments<'mcx>(
+        pstate: Option<&mut ParseState<'mcx>>,
         fargs: &mut [Expr],
         actual_arg_types: &[Oid],
         declared_arg_types: &[Oid],
@@ -104,10 +106,12 @@ seam_core::seam!(
     /// verify that a set-returning function call appears in a context where it
     /// is allowed (and detect nested-SRF). `last_srf` is the saved
     /// `pstate->p_last_srf` from before the operator's arguments were
-    /// transformed. `source_text` is the parse state's `p_sourcetext`. `Err`
-    /// carries the disallowed-placement `ereport(ERROR)` surface.
-    pub fn check_srf_call_placement(
-        source_text: Option<&str>,
+    /// transformed. The C reads `pstate->p_expr_kind` (to decide which contexts
+    /// allow an SRF) and writes `pstate->p_hasTargetSRFs`, so `pstate` crosses
+    /// as `&mut ParseState`. `Err` carries the disallowed-placement
+    /// `ereport(ERROR)` surface.
+    pub fn check_srf_call_placement<'mcx>(
+        pstate: &mut ParseState<'mcx>,
         last_srf: Option<&Expr>,
         location: i32,
     ) -> PgResult<()>
@@ -116,10 +120,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `pstate->p_last_srf = (Node *) result;` (parse_oper.c make_op): record
     /// the just-built set-returning `OpExpr` as the parse state's last SRF, for
-    /// nested-SRF error checks at higher levels. The repo's trimmed
-    /// [`types_parsenodes::ParseState`] does not yet carry `p_last_srf`, and the
-    /// parse-state owner (`parse_node.c` / `parse_expr.c`) is unported, so the
-    /// assignment crosses a seam keyed on the parse state's `p_sourcetext`
-    /// identity; the host updates the real `ParseState->p_last_srf`.
-    pub fn set_last_srf(source_text: Option<&str>, result: &Expr) -> PgResult<()>
+    /// nested-SRF error checks at higher levels. The C only performs this when
+    /// `pstate != NULL`, so `pstate` crosses as `&mut ParseState`; the owner
+    /// writes the real `ParseState->p_last_srf`.
+    pub fn set_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()>
 );
