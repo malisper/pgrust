@@ -179,6 +179,7 @@ pub fn init_all() {
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
+    backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
@@ -688,6 +689,19 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
+        // DESIGN_DEBT (TD-SRF-INLINE-QUERY): `inline_set_returning_function` is the
+        // full SET-returning-function inliner (clauses.c:5134) that
+        // `preprocess_function_rtes` (prepjointree.c:931) calls to turn a FUNCTION
+        // RTE into a subquery RTE. The owner is clauses.c, but the inline leg
+        // (LANGUAGE SQL prosrc parse + rewrite + single-SELECT querytree
+        // validation, returning an owned `Query`) is gated on the SQL-function
+        // parse/rewrite path, which is unported — the same gap as the sibling
+        // `inline_set_returning_function_core` (the scalar-SQL inline leg, also
+        // uninstalled). The FuncExpr node universe + SQL-function querytree are not
+        // reachable as a walkable `Query` here, so the seam loud-panics (a wrong-
+        // plan-class change, never a silent skip) until the inliner leg lands.
+        // DELETE this entry when clauses.c's SRF-inliner is ported.
+        ("backend_optimizer_util_clauses", "inline_set_returning_function"),
         // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
         // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
         // `init_local_reloptions(&relopts, 0)` +

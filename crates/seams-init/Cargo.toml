@@ -183,6 +183,7 @@ backend-parser-parse-target = { path = "../backend-parser-parse-target" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
 backend-optimizer-prep-prepjointree = { path = "../backend-optimizer-prep-prepjointree" }
+backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }

@@ -27,3 +27,4 @@ backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" 
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 types-catalog = { path = "../types-catalog" }
 types-nodes = { path = "../types-nodes" }
+types-fmgr = { path = "../types-fmgr" }
