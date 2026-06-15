@@ -65,6 +65,7 @@
 
 extern crate alloc;
 
+mod pullup;
 mod result_rtes;
 mod sublinks;
 
@@ -758,18 +759,5 @@ pub fn init_seams() {
         result_rtes::remove_useless_result_rtes,
     );
     backend_optimizer_prep_prepjointree_seams::pull_up_sublinks::set(sublinks::pull_up_sublinks);
-    backend_optimizer_prep_prepjointree_seams::pull_up_subqueries::set(pull_up_subqueries_panic);
-}
-
-/// FAMILY 2 — deferred to FAMILY 5 + the AppendRelInfo.translated_vars
-/// walkable-carrier keystone (#274).
-fn pull_up_subqueries_panic<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-) -> PgResult<()> {
-    panic!(
-        "pull_up_subqueries: prepjointree FAMILY 2 not yet ported — deferred to FAMILY 5 \
-         and the AppendRelInfo.translated_vars walkable-carrier keystone (#274)"
-    )
+    backend_optimizer_prep_prepjointree_seams::pull_up_subqueries::set(pullup::pull_up_subqueries);
 }
