@@ -46,6 +46,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-insert-vacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-brin-insert-vacuum-seams",
+ "backend-access-brin-pageops",
+ "backend-access-brin-scan",
+ "backend-access-brin-tuple",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-index-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-page",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "types-acl",
+ "types-brin",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-brin-insert-vacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-brin-pageops"
 version = "0.1.0"
 dependencies = [
@@ -72,6 +121,7 @@ name = "backend-access-brin-scan"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-entry-seams",
+ "backend-access-brin-insert-vacuum-seams",
  "backend-access-brin-pageops",
  "backend-access-brin-tuple",
  "backend-access-table-table-seams",
@@ -9551,6 +9601,8 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
  "backend-storage-smgr-smgr",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "mcx",
@@ -14256,6 +14308,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-insert-vacuum",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",

@@ -58,6 +58,11 @@ backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" 
 # F2b: MaxBackends (the proportional-pin divisor MaxBackends+NUM_AUXILIARY_PROCS)
 # and HOLD_INTERRUPTS/RESUME_INTERRUPTS bracketing the direct content-lock path.
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# F3 read path: PageIsVerified failure on RBM_ZERO_ON_ERROR emits a WARNING via
+# the real ereport/errstart cycle (and the ERROR path builds a PgError).
+backend-utils-error = { path = "../backend-utils-error" }
+# F3 WaitReadBuffers' retry loop runs CHECK_FOR_INTERRUPTS between re-issues.
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 
 [dev-dependencies]
 # Test-only: stub ShmemInitStruct so BufferManagerShmemInit can stand up the

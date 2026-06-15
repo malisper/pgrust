@@ -36,6 +36,7 @@ backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
+backend-access-brin-insert-vacuum = { path = "../backend-access-brin-insert-vacuum" }
 backend-access-hash-xlog = { path = "../backend-access-hash-xlog" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }

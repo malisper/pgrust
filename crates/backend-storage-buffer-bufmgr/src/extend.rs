@@ -378,23 +378,22 @@ impl BufferManager {
         }
 
         // It's possible that another backend concurrently extended the relation.
-        // In that case read the buffer.
+        // In that case read the buffer. (bufmgr.c:1006)
         if buffer == INVALID_BUFFER {
             debug_assert_eq!(extended_by, 0);
             // ReadBuffer_common(bmr.smgr, bmr.relpersistence, fork, extend_to-1,
-            //                   mode, strategy). The synchronous read-or-zero
-            // path IS the F3 read engine (`ReadBuffer*` / `StartReadBuffers` /
-            // `WaitReadBuffers`), not yet ported in this crate. This branch is
-            // only reachable when another backend won the extension race between
-            // our size probe and the per-iteration extend; panic-until-F3 (a
-            // sanctioned deep-leg panic, never a silent stub).
-            let _ = (bmr.relpersistence, mode);
-            panic!(
-                "ExtendBufferedRelTo: concurrent extension fallback read of block {} \
-                 (fork {:?}) requires the F3 ReadBuffer_common read engine, not yet ported",
+            //                   mode, strategy) — the F3 synchronous read core.
+            // Reachable only when another backend won the extension race between
+            // our size probe and the per-iteration extend.
+            buffer = self.read_buffer_common(
+                Some(bmr.rlocator),
+                bmr.relpersistence,
+                fork,
                 extend_to - 1,
-                fork
-            );
+                mode,
+                has_strategy,
+                Some(bmr.rel),
+            )?;
         }
 
         Ok(buffer)
