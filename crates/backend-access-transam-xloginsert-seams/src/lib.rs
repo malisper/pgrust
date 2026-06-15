@@ -123,3 +123,11 @@ seam_core::seam!(
         page_std: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `XLogSaveBufferForHint(buffer, buffer_std)` (xloginsert.c:1064) — emit an
+    /// `XLOG_FPI_FOR_HINT` full-page image of a buffer about to receive a
+    /// hint-bit change, returning the record's end LSN (or `InvalidXLogRecPtr`
+    /// when no backup is needed). Consumed by `MarkBufferDirtyHint` (bufmgr.c).
+    pub fn xlog_save_buffer_for_hint(buffer: Buffer, buffer_std: bool) -> PgResult<XLogRecPtr>
+);
