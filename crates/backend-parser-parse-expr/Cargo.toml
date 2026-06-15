@@ -37,4 +37,15 @@ backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 
+# Sibling parser owners now landed (downward calls; they depend only on
+# backend-parser-parse-expr-seams, so these impl deps stay cycle-free).
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-func = { path = "../backend-parser-func" }
+backend-parser-parse-target = { path = "../backend-parser-parse-target" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+
+# Cross-database catalog-name check in transformColumnRef (4-part name).
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
 [dev-dependencies]
