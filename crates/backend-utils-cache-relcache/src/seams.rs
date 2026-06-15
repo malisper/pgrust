@@ -88,10 +88,12 @@ pub fn init_seams() {
     sx::rd_indam_amcanorder::set(rd_indam_amcanorder);
     sx::rd_indam_amsearcharray::set(rd_indam_amsearcharray);
 
-    // --- rd_amcache: hash's cached metapage (the only rd_amcache consumer yet
-    //     ported; SP-GiST/GIN/GiST install their own when those AMs land) ---
+    // --- rd_amcache: hash's cached metapage + SP-GiST's cached SpGistCache
+    //     (GIN/GiST install their own when those AMs land) ---
     sx::rd_amcache_hashmeta::set(rd_amcache_hashmeta);
     sx::set_rd_amcache_hashmeta::set(set_rd_amcache_hashmeta);
+    sx::rd_amcache_spgist::set(rd_amcache_spgist);
+    sx::set_rd_amcache_spgist::set(set_rd_amcache_spgist);
 }
 
 /* ==========================================================================
@@ -703,4 +705,30 @@ fn set_rd_amcache_hashmeta(
     // `rel->rd_amcache = MemoryContextAlloc(rel->rd_indexcxt, ...); memcpy(...)`
     // — install/refresh the cached metapage on the entry's rd_amcache slot.
     crate::core_entry_store::set_rd_amcache(index_oid, Box::new(HashMetaAmcache(metap)))
+}
+
+/// The `rd_amcache` payload for an SP-GiST index: a cached `SpGistCache`
+/// (spgist_private.h). The `'static` bound holds because `SpGistCache` is all
+/// owned scalars (`Copy`, no `'mcx` borrow), matching the C `rd_indexcxt`
+/// (CacheMemoryContext) lifetime — exactly like [`HashMetaAmcache`].
+struct SpGistCacheAmcache(types_spgist::SpGistCache);
+
+impl types_tableam::amopaque::AmOpaqueType<'static> for SpGistCacheAmcache {
+    const TAG: types_tableam::amopaque::AmOpaqueTag =
+        types_tableam::amopaque::tags::SPGIST_CACHE;
+}
+
+fn rd_amcache_spgist(index_oid: Oid) -> PgResult<Option<types_spgist::SpGistCache>> {
+    // `(SpGistCache *) index->rd_amcache` — read the cached cache, or `None`
+    // (the C `rd_amcache == NULL`). A missing/closed entry reads as no cache.
+    Ok(
+        crate::core_entry_store::with_rd_amcache::<SpGistCacheAmcache, _>(index_oid, |c| c.0)
+            .unwrap_or(None),
+    )
+}
+
+fn set_rd_amcache_spgist(index_oid: Oid, cache: types_spgist::SpGistCache) -> PgResult<()> {
+    // `index->rd_amcache = MemoryContextAlloc(index->rd_indexcxt, ...); memcpy(...)`
+    // — install/refresh the cached SpGistCache on the entry's rd_amcache slot.
+    crate::core_entry_store::set_rd_amcache(index_oid, Box::new(SpGistCacheAmcache(cache)))
 }

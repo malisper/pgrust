@@ -24,3 +24,5 @@ types-tuple = { path = "../types-tuple" }
 types-relcache-entry = { path = "../types-relcache-entry" }
 # Hash AM's rd_amcache stores a HashMetaPageData; the relcache owns that slot.
 types-hash = { path = "../types-hash" }
+# SP-GiST's rd_amcache stores a SpGistCache; the relcache owns that slot.
+types-spgist = { path = "../types-spgist" }
