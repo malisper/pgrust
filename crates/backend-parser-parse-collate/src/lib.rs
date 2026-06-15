@@ -118,11 +118,14 @@ use CollateStrength::None as COLLATE_NONE;
 
 /// `assign_collations_context` (parse_collate.c:64): the state threaded through
 /// the collation-assignment tree walk. The C `ParseState *pstate` (used only for
-/// error positions) is modeled as the `Option<&ParseState>` the walk carries;
+/// error positions) is modeled as the `Option<&ParseState<'_>>` the walk carries;
 /// `None` ↔ the C NULL pstate.
-struct AssignCollationsContext<'p> {
-    /// parse state (for error reporting); `None` ↔ C NULL pstate.
-    pstate: Option<&'p ParseState>,
+struct AssignCollationsContext<'p, 'mcx> {
+    /// parse state (for error reporting); `None` ↔ C NULL pstate. The borrow
+    /// (`'p`) and the parse state's arena lifetime (`'mcx`) are independent —
+    /// the unified `ParseState<'mcx>` is invariant over its arena, so they must
+    /// not be unified.
+    pstate: Option<&'p ParseState<'mcx>>,
     /// OID of current collation, if any.
     collation: Oid,
     /// strength of current collation choice.
@@ -135,9 +138,9 @@ struct AssignCollationsContext<'p> {
     location2: i32,
 }
 
-impl<'p> AssignCollationsContext<'p> {
+impl<'p, 'mcx> AssignCollationsContext<'p, 'mcx> {
     /// A fresh context for a new tree walk (parse_collate.c:182-186,213-216).
-    fn fresh(pstate: Option<&'p ParseState>) -> Self {
+    fn fresh(pstate: Option<&'p ParseState<'mcx>>) -> Self {
         Self {
             pstate,
             collation: InvalidOid,
@@ -170,7 +173,7 @@ impl<'p> AssignCollationsContext<'p> {
 /// `assign_list_collations`; each `WALK(Node *)` to `assign_expr_collations`
 /// (the two branches of `assign_query_collations_walker`).
 pub fn assign_query_collations<'mcx>(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     query: &mut types_nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
     // targetList / returningList are `Vec<TargetEntry>` (typed); each member's
@@ -237,7 +240,7 @@ pub fn assign_query_collations<'mcx>(
 /// component expression trees (arbiter where, the SET targetlist, the
 /// `WHERE`), each processed independently by `assign_query_collations_walker`.
 fn assign_onconflict_collations<'mcx>(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     oce: &mut types_nodes::rawnodes::OnConflictExpr<'mcx>,
 ) -> PgResult<()> {
     for e in oce.arbiterElems.iter_mut() {
@@ -261,7 +264,7 @@ fn assign_onconflict_collations<'mcx>(
 /// `FromExpr` sub-walk (the query's jointree): each fromlist member and the
 /// quals, processed independently.
 fn assign_fromexpr_collations<'mcx>(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     from: &mut types_nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<()> {
     for e in from.fromlist.iter_mut() {
@@ -279,7 +282,7 @@ fn assign_fromexpr_collations<'mcx>(
 /// (→ assign_list_collations); a bare expression goes to
 /// `assign_expr_collations`.
 fn assign_query_collations_walker_node(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     node: &mut Node,
 ) -> PgResult<()> {
     // We don't want to recurse into a set-operations tree; it's already been
@@ -294,7 +297,7 @@ fn assign_query_collations_walker_node(
 /// targetlist `TargetEntry`): process it independently via
 /// `assign_expr_collations`.
 fn assign_query_collations_walker_expr(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     expr: &mut Expr,
 ) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
@@ -304,7 +307,7 @@ fn assign_query_collations_walker_expr(
 /// `assign_list_collations()` (parse_collate.c:154): mark all nodes in a list of
 /// expressions with collation info, processing each independently (they do not
 /// have to share a common collation).
-pub fn assign_list_collations(pstate: Option<&ParseState>, exprs: &mut [Expr]) -> PgResult<()> {
+pub fn assign_list_collations(pstate: Option<&ParseState<'_>>, exprs: &mut [Expr]) -> PgResult<()> {
     for node in exprs.iter_mut() {
         let mut context = AssignCollationsContext::fresh(pstate);
         assign_collations_walker_expr(node, &mut context)?;
@@ -318,7 +321,7 @@ pub fn assign_list_collations(pstate: Option<&ParseState>, exprs: &mut [Expr]) -
 /// Exported for utility commands that process expressions without building a
 /// complete `Query`. Should be applied after `transformExpr()` plus any
 /// expression-modifying operations such as `coerce_to_boolean()`.
-pub fn assign_expr_collations(pstate: Option<&ParseState>, expr: &mut Expr) -> PgResult<()> {
+pub fn assign_expr_collations(pstate: Option<&ParseState<'_>>, expr: &mut Expr) -> PgResult<()> {
     // initialize context for tree walk
     let mut context = AssignCollationsContext::fresh(pstate);
     // and away we go
@@ -330,7 +333,7 @@ pub fn assign_expr_collations(pstate: Option<&ParseState>, expr: &mut Expr) -> P
 /// the expression walk; the non-expression `Node` arms (jointree members,
 /// MergeAction, …) recurse via the in-place `Node` walker exactly as C's
 /// `assign_collations_walker` does for those tags.
-fn assign_expr_collations_node(pstate: Option<&ParseState>, node: &mut Node) -> PgResult<()> {
+fn assign_expr_collations_node(pstate: Option<&ParseState<'_>>, node: &mut Node) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
     assign_collations_walker(node, &mut context)
 }
@@ -343,7 +346,7 @@ fn assign_expr_collations_node(pstate: Option<&ParseState>, node: &mut Node) -> 
 /// identified; otherwise an error is thrown for a conflict of implicit
 /// collations.
 pub fn select_common_collation(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     exprs: &mut [Expr],
     none_ok: bool,
 ) -> PgResult<Oid> {
@@ -383,7 +386,7 @@ pub fn select_common_collation(
 /// [`assign_collations_walker_expr`] (the expression switch).
 fn assign_collations_walker(
     node: &mut Node,
-    context: &mut AssignCollationsContext<'_>,
+    context: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // Prepare for recursion: each level has its own local context.
     let mut loccontext = AssignCollationsContext::fresh(context.pstate);
@@ -467,7 +470,7 @@ fn assign_collations_walker(
 /// `context` via [`merge_collation_state`].
 fn assign_collations_walker_expr(
     expr: &mut Expr,
-    context: &mut AssignCollationsContext<'_>,
+    context: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     let mut loccontext = AssignCollationsContext::fresh(context.pstate);
 
@@ -771,7 +774,7 @@ fn assign_collations_walker_expr(
 /// state into `loccontext`.
 fn recurse_children(
     node: &mut Node,
-    loccontext: &mut AssignCollationsContext<'_>,
+    loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     let mut err: Option<types_error::PgError> = None;
     expression_tree_walker_mut(node, &mut |child: &mut Node| {
@@ -795,7 +798,7 @@ fn recurse_children(
 /// `loccontext`.
 fn recurse_expr_children(
     expr: &mut Expr,
-    loccontext: &mut AssignCollationsContext<'_>,
+    loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // Wrap the Expr into a Node so the Node-level in-place walker enumerates its
     // children (it descends `Node::Expr` via the canonical Expr-level child set,
@@ -816,7 +819,7 @@ fn recurse_expr_children(
 /// element, bubbling collation state up from the list elements into `context`.
 fn assign_collations_list_walker(
     exprs: &mut [Expr],
-    context: &mut AssignCollationsContext<'_>,
+    context: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     for expr in exprs.iter_mut() {
         assign_collations_walker_expr(expr, context)?;
@@ -832,7 +835,7 @@ fn merge_collation_state(
     location: i32,
     collation2: Oid,
     location2: i32,
-    context: &mut AssignCollationsContext<'_>,
+    context: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // If the collation strength for this node is different from what's already
     // in *context, then this node either dominates or is dominated by earlier
@@ -906,7 +909,7 @@ fn merge_collation_state(
 /// `loccontext`.
 fn assign_aggregate_collations(
     aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_>,
+    loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // Plain aggregates have no direct args
     debug_assert!(aggref.aggdirectargs.is_empty());
@@ -940,7 +943,7 @@ fn assign_aggregate_collations(
 /// exactly one aggregated argument (single aggregated arg and non-variadic).
 fn assign_ordered_set_collations(
     aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_>,
+    loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // Merge sort collations to parent only if there can be only one
     let merge_sort_collations = aggref.args.len() == 1
@@ -972,7 +975,7 @@ fn assign_ordered_set_collations(
 /// chosen collation.
 fn assign_hypothetical_collations(
     aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_>,
+    loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     // Merge sort collations to parent only if there can be only one
     let merge_sort_collations = aggref.args.len() == 1
@@ -1109,7 +1112,7 @@ fn assign_hypothetical_collations(
 
 /// `parser_errposition(pstate, location)` — cursor position for an error from a
 /// token location. NULL pstate (None) contributes 0 (cf parse_type.c).
-fn parser_errposition(pstate: Option<&ParseState>, location: i32) -> PgResult<i32> {
+fn parser_errposition(pstate: Option<&ParseState<'_>>, location: i32) -> PgResult<i32> {
     match pstate {
         Some(ps) => backend_parser_small1_seams::parser_errposition::call(ps, location),
         None => Ok(0),
@@ -1139,7 +1142,7 @@ fn get_collation_name(colloid: Oid) -> PgResult<String> {
 /// the sort/group `TargetEntry` arm, and the hypothetical-pair conflict
 /// (parse_collate.c:226-232, 473-480, 1003-1010).
 fn implicit_conflict_error(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     collation: Oid,
     collation2: Oid,
     location2: i32,
@@ -1162,7 +1165,7 @@ fn implicit_conflict_error(
 /// The explicit-collation conflict ereport thrown by `merge_collation_state`
 /// (parse_collate.c:853-858). No HINT (matching PG).
 fn explicit_conflict_error(
-    pstate: Option<&ParseState>,
+    pstate: Option<&ParseState<'_>>,
     collation: Oid,
     collation2: Oid,
     location: i32,
