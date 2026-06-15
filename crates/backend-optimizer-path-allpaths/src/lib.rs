@@ -667,9 +667,9 @@ pub use dummy::set_dummy_rel_pathlist;
 /// `RELPERSISTENCE_TEMP` (pg_class.h).
 const RELPERSISTENCE_TEMP: i8 = b't' as i8;
 
-/// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c) — plancat
-/// owner crate is not yet ported; route through the rte-seams placeholder.
-fn relation_excluded_by_constraints(root: &PlannerInfo, rel: RelId, rti: Index) -> bool {
+/// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c) — routes
+/// through the plancat-owned seam (installed once plancat lands).
+fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> bool {
     seams::relation_excluded_by_constraints::call(root, rel, rti)
 }
 

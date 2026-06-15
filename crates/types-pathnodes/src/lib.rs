@@ -1716,6 +1716,28 @@ pub struct ForeignKeyOptInfo {
     pub fk_eclass_member: Vec<Option<EmId>>,
 }
 
+/// `StatisticExtInfo` (pathnodes.h) — extended statistics defined on a relation,
+/// as produced by `get_relation_statistics` (plancat.c). Identifying metadata
+/// only — the actual statistics data is loaded later by the selectivity code.
+/// `keys` is the bitmapset of simple column attnums covered; `exprs` are the
+/// expression-covered columns as opaque arena node handles.
+#[derive(Clone, Debug, Default)]
+pub struct StatisticExtInfo {
+    /// `Oid statOid` — OID of the statistics row.
+    pub stat_oid: Oid,
+    /// `bool inherit` — includes child relations.
+    pub inherit: bool,
+    /// `RelOptInfo *rel` — back-link to the rel (handle into `rel_arena`).
+    pub rel: Option<RelId>,
+    /// `char kind` — statistics kind (STATS_EXT_NDISTINCT/DEPENDENCIES/MCV/...).
+    pub kind: i8,
+    /// `Bitmapset *keys` — attnums covered by the statistics object.
+    pub keys: Relids,
+    /// `List *exprs` — expressions covered by the statistics object (opaque
+    /// arena node handles).
+    pub exprs: Vec<NodeId>,
+}
+
 /// `OuterJoinClauseInfo` (pathnodes.h) — an outer-join clause set aside by
 /// `distribute_qual_to_rels` for `reconsider_outer_join_clauses` to re-examine.
 #[derive(Clone, Debug)]
@@ -2182,6 +2204,12 @@ pub enum ArenaNode {
     Expr(Expr),
     /// A `TargetEntry` node (lifetime-free; child `expr` is an arena handle).
     TargetEntry(TargetEntryNode),
+    /// A `ForeignKeyOptInfo` node — `root->fkey_list` stores these as `Node *`
+    /// handles, so they share the same id-space as `Expr`/`TargetEntry`.
+    ForeignKey(ForeignKeyOptInfo),
+    /// A `StatisticExtInfo` node — `RelOptInfo::statlist` stores these as
+    /// `Node *` handles in the same id-space.
+    StatisticExt(StatisticExtInfo),
 }
 
 /// Lifetime-free arena form of `TargetEntry` (nodes/primnodes.h), field-for-field
@@ -2305,8 +2333,8 @@ impl PlannerInfo {
     pub fn node(&self, id: NodeId) -> &Expr {
         match &self.node_arena[id.index()] {
             ArenaNode::Expr(e) => e,
-            ArenaNode::TargetEntry(_) => panic!(
-                "PlannerInfo::node: NodeId {} resolves to a TargetEntry, not an Expr",
+            _ => panic!(
+                "PlannerInfo::node: NodeId {} does not resolve to an Expr",
                 id.0
             ),
         }
@@ -2316,8 +2344,8 @@ impl PlannerInfo {
     pub fn node_mut(&mut self, id: NodeId) -> &mut Expr {
         match &mut self.node_arena[id.index()] {
             ArenaNode::Expr(e) => e,
-            ArenaNode::TargetEntry(_) => panic!(
-                "PlannerInfo::node_mut: NodeId {} resolves to a TargetEntry, not an Expr",
+            _ => panic!(
+                "PlannerInfo::node_mut: NodeId {} does not resolve to an Expr",
                 id.0
             ),
         }
@@ -2329,8 +2357,8 @@ impl PlannerInfo {
     pub fn targetentry(&self, id: NodeId) -> &TargetEntryNode {
         match &self.node_arena[id.index()] {
             ArenaNode::TargetEntry(te) => te,
-            ArenaNode::Expr(_) => panic!(
-                "PlannerInfo::targetentry: NodeId {} resolves to an Expr, not a TargetEntry",
+            _ => panic!(
+                "PlannerInfo::targetentry: NodeId {} does not resolve to a TargetEntry",
                 id.0
             ),
         }
@@ -2340,8 +2368,32 @@ impl PlannerInfo {
     pub fn targetentry_mut(&mut self, id: NodeId) -> &mut TargetEntryNode {
         match &mut self.node_arena[id.index()] {
             ArenaNode::TargetEntry(te) => te,
-            ArenaNode::Expr(_) => panic!(
-                "PlannerInfo::targetentry_mut: NodeId {} resolves to an Expr, not a TargetEntry",
+            _ => panic!(
+                "PlannerInfo::targetentry_mut: NodeId {} does not resolve to a TargetEntry",
+                id.0
+            ),
+        }
+    }
+
+    /// Resolve a [`NodeId`] to its [`ForeignKeyOptInfo`] (a `root->fkey_list`
+    /// element).
+    #[inline]
+    pub fn foreign_key(&self, id: NodeId) -> &ForeignKeyOptInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::ForeignKey(fk) => fk,
+            _ => panic!(
+                "PlannerInfo::foreign_key: NodeId {} does not resolve to a ForeignKeyOptInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`StatisticExtInfo`] (a `statlist` element).
+    #[inline]
+    pub fn statistic_ext(&self, id: NodeId) -> &StatisticExtInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::StatisticExt(s) => s,
+            _ => panic!(
+                "PlannerInfo::statistic_ext: NodeId {} does not resolve to a StatisticExtInfo",
                 id.0
             ),
         }
@@ -2394,6 +2446,24 @@ impl PlannerInfo {
     pub fn alloc_targetentry(&mut self, te: TargetEntryNode) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::TargetEntry(te));
+        id
+    }
+    /// Intern a [`ForeignKeyOptInfo`] into the node store, returning its
+    /// [`NodeId`] handle (`root->fkey_list` elements). Producer: plancat's
+    /// `get_relation_foreign_keys`.
+    #[inline]
+    pub fn alloc_foreign_key(&mut self, fk: ForeignKeyOptInfo) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::ForeignKey(fk));
+        id
+    }
+    /// Intern a [`StatisticExtInfo`] into the node store, returning its
+    /// [`NodeId`] handle (`RelOptInfo::statlist` elements). Producer: plancat's
+    /// `get_relation_statistics`.
+    #[inline]
+    pub fn alloc_statistic_ext(&mut self, s: StatisticExtInfo) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::StatisticExt(s));
         id
     }
 }

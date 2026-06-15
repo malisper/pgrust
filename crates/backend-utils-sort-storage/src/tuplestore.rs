@@ -971,6 +971,22 @@ fn tuplestore_updatemax(state: &mut TuplestorestateState<'_>, ctx: &MemoryContex
     Ok(())
 }
 
+/// `tuplestore_get_stats(state, max_storage_type, max_space)`.
+///
+/// Obtain statistics about the maximum space used by the tuplestore. These
+/// statistics are the maximums and are not reset by calls to `tuplestore_trim()`
+/// or `tuplestore_clear()`. Returns `(max_storage_type, max_space)`.
+pub fn tuplestore_get_stats(
+    carrier: &mut types_nodes::Tuplestorestate<'_>,
+) -> PgResult<(&'static str, i64)> {
+    with_store(carrier, |state, ctx| {
+        tuplestore_updatemax(state, ctx)?;
+
+        let max_storage_type = if state.usedDisk { "Disk" } else { "Memory" };
+        Ok((max_storage_type, state.maxSpace))
+    })
+}
+
 /// `tuplestore_in_memory(state)`.
 pub fn tuplestore_in_memory(carrier: &types_nodes::Tuplestorestate<'_>) -> bool {
     with_store_ref(carrier, |state| state.status == TSS_INMEM)
