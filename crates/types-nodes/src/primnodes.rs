@@ -272,8 +272,26 @@ fn clone_copy_list<'b, T: Copy>(
     }
 }
 
+/// `Relids` (nodes/bitmapset.h: `Bitmapset *`) for the lifetime-free expression
+/// tree — a planner relation-id set carried by a [`Var`]/[`PlaceHolderVar`].
+///
+/// The canonical [`crate::bitmapset::Bitmapset`] is `'mcx`-lifetimed and not
+/// `Clone`, so it cannot be embedded in the lifetime-free, `Clone`+`Default`
+/// [`Expr`] tree without forcing an `'mcx` flag-day across every `Expr` consumer.
+/// This is the lifetime-free planner analogue (same `Vec<u64>`-word storage as
+/// `types_pathnodes::Bitmapset`, the planner-arena relids type): the empty set is
+/// an empty `words` vector (`bms_is_empty`), matching the C `Bitmapset *` whose
+/// `NULL`/empty pointer is the empty set. The `bms_*` algebra lives with the
+/// owning bitmapset/relnode units; this carries only the word storage so the
+/// optimizer can read/assign the relids of a `Var`/`PlaceHolderVar`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExprRelids {
+    /// `bitmapword words[]` — the bit storage (empty = the empty set).
+    pub words: Vec<u64>,
+}
+
 /// `Var` (nodes/primnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Var {
     /// `int varno` — index of this var's relation in the range table.
     pub varno: i32,
@@ -289,6 +307,12 @@ pub struct Var {
     /// Added field-for-field vs primnodes.h (the keystone Expr expansion left
     /// the leaf trimmed); `Default` keeps `Var { .. }` construction additive.
     pub varcollid: Oid,
+    /// `Bitmapset *varnullingrels` — RT indexes of outer joins that can replace
+    /// this Var's value with null. The planner's `build_joinrel_tlist`
+    /// (relnode.c) mutates this when forming a joinrel's targetlist. Empty in a
+    /// normal Var. Carried as the lifetime-free [`ExprRelids`] so the `Var`
+    /// stays embeddable in the lifetime-free [`Expr`] tree.
+    pub varnullingrels: ExprRelids,
     /// `Index varlevelsup` — subplan levels up; 0 = current query level.
     pub varlevelsup: Index,
 }
@@ -1302,6 +1326,29 @@ pub struct ReturningExpr {
     pub retexpr: Option<Box<Expr>>,
 }
 
+/// `PlaceHolderVar` (nodes/pathnodes.h) — a placeholder for a subexpression that
+/// must be evaluated below an outer join and then forced to null above it. The
+/// optimizer dispatches `IsA(node, PlaceHolderVar)` and reads
+/// `phid`/`phrels`/`phnullingrels`/`phexpr`.
+///
+/// `phexpr` is an owned `Box<Expr>` (matching the rest of the lifetime-free
+/// tree); `phrels`/`phnullingrels` are the lifetime-free [`ExprRelids`].
+#[derive(Clone, Debug, Default)]
+pub struct PlaceHolderVar {
+    /// `Expr *phexpr` — the represented expression. `None` only during
+    /// construction; a built PHV always wraps an expression.
+    pub phexpr: Option<Box<Expr>>,
+    /// `Relids phrels` — base+OJ relids syntactically within `phexpr`.
+    pub phrels: ExprRelids,
+    /// `Relids phnullingrels` — RT indexes of outer joins that can null the
+    /// PHV's value.
+    pub phnullingrels: ExprRelids,
+    /// `Index phid` — ID for the PHV (unique within a planner run).
+    pub phid: u32,
+    /// `Index phlevelsup` — `> 0` if the PHV belongs to an outer query.
+    pub phlevelsup: u32,
+}
+
 /// Expression-tree node (`Expr *` in C). The `NodeTag` is the enum
 /// discriminant (`IsA(node, Var)` is a match on the variant), so
 /// `ExecInitExprRec`'s switch over the node tag is a `match` over this enum.
@@ -1407,6 +1454,61 @@ pub enum Expr {
     InferenceElem(InferenceElem),
     /// `T_ReturningExpr`.
     ReturningExpr(ReturningExpr),
+    /// `T_PlaceHolderVar` (nodes/pathnodes.h) — a planner placeholder node. Not
+    /// in the contiguous executor `Expr` run, but it derives from `Expr` in C
+    /// and the optimizer dispatches it via `IsA`/`match`.
+    PlaceHolderVar(PlaceHolderVar),
+}
+
+impl Expr {
+    /// `castNode(Var, node)` — borrow the [`Var`] payload, or `None` if this is
+    /// not an `Expr::Var`. The optimizer uses this where C writes
+    /// `(Var *) node` after an `IsA(node, Var)` test.
+    #[inline]
+    pub fn expect_var(&self) -> Option<&Var> {
+        match self {
+            Expr::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Mutable variant of [`Expr::expect_var`] — e.g. `build_joinrel_tlist`
+    /// (relnode.c) sets `var->varnullingrels`.
+    #[inline]
+    pub fn expect_var_mut(&mut self) -> Option<&mut Var> {
+        match self {
+            Expr::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// `castNode(OpExpr, node)` — borrow the [`OpExpr`] payload, or `None`.
+    #[inline]
+    pub fn expect_opexpr(&self) -> Option<&OpExpr> {
+        match self {
+            Expr::OpExpr(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// `castNode(PlaceHolderVar, node)` — borrow the [`PlaceHolderVar`] payload,
+    /// or `None` if this is not an `Expr::PlaceHolderVar`.
+    #[inline]
+    pub fn expect_placeholdervar(&self) -> Option<&PlaceHolderVar> {
+        match self {
+            Expr::PlaceHolderVar(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Mutable variant of [`Expr::expect_placeholdervar`].
+    #[inline]
+    pub fn expect_placeholdervar_mut(&mut self) -> Option<&mut PlaceHolderVar> {
+        match self {
+            Expr::PlaceHolderVar(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// Owned-tree form of `SubPlan` for embedding directly in the [`Expr`] enum.

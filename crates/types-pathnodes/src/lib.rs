@@ -180,6 +180,15 @@ pub struct QualCost {
     pub per_tuple: Cost,
 }
 
+/// `VolatileFunctionStatus` (pathnodes.h) — caches a node's
+/// `contain_volatile_functions` result. `VOLATILITY_UNKNOWN` (the `Default`)
+/// means "not yet computed". Modeled as the existing local `pub type X = u32` +
+/// const convention; discriminant values match the C enum exactly.
+pub type VolatileFunctionStatus = u32;
+pub const VOLATILITY_UNKNOWN: VolatileFunctionStatus = 0;
+pub const VOLATILITY_VOLATILE: VolatileFunctionStatus = 1;
+pub const VOLATILITY_NOVOLATILE: VolatileFunctionStatus = 2;
+
 /* ==========================================================================
  * PartitionSchemeData (pathnodes.h:612-628)
  *
@@ -434,6 +443,41 @@ pub struct JoinDomain {
 }
 
 /* ==========================================================================
+ * AppendRelInfo (parsenodes.h) — relates an append-relation parent to one of
+ * its children, used to translate parent Vars into child references. The C
+ * `RelOptInfo`-adjacent planner code reads `child_relid`/`parent_relid` etc; the
+ * `translated_vars` expressions are opaque expr-node handles into the optimizer
+ * arena. `PlannerInfo::append_rel_array` carries one of these per child relid.
+ * ======================================================================== */
+
+/// `AppendRelInfo` — one parent/child append relationship (parsenodes.h).
+#[derive(Clone, Debug, Default)]
+pub struct AppendRelInfo {
+    /// `Index parent_relid` — RT index of the append parent rel.
+    pub parent_relid: Index,
+    /// `Index child_relid` — RT index of the append child rel.
+    pub child_relid: Index,
+    /// `Oid parent_reltype` — OID of the parent's composite type (InvalidOid for
+    /// a UNION-ALL appendrel).
+    pub parent_reltype: Oid,
+    /// `Oid child_reltype` — OID of the child's composite type (InvalidOid for a
+    /// UNION-ALL appendrel).
+    pub child_reltype: Oid,
+    /// `List *translated_vars` — N'th element is the child column (a Var or
+    /// expression) for the N'th parent column; opaque expr-node handles. A NULL
+    /// element (dropped parent column) is `NodeId::default()` (0).
+    pub translated_vars: Vec<NodeId>,
+    /// `int num_child_cols` — length of `parent_colnos`.
+    pub num_child_cols: i32,
+    /// `AttrNumber *parent_colnos` — per child column, the 1-based parent column
+    /// number (0 if dropped or absent in parent). `num_child_cols` entries.
+    pub parent_colnos: Vec<i16>,
+    /// `Oid parent_reloid` — OID of the parent relation (InvalidOid for UNION
+    /// ALL); used only for error messages.
+    pub parent_reloid: Oid,
+}
+
+/* ==========================================================================
  * IndexOptInfo (pathnodes.h:1137-1239) — per-index planning state, built by
  * plancat.c. This is the FULL planner producer type (distinct from the
  * trimmed executor-side IndexOptInfo in types_nodes::pathnodes). The
@@ -521,12 +565,26 @@ pub struct PathKey {
     pub pk_nulls_first: bool,
 }
 
-/// `PathTarget` — the output columns a Path computes. Trimmed (the `exprs` node
-/// list belongs to the owning crate; cost/width are the consumed scalars).
+/// `PathTarget` — the output columns a Path computes (pathnodes.h). `exprs` is
+/// the targetlist as opaque expression-node handles (the owning optimizer arena
+/// holds the `Expr` trees); `sortgrouprefs` is the per-column sort/group ref (0
+/// if none); cost/width are the consumed scalars.
 #[derive(Clone, Debug, Default)]
 pub struct PathTarget {
+    /// `List *exprs` — expressions to be computed (one per output column), as
+    /// opaque expr-node handles into the optimizer arena.
+    pub exprs: Vec<NodeId>,
+    /// `Index *sortgrouprefs` — sort/group refs, or empty if none. One entry per
+    /// `exprs` element (`exprs`-length array in C; 0 = "no ref").
+    pub sortgrouprefs: Vec<u32>,
+    /// `QualCost cost` — cost of evaluating the expressions.
     pub cost: QualCost,
+    /// `int width` — estimated avg width of result tuples.
     pub width: i32,
+    /// `VolatileFunctionStatus has_volatile_expr` — whether `exprs` contains any
+    /// volatile functions. Modeled as the C enum value (`VOLATILITY_UNKNOWN` = 0
+    /// until computed); see [`VolatileFunctionStatus`].
+    pub has_volatile_expr: VolatileFunctionStatus,
 }
 
 /// `ParamPathInfo` — shared parameterization info for a set of paths. Trimmed to
@@ -1393,27 +1451,74 @@ impl PathNode {
 /// is not carried in this consumer-facing mirror.
 #[derive(Clone, Debug)]
 pub struct RestrictInfo {
+    /// `Expr *clause` — the represented WHERE/JOIN clause, as an opaque
+    /// expr-node handle into the optimizer arena.
+    pub clause: NodeId,
     pub is_pushed_down: bool,
     pub can_join: bool,
     pub pseudoconstant: bool,
+    /// `bool has_clone` — this clause has clones with extra `required_relids`.
+    pub has_clone: bool,
+    /// `bool is_clone` — this clause is a clone of another (outer-join id 3).
+    pub is_clone: bool,
+    /// `bool leakproof` — true if known to contain no leaked Vars.
+    pub leakproof: bool,
+    /// `VolatileFunctionStatus has_volatile` — volatility cache of the clause.
+    pub has_volatile: VolatileFunctionStatus,
+    /// `Index security_level` — security level of the clause.
+    pub security_level: u32,
+    /// `int num_base_rels` — number of base rels in `clause_relids`.
+    pub num_base_rels: i32,
     pub clause_relids: Relids,
     pub required_relids: Relids,
+    /// `Relids incompatible_relids` — relids above which the clause can't be
+    /// evaluated.
+    pub incompatible_relids: Relids,
     pub outer_relids: Relids,
     pub left_relids: Relids,
     pub right_relids: Relids,
+    /// `Expr *orclause` — modified clause with RestrictInfos; `None` unless
+    /// `clause` is an OR clause. Opaque expr-node handle.
+    pub orclause: Option<NodeId>,
+    /// per-clause serial (unique within a planner run); the memoize
+    /// inner_unique guard tests membership in `ppi_serials`.
+    pub rinfo_serial: i32,
     /// generating EquivalenceClass, if any — handle into `eq_classes`.
     pub parent_ec: Option<EcId>,
+    /// `QualCost eval_cost` — eval cost of the clause; `-1` startup if not set.
+    pub eval_cost: QualCost,
+    /// `Selectivity norm_selec` — selectivity for JOIN_INNER semantics; -1 if
+    /// not yet set.
+    pub norm_selec: f64,
+    /// `Selectivity outer_selec` — selectivity for outer-join semantics; -1 if
+    /// not yet set.
+    pub outer_selec: f64,
     /// opfamilies containing clause operator (OIDs), valid if mergejoinable.
     pub mergeopfamilies: Vec<Oid>,
     /// EquivalenceClass containing the left operand — handle into `eq_classes`.
     pub left_ec: Option<EcId>,
     /// EquivalenceClass containing the right operand — handle into `eq_classes`.
     pub right_ec: Option<EcId>,
+    /// `EquivalenceMember *left_em` — EM for the lefthand; handle into `em_arena`.
+    pub left_em: Option<EmId>,
+    /// `EquivalenceMember *right_em` — EM for the righthand; handle into
+    /// `em_arena`.
+    pub right_em: Option<EmId>,
+    /// `List *scansel_cache` — MergeScanSelCache structs. Not Nodes; the C code
+    /// replaces them with NIL on copy, so this carries opaque handles and is
+    /// reset (empty) by a clone-style rebuild.
+    pub scansel_cache: Vec<NodeId>,
     pub outer_is_left: bool,
     pub hashjoinoperator: Oid,
-    /// per-clause serial (unique within a planner run); the memoize
-    /// inner_unique guard tests membership in `ppi_serials`.
-    pub rinfo_serial: i32,
+    /// `Selectivity left_bucketsize` — avg bucketsize of the left side; -1 if not
+    /// yet set.
+    pub left_bucketsize: f64,
+    /// `Selectivity right_bucketsize` — avg bucketsize of the right side.
+    pub right_bucketsize: f64,
+    /// `Selectivity left_mcvfreq` — left side's most-common-value frequency.
+    pub left_mcvfreq: f64,
+    /// `Selectivity right_mcvfreq` — right side's most-common-value frequency.
+    pub right_mcvfreq: f64,
     /// hash equality operator for the "outer op inner" form (clause's left
     /// arg is the outer side) — `OpExpr` payload cached on the rinfo.
     pub left_hasheqoperator: Oid,
@@ -1740,8 +1845,9 @@ pub struct PlannerInfo {
     /// `RangeTblEntry **simple_rte_array` — per-RT-index RTE handles.
     pub simple_rte_array: Vec<RangeTblEntryId>,
     /// `AppendRelInfo **append_rel_array` — per-child-relid AppendRelInfo
-    /// (opaque node handles; 0 = NULL slot).
-    pub append_rel_array: Vec<NodeId>,
+    /// (`None` = NULL slot). A real [`AppendRelInfo`] value: relnode reads
+    /// `appinfo->child_relid`/`parent_relid` etc. directly.
+    pub append_rel_array: Vec<Option<AppendRelInfo>>,
     /// `int join_cur_level` — index of the join level being extended.
     pub join_cur_level: i32,
     /// `List *init_plans` — init SubPlans for the query (opaque node handles).
@@ -1768,8 +1874,8 @@ pub struct PlannerInfo {
     pub all_result_relids: Relids,
     /// `Relids leaf_result_relids` — set of all leaf result relids.
     pub leaf_result_relids: Relids,
-    /// `List *append_rel_list` — AppendRelInfos (opaque node handles).
-    pub append_rel_list: Vec<NodeId>,
+    /// `List *append_rel_list` — AppendRelInfos (real values).
+    pub append_rel_list: Vec<AppendRelInfo>,
     /// `List *row_identity_vars` — RowIdentityVarInfos (opaque node handles).
     pub row_identity_vars: Vec<NodeId>,
     /// `List *rowMarks` — PlanRowMarks (opaque node handles).
