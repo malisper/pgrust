@@ -126,6 +126,62 @@ fn invalidations_round_trip() {
     assert_eq!(n, 1);
 }
 
+#[test]
+fn build_tuple_cid_hash_maps_locator_tid_to_cmin_cmax() {
+    let mut rb = ReorderBuffer::allocate();
+    // No catalog changes => no hash built.
+    rb.add_new_tuple_cids(
+        600,
+        0x10,
+        RelFileLocator::default(),
+        ItemPointerData::new(5, 7),
+        1,
+        2,
+        0,
+    );
+    rb.build_tuple_cid_hash(600);
+    assert!(rb.with_txn_for_test(600, |t| t.tuplecid_hash.is_none()));
+
+    // With catalog changes the hash is built from the recorded tuplecids.
+    rb.xid_set_catalog_changes(600, 0x20);
+    rb.build_tuple_cid_hash(600);
+    let key = ReorderBufferTupleCidKey {
+        rlocator: RelFileLocator::default(),
+        tid: ItemPointerData::new(5, 7),
+    };
+    let ent = rb
+        .with_txn_for_test(600, |t| t.tuplecid_hash.as_ref().unwrap().get(&key).copied())
+        .unwrap();
+    assert_eq!(ent.cmin, 1);
+    assert_eq!(ent.cmax, 2);
+}
+
+#[test]
+fn copy_snap_builds_subxip_with_toplevel_and_subtxns() {
+    let mut rb = ReorderBuffer::allocate();
+    rb.process_xid(1000, 0x10);
+    // record two subtransactions on the txn.
+    rb.with_txn_for_test(1000, |t| {
+        t.subtxns = vec![1005, 1002];
+        t.nsubtxns = 2;
+    });
+    let orig = {
+        let mut s = mk_snapshot(10);
+        s.xip = vec![3, 4];
+        s.xcnt = 2;
+        s
+    };
+    let snap = rb.copy_snap(&orig, 1000, 42);
+    assert!(snap.copied);
+    assert_eq!(snap.active_count, 1);
+    assert_eq!(snap.regd_count, 0);
+    assert_eq!(snap.curcid, 42);
+    assert_eq!(snap.xip, vec![3, 4]);
+    // subxip = toplevel xid + subtxns, sorted.
+    assert_eq!(snap.subxip, vec![1000, 1002, 1005]);
+    assert_eq!(snap.subxcnt, 3);
+}
+
 impl ReorderBuffer {
     /// Test-only accessor mirroring `with_txn`.
     fn with_txn_for_test<R>(
