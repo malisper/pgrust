@@ -1622,6 +1622,7 @@ fn elog_error(msg: &str) -> types_error::PgError {
 /// single-threaded startup from `seams-init`.
 pub fn init_seams() {
     seam::clauselist_selectivity::set(clauselist_selectivity);
+    seam::clause_selectivity::set(clause_selectivity);
 }
 
 #[cfg(test)]
