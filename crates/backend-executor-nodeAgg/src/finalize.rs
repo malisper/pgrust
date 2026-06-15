@@ -5,11 +5,11 @@ use types_core::primitive::OidIsValid;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
-use types_nodes::nodeagg::{
-    AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerTransData, AGG_HASHED,
-    AGG_MIXED,
-};
+use types_nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 use types_nodes::nodeagg::do_aggsplit_skipfinal;
+use crate::aggstate::{
+    AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerTransData,
+};
 use types_nodes::{EStateData, SlotId};
 
 use crate::transition::{process_ordered_aggregate_multi, process_ordered_aggregate_single};

@@ -8,8 +8,9 @@ use types_core::primitive::{Oid, OidIsValid};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
-    Aggref, AggStateData, AggStatePerTransData, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+    Aggref, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
+use crate::aggstate::{AggStateData, AggStatePerTransData};
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, SlotId};
 use types_tuple::heaptuple::TupleDescData;

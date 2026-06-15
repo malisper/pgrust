@@ -34,7 +34,10 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+extern crate alloc;
+
 pub mod aggapi;
+pub mod aggstate;
 pub mod exec_init_agg;
 pub mod finalize;
 pub mod hash_grouping;
@@ -42,6 +45,15 @@ pub mod node_lifecycle;
 pub mod sorted_grouping;
 pub mod spill;
 pub mod transition;
+
+// The `AggState` runtime state + per-aggregate satellites + spill structs, now
+// homed in their real owner (relocated out of `types-nodes::nodeagg` so
+// `hash_tapeset` can hold a real owned `LogicalTapeSet`).
+pub use aggstate::{
+    AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerHashData,
+    AggStatePerPhaseData, AggStatePerTransData, AggregateInstrumentation, HashAggBatch,
+    HashAggSpill, SharedAggInfo,
+};
 
 // Re-export the public interface (nodeAgg.h + the AggState support API).
 pub use aggapi::{

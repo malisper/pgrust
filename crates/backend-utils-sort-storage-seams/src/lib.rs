@@ -8,6 +8,103 @@
 
 #![allow(non_snake_case)]
 
+extern crate alloc;
+
+// ===========================================================================
+// logtape.c structures — the real owned `LogicalTapeSet` / `LogicalTape`.
+//
+// `LogicalTapeSet *` / `LogicalTape *` are opaque typedefs in C
+// (`logtape.h`); the two working structs are private to `logtape.c`. In this
+// repo they are the shared vocabulary the hash-agg spill consumer (nodeAgg)
+// holds BY VALUE: the set is an owned `PgBox<LogicalTapeSet<'mcx>>`, and a
+// `LogicalTape *` is a `usize` slot index into the set's `tapes` vector (the
+// faithful rendering of C's pointer into the set-owned tape array). The
+// concrete bodies (block I/O, the free-block min-heap) live in the owner
+// crate, which deps this crate and operates on these structs through the
+// value-typed seams below — no side-table registry.
+// ===========================================================================
+
+/// Per-tape state. Port of `struct LogicalTape` (private to `logtape.c`). The
+/// `lt->tapeSet` back-pointer is implicit: a tape lives in its set's `tapes`
+/// vector (addressed by its slot index, the owned-model `LogicalTape *`).
+#[derive(Debug)]
+pub struct LogicalTape<'mcx> {
+    /// T while in write phase.
+    pub writing: bool,
+    /// T if blocks should not be freed when read.
+    pub frozen: bool,
+    /// does buffer need to be written?
+    pub dirty: bool,
+
+    /// block number of the first block of the tape, or -1.
+    pub firstBlockNumber: i64,
+    /// "current" block number (valid when writing or reading a frozen tape).
+    pub curBlockNumber: i64,
+    /// next block of the tape, or -1.
+    pub nextBlockNumber: i64,
+    /// offset applied during reads for leader tapesets.
+    pub offsetBlockNumber: i64,
+
+    /// physical buffer (`char *buffer`), empty until lazily allocated.
+    pub buffer: mcx::PgVec<'mcx, u8>,
+    /// allocated/intended size of the buffer.
+    pub buffer_size: usize,
+    /// highest useful, safe `buffer_size`.
+    pub max_size: usize,
+    /// next read/write position in buffer.
+    pub pos: usize,
+    /// total # of valid bytes in buffer.
+    pub nbytes: usize,
+    /// has the read/write buffer been allocated yet? (`lt->buffer == NULL`).
+    pub buffer_allocated: bool,
+
+    /// preallocated block numbers, sorted descending; consumed from the end.
+    pub prealloc: mcx::PgVec<'mcx, i64>,
+    /// has the prealloc list been allocated yet? (`lt->prealloc != NULL`).
+    pub prealloc_allocated: bool,
+    /// number of valid elements in the list.
+    pub nprealloc: i32,
+    /// number of elements the list can hold.
+    pub prealloc_size: i32,
+}
+
+/// The mutable state of a set of related "logical tapes" sharing space in a
+/// single underlying file. Port of `struct LogicalTapeSet` (private to
+/// `logtape.c`), plus the tapes created in it (`tapes`) so the whole set is one
+/// owned bundle. nodeAgg holds this by value (`PgBox<LogicalTapeSet<'mcx>>`),
+/// retiring the former side-table registry.
+#[derive(Debug)]
+pub struct LogicalTapeSet<'mcx> {
+    /// underlying file for whole tape set (`BufFile *pfile`), or `None`.
+    pub pfile: Option<mcx::PgBox<'mcx, types_nodes::nodehashjoin::BufFile>>,
+    /// shared fileset (parallel sort), or `None`.
+    pub fileset: Option<alloc::boxed::Box<types_storage::fileset::SharedFileSet>>,
+    /// worker # if shared, -1 for leader/serial.
+    pub worker: i32,
+
+    /// # of blocks allocated.
+    pub nBlocksAllocated: i64,
+    /// # of blocks used in underlying file.
+    pub nBlocksWritten: i64,
+    /// # of "hole" blocks left.
+    pub nHoleBlocks: i64,
+
+    /// are we remembering free blocks?
+    pub forgetFreeSpace: bool,
+    /// minheap of free blocks (the first `nFreeBlocks` slots are the heap).
+    pub freeBlocks: mcx::PgVec<'mcx, i64>,
+    /// # of currently free blocks.
+    pub nFreeBlocks: i64,
+    /// current allocated length of `freeBlocks`.
+    pub freeBlocksLen: usize,
+    /// preallocate write blocks?
+    pub enable_prealloc: bool,
+
+    /// tapes created in this set, addressed by the tape handle's slot. A
+    /// `None` slot is a closed tape.
+    pub tapes: alloc::vec::Vec<Option<LogicalTape<'mcx>>>,
+}
+
 seam_core::seam!(
     /// `tuplestore_begin_heap(randomAccess, interXact, maxKBytes)`
     /// (tuplestore.c): create a new tuplestore; `maxKBytes` is the work_mem
@@ -238,70 +335,76 @@ seam_core::seam!(
 
 // ---------------------------------------------------------------------------
 // logtape.c — the logical-tape spill surface the hash-agg spill path drives.
-// `LogicalTapeSet *` / `LogicalTape *` cross as the opaque handles from
-// `types_nodes::nodeagg`; the owner names the concrete state when it lands.
+// `LogicalTapeSet *` is the real owned [`LogicalTapeSet`] (the consumer holds
+// it by value); `LogicalTape *` is a `usize` slot index into the set's `tapes`
+// vector. No side-table registry.
 // ---------------------------------------------------------------------------
 
 seam_core::seam!(
     /// `LogicalTapeSetCreate(preallocate, fileset, worker)` (logtape.c):
     /// create a tape set. The hash-agg path passes no `SharedFileSet`
     /// (non-parallel spill) — `fileset = NULL`, `worker = -1`. The set is
-    /// pallocked in the caller's context, so creation is fallible on OOM.
+    /// pallocked in `mcx` (the caller's context), so creation is fallible on
+    /// OOM; the owned set is returned for the consumer to hold by value.
     pub fn logical_tape_set_create<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         preallocate: bool,
         worker: i32,
-    ) -> types_error::PgResult<types_nodes::nodeagg::LogicalTapeSetHandle>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, LogicalTapeSet<'mcx>>>
 );
 
 seam_core::seam!(
     /// `LogicalTapeSetClose(lts)` (logtape.c): destroy the tape set and its
     /// underlying `BufFile`. Infallible (close paths do not `ereport(ERROR)`).
-    pub fn logical_tape_set_close(lts: types_nodes::nodeagg::LogicalTapeSetHandle)
+    /// Consumes the owned set (the C caller frees the `LogicalTapeSet *`).
+    pub fn logical_tape_set_close(lts: mcx::PgBox<'_, LogicalTapeSet<'_>>)
 );
 
 seam_core::seam!(
     /// `LogicalTapeSetBlocks(lts)` (logtape.c): number of blocks used by the
     /// set (the agg disk-usage metric reads this).
-    pub fn logical_tape_set_blocks(lts: types_nodes::nodeagg::LogicalTapeSetHandle) -> i64
+    pub fn logical_tape_set_blocks(lts: &LogicalTapeSet<'_>) -> i64
 );
 
 seam_core::seam!(
-    /// `LogicalTapeCreate(lts)` (logtape.c): allocate a new tape in the set.
-    pub fn logical_tape_create<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        lts: types_nodes::nodeagg::LogicalTapeSetHandle,
-    ) -> types_error::PgResult<types_nodes::nodeagg::LogicalTapeHandle>
+    /// `LogicalTapeCreate(lts)` (logtape.c): allocate a new tape in the set;
+    /// returns the tape's slot index (the owned-model `LogicalTape *`).
+    pub fn logical_tape_create(
+        lts: &mut LogicalTapeSet<'_>,
+    ) -> types_error::PgResult<usize>
 );
 
 seam_core::seam!(
-    /// `LogicalTapeClose(lt)` (logtape.c): release a single tape.
-    pub fn logical_tape_close(lt: types_nodes::nodeagg::LogicalTapeHandle)
+    /// `LogicalTapeClose(lt)` (logtape.c): release a single tape (by slot).
+    pub fn logical_tape_close(lts: &mut LogicalTapeSet<'_>, slot: usize)
 );
 
 seam_core::seam!(
-    /// `LogicalTapeWrite(lt, ptr, size)` (logtape.c): append `data` to the
-    /// tape. Flushing a full block can `ereport(ERROR)` on a write failure.
+    /// `LogicalTapeWrite(lt, ptr, size)` (logtape.c): append `data` to the tape
+    /// at `slot`. Flushing a full block can `ereport(ERROR)` on a write failure.
     pub fn logical_tape_write(
-        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        lts: &mut LogicalTapeSet<'_>,
+        slot: usize,
         data: &[u8],
     ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `LogicalTapeRewindForRead(lt, buffer_size)` (logtape.c): switch the
-    /// tape from writing to reading, with the given read buffer size.
+    /// `LogicalTapeRewindForRead(lt, buffer_size)` (logtape.c): switch the tape
+    /// at `slot` from writing to reading, with the given read buffer size.
     pub fn logical_tape_rewind_for_read(
-        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        lts: &mut LogicalTapeSet<'_>,
+        slot: usize,
         buffer_size: usize,
     ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `LogicalTapeRead(lt, ptr, size)` (logtape.c): read up to `dst.len()`
-    /// bytes from the tape; returns the number of bytes actually read.
+    /// bytes from the tape at `slot`; returns the number of bytes actually read.
     pub fn logical_tape_read(
-        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        lts: &mut LogicalTapeSet<'_>,
+        slot: usize,
         dst: &mut [u8],
     ) -> types_error::PgResult<usize>
 );

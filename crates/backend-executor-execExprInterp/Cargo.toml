@@ -23,6 +23,10 @@ backend-executor-execExprInterp-seams = { path = "../backend-executor-execExprIn
 
 # Seams into unported owners the interpreter calls.
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+# AggStateData + AggStatePer* now live in their real owner nodeAgg (relocated out
+# of types-nodes for the logtape registry retire). nodeAgg deps only the SEAM
+# crates of execExpr*/execProcnode etc., not these owner crates, so no cycle.
+backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

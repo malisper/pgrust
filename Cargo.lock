@@ -7423,6 +7423,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-analyze"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-util-vars",
+ "backend-parser-agg",
+ "backend-parser-analyze-seams",
+ "backend-parser-clause",
+ "backend-parser-coerce",
+ "backend-parser-cte",
+ "backend-parser-driver",
+ "backend-parser-gram-core",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-target",
+ "backend-parser-parse-type",
+ "backend-parser-relation",
+ "backend-parser-small1",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-typcache",
+ "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-parser-analyze-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -9198,6 +9234,26 @@ dependencies = [
  "types-error",
  "types-fsm",
  "types-rel",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-buffer-support"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-storage-page",
+ "backend-storage-smgr-seams",
+ "backend-utils-init-small-seams",
+ "common-hashfn",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -13940,6 +13996,7 @@ dependencies = [
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
  "backend-parser-agg",
+ "backend-parser-analyze",
  "backend-parser-clause",
  "backend-parser-coerce",
  "backend-parser-func",
@@ -13972,6 +14029,7 @@ dependencies = [
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
+ "backend-storage-buffer-support",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
  "backend-storage-file-fileset",

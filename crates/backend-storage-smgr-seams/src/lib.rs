@@ -95,6 +95,62 @@ seam_core::seam!(
     pub fn relation_close_smgr(rlocator: RelFileLocatorBackend)
 );
 
+// --- localbuf.c temp-relation I/O consumers (smgr.c) ---
+
+seam_core::seam!(
+    /// `smgrread(smgropen(rlocator, backend), forknum, blocknum, buffer)`
+    /// (smgr.c) — read one block of a (temp) relation fork into `dst`
+    /// (`BLCKSZ` bytes). `Err` carries the file-layer `ereport(ERROR)`s.
+    pub fn smgr_read(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+        dst: &mut [u8],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `smgrwrite(smgropen(rlocator, backend), forknum, blocknum, buffer,
+    /// false)` (smgr.c) — write one block of a (temp) relation fork from
+    /// `src` (`BLCKSZ` bytes). `Err` carries the file-layer `ereport(ERROR)`s.
+    pub fn smgr_write(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+        src: &[u8],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `smgrzeroextend(smgropen(rlocator, backend), forknum, blocknum,
+    /// nblocks, skipFsync)` (smgr.c) — extend a (temp) relation fork by
+    /// `nblocks` all-zero blocks starting at `blocknum`. `Err` carries the
+    /// file-layer `ereport(ERROR)`s.
+    pub fn smgr_zeroextend(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+        nblocks: u32,
+        skip_fsync: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `smgrprefetch(smgropen(rlocator, backend), forknum, blocknum, 1)`
+    /// (smgr.c) — initiate an async read of one block; returns whether the
+    /// prefetch facility is available. `Err` carries the file-layer
+    /// `ereport(ERROR)`s.
+    pub fn smgr_prefetch(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<bool>
+);
+
 // --- backend-utils-init-postinit consumer (smgr.c) ---
 
 seam_core::seam!(

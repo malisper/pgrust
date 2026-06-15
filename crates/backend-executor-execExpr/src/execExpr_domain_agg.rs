@@ -23,7 +23,8 @@ use types_nodes::execexpr::{
 };
 use types_nodes::execexpr::SubPlanState;
 use types_nodes::executor::TupleSlotKind;
-use types_nodes::nodeagg::{do_aggsplit_combine, AggStateData, AggStrategy, Aggref};
+use types_nodes::nodeagg::{do_aggsplit_combine, AggStrategy, Aggref};
+use backend_executor_nodeAgg::AggStateData;
 use types_nodes::parsenodes::OBJECT_FUNCTION;
 use types_nodes::primnodes::{Expr, OpExpr, AND_EXPR};
 use types_nodes::EStateData;

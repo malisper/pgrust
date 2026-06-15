@@ -4,11 +4,11 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodeagg::{
-    AggStateData, HashAggBatch, HashAggSpill, LogicalTapeHandle, LogicalTapeSetHandle, AGG_HASHED,
-    AGG_MIXED,
-};
+use types_nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 use types_nodes::{EStateData, SlotId};
+
+use crate::aggstate::{AggStateData, HashAggBatch, HashAggSpill};
+use backend_utils_sort_storage_seams::LogicalTapeSet;
 
 use backend_lib_hyperloglog as hll;
 use backend_executor_nodeHash_seams as nodeHash_seams;
@@ -163,6 +163,13 @@ pub fn hash_agg_enter_spill_mode<'mcx>(
             spills.push(HashAggSpill::default());
         }
 
+        // Snapshot each grouping set's estimated group count
+        // (aggstate->perhash[setno].aggnode->numGroups) before borrowing the
+        // tape set mutably — the perhash read and the mut tapeset borrow are on
+        // disjoint fields of `aggstate`, but the spill-init loop holds the
+        // tapeset mut borrow, so the perhash reads are hoisted here.
+        let hashentrysize = aggstate.hashentrysize;
+        let mut num_groups_per: alloc::vec::Vec<f64> = alloc::vec::Vec::new();
         for setno in 0..num_hashes as usize {
             let num_groups = aggstate
                 .perhash
@@ -171,12 +178,19 @@ pub fn hash_agg_enter_spill_mode<'mcx>(
                 .and_then(|ph| ph.aggnode.as_ref())
                 .map(|n| n.num_groups)
                 .unwrap_or(0);
-            let hashentrysize = aggstate.hashentrysize;
+            num_groups_per.push(num_groups as f64);
+        }
+
+        let tapeset = aggstate
+            .hash_tapeset
+            .as_mut()
+            .expect("hash_agg_enter_spill_mode: hash_tapeset just created");
+        for setno in 0..num_hashes as usize {
             hashagg_spill_init(
                 &mut spills[setno],
                 tapeset,
                 0,
-                num_groups as f64,
+                num_groups_per[setno],
                 hashentrysize,
                 mcx,
             )?;
@@ -233,7 +247,7 @@ pub fn hash_agg_update_metrics<'mcx>(
     }
 
     // update disk usage
-    if let Some(tapeset) = aggstate.hash_tapeset {
+    if let Some(tapeset) = aggstate.hash_tapeset.as_ref() {
         let blocks = tape_seams::logical_tape_set_blocks::call(tapeset);
         // disk_used = blocks * (BLCKSZ / 1024)
         let disk_used = blocks as u64 * (types_core::BLCKSZ as u64 / 1024);
@@ -302,7 +316,7 @@ pub fn hashagg_reset_spill_state<'mcx>(aggstate: &mut AggStateData<'mcx>) -> PgR
 /// `hashagg_batch_new(input_tape, setno, input_tuples, input_card, used_bits)`
 /// — allocate a `HashAggBatch` describing one spill partition to refill from.
 pub fn hashagg_batch_new<'mcx>(
-    input_tape: LogicalTapeHandle,
+    input_tape: usize,
     setno: i32,
     input_tuples: i64,
     input_card: f64,
@@ -323,6 +337,7 @@ pub fn hashagg_batch_new<'mcx>(
 /// from a batch's input tape, returning its bytes and the stored hash, or
 /// `None` at end of tape.
 pub fn hashagg_batch_read<'mcx>(
+    tapeset: &mut LogicalTapeSet<'mcx>,
     batch: &mut HashAggBatch,
     mcx: Mcx<'mcx>,
 ) -> PgResult<Option<(mcx::PgVec<'mcx, u8>, u32)>> {
@@ -332,14 +347,13 @@ pub fn hashagg_batch_read<'mcx>(
 
     // Read the stored 32-bit hash.
     let mut hash_buf = [0u8; 4];
-    let nread = tape_seams::logical_tape_read::call(tape, &mut hash_buf)?;
+    let nread = tape_seams::logical_tape_read::call(tapeset, tape, &mut hash_buf)?;
     if nread == 0 {
         return Ok(None);
     }
     if nread != core::mem::size_of::<u32>() {
         return Err(types_error::PgError::error(format!(
-            "unexpected EOF for tape {:?}: requested {} bytes, read {} bytes",
-            tape,
+            "unexpected EOF for tape {tape}: requested {} bytes, read {} bytes",
             core::mem::size_of::<u32>(),
             nread
         )));
@@ -348,11 +362,10 @@ pub fn hashagg_batch_read<'mcx>(
 
     // Read the minimal tuple length (the leading uint32 of MinimalTupleData).
     let mut tlen_buf = [0u8; 4];
-    let nread = tape_seams::logical_tape_read::call(tape, &mut tlen_buf)?;
+    let nread = tape_seams::logical_tape_read::call(tapeset, tape, &mut tlen_buf)?;
     if nread != core::mem::size_of::<u32>() {
         return Err(types_error::PgError::error(format!(
-            "unexpected EOF for tape {:?}: requested {} bytes, read {} bytes",
-            tape,
+            "unexpected EOF for tape {tape}: requested {} bytes, read {} bytes",
             core::mem::size_of::<u32>(),
             nread
         )));
@@ -365,11 +378,11 @@ pub fn hashagg_batch_read<'mcx>(
     tuple.resize(t_len, 0);
 
     let rest = t_len - core::mem::size_of::<u32>();
-    let nread = tape_seams::logical_tape_read::call(tape, &mut tuple[core::mem::size_of::<u32>()..])?;
+    let nread =
+        tape_seams::logical_tape_read::call(tapeset, tape, &mut tuple[core::mem::size_of::<u32>()..])?;
     if nread != rest {
         return Err(types_error::PgError::error(format!(
-            "unexpected EOF for tape {:?}: requested {} bytes, read {} bytes",
-            tape, rest, nread
+            "unexpected EOF for tape {tape}: requested {rest} bytes, read {nread} bytes"
         )));
     }
 
@@ -381,7 +394,7 @@ pub fn hashagg_batch_read<'mcx>(
 /// and create one output tape per partition.
 pub fn hashagg_spill_init<'mcx>(
     spill: &mut HashAggSpill<'mcx>,
-    tapeset: LogicalTapeSetHandle,
+    tapeset: &mut LogicalTapeSet<'mcx>,
     used_bits: i32,
     input_groups: f64,
     hashentrysize: f64,
@@ -392,8 +405,7 @@ pub fn hashagg_spill_init<'mcx>(
 
     // (USE_INJECTION_POINTS single-partition override omitted — test facility.)
 
-    let mut partitions =
-        mcx::vec_with_capacity_in::<Option<LogicalTapeHandle>>(mcx, npartitions as usize)?;
+    let mut partitions = mcx::vec_with_capacity_in::<Option<usize>>(mcx, npartitions as usize)?;
     let mut ntuples = mcx::vec_with_capacity_in::<i64>(mcx, npartitions as usize)?;
     // C: spill->hll_card = palloc0(sizeof(hyperLogLogState) * npartitions) — an
     // array of estimator state held by value, one per partition.
@@ -405,7 +417,7 @@ pub fn hashagg_spill_init<'mcx>(
     }
 
     for i in 0..npartitions as usize {
-        partitions[i] = Some(tape_seams::logical_tape_create::call(mcx, tapeset)?);
+        partitions[i] = Some(tape_seams::logical_tape_create::call(tapeset)?);
     }
 
     spill.shift = 32 - used_bits - partition_bits;
@@ -501,7 +513,17 @@ pub fn hashagg_spill_finish<'mcx>(
         // above without a per-element free in C, exactly as here.)
 
         // rewinding frees the buffer while not in use
-        tape_seams::logical_tape_rewind_for_read::call(tape, HASHAGG_READ_BUFFER_SIZE)?;
+        {
+            let tapeset = aggstate
+                .hash_tapeset
+                .as_mut()
+                .expect("hashagg_spill_finish: hash_tapeset present while spilling");
+            tape_seams::logical_tape_rewind_for_read::call(
+                tapeset,
+                tape,
+                HASHAGG_READ_BUFFER_SIZE,
+            )?;
+        }
 
         let new_batch =
             hashagg_batch_new(tape, setno, ntuples_i, cardinality, used_bits, mcx)?;
