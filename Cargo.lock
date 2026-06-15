@@ -883,7 +883,9 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-hash-entry",
+ "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
+ "backend-access-nbt-validate",
  "backend-access-nbtree-nbtree",
  "backend-utils-cache-syscache-seams",
  "mcx",
@@ -9332,10 +9334,16 @@ dependencies = [
 name = "backend-storage-buffer-bufmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
+ "backend-storage-page",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-ps-status-seams",
  "mcx",
  "types-condvar",
  "types-core",
