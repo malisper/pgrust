@@ -161,3 +161,24 @@ pub fn remove_nulling_relids(
         0,
     );
 }
+
+/// `remove_nulling_relids((Node *) query, removable_relids, except_relids)` —
+/// the `IsA(node, Query)` entry of [`remove_nulling_relids`], applied directly
+/// to a `&mut Query` (the repo's owned `root->parse`, which can't be moved into
+/// a `Node::Query` wrapper from behind a `&mut` borrow). This is observationally
+/// identical to wrapping the `Query` in a `Node::Query` and calling
+/// [`remove_nulling_relids`]: the `query_or_expression_tree_mutator`
+/// `Node::Query(q)` arm is exactly `query_tree_mutator(q, mutator, flags)` (it
+/// does NOT bump `sublevels_up` — the top query is level 0).
+pub fn remove_nulling_relids_in_query(
+    query: &mut types_nodes::copy_query::Query,
+    removable_relids: &ExprRelids,
+    except_relids: &ExprRelids,
+) {
+    let mut ctx = RemoveNullingCtx {
+        removable_relids,
+        except_relids,
+        sublevels_up: 0,
+    };
+    query_tree_mutator(query, &mut |n| remove_nulling_relids_mutator(n, &mut ctx), 0);
+}

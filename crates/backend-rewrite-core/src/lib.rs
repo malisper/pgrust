@@ -74,7 +74,7 @@ pub use change::{
     ChangeVarNodesWalkExpression,
 };
 pub use increment::{IncrementVarSublevelsUp, IncrementVarSublevelsUp_rtable, SetVarReturningType};
-pub use nulling::{add_nulling_relids, remove_nulling_relids};
+pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
 pub use offset::OffsetVarNodes;
 pub use replace::{
     map_variable_attnos, replace_rte_variables, ReplaceVarFromTargetList, ReplaceVarsFromTargetList,
