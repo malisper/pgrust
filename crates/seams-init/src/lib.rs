@@ -722,15 +722,6 @@ mod recurrence_guard {
         // workspace-wide. Installing would just relocate the runtime panic into the
         // fmgr leg. Pay down once the pointer-Datum/fmgr dispatch bridge lands.
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
-        // DESIGN_DEBT (TD-CREATE-PARTIAL-BITMAP-PATHS): `create_partial_bitmap_paths`
-        // is owned by `optimizer/path/allpaths.c`, NOT costsize.c — but the
-        // indxpath.c port declared it in `backend-optimizer-path-costsize-seams`
-        // (the nearest path-layer seam crate) since allpaths.c has no crate yet.
-        // costsize is COMPLETE, so the guard flags the uninstalled seam; the real
-        // owner allpaths.c is unported, so the loud-panic is correct mirror-pg-
-        // and-panic. Re-home onto an `allpaths-seams` crate and DELETE this entry
-        // when allpaths.c lands.
-        ("backend_optimizer_path_costsize", "create_partial_bitmap_paths"),
         // DESIGN_DEBT (TD-GIN-EXTRACT-QUERY): `gin_extract_query` is the GIN
         // `extractQueryFn` fmgr dispatch (`FunctionCall7Coll(...)` with by-pointer
         // out-params) that `ginscan.c`'s `ginNewScanKey` invokes. Its real owner
@@ -744,6 +735,23 @@ mod recurrence_guard {
         // not fire. It is genuinely uninstalled / loud-panic (mirror-pg-and-panic)
         // until the fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_extract_query"),
+        // DESIGN_DEBT (TD-GIN-COMPARE-PARTIAL): `gin_compare_partial` is the GIN
+        // `comparePartialFn` fmgr dispatch — the inline
+        // `DatumGetInt32(FunctionCall4Coll(&ginstate->comparePartialFn[attnum-1],
+        // collation, queryKey, idatum, UInt16GetDatum(strategy),
+        // PointerGetDatum(extra_data)))` that ginget.c (`collectMatchBitmap`,
+        // ginget.c:193; `matchPartialInPendingList`, ginget.c:1592) invokes. Its
+        // real owner is the fmgr GIN-call dispatcher (still unported) — the SAME
+        // owner as the already-uninstalled `gin_extract_value` /
+        // `gin_compare_entries` / `gin_extract_query` substrate seams. It is
+        // declared in `backend-access-gin-ginutil-seams` (ginutil owns
+        // `comparePartialFn` via initGinState, ginutil.c:198) so the guard
+        // attributes it to the COMPLETE `ginutil` owner; but ginutil does not
+        // call it (ginget does), so the OUTWARD-seam exclusion that covers the
+        // sibling gin substrate seams (which ginutil DOES call) does not fire. It
+        // is genuinely uninstalled / loud-panic (mirror-pg-and-panic) until the
+        // fmgr GIN dispatcher lands. DELETE this entry when it does.
+        ("backend_access_gin_ginutil", "gin_compare_partial"),
         // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
         // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
         // ported in the otherwise-complete `backend-optimizer-util-pathnode`
@@ -1013,14 +1021,6 @@ mod recurrence_guard {
         // those 13 seams are now installed by inward_seams over ProcGlobal->
         // clogGroupFirst + the per-PGPROC clogGroup* fields.)
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
-        // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
-        // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
-        // It is correctly installed at runtime by backend-timezone-localtime's
-        // init_seams() (wired into init_all), so the call path never panics; only
-        // the guard's name-prefix attribution flags it because the pgtz owner
-        // crate landed and flipped pgtz-seams into "complete owner" status. Pay
-        // down by relocating the decl to a backend-timezone-localtime-seams crate.
-        ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
@@ -1264,6 +1264,35 @@ mod recurrence_guard {
         called
     }
 
+    /// Workspace-wide `(seams_lib, fn)` set of every seam installed via
+    /// `<seams_lib>::<fn>::set(` in non-test code, anywhere under `crates/`.
+    /// A seam's INSTALLER need not be the crate whose NAME matches the seam
+    /// crate: the C function's real owner may be a different crate (e.g.
+    /// `add_function_cost` is declared in `costsize-seams` but its real owner
+    /// is plancat.c, so `plancat` installs it). A cross-crate `::set` is a
+    /// legitimate install, so the by-name owner check must not flag it.
+    fn installed_seams(crates: &Path) -> std::collections::HashSet<(String, String)> {
+        let mut installed = std::collections::HashSet::new();
+        for entry in fs::read_dir(crates).expect("read crates dir").flatten() {
+            let src = entry.path().join("src");
+            if !src.is_dir() {
+                continue;
+            }
+            let mut files = Vec::new();
+            rs_files(&src, &mut files);
+            for f in &files {
+                if is_test_file(f) {
+                    continue; // test stubs `::set` deps; not a real install
+                }
+                let raw = fs::read_to_string(f).unwrap_or_default();
+                let aliases = alias_map(&raw);
+                let txt = strip_cfg_test(&raw);
+                collect_sites(&txt, b"::set", &aliases, &mut installed);
+            }
+        }
+        installed
+    }
+
     /// Parse `ident::ident::call(` triples out of one source string, resolving
     /// the leading crate ident through `aliases` (`use ... as <alias>;`).
     fn collect_call_sites(
@@ -1271,8 +1300,18 @@ mod recurrence_guard {
         aliases: &std::collections::HashMap<String, String>,
         out: &mut std::collections::HashSet<(String, String)>,
     ) {
+        collect_sites(src, b"::call", aliases, out);
+    }
+
+    /// Parse `ident::ident<needle>(` triples (e.g. `::call` / `::set`) out of
+    /// one source string, resolving the leading crate ident through `aliases`.
+    fn collect_sites(
+        src: &str,
+        needle: &[u8],
+        aliases: &std::collections::HashMap<String, String>,
+        out: &mut std::collections::HashSet<(String, String)>,
+    ) {
         let bytes = src.as_bytes();
-        let needle = b"::call";
         let mut i = 0;
         while i + needle.len() <= bytes.len() {
             if &bytes[i..i + needle.len()] != needle {
@@ -1333,6 +1372,11 @@ mod recurrence_guard {
         let crates = crates_dir();
         let complete = complete_crate_dirs(&crates);
         let called = called_seams(&crates);
+        // Every seam installed via `::set(` ANYWHERE in non-test code, keyed by
+        // (seams_lib, fn). A seam's real installer may be a crate whose name
+        // does not match the seam crate (the C function's true owner) — that is
+        // still a valid install, so it must clear the by-name owner check.
+        let installed = installed_seams(&crates);
         let allowed: std::collections::HashSet<(&str, &str)> =
             CONTRACT_RECONCILE_PENDING.iter().copied().collect();
 
@@ -1424,9 +1468,18 @@ mod recurrence_guard {
             for fname in &declared {
                 let pat1 = format!("{}::set(", fname);
                 let pat2 = format!("{}::set (", fname);
-                let installed = has_init_seams
+                let installed_by_name = has_init_seams
                     && (owner_src.contains(&pat1) || owner_src.contains(&pat2));
-                if installed {
+                if installed_by_name {
+                    continue;
+                }
+
+                // Cross-crate install: the seam's real owner (the C function's
+                // true home) may be a DIFFERENT crate than the name-matched one
+                // — e.g. `add_function_cost` is declared in `costsize-seams`
+                // but defined in plancat.c, so `plancat` installs it. A `::set`
+                // of this seam anywhere in non-test code is a valid install.
+                if installed.contains(&(seams_lib.clone(), fname.clone())) {
                     continue;
                 }
 
