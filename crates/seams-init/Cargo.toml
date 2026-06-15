@@ -142,6 +142,7 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-nodes-copyfuncs = { path = "../backend-nodes-copyfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }

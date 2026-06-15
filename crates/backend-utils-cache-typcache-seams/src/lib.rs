@@ -334,3 +334,25 @@ seam_core::seam!(
     /// `AtEOSubXact_TypeCache()`.
     pub fn at_eosubxact_type_cache()
 );
+
+seam_core::seam!(
+    /// The `get_sort_group_operators` (parse_oper.c) typcache leg: run
+    /// `lookup_type_cache(argtype, TYPECACHE_LT_OPR | TYPECACHE_EQ_OPR |
+    /// TYPECACHE_GT_OPR [| TYPECACHE_HASH_PROC])` and return the resolved
+    /// default sorting/grouping operators by value: `(lt_opr, eq_opr, gt_opr,
+    /// is_hashable)`. `is_hashable` is `OidIsValid(hash_proc)`, only computed
+    /// when `want_hashable` is true (the C non-NULL `isHashable` toggling
+    /// `TYPECACHE_HASH_PROC`); otherwise `false`. Encapsulated on the owner
+    /// because the trimmed [`types_typcache::TypeCacheEntry`] copy-out does not
+    /// carry the operator/proc fields. `Err` carries the cache-lookup
+    /// `ereport(ERROR)` surface (e.g. "type ... does not exist").
+    pub fn sort_group_operators(
+        argtype: types_core::primitive::Oid,
+        want_hashable: bool,
+    ) -> types_error::PgResult<(
+        types_core::primitive::Oid,
+        types_core::primitive::Oid,
+        types_core::primitive::Oid,
+        bool,
+    )>
+);
