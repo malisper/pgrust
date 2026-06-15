@@ -209,6 +209,7 @@ backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-file-fileset = { path = "../backend-storage-file-fileset" }
