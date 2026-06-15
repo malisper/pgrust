@@ -1,0 +1,806 @@
+//! `optimizer/util/var.c` — the `Var` node manipulation routines.
+//!
+//! For most purposes a `PlaceHolderVar` is considered a `Var` too, even if its
+//! contained expression is variable-free; a `CurrentOfExpr` is likewise treated
+//! as a `Var` for the "contains variables" tests.
+//!
+//! # Node-walking over the arena
+//!
+//! var.c is pure node-walking. The optimizer interns expression payloads in the
+//! [`PlannerInfo`] node arena (`node_arena: Vec<Expr>`); a seam takes a
+//! [`NodeId`] handle, which this crate resolves to `&Expr` via
+//! [`PlannerInfo::node`], wraps as `Node::Expr(expr.clone())`, and walks with
+//! the central [`backend_nodes_core::node_walker`] engine
+//! (`expression_tree_walker` / `query_or_expression_tree_walker` /
+//! `query_tree_walker`), whose `bool (*)(Node *, void *)` walker is a Rust
+//! `&mut dyn FnMut(&Node) -> bool` closure. C's `IsA(node, X)` dispatch is a
+//! match over the [`Node`]/[`Expr`] enum arms (every `Var`-family node is an
+//! `Expr` arm; `Query` is its own `Node` arm).
+//!
+//! # Relids set algebra
+//!
+//! The collectors accumulate a [`Relids`] (`= Option<Box<Bitmapset>>`, the
+//! planner relation-id set; empty = `None`). `Bitmapset` here is the
+//! lifetime-free word-vector type (`{ words: Vec<u64> }`), so the small `bms_*`
+//! algebra var.c needs (`bms_add_member`, `bms_add_members`, `bms_equal`,
+//! `bms_difference`, `bms_join`) is reproduced faithfully inline over the word
+//! storage — a 1:1 port of nodes/bitmapset.c's semantics (trailing-zero
+//! trimming so the empty set is `None`/empty-`words`).
+
+#![allow(non_snake_case)]
+
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use backend_nodes_core::node_walker::{
+    expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
+};
+use types_error::PgResult;
+use types_nodes::nodes::Node;
+use types_nodes::primnodes::Expr;
+use types_pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
+
+// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) = -7. var.c offsets
+// attribute numbers by this so system attributes fit a bitmap; matches
+// `types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber`.
+const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
+
+/// `VAR_RETURNING_DEFAULT` (primnodes.h) — the default `varreturningtype`.
+use types_nodes::primnodes::VarReturningType;
+
+// ===========================================================================
+// Relids word-vector algebra (nodes/bitmapset.c) — inline, faithful.
+//
+// `Relids = Option<Box<Bitmapset>>` with `Bitmapset { words: Vec<u64> }`. The
+// empty set is `None`. We mirror bitmapset.c: the canonical representation has
+// no trailing all-zero words, so the empty set is `None`.
+// ===========================================================================
+
+const BITS_PER_WORD: i32 = 64;
+
+#[inline]
+fn wordnum(x: i32) -> usize {
+    (x / BITS_PER_WORD) as usize
+}
+#[inline]
+fn bitnum(x: i32) -> u32 {
+    (x % BITS_PER_WORD) as u32
+}
+
+/// Drop trailing all-zero words; return `None` if the set became empty. Keeps
+/// `Relids` canonical (`bms_is_empty` ⇔ `None`).
+fn normalize(mut bms: Box<Bitmapset>) -> Relids {
+    while let Some(&last) = bms.words.last() {
+        if last == 0 {
+            bms.words.pop();
+        } else {
+            break;
+        }
+    }
+    if bms.words.is_empty() {
+        None
+    } else {
+        Some(bms)
+    }
+}
+
+/// `bms_add_member(a, x)` — add member `x` to `a`, recycling `a`.
+fn bms_add_member(a: Relids, x: i32) -> Relids {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    let mut bms = a.unwrap_or_else(|| Box::new(Bitmapset { words: Vec::new() }));
+    let wnum = wordnum(x);
+    if wnum >= bms.words.len() {
+        bms.words.resize(wnum + 1, 0);
+    }
+    bms.words[wnum] |= 1u64 << bitnum(x);
+    Some(bms)
+}
+
+/// `bms_add_members(a, b)` — `a := a ∪ b`, recycling `a`, `b` unchanged.
+fn bms_add_members(a: Relids, b: &Relids) -> Relids {
+    let bw = match b {
+        None => return a,
+        Some(b) => &b.words,
+    };
+    if bw.is_empty() {
+        return a;
+    }
+    let mut bms = a.unwrap_or_else(|| Box::new(Bitmapset { words: Vec::new() }));
+    if bms.words.len() < bw.len() {
+        bms.words.resize(bw.len(), 0);
+    }
+    for (i, &w) in bw.iter().enumerate() {
+        bms.words[i] |= w;
+    }
+    normalize(bms)
+}
+
+/// `bms_equal(a, b)` — set equality. Canonical sets compare word-for-word; the
+/// empty set is `None`/empty `words`.
+fn bms_equal(a: &Relids, b: &Relids) -> bool {
+    let aw: &[u64] = match a {
+        None => &[],
+        Some(a) => &a.words,
+    };
+    let bw: &[u64] = match b {
+        None => &[],
+        Some(b) => &b.words,
+    };
+    // Compare ignoring trailing zeros (defensive; canonical sets have none).
+    let alen = aw.iter().rposition(|&w| w != 0).map_or(0, |i| i + 1);
+    let blen = bw.iter().rposition(|&w| w != 0).map_or(0, |i| i + 1);
+    if alen != blen {
+        return false;
+    }
+    aw[..alen] == bw[..blen]
+}
+
+/// `bms_difference(a, b)` — a fresh set `a \ b` (inputs unchanged).
+fn bms_difference(a: &Relids, b: &Relids) -> Relids {
+    let aw = match a {
+        None => return None,
+        Some(a) => &a.words,
+    };
+    let bw: &[u64] = match b {
+        None => aw, // a \ ∅ = a; copy below
+        Some(b) => &b.words,
+    };
+    let mut words = aw.clone();
+    if let Some(b) = b {
+        let _ = bw;
+        for i in 0..words.len() {
+            if i < b.words.len() {
+                words[i] &= !b.words[i];
+            }
+        }
+    }
+    normalize(Box::new(Bitmapset { words }))
+}
+
+/// `bms_join(a, b)` — destructive union; both inputs recycled into the result.
+fn bms_join(a: Relids, b: Relids) -> Relids {
+    let a = match a {
+        None => return b,
+        Some(a) => a,
+    };
+    let b = match b {
+        None => return Some(a),
+        Some(b) => b,
+    };
+    let (mut result, other) = if a.words.len() < b.words.len() {
+        (b, a)
+    } else {
+        (a, b)
+    };
+    for i in 0..other.words.len() {
+        result.words[i] |= other.words[i];
+    }
+    normalize(result)
+}
+
+/// Convert an [`ExprRelids`] (the lifetime-free relids carried on a
+/// `Var`/`PlaceHolderVar`) into a borrowable [`Relids`]. The two share the same
+/// `{ words: Vec<u64> }` representation; an empty `words` is the empty set
+/// (`None`).
+fn expr_relids_to_relids(er: &types_nodes::primnodes::ExprRelids) -> Relids {
+    if er.words.iter().all(|&w| w == 0) {
+        None
+    } else {
+        Some(Box::new(Bitmapset {
+            words: er.words.clone(),
+        }))
+    }
+}
+
+// ===========================================================================
+// pull_varnos / pull_varnos_of_level (var.c:113-278)
+// ===========================================================================
+
+/// `pull_varnos_context` (var.c:33-38).
+struct PullVarnosContext<'a> {
+    varnos: Relids,
+    root: Option<&'a PlannerInfo>,
+    sublevels_up: i32,
+}
+
+/// `pull_varnos(root, node)` (var.c:113). Create a set of all the distinct
+/// varnos present in a parsetree. Only varnos referencing level-zero rtable
+/// entries are considered. The result includes outer-join relids mentioned in
+/// `Var.varnullingrels` and `PlaceHolderVar.phnullingrels`. `root` may be `None`
+/// if PlaceHolderVars need not be processed.
+pub fn pull_varnos(root: Option<&PlannerInfo>, node: &Node) -> Relids {
+    let mut context = PullVarnosContext {
+        varnos: None,
+        root,
+        sublevels_up: 0,
+    };
+    // Must be prepared to start with a Query or a bare expression tree; if it's
+    // a Query, we don't want to increment sublevels_up.
+    query_or_expression_tree_walker(
+        node,
+        &mut |n: &Node| pull_varnos_walker(n, &mut context),
+        0,
+    );
+    context.varnos
+}
+
+/// `pull_varnos_of_level(root, node, levelsup)` (var.c:139). Only Vars of the
+/// specified level are considered.
+pub fn pull_varnos_of_level(root: Option<&PlannerInfo>, node: &Node, levelsup: i32) -> Relids {
+    let mut context = PullVarnosContext {
+        varnos: None,
+        root,
+        sublevels_up: levelsup,
+    };
+    query_or_expression_tree_walker(
+        node,
+        &mut |n: &Node| pull_varnos_walker(n, &mut context),
+        0,
+    );
+    context.varnos
+}
+
+/// `pull_varnos_walker` (var.c:160).
+fn pull_varnos_walker(node: &Node, context: &mut PullVarnosContext<'_>) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            if var.varlevelsup as i32 == context.sublevels_up {
+                context.varnos = bms_add_member(context.varnos.take(), var.varno);
+                context.varnos = bms_add_members(
+                    context.varnos.take(),
+                    &expr_relids_to_relids(&var.varnullingrels),
+                );
+            }
+            false
+        }
+        Node::Expr(Expr::CurrentOfExpr(cexpr)) => {
+            if context.sublevels_up == 0 {
+                context.varnos = bms_add_member(context.varnos.take(), cexpr.cvarno as i32);
+            }
+            false
+        }
+        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+            // If a PlaceHolderVar is not of the target query level, ignore it,
+            // instead recursing into its expression to see if it contains any
+            // vars of the target level. We also do that when no "root" is
+            // passed.
+            if phv.phlevelsup as i32 == context.sublevels_up && context.root.is_some() {
+                let root = context.root.unwrap();
+
+                // Ideally, the PHV's contribution is its ph_eval_at set; but
+                // this code can run before that's computed. If we cannot find a
+                // PlaceHolderInfo, fall back to the syntactic level (phv.phrels).
+                let mut phinfo: Option<&types_pathnodes::PlaceHolderInfo> = None;
+                if phv.phlevelsup == 0 && (phv.phid as i32) < root.placeholder_array_size {
+                    if let Some(Some(phid)) = root.placeholder_array.get(phv.phid as usize) {
+                        phinfo = Some(root.phinfo(*phid));
+                    }
+                }
+
+                let phv_phrels = expr_relids_to_relids(&phv.phrels);
+                match phinfo {
+                    None => {
+                        // No PlaceHolderInfo yet, use phrels.
+                        context.varnos = bms_add_members(context.varnos.take(), &phv_phrels);
+                    }
+                    Some(phinfo) => {
+                        let ph_var_phrels = &phinfo.ph_var_phrels;
+                        if bms_equal(&phv_phrels, ph_var_phrels) {
+                            // Normal case: use ph_eval_at.
+                            context.varnos =
+                                bms_add_members(context.varnos.take(), &phinfo.ph_eval_at);
+                        } else {
+                            // Translated PlaceHolderVar: translate ph_eval_at.
+                            // remove what was removed from phv.phrels ...
+                            let delta = bms_difference(ph_var_phrels, &phv_phrels);
+                            let mut newevalat = bms_difference(&phinfo.ph_eval_at, &delta);
+                            // ... then if that was in fact part of ph_eval_at ...
+                            if !bms_equal(&newevalat, &phinfo.ph_eval_at) {
+                                // ... add what was added
+                                let delta = bms_difference(&phv_phrels, ph_var_phrels);
+                                newevalat = bms_join(newevalat, delta);
+                            }
+                            context.varnos = bms_join(context.varnos.take(), newevalat);
+                        }
+                    }
+                }
+
+                // In all three cases, include phnullingrels in the result.
+                context.varnos = bms_add_members(
+                    context.varnos.take(),
+                    &expr_relids_to_relids(&phv.phnullingrels),
+                );
+                return false; // don't recurse into expression
+            }
+            // PHV of a different level (or no root): recurse into the expr.
+            expression_tree_walker(node, &mut |n: &Node| pull_varnos_walker(n, context))
+        }
+        Node::Query(q) => {
+            // Recurse into RTE subquery or not-yet-planned sublink subquery.
+            context.sublevels_up += 1;
+            let result =
+                query_tree_walker(q, &mut |n: &Node| pull_varnos_walker(n, context), 0);
+            context.sublevels_up -= 1;
+            result
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| pull_varnos_walker(n, context)),
+    }
+}
+
+// ===========================================================================
+// pull_varattnos (var.c:295-328)
+// ===========================================================================
+
+/// `pull_varattnos_context` (var.c:40-44). The result here is the lifetime-free
+/// [`Relids`] word set (system attributes fit because numbers are offset by
+/// `FirstLowInvalidHeapAttributeNumber`).
+struct PullVarattnosContext {
+    varattnos: Relids,
+    varno: i32,
+}
+
+/// `pull_varattnos(node, varno, &varattnos)` (var.c:295). Find all the distinct
+/// attribute numbers present in `node` that reference range-table entry `varno`
+/// at rtable level zero, offset by `FirstLowInvalidHeapAttributeNumber`, added
+/// to the initial `varattnos`. C signature is `void(Node*, Index, Bitmapset**)`;
+/// the owned form takes the initial set by value and returns the updated one.
+pub fn pull_varattnos(node: &Node, varno: i32, varattnos: Relids) -> Relids {
+    let mut context = PullVarattnosContext { varattnos, varno };
+    let _ = pull_varattnos_walker(node, &mut context);
+    context.varattnos
+}
+
+/// `pull_varattnos_walker` (var.c:308).
+fn pull_varattnos_walker(node: &Node, context: &mut PullVarattnosContext) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            if var.varno == context.varno && var.varlevelsup == 0 {
+                let member = var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
+                context.varattnos = bms_add_member(context.varattnos.take(), member);
+            }
+            false
+        }
+        // Should not find an unplanned subquery (C: Assert(!IsA(node, Query))).
+        Node::Query(_) => {
+            panic!("pull_varattnos_walker: unexpected unplanned Query subtree");
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| pull_varattnos_walker(n, context)),
+    }
+}
+
+// ===========================================================================
+// pull_vars_of_level (var.c:338-392)
+// ===========================================================================
+
+/// `pull_vars_context` (var.c:46-50). The Vars/PHVs are cloned into the list
+/// (the owned tree does not hand out shared `Node *` aliases).
+struct PullVarsContext {
+    vars: Vec<Expr>,
+    sublevels_up: i32,
+}
+
+/// `pull_vars_of_level(node, levelsup)` (var.c:338). Create a list of all Vars
+/// (and PlaceHolderVars) referencing the specified query level. The cloned
+/// `Var`/`PlaceHolderVar` `Expr`s are returned (the seam interns them into the
+/// arena and hands back `NodeId`s).
+pub fn pull_vars_of_level(node: &Node, levelsup: i32) -> Vec<Expr> {
+    let mut context = PullVarsContext {
+        vars: Vec::new(),
+        sublevels_up: levelsup,
+    };
+    query_or_expression_tree_walker(
+        node,
+        &mut |n: &Node| pull_vars_walker(n, &mut context),
+        0,
+    );
+    context.vars
+}
+
+/// `pull_vars_walker` (var.c:358).
+fn pull_vars_walker(node: &Node, context: &mut PullVarsContext) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            if var.varlevelsup as i32 == context.sublevels_up {
+                context.vars.push(Expr::Var(var.clone()));
+            }
+            false
+        }
+        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+            if phv.phlevelsup as i32 == context.sublevels_up {
+                context.vars.push(Expr::PlaceHolderVar(phv.clone()));
+            }
+            // we don't want to look into the contained expression
+            false
+        }
+        Node::Query(q) => {
+            context.sublevels_up += 1;
+            let result = query_tree_walker(q, &mut |n: &Node| pull_vars_walker(n, context), 0);
+            context.sublevels_up -= 1;
+            result
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context)),
+    }
+}
+
+// ===========================================================================
+// contain_var_clause (var.c:405-431)
+// ===========================================================================
+
+/// `contain_var_clause(node)` (var.c:405). True iff `node` contains any Var of
+/// the current query level. Does not examine subqueries; must only be used after
+/// reduction of sublinks to subplans.
+pub fn contain_var_clause(node: &Node) -> bool {
+    contain_var_clause_walker(node)
+}
+
+/// `contain_var_clause_walker` (var.c:411).
+fn contain_var_clause_walker(node: &Node) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => var.varlevelsup == 0,
+        Node::Expr(Expr::CurrentOfExpr(_)) => true,
+        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+            if phv.phlevelsup == 0 {
+                return true;
+            }
+            // else fall through to check the contained expr
+            expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n))
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n)),
+    }
+}
+
+// ===========================================================================
+// contain_vars_of_level (var.c:443-493)
+// ===========================================================================
+
+/// `contain_vars_of_level(node, levelsup)` (var.c:443). True iff `node` contains
+/// any Var of the specified query level. Recurses into sublinks; may be invoked
+/// directly on a Query.
+pub fn contain_vars_of_level(node: &Node, levelsup: i32) -> bool {
+    let mut sublevels_up = levelsup;
+    query_or_expression_tree_walker(
+        node,
+        &mut |n: &Node| contain_vars_of_level_walker(n, &mut sublevels_up),
+        0,
+    )
+}
+
+/// `contain_vars_of_level_walker` (var.c:454).
+fn contain_vars_of_level_walker(node: &Node, sublevels_up: &mut i32) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => var.varlevelsup as i32 == *sublevels_up,
+        Node::Expr(Expr::CurrentOfExpr(_)) => *sublevels_up == 0,
+        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+            if phv.phlevelsup as i32 == *sublevels_up {
+                return true;
+            }
+            expression_tree_walker(node, &mut |n: &Node| {
+                contain_vars_of_level_walker(n, sublevels_up)
+            })
+        }
+        Node::Query(q) => {
+            *sublevels_up += 1;
+            let result = query_tree_walker(
+                q,
+                &mut |n: &Node| contain_vars_of_level_walker(n, sublevels_up),
+                0,
+            );
+            *sublevels_up -= 1;
+            result
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| {
+            contain_vars_of_level_walker(n, sublevels_up)
+        }),
+    }
+}
+
+// ===========================================================================
+// contain_vars_returning_old_or_new (var.c:510-536)
+// ===========================================================================
+
+/// `contain_vars_returning_old_or_new(node)` (var.c:510). True iff `node`
+/// contains any current-level Var whose `varreturningtype` is OLD/NEW, or any
+/// current-level `ReturningExpr`. Does not examine subqueries.
+pub fn contain_vars_returning_old_or_new(node: &Node) -> bool {
+    contain_vars_returning_old_or_new_walker(node)
+}
+
+/// `contain_vars_returning_old_or_new_walker` (var.c:516).
+fn contain_vars_returning_old_or_new_walker(node: &Node) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            var.varlevelsup == 0
+                && var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT
+        }
+        Node::Expr(Expr::ReturningExpr(rexpr)) => rexpr.retlevelsup == 0,
+        _ => expression_tree_walker(node, &mut |n: &Node| {
+            contain_vars_returning_old_or_new_walker(n)
+        }),
+    }
+}
+
+// ===========================================================================
+// locate_var_of_level (var.c:554-610)
+// ===========================================================================
+
+/// `locate_var_of_level_context` (var.c:52-56).
+struct LocateVarOfLevelContext {
+    var_location: i32,
+    sublevels_up: i32,
+}
+
+/// `locate_var_of_level(node, levelsup)` (var.c:554). Find the parse location of
+/// any Var of the specified query level, or -1. Recurses into sublinks.
+pub fn locate_var_of_level(node: &Node, levelsup: i32) -> i32 {
+    let mut context = LocateVarOfLevelContext {
+        var_location: -1,
+        sublevels_up: levelsup,
+    };
+    let _ = query_or_expression_tree_walker(
+        node,
+        &mut |n: &Node| locate_var_of_level_walker(n, &mut context),
+        0,
+    );
+    context.var_location
+}
+
+/// `locate_var_of_level_walker` (var.c:570).
+fn locate_var_of_level_walker(node: &Node, context: &mut LocateVarOfLevelContext) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            if var.varlevelsup as i32 == context.sublevels_up && var.location >= 0 {
+                context.var_location = var.location;
+                return true;
+            }
+            false
+        }
+        // since CurrentOfExpr doesn't carry location, nothing we can do
+        Node::Expr(Expr::CurrentOfExpr(_)) => false,
+        // No extra code needed for PlaceHolderVar; just look in contained expr.
+        Node::Query(q) => {
+            context.sublevels_up += 1;
+            let result = query_tree_walker(
+                q,
+                &mut |n: &Node| locate_var_of_level_walker(n, context),
+                0,
+            );
+            context.sublevels_up -= 1;
+            result
+        }
+        _ => expression_tree_walker(node, &mut |n: &Node| {
+            locate_var_of_level_walker(n, context)
+        }),
+    }
+}
+
+// ===========================================================================
+// pull_var_clause (var.c:652-752)
+// ===========================================================================
+
+/// `PVC_INCLUDE_AGGREGATES` — include `Aggref`s in output list.
+pub const PVC_INCLUDE_AGGREGATES: i32 = 0x0001;
+/// `PVC_RECURSE_AGGREGATES` — recurse into `Aggref` arguments.
+pub const PVC_RECURSE_AGGREGATES: i32 = 0x0002;
+/// `PVC_INCLUDE_WINDOWFUNCS` — include `WindowFunc`s in output list.
+pub const PVC_INCLUDE_WINDOWFUNCS: i32 = 0x0004;
+/// `PVC_RECURSE_WINDOWFUNCS` — recurse into `WindowFunc` arguments.
+pub const PVC_RECURSE_WINDOWFUNCS: i32 = 0x0008;
+/// `PVC_INCLUDE_PLACEHOLDERS` — include `PlaceHolderVar`s in output list.
+pub const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0010;
+/// `PVC_RECURSE_PLACEHOLDERS` — recurse into `PlaceHolderVar` expressions.
+pub const PVC_RECURSE_PLACEHOLDERS: i32 = 0x0020;
+
+/// `pull_var_clause_context` (var.c:58-62).
+struct PullVarClauseContext {
+    varlist: Vec<Expr>,
+    flags: i32,
+}
+
+/// `pull_var_clause(node, flags)` (var.c:652). Recursively pull all Var nodes
+/// from an expression clause. `Aggref`/`WindowFunc`/`PlaceHolderVar` are handled
+/// per the `PVC_*` flag bits; `GroupingFunc` is treated like `Aggref`;
+/// `CurrentOfExpr` is ignored. Upper-level vars/aggrefs/PHVs should not be seen.
+/// Returns a list of the (cloned) nodes found. Does not examine subqueries.
+pub fn pull_var_clause(node: &Node, flags: i32) -> Vec<Expr> {
+    // Assert that caller has not specified inconsistent flags.
+    debug_assert_ne!(
+        flags & (PVC_INCLUDE_AGGREGATES | PVC_RECURSE_AGGREGATES),
+        PVC_INCLUDE_AGGREGATES | PVC_RECURSE_AGGREGATES
+    );
+    debug_assert_ne!(
+        flags & (PVC_INCLUDE_WINDOWFUNCS | PVC_RECURSE_WINDOWFUNCS),
+        PVC_INCLUDE_WINDOWFUNCS | PVC_RECURSE_WINDOWFUNCS
+    );
+    debug_assert_ne!(
+        flags & (PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS),
+        PVC_INCLUDE_PLACEHOLDERS | PVC_RECURSE_PLACEHOLDERS
+    );
+
+    let mut context = PullVarClauseContext {
+        varlist: Vec::new(),
+        flags,
+    };
+    pull_var_clause_walker(node, &mut context);
+    context.varlist
+}
+
+/// `pull_var_clause_walker` (var.c:672).
+fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bool {
+    match node {
+        Node::Expr(Expr::Var(var)) => {
+            if var.varlevelsup != 0 {
+                panic!("Upper-level Var found where not expected");
+            }
+            context.varlist.push(Expr::Var(var.clone()));
+            return false;
+        }
+        Node::Expr(Expr::Aggref(agg)) => {
+            if agg.agglevelsup != 0 {
+                panic!("Upper-level Aggref found where not expected");
+            }
+            if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                context.varlist.push(node_expr_clone(node));
+                return false; // do NOT descend into the contained expression
+            } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
+                // fall through to recurse into the aggregate's arguments
+            } else {
+                panic!("Aggref found where not expected");
+            }
+        }
+        Node::Expr(Expr::GroupingFunc(grp)) => {
+            if grp.agglevelsup != 0 {
+                panic!("Upper-level GROUPING found where not expected");
+            }
+            if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                context.varlist.push(node_expr_clone(node));
+                return false;
+            } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
+                // fall through to recurse into the GroupingFunc's arguments
+            } else {
+                panic!("GROUPING found where not expected");
+            }
+        }
+        Node::Expr(Expr::WindowFunc(_)) => {
+            // WindowFuncs have no levelsup field to check ...
+            if context.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
+                context.varlist.push(node_expr_clone(node));
+                return false;
+            } else if context.flags & PVC_RECURSE_WINDOWFUNCS != 0 {
+                // fall through to recurse into the windowfunc's arguments
+            } else {
+                panic!("WindowFunc found where not expected");
+            }
+        }
+        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+            if phv.phlevelsup != 0 {
+                panic!("Upper-level PlaceHolderVar found where not expected");
+            }
+            if context.flags & PVC_INCLUDE_PLACEHOLDERS != 0 {
+                context.varlist.push(Expr::PlaceHolderVar(phv.clone()));
+                return false;
+            } else if context.flags & PVC_RECURSE_PLACEHOLDERS != 0 {
+                // fall through to recurse into the placeholder's expression
+            } else {
+                panic!("PlaceHolderVar found where not expected");
+            }
+        }
+        _ => {}
+    }
+    expression_tree_walker(node, &mut |n: &Node| pull_var_clause_walker(n, context))
+}
+
+/// Clone the `Expr` payload of a `Node::Expr(..)` arm. Only called on arms known
+/// to be `Node::Expr`.
+fn node_expr_clone(node: &Node) -> Expr {
+    match node {
+        Node::Expr(e) => e.clone(),
+        _ => unreachable!("node_expr_clone on non-Expr node"),
+    }
+}
+
+// ===========================================================================
+// Seam installs — the join-path enumerator (`get_memoize_path`) consumes these
+// NodeId-shaped views; var.c owns them and resolves the handle internally.
+// ===========================================================================
+
+/// `pull_varnos(root, (Node *) node)` (var.c) — installed seam. Resolves the
+/// arena `NodeId` to `&Expr`, wraps as `Node::Expr`, and walks. The C `root` is
+/// always passed here (the join-path caller has a real `PlannerInfo`).
+fn seam_pull_varnos(root: &PlannerInfo, node: NodeId) -> Relids {
+    let expr = root.node(node).clone();
+    let wrapped = Node::Expr(expr);
+    pull_varnos(Some(root), &wrapped)
+}
+
+/// `pull_vars_of_level((Node *) node, levelsup)` (var.c) — installed seam.
+/// Returns the level-`levelsup` Vars/PHVs as fresh arena handles.
+fn seam_pull_vars_of_level(
+    root: &mut PlannerInfo,
+    node: NodeId,
+    levelsup: i32,
+) -> PgResult<Vec<NodeId>> {
+    let expr = root.node(node).clone();
+    let wrapped = Node::Expr(expr);
+    let vars = pull_vars_of_level(&wrapped, levelsup);
+    let mut out = Vec::with_capacity(vars.len());
+    for v in vars {
+        out.push(root.alloc_node(v));
+    }
+    Ok(out)
+}
+
+/// `IsA(node, Var)` — installed seam.
+fn seam_node_is_var(root: &PlannerInfo, node: NodeId) -> bool {
+    matches!(root.node(node), Expr::Var(_))
+}
+
+/// `((Var *) node)->varno` — installed seam.
+fn seam_var_varno(root: &PlannerInfo, node: NodeId) -> i32 {
+    match root.node(node) {
+        Expr::Var(v) => v.varno,
+        other => panic!("var_varno: node is not a Var (tag {:?})", core::mem::discriminant(other)),
+    }
+}
+
+/// `pull_varattnos(node, varno, &varattnos)` (var.c) — installed seam. The
+/// existing `backend-optimizer-util-var-seams` contract takes the expression by
+/// value and `varno: u32`, accumulating into a `types_nodes::Bitmapset`
+/// allocated in `mcx`; this bridges the lifetime-free word-set collector into
+/// that `mcx`-owned result.
+fn seam_pull_varattnos<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &Expr,
+    varno: u32,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    let wrapped = Node::Expr(node.clone());
+    let relids = pull_varattnos(&wrapped, varno as i32, None);
+    match relids {
+        None => Ok(None),
+        Some(bms) => {
+            // Materialize the word set into an mcx-owned `types_nodes::Bitmapset`
+            // by adding each member through the canonical bms_add_member.
+            let mut acc: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+            let mut bit: i32 = -1;
+            loop {
+                bit = next_member(&bms.words, bit);
+                if bit < 0 {
+                    break;
+                }
+                acc = Some(backend_nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
+            }
+            Ok(acc)
+        }
+    }
+}
+
+/// Smallest set member greater than `prevbit` in a word-vector, or -1 if none.
+/// Mirrors `bms_next_member` over the canonical word storage.
+fn next_member(words: &[u64], prevbit: i32) -> i32 {
+    let mut bit = prevbit;
+    let total = (words.len() as i32) * BITS_PER_WORD;
+    loop {
+        bit += 1;
+        if bit >= total {
+            return -1;
+        }
+        let w = words[wordnum(bit)];
+        if w & (1u64 << bitnum(bit)) != 0 {
+            return bit;
+        }
+    }
+}
+
+/// Install the var.c-owned seams consumed by the join-path enumerator and by
+/// `nodeModifyTable` (`pull_varattnos`).
+pub fn init_seams() {
+    use backend_optimizer_path_joinpath_seams as jp;
+    jp::pull_varnos::set(seam_pull_varnos);
+    jp::pull_vars_of_level::set(seam_pull_vars_of_level);
+    jp::node_is_var::set(seam_node_is_var);
+    jp::var_varno::set(seam_var_varno);
+
+    backend_optimizer_util_var_seams::pull_varattnos::set(seam_pull_varattnos);
+}
