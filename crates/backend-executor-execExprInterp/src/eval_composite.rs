@@ -42,6 +42,7 @@
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ExprState.resvalue` / `ResultCell.value` carry, and what the
 // composite helpers operate on directly.
+use backend_utils_fmgr_fmgr_seams::function_call_invoke;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
@@ -232,13 +233,14 @@ pub fn ExecEvalMinMax<'mcx>(
     // Assert(fcinfo->args[0].isnull == false);
     // Assert(fcinfo->args[1].isnull == false);
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    let (values, nulls, nelems, operator) = match &steps[op].d {
+    let (values, nulls, nelems, operator, fn_oid, collation) = match &steps[op].d {
         ExprEvalStepData::MinMax {
             values,
             nulls,
             nelems,
             op: minmax_op,
-            ..
+            finfo,
+            fcinfo_data,
         } => {
             let values = values
                 .as_ref()
@@ -246,7 +248,20 @@ pub fn ExecEvalMinMax<'mcx>(
             let nulls = nulls
                 .as_ref()
                 .expect("ExecEvalMinMax: op->d.minmax.nulls not allocated");
-            (values.clone(), nulls.clone(), *nelems, *minmax_op)
+            let finfo = finfo
+                .as_ref()
+                .expect("ExecEvalMinMax: op->d.minmax.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("ExecEvalMinMax: op->d.minmax.fcinfo_data missing");
+            (
+                values.clone(),
+                nulls.clone(),
+                *nelems,
+                *minmax_op,
+                finfo.fn_oid,
+                fcinfo.fncollation,
+            )
         }
         other => unreachable!("ExecEvalMinMax: step.d is not MinMax: {other:?}"),
     };
@@ -278,17 +293,31 @@ pub fn ExecEvalMinMax<'mcx>(
             // if (cmpresult > 0 && operator == IS_LEAST)    *op->resvalue = values[off];
             // else if (cmpresult < 0 && operator == IS_GREATEST) *op->resvalue = values[off];
             //
-            // The comparison `FunctionCallInvoke(fcinfo)` over `fcinfo->args[0/1]`
-            // needs the fmgr-widened FunctionCallInfoBaseData (trimmed model has no
-            // args[]/isnull) — same blocker the ExecJust* func paths document.
-            let _ = (cur_value, operator, MinMaxOp::IS_GREATEST, MinMaxOp::IS_LEAST);
-            panic!(
-                "backend-utils-fmgr-fmgr: ExecEvalMinMax comparison \
-                 FunctionCallInvoke(fcinfo) over fcinfo->args[0]/args[1] needs the \
-                 fmgr-widened FunctionCallInfoBaseData (the trimmed model carries \
-                 only resultinfo, no args[]/isnull); blocked until fmgr widens the \
-                 call frame in this lineage"
-            )
+            // The resolved FmgrInfo cannot cross the seam, so dispatch by
+            // fn_oid through function_call_invoke (#296: the call frame now
+            // carries args/collation/isnull). The two compared values are
+            // gathered into the args[0]/args[1] frame; both are non-null here.
+            let args = [
+                types_datum::NullableDatum {
+                    value: types_datum::Datum::from_usize(cur_value.as_usize()),
+                    isnull: false,
+                },
+                types_datum::NullableDatum {
+                    value: types_datum::Datum::from_usize(values[off].as_usize()),
+                    isnull: false,
+                },
+            ];
+            let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            if isnull {
+                // probably should not happen
+                continue;
+            }
+            let cmpresult = types_datum::Datum::from_usize(word.as_usize()).as_i32();
+            if (cmpresult > 0 && operator == MinMaxOp::IS_LEAST)
+                || (cmpresult < 0 && operator == MinMaxOp::IS_GREATEST)
+            {
+                store_result(state, op, values[off].clone(), false);
+            }
         }
     }
 
