@@ -7782,6 +7782,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-init-subselect-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7800,6 +7809,37 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-allpaths",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]

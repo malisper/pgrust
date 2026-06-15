@@ -1,0 +1,30 @@
+[package]
+name = "backend-optimizer-plan-small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_plan_small"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+
+# Real, already-landed callees (direct deps — no cycle).
+backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
+backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
+backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
+backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
+backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
+
+# Unported callees reached through their owners' seam crates (loud-panic until owner lands).
+backend-optimizer-plan-small-seams = { path = "../backend-optimizer-plan-small-seams" }
+backend-optimizer-plan-init-subselect-seams = { path = "../backend-optimizer-plan-init-subselect-seams" }
+backend-optimizer-util-appendinfo-seams = { path = "../backend-optimizer-util-appendinfo-seams" }
