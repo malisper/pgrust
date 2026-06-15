@@ -1100,11 +1100,10 @@ fn update_frameheadpos<'mcx>(
             }
 
             while !estate.slot(framehead_slot).is_empty() {
-                let mcx = estate.es_query_cxt;
                 let (headval, headisnull) =
-                    execTuples::slot_getattr::call(mcx, estate.slot_mut(framehead_slot), sortCol)?;
+                    execTuples::slot_getattr::call(estate, framehead_slot, sortCol)?;
                 let (currval, currisnull) =
-                    execTuples::slot_getattr::call(mcx, estate.slot_mut(scan_slot), sortCol)?;
+                    execTuples::slot_getattr::call(estate, scan_slot, sortCol)?;
                 if headisnull || currisnull {
                     // order of the rows depends only on nulls_first
                     if winstate.inRangeNullsFirst {
@@ -1316,11 +1315,10 @@ fn update_frametailpos<'mcx>(
             }
 
             while !estate.slot(frametail_slot).is_empty() {
-                let mcx = estate.es_query_cxt;
                 let (tailval, tailisnull) =
-                    execTuples::slot_getattr::call(mcx, estate.slot_mut(frametail_slot), sortCol)?;
+                    execTuples::slot_getattr::call(estate, frametail_slot, sortCol)?;
                 let (currval, currisnull) =
-                    execTuples::slot_getattr::call(mcx, estate.slot_mut(scan_slot), sortCol)?;
+                    execTuples::slot_getattr::call(estate, scan_slot, sortCol)?;
                 if tailisnull || currisnull {
                     if winstate.inRangeNullsFirst {
                         if !tailisnull {

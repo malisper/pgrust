@@ -479,6 +479,221 @@ fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
     }
 }
 
+// ===========================================================================
+//  Slot-payload op seams over the pool's `SlotData` (the body already exists in
+//  `slot_store_fetch` / `slot_deform`; these adapters resolve the `SlotId` to
+//  the live `&mut SlotData` and thread `mcx`).
+// ===========================================================================
+
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
+
+/// Seam `exec_materialize_slot` — `ExecMaterializeSlot`.
+fn seam_exec_materialize_slot<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecMaterializeSlot(mcx, estate.slot_data_mut(slot))
+}
+
+/// Seam `exec_store_virtual_tuple` — `ExecStoreVirtualTuple`.
+fn seam_exec_store_virtual_tuple<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
+    crate::slot_store_fetch::ExecStoreVirtualTuple(estate.slot_data_mut(slot))
+}
+
+/// Seam `exec_store_first_datum` — `ExecClearTuple(slot); slot->tts_values[0] =
+/// val; slot->tts_isnull[0] = isnull; ExecStoreVirtualTuple(slot)`
+/// (nodeSort's Datum-sort output path).
+fn seam_exec_store_first_datum<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    val: Datum<'mcx>,
+    is_null: bool,
+) -> PgResult<()> {
+    let slot_data = estate.slot_data_mut(slot);
+    // ExecClearTuple(slot);
+    crate::slot_store_fetch::ExecClearTuple(slot_data)?;
+    // slot->tts_values[0] = val; slot->tts_isnull[0] = isnull;
+    let base = slot_data.base_mut();
+    base.tts_values[0] = val;
+    base.tts_isnull[0] = is_null;
+    // ExecStoreVirtualTuple(slot);
+    crate::slot_store_fetch::ExecStoreVirtualTuple(slot_data)
+}
+
+/// Seam `store_virtual_values` — fill a virtual slot's per-column payload with
+/// `values`/`isnull` (the N-column analogue of `exec_store_first_datum`):
+/// `ExecClearTuple(slot); memcpy(tts_values, values); memcpy(tts_isnull,
+/// isnull); ExecStoreVirtualTuple(slot)`.
+fn seam_store_virtual_values<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<()> {
+    let slot_data = estate.slot_data_mut(slot);
+    // ExecClearTuple(slot);
+    crate::slot_store_fetch::ExecClearTuple(slot_data)?;
+    // memcpy(slot->tts_values, values, natts * sizeof(Datum));
+    // memcpy(slot->tts_isnull, isnull, natts * sizeof(bool));
+    let base = slot_data.base_mut();
+    for (i, v) in values.iter().enumerate() {
+        base.tts_values[i] = v.clone();
+    }
+    for (i, n) in isnull.iter().enumerate() {
+        base.tts_isnull[i] = *n;
+    }
+    // ExecStoreVirtualTuple(slot);
+    crate::slot_store_fetch::ExecStoreVirtualTuple(slot_data)
+}
+
+/// Seam `exec_copy_slot_heap_tuple` — `ExecCopySlotHeapTuple` (returns the
+/// owned [`FormedTuple`] carrier copied in the per-query context).
+fn seam_exec_copy_slot_heap_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<FormedTuple<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecCopySlotHeapTuple(mcx, estate.slot_data_mut(slot))
+}
+
+/// Seam `slot_getattr_by_id` — `slot_getattr` resolving the pool `SlotId` to its
+/// live payload-bearing `&mut SlotData`.
+fn seam_slot_getattr_by_id<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    attnum: AttrNumber,
+) -> PgResult<backend_executor_execTuples_seams::SlotAttr<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    let (value, isnull) = crate::slot_deform::slot_getattr(mcx, estate.slot_data_mut(slot), attnum)?;
+    Ok(backend_executor_execTuples_seams::SlotAttr { value, isnull })
+}
+
+/// Seam `slot_getattr` (SlotId form) — `slot_getattr` resolving the pool
+/// `SlotId` to its live payload-bearing `&mut SlotData`, returning the bare
+/// `(value, isnull)` pair.
+fn seam_slot_getattr<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    attnum: AttrNumber,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_deform::slot_getattr(mcx, estate.slot_data_mut(slot), attnum)
+}
+
+/// Seam `slot_getsomeattr` — `slot_getsomeattrs(slot, attnum)` then
+/// `(slot->tts_values[attnum-1], slot->tts_isnull[attnum-1])`, resolving the
+/// pool `SlotId` to its live `&mut SlotData`.
+fn seam_slot_getsomeattr<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    attnum: i32,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mcx = estate.es_query_cxt;
+    let slot_data = estate.slot_data_mut(slot);
+    // slot_getsomeattrs(slot, attnum);
+    crate::slot_deform::slot_getsomeattrs(mcx, slot_data, attnum)?;
+    // return (slot->tts_values[attnum - 1], slot->tts_isnull[attnum - 1]);
+    let base = slot_data.base();
+    let value = base.tts_values[(attnum - 1) as usize].clone_in(mcx)?;
+    let isnull = base.tts_isnull[(attnum - 1) as usize];
+    Ok((value, isnull))
+}
+
+/// Seam `slot_natts` — `slot->tts_tupleDescriptor->natts` of the pool slot.
+fn seam_slot_natts(estate: &EStateData<'_>, slot: SlotId) -> i32 {
+    estate
+        .slot_data(slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .map(|d| d.natts)
+        .unwrap_or(0)
+}
+
+/// Seam `exec_scan_slot_descriptor` — `scanstate->ss_ScanTupleSlot->
+/// tts_tupleDescriptor`: the scan slot's tuple descriptor, copied into `mcx`
+/// (C reads the shared pointer).
+fn seam_exec_scan_slot_descriptor<'mcx>(
+    mcx: Mcx<'mcx>,
+    scanstate: &ScanStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<TupleDesc<'mcx>> {
+    // scanstate->ss_ScanTupleSlot->tts_tupleDescriptor
+    let slot = scanstate
+        .ss_ScanTupleSlot
+        .expect("exec_scan_slot_descriptor: scan slot not initialized");
+    match estate.slot_data(slot).base().tts_tupleDescriptor.as_deref() {
+        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// Seam `execute_attr_map_slot_explicit` — `execute_attr_map_slot(attrMap,
+/// in_slot, out_slot)` (tupconvert.c) with an explicitly-supplied `attr_map`.
+///
+/// ```c
+/// outnatts = out_slot->tts_tupleDescriptor->natts;
+/// slot_getallattrs(in_slot);
+/// ExecClearTuple(out_slot);
+/// for (i = 0; i < outnatts; i++) {
+///     int j = attrMap->attnums[i] - 1;
+///     if (j == -1) { outvalues[i] = 0; outisnull[i] = true; }
+///     else { outvalues[i] = invalues[j]; outisnull[i] = inisnull[j]; }
+/// }
+/// ExecStoreVirtualTuple(out_slot);
+/// ```
+fn seam_execute_attr_map_slot_explicit<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    attr_map: &types_tuple::attmap::AttrMap<'mcx>,
+    in_slot: SlotId,
+    out_slot: SlotId,
+) -> PgResult<SlotId> {
+    let mcx = estate.es_query_cxt;
+    // slot_getallattrs(in_slot): deform every input column.
+    {
+        let in_data = estate.slot_data_mut(in_slot);
+        crate::slot_deform::slot_getallattrs(mcx, in_data)?;
+    }
+    // outnatts = out_slot->tts_tupleDescriptor->natts;
+    let outnatts = estate
+        .slot_data(out_slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .map(|d| d.natts)
+        .unwrap_or(0);
+    // Snapshot the input (value, isnull) columns before borrowing the out slot
+    // (the two pool entries are distinct; copy out the source values C reads via
+    // `invalues = in_slot->tts_values`).
+    let in_cols: Vec<(Datum<'mcx>, bool)> = {
+        let base = estate.slot_data(in_slot).base();
+        (0..base.tts_values.len())
+            .map(|j| (base.tts_values[j].clone(), base.tts_isnull[j]))
+            .collect()
+    };
+    // ExecClearTuple(out_slot);
+    {
+        let out_data = estate.slot_data_mut(out_slot);
+        crate::slot_store_fetch::ExecClearTuple(out_data)?;
+        // Transpose into proper fields of the out slot.
+        let base = out_data.base_mut();
+        for i in 0..outnatts as usize {
+            // int j = attrMap->attnums[i] - 1;
+            let j = attr_map.attnums[i] as i32 - 1;
+            if j == -1 {
+                // attrMap->attnums[i] == 0 means it's a NULL datum.
+                base.tts_values[i] = Datum::null();
+                base.tts_isnull[i] = true;
+            } else {
+                base.tts_values[i] = in_cols[j as usize].0.clone();
+                base.tts_isnull[i] = in_cols[j as usize].1;
+            }
+        }
+        // ExecStoreVirtualTuple(out_slot);
+        crate::slot_store_fetch::ExecStoreVirtualTuple(out_data)?;
+    }
+    // return out_slot;
+    Ok(out_slot)
+}
+
 /// Install every seam this unit owns.
 pub fn init_seams() {
     use backend_executor_execTuples_seams as seams;
@@ -517,7 +732,17 @@ pub fn init_seams() {
     // ExecTypeFromExprList is likewise fully owned + implemented in this crate's
     // exectype_tupoutput family, so its seam is installed here.
     seams::exec_type_from_expr_list::set(crate::exectype_tupoutput::ExecTypeFromExprList);
-    // ExecInitResultTypeTL lives in execTuples.c (sets ps_ResultTupleDesc from
-    // the plan's targetlist via ExecTypeFromTL); home its seam here.
-    seams::exec_init_result_type_tl::set(crate::exectype_tupoutput::ExecInitResultTypeTL);
+    // Slot-payload op seams over the pool's `SlotData` (bodies in
+    // `slot_store_fetch` / `slot_deform`; the adapters resolve the `SlotId`).
+    seams::exec_materialize_slot::set(seam_exec_materialize_slot);
+    seams::exec_store_virtual_tuple::set(seam_exec_store_virtual_tuple);
+    seams::exec_store_first_datum::set(seam_exec_store_first_datum);
+    seams::store_virtual_values::set(seam_store_virtual_values);
+    seams::exec_copy_slot_heap_tuple::set(seam_exec_copy_slot_heap_tuple);
+    seams::slot_getattr_by_id::set(seam_slot_getattr_by_id);
+    seams::slot_getattr::set(seam_slot_getattr);
+    seams::slot_getsomeattr::set(seam_slot_getsomeattr);
+    seams::slot_natts::set(seam_slot_natts);
+    seams::exec_scan_slot_descriptor::set(seam_exec_scan_slot_descriptor);
+    seams::execute_attr_map_slot_explicit::set(seam_execute_attr_map_slot_explicit);
 }

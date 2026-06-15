@@ -174,9 +174,8 @@ pub fn ExecNestLoop<'mcx>(
                     .ecxt(econtext)
                     .ecxt_outertuple
                     .expect("nest-loop outer tuple slot is missing");
-                let mcx = estate.es_query_cxt;
                 let (value, isnull) =
-                    execTuples::slot_getattr::call(mcx, estate.slot_mut(outer_id), varattno)?;
+                    execTuples::slot_getattr::call(estate, outer_id, varattno)?;
                 let prm = &mut estate.es_param_exec_vals[paramno as usize];
                 // `slot_getattr` now yields the canonical unified value, stored
                 // directly into `ParamExecData.value`

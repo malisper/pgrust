@@ -14739,6 +14739,7 @@ dependencies = [
 name = "types-pathnodes"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-hash",
  "types-nodes",
