@@ -8222,6 +8222,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-paramassign"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-equalfuncs",
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-paramassign-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-pathkeys-seams"
 version = "0.0.0"
 dependencies = [
@@ -8400,6 +8430,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-var-seams",
  "mcx",
@@ -15239,6 +15270,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",

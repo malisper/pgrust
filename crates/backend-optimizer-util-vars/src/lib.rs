@@ -47,12 +47,14 @@
 
 extern crate alloc;
 
+pub mod fix_indexqual;
 pub mod tlist;
 pub mod var;
 
 #[cfg(test)]
 mod tests;
 
+pub use fix_indexqual::fix_indexqual_operand;
 pub use var::{
     contain_var_clause, contain_vars_of_level, contain_vars_returning_old_or_new,
     locate_var_of_level, pull_var_clause, pull_varattnos, pull_varnos, pull_varnos_of_level,

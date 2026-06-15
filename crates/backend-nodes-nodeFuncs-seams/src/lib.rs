@@ -118,6 +118,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `exprLocation(node)` (nodeFuncs.c) — the parse location of an expression
+    /// node (or -1 if unknown), over the arena `Expr` value. Pure read.
+    /// Installed by the nodeFuncs.c owner; until then a call panics.
+    pub fn exprLocation(expr: &Expr) -> i32
+);
+
+seam_core::seam!(
     /// `equal(a, b)` (equalfuncs.c) — deep structural equality of two expression
     /// nodes, over the arena `Expr` value. `equal(NULL, NULL)` is true; this
     /// helper is only called with two present nodes.
