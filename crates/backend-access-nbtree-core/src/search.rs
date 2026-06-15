@@ -33,9 +33,6 @@
 //!
 //! # Genuinely-unported callees (honest seam-and-panic)
 //!
-//!   * `index_getattr` (single-attribute index-tuple deform over a byte slice):
-//!     no producer exists — the same blocker `utils.rs`/`preprocesskeys.rs`
-//!     documented. `_bt_compare`'s value extraction reaches it.
 //!   * `_bt_parallel_*` (nbtree.c): parallel-scan branches only.
 
 #![allow(non_snake_case)]
@@ -78,6 +75,7 @@ use backend_storage_page::{
     PageGetSpecialPointer, PageRef,
 };
 
+use backend_access_common_indextuple_seams as indextuple;
 use backend_access_index_indexam_seams as indexam;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -407,12 +405,19 @@ fn max_heap_tid(tuple: &[u8]) -> ItemPointerData {
 // ===========================================================================
 
 /// `index_getattr(itup, attno, tupdesc, &isnull)` (access/itup.h): deform a
-/// single attribute out of an index tuple's byte slice. No producer in this
-/// repo deforms one attribute from an index tuple's bytes (the only
-/// `index_deform_tuple` seam targets an executor slot). Same blocker as
-/// `utils::index_getattr` / `preprocesskeys`.
-fn index_getattr(_tuple: &[u8], _attno: AttrNumber, _rel: &Relation) -> (Datum<'static>, bool) {
-    panic!("_bt_compare: index_getattr (single-attribute index-tuple deform) not yet ported")
+/// single attribute out of an index tuple's on-disk byte image, against
+/// `RelationGetDescr(rel)`. Backed by the now-ported
+/// `backend-access-common-indextuple` `nocache_index_getattr` seam (byte-slice
+/// variant); the scan-lifetime `Mcx` (into which a by-ref value is copied) is
+/// the index relation's allocator, exactly as `rel_mcx` threads it for page
+/// reads. `Err` propagates the detoast / `ereport(ERROR)` surface.
+fn index_getattr<'mcx>(
+    tuple: &[u8],
+    attno: AttrNumber,
+    rel: &Relation<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mcx = rel_mcx(rel);
+    indextuple::nocache_index_getattr::call(mcx, tuple, attno as i32, rel.rd_att.as_ref())
 }
 
 // --- Predicate locking / pgstat / instrument: behaviour-preserving no-ops ---
@@ -1007,7 +1012,7 @@ pub fn bt_compare<'mcx>(
     for i in 0..ncmpkey as usize {
         let scankey = &keyd.scankeys[i];
 
-        let (datum, is_null) = index_getattr(itup, scankey.sk_attno, rel);
+        let (datum, is_null) = index_getattr(itup, scankey.sk_attno, rel)?;
 
         let result: i32 = if (scankey.sk_flags & SK_ISNULL) != 0 {
             /* key is NULL */

@@ -26,6 +26,7 @@ pub fn init_all() {
     backend_access_index_amapi::init_seams();
     backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
+    backend_access_spg_proc::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
@@ -204,6 +205,7 @@ pub fn init_all() {
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
+    backend_rewrite_core::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
     backend_storage_file_fileset::init_seams();
