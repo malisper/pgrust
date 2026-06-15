@@ -770,7 +770,8 @@ pub fn BeginCopyTo<'mcx>(
         let query = &rewritten[0];
 
         // The grammar allows SELECT INTO, but we don't support that.
-        if let Some(tag) = query.utilityStmt {
+        if let Some(stmt) = &query.utilityStmt {
+            let tag = stmt.tag();
             if tag == T_CreateTableAsStmt {
                 return Err(PgError::error("COPY (SELECT INTO) is not supported")
                     .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));

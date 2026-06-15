@@ -60,6 +60,14 @@ pub use MergeMatchKind::{
     MERGE_WHEN_MATCHED, MERGE_WHEN_NOT_MATCHED_BY_SOURCE, MERGE_WHEN_NOT_MATCHED_BY_TARGET,
 };
 
+impl Default for MergeMatchKind {
+    /// A zero-initialized `makeNode(MergeAction)` leaves `matchKind == 0`
+    /// (`MERGE_WHEN_MATCHED`).
+    fn default() -> Self {
+        MergeMatchKind::MERGE_WHEN_MATCHED
+    }
+}
+
 /// Number of `MergeMatchKind` values, mirroring C's `NUM_MERGE_MATCH_KINDS`.
 pub const NUM_MERGE_MATCH_KINDS: usize = 3;
 
@@ -70,6 +78,14 @@ pub enum OverridingKind {
     OVERRIDING_NOT_SET = 0,
     OVERRIDING_USER_VALUE = 1,
     OVERRIDING_SYSTEM_VALUE = 2,
+}
+
+impl Default for OverridingKind {
+    /// A zero-initialized `makeNode` leaves `override == 0`
+    /// (`OVERRIDING_NOT_SET`).
+    fn default() -> Self {
+        OverridingKind::OVERRIDING_NOT_SET
+    }
 }
 
 /// `MergeAction` (nodes/primnodes.h) — a single WHEN clause of a MERGE.

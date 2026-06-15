@@ -71,6 +71,10 @@ pub mod nodeworktablescan;
 pub mod params;
 pub mod parsenodes;
 pub mod parsestmt;
+/// Full parse-tree producer model + raw-grammar input nodes (the K1-parsetree
+/// keystone): the statement-node vocabulary the parser/analyze/rewrite emit and
+/// the raw-grammar nodes analyze.c/parse_clause/parse_expr consume.
+pub mod rawnodes;
 pub mod partition;
 pub mod pathnodes;
 pub mod portalcmds;
