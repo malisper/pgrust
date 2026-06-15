@@ -6816,6 +6816,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -6869,6 +6871,30 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-expr"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-type",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12838,6 +12864,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-vars",
+ "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
  "backend-port-atomics",
