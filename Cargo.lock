@@ -32,6 +32,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-bloom"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-access-brin-entry-seams"
 version = "0.0.0"
 dependencies = [
@@ -119,6 +141,7 @@ dependencies = [
 name = "backend-access-brin-minmax"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-bloom",
  "backend-access-brin-entry-seams",
  "backend-access-brin-inclusion",
  "backend-access-index-indexam-seams",
