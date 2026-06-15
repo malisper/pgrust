@@ -65,16 +65,45 @@ use mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_nodes::nodeindexscan::Plan;
 use types_nodes::nodes::{Node, NodeTag};
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{Expr, TargetEntry};
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{NodeId, Path, PathId, PathNode, PlannerInfo, RinfoId};
+use types_pathnodes::{
+    NodeId, Path, PathId, PathNode, PathTarget, PlannerInfo, RinfoId, RELOPT_BASEREL, RTE_RELATION,
+};
 
+use backend_nodes_core::makefuncs::make_target_entry;
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
 use backend_optimizer_plan_createplan_seams as cp_seam;
+use backend_optimizer_util_joininfo::restrictinfo::extract_actual_clauses;
 use backend_optimizer_util_paramassign_seams as paramassign;
 use backend_optimizer_util_pathnode_seams as pathnode;
 use backend_optimizer_util_placeholder_seams as placeholder;
+use backend_optimizer_util_plancat::build_physical_tlist;
 use backend_optimizer_util_relnode_seams as relnode;
+use backend_optimizer_util_vars::tlist::apply_pathtarget_labeling_to_tlist;
+
+// ---------------------------------------------------------------------------
+// RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
+// `RTE_RELATION` is re-exported from types-pathnodes; the rest are defined here
+// from the C enum (RTE_RELATION = 0, RTE_SUBQUERY = 1, RTE_JOIN = 2,
+// RTE_FUNCTION = 3, RTE_TABLEFUNC = 4, RTE_VALUES = 5, RTE_CTE = 6).
+// ---------------------------------------------------------------------------
+
+/// `RTE_SUBQUERY` (parsenodes.h).
+const RTE_SUBQUERY: types_pathnodes::RTEKind = 1;
+/// `RTE_FUNCTION` (parsenodes.h).
+const RTE_FUNCTION: types_pathnodes::RTEKind = 3;
+/// `RTE_TABLEFUNC` (parsenodes.h).
+const RTE_TABLEFUNC: types_pathnodes::RTEKind = 4;
+/// `RTE_VALUES` (parsenodes.h).
+const RTE_VALUES: types_pathnodes::RTEKind = 5;
+/// `RTE_CTE` (parsenodes.h).
+const RTE_CTE: types_pathnodes::RTEKind = 6;
+
+/// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) — the most-negative
+/// system attribute number minus one (`-7` in PG 18.3). Used by
+/// `use_physical_tlist` to offset `varattno` into the `sortgroupatts` set.
+const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 
 // ---------------------------------------------------------------------------
 // CP_* flags (createplan.c lines ~70-73)
@@ -373,6 +402,490 @@ fn replace_nestloop_params_mutator(
 }
 
 // ---------------------------------------------------------------------------
+// build_path_tlist (createplan.c ~824)
+// ---------------------------------------------------------------------------
+
+/// `build_path_tlist(root, path)` — build a target list (a list of
+/// `TargetEntry`) for the Path's output.
+///
+/// This is almost just `make_tlist_from_pathtarget()`, but we also have to deal
+/// with replacing nestloop params: if the path is parameterized, lateral
+/// references in the tlist are replaced with `Param`s, applied per list item (no
+/// need to remake the `TargetEntry` nodes). Each expr is resolved out of the
+/// arena, run through [`replace_nestloop_params`] when `param_info` is set, and
+/// wrapped into a fresh owned `TargetEntry` allocated in `mcx`.
+fn build_path_tlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    path: PathId,
+) -> PgResult<Vec<TargetEntry<'mcx>>> {
+    // Snapshot the pathtarget so we can mutate `root` (replace_nestloop_params)
+    // while iterating the (cloned) exprs/sortgrouprefs. In C `path->pathtarget`
+    // is a stable pointer; here the arena handles are Copy and the small
+    // sortgrouprefs vector is cloned out.
+    let target: PathTarget = root
+        .path(path)
+        .base()
+        .pathtarget
+        .as_deref()
+        .expect("build_path_tlist: path has no pathtarget")
+        .clone();
+    let has_param_info = root.path(path).base().param_info.is_some();
+
+    let sortgrouprefs = &target.sortgrouprefs;
+    let mut tlist = Vec::with_capacity(target.exprs.len());
+    let mut resno: i32 = 1;
+    for &node_id in target.exprs.iter() {
+        // If it's a parameterized path, there might be lateral references in
+        // the tlist, which need to be replaced with Params. There's no need to
+        // remake the TargetEntry nodes, so apply this to each list item
+        // separately.
+        let expr: Expr = if has_param_info {
+            let replaced = replace_nestloop_params(mcx, root, node_id)?;
+            root.node(replaced).clone()
+        } else {
+            root.node(node_id).clone()
+        };
+
+        let mut tle = make_target_entry(mcx, expr, resno as i16, None, false)?;
+        if !sortgrouprefs.is_empty() {
+            tle.ressortgroupref = sortgrouprefs[(resno - 1) as usize];
+        }
+        tlist.push(tle);
+        resno += 1;
+    }
+    Ok(tlist)
+}
+
+// ---------------------------------------------------------------------------
+// use_physical_tlist (createplan.c ~864)
+// ---------------------------------------------------------------------------
+
+/// `use_physical_tlist(root, path, flags)` — decide whether to use a tlist
+/// matching relation structure, rather than only those Vars actually
+/// referenced.
+fn use_physical_tlist(root: &PlannerInfo, path: PathId, flags: i32) -> bool {
+    let rel_id = root.path(path).base().parent;
+    let rel = root.rel(rel_id);
+
+    // Forget it if either exact tlist or small tlist is demanded.
+    if flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) != 0 {
+        return false;
+    }
+
+    // We can do this for real relation scans, subquery scans, function scans,
+    // tablefunc scans, values scans, and CTE scans (but not for, eg, joins).
+    if rel.rtekind != RTE_RELATION
+        && rel.rtekind != RTE_SUBQUERY
+        && rel.rtekind != RTE_FUNCTION
+        && rel.rtekind != RTE_TABLEFUNC
+        && rel.rtekind != RTE_VALUES
+        && rel.rtekind != RTE_CTE
+    {
+        return false;
+    }
+
+    // Can't do it with inheritance cases either (mainly because Append doesn't
+    // project; this test may be unnecessary now that create_append_plan
+    // instructs its children to return an exact tlist).
+    if rel.reloptkind != RELOPT_BASEREL {
+        return false;
+    }
+
+    // Also, don't do it to a CustomPath; the premise that we're extracting
+    // columns from a simple physical tuple is unlikely to hold for those.
+    if matches!(root.path(path), PathNode::CustomPath(_)) {
+        return false;
+    }
+
+    // If a bitmap scan's tlist is empty, keep it as-is. This may allow the
+    // executor to skip heap page fetches, and in any case, the benefit of using
+    // a physical tlist instead would be minimal.
+    if matches!(root.path(path), PathNode::BitmapHeapPath(_))
+        && root
+            .path(path)
+            .base()
+            .pathtarget
+            .as_deref()
+            .map(|t| t.exprs.is_empty())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    // Can't do it if any system columns or whole-row Vars are requested. (This
+    // could possibly be fixed but would take some fragile assumptions in
+    // setrefs.c, I think.)  attr_needed is indexed by (i - min_attr).
+    let mut i = rel.min_attr;
+    while i <= 0 {
+        let idx = (i - rel.min_attr) as usize;
+        if !relnode::relids_is_empty::call(&rel.attr_needed[idx]) {
+            return false;
+        }
+        i += 1;
+    }
+
+    // Can't do it if the rel is required to emit any placeholder expressions,
+    // either.
+    for &phid in root.placeholder_list.iter() {
+        let phinfo = root.phinfo(phid);
+        if relnode::relids_nonempty_difference::call(&phinfo.ph_needed, &rel.relids)
+            && relnode::relids_is_subset::call(&phinfo.ph_eval_at, &rel.relids)
+        {
+            return false;
+        }
+    }
+
+    // For an index-only scan, the "physical tlist" is the index's indextlist.
+    // We can only return that without a projection if all the index's columns
+    // are returnable.
+    if root.path(path).base().pathtype == T_IndexOnlyScan {
+        if let PathNode::IndexPath(ipath) = root.path(path) {
+            let indexinfo = ipath
+                .indexinfo
+                .as_deref()
+                .expect("use_physical_tlist: IndexPath has no indexinfo");
+            for c in 0..(indexinfo.ncolumns as usize) {
+                if !indexinfo.canreturn[c] {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Also, can't do it if CP_LABEL_TLIST is specified and path is requested to
+    // emit any sort/group columns that are not simple Vars. (If they are simple
+    // Vars, they should appear in the physical tlist, and
+    // apply_pathtarget_labeling_to_tlist will take care of getting them labeled
+    // again.)  We also have to check that no two sort/group columns are the same
+    // Var, else that element of the physical tlist would need conflicting
+    // ressortgroupref labels.
+    if flags & CP_LABEL_TLIST != 0 {
+        let target = root
+            .path(path)
+            .base()
+            .pathtarget
+            .as_deref()
+            .expect("use_physical_tlist: path has no pathtarget");
+        if !target.sortgrouprefs.is_empty() {
+            let mut sortgroupatts: types_pathnodes::Relids = None;
+            for (i, &expr_id) in target.exprs.iter().enumerate() {
+                if target.sortgrouprefs[i] != 0 {
+                    if let Expr::Var(var) = root.node(expr_id) {
+                        let attno = var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
+                        if relnode::relids_is_member::call(attno, &sortgroupatts) {
+                            return false;
+                        }
+                        sortgroupatts = relnode::relids_add_member::call(sortgroupatts, attno);
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
+}
+
+// ---------------------------------------------------------------------------
+// create_scan_plan (createplan.c ~558)
+// ---------------------------------------------------------------------------
+
+/// `create_scan_plan(root, best_path, flags)` — create a scan plan for the
+/// parent relation of `best_path`.
+///
+/// Extracts the relevant restriction clauses, optionally concatenates the
+/// parameterized join clauses, detects pseudoconstant gating quals, picks the
+/// tlist (physical vs path), routes to the per-scan-type `create_*scan_plan`
+/// converter (each a seam filled by the F2c scan family — loud-panic until
+/// installed), and stacks a gating `Result` for any pseudoconstant quals.
+fn create_scan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    mut flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let pathtype = root.path(best_path).base().pathtype;
+
+    // Extract the relevant restriction clauses from the parent relation. The
+    // executor must apply all these restrictions during the scan, except for
+    // pseudoconstants which we'll take care of below.
+    //
+    // If this is a plain indexscan or index-only scan, we need not consider
+    // restriction clauses that are implied by the index's predicate, so use
+    // indrestrictinfo not baserestrictinfo. Note that we can't do that for
+    // bitmap indexscans, since there's not necessarily a single index involved;
+    // but it doesn't matter since create_bitmap_scan_plan() will be able to get
+    // rid of such clauses anyway via predicate proof.
+    let mut scan_clauses: Vec<RinfoId> = match pathtype {
+        t if t == T_IndexScan || t == T_IndexOnlyScan => {
+            let ipath = match root.path(best_path) {
+                PathNode::IndexPath(p) => p,
+                _ => return Err(PgError::error("create_scan_plan: T_IndexScan path is not an IndexPath")),
+            };
+            ipath
+                .indexinfo
+                .as_deref()
+                .expect("create_scan_plan: IndexPath has no indexinfo")
+                .indrestrictinfo
+                .clone()
+        }
+        _ => root.rel(rel_id).baserestrictinfo.clone(),
+    };
+
+    // If this is a parameterized scan, we also need to enforce all the join
+    // clauses available from the outer relation(s). For paranoia's sake, don't
+    // modify the stored baserestrictinfo list.
+    if let Some(ppi) = root.path(best_path).base().param_info.as_deref() {
+        // list_concat_copy(scan_clauses, ppi_clauses): scan_clauses was already
+        // cloned above, so extend it (a fresh list).
+        scan_clauses.extend_from_slice(&ppi.ppi_clauses);
+    }
+
+    // Detect whether we have any pseudoconstant quals to deal with. Then, if
+    // we'll need a gating Result node, it will be able to project, so there are
+    // no requirements on the child's tlist.
+    //
+    // If this replaces a join, it must be a foreign scan or a custom scan, and
+    // the FDW or the custom scan provider would have stored in the best path the
+    // list of RestrictInfo nodes to apply to the join; check against that list
+    // in that case.
+    let gating_clauses: Vec<NodeId> = if is_join_rel(root, rel_id) {
+        // Assert(pathtype == T_ForeignScan || pathtype == T_CustomScan);
+        debug_assert!(pathtype == T_ForeignScan || pathtype == T_CustomScan);
+        let join_clauses: Vec<RinfoId> = match root.path(best_path) {
+            PathNode::ForeignPath(fp) => fp.fdw_restrictinfo.clone(),
+            PathNode::CustomPath(cp) => cp.custom_restrictinfo.clone(),
+            _ => {
+                return Err(PgError::error(
+                    "create_scan_plan: join rel scan path is neither ForeignPath nor CustomPath",
+                ))
+            }
+        };
+        get_gating_quals(root, &join_clauses)
+    } else {
+        get_gating_quals(root, &scan_clauses)
+    };
+    if !gating_clauses.is_empty() {
+        flags = 0;
+    }
+
+    // For table scans, rather than using the relation targetlist (which is only
+    // those Vars actually needed by the query), we prefer to generate a tlist
+    // containing all Vars in order. This will allow the executor to optimize
+    // away projection of the table tuples, if possible.
+    //
+    // But if the caller is going to ignore our tlist anyway, then don't bother
+    // generating one at all. We use an exact equality test here, so that this
+    // only applies when CP_IGNORE_TLIST is the only flag set.
+    let tlist: Vec<TargetEntry<'mcx>> = if flags == CP_IGNORE_TLIST {
+        Vec::new()
+    } else if use_physical_tlist(root, best_path, flags) {
+        if pathtype == T_IndexOnlyScan {
+            // For index-only scan, the preferred tlist is the index's.
+            let indextlist: Vec<NodeId> = match root.path(best_path) {
+                PathNode::IndexPath(ipath) => ipath
+                    .indexinfo
+                    .as_deref()
+                    .expect("create_scan_plan: IndexPath has no indexinfo")
+                    .indextlist
+                    .clone(),
+                _ => {
+                    return Err(PgError::error(
+                        "create_scan_plan: T_IndexOnlyScan path is not an IndexPath",
+                    ))
+                }
+            };
+            let mut tlist = resolve_targetentry_list(mcx, root, &indextlist)?;
+            // Transfer sortgroupref data to the replacement tlist, if requested
+            // (use_physical_tlist checked that this will work).
+            if flags & CP_LABEL_TLIST != 0 {
+                let target = root
+                    .path(best_path)
+                    .base()
+                    .pathtarget
+                    .as_deref()
+                    .expect("create_scan_plan: path has no pathtarget")
+                    .clone();
+                apply_pathtarget_labeling_to_tlist(root, &mut tlist, &target)?;
+            }
+            tlist
+        } else {
+            let phys: Vec<NodeId> = build_physical_tlist(root, rel_id)?;
+            if phys.is_empty() {
+                // Failed because of dropped cols, so use regular method.
+                build_path_tlist(mcx, root, best_path)?
+            } else {
+                let mut tlist = resolve_targetentry_list(mcx, root, &phys)?;
+                // As above, transfer sortgroupref data to replacement tlist.
+                if flags & CP_LABEL_TLIST != 0 {
+                    let target = root
+                        .path(best_path)
+                        .base()
+                        .pathtarget
+                        .as_deref()
+                        .expect("create_scan_plan: path has no pathtarget")
+                        .clone();
+                    apply_pathtarget_labeling_to_tlist(root, &mut tlist, &target)?;
+                }
+                tlist
+            }
+        }
+    } else {
+        build_path_tlist(mcx, root, best_path)?
+    };
+
+    // The per-scan-type converter receives the relation's RestrictInfo
+    // `scan_clauses` (each converter does its own `order_qual_clauses` /
+    // `extract_actual_clauses` / `replace_nestloop_params`), exactly as C passes
+    // the `scan_clauses` list. `scan_clauses` is moved into the matched arm.
+    let plan: Node<'mcx> = match pathtype {
+        t if t == T_SeqScan => {
+            cp_seam::create_seqscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_SampleScan => {
+            cp_seam::create_samplescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_IndexScan => cp_seam::create_indexscan_plan::call(
+            mcx, root, run, best_path, tlist, scan_clauses, false,
+        )?,
+        t if t == T_IndexOnlyScan => cp_seam::create_indexscan_plan::call(
+            mcx, root, run, best_path, tlist, scan_clauses, true,
+        )?,
+        t if t == T_BitmapHeapScan => {
+            cp_seam::create_bitmap_scan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_TidScan => {
+            cp_seam::create_tidscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_TidRangeScan => {
+            cp_seam::create_tidrangescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_SubqueryScan => {
+            cp_seam::create_subqueryscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_FunctionScan => {
+            cp_seam::create_functionscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_TableFuncScan => cp_seam::create_tablefuncscan_plan::call(
+            mcx, root, run, best_path, tlist, scan_clauses,
+        )?,
+        t if t == T_ValuesScan => {
+            cp_seam::create_valuesscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_CteScan => {
+            cp_seam::create_ctescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_NamedTuplestoreScan => cp_seam::create_namedtuplestorescan_plan::call(
+            mcx, root, run, best_path, tlist, scan_clauses,
+        )?,
+        t if t == T_Result => {
+            cp_seam::create_resultscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_WorkTableScan => cp_seam::create_worktablescan_plan::call(
+            mcx, root, run, best_path, tlist, scan_clauses,
+        )?,
+        t if t == T_ForeignScan => {
+            cp_seam::create_foreignscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        t if t == T_CustomScan => {
+            cp_seam::create_customscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
+        other => {
+            return Err(PgError::error(alloc::format!(
+                "unrecognized node type: {}",
+                other.0
+            )))
+        }
+    };
+
+    // If there are any pseudoconstant clauses attached to this node, insert a
+    // gating Result node that evaluates the pseudoconstants as one-time quals.
+    if !gating_clauses.is_empty() {
+        // create_gating_plan builds the gating Result via make_result (in the
+        // F2c scan-converter / make_* family); routed through its seam until
+        // that family lands.
+        cp_seam::create_gating_plan::call(mcx, root, best_path, plan, gating_clauses)
+    } else {
+        Ok(plan)
+    }
+}
+
+/// `IS_JOIN_REL(rel)` (pathnodes.h) — `rel->reloptkind == RELOPT_JOINREL ||
+/// rel->reloptkind == RELOPT_OTHER_JOINREL`.
+fn is_join_rel(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
+    use types_pathnodes::{RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
+    let k = root.rel(rel_id).reloptkind;
+    k == RELOPT_JOINREL || k == RELOPT_OTHER_JOINREL
+}
+
+/// Resolve a list of `TargetEntryNode` arena handles (the C `List<TargetEntry>`
+/// produced by `build_physical_tlist` / an index's `indextlist`) into owned
+/// `TargetEntry<'mcx>` nodes, rebuilding each from its resolved expr (the same
+/// shape as `make_tlist_from_pathtarget`, but the handles already carry the
+/// resno/sortgroupref/resorig fields). `copyObject(indextlist)` faithfulness:
+/// the produced entries are fresh owned copies.
+fn resolve_targetentry_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    tes: &[NodeId],
+) -> PgResult<Vec<TargetEntry<'mcx>>> {
+    let mut out = Vec::with_capacity(tes.len());
+    for &te_id in tes {
+        let te = root.targetentry(te_id).clone();
+        let expr = root.node(te.expr).clone();
+        let mut tle = make_target_entry(mcx, expr, te.resno, te.resname.as_deref(), te.resjunk)?;
+        tle.ressortgroupref = te.ressortgroupref;
+        tle.resorigtbl = te.resorigtbl;
+        tle.resorigcol = te.resorigcol;
+        out.push(tle);
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// get_gating_quals (createplan.c ~1001)
+// ---------------------------------------------------------------------------
+
+/// `get_gating_quals(root, quals)` — see if there are pseudoconstant quals in a
+/// node's quals list; if so, return just those quals (as bare clause node
+/// handles). `quals` is the RestrictInfo list (arena `RinfoId`s).
+///
+/// In C `quals` is a `List<RestrictInfo>` that `order_qual_clauses` reorders in
+/// place (preserving the `RestrictInfo` nodes). Our `order_qual_clauses`
+/// operates on node-arena handles that resolve to `Expr::RestrictInfo`, so we
+/// intern each `RinfoId` as a transient `Expr::RestrictInfo(RinfoRef)` node (the
+/// same `(Expr *) restrictinfo` up-cast joininfo.c uses), order, then resolve
+/// each ordered node back to its `RinfoId`. The intern/resolve round-trips the
+/// identity, so the result is faithful to C's `List<RestrictInfo>` reorder.
+fn get_gating_quals(root: &mut PlannerInfo, quals: &[RinfoId]) -> Vec<NodeId> {
+    // No need to look if we know there are no pseudoconstants.
+    if !root.hasPseudoConstantQuals {
+        return Vec::new();
+    }
+
+    // Sort into desirable execution order while still in RestrictInfo form.
+    let nodes: Vec<NodeId> = quals
+        .iter()
+        .map(|&rid| root.alloc_node(Expr::RestrictInfo(rid.as_expr_ref())))
+        .collect();
+    let ordered = order_qual_clauses(root, &nodes);
+    let ordered_rinfos: Vec<RinfoId> = ordered
+        .iter()
+        .map(|&nid| match root.node(nid) {
+            Expr::RestrictInfo(r) => RinfoId::from(*r),
+            _ => unreachable!("get_gating_quals: ordered qual node is not a RestrictInfo"),
+        })
+        .collect();
+
+    // Pull out any pseudoconstant quals from the RestrictInfo list.
+    extract_actual_clauses(root, &ordered_rinfos, true)
+}
+
+// ---------------------------------------------------------------------------
 // create_plan / create_plan_recurse (createplan.c ~336-552)
 // ---------------------------------------------------------------------------
 
@@ -501,3 +1014,18 @@ pub fn create_plan_recurse<'mcx>(
         ))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Seam installation (this crate OWNS create_scan_plan).
+// ---------------------------------------------------------------------------
+
+/// Install the createplan-owned seams. F2b owns `create_scan_plan` (the scan
+/// dispatch + tlist selection + gating wiring); the per-scan-type converters
+/// (`create_seqscan_plan`, …), `create_gating_plan`, and the non-scan converter
+/// arms are installed by the later scan / join / append / upper F-families.
+pub fn init_seams() {
+    cp_seam::create_scan_plan::set(create_scan_plan);
+}
+
+#[cfg(test)]
+mod tests;

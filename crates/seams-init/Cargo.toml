@@ -199,6 +199,7 @@ backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
+backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createplan" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
