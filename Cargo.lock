@@ -13629,6 +13629,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-gist"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-scan",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "types-guc"
 version = "0.0.0"
 
