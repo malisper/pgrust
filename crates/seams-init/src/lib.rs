@@ -7,6 +7,7 @@
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     contrib_amcheck_verify_nbtree::init_seams();
+    backend_archive_shell_archive::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -32,8 +33,6 @@ pub fn init_all() {
     backend_access_table_tableam::init_seams();
     backend_access_brin_xlog::init_seams();
     backend_access_hash_xlog::init_seams();
-    backend_access_hash_core::init_seams();
-    backend_access_hash_entry::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
@@ -139,7 +138,11 @@ pub fn init_all() {
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
+    backend_access_hash_core::init_seams();
+    backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_parser_parse_oper::init_seams();
+    backend_parser_parse_type::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -647,7 +650,9 @@ mod recurrence_guard {
         // so the name-keyed guard sees them as satisfied (they are equally
         // uninstalled at runtime — same blocker).
         ("backend_access_common_tupdesc", "free_tuple_desc"),
-        ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
+        // RETIRED (task #161): `heap_tuple_header_get_datum`
+        // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
+        // The composite/record-Datum carrier bridge landed.
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
@@ -701,12 +706,10 @@ mod recurrence_guard {
         ("backend_access_table_tableam", "table_relation_needs_toast_table"),
         ("backend_access_table_tableam", "table_relation_toast_am"),
         // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
-        // `table_index_build_scan` (tableam.h) dispatches the vtable callback
-        // `index_build_range_scan` to the concrete table AM — for heap that is
-        // `heapam_handler.c`'s `heapam_index_build_range_scan`, which is still
-        // `todo`. There is no in-unit body to install. Consumed by the hash AM
-        // build driver (`hashbuild`, backend-access-hash-entry) and the nbtree
-        // build driver. Pay down by porting heapam_handler.c. See DESIGN_DEBT.md.
+        // `table_index_build_scan` (tableam.h) dispatches to the heap AM's
+        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`).
+        // hashbuild / hashbuildempty call it; it becomes a real install once
+        // heapam_handler.c lands. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "table_index_build_scan"),
         // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
         // is `common/relpath.c`'s function, not catalog.c's — the seam was
@@ -771,16 +774,11 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
-        ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "exec_force_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_materialize_slot"),
         ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
         ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "exec_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
         ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
@@ -1027,14 +1025,8 @@ mod recurrence_guard {
         // seams declared alongside it ARE installed in miscinit's init_seams by
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
-        // DESIGN_DEBT: `record_from_values` returns a composite *record* `Datum`
-        // (`heap_form_tuple` + `HeapTupleGetDatum`). The composite-Datum bridge
-        // (`HeapTupleGetDatum` / the `FormedTuple`->record-Datum carrier) is
-        // unported workspace-wide — `types_tuple::Datum` (`TupleValue` ByVal/ByRef)
-        // is a scalar byte lane with no Composite/record arm, so the owner cannot
-        // construct the return value faithfully. K1-gated on the FormedTuple->
-        // HeapTuple carrier bridge (task #161); install once that lands.
-        ("backend_utils_fmgr_funcapi", "record_from_values"),
+        // RETIRED (task #161): `record_from_values` is now installed by funcapi's
+        // init_seams(). The composite/record-Datum carrier bridge landed.
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
         // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
         // in `srf_support::value_srf_unported` and panics loudly naming the missing
@@ -1102,6 +1094,16 @@ mod recurrence_guard {
         ("backend_access_transam_xlogreader", "xlog_rec_info"),
         ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
         ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
+        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
+        // and extracts the single `TypeName` node. The owner of `raw_parser`
+        // (backend-parser-driver, audited) cannot install this seam yet because
+        // the bison grammar it drives (`base_yyparse`, gram.y) is not ported —
+        // any raw-parse call reaches the still-unported grammar and panics
+        // (mirror-pg-and-panic). Becomes a real install once gram.y lands and
+        // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
+        // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
+        ("backend_parser_driver", "raw_parse_type_name"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
+backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
@@ -19,6 +20,8 @@ backend-access-common-reloptions = { path = "../backend-access-common-reloptions
 backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
+backend-access-hash-core = { path = "../backend-access-hash-core" }
+backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
@@ -34,8 +37,6 @@ backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
 backend-access-hash-xlog = { path = "../backend-access-hash-xlog" }
-backend-access-hash-core = { path = "../backend-access-hash-core" }
-backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }
@@ -144,6 +145,8 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-nodes-copyfuncs = { path = "../backend-nodes-copyfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
