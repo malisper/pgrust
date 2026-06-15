@@ -57,7 +57,7 @@
 //! `PlanState` node universes, which the parser/planner/executor units that own
 //! them have not yet ported into the layered tree (the layered `Query`/
 //! `RangeTblEntry` carriers are trimmed and do not expose their expression
-//! subtrees as walkable `Expr` trees). They stay `todo!()`-free by being absent
+//! subtrees as walkable `Expr` trees). They stay stub-free by being absent
 //! — there is no faithful body to write against the current model.
 
 #![allow(non_snake_case)]

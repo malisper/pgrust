@@ -393,18 +393,12 @@ fn relation_get_index_attr_bitmap<'mcx>(
     rel: &types_rel::RelationData<'_>,
     attr_kind: sx::IndexAttrBitmapKind,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
-    use crate::derived::IndexAttrBitmapKind as K;
-    // Map the seam-public kind onto the owner's enum.
-    let kind = match attr_kind {
-        sx::IndexAttrBitmapKind::Keys => K::Keys,
-        sx::IndexAttrBitmapKind::PrimaryKey => K::PrimaryKey,
-        sx::IndexAttrBitmapKind::Identity => K::Identity,
-        sx::IndexAttrBitmapKind::HotBlocking => K::HotBlocking,
-        sx::IndexAttrBitmapKind::Summarized => K::Summarized,
-    };
+    // The seam-public kind and the owner's `derived` kind are now the same
+    // canonical `types_relcache_entry::IndexAttrBitmapKind`, so it passes
+    // straight through.
     // Run the derived build (own logic over the store); it yields the offset
     // members (already offset by FirstLowInvalidHeapAttributeNumber).
-    let members = crate::derived::RelationGetIndexAttrBitmap(rel.rd_id, kind)?;
+    let members = crate::derived::RelationGetIndexAttrBitmap(rel.rd_id, attr_kind)?;
     // Encode into a node `Bitmapset` via the bitmapset owner's `bms_add_member`.
     // An empty member list yields the C NULL set (`None`).
     let mut bms: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;

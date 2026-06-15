@@ -380,12 +380,9 @@ seam_core::seam!(
 /// One read of a slot/tuple attribute: its `Datum` plus is-null.
 ///
 /// Carries the canonical [`types_tuple::backend_access_common_heaptuple::Datum`]
-/// value (no longer `Copy`: the by-reference arm owns a `PgVec`).
-#[derive(Clone, Debug)]
-pub struct SlotAttr<'mcx> {
-    pub value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-    pub isnull: bool,
-}
+/// value (no longer `Copy`: the by-reference arm owns a `PgVec`). Canonical
+/// definition in `types-tuple`.
+pub use types_tuple::backend_access_common_heaptuple::SlotAttr;
 
 seam_core::seam!(
     /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch a user

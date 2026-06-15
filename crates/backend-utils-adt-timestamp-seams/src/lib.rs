@@ -12,6 +12,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Syntax-only timestamp parse used by `check_recovery_target_time`
+    /// (xlogrecovery.c:4948): `ParseDateTime` + `DecodeDateTime` and a final
+    /// `tm2timestamp` range check, returning `true` when the string parses to a
+    /// `DTK_DATE` timestamp in range. The time-zone-dependent final parse is
+    /// deferred to `timestamptz_in` at assign time. Owned by `timestamp.c`.
+    pub fn parse_recovery_target_time(newval: String) -> bool
+);
+
+seam_core::seam!(
     /// `void TimestampDifference(TimestampTz start, TimestampTz stop,
     /// long *secs, int *microsecs)` (`timestamp.c`) — returns `(secs, usecs)`
     /// of `stop - start`, clamped to 0 when negative.

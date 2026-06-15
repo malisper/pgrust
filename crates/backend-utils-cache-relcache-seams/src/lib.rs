@@ -242,17 +242,10 @@ seam_core::seam!(
 );
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute bitmap
-/// `RelationGetIndexAttrBitmap` should return. Mirrors the owner's enum (kept
-/// here so cross-crate callers can name the kind without depending on the
-/// relcache crate).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IndexAttrBitmapKind {
-    Keys,
-    PrimaryKey,
-    Identity,
-    HotBlocking,
-    Summarized,
-}
+/// `RelationGetIndexAttrBitmap` should return. Canonical definition lives in
+/// `types-relcache-entry` (the relcache entry-store vocabulary crate); both the
+/// owner and cross-crate callers name it from there.
+pub use types_relcache_entry::IndexAttrBitmapKind;
 
 seam_core::seam!(
     /// `RelationGetIndexAttrBitmap(relation, attrKind)` (relcache.c): the set of

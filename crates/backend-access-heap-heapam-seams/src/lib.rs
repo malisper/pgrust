@@ -310,13 +310,7 @@ seam_core::seam!(
 
 /// The result of [`does_multi_xact_id_conflict`] — C's `bool` return plus the
 /// `*current_is_member` out param.
-#[derive(Clone, Copy, Debug)]
-pub struct MultiXactConflict {
-    /// C's `bool` return: does the multixact conflict with the wanted mode?
-    pub conflict: bool,
-    /// C's `*current_is_member`: is the current backend already a member?
-    pub current_is_member: bool,
-}
+pub use types_storage::multixact::MultiXactConflict;
 
 seam_core::seam!(
     /// `DoesMultiXactIdConflict(multi, infomask, lockmode, &current_is_member)`

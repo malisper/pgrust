@@ -60,7 +60,7 @@
 //! Per "Mirror PG and panic", each handler below carries the full faithful
 //! `execExprInterp.c` logic as a structural comment and a loud seam-and-panic
 //! body naming the unported owners — it is neither a silent stub nor an invented
-//! opaque stand-in, and it is not `todo!()` (this family's own interpreter logic
+//! opaque stand-in, and it is not a placeholder stub (this family's own interpreter logic
 //! is complete: every branch, every field read, every worker call is mirrored).
 //! These bodies become real the moment the parked node/state types and the
 //! xml/json/jsonpath worker seams land, exactly as the compiler-side

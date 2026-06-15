@@ -21,11 +21,8 @@ pub enum ProjectionKind {
 }
 
 /// One read of a projection-result-slot attribute: its `Datum` plus is-null.
-#[derive(Clone, Debug)]
-pub struct SlotAttr<'mcx> {
-    pub value: types_tuple::Datum<'mcx>,
-    pub isnull: bool,
-}
+/// Canonical definition in `types-tuple`.
+pub use types_tuple::backend_access_common_heaptuple::SlotAttr;
 
 /// Classification of `subplan->testexpr` for the hashed-subplan init path
 /// (`IsA(testexpr, OpExpr)` / `is_andclause(testexpr)` / else). The `ncols`

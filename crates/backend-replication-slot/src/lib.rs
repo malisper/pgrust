@@ -2985,6 +2985,7 @@ fn seam_slot_data_invalidated(handle: ReplicationSlotHandle) -> ReplicationSlotI
 /// Install every seam in `backend-replication-slot-seams`.
 pub fn init_seams() {
     use backend_replication_slot_seams as s;
+    s::replication_slot_validate_name_internal::set(ReplicationSlotValidateNameInternal);
     s::replication_slots_shmem_init::set(ReplicationSlotsShmemInit);
     s::replication_slots_shmem_size::set(|| Ok(ReplicationSlotsShmemSize()));
     s::replication_slot_initialize::set(ReplicationSlotInitialize);

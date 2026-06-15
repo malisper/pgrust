@@ -104,6 +104,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GUC_check_errcode(sqlerrcode)` (guc.h): record the SQLSTATE for the
+    /// in-progress GUC check-hook failure (`GUC_check_errcode_value`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errcode(sqlstate: types_error::SqlState)
+);
+
+seam_core::seam!(
     /// `GUC_check_errdetail(fmt, ...)` (guc.h): record errdetail for the
     /// in-progress GUC check-hook failure (`GUC_check_errdetail_string`).
     /// Plain backend-local state write.

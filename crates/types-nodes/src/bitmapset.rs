@@ -13,6 +13,21 @@ pub type bitmapword = u64;
 /// [`bitmapword`]. The 64-bit build (`bitmapword == uint64`).
 pub const BITS_PER_BITMAPWORD: usize = 64;
 
+/// `BMS_Comparison` (nodes/bitmapset.h) — result of `bms_subset_compare`.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BMS_Comparison {
+    /// sets are equal
+    BMS_EQUAL = 0,
+    /// first set is a subset of the second
+    BMS_SUBSET1 = 1,
+    /// second set is a subset of the first
+    BMS_SUBSET2 = 2,
+    /// neither set is a subset of the other
+    BMS_DIFFERENT = 3,
+}
+
 /// `Bitmapset` (nodes/bitmapset.h):
 ///
 /// ```c

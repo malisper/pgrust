@@ -4,7 +4,7 @@
 //! # Scaffold stage
 //!
 //! This crate is the `ipci.c` port-in-progress. Every public function below
-//! carries its real, C-faithful signature with a `todo!()` body; the
+//! carries its real, C-faithful signature with a stub body; the
 //! shared-memory subsystem boundaries it routes across are wired to the
 //! owners' per-owner `*-seams` crates. The crate compiles so dependents can
 //! build against the stable surface while the bodies are filled in.

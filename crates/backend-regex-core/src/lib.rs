@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 // SCAFFOLD STAGE: prerequisite types and family signatures are in place ahead
-// of the algorithmic bodies (which are `todo!()`); foundation helpers are not
+// of the algorithmic bodies (which are placeholder stubs); foundation helpers are not
 // yet called by anything.
 #![allow(dead_code)]
 // Every fallible function returns the project-wide `PgResult` (== `Result<_,
