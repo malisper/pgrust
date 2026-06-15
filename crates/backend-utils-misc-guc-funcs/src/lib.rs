@@ -47,7 +47,7 @@
 //! `show_all_file_settings`) and the `GetConfigOptionValues` helper feeding
 //! `show_all_settings` belong to the project-wide fmgr/Datum-layer deferral.
 //! They live behind a loud-panic module ([`fmgr_deferred`]) — never a pretend
-//! success (and never `todo!()`/`unimplemented!()`).
+//! success (and never a placeholder/unported stub).
 
 extern crate alloc;
 
@@ -669,7 +669,7 @@ pub const MAX_GUC_FLAGS: usize = 6;
 /// `show_all_settings`.
 ///
 /// They are NOT stubbed behind a pretend success and use NO
-/// `todo!()`/`unimplemented!()` — each is a loud `panic!` until the fmgr/Datum
+/// placeholder/unported stub macros — each is a loud `panic!` until the fmgr/Datum
 /// layer lands.
 pub mod fmgr_deferred {
     /// `set_config_by_name(name text, value text, is_local bool) -> text`

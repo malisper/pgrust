@@ -6,7 +6,7 @@
 //!
 //! SCAFFOLD STAGE. The C file (~3204 LOC) is split into the families below,
 //! re-derived from the C source. Each family module carries the faithful Rust
-//! signatures with `todo!()` bodies so the crate compiles; the per-pass agents
+//! signatures with stub bodies so the crate compiles; the per-pass agents
 //! fill the bodies 1:1 against the C.
 //!
 //! Families (one module per cluster of `funcapi.c`):

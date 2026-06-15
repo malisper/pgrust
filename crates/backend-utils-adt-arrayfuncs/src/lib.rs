@@ -10,7 +10,7 @@
 //! prerequisite ABI types live in [`types_array`] (authored field-for-field
 //! against `array.h` / `c.h`); the seam crate declarations (inward + outward)
 //! are wired; and one module per *family* exposes the function signatures with
-//! `todo!()` bodies so the crate compiles. Logic lands family-by-family on
+//! stub bodies so the crate compiles. Logic lands family-by-family on
 //! follow-up branches.
 //!
 //! An array value is represented as the same contiguous byte buffer the C

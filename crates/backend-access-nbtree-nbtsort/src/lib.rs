@@ -9,7 +9,7 @@
 //! callback boundary that the function seam cannot carry, plus the
 //! DSM/parallel-context machinery). The deferred panics mirror the
 //! src-idiomatic `deferred.rs` rationale and are *not* silent stubs — this is
-//! sanctioned mirror-and-panic, never a `todo!()`.
+//! sanctioned mirror-and-panic, never a placeholder stub-panic.
 //!
 //! ## Grounded here (1:1 with C, original names preserved)
 //! - [`_bt_leafbuild`], [`_bt_load`], [`_bt_buildadd`], [`_bt_pagestate`],

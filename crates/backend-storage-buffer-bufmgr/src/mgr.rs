@@ -287,6 +287,35 @@ impl BufferManager {
         self.states[buf_id].value.load(Ordering::Acquire)
     }
 
+    /// `pg_atomic_compare_exchange_u32(&buf->state, &expected, new)` — the
+    /// lock-free pin/unpin/mark CAS substrate. C `pg_atomic_compare_exchange_u32`
+    /// has FULL barrier semantics (atomics.h:370); `SeqCst` on both the success
+    /// and failure orderings is the Rust match (`AcqRel`/`Acquire` would be
+    /// genuinely weaker). Returns `Ok(())` on success or `Err(actual)` with the
+    /// observed value on failure, mirroring the C in/out `expected` pointer.
+    #[allow(dead_code)]
+    pub(crate) fn state_compare_exchange(
+        &self,
+        buf_id: usize,
+        expected: u32,
+        new: u32,
+    ) -> Result<u32, u32> {
+        self.states[buf_id].value.compare_exchange_weak(
+            expected,
+            new,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+    }
+
+    /// `GetBufferDescriptor(buf_id)->wait_backend_pgprocno` — the backend parked
+    /// as the `BM_PIN_COUNT_WAITER`. Read under the header spinlock by the caller
+    /// (`WakePinCountWaiter`).
+    #[allow(dead_code)]
+    pub(crate) fn wait_backend_pgprocno(&self, buf_id: usize) -> i32 {
+        self.fields.borrow()[buf_id].wait_backend_pgprocno
+    }
+
     // -- buffer-id <-> Buffer helpers --------------------------------------
 
     /// `BufferIsValid` — true iff `buffer` is a valid shared (1..=NBuffers)

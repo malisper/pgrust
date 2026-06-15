@@ -9332,6 +9332,7 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
  "mcx",
  "types-condvar",
  "types-core",
@@ -14804,6 +14805,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-datum",
  "types-hash",
  "types-nodes",
 ]
