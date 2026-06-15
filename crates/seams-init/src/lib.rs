@@ -206,6 +206,7 @@ pub fn init_all() {
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_slotsync::init_seams();
+    backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();

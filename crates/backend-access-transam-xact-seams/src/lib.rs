@@ -278,3 +278,16 @@ seam_core::seam!(
     /// just-started transaction's isolation level to read committed.
     pub fn set_xact_iso_level_read_committed()
 );
+
+seam_core::seam!(
+    /// `XactIsoLevel = XACT_REPEATABLE_READ` (xact.c global): raise the
+    /// just-started transaction's isolation level. snapbuild.c's
+    /// SnapBuildExportSnapshot sets this before building the exported snapshot.
+    pub fn set_xact_iso_level_repeatable_read()
+);
+
+seam_core::seam!(
+    /// `XactReadOnly = value` (xact.c global): set the current transaction's
+    /// read-only flag. snapbuild.c's SnapBuildExportSnapshot sets it true.
+    pub fn set_xact_read_only(value: bool)
+);

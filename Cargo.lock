@@ -9475,6 +9475,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-snapbuild"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-origin-extern-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-logical-snapbuild-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-snapbuild-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-resowner-resowner-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "port-crc32c-seams",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-nodes",
+ "types-pgstat",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-replication-logical-snapbuild-seams"
 version = "0.0.0"
 dependencies = [
@@ -14787,6 +14823,7 @@ dependencies = [
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",
  "backend-replication-logical-slotsync",
+ "backend-replication-logical-snapbuild",
  "backend-replication-slot",
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
