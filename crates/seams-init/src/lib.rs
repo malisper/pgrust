@@ -146,6 +146,7 @@ pub fn init_all() {
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
+    backend_nodes_equalfuncs::init_seams();
     backend_access_hash_core::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
@@ -214,6 +215,7 @@ pub fn init_all() {
     backend_storage_ipc_pmsignal::init_seams();
     backend_storage_ipc_procarray::init_seams();
     backend_storage_buffer_support::init_seams();
+    backend_storage_buffer_bufmgr::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();

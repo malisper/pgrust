@@ -6762,6 +6762,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-node-support",
+ "seam-core",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-nodes-equalfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -9313,6 +9324,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-buffer-bufmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-lwlock",
+ "mcx",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -9340,6 +9365,16 @@ dependencies = [
  "common-hashfn",
  "common-relpath-seams",
  "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-buffer-support-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
  "types-error",
  "types-storage",
@@ -14133,6 +14168,7 @@ dependencies = [
  "backend-main-main",
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
+ "backend-nodes-equalfuncs",
  "backend-nodes-extensible",
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize",
@@ -14183,6 +14219,7 @@ dependencies = [
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
