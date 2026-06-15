@@ -20,6 +20,9 @@ backend-storage-page = { path = "../backend-storage-page" }
 backend-utils-error = { path = "../backend-utils-error" }
 # posting-list codec / item-pointer compare (audited gin-core-probe).
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
+# TIDBitmap carrier + tbm_add_tuples (GinDataLeafPageGetItemsToTbm).
+types-tidbitmap = { path = "../types-tidbitmap" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 # ginbtree.c descent/insert spine (ginFindLeafPage / ginInsertValue).
 backend-access-gin-ginbtree = { path = "../backend-access-gin-ginbtree" }
 # bufmgr (bufmgr.c) — page access / mark-dirty / new buffer / lsn.

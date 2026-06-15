@@ -1191,6 +1191,7 @@ pub fn init_seams() {
     backend_storage_freespace_seams::index_free_space_map_vacuum::set(|rel| {
         IndexFreeSpaceMapVacuum(rel)
     });
+    backend_storage_freespace_seams::get_free_index_page::set(|rel| GetFreeIndexPage(rel));
     backend_storage_freespace_seams::get_page_with_free_space::set(|rel, space_needed| {
         GetPageWithFreeSpace(rel, space_needed)
     });

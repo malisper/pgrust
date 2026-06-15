@@ -1646,6 +1646,23 @@ fn build_reloptions_hash_seam(
     build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_HASH, 8, &tab)
 }
 
+/// Seam target for `spgoptions(reloptions, validate)` (spgutils.c) — the
+/// SP-GiST AM's `amoptions` callback. Mirrors the C:
+/// `build_reloptions(reloptions, validate, RELOPT_KIND_SPGIST,
+///  sizeof(SpGistOptions), tab, lengthof(tab))` where `tab` has the single
+/// entry `{"fillfactor", RELOPT_TYPE_INT, offsetof(SpGistOptions, fillfactor)}`.
+///
+/// `SpGistOptions` is `{ int32 varlena_header_; int fillfactor; }`, so its size
+/// is 8 and `fillfactor` is at offset 4 — same layout as `HashOptions`.
+fn build_reloptions_spgist_seam(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    let scratch = mcx::MemoryContext::new("spgoptions");
+    let tab = [RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4)];
+    build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_SPGIST, 8, &tab)
+}
+
 /// Seam target for `tablespace_reloptions(reloptions, validate)` (see
 /// [`attribute_reloptions_seam`]).
 fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<TableSpaceOpts> {
@@ -1715,4 +1732,7 @@ pub fn init_seams() {
         add_local_int_reloption_seam,
     );
     backend_access_common_reloptions_seams::build_reloptions_hash::set(build_reloptions_hash_seam);
+    backend_access_common_reloptions_seams::build_reloptions_spgist::set(
+        build_reloptions_spgist_seam,
+    );
 }
