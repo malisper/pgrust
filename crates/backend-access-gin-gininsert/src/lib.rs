@@ -51,6 +51,7 @@ use types_core::primitive::{BlockNumber, OffsetNumber};
 use types_gin::{GinNullCategory, GinState, GinStatsData, GinMaxItemSize, GIN_UNLOCK, GIN_EXCLUSIVE};
 use types_rel::Relation;
 use types_storage::storage::Buffer;
+use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{IndexTupleData, ItemPointerData};
 
@@ -75,15 +76,17 @@ use types_gin::{GinBtreeData, GinBtreeEntryInsertData, GinInsertPayload};
 mod tests;
 
 // ===========================================================================
-// init_seams — this crate owns no inward seams. (The fast-update leg's
-// gin_fast_insert seam is OWNED+declared by the gininsert-seams crate but
-// INSTALLED by the future ginfast owner, not here.)
+// init_seams — install the GIN AM `aminsert` callback (`gininsert`) into the
+// `ginutil-seams` vtable-callback registry that `ginhandler` consumes. (The
+// fast-update leg's `gin_fast_insert` seam is OWNED+declared by the
+// gininsert-seams crate but INSTALLED by the future ginfast owner, not here.)
 // ===========================================================================
 
-/// No inward seams to install. Present for the workspace `seams-init` wiring
-/// convention (the guard test confirms an empty body is correct for a crate
-/// that owns no inward seams).
-pub fn init_seams() {}
+/// Install the `gininsert` (`aminsert`) callback seam that `ginhandler`
+/// (ginutil.c) routes the index-AM `aminsert` dispatch through.
+pub fn init_seams() {
+    backend_access_gin_ginutil_seams::gininsert::set(gininsert);
+}
 
 // ===========================================================================
 // clone_ginstate — deep-clone a GinState into `mcx`.
@@ -530,12 +533,11 @@ fn ginHeapTupleInsert<'mcx>(
     Ok(())
 }
 
-/// `gininsert(index, values, isnull, ht_ctid, heapRel, checkUnique,
-/// indexUnchanged, indexInfo)` (gininsert.c:851): insert one heap tuple's index
-/// entries. Uses the fast-update pending list when enabled (F3 — seam-routed),
-/// else inserts each entry directly. Always returns `false` (GIN never reports a
+/// The body of `gininsert` (gininsert.c) once the per-command [`GinState`] is in
+/// hand: use the fast-update pending list when enabled (F3 — seam-routed), else
+/// insert each entry directly. Always returns `false` (GIN never reports a
 /// unique-check result).
-pub fn gininsert<'mcx>(
+fn gininsert_with_state<'mcx>(
     ginstate: &GinState<'mcx>,
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -570,6 +572,40 @@ pub fn gininsert<'mcx>(
     }
 
     Ok(false)
+}
+
+/// `gininsert(index, values, isnull, ht_ctid, heapRel, checkUnique,
+/// indexUnchanged, indexInfo)` (gininsert.c:851): the `aminsert` callback. Insert
+/// one heap tuple's index entries. Always returns `false` (GIN never reports a
+/// unique-check result).
+///
+/// C caches the per-command [`GinState`] in `indexInfo->ii_AmCache`, lazily
+/// building it via `initGinState` on the first call. Our `IndexInfo.payload`
+/// carrier is `Box<dyn Any + 'static>`, which cannot hold the `'mcx`-bound
+/// `GinState`, so we rebuild it on every call (behaviour-preserving — the cache
+/// is a pure per-statement performance hint and changes no on-disk state). This
+/// is the same approach BRIN's `brininsert` takes for its `BrinInsertState`
+/// cache.
+pub fn gininsert<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    ht_ctid: &ItemPointerData,
+    _heap_rel: &Relation<'mcx>,
+    _check_unique: IndexUniqueCheck,
+    _index_unchanged: bool,
+    index_info: &mut IndexInfo,
+) -> PgResult<bool> {
+    let _ = index_info;
+
+    // C: ginstate = indexInfo->ii_AmCache; if NULL, initGinState(ginstate, index).
+    // Rebuilt every call (see the doc comment) instead of cached in ii_AmCache.
+    let ginstate = backend_access_gin_ginutil::initGinState(index, mcx)?;
+
+    // C creates a short-lived "Gin insert temporary context" here; in the owned
+    // model the per-call scratch allocations ride `mcx`.
+    gininsert_with_state(&ginstate, mcx, index, values, isnull, ht_ctid)
 }
 
 // ===========================================================================

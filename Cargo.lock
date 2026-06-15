@@ -794,6 +794,7 @@ dependencies = [
  "types-gin",
  "types-rel",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -13101,14 +13102,18 @@ dependencies = [
 name = "backend-utils-cache-syscache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-cache",
  "types-catalog",
@@ -13118,6 +13123,7 @@ dependencies = [
  "types-fmgr",
  "types-hash",
  "types-nodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -14827,6 +14833,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-gin-ginget",
+ "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
  "backend-access-gist-core",
  "backend-access-gist-proc",
