@@ -28,6 +28,7 @@ pub fn init_all() {
     backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
+    backend_access_spg_quadtree::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
@@ -178,6 +179,7 @@ pub fn init_all() {
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
+    backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
