@@ -1583,7 +1583,7 @@ fn btvacuumscan<'mcx>(
             None
         };
         num_pages = bufmgr::relation_get_number_of_blocks_in_fork::call(
-            rel.rd_id,
+            rel,
             types_core::primitive::ForkNumber::MAIN_FORKNUM,
         )?;
         if let Some(g) = guard {

@@ -17,11 +17,14 @@
 
 seam_core::seam!(
     /// `RelationGetNumberOfBlocksInFork(relation, forkNum)` (bufmgr.c): the
-    /// current number of blocks in the relation fork (`smgrnblocks` under
-    /// the covers — the `RelationGetNumberOfBlocks` macro is the
-    /// `MAIN_FORKNUM` case). `Err` carries the smgr `ereport(ERROR)`s.
-    pub fn relation_get_number_of_blocks_in_fork(
-        relation: types_core::primitive::Oid,
+    /// current number of blocks in the relation fork. For a table-AM relation
+    /// this is `table_relation_size(rel, fork) / BLCKSZ` (rounded up); for any
+    /// other relation with storage it is `smgrnblocks(RelationGetSmgr(rel),
+    /// fork)`. The `RelationGetNumberOfBlocks` macro is the `MAIN_FORKNUM` case.
+    /// Takes the `&Relation` (the C `Relation`); the owner resolves the physical
+    /// id and relkind off it directly. `Err` carries the smgr `ereport(ERROR)`s.
+    pub fn relation_get_number_of_blocks_in_fork<'mcx>(
+        relation: &types_rel::Relation<'mcx>,
         fork_num: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<types_core::primitive::BlockNumber>
 );
@@ -748,6 +751,77 @@ seam_core::seam!(
     pub fn mark_local_buffer_dirty(
         buffer: types_storage::storage::Buffer,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr)` (localbuf.c) — the
+    /// `RELPERSISTENCE_TEMP` arm of `PinBufferForBlock` (bufmgr.c:1148): find or
+    /// allocate the given block in this backend's local (temp) buffer pool. The
+    /// C `SMgrRelation` is flattened to its `RelFileLocatorBackend`. Returns the
+    /// pinned (local) `Buffer` and `found = true` iff the block was already
+    /// present. Installed by the local-buffer owner when its ambient per-backend
+    /// `LocalBufferManager` handle lands (panic-until-owner — sanctioned, same
+    /// posture as the F1c local-buffer pin dispatch). `Err` carries the localbuf
+    /// `ereport(ERROR)`s.
+    pub fn local_buffer_alloc(
+        smgr_reln: types_storage::RelFileLocatorBackend,
+        fork_num: types_core::primitive::ForkNumber,
+        block_num: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<(types_storage::storage::Buffer, bool)>
+);
+
+seam_core::seam!(
+    /// `PrefetchLocalBuffer(smgr, forkNum, blockNum)` (localbuf.c) — the
+    /// `RELPERSISTENCE_TEMP` arm of `PrefetchBuffer` (bufmgr.c:665): initiate (or
+    /// note as unnecessary) a prefetch of a block in this backend's local (temp)
+    /// buffer pool. The C `SMgrRelation` is flattened to its
+    /// `RelFileLocatorBackend`. Installed by the local-buffer owner
+    /// (panic-until-owner). `Err` carries the localbuf `ereport(ERROR)`s.
+    pub fn prefetch_local_buffer(
+        smgr_reln: types_storage::RelFileLocatorBackend,
+        fork_num: types_core::primitive::ForkNumber,
+        block_num: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::PrefetchBufferResult>
+);
+
+seam_core::seam!(
+    /// `AtEOXact_LocalBuffers(isCommit)` (localbuf.c) — the local-buffer leg of
+    /// `AtEOXact_Buffers` (bufmgr.c:3995): leak-check this backend's local (temp)
+    /// buffer pins at end of transaction. Installed by the local-buffer owner
+    /// when its ambient per-backend handle lands (panic-until-owner — sanctioned,
+    /// same posture as the F1c local-buffer dispatch). `Err` carries the localbuf
+    /// `ereport` surface.
+    pub fn at_eoxact_local_buffers(is_commit: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtProcExit_LocalBuffers()` (localbuf.c) — the local-buffer leg of
+    /// `AtProcExit_Buffers` (bufmgr.c:4047): leak-check this backend's local
+    /// (temp) buffer pins at backend exit. Installed by the local-buffer owner
+    /// when its ambient per-backend handle lands (panic-until-owner). `Err`
+    /// carries the localbuf `ereport` surface.
+    pub fn at_proc_exit_local_buffers() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRelLocal(bmr, fork, flags, extend_by, extend_upto, buffers,
+    /// extended_by)` (localbuf.c) — the `RELPERSISTENCE_TEMP` arm of
+    /// `ExtendBufferedRelCommon` (bufmgr.c:2580): extend a temp relation fork in
+    /// this backend's local (temp) buffer pool by up to `extend_by` blocks,
+    /// filling `buffers` with the pinned new (local) `Buffer`s and reporting the
+    /// actual count extended. The C `BufferManagerRelation` is flattened to its
+    /// `RelFileLocatorBackend` + relpersistence (already known to be TEMP). The
+    /// extension `flags` (`EB_*` bits) cross as a bitmask. Returns
+    /// `(first_block, extended_by)`. Installed by the local-buffer owner
+    /// (panic-until-owner). `Err` carries the localbuf `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_local(
+        smgr_reln: types_storage::RelFileLocatorBackend,
+        fork_num: types_core::primitive::ForkNumber,
+        flags: u32,
+        extend_by: u32,
+        extend_upto: types_core::primitive::BlockNumber,
+        buffers: &mut [types_storage::storage::Buffer],
+    ) -> types_error::PgResult<(types_core::primitive::BlockNumber, u32)>
 );
 
 // ---------------------------------------------------------------------------

@@ -293,7 +293,7 @@ fn initscan(
 /// count, reached through the bufmgr seam (which calls `smgrnblocks`).
 fn relation_get_number_of_blocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
     bufmgr_seam::relation_get_number_of_blocks_in_fork::call(
-        rel.rd_id,
+        rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )
 }

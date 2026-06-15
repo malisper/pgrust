@@ -26,6 +26,7 @@ mod bufalloc;
 mod buf_drop;
 mod buf_flush;
 mod buf_lock;
+mod eoxact;
 mod extend;
 mod mgr;
 mod ops;
@@ -462,6 +463,92 @@ fn flush_relations_all_buffers(
     BufferManager::global_expect().FlushRelationsAllBuffers(&locators)
 }
 
+// --- lifecycle + relation-size seams (bufmgr.c) ---------------------------
+
+/// `UnlockBuffers()` installed seam (bufmgr.c) — release the in-progress
+/// PIN_COUNT request on the abort/cleanup path (xact / standby consumers).
+fn unlock_buffers() {
+    BufferManager::global_expect().UnlockBuffers();
+}
+
+/// `HoldingBufferPinThatDelaysRecovery()` installed seam (bufmgr.c) — does this
+/// backend hold the buffer pin the Startup process is waiting on?
+fn holding_buffer_pin_that_delays_recovery() -> bool {
+    BufferManager::global_expect().HoldingBufferPinThatDelaysRecovery()
+}
+
+/// `AtEOXact_Buffers(isCommit)` installed seam (bufmgr.c) — end-of-transaction
+/// buffer-pin leak check (xact commit/abort consumer).
+fn at_eoxact_buffers(is_commit: bool) {
+    BufferManager::global_expect()
+        .AtEOXact_Buffers(is_commit)
+        .expect("AtEOXact_Buffers: buffer-pin leak");
+}
+
+/// `InitBufferManagerAccess()` installed seam (bufmgr.c) — set up this backend's
+/// private pin map and register the process-exit cleanup (postinit consumer).
+fn init_buffer_manager_access() -> types_error::PgResult<()> {
+    BufferManager::global_expect().InitBufferManagerAccess()
+}
+
+/// `RelationGetNumberOfBlocksInFork(relation, forkNum)` installed seam
+/// (bufmgr.c) — the current block count of a relation fork
+/// (hash / nbtree / table-AM consumers).
+fn relation_get_number_of_blocks_in_fork(
+    relation: &types_rel::Relation<'_>,
+    fork_num: types_core::primitive::ForkNumber,
+) -> types_error::PgResult<types_core::primitive::BlockNumber> {
+    BufferManager::global_expect().RelationGetNumberOfBlocksInFork(relation, fork_num)
+}
+
+/// `(FSMPage) PageGetContents(BufferGetPage(buf))` installed seam (bufmgr.c) —
+/// materialise the FSM page body as an owned [`types_fsm::FSMPageData`]
+/// (freespace consumer).
+fn fsm_buffer_get_page(buf: Buffer) -> types_error::PgResult<types_fsm::FSMPageData> {
+    BufferManager::global_expect().fsm_buffer_get_page(buf)
+}
+
+/// Store a mutated FSM page body back into the buffer's page (bufmgr.c)
+/// installed seam (freespace consumer).
+fn fsm_buffer_set_page(
+    buf: Buffer,
+    page: types_fsm::FSMPageData,
+) -> types_error::PgResult<()> {
+    BufferManager::global_expect().fsm_buffer_set_page(buf, page)
+}
+
+/// `PageSetChecksumInplace(page, blkno); smgrextend(RelationGetSmgr(rel),
+/// forkNum, blkno, page, skipFsync)` installed seam (bufmgr/smgr) — the
+/// `_hash_alloc_buckets` tail that stamps a checksum into the in-memory page and
+/// writes it past the current EOF (hash consumer). smgr is a direct dep.
+fn smgr_extend_page(
+    rlocator: types_storage::RelFileLocator,
+    fork_num: types_core::primitive::ForkNumber,
+    blkno: types_core::primitive::BlockNumber,
+    page: &mut [u8],
+    skip_fsync: bool,
+) -> types_error::PgResult<()> {
+    // PageSetChecksumInplace(page, blkno).
+    {
+        let mut p = backend_storage_page::PageMut::new(page)
+            .expect("smgr_extend_page: page is BLCKSZ");
+        backend_storage_page::PageSetChecksumInplace(&mut p, blkno);
+    }
+    // smgrextend(RelationGetSmgr(rel), forkNum, blkno, page, skipFsync). The
+    // page write is keyed by the unbacked RelFileLocatorBackend; the hash AM
+    // only reaches this for permanent relations.
+    backend_storage_smgr_smgr::smgrextend(
+        types_storage::RelFileLocatorBackend {
+            locator: rlocator,
+            backend: types_core::primitive::INVALID_PROC_NUMBER,
+        },
+        fork_num,
+        blkno,
+        page,
+        skip_fsync,
+    )
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -532,4 +619,22 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::report_bgwriter_buf_alloc::set(|_| {});
     backend_storage_buffer_bufmgr_seams::count_bgwriter_maxwritten_clean::set(|| {});
     backend_storage_buffer_bufmgr_seams::count_bgwriter_buffer_written_clean::set(|| {});
+    // Lifecycle + relation-size + FSM-page + smgr-extend seams: bufmgr OWNS all
+    // of these (the local-buffer leg of AtEOXact/AtProcExit + the temp-relation
+    // dispatch stay panic-until-owner outward seams installed by the local-buffer
+    // owner; log_newpage is installed by its xloginsert owner).
+    backend_storage_buffer_bufmgr_seams::unlock_buffers::set(unlock_buffers);
+    backend_storage_buffer_bufmgr_seams::holding_buffer_pin_that_delays_recovery::set(
+        holding_buffer_pin_that_delays_recovery,
+    );
+    backend_storage_buffer_bufmgr_seams::at_eoxact_buffers::set(at_eoxact_buffers);
+    backend_storage_buffer_bufmgr_seams::init_buffer_manager_access::set(
+        init_buffer_manager_access,
+    );
+    backend_storage_buffer_bufmgr_seams::relation_get_number_of_blocks_in_fork::set(
+        relation_get_number_of_blocks_in_fork,
+    );
+    backend_storage_buffer_bufmgr_seams::fsm_buffer_get_page::set(fsm_buffer_get_page);
+    backend_storage_buffer_bufmgr_seams::fsm_buffer_set_page::set(fsm_buffer_set_page);
+    backend_storage_buffer_bufmgr_seams::smgr_extend_page::set(smgr_extend_page);
 }

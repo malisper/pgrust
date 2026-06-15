@@ -253,7 +253,7 @@ pub fn _hash_getnewbuf<'mcx>(
     blkno: BlockNumber,
     fork_num: ForkNumber,
 ) -> PgResult<Buffer> {
-    let nblocks = bufmgr::relation_get_number_of_blocks_in_fork::call(rel.rd_id, fork_num)?;
+    let nblocks = bufmgr::relation_get_number_of_blocks_in_fork::call(rel, fork_num)?;
 
     if blkno == P_NEW {
         return Err(PgError::new(ERROR, "hash AM does not use P_NEW"));
@@ -362,7 +362,7 @@ pub fn _hash_init<'mcx>(
     fork_num: ForkNumber,
 ) -> PgResult<u32> {
     // safety check
-    if bufmgr::relation_get_number_of_blocks_in_fork::call(rel.rd_id, fork_num)? != 0 {
+    if bufmgr::relation_get_number_of_blocks_in_fork::call(rel, fork_num)? != 0 {
         return Err(PgError::new(ERROR, "cannot initialize non-empty hash index"));
     }
 

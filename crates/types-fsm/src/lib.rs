@@ -26,7 +26,7 @@ const fn maxalign(len: usize) -> usize {
 
 /// `offsetof(FSMPageData, fp_nodes)` — the flexible array follows a single
 /// 4-byte `int` with no intervening padding, so the C `offsetof` is `4`.
-const OFFSET_OF_FP_NODES: usize = 4;
+pub const OFFSET_OF_FP_NODES: usize = 4;
 
 /// `#define NodesPerPage (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
 /// offsetof(FSMPageData, fp_nodes))` — total bytes (tree nodes) available on a

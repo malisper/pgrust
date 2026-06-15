@@ -1639,6 +1639,18 @@ pub fn init_seams() {
     s::init_xlog_insert::set(InitXLogInsert);
     s::log_newpage_buffer::set(log_newpage_buffer);
     s::xlog_save_buffer_for_hint::set(XLogSaveBufferForHint);
+
+    // `log_newpage` (xloginsert.c) is declared as a bufmgr seam (consumed by the
+    // hash AM); xloginsert OWNS the C function, so it installs it here. The seam
+    // hands the page image in as a slice and only wants the record LSN back; the
+    // owner takes/returns the page by value (it stamps the LSN into a NON-new
+    // page), so adapt: copy in, drop the returned image.
+    backend_storage_buffer_bufmgr_seams::log_newpage::set(
+        |rlocator, forknum, blkno, page, page_std| {
+            let (recptr, _page) = log_newpage(&rlocator, forknum, blkno, page.to_vec(), page_std)?;
+            Ok(recptr)
+        },
+    );
 }
 
 #[cfg(test)]
