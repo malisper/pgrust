@@ -69,6 +69,7 @@ use types_pathnodes::{
 use backend_optimizer_util_pathnode_seams::PathKeysComparison;
 
 use backend_optimizer_path_equivclass_seams as ec;
+use backend_optimizer_path_indxpath_seams as ix;
 use backend_optimizer_path_equivclass as equivclass;
 use backend_optimizer_util_relnode_seams as bms;
 use backend_nodes_nodeFuncs_seams as nf;
@@ -736,7 +737,7 @@ pub fn build_index_pathkeys(
                 // Boolean index keys might be redundant even if not in an EC
                 // (see indexcol_is_bool_constant_for_query). If that applies, we
                 // can keep examining lower-order index columns; else stop.
-                if !indexcol_is_bool_constant_for_query(root, index, i as i32) {
+                if !ix::indexcol_is_bool_constant_for_query::call(root, index, i as i32) {
                     break;
                 }
             }
@@ -1841,22 +1842,6 @@ pub fn has_useful_pathkeys(root: &PlannerInfo, rel: &RelOptInfo) -> bool {
 #[inline]
 fn scan_direction_is_backward(scandir: ScanDirection) -> bool {
     scandir == BackwardScanDirection
-}
-
-/// `indexcol_is_bool_constant_for_query(root, index, indexcol)` (indxpath.c) —
-/// detect whether a boolean index column is constrained to a constant by the
-/// query. indxpath.c is **not yet ported**; this is a seam-and-panic into its
-/// future owner. (pathkeys.c only *calls* it; the function belongs to indxpath.c.)
-fn indexcol_is_bool_constant_for_query(
-    _root: &PlannerInfo,
-    _index: &IndexOptInfo,
-    _indexcol: i32,
-) -> bool {
-    panic!(
-        "indexcol_is_bool_constant_for_query: optimizer/path/indxpath.c is not yet ported; \
-         build_index_pathkeys reached a boolean index column that is not in an \
-         EquivalenceClass"
-    )
 }
 
 /// Collect a `get_mergejoin_opfamilies`-style `Mcx`-allocating lsyscache seam
