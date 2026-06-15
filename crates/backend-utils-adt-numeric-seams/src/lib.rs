@@ -23,6 +23,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatumGetFloat8(DirectFunctionCall1(numeric_float8,
+    /// DirectFunctionCall2(numeric_sub, a, b)))` over two on-disk `numeric`
+    /// varlenas — the `numeric` distance `a - b` as a `float8`. This is the
+    /// owned-bytes counterpart of [`numeric_subdiff`] (which takes
+    /// pointer-bearing `Datum`s); reached from `brin_minmax_multi`'s
+    /// `brin_minmax_multi_distance_numeric`, whose arguments arrive as detoasted
+    /// `numeric` byte images on the fmgr by-reference lane. `Err` carries the
+    /// `numeric_sub` / `numeric_float8` `ereport(ERROR)`s (e.g. overflow). Pure
+    /// computation otherwise.
+    pub fn numeric_subdiff_bytes(a: &[u8], b: &[u8]) -> types_error::PgResult<f64>
+);
+
+seam_core::seam!(
     /// `numeric_maximum_size(typmod)` (numeric.c): the maximum on-disk size of
     /// a `numeric` value with the given typmod, or -1 if indeterminate. Pure
     /// arithmetic on the typmod-encoded precision/scale; no allocation, no

@@ -92,4 +92,5 @@ pub fn init_seams() {
     seams::numeric_cmp::set(io::seam_numeric_cmp);
     seams::numeric_maximum_size::set(ops_sql::seam_numeric_maximum_size);
     seams::numeric_subdiff::set(ops_sql::seam_numeric_subdiff);
+    seams::numeric_subdiff_bytes::set(ops_sql::seam_numeric_subdiff_bytes);
 }
