@@ -119,6 +119,12 @@ fn conditional_lock_buffer_for_cleanup(buffer: Buffer) -> types_error::PgResult<
     BufferManager::global_expect().ConditionalLockBufferForCleanup(buffer)
 }
 
+/// `ConditionalLockBuffer(buffer)` installed seam (bufmgr.c) — try to take the
+/// buffer's exclusive content lock without blocking.
+fn conditional_lock_buffer(buffer: Buffer) -> types_error::PgResult<bool> {
+    BufferManager::global_expect().ConditionalLockBuffer(buffer)
+}
+
 /// `IsBufferCleanupOK(buffer)` installed seam (bufmgr.c) — does the already-held
 /// exclusive lock happen to be a cleanup lock?
 fn is_buffer_cleanup_ok(buffer: Buffer) -> types_error::PgResult<bool> {
@@ -571,6 +577,7 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::conditional_lock_buffer_for_cleanup::set(
         conditional_lock_buffer_for_cleanup,
     );
+    backend_storage_buffer_bufmgr_seams::conditional_lock_buffer::set(conditional_lock_buffer);
     backend_storage_buffer_bufmgr_seams::is_buffer_cleanup_ok::set(is_buffer_cleanup_ok);
     backend_storage_buffer_bufmgr_seams::mark_buffer_dirty_hint::set(mark_buffer_dirty_hint);
     // F1d
