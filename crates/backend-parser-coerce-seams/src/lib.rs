@@ -44,3 +44,22 @@ seam_core::seam!(
     /// catcache-path `ereport(ERROR)`s.
     pub fn is_binary_coercible(srctype: Oid, targettype: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `enforce_generic_type_consistency(actual_arg_types, declared_arg_types,
+    /// nargs, rettype, allow_poly)` (parse_coerce.c): resolve any polymorphic
+    /// (`ANY*`) entries in `declared_arg_types` against the concrete
+    /// `actual_arg_types`, mutating `declared_arg_types` in place (the C output
+    /// array used by `make_fn_arguments` as the cast destination) and returning
+    /// the actual result type the polymorphic `rettype` resolves to.
+    /// `allow_poly` is the C trailing `bool` (parse_oper.c always passes
+    /// `false`). `Err` carries the inconsistent-polymorphic-types
+    /// `ereport(ERROR)` surface.
+    pub fn enforce_generic_type_consistency(
+        actual_arg_types: &[types_core::Oid],
+        declared_arg_types: &mut [types_core::Oid],
+        nargs: i32,
+        rettype: types_core::Oid,
+        allow_poly: bool,
+    ) -> PgResult<types_core::Oid>
+);

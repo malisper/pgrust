@@ -614,49 +614,46 @@ fn deform_into_slot<'mcx>(
 ///
 /// `DatumGetHeapTupleHeader(data)` decodes a composite (`record`) `Datum` back
 /// into a `HeapTupleHeader` + its data area. The canonical `Datum` enum carries
-/// a composite value as `ByRef(bytes)`, but the composite-Datum decode bridge —
-/// reinterpreting those `ByRef` bytes as a `HeapTupleHeader`
-/// (`DatumGetHeapTupleHeader`) and reading `HeapTupleHeaderGetDatumLength` /
-/// the composite-Datum header fields off them — is not ported anywhere in the
-/// workspace. Every consumer of it (execExprInterp's row/fieldselect/fieldstore
-/// /convert-rowtype steps included) is still a mirror-PG-and-panic on the same
-/// unported bridge. Mirror PG and panic on the genuinely-unported composite-Datum
-/// decode.
+/// a composite value as `ByRef(bytes)`; the composite/record-Datum carrier
+/// bridge (task #161) decodes those `ByRef` bytes back into a `FormedTuple`
+/// (`backend_access_common_heaptuple::DatumGetHeapTupleHeader`), which is then
+/// deformed into the slot's `tts_values`/`tts_isnull` arrays exactly as
+/// `deform_into_slot` does for a directly-stored tuple.
 fn deform_composite_datum_into_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &mut SlotData<'mcx>,
-    _data: Datum,
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    data: Datum<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "execTuples.c ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader (composite-Datum \
-         decode — reinterpreting the record Datum's ByRef bytes as a HeapTupleHeader) is \
-         not ported anywhere in the workspace; same unported bridge execExprInterp's \
-         composite steps panic on"
-    )
+    // tuple = DatumGetHeapTupleHeader(data) — decode the composite Datum's
+    // ByRef bytes back into a FormedTuple (owned header + data area).
+    let tuple = backend_access_common_heaptuple::DatumGetHeapTupleHeader(mcx, &data)?;
+    // heap_deform_tuple(&tuple, slot->tts_tupleDescriptor, values, isnull).
+    deform_into_slot(mcx, slot, &tuple)
 }
 
 /// `heap_copy_tuple_as_datum(tup, slot->tts_tupleDescriptor)`
 /// (`ExecFetchSlotHeapTupleDatum`): the fetched heap tuple flattened into a
 /// composite `Datum`.
 ///
-/// `heap_copy_tuple_as_datum` itself is ported (it yields a `FormedTuple`
-/// composite image), but minting that image into a composite `Datum` —
-/// serializing the `HeapTupleHeader` (with the `datum_len_`/`datum_typeid`/
-/// `datum_typmod` fields) into the `ByRef` byte layout `DatumGetHeapTupleHeader`
-/// reads back (`HeapTupleGetDatum`) — is the composite-Datum bridge that is
-/// unported workspace-wide. (Even with the canonical `Datum::ByRef` lane, that
-/// header-serialization layout has no porter; execExprInterp's composite steps
-/// panic on the same boundary.) Mirror PG and panic on the genuinely-unported
-/// composite-Datum mint.
+/// The composite/record-Datum carrier bridge (task #161): mint the formed tuple
+/// into a composite `Datum` via
+/// `backend_access_common_heaptuple::HeapTupleGetDatum`, which sets the
+/// `datum_len_`/`datum_typeid`/`datum_typmod` header fields (and flattens any
+/// external TOAST pointers) and serialises the contiguous `HeapTupleHeader` image
+/// into the canonical `Datum::ByRef` byte layout.
 fn heap_copy_tuple_as_datum_carrier<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &SlotData<'mcx>,
-    _tup: FormedTuple<'mcx>,
+    mcx: Mcx<'mcx>,
+    slot: &SlotData<'mcx>,
+    tup: FormedTuple<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
-    panic!(
-        "execTuples.c ExecFetchSlotHeapTupleDatum: minting heap_copy_tuple_as_datum's image \
-         into a composite Datum (HeapTupleGetDatum — serializing the HeapTupleHeader into the \
-         ByRef byte layout DatumGetHeapTupleHeader reads back) needs the composite-Datum bridge, \
-         which is unported workspace-wide"
-    )
+    // tupdesc = slot->tts_tupleDescriptor;
+    let desc = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .ok_or_else(|| {
+            PgError::error("ExecFetchSlotHeapTupleDatum: slot has no tuple descriptor")
+        })?;
+    // ret = heap_copy_tuple_as_datum(tup, tupdesc) -> composite Datum.
+    backend_access_common_heaptuple::HeapTupleGetDatum(mcx, &tup, desc)
 }

@@ -2210,6 +2210,169 @@ pub fn heap_tuple_to_disk_image<'mcx>(
     Ok(img)
 }
 
+// ===========================================================================
+// The composite/record-Datum carrier bridge (task #161):
+// FormedTuple <-> composite Datum (a varlena-wrapped HeapTupleHeader image).
+//
+// In C a composite/record value crosses as an ordinary pass-by-reference
+// (varlena) Datum whose bytes are a `HeapTupleHeader` (`DatumGetHeapTupleHeader`
+// == `DatumGetPointer` + detoast; `HeapTupleGetDatum` ==
+// `HeapTupleHeaderGetDatum(tuple->t_data)`). PostgreSQL has NO composite *kind*;
+// the record case is just `Datum::ByRef(bytes)` (datum-redesign-plan, Option A).
+// These two functions are the canonical model's faithful realisation of that
+// pair: they compose the existing carrier conversions
+// (`heap_copy_tuple_as_datum` to set the composite-Datum header fields +
+// `heap_tuple_to_disk_image` to lay down the contiguous byte image) with the
+// `Datum::ByRef` byte lane — NO new Datum variant and NO forged pointer.
+// ===========================================================================
+
+/// `HeapTupleGetDatum(tuple)` (htup_details.h) — turn a fully-formed tuple into
+/// a composite/record `Datum`. C's macro is
+/// `HeapTupleHeaderGetDatum((tuple)->t_data)`: it sets the composite-Datum
+/// header fields (`datum_len_`/`datum_typeid`/`datum_typmod`, via
+/// `heap_form_tuple`/`heap_copy_tuple_as_datum`) and inlines any external TOAST
+/// pointers, yielding a self-contained varlena-wrapped `HeapTupleHeader`.
+///
+/// In the canonical model that self-contained byte image is exactly a
+/// by-reference [`Datum::ByRef`] value (a composite value is a pass-by-reference
+/// Datum, datum-redesign-plan Option A). This composes
+/// [`heap_copy_tuple_as_datum`] (which sets the Datum header fields and routes
+/// the `HEAP_HASEXTERNAL` case through the heaptoast flatten seam) with
+/// [`heap_tuple_to_disk_image`] (which serialises header + null bitmap + pad +
+/// user data into the contiguous `t_len`-byte image). The bytes are allocated in
+/// `mcx` (C: palloc in the current context). `Err` carries OOM and any detoast
+/// `ereport(ERROR)` from the flatten path.
+#[allow(non_snake_case)]
+pub fn HeapTupleGetDatum<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<Datum<'mcx>> {
+    // C: HeapTupleHeaderGetDatum(tuple->t_data) — set the composite-Datum header
+    // fields (and flatten external TOAST pointers if any).
+    let as_datum = heap_copy_tuple_as_datum(mcx, tuple, tuple_desc)?;
+    // The composite Datum *is* the self-contained header+data byte image, the
+    // faithful stand-in for C's `PointerGetDatum(td)`.
+    let bytes = heap_tuple_to_disk_image(mcx, &as_datum)?;
+    Ok(Datum::ByRef(bytes))
+}
+
+/// `DatumGetHeapTupleHeader(datum)` (htup_details.h) — the inverse bridge: read
+/// a composite/record `Datum` back as a [`FormedTuple`] (owned header + user
+/// data). In C this is `DatumGetPointer(datum)` (after detoasting), i.e. the
+/// caller reinterprets the varlena bytes as a `HeapTupleHeader`; here the
+/// already-detoasted [`Datum::ByRef`] bytes are decoded back into the structured
+/// [`FormedTuple`] carrier (the reverse of [`heap_tuple_to_disk_image`]),
+/// allocated in `mcx`.
+///
+/// The bytes are a self-contained composite-Datum image: a fixed
+/// `SizeofHeapTupleHeader` (23-byte) header (with the `TDatum` union arm carrying
+/// `datum_len_`/`datum_typmod`/`datum_typeid`), an optional `t_bits` null bitmap,
+/// MAXALIGN pad to `t_hoff`, then the user-data column area. `t_self`/`t_tableOid`
+/// are not part of the on-image bytes (a composite Datum has no page identity);
+/// they are set invalid, exactly as a tuple reconstructed from a Datum has no
+/// home page. Panics if a `ByVal` scalar is passed (a caller bug — C would read
+/// garbage by treating a scalar word as a pointer); `Err` is a structurally
+/// corrupt image (length/`t_hoff` bounds), surfaced loud rather than fabricated.
+#[allow(non_snake_case)]
+pub fn DatumGetHeapTupleHeader<'mcx>(
+    mcx: Mcx<'mcx>,
+    datum: &Datum<'_>,
+) -> PgResult<FormedTuple<'mcx>> {
+    let image: &[u8] = match datum {
+        Datum::ByRef(b) => b,
+        Datum::ByVal(_) => {
+            panic!("DatumGetHeapTupleHeader called on a by-value (non-composite) Datum")
+        }
+    };
+
+    if image.len() < SizeofHeapTupleHeader {
+        return Err(PgError::error(
+            "DatumGetHeapTupleHeader: composite Datum shorter than HeapTupleHeader",
+        ));
+    }
+
+    let u32_at = |o: usize| u32::from_ne_bytes([image[o], image[o + 1], image[o + 2], image[o + 3]]);
+    let u16_at = |o: usize| u16::from_ne_bytes([image[o], image[o + 1]]);
+
+    // --- t_choice (12 bytes): a composite Datum carries the TDatum union arm ---
+    let datum_len_ = u32_at(0) as i32;
+    let datum_typmod = u32_at(4) as i32;
+    let datum_typeid: Oid = u32_at(8);
+
+    // --- t_ctid (6 bytes) --- (carried verbatim; a composite Datum's t_ctid
+    // holds no page identity, but the bytes round-trip the disk image exactly).
+    let t_ctid = ItemPointerData {
+        ip_blkid: BlockIdData {
+            bi_hi: u16_at(12),
+            bi_lo: u16_at(14),
+        },
+        ip_posid: u16_at(16),
+    };
+
+    // --- t_infomask2(2) t_infomask(2) t_hoff(1) ---
+    let t_infomask2 = u16_at(18);
+    let t_infomask = u16_at(20);
+    let t_hoff = image[22];
+    let t_hoff_usize = t_hoff as usize;
+
+    if t_hoff_usize < SizeofHeapTupleHeader || t_hoff_usize > image.len() {
+        return Err(PgError::error(
+            "DatumGetHeapTupleHeader: composite Datum t_hoff out of bounds",
+        ));
+    }
+
+    // --- t_bits (null bitmap), present iff HEAP_HASNULL ---
+    let t_bits: PgVec<'mcx, bits8> = if (t_infomask & HEAP_HASNULL) != 0 {
+        let natts = t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK;
+        let bitmap_len = BITMAPLEN(natts as i32) as usize;
+        if SizeofHeapTupleHeader + bitmap_len > t_hoff_usize {
+            return Err(PgError::error(
+                "DatumGetHeapTupleHeader: null bitmap overruns t_hoff",
+            ));
+        }
+        slice_in(
+            mcx,
+            &image[SizeofHeapTupleHeader..SizeofHeapTupleHeader + bitmap_len],
+        )?
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    let header = HeapTupleHeaderData {
+        t_choice: HeapTupleHeaderChoice::TDatum(DatumTupleFields {
+            datum_len_,
+            datum_typmod,
+            datum_typeid,
+        }),
+        t_ctid,
+        t_infomask2,
+        t_infomask,
+        t_hoff,
+        t_bits,
+    };
+
+    // The byte image's leading `datum_len_` is the varlena length word
+    // (`HeapTupleHeaderGetDatumLength`), equal to the full image length — the
+    // tuple's `t_len`.
+    let t_len = image.len() as u32;
+
+    Ok(FormedTuple {
+        tuple: alloc_in(
+            mcx,
+            HeapTupleData {
+                t_len,
+                // A composite Datum has no home page; the reconstructed tuple's
+                // identity is invalid (C: a Datum-sourced tuple has no t_self).
+                t_self: invalid_item_pointer(),
+                t_tableOid: types_core::InvalidOid,
+                t_data: Some(alloc_in(mcx, header)?),
+            },
+        )?,
+        data: slice_in(mcx, &image[t_hoff_usize..])?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Seam installation
 // ---------------------------------------------------------------------------

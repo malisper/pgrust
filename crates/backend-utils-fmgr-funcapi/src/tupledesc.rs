@@ -353,3 +353,67 @@ pub fn extract_variadic_args<'mcx>(
         nulls: nulls_res,
     }))
 }
+
+/// Build an anonymous-record `Datum` from a row of `values`/`nulls` whose
+/// columns have the given type OIDs (`coltypes[i]` is column `i+1`). This is the
+/// `CreateTemplateTupleDesc(n)` + per-column `TupleDescInitEntry(..., typ, -1, 0)`
+/// + `BlessTupleDesc` + `heap_form_tuple` + `HeapTupleGetDatum` idiom used by
+/// record-returning builtins (e.g. genfile.c's `pg_stat_file`).
+///
+/// The terminal `HeapTupleGetDatum` step — turning the formed tuple into a
+/// composite record `Datum` — crosses the composite/record-Datum carrier bridge
+/// (task #161): a composite value is an ordinary pass-by-reference (varlena)
+/// `Datum` whose bytes are a `HeapTupleHeader`, produced by
+/// [`backend_access_common_heaptuple::HeapTupleGetDatum`] (NO new Datum variant,
+/// NO forged pointer — datum-redesign-plan Option A). The descriptor / tuple are
+/// allocated in `mcx`; `Err` carries OOM from forming the tuple.
+pub fn record_from_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltypes: &[Oid],
+    values: &[DatumV<'mcx>],
+    nulls: &[bool],
+) -> PgResult<DatumV<'mcx>> {
+    let natts = coltypes.len();
+    debug_assert_eq!(values.len(), natts);
+    debug_assert_eq!(nulls.len(), natts);
+
+    // C: tupdesc = CreateTemplateTupleDesc(n);
+    let mut td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, natts as i32)?;
+    // C: TupleDescInitEntry(tupdesc, i+1, "...", coltypes[i], -1, 0);
+    // The column names are immaterial for an anonymous record built purely to
+    // wrap a value row (the producing builtin's pg_proc OUT-parameter names
+    // already describe the row); C's genfile.c passes literal names only for
+    // documentation. We pass `None` (TupleDescInitEntry fills a NameData; the
+    // name is not consulted when forming/deforming by position).
+    for (i, &typ) in coltypes.iter().enumerate() {
+        backend_access_common_tupdesc::TupleDescInitEntry(
+            &mut td,
+            (i + 1) as i16,
+            None,
+            typ,
+            -1,
+            0,
+        )?;
+    }
+
+    // C: BlessTupleDesc(tupdesc) — assign a transient typmod to the anonymous
+    // RECORD descriptor via the typcache (execTuples.c). Mirrored inline (the
+    // only owned step is the RECORDOID/typmod<0 guard around
+    // assign_record_type_typmod), exactly as srf_support's InitMaterializedSRF.
+    if td.tdtypeid == RECORDOID && td.tdtypmod < 0 {
+        backend_utils_cache_typcache_seams::assign_record_type_typmod::call(&mut td)?;
+    }
+
+    // C: tuple = heap_form_tuple(tupdesc, values, isnull);
+    let formed = backend_access_common_heaptuple::heap_form_tuple(mcx, &td, values, nulls)
+        .map_err(|e| {
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+                .errmsg(format!("record_from_values: heap_form_tuple failed: {e:?}"))
+                .into_error()
+        })?;
+
+    // C: PG_RETURN_DATUM(HeapTupleGetDatum(tuple)) — the composite/record-Datum
+    // carrier bridge (task #161).
+    backend_access_common_heaptuple::HeapTupleGetDatum(mcx, &formed, &td)
+}

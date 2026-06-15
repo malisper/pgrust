@@ -138,6 +138,7 @@ pub fn init_all() {
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_parser_parse_oper::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -645,7 +646,13 @@ mod recurrence_guard {
         // so the name-keyed guard sees them as satisfied (they are equally
         // uninstalled at runtime — same blocker).
         ("backend_access_common_tupdesc", "free_tuple_desc"),
-        ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
+        // RETIRED (task #161): `heap_tuple_header_get_datum`
+        // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
+        // The composite/record-Datum carrier bridge landed: the seam carries the
+        // data-bearing `FormedTuple`, and the no-external fast path mints the
+        // `Datum::ByRef` image directly via heap_tuple_to_disk_image while the
+        // external case flattens through toast_flatten_tuple_to_datum +
+        // lookup_rowtype_tupdesc.
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
@@ -1017,14 +1024,12 @@ mod recurrence_guard {
         // seams declared alongside it ARE installed in miscinit's init_seams by
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
-        // DESIGN_DEBT: `record_from_values` returns a composite *record* `Datum`
-        // (`heap_form_tuple` + `HeapTupleGetDatum`). The composite-Datum bridge
-        // (`HeapTupleGetDatum` / the `FormedTuple`->record-Datum carrier) is
-        // unported workspace-wide — `types_tuple::Datum` (`TupleValue` ByVal/ByRef)
-        // is a scalar byte lane with no Composite/record arm, so the owner cannot
-        // construct the return value faithfully. K1-gated on the FormedTuple->
-        // HeapTuple carrier bridge (task #161); install once that lands.
-        ("backend_utils_fmgr_funcapi", "record_from_values"),
+        // RETIRED (task #161): `record_from_values` is now installed by funcapi's
+        // init_seams(). The composite/record-Datum carrier bridge landed: the
+        // terminal `HeapTupleGetDatum` step crosses the formed tuple as a
+        // by-reference composite `Datum::ByRef` (a varlena-wrapped HeapTupleHeader
+        // image) via `backend_access_common_heaptuple::HeapTupleGetDatum` — no new
+        // Datum variant, no forged pointer (datum-redesign-plan Option A).
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
         // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
         // in `srf_support::value_srf_unported` and panics loudly naming the missing

@@ -4,10 +4,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::PgString;
+use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
+use types_namespace::FuncCandidateList;
 use types_nodes::parsenodes::ObjectType;
+use types_nodes::primnodes::Expr;
 use types_opclass::ObjectWithArgs;
 use types_parsenodes::ObjectWithArgs as ParseObjectWithArgs;
 
@@ -48,4 +50,76 @@ seam_core::seam!(
         func: &ParseObjectWithArgs,
         missing_ok: bool,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `func_match_argtypes(nargs, input_typeids, raw_candidates, &candidates)`
+    /// (parse_func.c): from the `raw_candidates` list, keep only those whose
+    /// declared argument types the `input_typeids` can be coerced to (directly
+    /// or via implicit cast), returning the filtered candidate list (C returns
+    /// the surviving count + the new list via the out-param; the owned port
+    /// returns the list, whose `len()` is that count). Allocated in `mcx`.
+    pub fn func_match_argtypes<'mcx>(
+        mcx: Mcx<'mcx>,
+        nargs: i32,
+        input_typeids: &[Oid],
+        raw_candidates: &FuncCandidateList<'mcx>,
+    ) -> PgResult<FuncCandidateList<'mcx>>
+);
+
+seam_core::seam!(
+    /// `func_select_candidate(nargs, input_typeids, candidates)`
+    /// (parse_func.c): apply the ambiguous-function resolution heuristics to
+    /// pick a single best candidate from `candidates`. `Ok(Some(oid))` is the
+    /// chosen candidate's OID (the C returns the single-element list whose
+    /// `->oid` the caller reads); `Ok(None)` is the C NULL return (no unique
+    /// best candidate). Allocated in `mcx`. `Err` carries the catalog-lookup
+    /// `ereport(ERROR)` surface.
+    pub fn func_select_candidate<'mcx>(
+        mcx: Mcx<'mcx>,
+        nargs: i32,
+        input_typeids: &[Oid],
+        candidates: &FuncCandidateList<'mcx>,
+    ) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `make_fn_arguments(pstate, fargs, actual_arg_types, declared_arg_types)`
+    /// (parse_func.c): coerce each argument expression in `fargs` from its
+    /// `actual_arg_types[i]` to the corresponding `declared_arg_types[i]`,
+    /// applying the necessary cast/relabel in place (the C scribbles the coerced
+    /// nodes back into the `fargs` list cells). `source_text` is the parse
+    /// state's `p_sourcetext` (`None` when `pstate == NULL`), used for error
+    /// positioning. `Err` carries the cannot-coerce `ereport(ERROR)` surface.
+    pub fn make_fn_arguments(
+        source_text: Option<&str>,
+        fargs: &mut [Expr],
+        actual_arg_types: &[Oid],
+        declared_arg_types: &[Oid],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `check_srf_call_placement(pstate, last_srf, location)` (parse_func.c):
+    /// verify that a set-returning function call appears in a context where it
+    /// is allowed (and detect nested-SRF). `last_srf` is the saved
+    /// `pstate->p_last_srf` from before the operator's arguments were
+    /// transformed. `source_text` is the parse state's `p_sourcetext`. `Err`
+    /// carries the disallowed-placement `ereport(ERROR)` surface.
+    pub fn check_srf_call_placement(
+        source_text: Option<&str>,
+        last_srf: Option<&Expr>,
+        location: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pstate->p_last_srf = (Node *) result;` (parse_oper.c make_op): record
+    /// the just-built set-returning `OpExpr` as the parse state's last SRF, for
+    /// nested-SRF error checks at higher levels. The repo's trimmed
+    /// [`types_parsenodes::ParseState`] does not yet carry `p_last_srf`, and the
+    /// parse-state owner (`parse_node.c` / `parse_expr.c`) is unported, so the
+    /// assignment crosses a seam keyed on the parse state's `p_sourcetext`
+    /// identity; the host updates the real `ParseState->p_last_srf`.
+    pub fn set_last_srf(source_text: Option<&str>, result: &Expr) -> PgResult<()>
 );
