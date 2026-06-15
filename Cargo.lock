@@ -6390,6 +6390,7 @@ dependencies = [
  "backend-catalog-pg-depend-seams",
  "backend-foreign-fdwapi-seams",
  "backend-foreign-foreign-seams",
+ "backend-optimizer-path-pathkeys",
  "backend-utils-adt-varlena",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
@@ -14156,7 +14157,6 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
- "backend-access-brin-validate",
  "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
