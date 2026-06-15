@@ -30,6 +30,7 @@ backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 
 # Merged sibling owners called directly (cycle-free).
+backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
