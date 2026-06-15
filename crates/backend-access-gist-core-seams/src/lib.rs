@@ -46,3 +46,56 @@ seam_core::seam!(
         delete_xid: types_core::xact::FullTransactionId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `gistXLogSplit(page_is_leaf, dist, orig_rlink, orignsn, leftchildbuf,
+    /// markfollowright)` (gistxlog.c) — WAL-log a GiST page split. `dist` is the
+    /// `SplitPageLayout` chain produced by `gistSplit` (one entry per produced
+    /// half, each carrying its `buffer`/`page` block + on-disk tuple bytes).
+    /// Returns the record's `XLogRecPtr`. Owned by the GiST xlog (F7) lane;
+    /// panics until that lands.
+    pub fn gist_xlog_split<'mcx>(
+        page_is_leaf: bool,
+        dist: &[types_gist::SplitPageLayout<'mcx>],
+        orig_rlink: types_core::BlockNumber,
+        orignsn: types_gist::GistNSN,
+        left_child_buf: types_storage::Buffer,
+        mark_follow_right: bool,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `gistXLogUpdate(buffer, todelete, ntodelete, itup, ituplen,
+    /// leftchildbuf)` (gistxlog.c) — WAL-log a GiST page update (delete some
+    /// offsets, add some tuples). `todelete` are the offsets to remove; `itup`
+    /// are the on-disk byte images to add. Returns the record's `XLogRecPtr`.
+    /// Owned by the GiST xlog (F7) lane; panics until that lands.
+    pub fn gist_xlog_update(
+        buffer: types_storage::Buffer,
+        todelete: &[types_core::primitive::OffsetNumber],
+        itup: &[&[u8]],
+        left_child_buf: types_storage::Buffer,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `gistXLogDelete(buffer, todelete, ntodelete, snapshotConflictHorizon,
+    /// heaprel)` (gistxlog.c) — WAL-log the deletion of LP_DEAD index tuples on
+    /// a leaf page. Returns the record's `XLogRecPtr`. Owned by the GiST xlog
+    /// (F7) lane; panics until that lands.
+    pub fn gist_xlog_delete<'mcx>(
+        buffer: types_storage::Buffer,
+        todelete: &[types_core::primitive::OffsetNumber],
+        snapshot_conflict_horizon: types_core::primitive::TransactionId,
+        heaprel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `gistGetFakeLSN(rel)` (gist.c) — produce a fake LSN for an unlogged or
+    /// temp GiST index (so NSN interlocks still order correctly without real
+    /// WAL). Owned by the GiST xlog (F7) lane; panics until that lands.
+    pub fn gist_get_fake_lsn<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
