@@ -98,7 +98,7 @@ pub fn init_seams() {
 // and the `ginget` clone). Mirrors `ginget`'s `clone_ginstate`.
 // ===========================================================================
 
-fn clone_ginstate<'mcx>(mcx: Mcx<'mcx>, src: &GinState<'mcx>) -> PgResult<GinState<'mcx>> {
+pub fn clone_ginstate<'mcx>(mcx: Mcx<'mcx>, src: &GinState<'mcx>) -> PgResult<GinState<'mcx>> {
     let clone_td = |td: &types_tuple::heaptuple::TupleDesc<'mcx>| -> PgResult<
         types_tuple::heaptuple::TupleDesc<'mcx>,
     > {
@@ -552,6 +552,8 @@ fn gininsert_with_state<'mcx>(
         // owner crate yet, so the whole fast path crosses the seam (loud-panic
         // until F3 lands — mirror-PG-and-panic for an unported sibling dep).
         backend_access_gin_gininsert_seams::gin_fast_insert::call(
+            mcx,
+            index,
             ginstate.index,
             values[..natts].to_vec(),
             isnull[..natts].to_vec(),
