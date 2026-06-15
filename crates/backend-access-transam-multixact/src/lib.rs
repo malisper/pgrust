@@ -2606,6 +2606,7 @@ pub fn init_seams() {
     mx_seams::multixactmemberssyncfiletag::set(multixactmemberssyncfiletag);
     mx_seams::multi_xact_shmem_size::set(multi_xact_shmem_size_seam);
     mx_seams::multi_xact_shmem_init::set(MultiXactShmemInit);
+    mx_seams::get_oldest_multi_xact_id::set(GetOldestMultiXactId);
 }
 
 /// `get_multi_xact_id_members` seam: the inward contract returns a `PgVec` in

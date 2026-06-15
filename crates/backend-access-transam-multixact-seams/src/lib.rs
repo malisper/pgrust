@@ -177,3 +177,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn multi_xact_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetOldestMultiXactId()` (multixact.c) — the oldest MultiXactId that
+    /// could still appear in a tuple (the floor `heapam_relation_set_new_filelocator`
+    /// stores as the new relation's `relminmxid`). `Err` carries the SLRU-read
+    /// `ereport` surface.
+    pub fn get_oldest_multi_xact_id() -> types_error::PgResult<types_core::primitive::MultiXactId>
+);

@@ -132,3 +132,19 @@ seam_core::seam!(
         at_commit: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// The storage-creation leg of `heapam_relation_set_new_filelocator`
+    /// (heapam_handler.c): `srel = RelationCreateStorage(newrlocator,
+    /// persistence, true)`, then for an unlogged relation
+    /// (`RELPERSISTENCE_UNLOGGED`) `smgrcreate(srel, INIT_FORKNUM, false)` +
+    /// `log_smgrcreate(newrlocator, INIT_FORKNUM)`, finally `smgrclose(srel)`.
+    /// Owned by `storage.c`; the transient `SMgrRelation` handle never crosses
+    /// the boundary (it is created and closed entirely inside the owner), so the
+    /// heap AM only supplies the locator + persistence. `Err` carries the
+    /// `ereport(ERROR)`s of storage creation / WAL logging.
+    pub fn relation_set_new_filelocator_storage(
+        newrlocator: RelFileLocator,
+        relpersistence: i8,
+    ) -> PgResult<()>
+);
