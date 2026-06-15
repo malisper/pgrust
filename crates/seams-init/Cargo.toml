@@ -34,6 +34,8 @@ backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
 backend-access-hash-xlog = { path = "../backend-access-hash-xlog" }
+backend-access-hash-core = { path = "../backend-access-hash-core" }
+backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }

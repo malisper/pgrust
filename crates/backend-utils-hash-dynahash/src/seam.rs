@@ -13,4 +13,11 @@ pub fn init_seams() {
     seams::hash_seq_init::set(crate::hash_seq_init);
     seams::hash_seq_search::set(crate::hash_seq_search);
     seams::at_eoxact_hash_tables::set(crate::AtEOXact_HashTables);
+    // `hash_destroy` is infallible (`hash_destroy` returns `()` in C and here);
+    // the seam shape is `PgResult<()>` to mirror the failure surface of the
+    // hash family, so adapt with an `Ok(())`-returning wrapper.
+    seams::hash_destroy::set(|hashp| {
+        crate::hash_destroy(hashp);
+        Ok(())
+    });
 }

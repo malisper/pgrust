@@ -32,6 +32,8 @@ pub fn init_all() {
     backend_access_table_tableam::init_seams();
     backend_access_brin_xlog::init_seams();
     backend_access_hash_xlog::init_seams();
+    backend_access_hash_core::init_seams();
+    backend_access_hash_entry::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
@@ -698,6 +700,14 @@ mod recurrence_guard {
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
         ("backend_access_table_tableam", "table_relation_needs_toast_table"),
         ("backend_access_table_tableam", "table_relation_toast_am"),
+        // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
+        // `table_index_build_scan` (tableam.h) dispatches the vtable callback
+        // `index_build_range_scan` to the concrete table AM — for heap that is
+        // `heapam_handler.c`'s `heapam_index_build_range_scan`, which is still
+        // `todo`. There is no in-unit body to install. Consumed by the hash AM
+        // build driver (`hashbuild`, backend-access-hash-entry) and the nbtree
+        // build driver. Pay down by porting heapam_handler.c. See DESIGN_DEBT.md.
+        ("backend_access_table_tableam", "table_index_build_scan"),
         // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
         // is `common/relpath.c`'s function, not catalog.c's — the seam was
         // mis-homed onto backend-catalog-catalog-seams (this owner's stable
