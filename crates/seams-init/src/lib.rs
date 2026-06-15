@@ -756,13 +756,23 @@ mod recurrence_guard {
         // is genuinely uninstalled / loud-panic (mirror-pg-and-panic) until the
         // fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_compare_partial"),
-        // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
-        // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
-        // ported in the otherwise-complete `backend-optimizer-util-pathnode`
-        // crate; joinrels.c (backend-optimizer-path-joinrels) calls them through
-        // the pathnode-seams decls and seam-and-panics until pathnode ports them.
+        // DESIGN_DEBT (TD-PATHNODE-CAN-CREATE-UNIQUE): pathnode.c's
+        // `can_create_unique_path` is the `create_unique_path(...) != NULL` test.
+        // Its body (`create_unique_path`, pathnode.c:1730) is itself genuinely
+        // uninstalled in the otherwise-complete `backend-optimizer-util-pathnode`
+        // crate — it crosses lsyscache (`get_ordering_op_for_equality_op` /
+        // `get_equality_op_for_ordering_op`), plancat
+        // (`relation_has_unique_index_for`), analyzejoins
+        // (`query_is_distinct_for`), and pathkeys.c
+        // (`make_pathkeys_for_sortclauses`), all unported, so `create_unique_path`
+        // delegates to a `unique_seam` that nobody installs (loud panic).
+        // Installing `can_create_unique_path` would just relocate that same panic.
+        // DELETE this entry once `create_unique_path`'s cross-subsystem owners
+        // land. (`install_dummy_append_path` — the pathnode-side of joinrels.c's
+        // `mark_dummy_rel` — is now INSTALLED by the pathnode owner: its body only
+        // needs `create_append_path`/`add_path`/`set_cheapest`, all ported
+        // in-owner.)
         ("backend_optimizer_util_pathnode", "can_create_unique_path"),
-        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
         // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
         // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
@@ -864,18 +874,23 @@ mod recurrence_guard {
         // backend-utils-misc-guc-seams) and are installed by those merged owners'
         // init_seams(). GUCArrayAdd/Delete/Reset are now genuinely ported in
         // backend-utils-misc-guc's guc_array.rs over the Vec<String> value model.)
-        // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED): aclcheck_error_type (aclchk.c) and
-        // get_language_oid (proclang.c) are declared in
-        // backend-commands-functioncmds-seams because functioncmds was their
-        // first consumer; their real owners (aclchk.c / proclang.c) are still
-        // unported, so neither is installed. objectaddress's resolution engine
-        // (#112) is now a second consumer (TRANSFORM/LANGUAGE arms +
-        // check_object_ownership type/transform arms), making them `::call`ed in
-        // non-test code while the dir-owner functioncmds is COMPLETE — hence the
-        // allowlist. They become real installs when aclchk.c / proclang.c land
-        // (or are re-homed to their proper -seams crates).
+        // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED, partial): aclcheck_error_type
+        // (aclchk.c) is declared in backend-commands-functioncmds-seams because
+        // functioncmds was its first consumer; its real owner (aclchk.c) is still
+        // unported, so it is not installed. objectaddress's resolution engine
+        // (#112) is a second consumer (check_object_ownership type/transform arms),
+        // making it `::call`ed in non-test code while the dir-owner functioncmds is
+        // COMPLETE — hence the allowlist. Its body must call the generic
+        // `aclcheck_error(aclerr, OBJECT_TYPE, format_type_be(...))`, whose seam
+        // (backend-catalog-aclchk-seams) is itself declared-but-uninstalled (same
+        // unported aclchk.c owner), so it cannot be honestly installed yet. It
+        // becomes a real install when aclchk.c lands (or is re-homed to
+        // aclchk-seams). (get_language_oid was RESOLVED: the mishomed
+        // functioncmds-seams decl was retired, the 3 consumers re-pointed at the
+        // correctly-homed backend-commands-proclang-seams::get_language_oid, and
+        // that seam is now installed by the merged syscache owner — proclang.c's
+        // sole logic is a LANGNAME-syscache OID lookup.)
         ("backend_commands_functioncmds", "aclcheck_error_type"),
-        ("backend_commands_functioncmds", "get_language_oid"),
         // NOTE: the PARAM_EXEC `execPlan`-link seams formerly listed here under
         // backend_executor_execProcnode were RELOCATED to execMain-seams (their
         // real owner: they operate on the executor-owned `es_param_exec_vals` /
@@ -1011,7 +1026,19 @@ mod recurrence_guard {
         // those 13 seams are now installed by inward_seams over ProcGlobal->
         // clogGroupFirst + the per-PGPROC clogGroup* fields.)
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
-        ("backend_utils_adt_acl", "has_bypassrls_privilege"),
+        // (has_bypassrls_privilege RESOLVED: the acl owner now installs it — a
+        // superuser_arg short-circuit + AUTHOID-syscache `rolbypassrls` read, after
+        // widening the AuthIdRow projection to carry rolbypassrls.)
+        // DESIGN_DEBT: `object_ownercheck` (catalog/aclchk.c) is the dynamic
+        // per-catalog owner test: `SearchSysCache1(get_object_catcache_oid(classid),
+        // objectid)` across ~40 different syscaches (plus a systable-scan fallback
+        // for cache-less catalogs), reading `get_object_attnum_owner(classid)`, then
+        // `has_privs_of_role`. The repo's syscache seams are fixed-catalog typed
+        // projections; there is no dynamic-by-cacheid lookup nor an
+        // `object_owner(classid, objectid) -> Oid` abstraction. Installing it needs
+        // that dynamic-syscache/systable-scan dispatch in a real aclchk owner crate
+        // (backend-catalog-aclchk, still `todo`), where its sibling aclchk seam
+        // family naturally belongs. Pay down when aclchk.c lands.
         ("backend_utils_adt_acl", "object_ownercheck"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
@@ -1049,6 +1076,15 @@ mod recurrence_guard {
         ("backend_utils_cache_plancache", "plansource_result_desc"),
         ("backend_utils_cache_plancache", "release_cached_plan"),
         ("backend_utils_cache_plancache", "save_cached_plan"),
+        // DESIGN_DEBT: `domain_check_input` (domains.c) checks a domain's
+        // constraints. Its NOT NULL arm is trivial, but the DOM_CONSTRAINT_CHECK
+        // arm requires `ExecCheck(con->check_exprstate, econtext)` — executor
+        // expression evaluation (`ExecEvalExprSwitchContext` over a compiled
+        // `ExprState`) in a standalone `ExprContext`. In this repo `check_exprstate`
+        // is an opaque `ExprStateHandle` built only via the unported domains.c
+        // executor bridge, `ExecCheck` has no seam, and the standalone-ExprContext
+        // machinery is absent. Blocked on the execExpr/execExprInterp executor-eval
+        // keystone. (The sibling `domain_get_base_input_info` IS installed.)
         ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),

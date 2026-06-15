@@ -265,11 +265,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_language_oid(langname, missing_ok)`.
-    pub fn get_language_oid(langname: String, missing_ok: bool) -> PgResult<Oid>
-);
-
-seam_core::seam!(
     /// `get_transform_oid(type_id, lang_id, missing_ok)` (functioncmds.c): the
     /// OID of the transform for (`type_id`, `lang_id`), or `InvalidOid` with
     /// `missing_ok = true`. With `missing_ok = false` a miss raises

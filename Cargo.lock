@@ -3563,6 +3563,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-commands-opclasscmds-seams",
  "backend-commands-policy-seams",
+ "backend-commands-proclang-seams",
  "backend-commands-tablespace-seams",
  "backend-commands-trigger-seams",
  "backend-commands-user-seams",
@@ -4705,6 +4706,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
+ "backend-commands-proclang-seams",
  "backend-executor-execMain-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-format-type-seams",
@@ -13348,6 +13350,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-commands-proclang-seams",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-arrayfuncs-seams",

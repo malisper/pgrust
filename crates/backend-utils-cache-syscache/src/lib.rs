@@ -901,6 +901,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::foreign_data_wrapper_oid_by_name::set(
         projections::foreign_data_wrapper_oid_by_name,
     );
+    // proclang.c's `get_language_oid` is a pure LANGNAME-syscache OID lookup; the
+    // unported proclang owner delegates it to this merged syscache owner.
+    backend_commands_proclang_seams::get_language_oid::set(projections::get_language_oid);
     backend_utils_cache_syscache_seams::foreign_server_oid_by_name::set(
         projections::foreign_server_oid_by_name,
     );

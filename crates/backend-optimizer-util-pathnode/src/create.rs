@@ -2240,6 +2240,43 @@ pub fn create_unique_path(
     unique_seam::create_unique_path::call(root, rel, subpath, sjinfo)
 }
 
+/// `install_dummy_append_path(root, rel)` — the pathnode-side body of joinrels.c's
+/// `mark_dummy_rel` (joinrels.c:1324), minus the already-marked early-out (ported
+/// in the joinrels consumer). Evicts the rel's paths, sets `rows = 0`, installs a
+/// childless dummy `create_append_path` (C `create_append_path(NULL, rel, NIL, NIL,
+/// NIL, rel->lateral_relids, 0, false, -1)`), and re-runs `set_cheapest`.
+///
+/// The `MemoryContextSwitchTo(GetMemoryChunkContext(rel))` dance around the C body
+/// is a no-op in the arena/`PlannerInfo` model (paths live in the planner arena,
+/// not a per-rel chunk context), so it is dropped behaviour-preservingly.
+pub fn install_dummy_append_path(root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+    // Set dummy size estimate.
+    root.rel_mut(rel).rows = 0.0;
+
+    // Evict any previously chosen paths.
+    root.rel_mut(rel).pathlist.clear();
+    root.rel_mut(rel).partial_pathlist.clear();
+
+    // Set up the dummy path: a childless Append over the rel's lateral_relids.
+    let lateral_relids = root.rel(rel).lateral_relids.clone();
+    let dummy = create_append_path(
+        root,
+        /* have_root = */ false,
+        rel,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &lateral_relids,
+        0,
+        false,
+        -1.0,
+    )?;
+    crate::add_path(root, rel, dummy)?;
+
+    // Set or update cheapest_total_path and related fields.
+    crate::set_cheapest(root, rel)
+}
+
 /// `reparameterize_path(root, path, required_outer, loop_count)`
 /// (pathnode.c:4242). Re-derives a path's clauses + re-runs the cost model over
 /// real RestrictInfo/expression nodes — crosses the reparam seam (panics until
