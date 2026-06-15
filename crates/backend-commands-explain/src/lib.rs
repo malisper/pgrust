@@ -167,7 +167,7 @@ fn explain_one_plan<'mcx>(
 
     // EXEC flags: es->analyze ? 0 : EXEC_FLAG_EXPLAIN_ONLY; |= EXPLAIN_GENERIC.
     const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
-    const EXEC_FLAG_EXPLAIN_GENERIC: i32 = 0x0040;
+    const EXEC_FLAG_EXPLAIN_GENERIC: i32 = 0x0002;
     let mut eflags = if es.analyze { 0 } else { EXEC_FLAG_EXPLAIN_ONLY };
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
