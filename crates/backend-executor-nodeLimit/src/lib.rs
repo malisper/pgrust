@@ -361,9 +361,7 @@ fn copy_last_slot<'mcx>(
     let dst = node
         .last_slot
         .expect("ExecCopySlot: WITH-TIES last_slot must be initialized");
-    let mcx = estate.es_query_cxt;
-    let (dstslot, srcslot) = estate.slot_pair_mut(dst, src);
-    execTuples::exec_copy_slot::call(mcx, dstslot, srcslot)
+        execTuples::exec_copy_slot::call(estate, dst, src)
 }
 
 /// The WITH-TIES tie test, mirroring the C:

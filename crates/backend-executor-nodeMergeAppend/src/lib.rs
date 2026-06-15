@@ -816,7 +816,7 @@ fn clear_result_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     match node.ps.ps_ResultTupleSlot {
-        Some(id) => execTuples::exec_clear_tuple::call(estate.slot_mut(id)),
+        Some(id) => execTuples::exec_clear_tuple::call(estate, id),
         // A MergeAppend always has a result slot after init; a missing one is a
         // structural bug, surfaced loudly rather than silently pretended.
         None => Err(elog_error("MergeAppend has no result tuple slot")),

@@ -551,9 +551,7 @@ pub fn finalize_aggregates<'mcx>(
                 pertrans.lastdatum = Datum::null();
             } else {
                 let uniqslot = pertrans.uniqslot.expect("multi-distinct uniqslot set");
-                backend_executor_execTuples_seams::exec_clear_tuple::call(
-                    estate.slot_mut(uniqslot),
-                )?;
+                backend_executor_execTuples_seams::exec_clear_tuple::call(estate, uniqslot)?;
             }
         }
     }

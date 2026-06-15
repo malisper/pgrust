@@ -144,7 +144,7 @@ fn install() {
         push("assign_scan_projection_info");
         Ok(())
     });
-    execTuples::exec_clear_tuple::set(|_| {
+    execTuples::exec_clear_tuple::set(|_, _| {
         push("ClearTuple");
         Ok(())
     });

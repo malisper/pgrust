@@ -239,9 +239,7 @@ pub fn ExecFindPartition<'mcx>(
                     estate, &map_copy, cur_slot, new_my,
                 )?;
                 if let Some(tempslot) = tempslot {
-                    backend_executor_execTuples_seams::exec_clear_tuple::call(
-                        estate.slot_mut(tempslot),
-                    )?;
+                    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, tempslot)?;
                 }
             }
 
@@ -286,7 +284,7 @@ pub fn ExecFindPartition<'mcx>(
 
     // Release the tuple in the lowest parent's dedicated slot.
     if let Some(myslot) = myslot {
-        backend_executor_execTuples_seams::exec_clear_tuple::call(estate.slot_mut(myslot))?;
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, myslot)?;
     }
     // Restore ecxt's scantuple.
     estate.ecxt_mut(ecxt).ecxt_scantuple = ecxt_scantuple_saved;

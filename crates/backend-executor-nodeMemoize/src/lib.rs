@@ -1640,7 +1640,7 @@ fn clear_result_slot<'mcx>(
         .ps
         .ps_ResultTupleSlot
         .ok_or_else(|| elog_internal("Memoize node result slot not initialized"))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))
+    execTuples::exec_clear_tuple::call(estate, slot)
 }
 
 /// `outerPlanState(mstate) = ExecInitNode(outerPlan(node), estate, eflags)` —

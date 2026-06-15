@@ -217,17 +217,20 @@ fn mock_project<'mcx>(
 /// `ExecCopySlot(dst, src)`: faithful to the C — the destination scan slot now
 /// holds a tuple, so it is no longer empty.
 fn mock_copy_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    dstslot: &mut TupleTableSlot,
-    _srcslot: &TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    dstslot: types_nodes::SlotId,
+    _srcslot: types_nodes::SlotId,
 ) -> PgResult<()> {
-    dstslot.tts_flags &= !types_nodes::executor::TTS_FLAG_EMPTY;
+    estate.slot_mut(dstslot).tts_flags &= !types_nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 
 /// `ExecClearTuple(slot)`: mark the slot empty (TTS_EMPTY).
-fn mock_clear_tuple(slot: &mut TupleTableSlot) -> PgResult<()> {
-    slot.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+fn mock_clear_tuple<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    estate.slot_mut(slot).tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 

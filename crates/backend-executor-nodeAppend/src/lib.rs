@@ -1355,7 +1355,7 @@ fn clear_result_tuple_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     if let Some(id) = node.ps.ps_ResultTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(id))?;
+        execTuples::exec_clear_tuple::call(estate, id)?;
     }
     Ok(())
 }

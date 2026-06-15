@@ -268,7 +268,7 @@ pub fn ExecSort<'mcx>(
             execTuples::exec_store_first_datum::call(estate, slot, val, is_null)?;
             Ok(true)
         } else {
-            execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+            execTuples::exec_clear_tuple::call(estate, slot)?;
             Ok(false)
         }
     } else {
@@ -484,7 +484,7 @@ pub fn ExecReScanSort<'mcx>(
         .ps
         .ps_ResultTupleSlot
         .ok_or_else(|| missing_result_slot())?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+    execTuples::exec_clear_tuple::call(estate, slot)?;
 
     // If subnode is to be rescanned then we forget previous sort results; we
     // have to re-read the subplan and re-sort. Also must re-sort if the

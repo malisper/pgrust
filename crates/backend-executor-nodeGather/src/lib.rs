@@ -500,7 +500,7 @@ fn gather_getnext<'mcx>(
     }
 
     // return ExecClearTuple(fslot);
-    execTuples::exec_clear_tuple::call(estate.slot_mut(fslot))?;
+    execTuples::exec_clear_tuple::call(estate, fslot)?;
     Ok(None)
 }
 

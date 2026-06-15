@@ -42,13 +42,33 @@ seam_core::seam!(
     /// arrays live in the slot itself). Deforming can detoast/allocate, so
     /// the call is fallible.
     ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no descriptor/values payload), so this contract cannot yet be
-    /// implemented as promised. It must be re-signed when the slot payload
-    /// model lands (same caveat as `exec_copy_slot`).
+    /// STANDALONE-SLOT FORM: this header-only `&TupleTableSlot` contract is for
+    /// callers whose slot is NOT in the `EState` tuple-table pool (no `SlotId`
+    /// exists) — `CopyOneRowTo`'s `table_slot_create` scan slot and logical
+    /// replication's `logicalrep_write_tuple` slot. Those slots are header-only
+    /// in the current model (`make_single_tuple_table_slot` builds no payload
+    /// arrays), so this form stays seam-and-panic until the *standalone*
+    /// `SlotData` carrier lands. Pool-resident callers use
+    /// [`slot_getallattrs_by_id`] instead.
     pub fn slot_getallattrs<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         slot: &types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<
+        mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>>,
+    >
+);
+
+seam_core::seam!(
+    /// `slot_getallattrs(slot)` (tuptable.h) resolving a pool [`SlotId`] to its
+    /// live payload-bearing [`SlotData`] first: fully deconstruct the slot and
+    /// return its per-attribute `(value, isnull)` array, copied into `mcx` (in
+    /// C the arrays live in the slot itself). Deforming can detoast/allocate, so
+    /// fallible. This is the form pool-resident executor nodes use (they hold
+    /// the slot's pool id); the header-only [`slot_getallattrs`] is the
+    /// standalone-slot sibling.
+    pub fn slot_getallattrs_by_id<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
     ) -> types_error::PgResult<
         mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>>,
     >
@@ -70,8 +90,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h): clear the slot's contents
-    /// (`slot->tts_ops->clear`).
-    pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_error::PgResult<()>
+    /// (`slot->tts_ops->clear`). The slot is addressed by its `EState`
+    /// tuple-table pool id; the body resolves it to the live payload-bearing
+    /// [`types_nodes::tuptable::SlotData`] and runs the real `clear` op (the
+    /// header-only `&mut TupleTableSlot` projection carries no payload to
+    /// clear). This is the form every executor node uses (they hold the slot's
+    /// pool id); it is the same op as the `exec_clear_tuple_by_id` alias.
+    pub fn exec_clear_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -132,19 +160,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h): copy the source slot's
-    /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). The
-    /// copy allocates in `mcx`, the destination slot's memory context (C:
-    /// `slot->tts_mcxt`; the trimmed slot carries no payload yet, so the
-    /// owned model passes the context explicitly). Fallible on OOM.
-    ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no descriptor/values payload), so this contract cannot yet be
-    /// implemented as promised. It must be re-signed when the first real
-    /// tuple flow (the slot payload model) lands.
+    /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). Both
+    /// slots are addressed by their `EState` tuple-table pool ids; the body
+    /// resolves them to the live payload-bearing
+    /// [`types_nodes::tuptable::SlotData`] pair and runs the real `copyslot`
+    /// op. The copy allocates in the destination slot's memory context (C:
+    /// `slot->tts_mcxt`; here the query context). Fallible on OOM.
     pub fn exec_copy_slot<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        dstslot: &mut types_nodes::TupleTableSlot,
-        srcslot: &types_nodes::TupleTableSlot,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        dstslot: types_nodes::SlotId,
+        srcslot: types_nodes::SlotId,
     ) -> types_error::PgResult<()>
 );
 
@@ -297,6 +322,13 @@ seam_core::seam!(
     /// carried on `Err`. The returned value is the canonical
     /// [`types_tuple::backend_access_common_heaptuple::Datum`]; a by-reference
     /// image is copied into `mcx`.
+    ///
+    /// STANDALONE-SLOT FORM: the only caller (`GetTupleTransactionInfo` in the
+    /// logical-replication conflict path) holds a header-only `&TupleTableSlot`
+    /// outside any `EState` pool (no `SlotId`), and that standalone slot carries
+    /// no payload in the current model, so this stays seam-and-panic until the
+    /// standalone-`SlotData` carrier lands. Pool-resident callers would use a
+    /// `_by_id` form (none exists yet — there are no pool-resident callers).
     pub fn slot_getsysattr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         slot: &types_nodes::TupleTableSlot,

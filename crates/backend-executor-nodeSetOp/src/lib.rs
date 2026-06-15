@@ -420,7 +420,7 @@ fn setop_load_group<'mcx>(
         let first = input_ref(setopstate, side)
             .firstTupleSlot
             .expect("setop_load_group: firstTupleSlot is NULL");
-        execTuples::exec_clear_tuple::call(estate.slot_mut(first))?;
+        execTuples::exec_clear_tuple::call(estate, first)?;
         input_mut(setopstate, side).numTuples = 0;
         return Ok(());
     }
@@ -495,11 +495,11 @@ fn setop_compare_slots<'mcx>(
     setopstate: &SetOpStateData<'mcx>,
     s1: SlotId,
     s2: SlotId,
-    estate: &EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<i32> {
     // slot_getallattrs(s1); slot_getallattrs(s2);
-    let cols1 = execTuples::slot_getallattrs::call(estate.es_query_cxt, estate.slot(s1))?;
-    let cols2 = execTuples::slot_getallattrs::call(estate.es_query_cxt, estate.slot(s2))?;
+    let cols1 = execTuples::slot_getallattrs_by_id::call(estate, s1)?;
+    let cols2 = execTuples::slot_getallattrs_by_id::call(estate, s2)?;
 
     for nkey in 0..setopstate.numCols as usize {
         let sort_key = &setopstate.sortKeys[nkey];
@@ -1019,7 +1019,7 @@ fn clear_result_tuple<'mcx>(
         .ps
         .ps_ResultTupleSlot
         .expect("clear_result_tuple: ps_ResultTupleSlot is NULL");
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))
+    execTuples::exec_clear_tuple::call(estate, slot)
 }
 
 /// `ResetExprContext(setopstate->ps.ps_ExprContext)` — reset the node's

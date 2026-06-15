@@ -151,8 +151,11 @@ fn mock_init_result_slot<'mcx>(
     Ok(())
 }
 
-fn mock_clear_tuple(slot: &mut TupleTableSlot) -> PgResult<()> {
-    slot.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+fn mock_clear_tuple<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    estate.slot_mut(slot).tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 

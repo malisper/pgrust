@@ -443,9 +443,7 @@ fn MarkInnerTuple<'mcx>(
     let marked = mergestate
         .mj_MarkedTupleSlot
         .expect("MarkInnerTuple: mj_MarkedTupleSlot not initialized");
-    let mcx = estate.es_query_cxt;
-    let (dst, src) = estate.slot_pair_mut(marked, inner_tuple_slot);
-    execTuples::exec_copy_slot::call(mcx, dst, src)
+        execTuples::exec_copy_slot::call(estate, marked, inner_tuple_slot)
 }
 
 // ===========================================================================
@@ -1430,7 +1428,7 @@ pub fn ExecReScanMergeJoin<'mcx>(
 ) -> PgResult<()> {
     // ExecClearTuple(node->mj_MarkedTupleSlot);
     if let Some(marked) = node.mj_MarkedTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(marked))?;
+        execTuples::exec_clear_tuple::call(estate, marked)?;
     }
 
     node.mj_JoinState = EXEC_MJ_INITIALIZE_OUTER;

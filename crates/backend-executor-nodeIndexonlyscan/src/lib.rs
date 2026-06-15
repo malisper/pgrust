@@ -225,7 +225,7 @@ fn IndexOnlyNext<'mcx>(
             }
 
             // ExecClearTuple(node->ioss_TableSlot);
-            execTuples::exec_clear_tuple::call(estate.slot_mut(table_slot))?;
+            execTuples::exec_clear_tuple::call(estate, table_slot)?;
 
             // Only MVCC snapshots are supported, so no need to keep following
             // the HOT chain once a visible entry has been found.
@@ -315,7 +315,7 @@ fn IndexOnlyNext<'mcx>(
     }
 
     // End of scan: return ExecClearTuple(slot);
-    execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+    execTuples::exec_clear_tuple::call(estate, scan_slot)?;
     Ok(false)
 }
 
@@ -340,7 +340,7 @@ fn StoreIndexTuple<'mcx>(
             .xs_itupdesc
             .as_ref()
             .ok_or_else(|| elog("index-only scan: no index tuple descriptor"))?;
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+        execTuples::exec_clear_tuple::call(estate, slot)?;
         indextuple::index_deform_tuple::call(estate, slot, itup, itupdesc)?;
     }
 

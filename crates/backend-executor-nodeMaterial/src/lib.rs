@@ -167,14 +167,12 @@ pub fn ExecMaterial<'mcx>(
         }
 
         // ExecCopySlot(slot, outerslot); return slot;
-        let mcx = estate.es_query_cxt;
-        let (dst, src) = estate.slot_pair_mut(slot, outerslot);
-        execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                execTuples::exec_copy_slot::call(estate, slot, outerslot)?;
         return Ok(true);
     }
 
     // Nothing left ...
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+    execTuples::exec_clear_tuple::call(estate, slot)?;
     Ok(false)
 }
 
@@ -349,7 +347,7 @@ pub fn ExecReScanMaterial<'mcx>(
         .ps
         .ps_ResultTupleSlot
         .expect("ExecReScanMaterial: ps_ResultTupleSlot not initialized");
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+    execTuples::exec_clear_tuple::call(estate, slot)?;
 
     if node.eflags != 0 {
         // If we haven't materialized yet, just return. If outerplan's

@@ -442,7 +442,7 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
     if !haslast || !equal {
         // if (pertrans->haslast) ExecClearTuple(pertrans->uniqslot);
         if haslast {
-            exec_clear_tuple::call(estate.slot_mut(uniqslot))?;
+            exec_clear_tuple::call(estate, uniqslot)?;
         }
         // pertrans->haslast = true;
         aggstate
@@ -451,9 +451,7 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
             .expect("ExecEvalPreOrderedDistinctMulti: pertrans")[pertrans]
             .haslast = true;
         // ExecCopySlot(pertrans->uniqslot, pertrans->sortslot);
-        let mcx = estate.es_query_cxt;
-        let (uniq, sort) = estate.slot_pair_mut(uniqslot, sortslot);
-        exec_copy_slot::call(mcx, uniq, sort)?;
+                exec_copy_slot::call(estate, uniqslot, sortslot)?;
         // isdistinct = true;
         isdistinct = true;
     } else {
@@ -566,7 +564,7 @@ pub fn ExecEvalAggOrderedTransTuple<'mcx>(
     };
 
     // ExecClearTuple(pertrans->sortslot);
-    exec_clear_tuple::call(estate.slot_mut(sortslot))?;
+    exec_clear_tuple::call(estate, sortslot)?;
     // pertrans->sortslot->tts_nvalid = pertrans->numInputs;
     // ExecStoreVirtualTuple(pertrans->sortslot);
     //

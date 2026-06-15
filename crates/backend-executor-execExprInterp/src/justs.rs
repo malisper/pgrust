@@ -18,7 +18,7 @@
 //! and panics loudly until `execTuples` lands. `slot_getattr(slot, attnum)`
 //! therefore maps to: deform via the seam, then take attribute `attnum - 1`.
 
-use backend_executor_execTuples_seams::slot_getallattrs;
+use backend_executor_execTuples_seams::slot_getallattrs_by_id;
 use backend_utils_fmgr_fmgr_seams::function_call1_coll;
 use types_core::primitive::InvalidOid;
 // The canonical unified value type (Datum-unification keystone) — what the
@@ -45,7 +45,7 @@ fn hash_arg_word(v: &Datum<'_>) -> types_datum::Datum {
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::executor::TupleTableSlot;
-use types_nodes::EStateData;
+use types_nodes::{EStateData, SlotId};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 
 use crate::dispatch::CheckOpSlotCompatibility;
@@ -71,7 +71,7 @@ fn pg_rotate_left32(word: u32, n: u32) -> u32 {
 /// path can shape its own NULL handling.
 #[inline]
 fn read_hash_var<'mcx>(
-    slot: &TupleTableSlot,
+    slot: SlotId,
     attnum: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
@@ -94,14 +94,14 @@ fn deformed_column_to_datum<'mcx>(col: &DeformedColumn<'mcx>) -> (Datum<'mcx>, b
     (value.clone(), *isnull)
 }
 
-/// Read attribute `attnum` (1-based, as C `slot_getattr`) out of `slot` by
-/// fully deforming it through the `execTuples` owner's seam.
+/// Read attribute `attnum` (1-based, as C `slot_getattr`) out of the pool slot
+/// `slot` by fully deforming it through the `execTuples` owner's seam.
 fn slot_getattr<'mcx>(
-    slot: &TupleTableSlot,
+    slot: SlotId,
     attnum: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
-    let cols = slot_getallattrs::call(estate.es_query_cxt, slot)?;
+    let cols = slot_getallattrs_by_id::call(estate, slot)?;
     let col = &cols[(attnum - 1) as usize];
     Ok(deformed_column_to_datum(col))
 }
@@ -110,7 +110,7 @@ fn slot_getattr<'mcx>(
 /// shared body for the plain non-virtual single-Var fast paths.
 pub fn ExecJustVarImpl<'mcx>(
     state: &ExprState<'mcx>,
-    slot: &TupleTableSlot,
+    slot: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[1];
@@ -122,7 +122,7 @@ pub fn ExecJustVarImpl<'mcx>(
     };
 
     // CheckOpSlotCompatibility(&state->steps[0], slot);
-    CheckOpSlotCompatibility(&steps[0], slot)?;
+    CheckOpSlotCompatibility(&steps[0], estate.slot(slot))?;
 
     // Since we use slot_getattr(), we don't need to implement the FETCHSOME
     // step explicitly, and we also needn't Assert that the attnum is in range
@@ -182,7 +182,7 @@ pub fn ExecJustAssignVarImpl<'mcx>(
 /// `ExecJustVarVirtImpl` — shared body for the virtual-slot single-Var paths.
 pub fn ExecJustVarVirtImpl<'mcx>(
     state: &ExprState<'mcx>,
-    slot: &TupleTableSlot,
+    slot: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[0];
@@ -199,7 +199,7 @@ pub fn ExecJustVarVirtImpl<'mcx>(
     // Assert(TTS_IS_VIRTUAL(slot));
     // Assert(TTS_FIXED(slot));
     // Assert(attnum >= 0 && attnum < slot->tts_nvalid);
-    debug_assert!(slot.is_fixed());
+    debug_assert!(estate.slot(slot).is_fixed());
 
     // *isnull = slot->tts_isnull[attnum];
     // return slot->tts_values[attnum];
@@ -250,7 +250,7 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
 /// `ExecJustHashVarImpl` — shared body for the single-Var hash-key paths.
 pub fn ExecJustHashVarImpl<'mcx>(
     state: &ExprState<'mcx>,
-    slot: &TupleTableSlot,
+    slot: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *fetchop = &state->steps[0];
@@ -272,7 +272,7 @@ pub fn ExecJustHashVarImpl<'mcx>(
     };
 
     // CheckOpSlotCompatibility(fetchop, slot);
-    CheckOpSlotCompatibility(&steps[0], slot)?;
+    CheckOpSlotCompatibility(&steps[0], estate.slot(slot))?;
 
     // slot_getsomeattrs(slot, fetchop->d.fetch.last_var);
     // fcinfo->args[0].value  = slot->tts_values[attnum];
@@ -303,7 +303,7 @@ pub fn ExecJustHashVarImpl<'mcx>(
 /// `ExecJustHashVarVirtImpl` — shared body for the virtual-slot hash-key paths.
 pub fn ExecJustHashVarVirtImpl<'mcx>(
     state: &ExprState<'mcx>,
-    slot: &TupleTableSlot,
+    slot: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *var = &state->steps[0];
@@ -368,8 +368,7 @@ pub fn ExecJustInnerVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarImpl(state, &slot, estate)
+    ExecJustVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustOuterVar` — read one Var from the outer slot.
@@ -380,8 +379,7 @@ pub fn ExecJustOuterVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarImpl(state, &slot, estate)
+    ExecJustVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustScanVar` — read one Var from the scan slot.
@@ -392,8 +390,7 @@ pub fn ExecJustScanVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarImpl(state, &slot, estate)
+    ExecJustVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignInnerVar` — assign one inner Var to the result slot.
@@ -557,8 +554,7 @@ pub fn ExecJustInnerVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarVirtImpl(state, &slot, estate)
+    ExecJustVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustOuterVarVirt` — read one Var from a virtual outer slot.
@@ -569,8 +565,7 @@ pub fn ExecJustOuterVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarVirtImpl(state, &slot, estate)
+    ExecJustVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustScanVarVirt` — read one Var from a virtual scan slot.
@@ -581,8 +576,7 @@ pub fn ExecJustScanVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustVarVirtImpl(state, &slot, estate)
+    ExecJustVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustAssignInnerVarVirt` — assign one virtual inner Var.
@@ -659,12 +653,11 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
     // CheckOpSlotCompatibility(fetchop, econtext->ecxt_innertuple);
     // slot_getsomeattrs(econtext->ecxt_innertuple, fetchop->d.fetch.last_var);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    CheckOpSlotCompatibility(&steps[0], &slot)?;
+    CheckOpSlotCompatibility(&steps[0], estate.slot(slot_id))?;
 
     // fcinfo->args[0].value  = econtext->ecxt_innertuple->tts_values[attnum];
     // fcinfo->args[0].isnull = econtext->ecxt_innertuple->tts_isnull[attnum];
-    let (value, isnull) = read_hash_var(&slot, attnum, estate)?;
+    let (value, isnull) = read_hash_var(slot_id, attnum, estate)?;
 
     // hashkey = pg_rotate_left32(hashkey, 1);
     let mut hashkey = init_hashkey;
@@ -693,8 +686,7 @@ pub fn ExecJustHashOuterVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustHashVarImpl(state, &slot, estate)
+    ExecJustHashVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustHashInnerVar` — hash one inner Var.
@@ -705,8 +697,7 @@ pub fn ExecJustHashInnerVar<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustHashVarImpl(state, &slot, estate)
+    ExecJustHashVarImpl(state, slot_id, estate)
 }
 
 /// `ExecJustHashOuterVarVirt` — hash one virtual outer Var.
@@ -717,8 +708,7 @@ pub fn ExecJustHashOuterVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustHashVarVirtImpl(state, &slot, estate)
+    ExecJustHashVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustHashInnerVarVirt` — hash one virtual inner Var.
@@ -729,8 +719,7 @@ pub fn ExecJustHashInnerVarVirt<'mcx>(
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
-    let slot = estate.slot(slot_id).clone();
-    ExecJustHashVarVirtImpl(state, &slot, estate)
+    ExecJustHashVarVirtImpl(state, slot_id, estate)
 }
 
 /// `ExecJustHashOuterVarStrict` — hash one outer Var, strict (null short-circuit).
@@ -763,12 +752,11 @@ pub fn ExecJustHashOuterVarStrict<'mcx>(
     // CheckOpSlotCompatibility(fetchop, econtext->ecxt_outertuple);
     // slot_getsomeattrs(econtext->ecxt_outertuple, fetchop->d.fetch.last_var);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
-    let slot = estate.slot(slot_id).clone();
-    CheckOpSlotCompatibility(&steps[0], &slot)?;
+    CheckOpSlotCompatibility(&steps[0], estate.slot(slot_id))?;
 
     // fcinfo->args[0].value  = econtext->ecxt_outertuple->tts_values[attnum];
     // fcinfo->args[0].isnull = econtext->ecxt_outertuple->tts_isnull[attnum];
-    let (value, isnull) = read_hash_var(&slot, attnum, estate)?;
+    let (value, isnull) = read_hash_var(slot_id, attnum, estate)?;
 
     // if (!fcinfo->args[0].isnull) {
     //     *isnull = false;

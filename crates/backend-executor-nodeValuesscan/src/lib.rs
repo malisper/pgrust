@@ -106,7 +106,7 @@ fn ValuesNext<'mcx>(
     // store-virtual-tuple protocol. It seems wise to clear the slot before we
     // reset the context it might have pointers into.
     //   ExecClearTuple(slot);
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+    execTuples::exec_clear_tuple::call(estate, slot)?;
 
     let curr_idx = node.curr_idx;
     if curr_idx >= 0 && curr_idx < node.array_len {
@@ -477,7 +477,7 @@ pub fn ExecReScanValuesScan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     if let Some(result_slot) = node.ss.ps.ps_ResultTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+        execTuples::exec_clear_tuple::call(estate, result_slot)?;
     }
 
     // ExecScanReScan(&node->ss);
@@ -533,7 +533,7 @@ fn ExecScanFetch<'mcx>(
                     .expect("ExecScanFetch: ss_ScanTupleSlot not initialized");
                 //   if (!(*recheckMtd)(node, slot)) ExecClearTuple(slot);
                 if !recheck_mtd(node, estate, slot)? {
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+                    execTuples::exec_clear_tuple::call(estate, slot)?;
                 }
                 //   return slot;
                 return Ok(Some(slot));
@@ -545,7 +545,7 @@ fn ExecScanFetch<'mcx>(
                 .ss
                 .ss_ScanTupleSlot
                 .expect("ExecScanFetch: ss_ScanTupleSlot not initialized");
-            execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+            execTuples::exec_clear_tuple::call(estate, slot)?;
             return Ok(None);
         } else if let Some(epq_slot) = epq_relsubs_slot(estate, scanrelid - 1) {
             // Return replacement tuple provided by the EPQ caller.
@@ -560,7 +560,7 @@ fn ExecScanFetch<'mcx>(
             }
             //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
             if !recheck_mtd(node, estate, epq_slot)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(epq_slot))?;
+                execTuples::exec_clear_tuple::call(estate, epq_slot)?;
                 return Ok(None);
             }
             //   return slot;
@@ -583,7 +583,7 @@ fn ExecScanFetch<'mcx>(
             }
             //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
             if !recheck_mtd(node, estate, slot)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+                execTuples::exec_clear_tuple::call(estate, slot)?;
                 return Ok(None);
             }
             //   return slot;
@@ -637,7 +637,7 @@ fn ExecScanExtended<'mcx>(
                     .ps
                     .ps_ResultTupleSlot
                     .expect("ExecScanExtended: ps_ResultTupleSlot not initialized");
-                execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+                execTuples::exec_clear_tuple::call(estate, result_slot)?;
                 return Ok(Some(result_slot));
             } else {
                 return Ok(None);

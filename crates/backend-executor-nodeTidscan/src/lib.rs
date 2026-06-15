@@ -467,7 +467,7 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
 
     // The TID scan failed, so we are at the end of the scan: clear the slot.
     if let Some(slot_id) = slot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot_id))?;
+        execTuples::exec_clear_tuple::call(estate, slot_id)?;
     }
     Ok(None)
 }
@@ -523,7 +523,7 @@ fn ExecScanFetch<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'m
                 let slot = node.ss.ss_ScanTupleSlot;
                 if !ok {
                     if let Some(id) = slot {
-                        execTuples::exec_clear_tuple::call(estate.slot_mut(id))?;
+                        execTuples::exec_clear_tuple::call(estate, id)?;
                     }
                     if clear_on_fail {
                         return Ok(None);
@@ -573,7 +573,7 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
             if has_proj_info {
                 // return ExecClearTuple(projInfo->pi_state.resultslot);
                 if let Some(result_slot) = node.ss.ps.ps_ResultTupleSlot {
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+                    execTuples::exec_clear_tuple::call(estate, result_slot)?;
                     return Ok(Some(result_slot));
                 }
             }

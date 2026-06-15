@@ -175,7 +175,7 @@ fn clear_scan_tuple_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     if let Some(slot) = node.ss.ss_ScanTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+        execTuples::exec_clear_tuple::call(estate, slot)?;
     }
     Ok(())
 }
@@ -412,7 +412,7 @@ pub fn ExecReScanCteScan<'mcx>(
     //   if (node->ss.ps.ps_ResultTupleSlot)
     //       ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     if let Some(slot) = node.ss.ps.ps_ResultTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+        execTuples::exec_clear_tuple::call(estate, slot)?;
     }
 
     //   ExecScanReScan(&node->ss);

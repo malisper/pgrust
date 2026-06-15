@@ -447,7 +447,7 @@ fn eval_windowaggregates<'mcx>(
 
         // And advance the aggregated-row state.
         winstate.aggregatedbase += 1;
-        execTuples::exec_clear_tuple::call(estate.slot_mut(temp_slot))?;
+        execTuples::exec_clear_tuple::call(estate, temp_slot)?;
     }
 
     // If we failed for any, forcibly update aggregatedbase.
@@ -496,7 +496,7 @@ fn eval_windowaggregates<'mcx>(
     let aggregatedupto_nonrestarted = winstate.aggregatedupto;
     if numaggs_restart > 0 && winstate.aggregatedupto != winstate.frameheadpos {
         winstate.aggregatedupto = winstate.frameheadpos;
-        execTuples::exec_clear_tuple::call(estate.slot_mut(agg_row_slot))?;
+        execTuples::exec_clear_tuple::call(estate, agg_row_slot)?;
     }
 
     // Advance until we reach a row not in frame (or end of partition).
@@ -519,7 +519,7 @@ fn eval_windowaggregates<'mcx>(
             // next_tuple:
             reset_expr_context(winstate.tmpcontext.unwrap(), estate)?;
             winstate.aggregatedupto += 1;
-            execTuples::exec_clear_tuple::call(estate.slot_mut(agg_row_slot))?;
+            execTuples::exec_clear_tuple::call(estate, agg_row_slot)?;
             continue;
         }
 
@@ -542,7 +542,7 @@ fn eval_windowaggregates<'mcx>(
         // next_tuple:
         reset_expr_context(winstate.tmpcontext.unwrap(), estate)?;
         winstate.aggregatedupto += 1;
-        execTuples::exec_clear_tuple::call(estate.slot_mut(agg_row_slot))?;
+        execTuples::exec_clear_tuple::call(estate, agg_row_slot)?;
     }
 
     // The frame's end is not supposed to move backwards, ever.
@@ -710,12 +710,12 @@ fn begin_partition<'mcx>(
     winstate.groupheadpos = 0;
     winstate.grouptailpos = -1; // see update_grouptailpos
 
-    execTuples::exec_clear_tuple::call(estate.slot_mut(winstate.agg_row_slot.unwrap()))?;
+    execTuples::exec_clear_tuple::call(estate, winstate.agg_row_slot.unwrap())?;
     if let Some(fh) = winstate.framehead_slot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(fh))?;
+        execTuples::exec_clear_tuple::call(estate, fh)?;
     }
     if let Some(ft) = winstate.frametail_slot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(ft))?;
+        execTuples::exec_clear_tuple::call(estate, ft)?;
     }
 
     // If this is the very first partition, fetch the first input row.
@@ -730,9 +730,7 @@ fn begin_partition<'mcx>(
         let outerslot = execProcnode::exec_proc_node::call(outerPlan, estate)?;
         match outerslot {
             Some(id) if !estate.slot(id).is_empty() => {
-                let mcx = estate.es_query_cxt;
-                let (dst, src) = estate.slot_pair_mut(first_part_slot, id);
-                execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                                execTuples::exec_copy_slot::call(estate, first_part_slot, id)?;
             }
             _ => {
                 // outer plan is empty, so we have nothing to do
@@ -846,9 +844,7 @@ fn spool_tuples<'mcx>(
             };
             if !still_in {
                 // end of partition; copy the tuple for the next cycle.
-                let mcx = estate.es_query_cxt;
-                let (dst, src) = estate.slot_pair_mut(first_part_slot, outerslot);
-                execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                                execTuples::exec_copy_slot::call(estate, first_part_slot, outerslot)?;
                 winstate.partition_spooled = true;
                 winstate.more_partitions = true;
                 break;
@@ -1174,9 +1170,7 @@ fn update_frameheadpos<'mcx>(
                     break; // this row is the correct frame head
                 }
                 {
-                    let mcx = estate.es_query_cxt;
-                    let (dst, src) = estate.slot_pair_mut(temp_slot_2, framehead_slot);
-                    execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                                        execTuples::exec_copy_slot::call(estate, temp_slot_2, framehead_slot)?;
                 }
                 winstate.frameheadpos += 1;
                 spool_tuples(winstate, winstate.frameheadpos, estate)?;
@@ -1193,7 +1187,7 @@ fn update_frameheadpos<'mcx>(
                     winstate.frameheadgroup += 1;
                 }
             }
-            execTuples::exec_clear_tuple::call(estate.slot_mut(temp_slot_2))?;
+            execTuples::exec_clear_tuple::call(estate, temp_slot_2)?;
             winstate.framehead_valid = true;
         } else {
             debug_assert!(false);
@@ -1390,9 +1384,7 @@ fn update_frametailpos<'mcx>(
                     break; // this row is the correct frame tail
                 }
                 {
-                    let mcx = estate.es_query_cxt;
-                    let (dst, src) = estate.slot_pair_mut(temp_slot_2, frametail_slot);
-                    execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                                        execTuples::exec_copy_slot::call(estate, temp_slot_2, frametail_slot)?;
                 }
                 winstate.frametailpos += 1;
                 spool_tuples(winstate, winstate.frametailpos, estate)?;
@@ -1409,7 +1401,7 @@ fn update_frametailpos<'mcx>(
                     winstate.frametailgroup += 1;
                 }
             }
-            execTuples::exec_clear_tuple::call(estate.slot_mut(temp_slot_2))?;
+            execTuples::exec_clear_tuple::call(estate, temp_slot_2)?;
             winstate.frametail_valid = true;
         } else {
             debug_assert!(false);
@@ -1465,7 +1457,7 @@ fn update_grouptailpos<'mcx>(
             break; // this row is the group tail
         }
     }
-    execTuples::exec_clear_tuple::call(estate.slot_mut(temp_slot_2))?;
+    execTuples::exec_clear_tuple::call(estate, temp_slot_2)?;
     winstate.grouptail_valid = true;
     Ok(())
 }
@@ -1624,9 +1616,7 @@ pub fn ExecWindowAgg<'mcx>(
             && winstate.currentpos > 0
         {
             {
-                let mcx = estate.es_query_cxt;
-                let (dst, src) = estate.slot_pair_mut(temp_slot_2, scan_slot);
-                execTuples::exec_copy_slot::call(mcx, dst, src)?;
+                                execTuples::exec_copy_slot::call(estate, temp_slot_2, scan_slot)?;
             }
             if !tuplestore::tuplestore_gettupleslot::call(
                 winstate.buffer.as_deref_mut().unwrap(),
@@ -1642,7 +1632,7 @@ pub fn ExecWindowAgg<'mcx>(
                 winstate.groupheadpos = winstate.currentpos;
                 winstate.grouptail_valid = false;
             }
-            execTuples::exec_clear_tuple::call(estate.slot_mut(temp_slot_2))?;
+            execTuples::exec_clear_tuple::call(estate, temp_slot_2)?;
         } else if !tuplestore::tuplestore_gettupleslot::call(
             winstate.buffer.as_deref_mut().unwrap(),
             true,
@@ -2018,16 +2008,16 @@ pub fn ExecReScanWindowAgg<'mcx>(
     release_partition(node)?;
 
     // release all temp tuples, but especially first_part_slot
-    execTuples::exec_clear_tuple::call(estate.slot_mut(node.ss.ss_ScanTupleSlot.unwrap()))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(node.first_part_slot.unwrap()))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(node.agg_row_slot.unwrap()))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(node.temp_slot_1.unwrap()))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(node.temp_slot_2.unwrap()))?;
+    execTuples::exec_clear_tuple::call(estate, node.ss.ss_ScanTupleSlot.unwrap())?;
+    execTuples::exec_clear_tuple::call(estate, node.first_part_slot.unwrap())?;
+    execTuples::exec_clear_tuple::call(estate, node.agg_row_slot.unwrap())?;
+    execTuples::exec_clear_tuple::call(estate, node.temp_slot_1.unwrap())?;
+    execTuples::exec_clear_tuple::call(estate, node.temp_slot_2.unwrap())?;
     if let Some(fh) = node.framehead_slot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(fh))?;
+        execTuples::exec_clear_tuple::call(estate, fh)?;
     }
     if let Some(ft) = node.frametail_slot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(ft))?;
+        execTuples::exec_clear_tuple::call(estate, ft)?;
     }
 
     // Forget current wfunc values.
@@ -2419,8 +2409,8 @@ pub fn WinRowsArePeers<'mcx>(
 
     let res = are_peers(winstate, slot1, slot2, estate)?;
 
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot1))?;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot2))?;
+    execTuples::exec_clear_tuple::call(estate, slot1)?;
+    execTuples::exec_clear_tuple::call(estate, slot2)?;
     Ok(res)
 }
 

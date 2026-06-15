@@ -171,7 +171,7 @@ fn ExecProjectSRF<'mcx>(
         .expect("ExecProjectSRF: ps_ExprContext not initialized");
 
     // ExecClearTuple(resultSlot);
-    execTuples::exec_clear_tuple::call(estate.slot_mut(resultSlot))?;
+    execTuples::exec_clear_tuple::call(estate, resultSlot)?;
 
     // Call SRFs, as well as plain expressions, in per-tuple context.
     //   oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);

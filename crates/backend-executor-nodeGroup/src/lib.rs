@@ -240,9 +240,7 @@ fn copy_into_first<'mcx>(
     src: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let mcx = estate.es_query_cxt;
-    let (dstslot, srcslot) = estate.slot_pair_mut(dst, src);
-    execTuples::exec_copy_slot::call(mcx, dstslot, srcslot)
+        execTuples::exec_copy_slot::call(estate, dst, src)
 }
 
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitGroup`]:
@@ -412,7 +410,7 @@ pub fn ExecReScanGroup<'mcx>(
     // must clear first tuple
     //   ExecClearTuple(node->ss.ss_ScanTupleSlot);
     if let Some(scan_slot) = node.ss.ss_ScanTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+        execTuples::exec_clear_tuple::call(estate, scan_slot)?;
     }
 
     // if chgParam of subnode is not null then plan will be re-scanned by first

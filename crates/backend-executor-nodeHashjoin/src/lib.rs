@@ -1093,7 +1093,7 @@ fn ExecParallelHashJoinOuterGetTuple<'mcx>(
         } else {
             // ExecClearTuple(hj_OuterTupleSlot)
             if let Some(id) = node.hj_OuterTupleSlot {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(id))?;
+                execTuples::exec_clear_tuple::call(estate, id)?;
             }
         }
     }
@@ -1503,7 +1503,7 @@ fn ExecHashJoinGetSavedTuple<'mcx>(
     };
     if nread == 0 {
         // end of file
-        execTuples::exec_clear_tuple::call(estate.slot_mut(tuple_slot))?;
+        execTuples::exec_clear_tuple::call(estate, tuple_slot)?;
         return Ok(None);
     }
 

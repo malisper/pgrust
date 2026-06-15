@@ -205,7 +205,7 @@ fn BitmapHeapNext<'mcx>(
                 // Fails recheck, so drop it and loop back for another.
                 InstrCountFiltered2(node, 1);
                 // ExecClearTuple(slot);
-                execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+                execTuples::exec_clear_tuple::call(estate, slot)?;
                 continue;
             }
         }
@@ -216,7 +216,7 @@ fn BitmapHeapNext<'mcx>(
 
     // if we get here it means we are at the end of the scan.
     // return ExecClearTuple(slot);
-    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+    execTuples::exec_clear_tuple::call(estate, slot)?;
     Ok(false)
 }
 
@@ -325,7 +325,7 @@ fn ExecScan<'mcx>(
         if !have_tuple {
             if has_proj_info {
                 let rslot = node.ss.ps.ps_ResultTupleSlot.expect("ps_ResultTupleSlot");
-                execTuples::exec_clear_tuple::call(estate.slot_mut(rslot))?;
+                execTuples::exec_clear_tuple::call(estate, rslot)?;
                 return Ok(Some(rslot));
             }
             return Ok(None);
@@ -458,11 +458,11 @@ fn exec_scan_rescan<'mcx>(
 ) -> PgResult<()> {
     // ExecClearTuple(node->ps.ps_ResultTupleSlot);
     if let Some(rslot) = node.ss.ps.ps_ResultTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(rslot))?;
+        execTuples::exec_clear_tuple::call(estate, rslot)?;
     }
     // if (node->ss_ScanTupleSlot) ExecClearTuple(node->ss_ScanTupleSlot);
     if let Some(sslot) = node.ss.ss_ScanTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(sslot))?;
+        execTuples::exec_clear_tuple::call(estate, sslot)?;
     }
     Ok(())
 }

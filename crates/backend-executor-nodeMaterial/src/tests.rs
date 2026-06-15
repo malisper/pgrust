@@ -223,17 +223,21 @@ fn mock_init_result_slot<'mcx>(
     Ok(())
 }
 
-fn mock_clear_tuple(slot: &mut TupleTableSlot) -> PgResult<()> {
-    slot.tts_flags |= TTS_FLAG_EMPTY;
+fn mock_clear_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    estate.slot_mut(slot).tts_flags |= TTS_FLAG_EMPTY;
     Ok(())
 }
 
 fn mock_copy_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    dst: &mut TupleTableSlot,
-    src: &TupleTableSlot,
+    estate: &mut EStateData<'mcx>,
+    dst: types_nodes::SlotId,
+    src: types_nodes::SlotId,
 ) -> PgResult<()> {
-    dst.tts_flags = src.tts_flags;
+    let src_flags = estate.slot(src).tts_flags;
+    estate.slot_mut(dst).tts_flags = src_flags;
     Ok(())
 }
 

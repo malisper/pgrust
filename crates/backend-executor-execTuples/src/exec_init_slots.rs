@@ -108,16 +108,48 @@ pub fn ExecDropSingleTupleTableSlot(slot: SlotData<'_>) -> PgResult<()> {
 //  `backend-executor-execTuples-seams` exactly.
 // ===========================================================================
 
-/// Seam `slot_getallattrs` (provisional contract; see seam doc).
+/// Seam `slot_getallattrs` (STANDALONE-SLOT form; see seam doc).
 ///
-/// PAYLOAD MODEL: fully deconstructing the slot needs its `tts_values`/
-/// `tts_isnull` payload arrays, which the trimmed pool header does not carry.
-/// Stays seam-and-panic until the slot payload model lands.
+/// The two callers (`CopyOneRowTo`'s `table_slot_create` scan slot and logical
+/// replication's `logicalrep_write_tuple` slot) hold a header-only
+/// `&TupleTableSlot` that is NOT in any `EState` pool, and `table_slot_create`
+/// / `MakeSingleTupleTableSlot` build no payload arrays in the current model, so
+/// there is no `tts_values`/`tts_isnull` to return. Stays seam-and-panic until
+/// the *standalone* `SlotData` carrier lands. Pool-resident callers use the
+/// implemented [`seam_slot_getallattrs_by_id`].
 fn seam_slot_getallattrs<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &TupleTableSlot,
 ) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
-    panic!("execTuples.c slot_getallattrs — needs the slot payload model (tts_values/tts_isnull)")
+    panic!("execTuples.c slot_getallattrs — standalone (non-pool) slot carries no payload model (tts_values/tts_isnull)")
+}
+
+/// Seam `slot_getallattrs_by_id` — `slot_getallattrs` resolving the pool
+/// `SlotId` to its live payload-bearing `&mut SlotData`, fully deconstructing it
+/// and returning its per-attribute `(value, isnull)` array copied into `mcx`.
+///
+/// ```c
+/// slot_getallattrs(slot);
+/// for (i = 0; i < natts; i++)
+///     cols[i] = (slot->tts_values[i], slot->tts_isnull[i]);
+/// ```
+fn seam_slot_getallattrs_by_id<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+    let slot_data = estate.slot_data_mut(slot);
+    // slot_getallattrs(slot): deform every column into tts_values/tts_isnull.
+    crate::slot_deform::slot_getallattrs(mcx, slot_data)?;
+    // Copy out (value, isnull) per attribute (C reads slot->tts_values[i]).
+    let base = slot_data.base();
+    let nvalid = base.tts_nvalid as usize;
+    let mut cols: mcx::PgVec<'mcx, DeformedColumn<'mcx>> = mcx::vec_with_capacity_in(mcx, nvalid)?;
+    for i in 0..nvalid {
+        let value = base.tts_values[i].clone_in(mcx)?;
+        cols.push((value, base.tts_isnull[i]));
+    }
+    Ok(cols)
 }
 
 /// Seam `exec_init_result_tuple_slot_tl` — `ExecInitResultTupleSlotTL`.
@@ -132,12 +164,10 @@ fn seam_exec_init_result_tuple_slot_tl<'mcx>(
     seam_exec_init_result_slot(planstate, estate, tts_ops)
 }
 
-/// Seam `exec_clear_tuple` — `ExecClearTuple`. The seam's `&mut TupleTableSlot`
-/// is the header-only projection; the live payload-bearing clear is reached via
-/// `exec_reset_one_slot` / the `SlotId` store seams, so this header-only seam
-/// stays a loud panic (no payload reachable from the header alone).
-fn seam_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
-    panic!("execTuples.c ExecClearTuple — header-only slot view carries no payload to clear; use a SlotId-based path")
+/// Seam `exec_clear_tuple` — `ExecClearTuple`, resolving the pool `SlotId` to
+/// its live payload-bearing `&mut SlotData` and running the real `clear` op.
+fn seam_exec_clear_tuple<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(estate.slot_data_mut(slot))
 }
 
 /// Seam `exec_clear_tuple_by_id` — `ExecClearTuple` resolving the pool `SlotId`
@@ -153,16 +183,17 @@ fn seam_exec_reset_one_slot(slot: &mut SlotData<'_>) -> PgResult<()> {
     crate::slot_store_fetch::ExecResetOneSlot(slot)
 }
 
-/// Seam `exec_copy_slot` — `ExecCopySlot` (provisional contract; see seam doc).
-///
-/// PAYLOAD MODEL: copying a tuple between slots needs both slots' stored-tuple
-/// payloads. Stays seam-and-panic until the slot payload model lands.
+/// Seam `exec_copy_slot` — `ExecCopySlot`, resolving the two pool `SlotId`s to
+/// their live payload-bearing `&mut SlotData` pair and running the real
+/// `copyslot` op (copy the source slot's tuple into the destination).
 fn seam_exec_copy_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dstslot: &mut TupleTableSlot,
-    _srcslot: &TupleTableSlot,
+    estate: &mut EStateData<'mcx>,
+    dstslot: SlotId,
+    srcslot: SlotId,
 ) -> PgResult<()> {
-    panic!("execTuples.c ExecCopySlot — needs the slot payload model (tts_ops->copyslot)")
+    let mcx = estate.es_query_cxt;
+    let (dst, src) = estate.slot_data_pair_mut(dstslot, srcslot);
+    crate::slot_store_fetch::ExecCopySlot(mcx, dst, src)
 }
 
 /// Seam `exec_init_result_slot` — `ExecInitResultSlot`.
@@ -270,17 +301,22 @@ fn seam_exec_drop_single_tuple_table_slot(slot: TupleTableSlot) -> PgResult<()> 
     Ok(())
 }
 
-/// Seam `slot_getsysattr` — `slot_getsysattr`.
+/// Seam `slot_getsysattr` — `slot_getsysattr` (STANDALONE-SLOT form; see seam
+/// doc).
 ///
-/// PAYLOAD MODEL: fetching a system attribute dispatches `tts_ops->getsysattr`
-/// against the slot's stored tuple. Stays seam-and-panic until the slot payload
-/// model lands.
+/// The only caller (`GetTupleTransactionInfo`, logical-replication conflict
+/// detection) holds a header-only `&TupleTableSlot` outside any `EState` pool
+/// (no `SlotId`), and that standalone slot carries no payload in the current
+/// model, so `tts_ops->getsysattr` has no stored tuple to dispatch against.
+/// Stays seam-and-panic until the *standalone* `SlotData` carrier lands. (When
+/// a pool-resident caller appears, add a `_by_id` form resolving the `SlotId`
+/// and delegating to `crate::slot_ops_vtables::slot_getsysattr`.)
 fn seam_slot_getsysattr<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &TupleTableSlot,
     _attnum: AttrNumber,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
-    panic!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
+    panic!("execTuples.c slot_getsysattr — standalone (non-pool) slot carries no payload model (tts_ops->getsysattr)")
 }
 
 /// Seam `exec_init_null_tuple_slot` — `ExecInitNullTupleSlot`.
@@ -467,6 +503,7 @@ pub fn init_seams() {
     use backend_executor_execTuples_seams as seams;
     seams::exec_alloc_table_slot::set(seam_exec_alloc_table_slot);
     seams::slot_getallattrs::set(seam_slot_getallattrs);
+    seams::slot_getallattrs_by_id::set(seam_slot_getallattrs_by_id);
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
     seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);
     seams::exec_clear_tuple::set(seam_exec_clear_tuple);

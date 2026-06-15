@@ -245,10 +245,9 @@ pub fn sub_clear_proj_result_slot<'mcx>(
 ) -> PgResult<()> {
     // C: ExecClearTuple(slot);  /* the projection's result slot */
     let slot_id = proj_carrier(proj_slot(node, which), which).resultslot;
-    // `ExecClearTuple` over a pool slot is owned by execTuples; route through
-    // its slot accessor. The result slot lives in the EState slot pool.
-    let slot = estate.slot_mut(slot_id);
-    backend_executor_execTuples_seams::exec_clear_tuple::call(slot)
+    // `ExecClearTuple` over a pool slot is owned by execTuples; the result slot
+    // lives in the EState slot pool, addressed by its id.
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot_id)
 }
 
 /// `slot->tts_tupleDescriptor->natts` of the named projection's result slot

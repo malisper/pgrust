@@ -1425,7 +1425,7 @@ fn clear_slot<'mcx>(
     idx: usize,
 ) -> PgResult<()> {
     if let Some(id) = gm_state.gm_slots[idx] {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(id))?;
+        execTuples::exec_clear_tuple::call(estate, id)?;
     }
     Ok(())
 }

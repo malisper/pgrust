@@ -245,7 +245,7 @@ fn ExecScanFetch<'mcx>(
                 // TupleTableSlot *slot = node->ss_ScanTupleSlot;
                 if !recheck_mtd(node, estate) {
                     // would not be returned by scan
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+                    execTuples::exec_clear_tuple::call(estate, scan_slot)?;
                 }
                 // return slot; (the node's scan slot)
                 return Ok(Some(scan_slot));
@@ -255,7 +255,7 @@ fn ExecScanFetch<'mcx>(
             // or we already returned it.
             // TupleTableSlot *slot = node->ss_ScanTupleSlot;
             // return ExecClearTuple(slot);
-            execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+            execTuples::exec_clear_tuple::call(estate, scan_slot)?;
             return Ok(Some(scan_slot));
         } else if let Some(repl) = relsubs_slot(estate, scanrelid - 1) {
             // Return replacement tuple provided by the EPQ caller.
@@ -273,7 +273,7 @@ fn ExecScanFetch<'mcx>(
             if !recheck_mtd(node, estate) {
                 // would not be returned by scan
                 // return ExecClearTuple(slot);
-                execTuples::exec_clear_tuple::call(estate.slot_mut(repl))?;
+                execTuples::exec_clear_tuple::call(estate, repl)?;
                 return Ok(Some(repl));
             }
             // return slot; — the EPQ replacement slot itself is the produced
@@ -298,7 +298,7 @@ fn ExecScanFetch<'mcx>(
             // Check if it meets the access-method conditions.
             if !recheck_mtd(node, estate) {
                 // return ExecClearTuple(slot);
-                execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+                execTuples::exec_clear_tuple::call(estate, scan_slot)?;
                 return Ok(Some(scan_slot));
             }
             // return slot;
@@ -369,7 +369,7 @@ fn ExecScanExtended<'mcx>(
                     .ps_ResultTupleSlot
                     .expect("ExecScanExtended: ps_ResultTupleSlot not initialized");
                 // return ExecClearTuple(projInfo->pi_state.resultslot);
-                execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+                execTuples::exec_clear_tuple::call(estate, result_slot)?;
                 return Ok(Some(result_slot));
             } else {
                 // return slot;

@@ -146,7 +146,7 @@ fn IndexNext<'mcx>(node: &mut IndexScanState<'mcx>, estate: &mut EStateData<'mcx
 
     // End of scan.
     node.iss_ReachedEnd = true;
-    execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+    execTuples::exec_clear_tuple::call(estate, scan_slot)?;
     Ok(false)
 }
 
@@ -226,7 +226,7 @@ fn IndexNextWithReorder<'mcx>(
             }
         } else if node.iss_ReachedEnd {
             // Queue empty and no more index tuples — done.
-            execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
+            execTuples::exec_clear_tuple::call(estate, scan_slot)?;
             return Ok(false);
         }
 

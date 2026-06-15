@@ -1050,8 +1050,7 @@ fn agg_plan_agg_params<'a, 'mcx>(
 
 /// `ExecClearTuple(slot)` (execTuples.c).
 fn clear_slot<'mcx>(estate: &mut EStateData<'mcx>, slot_id: SlotId) -> PgResult<()> {
-    let slot = estate.slot_mut(slot_id);
-    backend_executor_execTuples_seams::exec_clear_tuple::call(slot)
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot_id)
 }
 
 /// `MemSet(econtext->ecxt_aggvalues/ecxt_aggnulls, 0, ...)` — forget the

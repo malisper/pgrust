@@ -62,7 +62,10 @@ fn mock_exec_re_scan_set_param_plan<'mcx>(
     Ok(())
 }
 
-fn mock_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
+fn mock_exec_clear_tuple<'mcx>(
+    _estate: &mut types_nodes::EStateData<'mcx>,
+    _slot: types_nodes::SlotId,
+) -> PgResult<()> {
     Ok(())
 }
 

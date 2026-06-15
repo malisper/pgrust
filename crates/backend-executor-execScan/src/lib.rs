@@ -308,7 +308,7 @@ where
                     .expect("ExecScanFetch: ss_ScanTupleSlot not initialized");
                 //   if (!(*recheckMtd)(node, slot)) ExecClearTuple(slot);
                 if !recheck_mtd(node, estate)? {
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+                    execTuples::exec_clear_tuple::call(estate, slot)?;
                 }
                 //   return slot;
                 return Ok(Some(slot));
@@ -319,7 +319,7 @@ where
             let slot = node.ss()
                 .ss_ScanTupleSlot
                 .expect("ExecScanFetch: ss_ScanTupleSlot not initialized");
-            execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+            execTuples::exec_clear_tuple::call(estate, slot)?;
             return Ok(Some(slot));
         } else if let Some(epq_slot) = epq_relsubs_slot(estate, scanrelid - 1) {
             // Return replacement tuple provided by the EPQ caller.
@@ -338,7 +338,7 @@ where
             // callbacks of all scan-node consumers do this themselves, so the
             // EPQ replacement slot is the operative one.
             if !recheck_mtd(node, estate)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(epq_slot))?;
+                execTuples::exec_clear_tuple::call(estate, epq_slot)?;
                 return Ok(None);
             }
             //   return slot;
@@ -361,7 +361,7 @@ where
             }
             //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
             if !recheck_mtd(node, estate)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+                execTuples::exec_clear_tuple::call(estate, slot)?;
                 return Ok(None);
             }
             //   return slot;
@@ -432,7 +432,7 @@ where
             if has_proj {
                 // return ExecClearTuple(projInfo->pi_state.resultslot);
                 let result_slot = projection_result_slot(node.ss());
-                execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+                execTuples::exec_clear_tuple::call(estate, result_slot)?;
                 return Ok(Some(result_slot));
             } else {
                 // return slot;  (the C returns the empty/NULL slot itself)
@@ -536,7 +536,7 @@ fn exec_scan_rescan_ss<'mcx>(
     // node is not positioned on a tuple.
     //   ExecClearTuple(node->ss_ScanTupleSlot);
     if let Some(slot) = node.ss_ScanTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+        execTuples::exec_clear_tuple::call(estate, slot)?;
     }
 
     // Rescan EvalPlanQual tuple(s) if we're inside an EvalPlanQual recheck, but

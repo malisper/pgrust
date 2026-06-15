@@ -300,7 +300,7 @@ pub fn ExecReScanNamedTuplestoreScan<'mcx>(
     // if (node->ss.ps.ps_ResultTupleSlot)
     //     ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     if let Some(slot) = node.ss.ps.ps_ResultTupleSlot {
-        execTuples::exec_clear_tuple::call(estate.slot_mut(slot))?;
+        execTuples::exec_clear_tuple::call(estate, slot)?;
     }
 
     // ExecScanReScan(&node->ss);

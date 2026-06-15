@@ -607,8 +607,7 @@ fn build_index_value_desc<'b, 'mcx>(
         tableslot = estate.make_slot(new_slot)?;
 
         // tableslot = ExecCopySlot(tableslot, slot);
-        let (dst, src) = estate.slot_pair_mut(tableslot, slot);
-        execTuples_seams::exec_copy_slot::call(query_cxt, dst, src)?;
+        execTuples_seams::exec_copy_slot::call(estate, tableslot, slot)?;
     }
 
     // Initialize ecxt_scantuple for potential use in FormIndexDatum when

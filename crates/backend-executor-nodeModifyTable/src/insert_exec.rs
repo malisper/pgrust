@@ -718,7 +718,7 @@ fn fdw_exec_foreign_insert<'mcx>(
 
 /// `ExecClearTuple(slot)` (execTuples.c): clear the slot's tuple.
 fn exec_clear_tuple<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
-    backend_executor_execTuples_seams::exec_clear_tuple::call(estate.slot_mut(slot))
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot)
 }
 
 /// `InstrCountTuples2(&mtstate->ps, delta)` (execnodes.h): bump the node's

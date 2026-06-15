@@ -129,7 +129,7 @@ pub fn ExecUnique<'mcx>(
         let slot = match slot {
             None => {
                 // end of subplan, so we're done
-                execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+                execTuples::exec_clear_tuple::call(estate, result_slot)?;
                 return Ok(None);
             }
             Some(id) => id,
@@ -165,9 +165,7 @@ pub fn ExecUnique<'mcx>(
     // guarantee that this source tuple is still accessible after fetching the
     // next source tuple.
     //   return ExecCopySlot(resultTupleSlot, slot);
-    let mcx = estate.es_query_cxt;
-    let (dst, src) = estate.slot_pair_mut(result_slot, slot);
-    execTuples::exec_copy_slot::call(mcx, dst, src)?;
+        execTuples::exec_copy_slot::call(estate, result_slot, slot)?;
     Ok(Some(result_slot))
 }
 
@@ -401,7 +399,7 @@ pub fn ExecReScanUnique<'mcx>(
         .ps
         .ps_ResultTupleSlot
         .expect("ExecReScanUnique: ps_ResultTupleSlot must be set");
-    execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
+    execTuples::exec_clear_tuple::call(estate, result_slot)?;
 
     // if chgParam of subnode is not null then plan will be re-scanned by first
     // ExecProcNode.
