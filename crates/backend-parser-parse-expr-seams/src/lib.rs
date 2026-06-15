@@ -75,9 +75,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ParseExprKindName(exprKind)` (parse_expr.c) — the SQL-construct name for
-    /// an expression-kind, used in error messages (eg "GROUP BY").
-    pub fn parse_expr_kind_name(
-        expr_kind: types_nodes::parsestmt::ParseExprKind,
-    ) -> &'static str
+    /// `ParseExprKindName(exprKind)` (parse_expr.c): a human-readable SQL
+    /// construct name for a [`ParseExprKind`] (e.g. `"WHERE"`, `"GROUP BY"`),
+    /// used in `set-returning functions are not allowed in %s` and similar
+    /// error messages. Owned by parse_expr.c; consumed by
+    /// `check_srf_call_placement` (parse_func.c) across the parser cycle.
+    pub fn parse_expr_kind_name(expr_kind: ParseExprKind) -> &'static str
 );

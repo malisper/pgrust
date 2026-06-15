@@ -1859,7 +1859,7 @@ fn seam_transform_grouping_func<'mcx>(
     pstate: &mut ParseState<'mcx>,
     gf: Node<'mcx>,
 ) -> PgResult<Expr> {
-    backend_parser_agg_seams::transform_grouping_func::call(pstate, gf)
+    backend_parser_parse_agg_seams::transform_grouping_func::call(pstate, gf)
 }
 
 fn seam_transform_row_expr<'mcx>(
@@ -2063,8 +2063,8 @@ fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
 pub fn init_seams() {
     me::analyze_one_exec_param::set(analyze_one_exec_param_impl);
     me::parser_errposition::set(parser_errposition_impl);
-    me::transformExpr::set(transformExpr);
     me::parse_expr_kind_name::set(ParseExprKindName);
+    me::transformExpr::set(transformExpr);
 }
 
 #[cfg(test)]

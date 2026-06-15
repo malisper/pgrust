@@ -113,7 +113,7 @@ fn install() {
     pg_prng_uint32_global::set(|| Ok(PRNG_SEED.with(|s| *s.borrow())));
     hashfloat8::set(|_| Ok(0));
 
-    get_tsm_routine::set(|_node, _handler| mcx::alloc_in(static_mcx(), zeroed_tsm_routine()));
+    get_tsm_routine_oid::set(|_mcx, _handler| mcx::alloc_in(static_mcx(), zeroed_tsm_routine()));
     tsm_has_init_sample_scan::set(|_| Ok(false));
     tsm_init_sample_scan::set(|_, _| Ok(()));
     tsm_begin_sample_scan::set(|_, _, _| {

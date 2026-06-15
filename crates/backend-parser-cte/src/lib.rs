@@ -682,7 +682,7 @@ fn analyzeCTE<'mcx>(
         .take()
         .ok_or_else(|| elog_error("CTE has no query"))?;
     let query_node =
-        backend_parser_analyze_seams::parse_sub_analyze::call(mcx, &ctequery, pstate, cte, false, true)?;
+        backend_parser_analyze_seams::parse_sub_analyze::call(mcx, &ctequery, pstate, Some(&*cte), false, true)?;
     // cte->ctequery = (Node *) query;
     cte.ctequery = Some(query_node);
 

@@ -155,13 +155,14 @@ fn node_location(n: &Node) -> i32 {
 /// `args` is the already-transformed plain list of argument `Expr`s; `aggorder`
 /// is the raw ORDER BY (`SortBy` nodes wrapped as `Node`).
 pub fn transformAggregateCall<'mcx>(
-    mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    agg: &mut Aggref,
-    args: PgVec<'mcx, Expr>,
+    agg: Aggref,
+    args: Vec<Expr>,
     aggorder: PgVec<'mcx, NodePtr<'mcx>>,
     agg_distinct: bool,
-) -> PgResult<()> {
+) -> PgResult<Aggref> {
+    let mcx = pstate_mcx(pstate);
+    let mut agg = agg;
     let mut tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let mut torder: Vec<SortGroupClause> = Vec::new();
     let mut tdistinct: Vec<SortGroupClause> = Vec::new();
@@ -311,7 +312,8 @@ pub fn transformAggregateCall<'mcx>(
     agg.aggdistinct = tdistinct.into_iter().collect();
     agg.aggargtypes = argtypes;
 
-    check_agglevels_and_constraints(mcx, pstate, AggOrGrouping::Agg(agg))
+    check_agglevels_and_constraints(mcx, pstate, AggOrGrouping::Agg(&mut agg))?;
+    Ok(agg)
 }
 
 /// `Aggref.args` is `Vec<TargetEntry<'static>>`. The parser-built target
@@ -977,9 +979,10 @@ fn rte_eref_aliasname<'a>(rte: &'a RangeTblEntry) -> &'a str {
 /// Finish initial transformation of a window function call.
 pub fn transformWindowFuncCall<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    wfunc: &mut types_nodes::primnodes::WindowFunc,
-    windef: &WindowDef<'mcx>,
-) -> PgResult<()> {
+    wfunc: types_nodes::primnodes::WindowFunc,
+    windef: WindowDef<'mcx>,
+) -> PgResult<types_nodes::primnodes::WindowFunc> {
+    let mut wfunc = wfunc;
     // A window function call can't contain another one (but aggs are OK).
     if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(&wfunc.args) {
         let loc = locate_windowfunc_exprs(&wfunc.args);
@@ -1163,7 +1166,7 @@ pub fn transformWindowFuncCall<'mcx>(
     }
 
     pstate.p_hasWindowFuncs = true;
-    Ok(())
+    Ok(wfunc)
 }
 
 /// `contain_windowfuncs((Node *) list)` over an `Expr` list.
@@ -2665,16 +2668,16 @@ fn make_agg_arg(argtype: Oid, argcollation: Oid) -> Expr {
 
 /// Install every inward seam this unit owns. Wired into `seams-init::init_all`.
 pub fn init_seams() {
-    backend_parser_agg_seams::transform_grouping_func::set(transformGroupingFunc);
-    backend_parser_agg_seams::transform_aggregate_call::set(transformAggregateCall);
-    backend_parser_agg_seams::transform_window_func_call::set(transformWindowFuncCall);
-    backend_parser_agg_seams::parse_check_aggregates::set(parseCheckAggregates);
-    backend_parser_agg_seams::expand_grouping_sets::set(expand_grouping_sets);
-    backend_parser_agg_seams::get_aggregate_argtypes::set(get_aggregate_argtypes);
-    backend_parser_agg_seams::resolve_aggregate_transtype::set(resolve_aggregate_transtype);
-    backend_parser_agg_seams::agg_args_support_sendreceive::set(agg_args_support_sendreceive);
-    backend_parser_agg_seams::build_aggregate_transfn_expr::set(build_aggregate_transfn_expr);
-    backend_parser_agg_seams::build_aggregate_serialfn_expr::set(build_aggregate_serialfn_expr);
-    backend_parser_agg_seams::build_aggregate_deserialfn_expr::set(build_aggregate_deserialfn_expr);
-    backend_parser_agg_seams::build_aggregate_finalfn_expr::set(build_aggregate_finalfn_expr);
+    backend_parser_parse_agg_seams::transform_grouping_func::set(transformGroupingFunc);
+    backend_parser_parse_agg_seams::transform_aggregate_call::set(transformAggregateCall);
+    backend_parser_parse_agg_seams::transform_window_func_call::set(transformWindowFuncCall);
+    backend_parser_parse_agg_seams::parse_check_aggregates::set(parseCheckAggregates);
+    backend_parser_parse_agg_seams::expand_grouping_sets::set(expand_grouping_sets);
+    backend_parser_parse_agg_seams::get_aggregate_argtypes::set(get_aggregate_argtypes);
+    backend_parser_parse_agg_seams::resolve_aggregate_transtype::set(resolve_aggregate_transtype);
+    backend_parser_parse_agg_seams::agg_args_support_sendreceive::set(agg_args_support_sendreceive);
+    backend_parser_parse_agg_seams::build_aggregate_transfn_expr::set(build_aggregate_transfn_expr);
+    backend_parser_parse_agg_seams::build_aggregate_serialfn_expr::set(build_aggregate_serialfn_expr);
+    backend_parser_parse_agg_seams::build_aggregate_deserialfn_expr::set(build_aggregate_deserialfn_expr);
+    backend_parser_parse_agg_seams::build_aggregate_finalfn_expr::set(build_aggregate_finalfn_expr);
 }

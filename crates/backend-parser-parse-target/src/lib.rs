@@ -2200,10 +2200,24 @@ fn transform_target_entry_seam<'mcx>(
     )
 }
 
+/// Seam body for `backend_parser_target_seams::FigureColname` — the column-name
+/// heuristic parse_clause.c's `transformRangeFunction` reaches for its
+/// per-function alias names. The C `FigureColname` always returns a non-NULL
+/// `char *` (defaulting to `"?column?"`); the owned `FigureColname` mirrors
+/// that, so the seam allocates the result into the caller's `mcx`.
+fn figure_colname_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Node<'mcx>,
+) -> PgResult<mcx::PgString<'mcx>> {
+    let name = FigureColname(Some(node)).unwrap_or_else(|| String::from("?column?"));
+    mcx::PgString::from_str_in(&name, mcx)
+}
+
 /// Install this crate's inward seams (owner of `backend-parser-target-seams`,
 /// which maps to `parse_target.c`).
 pub fn init_seams() {
     backend_parser_target_seams::transform_target_entry::set(transform_target_entry_seam);
+    backend_parser_target_seams::FigureColname::set(figure_colname_seam);
 }
 
 #[cfg(test)]

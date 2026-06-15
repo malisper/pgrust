@@ -7398,6 +7398,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-agg"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-constraint",
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-util-vars",
+ "backend-parser-clause",
+ "backend-parser-coerce",
+ "backend-parser-parse-agg-seams",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-relation",
+ "backend-parser-small1-seams",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-parser-analyze-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7422,13 +7447,20 @@ dependencies = [
 name = "backend-parser-clause"
 version = "0.0.0"
 dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-namespace",
+ "backend-executor-nodeSamplescan-seams",
  "backend-nodes-copyfuncs-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
  "backend-optimizer-util-vars",
+ "backend-parser-analyze-seams",
+ "backend-parser-clause-seams",
  "backend-parser-coerce",
  "backend-parser-parse-agg-seams",
+ "backend-parser-parse-collate",
  "backend-parser-parse-expr",
+ "backend-parser-parse-func-seams",
  "backend-parser-parse-oper",
  "backend-parser-relation",
  "backend-parser-small1-seams",
@@ -7438,11 +7470,25 @@ dependencies = [
  "backend-utils-error",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-rel",
+ "types-samplescan",
+ "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-parser-clause-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -7481,6 +7527,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-cte"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-analyze-seams",
+ "backend-parser-coerce",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-small1",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-driver"
 version = "0.0.0"
 dependencies = [
@@ -7516,6 +7584,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-func"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace-seams",
+ "backend-nodes-core",
+ "backend-parser-clause-seams",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-agg-seams",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-func-seams",
+ "backend-parser-parse-type-seams",
+ "backend-parser-relation-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-gram-core"
 version = "0.0.0"
 dependencies = [
@@ -7548,7 +7646,10 @@ dependencies = [
 name = "backend-parser-parse-agg-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -7576,6 +7677,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-parser-coerce-seams",
+ "backend-parser-parse-agg-seams",
  "backend-parser-parse-collate",
  "backend-parser-parse-expr-seams",
  "backend-parser-parse-oper",
@@ -7760,9 +7862,11 @@ dependencies = [
 name = "backend-parser-relation-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8989,7 +9093,10 @@ dependencies = [
 name = "backend-rewrite-rewritemanip-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -13819,7 +13926,10 @@ dependencies = [
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
+ "backend-parser-agg",
+ "backend-parser-clause",
  "backend-parser-coerce",
+ "backend-parser-func",
  "backend-parser-gram-core",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",

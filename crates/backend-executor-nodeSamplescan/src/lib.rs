@@ -380,8 +380,12 @@ pub fn ExecInitSampleScan<'mcx>(
 
     // Finally, initialize the TABLESAMPLE method handler.
     // tsm = GetTsmRoutine(tsc->tsmhandler);
+    // The TsmRoutine is charged to the node's per-query context; the real
+    // owner (access/tablesample/tablesample.c GetTsmRoutine) reads only the
+    // handler OID, so this goes through the OID-keyed seam (shared with the
+    // parser's transformRangeTableSample).
     let tsmhandler = sample_clause(node).map(|tsc| tsc.tsmhandler).unwrap_or(0);
-    scanstate.tsmroutine = Some(seam::get_tsm_routine::call(&mut scanstate, tsmhandler)?);
+    scanstate.tsmroutine = Some(seam::get_tsm_routine_oid::call(estate.es_query_cxt, tsmhandler)?);
     scanstate.tsm_state = None;
 
     // if (tsm->InitSampleScan) tsm->InitSampleScan(scanstate, eflags);

@@ -149,3 +149,58 @@ seam_core::seam!(
         location: i32,
     ) -> PgResult<Option<Expr>>
 );
+
+seam_core::seam!(
+    /// `can_coerce_type(nargs, input_typeids, target_typeids, ccontext)`
+    /// (parse_coerce.c): can a set of input values be coerced to the desired
+    /// target types? Used by `func_match_argtypes`/`func_select_candidate`
+    /// (parse_func.c) to filter and rank candidate functions. `Err` carries the
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn can_coerce_type(
+        nargs: i32,
+        input_typeids: &[Oid],
+        target_typeids: &[Oid],
+        ccontext: CoercionContext,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `coerce_type(pstate, node, inputTypeId, targetTypeId, targetTypeMod,
+    /// ccontext, cformat, location)` (parse_coerce.c): the low-level
+    /// type-coercion worker that actually inserts the needed cast/relabel node.
+    /// `pstate` is `None` when the C passes `NULL` (no special unknown-Param
+    /// handling). The caller has already verified (via `can_coerce_type`) that
+    /// the coercion is possible, so this raises on an impossible coercion.
+    /// `Err` carries that `ereport(ERROR)` surface.
+    pub fn coerce_type<'mcx>(
+        pstate: Option<&mut ParseState<'mcx>>,
+        node: Expr,
+        input_type_id: Oid,
+        target_type_id: Oid,
+        target_type_mod: i32,
+        ccontext: CoercionContext,
+        cformat: CoercionForm,
+        location: i32,
+    ) -> PgResult<Expr>
+);
+
+seam_core::seam!(
+    /// `find_coercion_pathway(targetTypeId, sourceTypeId, COERCION_EXPLICIT,
+    /// &funcid)` (parse_coerce.c): like [`find_coercion_pathway_implicit`] but
+    /// under the *explicit* coercion context — the form `func_get_detail`
+    /// (parse_func.c) uses to decide whether a one-argument call naming a type
+    /// is really a type coercion. Returns the pathway kind and (for `Func`) the
+    /// coercion function OID, else `InvalidOid`.
+    pub fn find_coercion_pathway_explicit(
+        target_type_id: Oid,
+        source_type_id: Oid,
+    ) -> PgResult<(CoercionPathType, Oid)>
+);
+
+seam_core::seam!(
+    /// `select_common_typmod(pstate, exprs, common_type)` (parse_coerce.c): the
+    /// common typmod across `exprs` once they share `common_type` (the
+    /// `unify_hypothetical_args` companion to `select_common_type`). The C
+    /// `pstate` argument is unused by the computation, so it is dropped.
+    pub fn select_common_typmod(exprs: &[Expr], common_type: Oid) -> PgResult<i32>
+);

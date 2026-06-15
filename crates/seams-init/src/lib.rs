@@ -165,6 +165,7 @@ pub fn init_all() {
     backend_optimizer_util_vars::init_seams();
     backend_parser_parse_expr::init_seams();
     backend_parser_agg::init_seams();
+    backend_parser_func::init_seams();
     backend_parser_clause::init_seams();
     backend_parser_parse_target::init_seams();
     backend_optimizer_util_clauses::init_seams();

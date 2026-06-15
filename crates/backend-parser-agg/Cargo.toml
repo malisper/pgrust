@@ -17,7 +17,7 @@ types-nodes = { path = "../types-nodes" }
 backend-utils-error = { path = "../backend-utils-error" }
 
 # Owner of the inward seams this crate installs.
-backend-parser-agg-seams = { path = "../backend-parser-agg-seams" }
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
 
 # Direct (no-cycle) callees.
 backend-nodes-core = { path = "../backend-nodes-core" }

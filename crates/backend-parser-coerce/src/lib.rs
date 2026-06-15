@@ -2604,6 +2604,46 @@ pub fn init_seams() {
     s::select_common_type::set(seam_select_common_type);
     s::verify_common_type::set(verify_common_type);
     s::coerce_to_target_type::set(seam_coerce_to_target_type);
+    s::can_coerce_type::set(can_coerce_type);
+    s::coerce_type::set(seam_coerce_type);
+    s::find_coercion_pathway_explicit::set(seam_find_coercion_pathway_explicit);
+    s::select_common_typmod::set(select_common_typmod);
+}
+
+/// `coerce_type(pstate, node, ...)` (parse_coerce.c) for the parse_func.c
+/// callers: wrap `node` in `Some`, allocate a transient context, and require a
+/// non-NULL result (the caller has verified the coercion is possible).
+fn seam_coerce_type<'mcx>(
+    pstate: Option<&mut ParseState<'mcx>>,
+    node: Expr,
+    input_type_id: Oid,
+    target_type_id: Oid,
+    target_type_mod: i32,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: i32,
+) -> PgResult<Expr> {
+    let cx = MemoryContext::new("coerce_type");
+    coerce_type(
+        cx.mcx(),
+        pstate,
+        Some(node),
+        input_type_id,
+        target_type_id,
+        target_type_mod,
+        ccontext,
+        cformat,
+        location,
+    )?
+    .ok_or_else(|| types_error::PgError::error("coerce_type returned NULL"))
+}
+
+/// `find_coercion_pathway(target, source, COERCION_EXPLICIT, &funcid)`.
+fn seam_find_coercion_pathway_explicit(
+    target_type_id: Oid,
+    source_type_id: Oid,
+) -> PgResult<(CoercionPathType, Oid)> {
+    find_coercion_pathway(target_type_id, source_type_id, CoercionContext::COERCION_EXPLICIT)
 }
 
 fn seam_find_coercion_pathway_implicit(

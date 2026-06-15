@@ -16,8 +16,9 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use mcx::PgBox;
+use mcx::{Mcx, PgBox};
 use types_core::primitive::uint32;
+use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::execnodes::EStateData;
@@ -158,13 +159,16 @@ seam_core::seam!(
 // --- tablesample-method registry and callbacks (access/tsmapi.h) ---
 
 seam_core::seam!(
-    /// `GetTsmRoutine(tsc->tsmhandler)` — resolve the tablesample method's
-    /// `TsmRoutine` from its handler-function OID. The `scanstate` carries the
-    /// `'mcx` the returned `TsmRoutine` is charged to (the node's per-query
-    /// context); the C reads only the handler OID.
-    pub fn get_tsm_routine<'mcx>(
-        scanstate: &mut SampleScanState<'mcx>,
-        tsmhandler: u32,
+    /// `GetTsmRoutine(handlerOid)` (access/tablesample/tablesample.c) — resolve
+    /// the tablesample method's `TsmRoutine` from its handler-function OID,
+    /// charging the result to `mcx`. The C reads only the handler OID; both the
+    /// executor (`ExecInitSampleScan`) and the parser
+    /// (`transformRangeTableSample`, which needs the routine's `parameterTypes`
+    /// / `repeatable_across_queries` before any node state exists) use it.
+    /// Installed by the (still-unported) tablesample-method registry owner.
+    pub fn get_tsm_routine_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        handler_oid: Oid,
     ) -> PgResult<PgBox<'mcx, TsmRoutine>>
 );
 
