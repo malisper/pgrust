@@ -57,7 +57,7 @@ use types_core::Oid;
 // canonical `Datum<'mcx>` (by reference). So every value here is carried as the
 // canonical enum and forwarded unchanged across those edges; there is no
 // in-crate scalar-word logic (no `DatumGet*`/`*GetDatum` forges, no pointer
-// forges, no `datum_ref_registry` tokens, no `_as_datum` forges, no deprecated
+// forges, no datum pointer-token registry, no `_as_datum` forges, no deprecated
 // bare-word `datum_*` `_v` seam variants). The lone codec read (`DatumGetBool`)
 // is the canonical `Datum::as_bool` accessor. The bare-word
 // `types_datum::Datum(usize)` shim is no longer referenced internally.

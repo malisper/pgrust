@@ -6,8 +6,8 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
-    backend_archive_shell_archive::init_seams();
     contrib_amcheck_verify_nbtree::init_seams();
+    backend_archive_shell_archive::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -705,7 +705,7 @@ mod recurrence_guard {
         // (table_beginscan / table_scan_getnextslot{,_direction} /
         // table_relation_set_new_filelocator retired: the COPY/seqscan scan model
         // was reconciled onto tableam.c's value-typed `TableScanDesc<'mcx>` and the
-        // owner now installs them — the ScanToken divergence is resolved.) Pay down
+        // owner now installs them — the scan-handle divergence is resolved.) Pay down
         // the rest by porting heapam_handler.c + tableamapi.c. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "get_table_am_routine"),
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
