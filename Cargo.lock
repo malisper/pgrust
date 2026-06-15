@@ -13315,6 +13315,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-async"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
 name = "types-authid"
 version = "0.0.0"
 dependencies = [
