@@ -1629,6 +1629,23 @@ fn attribute_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<Attr
     Ok(opts.unwrap_or_default())
 }
 
+/// Seam target for `hashoptions(reloptions, validate)` (hashutil.c) — the hash
+/// AM's `amoptions` callback. Mirrors the C:
+/// `build_reloptions(reloptions, validate, RELOPT_KIND_HASH,
+///  sizeof(HashOptions), tab, lengthof(tab))` where `tab` has the single entry
+/// `{"fillfactor", RELOPT_TYPE_INT, offsetof(HashOptions, fillfactor)}`.
+///
+/// `HashOptions` is `{ int32 varlena_header_; int fillfactor; }`, so its size is
+/// 8 and `fillfactor` is at offset 4.
+fn build_reloptions_hash_seam(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    let scratch = mcx::MemoryContext::new("hashoptions");
+    let tab = [RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4)];
+    build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_HASH, 8, &tab)
+}
+
 /// Seam target for `tablespace_reloptions(reloptions, validate)` (see
 /// [`attribute_reloptions_seam`]).
 fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<TableSpaceOpts> {
@@ -1697,4 +1714,5 @@ pub fn init_seams() {
     backend_access_common_reloptions_seams::add_local_int_reloption::set(
         add_local_int_reloption_seam,
     );
+    backend_access_common_reloptions_seams::build_reloptions_hash::set(build_reloptions_hash_seam);
 }

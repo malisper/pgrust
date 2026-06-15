@@ -133,6 +133,12 @@ pub const T_UpdateStmt: NodeTag = NodeTag(139);
 pub const T_MergeStmt: NodeTag = NodeTag(140);
 pub const T_SelectStmt: NodeTag = NodeTag(141);
 pub const T_SetOperationStmt: NodeTag = NodeTag(142);
+// Value nodes (nodes/value.h) — tags verified vs nodes/nodetags.h.
+pub const T_Integer: NodeTag = NodeTag(465);
+pub const T_Float: NodeTag = NodeTag(466);
+pub const T_Boolean: NodeTag = NodeTag(467);
+pub const T_String: NodeTag = NodeTag(468);
+pub const T_BitString: NodeTag = NodeTag(469);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -352,6 +358,23 @@ pub enum Node<'mcx> {
     MergeWhenClause(crate::rawnodes::MergeWhenClause<'mcx>),
     /// `T_ReturningClause`.
     ReturningClause(crate::rawnodes::ReturningClause<'mcx>),
+    // --- value nodes (nodes/value.h) — leaf literals ---
+    // The lexer/grammar emits these `Value`-family leaves (`A_Const.val`,
+    // operator-name `list_make1(makeString(name))`, etc.) as `Node *`, so they
+    // must be arms of the central `Node` enum to flow through the generic
+    // `Node *` machinery. Additive (`#[non_exhaustive]`); tags verified vs
+    // nodes/nodetags.h (T_Integer=465 … T_BitString=469).
+    /// `T_Integer`.
+    Integer(crate::value::Integer),
+    /// `T_Float`.
+    Float(crate::value::Float<'mcx>),
+    /// `T_Boolean`.
+    Boolean(crate::value::Boolean),
+    /// `T_String` (the `String` value node; the carrier is `StringNode` to avoid
+    /// colliding with Rust's `String`).
+    String(crate::value::StringNode<'mcx>),
+    /// `T_BitString`.
+    BitString(crate::value::BitString<'mcx>),
     /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
     ///
     /// In C, every `Expr`-derived node is a `Node *` via the
@@ -367,6 +390,153 @@ pub enum Node<'mcx> {
 }
 
 impl<'mcx> Node<'mcx> {
+    /// `nodeTag(node)` — alias of [`Node::tag`] matching the C `nodeTag` /
+    /// src-idiomatic `node_tag` spelling the walkers and parser cluster use.
+    #[inline]
+    pub fn node_tag(&self) -> NodeTag {
+        self.tag()
+    }
+
+    // --- accessor surface for the walkers / parser recursive cluster ---------
+    //
+    // The split Expr/Node model carries every `Expr`-derived node inside the
+    // single `Node::Expr(Expr)` arm, so the `Expr`-leaf accessors (`as_var`,
+    // `as_opexpr`, `as_collateexpr`) reach *through* that arm. The parse/raw
+    // accessors (`as_targetentry`, `as_joinexpr`) match the dedicated `Node`
+    // arms directly. `as_*`/`as_*_mut` borrow; `into_*` consumes; `is_*` tests.
+    // (C: `IsA(node, T)` + the `castNode(T, node)` cast.)
+
+    /// `castNode(Var, node)` (borrow) — `Some` iff `node` is a `Var` expression.
+    pub fn as_var(&self) -> Option<&crate::primnodes::Var> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::Var(v)) => Some(v),
+            _ => None,
+        }
+    }
+    /// `castNode(Var, node)` (mutable borrow).
+    pub fn as_var_mut(&mut self) -> Option<&mut crate::primnodes::Var> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::Var(v)) => Some(v),
+            _ => None,
+        }
+    }
+    /// `IsA(node, Var)`.
+    pub fn is_var(&self) -> bool {
+        matches!(self, Node::Expr(crate::primnodes::Expr::Var(_)))
+    }
+
+    /// `castNode(OpExpr, node)` (borrow).
+    pub fn as_opexpr(&self) -> Option<&crate::primnodes::OpExpr> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::OpExpr(o)) => Some(o),
+            _ => None,
+        }
+    }
+    /// `castNode(OpExpr, node)` (mutable borrow).
+    pub fn as_opexpr_mut(&mut self) -> Option<&mut crate::primnodes::OpExpr> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::OpExpr(o)) => Some(o),
+            _ => None,
+        }
+    }
+    /// `IsA(node, OpExpr)`.
+    pub fn is_opexpr(&self) -> bool {
+        matches!(self, Node::Expr(crate::primnodes::Expr::OpExpr(_)))
+    }
+
+    /// `castNode(CollateExpr, node)` (borrow).
+    pub fn as_collateexpr(&self) -> Option<&crate::primnodes::CollateExpr> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::CollateExpr(c)) => Some(c),
+            _ => None,
+        }
+    }
+    /// `castNode(CollateExpr, node)` (mutable borrow).
+    pub fn as_collateexpr_mut(&mut self) -> Option<&mut crate::primnodes::CollateExpr> {
+        match self {
+            Node::Expr(crate::primnodes::Expr::CollateExpr(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The wrapped [`crate::primnodes::Expr`], if this is an expression node.
+    pub fn as_expr(&self) -> Option<&crate::primnodes::Expr> {
+        match self {
+            Node::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+    /// The wrapped [`crate::primnodes::Expr`] (mutable).
+    pub fn as_expr_mut(&mut self) -> Option<&mut crate::primnodes::Expr> {
+        match self {
+            Node::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+    /// `IsA`-family test: is this an expression node?
+    pub fn is_expr(&self) -> bool {
+        matches!(self, Node::Expr(_))
+    }
+    /// Consume into the wrapped [`crate::primnodes::Expr`].
+    pub fn into_expr(self) -> Option<crate::primnodes::Expr> {
+        match self {
+            Node::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// `castNode(TargetEntry, node)` (borrow).
+    pub fn as_targetentry(&self) -> Option<&crate::primnodes::TargetEntry<'mcx>> {
+        match self {
+            Node::TargetEntry(t) => Some(t),
+            _ => None,
+        }
+    }
+    /// `castNode(TargetEntry, node)` (mutable borrow).
+    pub fn as_targetentry_mut(&mut self) -> Option<&mut crate::primnodes::TargetEntry<'mcx>> {
+        match self {
+            Node::TargetEntry(t) => Some(t),
+            _ => None,
+        }
+    }
+    /// Consume into the `TargetEntry` (the unwrap leg of a wrap-walk).
+    pub fn into_targetentry(self) -> Option<crate::primnodes::TargetEntry<'mcx>> {
+        match self {
+            Node::TargetEntry(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// `castNode(JoinExpr, node)` (borrow).
+    pub fn as_joinexpr(&self) -> Option<&crate::rawnodes::JoinExpr<'mcx>> {
+        match self {
+            Node::JoinExpr(j) => Some(j),
+            _ => None,
+        }
+    }
+    /// `castNode(JoinExpr, node)` (mutable borrow).
+    pub fn as_joinexpr_mut(&mut self) -> Option<&mut crate::rawnodes::JoinExpr<'mcx>> {
+        match self {
+            Node::JoinExpr(j) => Some(j),
+            _ => None,
+        }
+    }
+
+    /// `castNode(Query, node)` (borrow).
+    pub fn as_query(&self) -> Option<&crate::copy_query::Query<'mcx>> {
+        match self {
+            Node::Query(q) => Some(q),
+            _ => None,
+        }
+    }
+    /// `castNode(Query, node)` (mutable borrow).
+    pub fn as_query_mut(&mut self) -> Option<&mut crate::copy_query::Query<'mcx>> {
+        match self {
+            Node::Query(q) => Some(q),
+            _ => None,
+        }
+    }
+
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
@@ -452,6 +622,11 @@ impl<'mcx> Node<'mcx> {
             Node::OnConflictClause(_) => T_OnConflictClause,
             Node::MergeWhenClause(_) => T_MergeWhenClause,
             Node::ReturningClause(_) => T_ReturningClause,
+            Node::Integer(_) => T_Integer,
+            Node::Float(_) => T_Float,
+            Node::Boolean(_) => T_Boolean,
+            Node::String(_) => T_String,
+            Node::BitString(_) => T_BitString,
             Node::Expr(e) => expr_tag(e),
         }
     }
@@ -601,6 +776,12 @@ impl<'mcx> Node<'mcx> {
             Node::OnConflictClause(o) => Ok(Node::OnConflictClause(o.clone_in(mcx)?)),
             Node::MergeWhenClause(m) => Ok(Node::MergeWhenClause(m.clone_in(mcx)?)),
             Node::ReturningClause(r) => Ok(Node::ReturningClause(r.clone_in(mcx)?)),
+            // Value nodes (nodes/value.h) — real per-struct `copyObject`.
+            Node::Integer(i) => Ok(Node::Integer(i.clone_in(mcx)?)),
+            Node::Float(f) => Ok(Node::Float(f.clone_in(mcx)?)),
+            Node::Boolean(b) => Ok(Node::Boolean(b.clone_in(mcx)?)),
+            Node::String(s) => Ok(Node::String(s.clone_in(mcx)?)),
+            Node::BitString(b) => Ok(Node::BitString(b.clone_in(mcx)?)),
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.
             Node::Expr(e) => Ok(Node::Expr(e.clone())),

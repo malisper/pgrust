@@ -31,3 +31,6 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
+# Parallel-worker GUC-state transfer seams (declared by parallel.c's runtime
+# seam crate, consumed by parallel.c; guc.c owns + installs the bodies):
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

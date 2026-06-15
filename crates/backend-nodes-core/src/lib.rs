@@ -39,6 +39,7 @@ pub mod bitmapset;
 pub mod list;
 pub mod makefuncs;
 pub mod multibitmapset;
+pub mod node_walker;
 pub mod nodefuncs;
 pub mod params;
 pub mod print;

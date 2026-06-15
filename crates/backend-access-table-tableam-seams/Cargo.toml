@@ -18,3 +18,4 @@ types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
+types-tuple = { path = "../types-tuple" }

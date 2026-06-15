@@ -42,6 +42,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the
+    /// relation's pending `t_numscans` counter (only when `rel->pgstat_info` is
+    /// set). Keyed by the relation OID; the macro never errors.
+    pub fn pgstat_count_index_scan(index_oid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
     /// `pgstat_count_heap_insert(rel, n)` (pgstat.h macro): add `n` to the
     /// relation's pending `tuples_inserted` counter (only when
     /// `rel->pgstat_info` is set). Keyed by the relation OID; the per-relation

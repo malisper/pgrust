@@ -46,6 +46,15 @@ pub use CompareType::{
     COMPARE_LT, COMPARE_NE, COMPARE_OVERLAP,
 };
 
+/// `IndexBuildResult` (`access/genam.h`) — statistics returned by `ambuild`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct IndexBuildResult {
+    /// `double heap_tuples` — # of heap tuples scanned.
+    pub heap_tuples: f64,
+    /// `double index_tuples` — # of index tuples created.
+    pub index_tuples: f64,
+}
+
 /// `amtranslate_strategy` callback (`access/amapi.h`).
 pub type IndexAmTranslateStrategy = fn(StrategyNumber, Oid) -> CompareType;
 /// `amtranslate_cmptype` callback (`access/amapi.h`).
