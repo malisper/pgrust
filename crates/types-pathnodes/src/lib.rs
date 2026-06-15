@@ -34,6 +34,7 @@
 extern crate alloc;
 
 pub mod optimizer_plan;
+pub mod planner_run;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -1991,7 +1992,11 @@ pub struct PlannerInfo {
      * refs use `RelId`; parse/global state use the opaque `QueryId`/
      * `PlannerGlobal` conventions.
      * ------------------------------------------------------------------ */
-    /// `Query *parse` — the Query being planned (opaque handle).
+    /// `Query *parse` — the Query being planned. An opaque [`QueryId`] handle
+    /// (keeps [`PlannerInfo`] lifetime-free); resolve it back to the owned
+    /// `Query<'mcx>` through the planner-run store
+    /// [`planner_run::PlannerRun::resolve`], which the prep/walk consumers
+    /// receive as an additive `&PlannerRun<'mcx>` parameter.
     pub parse: QueryId,
     /// `PlannerGlobal *glob` — global info for the current planner run.
     pub glob: Option<Box<PlannerGlobal>>,
