@@ -29,7 +29,6 @@ pub fn init_all() {
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
     backend_access_spg_quadtree::init_seams();
-    backend_access_spgist_core::init_seams();
     backend_access_gist_proc::init_seams();
     backend_access_gist_core::init_seams();
     backend_access_nbt_dedup::init_seams();
@@ -210,6 +209,7 @@ pub fn init_all() {
     backend_replication_logical_logical::init_seams();
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
+    backend_replication_logical_reorderbuffer::init_seams();
     backend_replication_logical_slotsync::init_seams();
     backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();

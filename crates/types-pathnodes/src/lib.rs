@@ -332,6 +332,22 @@ pub struct NodeId(pub u32);
 #[repr(transparent)]
 pub struct PhInfoId(pub u32);
 
+/// A node of the planner's "joinlist" (`deconstruct_jointree` output): either a
+/// leaf range-table reference (`RangeTblRef`, by 1-based rtindex) or a nested
+/// sub-joinlist (`List`). This is the owned analogue of the C `List *joinlist`
+/// whose elements are `RangeTblRef *` or `List *`. It is produced by
+/// `deconstruct_jointree` (initsplan.c), trimmed by `remove_useless_joins` /
+/// `remove_useless_self_joins` (analyzejoins.c), and consumed by `make_one_rel`
+/// (allpaths.c); it lives here so producers, consumers, and the cross-crate
+/// seams that carry it all name one type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinlistNode {
+    /// `RangeTblRef { rtindex }`.
+    Rel(i32),
+    /// A nested sub-joinlist (`List`).
+    Sub(alloc::vec::Vec<JoinlistNode>),
+}
+
 /// Handle into [`PlannerInfo::em_arena`] — the analogue of an
 /// `EquivalenceMember *`. EMs are densely shared (an EC's `ec_members` /
 /// `ec_childmembers` and each EM's `em_parent` all alias the same EM by

@@ -871,6 +871,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-ginvacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gin-core-probe",
+ "backend-access-gin-ginbtree",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginentrypage",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-gin-ginvacuum-seams",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-commands-vacuum-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginvacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+]
+
+[[package]]
 name = "backend-access-gist-core"
 version = "0.1.0"
 dependencies = [
@@ -1360,6 +1404,8 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-scan",
+ "backend-access-brin-validate",
+ "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
@@ -7736,6 +7782,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-init-subselect-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7754,6 +7809,37 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-allpaths",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -9617,6 +9703,20 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-replication-logical-reorderbuffer"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-reorderbuffer-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-snapshot",
  "types-storage",
  "types-tuple",
 ]
@@ -14895,7 +14995,6 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
- "backend-access-spgist-core",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
@@ -15060,6 +15159,7 @@ dependencies = [
  "backend-replication-logical-logical",
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",
+ "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
  "backend-replication-slot",
