@@ -7615,11 +7615,13 @@ dependencies = [
  "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-fmgr-funcapi",
  "mcx",
  "seam-core",
  "types-core",
@@ -7634,6 +7636,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -7705,10 +7708,12 @@ dependencies = [
 name = "backend-optimizer-util-clauses-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-tuple",
 ]
 
