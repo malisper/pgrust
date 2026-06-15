@@ -19,7 +19,7 @@ use types_core::primitive::INVALID_OID;
 use types_guc::guc::GucSource;
 use types_parsenodes::VariableSetKind;
 
-use backend_commands_functioncmds_seams as fseam;
+use backend_utils_misc_guc_seams as fseam;
 use seam::{AlterLookup, SettingScan};
 
 const SCAN: SettingScan = SettingScan(99);
