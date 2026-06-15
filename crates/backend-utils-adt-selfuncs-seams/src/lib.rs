@@ -17,7 +17,20 @@ use mcx::Mcx;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{ConstNodeInfo, StatsTuple, VariableStatData};
+
+seam_core::seam!(
+    /// `estimate_num_groups(root, groupExprs, input_rows, NULL, NULL)`
+    /// (selfuncs.c) — estimate the number of distinct groups the given grouping
+    /// expressions take over `input_rows` rows. The expression list crosses as a
+    /// borrowed slice of arena node handles (`SpecialJoinInfo.semi_rhs_exprs`).
+    pub fn estimate_num_groups(
+        root: &PlannerInfo,
+        group_exprs: &[NodeId],
+        input_rows: f64,
+    ) -> f64
+);
 
 seam_core::seam!(
     /// `get_restriction_variable(root, args, varRelid, &vardata, &other,

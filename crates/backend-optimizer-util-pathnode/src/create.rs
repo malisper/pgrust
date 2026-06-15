@@ -1275,6 +1275,7 @@ fn default_sjinfo() -> SpecialJoinInfo {
         semi_can_btree: false,
         semi_can_hash: false,
         semi_operators: Vec::new(),
+        semi_rhs_exprs: Vec::new(),
     }
 }
 

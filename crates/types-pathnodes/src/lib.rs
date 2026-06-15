@@ -1632,6 +1632,10 @@ pub struct SpecialJoinInfo {
     pub semi_can_btree: bool,
     pub semi_can_hash: bool,
     pub semi_operators: Vec<Oid>,
+    /// `List *semi_rhs_exprs` — RHS expressions for a JOIN_SEMI, as arena node
+    /// handles. Read by indxpath's `adjust_rowcount_for_semijoins` to estimate
+    /// the unique-ified RHS group count via `estimate_num_groups`.
+    pub semi_rhs_exprs: Vec<NodeId>,
 }
 
 /* ==========================================================================

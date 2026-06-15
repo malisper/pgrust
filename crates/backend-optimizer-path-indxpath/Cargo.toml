@@ -1,0 +1,34 @@
+[package]
+name = "backend-optimizer-path-indxpath"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_path_indxpath"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+
+backend-optimizer-path-indxpath-seams = { path = "../backend-optimizer-path-indxpath-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
+backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+backend-optimizer-path-joinrels-seams = { path = "../backend-optimizer-path-joinrels-seams" }
+backend-optimizer-util-restrictinfo-seams = { path = "../backend-optimizer-util-restrictinfo-seams" }
+backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
+backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
+backend-optimizer-util-pathkeys-seams = { path = "../backend-optimizer-util-pathkeys-seams" }
+backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
+backend-utils-fmgr-support-seams = { path = "../backend-utils-fmgr-support-seams" }
