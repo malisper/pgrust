@@ -7636,6 +7636,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-relation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-table-table",
+ "backend-catalog-namespace",
+ "backend-nodes-core",
+ "backend-nodes-core-seams",
+ "backend-optimizer-util-plancat-ext-seams",
+ "backend-parser-relation-seams",
+ "backend-parser-small1",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-misc-queryenvironment",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-relation-seams"
 version = "0.0.0"
 dependencies = [
@@ -14452,7 +14481,9 @@ version = "0.0.0"
 name = "types-slot"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
+ "types-storage",
  "types-tuple",
 ]
 

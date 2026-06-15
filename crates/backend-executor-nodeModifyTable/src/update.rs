@@ -694,7 +694,7 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
         // tuples.
         debug_assert!(mtstate.mt_root_tuple_slot.is_none());
         let root_slot = backend_access_table_tableam::table_slot_create(qcxt, &root_rel)?;
-        let root_slot_id = estate.make_slot(root_slot)?;
+        let root_slot_id = estate.push_slot_data(root_slot)?;
         mtstate.mt_root_tuple_slot = Some(root_slot_id);
     }
 
@@ -919,9 +919,9 @@ pub fn ExecInitUpdateProjection<'mcx>(
     // matching the table's desired format.
     let rel = relation_alias(estate, result_rel_info);
     let old_tuple_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-    let old_id = estate.make_slot(old_tuple_slot)?;
+    let old_id = estate.push_slot_data(old_tuple_slot)?;
     let new_tuple_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-    let new_id = estate.make_slot(new_tuple_slot)?;
+    let new_id = estate.push_slot_data(new_tuple_slot)?;
     estate.result_rel_mut(result_rel_info).ri_oldTupleSlot = Some(old_id);
     estate.result_rel_mut(result_rel_info).ri_newTupleSlot = Some(new_id);
 

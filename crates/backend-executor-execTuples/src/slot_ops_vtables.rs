@@ -144,17 +144,15 @@ pub fn tts_virtual_clear(slot: &mut VirtualTupleTableSlot) {
         // buffer (the owned PgVec models C's `char *data`; emptying it is the
         // free + NULL).
         slot.data.clear();
-        slot.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        slot.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
 
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base
-        .header
-        .tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.header.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
 }
 
 /// `tts_virtual_getsomeattrs` (execTuples.c):
@@ -273,7 +271,7 @@ pub fn tts_virtual_materialize<'mcx>(
     // copied field spans are read back).
     let mut data: mcx::PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
     data.resize(sz, 0u8);
-    slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+    slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
 
     // /* and copy all attributes into the pre-allocated space */
     // The C cursor `data` walks the buffer; here `cur` is the byte offset into
@@ -576,15 +574,15 @@ pub fn tts_heap_clear(slot: &mut HeapTupleTableSlot) {
     if slot.base.should_free() {
         // heap_freetuple(hslot->tuple): dropping the owned tuple frees it.
         slot.tuple = None;
-        slot.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        slot.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
 
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.header.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.header.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
     // hslot->off = 0;
     slot.off = 0;
     // hslot->tuple = NULL;
@@ -713,7 +711,7 @@ pub fn tts_heap_materialize<'mcx>(
     }
 
     // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-    slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+    slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
 
     // MemoryContextSwitchTo(oldContext);
     Ok(())
@@ -814,17 +812,17 @@ pub fn tts_heap_store_tuple<'mcx>(
     // data-area bytes), exactly the slot's carrier field.
 
     // slot->tts_tid = tuple->t_self; (read before the move).
-    slot.base.header.tts_tid = tuple.tuple.t_self;
+    slot.base.tts_tid = tuple.tuple.t_self;
     // hslot->tuple = tuple;
     slot.tuple = Some(tuple);
     // hslot->off = 0;
     slot.off = 0;
     // slot->tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
     slot.base.mark_not_empty();
-    slot.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+    slot.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     // if (shouldFree) slot->tts_flags |= TTS_FLAG_SHOULDFREE;
     if should_free {
-        slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+        slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
     }
 }
 
@@ -859,7 +857,7 @@ pub fn tts_heap_copyslot<'mcx>(
     if let SlotData::Heap(hdst) = dst {
         tts_heap_store_tuple(hdst, tuple, true);
     }
-    dst.base_mut().header.tts_tableOid = t_table_oid;
+    dst.base_mut().tts_tableOid = t_table_oid;
     Ok(())
 }
 
@@ -889,15 +887,15 @@ pub fn tts_minimal_clear(slot: &mut MinimalTupleTableSlot) {
     if slot.base.should_free() {
         // heap_free_minimal_tuple(mslot->mintuple): dropping frees it.
         slot.mintuple = None;
-        slot.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        slot.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
 
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.header.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.header.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
     // mslot->off = 0;
     slot.off = 0;
     // mslot->mintuple = NULL;
@@ -1077,7 +1075,7 @@ pub fn tts_minimal_materialize<'mcx>(
     };
 
     // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-    slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+    slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
 
     // Assert(mslot->tuple == &mslot->minhdr);
     // mslot->minhdr.t_len = mslot->mintuple->t_len + MINIMAL_TUPLE_OFFSET;
@@ -1224,7 +1222,7 @@ pub fn tts_minimal_store_tuple<'mcx>(
 
     // if (shouldFree) slot->tts_flags |= TTS_FLAG_SHOULDFREE;
     if should_free {
-        slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+        slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
     }
     Ok(())
 }
@@ -1336,7 +1334,7 @@ pub fn tts_buffer_heap_clear(slot: &mut BufferHeapTupleTableSlot) {
         debug_assert!(!BufferIsValid(slot.buffer));
         // heap_freetuple(bslot->base.tuple): dropping frees it.
         slot.base.tuple = None;
-        slot.base.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+        slot.base.base.tts_flags &= !TTS_FLAG_SHOULDFREE;
     }
 
     // if (BufferIsValid(bslot->buffer)) ReleaseBuffer(bslot->buffer);
@@ -1347,9 +1345,9 @@ pub fn tts_buffer_heap_clear(slot: &mut BufferHeapTupleTableSlot) {
     // slot->tts_nvalid = 0;
     slot.base.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.base.header.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.base.header.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
     // bslot->base.tuple = NULL;
     slot.base.tuple = None;
     // bslot->base.off = 0;
@@ -1492,7 +1490,7 @@ pub fn tts_buffer_heap_materialize<'mcx>(
     //  * any. ...
     //  */
     // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-    slot.base.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+    slot.base.base.tts_flags |= TTS_FLAG_SHOULDFREE;
 
     Ok(())
 }
@@ -1534,7 +1532,7 @@ pub fn tts_buffer_heap_copyslot<'mcx>(
             bdst.base.tuple = copied;
         }
         //     dstslot->tts_flags |= TTS_FLAG_SHOULDFREE;
-        dst.base_mut().header.tts_flags |= TTS_FLAG_SHOULDFREE;
+        dst.base_mut().tts_flags |= TTS_FLAG_SHOULDFREE;
         //     MemoryContextSwitchTo(oldContext);
         // }
     } else {
@@ -1793,14 +1791,14 @@ pub fn slot_getsysattr<'mcx>(
     // if (attnum == TableOidAttributeNumber) { *isnull = false;
     //     return ObjectIdGetDatum(slot->tts_tableOid); }
     if attnum == types_tuple::heaptuple::TableOidAttributeNumber {
-        return Ok((Datum::from_oid(slot.base().header.tts_tableOid), false));
+        return Ok((Datum::from_oid(slot.base().tts_tableOid), false));
     }
     // else if (attnum == SelfItemPointerAttributeNumber) { *isnull = false;
     //     return PointerGetDatum(&slot->tts_tid); }
     if attnum == types_tuple::heaptuple::SelfItemPointerAttributeNumber {
         let bytes = backend_access_common_heaptuple::item_pointer_bytes(
             mcx,
-            &slot.base().header.tts_tid,
+            &slot.base().tts_tid,
         )?;
         return Ok((Datum::ByRef(bytes), false));
     }

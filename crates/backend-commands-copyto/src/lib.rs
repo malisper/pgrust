@@ -27,7 +27,6 @@ use types_nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
 use types_nodes::querydesc::QueryDesc;
 use types_nodes::parsestmt::RawStmt;
 use types_nodes::nodes::{CmdType, CMD_SELECT};
-use types_nodes::TupleTableSlot;
 use types_pgstat::backend_progress::ProgressCommandType;
 use types_rel::Relation;
 use types_stringinfo::StringInfo;
@@ -1015,7 +1014,7 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
         let mut slot = backend_access_table_tableam::table_slot_create(cstate.mcx, &rel_alias)?;
 
         let mut local_processed: u64 = 0;
-        while tableam_s::table_scan_getnextslot::call(&mut scandesc, &mut slot)? {
+        while tableam_s::table_scan_getnextslot::call(&mut scandesc, slot.base_mut())? {
             // CHECK_FOR_INTERRUPTS();
             backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
@@ -1023,7 +1022,7 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
             // (it owns the deformed-columns view it passes to the routine).
 
             // Format and send the data
-            copy_one_row_to(cstate, &slot)?;
+            copy_one_row_to(cstate, &mut slot)?;
 
             // Increment the number of processed tuples, and report progress.
             local_processed += 1;
@@ -1071,7 +1070,10 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
 }
 
 /// `CopyOneRowTo(cstate, slot)` (copyto.c:1122).
-fn copy_one_row_to(cstate: &mut CopyToStateData<'_>, slot: &TupleTableSlot) -> PgResult<()> {
+fn copy_one_row_to<'mcx>(
+    cstate: &mut CopyToStateData<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+) -> PgResult<()> {
     // MemoryContextReset(cstate->rowcontext); switch to rowcontext: the owned
     // model recovers per-row output allocations by dropping them as locals.
 
@@ -1085,7 +1087,7 @@ fn copy_one_row_to(cstate: &mut CopyToStateData<'_>, slot: &TupleTableSlot) -> P
 /// `copy_dest_receive(slot, self)` (copyto.c:1398) — the inward seam impl: the
 /// executor's COPY-OUT receiver re-enters here with the receiver handle that
 /// carries the live cstate.
-fn copy_dest_receive(receiver: u64, slot: &mut TupleTableSlot) -> PgResult<bool> {
+fn copy_dest_receive(receiver: u64, slot: &mut types_nodes::tuptable::SlotData<'_>) -> PgResult<bool> {
     // CopyToState cstate = ((DR_copy *) self)->cstate;
     let ptr = RECEIVERS.with(|r| {
         let reg = r.borrow();

@@ -604,9 +604,9 @@ pub fn index_getnext_tid(
 /// `index_fetch_heap(scan, slot)` — get the scan's next heap tuple for the
 /// index TID most recently fetched by [`index_getnext_tid`]. On success the
 /// slot holds a visible heap tuple (its buffer pinned by the table AM).
-pub fn index_fetch_heap(
-    scan: &mut IndexScanDescData<'_>,
-    slot: &mut types_nodes::TupleTableSlot,
+pub fn index_fetch_heap<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    slot: &mut types_nodes::TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     let mut all_dead = false;
 
@@ -646,10 +646,10 @@ pub fn index_fetch_heap(
 /// `index_getnext_slot(scan, direction, slot)` — get the next tuple from a
 /// scan into `slot`, returning whether one satisfying the keys + snapshot was
 /// found.
-pub fn index_getnext_slot(
-    scan: &mut IndexScanDescData<'_>,
+pub fn index_getnext_slot<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
     direction: ScanDirection,
-    slot: &mut types_nodes::TupleTableSlot,
+    slot: &mut types_nodes::TupleTableSlot<'mcx>,
 ) -> PgResult<bool> {
     loop {
         if !scan.xs_heap_continue {

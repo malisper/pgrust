@@ -37,7 +37,7 @@ seam_core::seam!(
     /// fetch can error.
     pub fn table_scan_bitmap_next_tuple<'mcx>(
         scan: &mut TableScanDescData<'mcx>,
-        slot: &mut TupleTableSlot,
+        slot: &mut TupleTableSlot<'mcx>,
     ) -> PgResult<Option<(bool, u64, u64)>>
 );
 

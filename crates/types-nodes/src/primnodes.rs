@@ -315,6 +315,15 @@ pub struct Var {
     pub varnullingrels: ExprRelids,
     /// `Index varlevelsup` — subplan levels up; 0 = current query level.
     pub varlevelsup: Index,
+    /// `Index varnosyn` — syntactic relation index for ruleutils display,
+    /// usually the same as `varno`. Set by `scanNSItemForColumn` /
+    /// `expandNSItemVars` (parse_relation.c) from the nsitem's per-column data.
+    /// Added field-for-field vs primnodes.h; `Default` is 0.
+    pub varnosyn: Index,
+    /// `AttrNumber varattnosyn` — syntactic attribute number for ruleutils
+    /// display, usually the same as `varattno`. Set alongside `varnosyn`.
+    /// Added field-for-field vs primnodes.h; `Default` is 0.
+    pub varattnosyn: AttrNumber,
     /// `VarReturningType varreturningtype` — for a Var referencing the OLD/NEW
     /// pseudo-relations of a RETURNING list, whether it returns OLD or NEW (else
     /// `VAR_RETURNING_DEFAULT`). Read by `contain_vars_returning_old_or_new`

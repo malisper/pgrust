@@ -576,7 +576,7 @@ pub fn ExecInitModifyTable<'mcx>(
             .expect("ON CONFLICT result relation is open")
             .alias();
         let existing_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
-        let oc_existing = estate.make_slot(existing_slot)?;
+        let oc_existing = estate.push_slot_data(existing_slot)?;
 
         // Create the tuple slot for the UPDATE SET projection. We want a slot of
         // the table's type here, because the slot will be used to insert into
@@ -591,7 +591,7 @@ pub fn ExecInitModifyTable<'mcx>(
             .expect("ON CONFLICT result relation is open")
             .alias();
         let proj_slot_raw = backend_access_table_tableam::table_slot_create(mcx, &rel2)?;
-        let oc_proj_slot = estate.make_slot(proj_slot_raw)?;
+        let oc_proj_slot = estate.push_slot_data(proj_slot_raw)?;
 
         // build UPDATE SET projection state
         //   onconfl->oc_ProjInfo =

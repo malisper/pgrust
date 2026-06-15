@@ -34,7 +34,7 @@ use types_tuple::tupconvert::TupleConversionMap;
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_slot::{TupleSlotKind, TupleTableSlot};
-use crate::tuptable::{SlotBase, SlotData, VirtualTupleTableSlot};
+use crate::tuptable::{SlotData, VirtualTupleTableSlot};
 use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
@@ -912,20 +912,16 @@ impl<'mcx> EStateData<'mcx> {
     /// state a freshly-allocated virtual slot is in before any tuple is stored
     /// or descriptor assigned. (`ExecSetSlotDescriptor`/the store callbacks fill
     /// those payload fields.)
-    pub fn make_slot(&mut self, slot: TupleTableSlot) -> PgResult<SlotId> {
+    pub fn make_slot(&mut self, slot: TupleTableSlot<'mcx>) -> PgResult<SlotId> {
         let mcx = *self.es_tupleTable.allocator();
         self.es_tupleTable
             .try_reserve(1)
             .map_err(|_| mcx.oom(core::mem::size_of::<SlotData<'_>>()))?;
         let id = SlotId(self.es_tupleTable.len() as u32);
+        // The incoming slot is the unified base (header + payload); wrap it in
+        // the Virtual superstructure (its `data` materialization buffer empty).
         self.es_tupleTable.push(SlotData::Virtual(VirtualTupleTableSlot {
-            base: SlotBase {
-                header: slot,
-                tts_nvalid: 0,
-                tts_tupleDescriptor: None,
-                tts_values: PgVec::new_in(mcx),
-                tts_isnull: PgVec::new_in(mcx),
-            },
+            base: slot,
             data: PgVec::new_in(mcx),
         }));
         Ok(id)
@@ -950,15 +946,15 @@ impl<'mcx> EStateData<'mcx> {
     /// Resolve a slot id to the live slot's shared header (C: dereference the
     /// pointer and read its base bits). The header projection bridges through
     /// [`SlotData::base`]; the payload-aware view is [`slot_data`](Self::slot_data).
-    pub fn slot(&self, id: SlotId) -> &TupleTableSlot {
-        &self.es_tupleTable[id.0 as usize].base().header
+    pub fn slot(&self, id: SlotId) -> &TupleTableSlot<'mcx> {
+        self.es_tupleTable[id.0 as usize].base()
     }
 
     /// Resolve a slot id to its shared header mutably (C: dereference the
     /// pointer). Mutates only the header bits (`tts_flags`/`tts_tid`/…); the
     /// payload-aware mutable view is [`slot_data_mut`](Self::slot_data_mut).
-    pub fn slot_mut(&mut self, id: SlotId) -> &mut TupleTableSlot {
-        &mut self.es_tupleTable[id.0 as usize].base_mut().header
+    pub fn slot_mut(&mut self, id: SlotId) -> &mut TupleTableSlot<'mcx> {
+        self.es_tupleTable[id.0 as usize].base_mut()
     }
 
     /// Resolve a slot id to the live payload-bearing [`SlotData`] (the owned
@@ -981,15 +977,15 @@ impl<'mcx> EStateData<'mcx> {
         &mut self,
         a: SlotId,
         b: SlotId,
-    ) -> (&mut TupleTableSlot, &mut TupleTableSlot) {
+    ) -> (&mut TupleTableSlot<'mcx>, &mut TupleTableSlot<'mcx>) {
         assert_ne!(a, b, "slot_pair_mut: the two slots must be distinct");
         let (ai, bi) = (a.0 as usize, b.0 as usize);
         if ai < bi {
             let (lo, hi) = self.es_tupleTable.split_at_mut(bi);
-            (&mut lo[ai].base_mut().header, &mut hi[0].base_mut().header)
+            (lo[ai].base_mut(), hi[0].base_mut())
         } else {
             let (lo, hi) = self.es_tupleTable.split_at_mut(ai);
-            (&mut hi[0].base_mut().header, &mut lo[bi].base_mut().header)
+            (hi[0].base_mut(), lo[bi].base_mut())
         }
     }
 

@@ -124,7 +124,7 @@ fn exec_re_scan_walks_params_and_dispatches() {
     let child_plan = types_nodes::nodes::Node::Material(Material::default());
 
     let mut estate = EStateData::new_in(mcx);
-    let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
+    let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
 
     // Outer child: chgParam non-NULL so ExecReScanMaterial leaves the rescan
     // to the next ExecProcNode (no recursive exec_re_scan). The real

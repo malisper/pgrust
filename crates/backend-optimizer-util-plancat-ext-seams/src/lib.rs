@@ -617,6 +617,12 @@ seam_core::seam!(
     pub fn system_attribute_definition(attno: i32) -> PgResult<(Oid, i32, Oid)>
 );
 seam_core::seam!(
+    /// `SystemAttributeByName(attname)` (catalog/heap.c): if `attname` names a
+    /// system column, return its `attnum` (a negative number); else `None`.
+    /// Consumed by `specialAttNum` (parser/parse_relation.c).
+    pub fn system_attribute_by_name(attname: &str) -> PgResult<Option<i32>>
+);
+seam_core::seam!(
     /// `estimate_rel_size(indexRelation, NULL, &pages, &tuples, &allvisfrac)`
     /// for a partial index in `get_relation_info` — the index variant of size
     /// estimation (opens the index by OID).

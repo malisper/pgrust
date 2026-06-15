@@ -149,6 +149,8 @@ fn make_var(
         varcollid,
         varnullingrels: Default::default(),
         varlevelsup,
+        varnosyn: 0,
+        varattnosyn: 0,
         varreturningtype: Default::default(),
         location: -1,
     })

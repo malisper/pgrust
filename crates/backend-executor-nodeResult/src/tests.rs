@@ -56,9 +56,11 @@ fn supply_rows<'mcx>(
         return Ok(None);
     }
     OUTER_SUPPLY.with(|c| c.set(remaining - 1));
-    let id = estate.make_slot(TupleTableSlot {
-        tts_flags: 0,
-        ..Default::default()
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot({
+        let mut slot = TupleTableSlot::new_in(qcxt);
+        slot.tts_flags = 0;
+        slot
     })?;
     Ok(Some(id))
 }
@@ -143,7 +145,8 @@ fn mock_init_result_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
-    let id = estate.make_slot(TupleTableSlot::default())?;
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot(TupleTableSlot::new_in(qcxt))?;
     planstate.ps_ResultTupleSlot = Some(id);
     Ok(())
 }

@@ -584,7 +584,7 @@ pub fn heap_entry_is_visible<'mcx>(
         &state.heaprel,
         tid,
         &snapshot,
-        &mut slot,
+        slot.base_mut(),
     )?;
     // ExecDropSingleTupleTableSlot(slot): the slot is dropped here.
     drop(slot);

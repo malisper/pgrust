@@ -169,6 +169,7 @@ pub fn init_all() {
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_parse_oper::init_seams();
     backend_parser_parse_type::init_seams();
+    backend_parser_relation::init_seams();
     backend_parser_small1::init_seams();
     backend_parser_gram_core::init_seams();
     backend_port_atomics::init_seams();

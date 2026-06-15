@@ -99,7 +99,7 @@ pub(crate) fn ExecInitRoutingInfo<'mcx>(
             .expect("partition ResultRelInfo.ri_RelationDesc set")
             .alias();
         let slot = backend_access_table_tableam::table_slot_create(mcx, &partrel)?;
-        Some(estate.make_slot(slot)?)
+        Some(estate.push_slot_data(slot)?)
     } else {
         None
     };

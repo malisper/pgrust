@@ -229,7 +229,7 @@ fn getnext_returns_false_when_done() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     st.done = true;
     let out = tablesample_getnext(&mut st, &mut estate).unwrap();
     assert!(!out);
@@ -242,7 +242,7 @@ fn getnext_iterates_block_then_tuple_then_returns_slot() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     // block yes; tuple miss (page exhausted); block yes; tuple hit.
     BLOCKS.with(|q| q.borrow_mut().extend([true, true]));
     TUPLES.with(|q| q.borrow_mut().extend([false, true]));
@@ -262,7 +262,7 @@ fn getnext_sets_done_when_relation_exhausted() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     // no blocks scripted -> first next_block returns false -> done.
     let out = tablesample_getnext(&mut st, &mut estate).unwrap();
     assert!(!out);
@@ -309,7 +309,7 @@ fn init_begins_scan_and_sets_begun() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
     st.tsmroutine = Some(mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     // no args, no REPEATABLE -> use the init seed.
     st.seed = 0x1234;
     tablesample_init(&mut st, &mut estate).unwrap();
@@ -371,7 +371,7 @@ fn exec_sample_scan_returns_tuple() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
     st.begun = true; // skip init; go straight to getnext
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
+    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     BLOCKS.with(|q| q.borrow_mut().push_back(true));
     TUPLES.with(|q| q.borrow_mut().push_back(true));
     // No qual, no projInfo -> raw scan-tuple path.

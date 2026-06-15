@@ -55,9 +55,11 @@ fn supply_rows<'mcx>(
     if !have {
         return Ok(None);
     }
-    let id = estate.make_slot(TupleTableSlot {
-        tts_flags: 0,
-        ..Default::default()
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot({
+        let mut slot = TupleTableSlot::new_in(qcxt);
+        slot.tts_flags = 0;
+        slot
     })?;
     Ok(Some(id))
 }
@@ -147,7 +149,8 @@ fn mock_create_scan_slot<'mcx>(
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
     // The C builds the scan slot empty (TTS_EMPTY set).
-    let id = estate.make_slot(TupleTableSlot::default())?;
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot(TupleTableSlot::new_in(qcxt))?;
     scanstate.ss_ScanTupleSlot = Some(id);
     Ok(())
 }
@@ -157,7 +160,8 @@ fn mock_init_result_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
-    let id = estate.make_slot(TupleTableSlot::default())?;
+    let qcxt = estate.es_query_cxt;
+    let id = estate.make_slot(TupleTableSlot::new_in(qcxt))?;
     planstate.ps_ResultTupleSlot = Some(id);
     Ok(())
 }
