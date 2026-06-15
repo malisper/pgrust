@@ -34,8 +34,8 @@ const WCO_RLS_MERGE_DELETE_CHECK: i32 = 5;
 /// `i32`.
 const INPLACE_UPDATE_TUPLE_LOCK: i32 = 7;
 
-/// `MovedPartitionsBlockNumber` (`storage/itemptr.h`) — `InvalidBlockNumber-1`.
-const MOVED_PARTITIONS_BLOCK_NUMBER: BlockNumber = InvalidBlockNumber - 1;
+/// `MovedPartitionsBlockNumber` (`storage/itemptr.h`) — `InvalidBlockNumber`.
+const MOVED_PARTITIONS_BLOCK_NUMBER: BlockNumber = InvalidBlockNumber;
 /// `MovedPartitionsOffsetNumber` (`storage/itemptr.h`) — `0xfffd`.
 const MOVED_PARTITIONS_OFFSET_NUMBER: OffsetNumber = 0xfffd;
 
