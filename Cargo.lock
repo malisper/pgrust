@@ -2304,6 +2304,7 @@ dependencies = [
  "backend-access-spg-core-seams",
  "backend-access-spg-kdtree",
  "backend-access-spg-proc-seams",
+ "backend-access-spg-text",
  "backend-utils-adt-geo-ops-seams",
  "mcx",
  "types-core",
@@ -2311,6 +2312,39 @@ dependencies = [
  "types-scan",
  "types-spgist",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-spg-text"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-spgist",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-spg-validate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-access-spg-core-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-opclass",
+ "types-spgist",
 ]
 
 [[package]]
@@ -15375,6 +15409,8 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
+ "backend-access-spg-text",
+ "backend-access-spg-validate",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-clog",
