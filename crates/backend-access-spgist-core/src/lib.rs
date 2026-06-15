@@ -1615,5 +1615,11 @@ pub use spgscan::{
     SpGistScanOpaqueData,
 };
 
+pub mod spginsert;
+pub use spginsert::{spgbuild, spgbuildempty, spginsert};
+
+pub mod spgvacuum;
+pub use spgvacuum::{spgbulkdelete, spgvacuumcleanup, IndexBulkDeleteCallback};
+
 #[cfg(test)]
 mod tests;

@@ -37,12 +37,13 @@
 //! [`QueryId`]: crate::QueryId
 
 use mcx::{Mcx, PgVec};
+use types_core::primitive::Index;
 use types_nodes::copy_query::Query;
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::FromExpr;
 
-use crate::QueryId;
+use crate::{PlannerInfo, QueryId, RangeTblEntryId};
 
 /// The query store for one planner invocation — the resolver behind every
 /// [`QueryId`].
@@ -60,6 +61,14 @@ pub struct PlannerRun<'mcx> {
     /// in the planner-run [`Mcx`] so the interned `Query<'mcx>` subtrees and the
     /// store share one context lifetime.
     queries: PgVec<'mcx, Query<'mcx>>,
+    /// Backing store for every [`RangeTblEntry`]; a [`RangeTblEntryId`] indexes
+    /// here. This is the value resolver behind `PlannerInfo::simple_rte_array`
+    /// (the `RangeTblEntry **` handle array) — see [`planner_rt_fetch`]. The
+    /// parser produces a [`Query`] whose `rtable` is `PgVec<RangeTblEntry>`;
+    /// the planner setup interns each into this store, recording the returned
+    /// [`RangeTblEntryId`] in `simple_rte_array` keyed by RT index, exactly as C
+    /// fills `simple_rte_array[rti] = rt_fetch(rti, parse->rtable)`.
+    rtes: PgVec<'mcx, RangeTblEntry<'mcx>>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -68,6 +77,7 @@ impl<'mcx> PlannerRun<'mcx> {
     pub fn new(mcx: Mcx<'mcx>) -> Self {
         PlannerRun {
             queries: PgVec::new_in(mcx),
+            rtes: PgVec::new_in(mcx),
         }
     }
 
@@ -158,6 +168,93 @@ impl<'mcx> PlannerRun<'mcx> {
     pub fn rtable_mut(&mut self, id: QueryId) -> &mut PgVec<'mcx, RangeTblEntry<'mcx>> {
         &mut self.resolve_mut(id).rtable
     }
+
+    /* --------------------------------------------------------------------
+     * RangeTblEntry store — the value resolver behind
+     * `PlannerInfo::simple_rte_array`. C carries `simple_rte_array` as a
+     * `RangeTblEntry **` (each slot is an aliased `RangeTblEntry *`); this
+     * repo carries it as `Vec<RangeTblEntryId>` opaque handles. The store
+     * here is the safe-Rust rendering of those aliased pointers — exactly the
+     * same intern/resolve shape as the `Query` store above and as
+     * `PlannerInfo::rel_arena` (RelId -> RelOptInfo).
+     *
+     * The planner's `setup_simple_rel_arrays` (relnode.c) walks the top
+     * `Query`'s `rtable` and fills `simple_rte_array[rti]`; in this model it
+     * interns each `RangeTblEntry` here and records the returned
+     * `RangeTblEntryId` in `simple_rte_array`. A scan converter then calls
+     * [`planner_rt_fetch`] to recover the `&RangeTblEntry` for its RT index.
+     * ------------------------------------------------------------------ */
+
+    /// Intern a [`RangeTblEntry`] into the store, returning the
+    /// [`RangeTblEntryId`] handle that resolves to it. The producer path:
+    /// `setup_simple_rel_arrays` hands each top-level `rtable` entry here and
+    /// records the returned id in `PlannerInfo::simple_rte_array` at the RT
+    /// index (1-based slot; index 0 is the unused C placeholder).
+    #[inline]
+    pub fn intern_rte(&mut self, rte: RangeTblEntry<'mcx>) -> RangeTblEntryId {
+        let id = RangeTblEntryId(self.rtes.len() as u32);
+        self.rtes.push(rte);
+        id
+    }
+
+    /// Resolve a [`RangeTblEntryId`] to its [`RangeTblEntry`] — the safe-Rust
+    /// rendering of a `RangeTblEntry *` deref. Panics on an out-of-range handle
+    /// (a handle never produced by [`intern_rte`](Self::intern_rte) is a planner
+    /// bug, like indexing past `rel_arena`'s end).
+    #[inline]
+    pub fn resolve_rte(&self, id: RangeTblEntryId) -> &RangeTblEntry<'mcx> {
+        &self.rtes[id.0 as usize]
+    }
+
+    /// Resolve a [`RangeTblEntryId`] for mutation (planner passes mutate
+    /// `inh`/`lateral`/`securityQuals` etc. on the in-place RTE).
+    #[inline]
+    pub fn resolve_rte_mut(&mut self, id: RangeTblEntryId) -> &mut RangeTblEntry<'mcx> {
+        &mut self.rtes[id.0 as usize]
+    }
+
+    /// Number of interned range-table entries.
+    #[inline]
+    pub fn rte_len(&self) -> usize {
+        self.rtes.len()
+    }
+}
+
+/// `planner_rt_fetch(rti, root)` (pathnodes.h:594) — fetch the
+/// [`RangeTblEntry`] at range-table index `rti`.
+///
+/// C macro:
+/// ```c
+/// #define planner_rt_fetch(rti, root) \
+///     ((root)->simple_rte_array ? (root)->simple_rte_array[rti] : \
+///      rt_fetch(rti, (root)->parse->rtable))
+/// ```
+///
+/// The C macro has two legs because `simple_rte_array` may not be set up yet
+/// (before `setup_simple_rel_arrays` / outside `query_planner`); in that case it
+/// falls back to `rt_fetch(rti, parse->rtable)` — `list_nth(rtable, rti-1)`.
+/// `createplan.c`'s scan converters run well after `query_planner`, where
+/// `simple_rte_array` is always prepared, so they exercise only the first leg;
+/// we render both faithfully: the array leg resolves the handle through the
+/// run's RTE store, and the fallback leg resolves `root->parse` to its `Query`
+/// and indexes `rtable[rti-1]` (1-based, matching `rt_fetch`).
+///
+/// Panics on an out-of-range `rti` (the C `rt_fetch` likewise "crashes and
+/// burns if handed an out-of-range RT index").
+#[inline]
+pub fn planner_rt_fetch<'a, 'mcx>(
+    run: &'a PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> &'a RangeTblEntry<'mcx> {
+    if !root.simple_rte_array.is_empty() {
+        // simple_rte_array leg: simple_rte_array[rti] -> RangeTblEntryId -> RTE.
+        let id = root.simple_rte_array[rti as usize];
+        run.resolve_rte(id)
+    } else {
+        // rt_fetch fallback: list_nth(parse->rtable, rti-1).
+        &run.rtable(root.parse)[(rti as usize) - 1]
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +325,82 @@ mod tests {
         // resolve_mut threads back to the same node (in-place prep rewrites).
         run.resolve_mut(id).commandType = CmdType::CMD_DELETE;
         assert_eq!(run.resolve(id).commandType, CmdType::CMD_DELETE);
+    }
+
+    #[test]
+    fn rte_intern_resolve_round_trips() {
+        // The RTE store is the value resolver behind simple_rte_array's
+        // RangeTblEntryId handles; intern hands back dense, in-order ids.
+        use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
+
+        let cx = MemoryContext::new("planner-run");
+        let mut run = PlannerRun::new(cx.mcx());
+        assert_eq!(run.rte_len(), 0);
+
+        let mut r0 = RangeTblEntry::new_in(cx.mcx());
+        r0.rtekind = RTEKind::RTE_RELATION;
+        let mut r1 = RangeTblEntry::new_in(cx.mcx());
+        r1.rtekind = RTEKind::RTE_FUNCTION;
+
+        let id0 = run.intern_rte(r0);
+        let id1 = run.intern_rte(r1);
+        assert_eq!(id0, RangeTblEntryId(0));
+        assert_eq!(id1, RangeTblEntryId(1));
+        assert_eq!(run.rte_len(), 2);
+
+        // resolve_rte is the safe-Rust `RangeTblEntry *` deref.
+        assert_eq!(run.resolve_rte(id0).rtekind, RTEKind::RTE_RELATION);
+        assert_eq!(run.resolve_rte(id1).rtekind, RTEKind::RTE_FUNCTION);
+
+        // resolve_rte_mut threads back to the same node.
+        run.resolve_rte_mut(id0).rtekind = RTEKind::RTE_VALUES;
+        assert_eq!(run.resolve_rte(id0).rtekind, RTEKind::RTE_VALUES);
+    }
+
+    #[test]
+    fn planner_rt_fetch_array_leg() {
+        // The simple_rte_array leg: setup_simple_rel_arrays interned each RTE
+        // and recorded its id in simple_rte_array keyed by RT index (slot 0 is
+        // the unused C placeholder; rti 1 is the first real entry).
+        use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
+
+        let cx = MemoryContext::new("planner-run");
+        let mut run = PlannerRun::new(cx.mcx());
+
+        let mut rte = RangeTblEntry::new_in(cx.mcx());
+        rte.rtekind = RTEKind::RTE_FUNCTION;
+        let id = run.intern_rte(rte);
+
+        let mut root = crate::PlannerInfo::default();
+        // simple_rte_array[0] unused, [1] -> our function RTE.
+        root.simple_rte_array = alloc::vec![RangeTblEntryId(0), id];
+
+        // A scan converter fetches its RT index's RTE through the run store.
+        let fetched = planner_rt_fetch(&run, &root, 1);
+        assert_eq!(fetched.rtekind, RTEKind::RTE_FUNCTION);
+    }
+
+    #[test]
+    fn planner_rt_fetch_rtfetch_fallback() {
+        // The rt_fetch fallback leg (simple_rte_array empty): resolve
+        // root->parse to its Query and index rtable[rti-1] (1-based).
+        use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
+
+        let cx = MemoryContext::new("planner-run");
+        let mut run = PlannerRun::new(cx.mcx());
+
+        let mut top = Query::new(cx.mcx());
+        let mut rte = RangeTblEntry::new_in(cx.mcx());
+        rte.rtekind = RTEKind::RTE_VALUES;
+        top.rtable.push(rte);
+        let qid = run.intern(top);
+
+        let mut root = crate::PlannerInfo::default();
+        root.parse = qid;
+        // simple_rte_array left empty -> macro's else branch.
+        assert!(root.simple_rte_array.is_empty());
+
+        let fetched = planner_rt_fetch(&run, &root, 1);
+        assert_eq!(fetched.rtekind, RTEKind::RTE_VALUES);
     }
 }

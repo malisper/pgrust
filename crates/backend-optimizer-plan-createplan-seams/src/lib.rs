@@ -24,7 +24,16 @@
 //! owner from the [`PathNode`] variant (the analogue of the C up-cast). So every
 //! converter takes `best_path: PathId` rather than a typed pointer, plus the
 //! `mcx` the produced [`Node`](types_nodes::nodes::Node) plan tree is allocated
-//! in. The scan-family converters also receive the already-decided `tlist` and
+//! in. Every converter also receives `run: &PlannerRun<'mcx>` — the
+//! `'mcx`-scoped planner-run store (queries + range-table entries) that the
+//! lifetime-free [`PlannerInfo`] cannot hold (see
+//! [`types_pathnodes::planner_run::PlannerRun`]). It is the safe-Rust rendering
+//! of `root` reaching `simple_rte_array`: the scan converters call
+//! [`planner_rt_fetch`](types_pathnodes::planner_run::planner_rt_fetch)`(run,
+//! root, scanrelid)` to read their `RangeTblEntry`
+//! (`rtekind`/`functions`/`values_lists`/`ctename`/…), exactly as C dereferences
+//! `planner_rt_fetch(scanrelid, root)`. The scan-family converters also receive
+//! the already-decided `tlist` and
 //! resolved `scan_clauses` that `create_scan_plan` computed (the C
 //! `create_scan_plan` passes `tlist` + `scan_clauses` into each
 //! `create_*scan_plan`). `Err` carries each converter's `ereport(ERROR)`
@@ -35,6 +44,7 @@
 extern crate alloc;
 
 use types_nodes::nodes::Node;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PathId, PlannerInfo};
 
 // ---------------------------------------------------------------------------
@@ -53,6 +63,7 @@ seam_core::seam!(
     pub fn create_scan_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -65,6 +76,7 @@ seam_core::seam!(
     pub fn create_join_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -80,6 +92,7 @@ seam_core::seam!(
     pub fn create_append_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -90,6 +103,7 @@ seam_core::seam!(
     pub fn create_merge_append_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -101,6 +115,7 @@ seam_core::seam!(
     pub fn create_projection_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -112,6 +127,7 @@ seam_core::seam!(
     pub fn create_minmaxagg_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -122,6 +138,7 @@ seam_core::seam!(
     pub fn create_group_result_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -131,6 +148,7 @@ seam_core::seam!(
     pub fn create_project_set_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -140,6 +158,7 @@ seam_core::seam!(
     pub fn create_material_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -150,6 +169,7 @@ seam_core::seam!(
     pub fn create_memoize_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -163,6 +183,7 @@ seam_core::seam!(
     pub fn create_unique_dispatch_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -173,6 +194,7 @@ seam_core::seam!(
     pub fn create_gather_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -182,6 +204,7 @@ seam_core::seam!(
     pub fn create_sort_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -192,6 +215,7 @@ seam_core::seam!(
     pub fn create_incrementalsort_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -202,6 +226,7 @@ seam_core::seam!(
     pub fn create_group_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -214,6 +239,7 @@ seam_core::seam!(
     pub fn create_agg_dispatch_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -223,6 +249,7 @@ seam_core::seam!(
     pub fn create_windowagg_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -232,6 +259,7 @@ seam_core::seam!(
     pub fn create_setop_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -242,6 +270,7 @@ seam_core::seam!(
     pub fn create_recursiveunion_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -251,6 +280,7 @@ seam_core::seam!(
     pub fn create_lockrows_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -261,6 +291,7 @@ seam_core::seam!(
     pub fn create_modifytable_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
@@ -270,6 +301,7 @@ seam_core::seam!(
     pub fn create_limit_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
@@ -280,6 +312,7 @@ seam_core::seam!(
     pub fn create_gather_merge_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );

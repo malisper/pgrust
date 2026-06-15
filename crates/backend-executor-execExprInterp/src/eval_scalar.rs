@@ -154,6 +154,375 @@ pub fn exec_func_step<'mcx>(
     Ok(())
 }
 
+/// Read a `Func`-payload step's `(fn_oid, fncollation, make_ro)` and gather its
+/// argument result cells into the `args[]` call frame. Shared by the
+/// `EEOP_DISTINCT` / `EEOP_NOT_DISTINCT` / `EEOP_NULLIF` arms (they all carry the
+/// C `op->d.func` payload). Mirrors `func_step_inputs` but also surfaces the
+/// `make_ro` flag NULLIF needs.
+fn distinct_step_inputs<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> (
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    Vec<types_datum::NullableDatum>,
+    bool,
+) {
+    match step_data(state, op) {
+        ExprEvalStepData::Func {
+            finfo,
+            fcinfo_data,
+            arg_cells,
+            make_ro,
+            ..
+        } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_DISTINCT/NULLIF: op->d.func.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("EEOP_DISTINCT/NULLIF: op->d.func.fcinfo_data missing");
+            let cells = arg_cells
+                .as_ref()
+                .expect("EEOP_DISTINCT/NULLIF: op->d.func.arg_cells missing");
+            let args: Vec<types_datum::NullableDatum> = cells
+                .iter()
+                .map(|&cell| {
+                    let c = state.result_cells.get(cell);
+                    types_datum::NullableDatum {
+                        value: word_of(&c.value),
+                        isnull: c.isnull,
+                    }
+                })
+                .collect();
+            (finfo.fn_oid, fcinfo.fncollation, args, *make_ro)
+        }
+        other => unreachable!("EEOP_DISTINCT/NULLIF step carries the wrong payload: {other:?}"),
+    }
+}
+
+/// `EEOP_DISTINCT` / `EEOP_NOT_DISTINCT` core — `IS [NOT] DISTINCT FROM`
+/// (execExprInterp.c). The arguments are already gathered into `fcinfo->args`;
+/// the NULL handling differs from a strict function:
+///
+/// ```c
+/// if (args[0].isnull && args[1].isnull)        /* both NULL: not distinct  */
+/// else if (args[0].isnull || args[1].isnull)   /* one NULL:  distinct      */
+/// else { eqresult = fn_addr(fcinfo); ... }     /* neither:  apply equality */
+/// ```
+///
+/// `not_distinct` selects the `NOT DISTINCT` (inverted) variant: when neither arg
+/// is NULL it returns the raw equality result instead of inverting it, and the
+/// both-NULL/one-NULL constants flip.
+pub fn exec_distinct_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    not_distinct: bool,
+) -> PgResult<()> {
+    let (fn_oid, collation, args, _make_ro) = distinct_step_inputs(state, op);
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+
+    let a0_null = args[0].isnull;
+    let a1_null = args[1].isnull;
+
+    if a0_null && a1_null {
+        // Both NULL: DISTINCT -> false, NOT DISTINCT -> true.
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell { value: DatumV::from_bool(not_distinct), isnull: false },
+        );
+    } else if a0_null || a1_null {
+        // Only one NULL: DISTINCT -> true, NOT DISTINCT -> false.
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell { value: DatumV::from_bool(!not_distinct), isnull: false },
+        );
+    } else {
+        // Neither null: apply the equality function. fcinfo->isnull = false;
+        // eqresult = op->d.func.fn_addr(fcinfo);
+        let (eqword, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+        // DISTINCT inverts "=" (BoolGetDatum(!DatumGetBool(eqresult))); NOT
+        // DISTINCT returns the raw "=" result.
+        let value = if not_distinct {
+            DatumV::from_usize(eqword.as_usize())
+        } else {
+            DatumV::from_bool(!Datum::from_usize(eqword.as_usize()).as_bool())
+        };
+        state
+            .result_cells
+            .set(resvalue_id, ResultCell { value, isnull });
+    }
+    Ok(())
+}
+
+/// `EEOP_NULLIF` core (execExprInterp.c): the arguments are already evaluated
+/// into `fcinfo->args`; compare them via the equality function and return NULL if
+/// equal, else the (original) first argument.
+///
+/// ```c
+/// save_arg0 = fcinfo->args[0].value;
+/// if (!args[0].isnull && !args[1].isnull) {
+///     if (op->d.func.make_ro)
+///         fcinfo->args[0].value = MakeExpandedObjectReadOnlyInternal(save_arg0);
+///     fcinfo->isnull = false;
+///     result = fn_addr(fcinfo);
+///     if (!fcinfo->isnull && DatumGetBool(result)) { *resvalue = 0; *resnull = true; return; }
+/// }
+/// *resvalue = save_arg0; *resnull = args[0].isnull;
+/// ```
+pub fn exec_nullif_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
+    let (fn_oid, collation, mut args, make_ro) = distinct_step_inputs(state, op);
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+
+    // Datum save_arg0 = fcinfo->args[0].value (preserved across the make_ro
+    // rewrite so the returned value is the ORIGINAL arg0, possibly read-write).
+    let save_arg0 = args[0].value;
+
+    if !args[0].isnull && !args[1].isnull {
+        // The first argument might be an expanded datum; the comparison function
+        // must receive a read-only pointer. The make_ro transform lives in the
+        // expandeddatum owner, so it crosses the seam (mirror EEOP_ASSIGN_TMP_*).
+        if make_ro {
+            let mcx = estate.es_query_cxt;
+            let ro = backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v::call(
+                mcx,
+                &DatumV::from_usize(save_arg0.as_usize()),
+            )?;
+            args[0].value = Datum::from_usize(ro.as_usize());
+        }
+
+        // fcinfo->isnull = false; result = op->d.func.fn_addr(fcinfo);
+        let (result_word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+
+        // if (!fcinfo->isnull && DatumGetBool(result)) -> equal -> return NULL.
+        if !isnull && Datum::from_usize(result_word.as_usize()).as_bool() {
+            state
+                .result_cells
+                .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+            return Ok(());
+        }
+    }
+
+    // Arguments aren't equal (or one was NULL): return the first one.
+    // *op->resvalue = save_arg0; *op->resnull = fcinfo->args[0].isnull;
+    state.result_cells.set(
+        resvalue_id,
+        ResultCell { value: DatumV::from_usize(save_arg0.as_usize()), isnull: args[0].isnull },
+    );
+    Ok(())
+}
+
+/// Read a `RowCompareStep`-payload step's `(fn_oid, fncollation, fn_strict)` and
+/// gather its two argument cells into the call frame.
+fn rowcompare_step_inputs<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> (
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    Vec<types_datum::NullableDatum>,
+    bool,
+) {
+    match step_data(state, op) {
+        ExprEvalStepData::RowCompareStep {
+            finfo,
+            fcinfo_data,
+            ..
+        } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_ROWCOMPARE_STEP: op->d.rowcompare_step.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("EEOP_ROWCOMPARE_STEP: op->d.rowcompare_step.fcinfo_data missing");
+            // The two compared column values were gathered into fcinfo->args by
+            // the preceding sub-expression steps (the compiler aliases their
+            // resvalue/resnull onto &fcinfo->args[0/1]); the owned model carries
+            // them on the step's fcinfo_data.args frame.
+            let args = fcinfo.args.clone();
+            (finfo.fn_oid, fcinfo.fncollation, args, finfo.fn_strict)
+        }
+        other => unreachable!("EEOP_ROWCOMPARE_STEP carries the wrong payload: {other:?}"),
+    }
+}
+
+/// `EEOP_ROWCOMPARE_STEP` core (execExprInterp.c): apply one column's comparison
+/// function, force NULL on a strict-NULL input or NULL result, and short-circuit
+/// (`jumpdone`) once an inequality is found. Returns the next step index to jump
+/// to (the C `EEO_JUMP` / `EEO_NEXT` target).
+pub fn exec_rowcompare_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    jumpnull: i32,
+    jumpdone: i32,
+) -> PgResult<usize> {
+    let (fn_oid, collation, args, fn_strict) = rowcompare_step_inputs(state, op);
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+
+    // force NULL result if strict fn and NULL input
+    if fn_strict && (args[0].isnull || args[1].isnull) {
+        let cur = state.result_cells.get(resvalue_id).value;
+        state
+            .result_cells
+            .set(resvalue_id, ResultCell { value: cur, isnull: true });
+        return Ok(jumpnull as usize);
+    }
+
+    // fcinfo->isnull = false; d = op->d.rowcompare_step.fn_addr(fcinfo);
+    let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+    let value = DatumV::from_usize(word.as_usize());
+
+    // force NULL result if NULL function result
+    if isnull {
+        state
+            .result_cells
+            .set(resvalue_id, ResultCell { value, isnull: true });
+        return Ok(jumpnull as usize);
+    }
+
+    // *op->resvalue = d; *op->resnull = false;
+    let cmp = Datum::from_usize(word.as_usize()).as_i32();
+    state
+        .result_cells
+        .set(resvalue_id, ResultCell { value, isnull: false });
+
+    // If unequal, no need to compare remaining columns.
+    if cmp != 0 {
+        return Ok(jumpdone as usize);
+    }
+    Ok(op + 1)
+}
+
+/// Read a `HashDatum`-payload step's `(fn_oid, fncollation)`, gather its single
+/// argument cell into the call frame, and surface the previous (intermediate)
+/// hash via `iresult`. Returns `(fn_oid, collation, args, arg0_isnull, iresult)`.
+fn hashdatum_step_inputs<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> (
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    Vec<types_datum::NullableDatum>,
+    bool,
+    u32,
+) {
+    match step_data(state, op) {
+        ExprEvalStepData::HashDatum {
+            finfo,
+            fcinfo_data,
+            arg_cell,
+            iresult,
+            ..
+        } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_HASHDATUM_*: op->d.hashdatum.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("EEOP_HASHDATUM_*: op->d.hashdatum.fcinfo_data missing");
+            // fcinfo->args[0] <- the hash-key cell the sub-expression evaluated.
+            let c = state.result_cells.get(*arg_cell);
+            let args = vec![types_datum::NullableDatum {
+                value: word_of(&c.value),
+                isnull: c.isnull,
+            }];
+            // DatumGetUInt32(op->d.hashdatum.iresult->value) (NEXT32 only; the
+            // FIRST variants ignore it).
+            let existing = iresult
+                .as_ref()
+                .map(|ir| ir.value.as_u32())
+                .unwrap_or(0);
+            (finfo.fn_oid, fcinfo.fncollation, args, c.isnull, existing)
+        }
+        other => unreachable!("EEOP_HASHDATUM_* carries the wrong payload: {other:?}"),
+    }
+}
+
+/// `EEOP_HASHDATUM_FIRST[_STRICT]` / `EEOP_HASHDATUM_NEXT32[_STRICT]` core
+/// (execExprInterp.c): hash one key via the type's hash function and combine it
+/// with the running hash (NEXT32 rotates the previous value left by 1 and XORs).
+/// Returns the next step index (`jumpdone` on a strict NULL, else `op + 1`).
+///
+/// `first` selects the FIRST variants (no combine with a prior hash); `next32`
+/// the NEXT32 variants. `strict` selects the `_STRICT` NULL-input behaviour
+/// (return NULL / jump) vs the non-strict "treat NULL as 0 / leave hash alone".
+pub fn exec_hashdatum_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    first: bool,
+    strict: bool,
+    jumpdone: i32,
+) -> PgResult<usize> {
+    let (fn_oid, collation, args, arg0_isnull, existing) = hashdatum_step_inputs(state, op);
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+
+    if first {
+        if strict {
+            // EEOP_HASHDATUM_FIRST_STRICT: NULL input -> NULL result, jump.
+            if arg0_isnull {
+                state
+                    .result_cells
+                    .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+                return Ok(jumpdone as usize);
+            }
+            let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            state.result_cells.set(
+                resvalue_id,
+                ResultCell { value: DatumV::from_usize(word.as_usize()), isnull: false },
+            );
+            return Ok(op + 1);
+        }
+        // EEOP_HASHDATUM_FIRST: non-null -> hash; null -> 0.
+        let value = if !arg0_isnull {
+            let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            DatumV::from_usize(word.as_usize())
+        } else {
+            DatumV::from_usize(0)
+        };
+        state
+            .result_cells
+            .set(resvalue_id, ResultCell { value, isnull: false });
+        return Ok(op + 1);
+    }
+
+    // NEXT32 variants. existinghash = pg_rotate_left32(iresult->value, 1).
+    let rotated = existing.rotate_left(1);
+
+    if strict {
+        // EEOP_HASHDATUM_NEXT32_STRICT: NULL input -> NULL result, jump.
+        if arg0_isnull {
+            state
+                .result_cells
+                .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+            return Ok(jumpdone as usize);
+        }
+        let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+        let hashvalue = Datum::from_usize(word.as_usize()).as_u32();
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell { value: DatumV::from_u32(rotated ^ hashvalue), isnull: false },
+        );
+        return Ok(op + 1);
+    }
+
+    // EEOP_HASHDATUM_NEXT32: leave the hash alone on NULL inputs.
+    let combined = if !arg0_isnull {
+        let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+        let hashvalue = Datum::from_usize(word.as_usize()).as_u32();
+        rotated ^ hashvalue
+    } else {
+        rotated
+    };
+    state
+        .result_cells
+        .set(resvalue_id, ResultCell { value: DatumV::from_u32(combined), isnull: false });
+    Ok(op + 1)
+}
+
 /// `ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 /// ExprContext *econtext)` — call a (non-strict) function, tracking usage stats.
 pub fn ExecEvalFuncExprFusage<'mcx>(

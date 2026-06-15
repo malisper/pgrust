@@ -35,8 +35,23 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # Buffer manager (bufmgr.c).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 
-# Free-space map (indexfsm.c): GetFreeIndexPage.
+# Free-space map (indexfsm.c): GetFreeIndexPage / RecordFreeIndexPage /
+# IndexFreeSpaceMapVacuum.
 backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+
+# --- spgvacuum.c deps ---
+# lmgr (lmgr.c): LockRelationForExtension / UnlockRelationForExtension.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+# procarray (procarray.c): GlobalVisTestFor / GlobalVisTestIsRemovableXid.
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+# snapmgr (snapmgr.c): GetActiveSnapshot.
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+# vacuumlazy (vacuumlazy.c): vacuum_delay_point.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+# hio (hio.c): RELATION_IS_LOCAL.
+backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
+# snapshot vocabulary (SnapshotData.xmin).
+types-snapshot = { path = "../types-snapshot" }
 
 # reloptions (reloptions.c): build_reloptions_spgist.
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
@@ -69,8 +84,13 @@ backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 
 # --- spgdoinsert.c WAL-emit + dispatch deps ---
 
-# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert.
+# WAL insert (xloginsert.c): XLogBeginInsert/RegisterData/RegisterBuffer/Insert,
+# plus log_newpage_range for the spgbuild post-build WAL emit.
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# table-AM heap-scan provider (tableam.c): table_index_build_scan for spgbuild.
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+# bulk page writer (bulk_write.c): smgr_bulk_* for spgbuildempty.
+backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 # REGBUF_* flag constants + spgxlog record write-side serializers.
 types-wal = { path = "../types-wal" }
 types-xlog-records = { path = "../types-xlog-records" }

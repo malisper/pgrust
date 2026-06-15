@@ -32,6 +32,7 @@ extern crate alloc;
 pub mod gist_insert;
 pub mod gist_page;
 pub mod gist_scan;
+pub mod gist_vacuum;
 pub mod gistsplit;
 pub mod gistutil;
 
@@ -47,6 +48,7 @@ pub use gist_scan::{
     gistbeginscan, gistcanreturn, gistendscan, gistgetbitmap, gistgettuple, gisthandler,
     gistrescan,
 };
+pub use gist_vacuum::{gistbulkdelete, gistvacuumcleanup};
 pub use gistsplit::gistSplitByKey;
 pub use gistutil::{
     gistCompressValues, gistDeCompressAtt, gistFetchTuple, gistFormTuple, gistKeyIsEQ,
@@ -55,10 +57,23 @@ pub use gistutil::{
     gistnospace, gistpenalty, gistunion, initGISTstate,
 };
 
-/// Install this crate's inward seams. The GiST core's *outward*-facing utility
-/// functions (`initGISTstate` / `gistFormTuple` / page primitives) are reached
-/// by name by the sibling GiST scan / insert / build layers; this crate owns no
-/// inward seam in the F1-utils stage (the `backend-access-gist-core-seams` WAL
-/// rmgr callbacks are installed by the gistxlog layer in a later stage). The
-/// function is provided so `seams-init` can call it uniformly.
-pub fn init_seams() {}
+/// Install this crate's inward seams.
+///
+/// This crate now owns the GiST VACUUM lane (`gistvacuum.c`), so it installs the
+/// AM-vtable bulk-delete / cleanup callbacks declared in
+/// `backend-access-gist-am-seams` (the `ambulkdelete` / `amvacuumcleanup`
+/// slots), adapting the seam shape (`callback_state: Option<u64>` handle) to the
+/// owned-value bodies in [`gist_vacuum`].
+///
+/// The GiST core's *outward*-facing utility functions (`initGISTstate` /
+/// `gistFormTuple` / page primitives) are reached by name by the sibling scan /
+/// insert / build layers; the `backend-access-gist-core-seams` WAL rmgr
+/// callbacks are installed by the gistxlog layer (F7) in a later stage.
+pub fn init_seams() {
+    backend_access_gist_am_seams::gistbulkdelete::set(
+        |mcx, info, stats, callback_state| gistbulkdelete(mcx, info, stats, callback_state),
+    );
+    backend_access_gist_am_seams::gistvacuumcleanup::set(
+        |mcx, info, stats| gistvacuumcleanup(mcx, info, stats),
+    );
+}

@@ -836,6 +836,7 @@ pub fn ginInsertCleanup<'mcx>(
     let mut accum = backend_access_gin_ginbulk::new_accumulator(ginstate, mcx)?;
     let mut datums = initKeyArray(128);
     let mut cleanup_finish = false;
+    #[allow(unused_assignments)]
     let mut fsm_vac = false;
 
     loop {

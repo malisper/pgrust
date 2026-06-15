@@ -611,17 +611,25 @@ pub fn ExecInterpExpr<'mcx>(
                 op += 1;
             }
 
-            EEOP_DISTINCT | EEOP_NOT_DISTINCT | EEOP_NULLIF => {
-                // C: all three read fcinfo->args[0/1].isnull and conditionally
-                //    dispatch op->d.func.fn_addr(fcinfo). Needs the fmgr-widened
-                //    call frame; same blocker as EEOP_FUNCEXPR.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_DISTINCT/NOT_DISTINCT/NULLIF: inspect fcinfo->args[0/1].isnull \
-                     and dispatch op->d.func.fn_addr(fcinfo), needing the fmgr-widened \
-                     FunctionCallInfoBaseData (trimmed model has no args[]/isnull); \
-                     blocked until fmgr widens the call frame"
-                );
+            EEOP_DISTINCT => {
+                // C: IS DISTINCT FROM — both NULL -> false, one NULL -> true,
+                //    else invert the equality function's result.
+                eval_scalar::exec_distinct_step(state, op, false)?;
+                op += 1;
+            }
+
+            EEOP_NOT_DISTINCT => {
+                // C: IS NOT DISTINCT FROM — both NULL -> true, one NULL -> false,
+                //    else the raw equality function result.
+                eval_scalar::exec_distinct_step(state, op, true)?;
+                op += 1;
+            }
+
+            EEOP_NULLIF => {
+                // C: compare the two (already-gathered) args via the equality fn;
+                //    return NULL if equal, else the first argument.
+                eval_scalar::exec_nullif_step(state, op, estate)?;
+                op += 1;
             }
 
             EEOP_SQLVALUEFUNCTION => {
@@ -682,15 +690,13 @@ pub fn ExecInterpExpr<'mcx>(
             EEOP_ROWCOMPARE_STEP => {
                 // C: force NULL if (finfo->fn_strict && (args[0]|args[1] null)),
                 //    else dispatch fn_addr(fcinfo) and branch on the int result.
-                //    Needs the fmgr-widened call frame (args[]/isnull); same
-                //    blocker as EEOP_FUNCEXPR.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_ROWCOMPARE_STEP: strict-checks fcinfo->args[0/1].isnull and \
-                     dispatches op->d.rowcompare_step.fn_addr(fcinfo), needing the \
-                     fmgr-widened FunctionCallInfoBaseData (trimmed model has no \
-                     args[]/isnull); blocked until fmgr widens the call frame"
-                );
+                let (jumpnull, jumpdone) = match &state.steps.as_ref().unwrap()[op].d {
+                    ExprEvalStepData::RowCompareStep { jumpnull, jumpdone, .. } => {
+                        (*jumpnull, *jumpdone)
+                    }
+                    _ => unreachable!("EEOP_ROWCOMPARE_STEP: payload is not RowCompareStep"),
+                };
+                op = eval_scalar::exec_rowcompare_step(state, op, jumpnull, jumpdone)?;
             }
 
             EEOP_ROWCOMPARE_FINAL => {
@@ -844,15 +850,19 @@ pub fn ExecInterpExpr<'mcx>(
             | EEOP_HASHDATUM_NEXT32
             | EEOP_HASHDATUM_NEXT32_STRICT => {
                 // C: read fcinfo->args[0].isnull, dispatch op->d.hashdatum.fn_addr(fcinfo),
-                //    combine with iresult. Needs the fmgr-widened call frame
-                //    (args[]/isnull); same blocker as EEOP_FUNCEXPR.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_HASHDATUM_*: inspect fcinfo->args[0].isnull and dispatch \
-                     op->d.hashdatum.fn_addr(fcinfo), needing the fmgr-widened \
-                     FunctionCallInfoBaseData (trimmed model has no args[]/isnull); \
-                     blocked until fmgr widens the call frame"
+                //    combine with iresult (NEXT32 rotates+XORs). The FIRST variants
+                //    seed the hash; the _STRICT variants return NULL (and jump) on
+                //    a NULL input.
+                let first = matches!(opcode, EEOP_HASHDATUM_FIRST | EEOP_HASHDATUM_FIRST_STRICT);
+                let strict = matches!(
+                    opcode,
+                    EEOP_HASHDATUM_FIRST_STRICT | EEOP_HASHDATUM_NEXT32_STRICT
                 );
+                let jumpdone = match &state.steps.as_ref().unwrap()[op].d {
+                    ExprEvalStepData::HashDatum { jumpdone, .. } => *jumpdone,
+                    _ => unreachable!("EEOP_HASHDATUM_*: payload is not HashDatum"),
+                };
+                op = eval_scalar::exec_hashdatum_step(state, op, first, strict, jumpdone)?;
             }
 
             EEOP_XMLEXPR => {
@@ -950,17 +960,27 @@ pub fn ExecInterpExpr<'mcx>(
                 // C (DESERIALIZE): switch to aggstate->tmpcontext memory, dispatch
                 //                  FunctionCallInvoke(fcinfo), store result.
                 //
-                // Both read fcinfo->args[0] / dispatch the deserialfn through the
-                // fmgr call frame (args[]/isnull) — same blocker as EEOP_FUNCEXPR
-                // — and the non-strict arm additionally needs the nodeAgg-owned
-                // AggState (state->parent) tmpcontext.
+                // The args[0].isnull read and the FunctionCallInvoke dispatch are
+                // now expressible (fmgr #296 widened the call frame +
+                // function_call_invoke). The REMAINING blocker is the non-strict
+                // arm (which the STRICT arm falls through into): it runs the
+                // deserialfn inside aggstate->tmpcontext->ecxt_per_tuple_memory,
+                // and aggstate = castNode(AggState, state->parent) — the
+                // nodeAgg-owned AggState reached through state->parent, which the
+                // F0 model does not thread here (AggState-as-Node, #200). Running
+                // the deserialfn in the wrong memory context would leak/misplace
+                // its allocations, so this stays mirror-PG-and-panic. The pair
+                // can't be split: the STRICT arm is a bare null-check that falls
+                // through to the non-strict body.
                 let _ = (op, estate);
                 panic!(
-                    "EEOP_AGG_*DESERIALIZE: inspect op->d.agg_deserialize.fcinfo_data->\
-                     args[0].isnull and dispatch the deserialfn via FunctionCallInvoke, \
-                     needing the fmgr-widened FunctionCallInfoBaseData (trimmed model has \
-                     no args[]/isnull) and the nodeAgg AggState (state->parent) \
-                     tmpcontext; blocked until fmgr + nodeAgg land"
+                    "EEOP_AGG_*DESERIALIZE: the args[0].isnull check + deserialfn \
+                     FunctionCallInvoke are modeled (fmgr #296), but the non-strict \
+                     arm must run the call inside aggstate->tmpcontext \
+                     (aggstate = castNode(AggState, state->parent)), the \
+                     nodeAgg-owned AggState the F0 model does not thread here \
+                     (AggState-as-Node, #200); blocked until nodeAgg threads \
+                     state->parent's AggState + its tmpcontext"
                 );
             }
 

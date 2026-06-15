@@ -740,6 +740,7 @@ pub fn init_seams() {
     // XLogCtl shmem position readers + control-file-backed predicates (xlog.c).
     s::get_redo_rec_ptr::set(shmem::GetRedoRecPtr);
     s::get_xlog_insert_rec_ptr::set(shmem::GetXLogInsertRecPtr);
+    s::get_insert_rec_ptr::set(shmem::GetInsertRecPtr);
     s::get_flush_rec_ptr::set(shmem::GetFlushRecPtr);
     s::get_wal_insertion_timeline_if_set::set(shmem::GetWALInsertionTimeLineIfSet);
     s::get_system_identifier::set(shmem::GetSystemIdentifier);

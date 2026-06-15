@@ -48,6 +48,10 @@ pub const SIZEOF_GIST_PAGE_OPAQUE_DATA: usize = 16;
 /// `sizeof(FullTransactionId)` (access/transam.h) — a 64-bit value.
 const SIZEOF_FULL_TRANSACTION_ID: usize = 8;
 
+/// Byte offset of `pd_lower` within a `PageHeaderData` (bufpage.h):
+/// `pd_lsn(8) + pd_checksum(2) + pd_flags(2) = 12`.
+const OFF_PD_LOWER: usize = 12;
+
 /// `GiSTPageSize` (gist_private.h:476): the usable bytes on a GiST page,
 /// `BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(GISTPageOpaqueData))`.
 pub const GiSTPageSize: usize =
@@ -303,6 +307,45 @@ pub fn GistClearPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
 pub fn GistMarkPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
     set_gist_page_flags(page, f | types_gist::F_HAS_GARBAGE)
+}
+
+/// `GistMarkTuplesDeleted(page)` (gist.h:178): `flags |= F_TUPLES_DELETED`.
+pub fn GistMarkTuplesDeleted(page: &mut [u8]) -> PgResult<()> {
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f | types_gist::F_TUPLES_DELETED)
+}
+
+/// `GistPageSetDeleted(page, deletexid)` (gist.h:206): mark an *empty* page as
+/// deleted. Sets `F_DELETED`, advances `pd_lower` to cover the
+/// `GISTDeletedPageContents` (a single `FullTransactionId`), and writes the
+/// `deleteXid` into the page contents area. The C asserts `PageIsEmpty(page)`.
+pub fn GistPageSetDeleted(page: &mut [u8], deletexid: FullTransactionId) -> PgResult<()> {
+    // Assert(PageIsEmpty(page)).
+    {
+        let pref = PageRef::new(page)?;
+        if !PageIsEmpty(&pref) {
+            return Err(ereport(ERROR)
+                .errmsg_internal("GistPageSetDeleted called on a non-empty page")
+                .into_error());
+        }
+    }
+
+    // GistPageGetOpaque(page)->flags |= F_DELETED;
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f | types_gist::F_DELETED)?;
+
+    // ((PageHeader) page)->pd_lower =
+    //     MAXALIGN(SizeOfPageHeaderData) + sizeof(GISTDeletedPageContents);
+    // GISTDeletedPageContents is { FullTransactionId deleteXid; }. pd_lower is
+    // the uint16 at PageHeaderData offset 12 (lsn 8 + checksum 2 + flags 2).
+    let contents_off = maxalign(SizeOfPageHeaderData);
+    let new_lower = (contents_off + SIZEOF_FULL_TRANSACTION_ID) as u16;
+    page[OFF_PD_LOWER..OFF_PD_LOWER + 2].copy_from_slice(&new_lower.to_ne_bytes());
+
+    // ((GISTDeletedPageContents *) PageGetContents(page))->deleteXid = deletexid;
+    page[contents_off..contents_off + SIZEOF_FULL_TRANSACTION_ID]
+        .copy_from_slice(&deletexid.value.to_ne_bytes());
+    Ok(())
 }
 
 // ===========================================================================
