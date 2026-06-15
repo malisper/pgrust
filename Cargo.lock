@@ -4797,6 +4797,7 @@ dependencies = [
 name = "backend-executor-nodeGather"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4824,6 +4825,7 @@ dependencies = [
 name = "backend-executor-nodeGatherMerge"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4868,6 +4870,7 @@ dependencies = [
 name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -4925,6 +4928,7 @@ dependencies = [
 name = "backend-executor-nodeHashjoin"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
@@ -5618,6 +5622,28 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeWindowAgg"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
  "types-nodes",
  "types-tuple",
 ]

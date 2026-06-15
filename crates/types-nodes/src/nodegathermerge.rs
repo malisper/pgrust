@@ -16,7 +16,8 @@ use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
 use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::{MinimalTuple, TupleDesc};
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
+use types_tuple::heaptuple::TupleDesc;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};
@@ -116,8 +117,9 @@ impl GatherMerge<'_> {
 #[derive(Debug)]
 pub struct GMReaderTupleBuffer<'mcx> {
     /// `MinimalTuple *tuple` — array of length `MAX_TUPLE_STORE`; `None` slots
-    /// are unoccupied entries (the C `palloc0` NULL pointers).
-    pub tuple: PgVec<'mcx, MinimalTuple<'mcx>>,
+    /// are unoccupied entries (the C `palloc0` NULL pointers). Each occupied
+    /// entry is the payload-bearing [`FormedMinimalTuple`] carrier.
+    pub tuple: PgVec<'mcx, Option<FormedMinimalTuple<'mcx>>>,
     /// `int nTuples` — number of tuples currently stored.
     pub nTuples: i32,
     /// `int readCounter` — index of next tuple to extract.

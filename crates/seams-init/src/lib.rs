@@ -646,13 +646,6 @@ mod recurrence_guard {
         // so the name-keyed guard sees them as satisfied (they are equally
         // uninstalled at runtime — same blocker).
         ("backend_access_common_tupdesc", "free_tuple_desc"),
-        // RETIRED (task #161): `heap_tuple_header_get_datum`
-        // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
-        // The composite/record-Datum carrier bridge landed: the seam carries the
-        // data-bearing `FormedTuple`, and the no-external fast path mints the
-        // `Datum::ByRef` image directly via heap_tuple_to_disk_image while the
-        // external case flattens through toast_flatten_tuple_to_datum +
-        // lookup_rowtype_tupdesc.
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
         // a node-driven model — `types_nodes::IndexScanDescData`/`ParallelIndex-
@@ -768,16 +761,11 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
         ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
-        ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "exec_force_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_materialize_slot"),
         ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
         ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
-        ("backend_executor_execTuples", "exec_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
         ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
@@ -1024,12 +1012,6 @@ mod recurrence_guard {
         // seams declared alongside it ARE installed in miscinit's init_seams by
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
-        // RETIRED (task #161): `record_from_values` is now installed by funcapi's
-        // init_seams(). The composite/record-Datum carrier bridge landed: the
-        // terminal `HeapTupleGetDatum` step crosses the formed tuple as a
-        // by-reference composite `Datum::ByRef` (a varlena-wrapped HeapTupleHeader
-        // image) via `backend_access_common_heaptuple::HeapTupleGetDatum` — no new
-        // Datum variant, no forged pointer (datum-redesign-plan Option A).
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
         // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
         // in `srf_support::value_srf_unported` and panics loudly naming the missing

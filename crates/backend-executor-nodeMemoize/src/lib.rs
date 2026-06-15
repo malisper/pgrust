@@ -39,7 +39,7 @@ use types_nodes::nodememoize::{
     MemoizeKeyAttr, MemoizeScanState,
 };
 use types_nodes::TupleSlotKind;
-use types_tuple::heaptuple::MinimalTupleData;
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 // Datum-unification: the canonical unified value enum is this crate's internal
 // currency for every slot value. The execExpr eval leaf and the execTuples
 // deform seams already hand back canonical `Datum<'mcx>`, and the binary-mode
@@ -119,7 +119,7 @@ fn murmurhash32(data: u32) -> u32 {
 /// values/nulls into the probe slot. This control flow is nodeMemoize.c's own.
 fn prepare_probe_slot<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    key: Option<&MinimalTupleData<'mcx>>,
+    key: Option<&FormedMinimalTuple<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let num_keys = mstate.nkeys as usize;
@@ -251,7 +251,7 @@ fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32>
 /// nodeMemoize.c's own.
 fn memoize_hash_equal<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    params: &MinimalTupleData<'mcx>,
+    params: &FormedMinimalTuple<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // probeslot should have already been prepared by prepare_probe_slot().
@@ -386,7 +386,7 @@ fn entry_purge_tuples(mstate: &mut MemoizeScanState, slot_id: usize) -> PgResult
 
     let mut freed_mem: u64 = 0;
     for tuple in entry.tuples.drain(..) {
-        freed_mem += MemoizeScanState::cache_tuple_bytes(tuple.mintuple.t_len);
+        freed_mem += MemoizeScanState::cache_tuple_bytes(tuple.mintuple.tuple.t_len);
     }
     entry.complete = false;
     // entry.tuples is now empty (tuplehead = NULL).
@@ -403,7 +403,7 @@ fn remove_cache_entry(mstate: &mut MemoizeScanState, slot_id: usize) -> PgResult
 
     let params_len = {
         let cache = cache_ref(mstate)?;
-        entry_at(cache, slot_id)?.params.t_len
+        entry_at(cache, slot_id)?.params.tuple.t_len
     };
 
     // Update memory accounting for the entry itself. entry_purge_tuples has
@@ -535,7 +535,7 @@ fn cache_lookup<'mcx>(
     // allocated in the estate's per-query context (C: mstate->tableContext).
     let mcx = estate.es_query_cxt;
     let params = copy_probe_slot_minimal_tuple(mstate, mcx, estate)?;
-    let params_len = params.t_len;
+    let params_len = params.tuple.t_len;
 
     let slot_id = {
         let cache = cache_mut(mstate)?;
@@ -579,14 +579,14 @@ fn cache_lookup<'mcx>(
 /// the budget.
 fn cache_store_tuple<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    mintuple: &MinimalTupleData<'mcx>,
+    mintuple: &FormedMinimalTuple<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let entry_slot = mstate
         .entry
         .ok_or_else(|| elog_internal("cache_store_tuple with no current entry"))?;
 
-    let tuple_len = mintuple.t_len;
+    let tuple_len = mintuple.tuple.t_len;
 
     {
         let mcx = estate.es_query_cxt;
@@ -1006,9 +1006,9 @@ pub fn ExecEndMemoize<'mcx>(
         let mut count: u32 = 0;
         for slot in cache.slots.iter() {
             if let Some(entry) = slot {
-                mem += MemoizeScanState::empty_entry_memory_bytes(entry.params.t_len);
+                mem += MemoizeScanState::empty_entry_memory_bytes(entry.params.tuple.t_len);
                 for tuple in entry.tuples.iter() {
-                    mem += MemoizeScanState::cache_tuple_bytes(tuple.mintuple.t_len);
+                    mem += MemoizeScanState::cache_tuple_bytes(tuple.mintuple.tuple.t_len);
                 }
                 count += 1;
             }
@@ -1372,7 +1372,7 @@ fn entry_params_clone<'mcx>(
     mstate: &MemoizeScanState<'mcx>,
     slot_id: usize,
     estate: &EStateData<'mcx>,
-) -> PgResult<MinimalTupleData<'mcx>> {
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     let mcx = estate.es_query_cxt;
     entry_at(cache_ref(mstate)?, slot_id)?.params.clone_in(mcx)
 }
@@ -1405,7 +1405,7 @@ fn entry_tuple_clone<'mcx>(
     slot_id: usize,
     index: usize,
     estate: &EStateData<'mcx>,
-) -> PgResult<MinimalTupleData<'mcx>> {
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     let mcx = estate.es_query_cxt;
     let entry = entry_at(cache_ref(mstate)?, slot_id)?;
     let tuple = entry
@@ -1561,7 +1561,7 @@ fn exec_proc_outer<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<MinimalTupleData<'mcx>>> {
+) -> PgResult<Option<FormedMinimalTuple<'mcx>>> {
     let outer = mstate
         .ss
         .ps
@@ -1574,8 +1574,8 @@ fn exec_proc_outer<'mcx>(
     };
     // ExecCopySlotMinimalTuple(outerslot): materialize as a MinimalTuple in mcx.
     let (mtup, _should_free) =
-        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate.slot_mut(slot_id))?;
-    Ok(Some(mtup.clone_in(mcx)?))
+        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot_id)?;
+    Ok(Some(mtup))
 }
 
 /// `ExecEndNode(outerPlanState(node))` — shut down the outer child. Thin
@@ -1615,7 +1615,7 @@ fn exec_rescan_outer<'mcx>(
 /// leaf and the node's `ps_ResultTupleSlot`.
 fn store_result_minimal_tuple<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    tuple: &MinimalTupleData<'mcx>,
+    tuple: &FormedMinimalTuple<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let slot = mstate
@@ -1624,7 +1624,7 @@ fn store_result_minimal_tuple<'mcx>(
         .ps_ResultTupleSlot
         .ok_or_else(|| elog_internal("Memoize node result slot not initialized"))?;
     let mcx = estate.es_query_cxt;
-    let mtup = mcx::alloc_in(mcx, tuple.clone_in(mcx)?)?;
+    let mtup = tuple.clone_in(mcx)?;
     execTuples::exec_force_store_minimal_tuple::call(slot, mtup, false, estate)
 }
 
@@ -1887,7 +1887,7 @@ fn build_cache_eq_expr<'mcx>(
 /// Routed through the execTuples owner seams against the real `tableslot`.
 fn deform_key_params<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    params: &MinimalTupleData<'mcx>,
+    params: &FormedMinimalTuple<'mcx>,
     numkeys: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Vec<DatumV<'mcx>>, Vec<bool>)> {
@@ -1897,7 +1897,7 @@ fn deform_key_params<'mcx>(
     let mcx = estate.es_query_cxt;
 
     // ExecStoreMinimalTuple(key->params, tslot, false): store a borrowed copy.
-    let mtup = mcx::alloc_in(mcx, params.clone_in(mcx)?)?;
+    let mtup = params.clone_in(mcx)?;
     execTuples::exec_force_store_minimal_tuple::call(tableslot, mtup, false, estate)?;
 
     // slot_getallattrs(tslot); read tts_values[i]/tts_isnull[i] for the keys.
@@ -1919,7 +1919,7 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<MinimalTupleData<'mcx>> {
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     let probeslot = mstate
         .probeslot
         .ok_or_else(|| elog_internal("Memoize probeslot not initialized"))?;
@@ -1933,8 +1933,8 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
 
     // ExecCopySlotMinimalTuple(probeslot): materialize as an owned MinimalTuple.
     let (mtup, _should_free) =
-        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate.slot_mut(probeslot))?;
-    mtup.clone_in(mcx)
+        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, probeslot)?;
+    Ok(mtup)
 }
 
 // ===========================================================================

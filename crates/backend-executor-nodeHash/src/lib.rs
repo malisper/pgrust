@@ -227,10 +227,7 @@ mod adapters {
             .hj_HashTable
             .take()
             .expect("exec_hash_table_insert: hj_HashTable is NULL");
-        let res = {
-            let s = estate.slot(slot);
-            hash_table::ExecHashTableInsert(mcx, &mut table, s, hashvalue)
-        };
+        let res = hash_table::ExecHashTableInsert(mcx, &mut table, estate, slot, hashvalue);
         node.hj_HashTable = Some(table);
         res
     }
@@ -275,7 +272,7 @@ mod adapters {
         // HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)).
         let table = ht_ref(node);
         match node.hj_CurTuple {
-            Some(idx) => table.tuples[idx.0].mintuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0,
+            Some(idx) => table.tuples[idx.0].mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0,
             None => false,
         }
     }
@@ -285,7 +282,7 @@ mod adapters {
         let cur = node.hj_CurTuple;
         let table = ht(node);
         if let Some(idx) = cur {
-            table.tuples[idx.0].mintuple.t_infomask2 |= HEAP_TUPLE_HAS_MATCH;
+            table.tuples[idx.0].mintuple.tuple.t_infomask2 |= HEAP_TUPLE_HAS_MATCH;
         }
         Ok(())
     }
@@ -443,10 +440,9 @@ mod adapters {
             .hj_HashTable
             .take()
             .expect("exec_parallel_hash_table_insert_current_batch: hj_HashTable is NULL");
-        let res = {
-            let s = estate.slot(slot);
-            parallel::ExecParallelHashTableInsertCurrentBatch(mcx, &mut table, s, hashvalue)
-        };
+        let res = parallel::ExecParallelHashTableInsertCurrentBatch(
+            mcx, &mut table, estate, slot, hashvalue,
+        );
         node.hj_HashTable = Some(table);
         res
     }
@@ -461,7 +457,7 @@ mod adapters {
 
     pub fn force_store_minimal_into_slot<'mcx>(
         slot: SlotId,
-        tuple: PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        tuple: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
         // ExecForceStoreMinimalTuple(tuple, slot, false) — owned by execTuples.

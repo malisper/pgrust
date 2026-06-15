@@ -31,5 +31,6 @@ types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-execparallel = { path = "../types-execparallel" }
 types-storage = { path = "../types-storage" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-executor-nodeHashjoin-pq-seams = { path = "../backend-executor-nodeHashjoin-pq-seams" }
 mcx = { path = "../mcx" }

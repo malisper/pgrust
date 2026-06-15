@@ -67,6 +67,7 @@ pub mod nodetidrangescan;
 pub mod nodetidscan;
 pub mod nodeunique;
 pub mod nodevaluesscan;
+pub mod nodewindowagg;
 pub mod nodeworktablescan;
 pub mod params;
 pub mod parsenodes;

@@ -76,7 +76,21 @@ use types_nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
 use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::{MinimalTuple, MinimalTupleData};
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
+
+/// Decode a flat C `MinimalTuple` byte image (the tuple-queue wire bytes) into
+/// the payload-bearing [`FormedMinimalTuple`] carrier.
+fn mintuple_from_flat<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    blob: &[u8],
+) -> types_error::PgResult<FormedMinimalTuple<'mcx>> {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+        Ok(mtup) => Ok(mtup),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_from_flat on a tuple-queue image failed: {other:?}"),
+    }
+}
 
 /// `SlotNumber` (nodeGatherMerge.c) — `typedef int32 SlotNumber;`. A slot /
 /// participant index stored in the heap. Provides no formal type-safety; it
@@ -650,7 +664,7 @@ fn gather_merge_setup<'mcx>(
     for i in 0..nreaders_usize {
         // Allocate the tuple array with length MAX_TUPLE_STORE.
         //   gm_state->gm_tuple_buffers[i].tuple = palloc0(sizeof(MinimalTuple) * MAX_TUPLE_STORE);
-        let mut tuple: mcx::PgVec<'mcx, MinimalTuple<'mcx>> =
+        let mut tuple: mcx::PgVec<'mcx, Option<FormedMinimalTuple<'mcx>>> =
             mcx::vec_with_capacity_in(mcx, MAX_TUPLE_STORE as usize)?;
         for _ in 0..MAX_TUPLE_STORE {
             tuple.push(None);
@@ -986,7 +1000,7 @@ fn gather_merge_readnext<'mcx>(
     //   tuple_buffer = &gm_state->gm_tuple_buffers[reader - 1];
     let bufidx = (reader - 1) as usize;
 
-    let tup: MinimalTuple<'mcx>;
+    let tup: Option<FormedMinimalTuple<'mcx>>;
     let n_tuples = gm_state.gm_tuple_buffers[bufidx].nTuples;
     let read_counter = gm_state.gm_tuple_buffers[bufidx].readCounter;
     if n_tuples > read_counter {
@@ -1027,6 +1041,7 @@ fn gather_merge_readnext<'mcx>(
     let slot_id = gm_state.gm_slots[reader as usize].ok_or_else(|| {
         elog_error("gather_merge_readnext: worker slot must have been allocated by gather_merge_setup")
     })?;
+    let tup = tup.expect("gather_merge_readnext: tuple present");
     execTuples::exec_store_minimal_tuple::call(estate, tup, slot_id, true)?;
 
     Ok(true)
@@ -1040,7 +1055,7 @@ fn gm_readnext_tuple<'mcx>(
     nowait: bool,
     done: &mut bool,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<MinimalTuple<'mcx>> {
+) -> PgResult<Option<FormedMinimalTuple<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
     // Check for async events, particularly messages from workers.
@@ -1075,12 +1090,10 @@ fn gm_readnext_tuple<'mcx>(
     match bytes {
         None => Ok(None),
         Some(image) => {
-            // image == MinimalTupleData::to_minimal_bytes(): the leading 4-byte
-            // `t_len` word followed by the body the reader re-stores.
-            let t_len = u32::from_ne_bytes([image[0], image[1], image[2], image[3]]);
-            let body = &image[core::mem::size_of::<u32>()..];
-            let mtup = MinimalTupleData::from_minimal_parts(mcx, t_len, body)?;
-            Ok(Some(alloc_in(mcx, mtup)?))
+            // `image` is the tuple's contiguous C MinimalTuple byte image (the
+            // flat blob, `t_len` first); decode it into the buffer-lived copy.
+            let mtup = mintuple_from_flat(mcx, &image)?;
+            Ok(Some(mtup))
         }
     }
 }

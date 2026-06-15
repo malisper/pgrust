@@ -20,7 +20,24 @@ use types_nodes::nodehash::{
     INVALID_SKEW_BUCKET_NO, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD,
 };
 use types_nodes::nodehash::Hash as HashPlan;
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
+
+/// Serialize a [`FormedMinimalTuple`] to its contiguous C `MinimalTuple` byte
+/// image (the flat blob, `t_len` first) — the form the batch temp file / shared
+/// tuplestore boundary carries. A well-formed in-arena tuple can only fail on
+/// the allocation `ereport(ERROR)` (OOM).
+pub(crate) fn mintuple_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
+        Ok(blob) => Ok(blob),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_to_flat on an in-arena tuple failed: {other:?}"),
+    }
+}
 
 use crate::{
     BLCKSZ, HJTUPLE_OVERHEAD, MAXALIGN, MaxAllocSize, SizeofMinimalTupleHeader, SKEW_BUCKET_OVERHEAD,
@@ -685,7 +702,7 @@ pub fn ExecHashIncreaseNumBatches<'mcx>(
     hashtable.current_chunk = None;
 
     for old in old_tuples.into_iter() {
-        let hash_tuple_size = HJTUPLE_OVERHEAD + old.mintuple.t_len as usize;
+        let hash_tuple_size = HJTUPLE_OVERHEAD + old.mintuple.tuple.t_len as usize;
 
         ninmemory += 1;
         let bb = ExecHashGetBucketAndBatch(hashtable, old.hashvalue);
@@ -726,10 +743,13 @@ pub fn ExecHashIncreaseNumBatches<'mcx>(
             //                         &hashtable->innerBatchFile[batchno],
             //                         hashtable);
             let hashvalue = old.hashvalue;
+            // ExecHashJoinSaveTuple writes the minimal tuple's contiguous C byte
+            // image (the flat blob, `t_len` bytes) to the batch temp file.
+            let blob = mintuple_to_flat(mcx, &old.mintuple)?;
             let file = &mut hashtable.innerBatchFile[batchno as usize];
             backend_executor_nodeHashjoin_seams::ExecHashJoinSaveTuple::call(
                 mcx,
-                &old.mintuple,
+                &blob,
                 hashvalue,
                 file,
             )?;
@@ -847,7 +867,7 @@ pub fn dense_alloc<'mcx>(
     hashtable.tuples.push(HashJoinTupleData {
         next: HashJoinTupleLink::Unshared(None),
         hashvalue: 0,
-        mintuple: empty_mintuple(mcx),
+        mintuple: empty_mintuple(mcx)?,
     });
 
     // If tuple size is larger than threshold, allocate a separate chunk.
@@ -916,19 +936,25 @@ pub fn dense_alloc<'mcx>(
     Ok(tuple_idx)
 }
 
-/// An empty `MinimalTupleData` placeholder for a freshly-reserved arena slot
+/// An empty `FormedMinimalTuple` placeholder for a freshly-reserved arena slot
 /// (the caller overwrites it with the real tuple). Mirrors the uninitialized
 /// dense-buffer bytes C hands back from `dense_alloc`.
 #[inline]
-fn empty_mintuple<'mcx>(mcx: Mcx<'mcx>) -> MinimalTupleData<'mcx> {
-    MinimalTupleData {
-        t_len: 0,
-        mt_padding: [0; 6],
-        t_infomask2: 0,
-        t_infomask: 0,
-        t_hoff: 0,
-        t_bits: PgVec::new_in(mcx),
-    }
+fn empty_mintuple<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FormedMinimalTuple<'mcx>> {
+    Ok(FormedMinimalTuple {
+        tuple: mcx::alloc_in(
+            mcx,
+            MinimalTupleData {
+                t_len: 0,
+                mt_padding: [0; 6],
+                t_infomask2: 0,
+                t_infomask: 0,
+                t_hoff: 0,
+                t_bits: PgVec::new_in(mcx),
+            },
+        )?,
+        data: PgVec::new_in(mcx),
+    })
 }
 
 // ===========================================================================
@@ -941,7 +967,8 @@ fn empty_mintuple<'mcx>(mcx: Mcx<'mcx>) -> MinimalTupleData<'mcx> {
 pub fn ExecHashTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    slot: &types_nodes::TupleTableSlot,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
     // bool shouldFree;
@@ -951,9 +978,8 @@ pub fn ExecHashTableInsert<'mcx>(
     //
     // The execTuples seam copies the slot's tuple into mcx, so the owned model
     // never frees explicitly (the copy is dropped with the context).
-    let tuple = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
-        mcx, slot,
-    )?;
+    let (tuple, _should_free) =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot)?;
     exec_hash_table_insert_tuple(mcx, hashtable, tuple, hashvalue)
 }
 
@@ -965,7 +991,7 @@ pub fn ExecHashTableInsert<'mcx>(
 pub fn exec_hash_table_insert_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    tuple: MinimalTupleData<'mcx>,
+    tuple: FormedMinimalTuple<'mcx>,
     hashvalue: uint32,
 ) -> PgResult<()> {
     let bb = ExecHashGetBucketAndBatch(hashtable, hashvalue);
@@ -978,7 +1004,7 @@ pub fn exec_hash_table_insert_tuple<'mcx>(
         let ntuples = hashtable.totalTuples - hashtable.skewTuples;
 
         // Create the HashJoinTuple.
-        let hash_tuple_size = HJTUPLE_OVERHEAD + tuple.t_len as usize;
+        let hash_tuple_size = HJTUPLE_OVERHEAD + tuple.tuple.t_len as usize;
         let new_idx = dense_alloc(mcx, hashtable, hash_tuple_size)?;
 
         // hashTuple->hashvalue = hashvalue;
@@ -986,7 +1012,7 @@ pub fn exec_hash_table_insert_tuple<'mcx>(
         let mut tuple = tuple;
         // We always reset the tuple-matched flag on insertion.
         //   HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
-        tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+        tuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
         {
             let dst = &mut hashtable.tuples[new_idx.0];
             dst.hashvalue = hashvalue;
@@ -1036,9 +1062,10 @@ pub fn exec_hash_table_insert_tuple<'mcx>(
     } else {
         // put the tuple into a temp file for later batches
         debug_assert!(batchno > hashtable.curbatch);
+        let blob = mintuple_to_flat(mcx, &tuple)?;
         let file = &mut hashtable.innerBatchFile[batchno as usize];
         backend_executor_nodeHashjoin_seams::ExecHashJoinSaveTuple::call(
-            mcx, &tuple, hashvalue, file,
+            mcx, &blob, hashvalue, file,
         )?;
     }
 
@@ -1156,7 +1183,7 @@ pub fn ExecScanHashBucket<'mcx>(
             //   econtext->ecxt_innertuple = inntuple;
             // The owned arena stores the MinimalTuple once; copy it into mcx and
             // force-store into the hash-tuple slot (the slot's ops own the copy).
-            let mtup = mcx::alloc_in(mcx, mtup_copy.expect("is_match"))?;
+            let mtup = mtup_copy.expect("is_match");
             backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
                 hash_tuple_slot,
                 mtup,
@@ -1259,7 +1286,7 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
             let (has_match, next, mtup_copy) = {
                 let hashtable = hjstate.hj_HashTable.as_ref().unwrap();
                 let has_match =
-                    hashtable.tuples[idx.0].mintuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0;
+                    hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0;
                 let next = match hashtable.tuples[idx.0].next {
                     HashJoinTupleLink::Unshared(n) => n,
                     HashJoinTupleLink::Shared(_) => None,
@@ -1278,7 +1305,7 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
                 //   econtext->ecxt_innertuple = inntuple;
                 //   ResetExprContext(econtext);
                 //   hjstate->hj_CurTuple = hashTuple; return true;
-                let mtup = mcx::alloc_in(mcx, mtup_copy.expect("!has_match"))?;
+                let mtup = mtup_copy.expect("!has_match");
                 backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
                     hash_tuple_slot,
                     mtup,
@@ -1355,7 +1382,7 @@ pub fn ExecHashTableResetMatchFlags<'mcx>(hashtable: &mut HashJoinTableData<'mcx
         };
         while let Some(idx) = t {
             // HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(tuple));
-            hashtable.tuples[idx.0].mintuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+            hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
             t = match hashtable.tuples[idx.0].next {
                 HashJoinTupleLink::Unshared(n) => n,
                 HashJoinTupleLink::Shared(_) => None,
@@ -1368,7 +1395,7 @@ pub fn ExecHashTableResetMatchFlags<'mcx>(hashtable: &mut HashJoinTableData<'mcx
         let j = hashtable.skewBucketNums[i] as usize;
         let mut t = hashtable.skewBucket[j].as_ref().and_then(|b| b.tuples);
         while let Some(idx) = t {
-            hashtable.tuples[idx.0].mintuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+            hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
             t = match hashtable.tuples[idx.0].next {
                 HashJoinTupleLink::Unshared(n) => n,
                 HashJoinTupleLink::Shared(_) => None,
