@@ -1579,18 +1579,22 @@ fn clone_step<'mcx>(s: &ExprEvalStep<'mcx>) -> ExprEvalStep<'mcx> {
 
 /// `fcinfo = palloc0(SizeForFunctionCallInfo(nargs));
 /// InitFunctionCallInfoData(*fcinfo, finfo, nargs, inputcollid, NULL, NULL)`.
-/// This crate's `FunctionCallInfoBaseData` is trimmed (the per-arg cells the C
-/// `args[]` aliases are modeled as the step payload's `arg_cell`/`arg_cells`
-/// arena ids, gathered by the interpreter), so the call frame carries only its
-/// `resultinfo` (NULL here). The collation is threaded by the owner at call
-/// time alongside the re-resolved `finfo`.
+/// The per-arg cells the C `args[]` aliases are modeled as the step payload's
+/// `arg_cell`/`arg_cells` arena ids (gathered into `fcinfo->args` by the
+/// interpreter), so the call frame carries no args at init. #296: the widened
+/// frame records `inputcollid` as `fcinfo->fncollation`, surviving to call
+/// time; `finfo` is carried by the step payload separately (these agg/distinct
+/// frames re-resolve at dispatch), so `flinfo` stays NULL here.
 fn init_fcinfo<'mcx>(
     mcx: Mcx<'mcx>,
-    _inputcollid: Oid,
+    inputcollid: Oid,
 ) -> PgResult<PgBox<'mcx, types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>>> {
     mcx::alloc_in(
         mcx,
-        types_nodes::fmgr::FunctionCallInfoBaseData::default(),
+        types_nodes::fmgr::FunctionCallInfoBaseData {
+            fncollation: inputcollid,
+            ..Default::default()
+        },
     )
 }
 
