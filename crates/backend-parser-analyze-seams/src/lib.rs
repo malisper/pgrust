@@ -82,3 +82,19 @@ seam_core::seam!(
         parent: Option<&types_nodes::parsestmt::ParseState<'mcx>>,
     ) -> PgResult<mcx::PgBox<'mcx, types_nodes::parsestmt::ParseState<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `parse_sub_analyze(parseTree, parentParseState, parentCTE,
+    /// locked_from_parent, resolve_unknowns)` (parser/analyze.c) — analyze a
+    /// delimited subquery (a sub-SELECT in FROM, or a CTE/sublink body) under a
+    /// child `ParseState` linked to `parent`, returning the transformed `Query`.
+    /// The FROM sub-select caller passes `parentCTE = NULL` (not modeled here;
+    /// the owner builds the child state from `parent`). Can `ereport(ERROR)`.
+    pub fn parse_sub_analyze<'mcx>(
+        mcx: Mcx<'mcx>,
+        parse_tree: &Node<'mcx>,
+        parent: &mut types_nodes::parsestmt::ParseState<'mcx>,
+        locked_from_parent: bool,
+        resolve_unknowns: bool,
+    ) -> PgResult<CopyQuery<'mcx>>
+);

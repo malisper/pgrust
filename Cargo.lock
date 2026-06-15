@@ -7419,6 +7419,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-clause"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-namespace",
+ "backend-commands-functioncmds-seams",
+ "backend-executor-nodeSamplescan-seams",
+ "backend-nodes-copyfuncs-seams",
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-util-vars",
+ "backend-parser-analyze-seams",
+ "backend-parser-coerce",
+ "backend-parser-parse-agg-seams",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-parse-oper",
+ "backend-parser-relation",
+ "backend-parser-small1-seams",
+ "backend-parser-target-seams",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-samplescan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-parser-coerce"
 version = "0.0.0"
 dependencies = [
@@ -7515,6 +7552,14 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-agg-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
 ]
 
 [[package]]
@@ -7777,6 +7822,17 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cluster",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-target-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
 ]
@@ -8907,6 +8963,14 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+]
+
+[[package]]
+name = "backend-rewrite-rewritemanip-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
 ]
 
 [[package]]
@@ -11866,17 +11930,21 @@ name = "backend-utils-cache-syscache"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "mcx",
  "types-cache",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",
  "types-hash",
+ "types-nodes",
  "types-storage",
  "types-tuple",
 ]
@@ -11906,6 +11974,7 @@ dependencies = [
  "types-format-type",
  "types-hash",
  "types-namespace",
+ "types-nodes",
  "types-partition",
  "types-rel",
  "types-selfuncs",

@@ -349,6 +349,9 @@ pub enum Node<'mcx> {
     RangeFunction(crate::rawnodes::RangeFunction<'mcx>),
     /// `T_RangeTableSample`.
     RangeTableSample(crate::rawnodes::RangeTableSample<'mcx>),
+    /// `T_TableSampleClause` — the post-analysis form stored in
+    /// `RangeTblEntry.tablesample` (built by `transformRangeTableSample`).
+    TableSampleClause(crate::nodesamplescan::TableSampleClause<'mcx>),
     /// `T_WithClause`.
     WithClause(crate::rawnodes::WithClause<'mcx>),
     /// `T_InferClause`.
@@ -670,6 +673,7 @@ impl<'mcx> Node<'mcx> {
             Node::RangeSubselect(_) => T_RangeSubselect,
             Node::RangeFunction(_) => T_RangeFunction,
             Node::RangeTableSample(_) => T_RangeTableSample,
+            Node::TableSampleClause(_) => crate::nodesamplescan::T_TableSampleClause,
             Node::WithClause(_) => T_WithClause,
             Node::InferClause(_) => T_InferClause,
             Node::OnConflictClause(_) => T_OnConflictClause,
@@ -844,6 +848,7 @@ impl<'mcx> Node<'mcx> {
             Node::RangeSubselect(r) => Ok(Node::RangeSubselect(r.clone_in(mcx)?)),
             Node::RangeFunction(r) => Ok(Node::RangeFunction(r.clone_in(mcx)?)),
             Node::RangeTableSample(r) => Ok(Node::RangeTableSample(r.clone_in(mcx)?)),
+            Node::TableSampleClause(t) => Ok(Node::TableSampleClause(t.clone_in(mcx)?)),
             Node::WithClause(w) => Ok(Node::WithClause(w.clone_in(mcx)?)),
             Node::InferClause(i) => Ok(Node::InferClause(i.clone_in(mcx)?)),
             Node::OnConflictClause(o) => Ok(Node::OnConflictClause(o.clone_in(mcx)?)),

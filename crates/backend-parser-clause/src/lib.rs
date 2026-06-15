@@ -33,11 +33,15 @@
 //! (`get_equality_op_for_ordering_op`, `op_hashjoinable`, `get_commutator`) and
 //! `parser_errposition` (parse_node.c) go through their installed seams.
 //!
+//! # F2 — FROM clause / JOIN (in `from_clause`)
+//!
+//! `transformFromClause` / `setTargetTable` / `transformFromClauseItem` and the
+//! JOIN machinery live in the [`from_clause`] submodule.
+//!
 //! # Deferred to follow-on families (NOT in this crate)
 //!
-//!   * F2: `transformFromClause` / `transformFromClauseItem` / JOIN.
 //!   * F3a: `transformWindowDefinitions` / on-conflict.
-//!   * F3b: tablefunc / `JSON_TABLE`.
+//!   * F3b: tablefunc (XMLTABLE) / `JSON_TABLE`.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -103,7 +107,7 @@ const COERCE_IMPLICIT_CAST: CoercionForm = CoercionForm::COERCE_IMPLICIT_CAST;
 // ===========================================================================
 
 /// `strVal(node)` if `node` is a `T_String` value node, else `None`.
-fn str_val<'a>(node: &'a Node<'_>) -> Option<&'a str> {
+pub(crate) fn str_val<'a>(node: &'a Node<'_>) -> Option<&'a str> {
     match node {
         Node::String(s) => Some(s.sval.as_str()),
         _ => None,
@@ -111,7 +115,7 @@ fn str_val<'a>(node: &'a Node<'_>) -> Option<&'a str> {
 }
 
 /// `elog(ERROR, ...)` equivalent — an internal "can't happen" error.
-fn elog_error(msg: impl Into<String>) -> PgError {
+pub(crate) fn elog_error(msg: impl Into<String>) -> PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INTERNAL_ERROR)
         .errmsg_internal(msg)
@@ -121,7 +125,7 @@ fn elog_error(msg: impl Into<String>) -> PgError {
 /// `parser_errposition(pstate, location)` — best-effort cursor position; the C
 /// is infallible here (it reads `pstate->p_sourcetext`), so unwrap to 0 on the
 /// catcache-free path, matching the parse_expr.c port's helper.
-fn errpos(pstate: &ParseState<'_>, location: i32) -> i32 {
+pub(crate) fn errpos(pstate: &ParseState<'_>, location: i32) -> i32 {
     parse_node::parser_errposition::call(pstate, location).unwrap_or(0)
 }
 
@@ -1465,6 +1469,11 @@ fn empty_pgvec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>
 /// (`analyze.c`). The aggregator still invokes this so the crate participates in
 /// the wiring discipline; it installs nothing.
 pub fn init_seams() {}
+
+mod from_clause;
+pub use from_clause::{
+    setNamespaceLateralState, setTargetTable, transformFromClause,
+};
 
 #[cfg(test)]
 mod tests;
