@@ -23,7 +23,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 // raw-fmgr-ABI dispatch seams (`FunctionCallN` / `Oid*FunctionCall`) whose owner
 // `backend-utils-fmgr-core` and all consumers have NOT yet migrated off the
 // shim word. Those seams carry the literal call-frame `Datum` word — a by-value
-// scalar or a `datum_ref_registry` pointer token decoded by the owner — an
+// scalar or a pointer token decoded by the owner — an
 // audited ABI/storage edge that must stay a bare word until its owner migrates.
 // Migrating the contract here ahead of the owner would diverge it from the
 // landed `types_datum::Datum`-typed `set()` closures and every consumer.
