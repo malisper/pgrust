@@ -68,14 +68,16 @@ fn strip_array_coercion(node: &Expr) -> &Expr {
     let mut node = node;
     loop {
         if let Some(acoerce) = node.as_arraycoerceexpr() {
-            // If it's an array-to-array conversion that just relabels the
-            // element type, look through it.
-            if acoerce
+            // If the per-element expression is just a RelabelType on top of
+            // CaseTestExpr, then we know it's a binary-compatible relabeling.
+            let is_binary_relabel = acoerce
                 .elemexpr
                 .as_deref()
-                .map(|e| matches!(e, Expr::RelabelType(_)))
-                .unwrap_or(false)
-            {
+                .and_then(|e| e.as_relabeltype())
+                .and_then(|r| r.arg.as_deref())
+                .map(|a| matches!(a, Expr::CaseTestExpr(_)))
+                .unwrap_or(false);
+            if is_binary_relabel {
                 if let Some(arg) = acoerce.arg.as_deref() {
                     node = arg;
                     continue;
