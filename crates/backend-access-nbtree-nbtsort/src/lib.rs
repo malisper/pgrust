@@ -4,12 +4,16 @@
 //!
 //! This crate **grounds the page-format + suffix-truncation + deduplication +
 //! leaf-load half** of `nbtsort.c` (the part driven by a *pull-based* sorted
-//! spool over owned page buffers) and **honestly panics the closure-based heap
-//! build-scan + parallel-build half** (genuinely blocked on the per-tuple
-//! callback boundary that the function seam cannot carry, plus the
-//! DSM/parallel-context machinery). The deferred panics mirror the
-//! src-idiomatic `deferred.rs` rationale and are *not* silent stubs — this is
-//! sanctioned mirror-and-panic, never a placeholder stub-panic.
+//! spool over owned page buffers) AND the **serial heap build scan** (`btbuild`
+//! / `_bt_spools_heapscan` / `_bt_build_callback` / `_bt_spool`, which feed a
+//! per-tuple callback closure into the spool through `table_index_build_scan`,
+//! exactly as hash `hashbuild` and brin `brinbuild` do). It **honestly panics
+//! the parallel-build half** (genuinely blocked on the DSM/parallel-context
+//! machinery) plus the one irreducible serial residual: the AM `ambuild`
+//! callback's type-erased `amapi::IndexInfo` exposes no `ii_Unique` /
+//! `ii_NullsNotDistinct` (see [`deferred`]). The deferred panics are *not*
+//! silent stubs — this is sanctioned mirror-and-panic, never a placeholder
+//! stub-panic.
 //!
 //! ## Grounded here (1:1 with C, original names preserved)
 //! - [`_bt_leafbuild`], [`_bt_load`], [`_bt_buildadd`], [`_bt_pagestate`],
@@ -38,9 +42,14 @@
 //! - progress reporting: `pgstat_progress_update_param`
 //!   (`backend-utils-activity-small`, already ported).
 //!
+//! ## Serial build (see [`deferred`])
+//! [`deferred::btbuild`], `_bt_spools_heapscan`, `_bt_build_callback`,
+//! `_bt_spool` — ported; the heap scan crosses `table_index_build_scan` (heap
+//! AM provider) and the per-tuple closure feeds the spool. The only panic in
+//! this path is the type-erased `amapi::IndexInfo` flag read.
+//!
 //! ## Deferred behind a loud panic (see [`deferred`])
-//! [`deferred::btbuild`], `_bt_spools_heapscan`, `_bt_build_callback`, and the
-//! entire parallel build coordination (`_bt_begin_parallel`,
+//! The entire parallel build coordination (`_bt_begin_parallel`,
 //! `_bt_end_parallel`, `_bt_parallel_*`).
 
 #![allow(non_snake_case)]
@@ -669,16 +678,14 @@ pub struct BTWriteState<'mcx> {
 // ===========================================================================
 
 /// `_bt_spool(btspool, self_tid, values, isnull)` — spool one index tuple for
-/// the build sort, via `tuplesort_putindextuplevalues`.
-///
-/// The `tuplesort_putindextuplevalues` substrate is part of the unported
-/// tuplesort owner; the grounded entry the build actually drives is the
-/// pull-based [`_bt_load`] over `tuplesort_getindextuple`. The push side is fed
-/// by the (deferred) heap build scan, so it routes to the deferred path rather
-/// than a fabricated put-seam.
-pub fn _bt_spool() -> ! {
-    deferred::_bt_spool()
-}
+/// the build sort, via `tuplesort_putindextuplevalues`. The real serial-build
+/// accessor lives in [`deferred`] (it is driven by the build-scan callback);
+/// re-exported here under its C name.
+pub use deferred::_bt_spool;
+
+/// `btbuild()` — the AM `ambuild`; the serial build entry point. Re-exported
+/// from [`deferred`] (where it lives alongside the build-scan callback).
+pub use deferred::btbuild;
 
 /// `_bt_spooldestroy(btspool)` — clean up a spool structure and its sort state.
 ///
