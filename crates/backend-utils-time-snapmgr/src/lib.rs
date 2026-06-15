@@ -1561,6 +1561,8 @@ pub fn init_seams() {
     });
     seams::pop_active_snapshot::set(PopActiveSnapshot);
     seams::historic_snapshot_active::set(HistoricSnapshotActive);
+    seams::have_registered_or_active_snapshot::set(HaveRegisteredOrActiveSnapshot);
+    seams::export_snapshot::set(|snapshot| ExportSnapshot(&new_handle(snapshot)));
     seams::active_snapshot_set::set(ActiveSnapshotSet);
     seams::get_latest_snapshot::set(|| Ok(GetLatestSnapshot()?.borrow().clone()));
     seams::get_transaction_snapshot::set(|| Ok(GetTransactionSnapshot()?.borrow().clone()));

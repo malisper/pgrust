@@ -20,6 +20,8 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-tidbitmap = { path = "../types-tidbitmap" }
+# GIN scan consumer carrier (ginget.c fills types_gin::TBMIterateResult).
+types-gin = { path = "../types-gin" }
 types-execparallel = { path = "../types-execparallel" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-fmgr = { path = "../types-fmgr" }

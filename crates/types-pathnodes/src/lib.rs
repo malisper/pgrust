@@ -40,7 +40,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use types_core::primitive::{
-    AttrNumber, BlockNumber, Cardinality, Cost, Index, Selectivity,
+    AttrNumber, BlockNumber, Cardinality, Cost, Index, Selectivity, Size,
 };
 pub use types_core::primitive::Oid;
 pub use types_core::fmgr::FmgrInfo;
@@ -2304,6 +2304,28 @@ pub struct AggTransInfo {
     /// `bool initValueIsNull` — is the initial transition value NULL?
     #[allow(non_snake_case)]
     pub initValueIsNull: bool,
+}
+
+/// `AggClauseCosts` (nodes/pathnodes.h) — accumulated execution-cost estimates
+/// for the aggregates of a query, the output of `get_agg_clause_costs`
+/// (prepagg.c). Field-for-field vs the C struct: `transCost` / `finalCost` are
+/// [`QualCost`]s and `transitionSpace` is the estimated transition-state size
+/// (`Size` in C — `int` in older trees; pathnodes.h PG18 uses `Size`).
+///
+/// NOTE that `get_agg_clause_costs` *adds* into these fields, so the caller is
+/// responsible for zeroing the struct first (the [`Default`] does that).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(non_snake_case)]
+pub struct AggClauseCosts {
+    /// `QualCost transCost` — total per-input-row execution cost of the
+    /// transition functions (plus their argument/filter eval costs).
+    pub transCost: QualCost,
+    /// `QualCost finalCost` — total per-aggregated-group cost of the final
+    /// functions (plus direct-arg eval and any serialize costs).
+    pub finalCost: QualCost,
+    /// `Size transitionSpace` — estimate of the total space (bytes) needed to
+    /// hold all the aggregates' transition states concurrently (HashAgg).
+    pub transitionSpace: Size,
 }
 
 /// Lifetime-free arena form of `TargetEntry` (nodes/primnodes.h), field-for-field

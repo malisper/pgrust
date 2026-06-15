@@ -699,6 +699,7 @@ dependencies = [
  "backend-access-gin-ginbtree",
  "backend-access-gin-ginutil-seams",
  "backend-access-transam-xloginsert-seams",
+ "backend-nodes-core-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-storage-page",
@@ -710,6 +711,7 @@ dependencies = [
  "types-gin",
  "types-rel",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -732,6 +734,41 @@ dependencies = [
  "types-gin",
  "types-rel",
  "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-ginget"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-gin-core-probe",
+ "backend-access-gin-ginbtree",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginentrypage",
+ "backend-access-gin-ginscan",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-nodes-core",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-page",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "pg-prng",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -7179,6 +7216,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-fmgr",
+ "types-gin",
  "types-nodes",
  "types-parsenodes",
  "types-pathnodes",
@@ -7655,6 +7693,40 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-prepagg"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-prep-prepagg-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-parser-parse-agg-seams",
+ "backend-utils-cache-lsyscache",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-prepagg-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -9526,6 +9598,42 @@ dependencies = [
  "types-error",
  "types-startup",
  "types-walreceiver",
+]
+
+[[package]]
+name = "backend-replication-logical-snapbuild"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-origin-extern-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-logical-snapbuild-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-snapbuild-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-resowner-resowner-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "port-crc32c-seams",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-nodes",
+ "types-pgstat",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -14815,6 +14923,7 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
  "backend-optimizer-plan-subselect-pullup",
+ "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
@@ -14854,6 +14963,7 @@ dependencies = [
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",
  "backend-replication-logical-slotsync",
+ "backend-replication-logical-snapbuild",
  "backend-replication-slot",
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",

@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::{Oid, XLogRecPtr};
+use types_core::primitive::{Oid, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 use types_logical::ReorderBufferCallback;
 
@@ -39,4 +39,25 @@ seam_core::seam!(
         wal_segment_size: i32,
         my_database_id: Oid,
     ) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `LogicalIncreaseXminForSlot(current_lsn, xmin)` (logical.c:1678) — record
+    /// a new candidate catalog xmin for `MyReplicationSlot`. snapbuild.c calls
+    /// this from `SnapBuildProcessRunningXacts`.
+    pub fn logical_increase_xmin_for_slot(
+        current_lsn: XLogRecPtr,
+        xmin: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LogicalIncreaseRestartDecodingForSlot(current_lsn, restart_lsn)`
+    /// (logical.c:1746) — record a new candidate restart LSN for
+    /// `MyReplicationSlot`. snapbuild.c calls this from
+    /// `SnapBuildProcessRunningXacts`.
+    pub fn logical_increase_restart_decoding_for_slot(
+        current_lsn: XLogRecPtr,
+        restart_lsn: XLogRecPtr,
+    ) -> PgResult<()>
 );
