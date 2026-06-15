@@ -1021,6 +1021,8 @@ name = "backend-access-nbt-compare-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-sortsupport",
 ]
 
@@ -13333,6 +13335,7 @@ dependencies = [
 name = "backend-utils-sort-sortsupport"
 version = "0.0.0"
 dependencies = [
+ "backend-access-nbt-compare-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-fmgr-core",
