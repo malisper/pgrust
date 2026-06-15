@@ -50,6 +50,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
+use types_core::primitive::AttrNumber;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
@@ -65,8 +66,9 @@ use backend_optimizer_util_clauses::grounded::{
 };
 use backend_optimizer_util_vars::var::{contain_vars_of_level, pull_varnos, pull_varnos_of_level};
 use backend_rewrite_core::{
-    add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp, OffsetVarNodes,
-    ReplaceVarFromTargetList, ReplaceVarsNoMatchOption,
+    add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp,
+    IncrementVarSublevelsUp_rtable, OffsetVarNodes, ReplaceVarFromTargetList,
+    ReplaceVarsNoMatchOption,
 };
 use backend_rewrite_core::replace::ReplaceRteVariablesContext;
 
@@ -383,7 +385,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                 let is_union_all = {
                     let rte = &parse.rtable[(varno - 1) as usize];
                     let sub = rte.subquery.as_deref().unwrap();
-                    is_simple_union_all(sub)
+                    is_simple_union_all(sub)?
                 };
                 if is_union_all {
                     return pull_up_simple_union_all(mcx, root, parse, Node::RangeTblRef(r), varno);
@@ -393,7 +395,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                 // an appendrel.
                 if lowest_outer_join.is_none()
                     && containing_appendrel.is_none()
-                    && is_simple_values(root, &parse.rtable[(varno - 1) as usize])
+                    && is_simple_values(root, parse, &parse.rtable[(varno - 1) as usize])
                 {
                     return pull_up_simple_values(mcx, root, parse, Node::RangeTblRef(r), varno);
                 }
@@ -863,102 +865,1008 @@ fn last_ph_id(root: &PlannerInfo) -> u32 {
 }
 
 // ===========================================================================
-// F3 / F6 callees — seam-and-panic into not-yet-ported families.
+// FAMILY 3 — the simple-UNION-ALL pull-up.
+//
+// 1:1 port of `pull_up_simple_union_all` / `pull_up_union_leaf_queries` /
+// `make_setop_translation_list` / `is_simple_union_all` /
+// `is_simple_union_all_recurse` / `flatten_simple_union_all`
+// (prepjointree.c:1608..3060) over the lifetime-free owned `Query<'mcx>` +
+// embedded-`PgBox` model.
+//
+// Model notes:
+//   * The subquery's `setOperations` tree (`SetOperationStmt`/`RangeTblRef`
+//     nodes) lives in the embedded owned subquery; we walk it by deref exactly
+//     as the C walks `Node *`. `RangeTblRef.rtindex` indexes the *setop query's*
+//     own rtable (`rt_fetch(rtr->rtindex, setOpQuery->rtable)`), not the
+//     parent's.
+//   * `make_setop_translation_list` builds the `AppendRelInfo.translated_vars`
+//     list. Here `translated_vars` is `Vec<NodeId>` arena handles (#274); each
+//     `makeVarFromTargetEntry` Var is stored via `root.alloc_node(Expr::Var(..))`
+//     and the resulting `NodeId` pushed (a dropped/junk parent column keeps the
+//     C `palloc0` reverse-translation zero in `parent_colnos`; there is no entry
+//     pushed to `translated_vars` for junk columns, matching `vars = lappend`).
 // ===========================================================================
 
-/// `is_simple_union_all(subquery)` (prepjointree.c:2215). FAMILY 3 (union-all);
-/// not yet ported. The conservative answer until F3 lands is "no" — but a silent
-/// "no" would skip a required pull-up, so we panic loudly (mirror-PG-and-panic).
-fn is_simple_union_all(_subquery: &Query) -> bool {
-    panic!(
-        "is_simple_union_all: prepjointree FAMILY 3 (union-all pullup) not yet ported \
-         (separate lane); pull_up_simple_union_all + is_simple_union_all_recurse + \
-         make_setop_translation_list + pull_up_union_leaf_queries"
-    )
-}
-
 /// `pull_up_simple_union_all(root, jtnode, rte)` (prepjointree.c:1617). FAMILY 3.
+///
+/// `jtnode` is the `RangeTblRef` identified as a simple UNION ALL subquery; we
+/// pull up the leaf subqueries and build an append relation for the union set.
+/// The result is just `jtnode` (the query jointree is unchanged).
 fn pull_up_simple_union_all<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-    _jtnode: Node<'mcx>,
-    _varno: i32,
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    jtnode: Node<'mcx>,
+    varno: i32,
 ) -> PgResult<Node<'mcx>> {
-    panic!("pull_up_simple_union_all: prepjointree FAMILY 3 (union-all pullup) not yet ported")
+    // int rtoffset = list_length(root->parse->rtable);
+    let rtoffset = parse.rtable.len() as i32;
+
+    // Take the subquery out of the RTE so we can own + adjust it. (The C keeps
+    // `rte->subquery` live and `copyObject(subquery->rtable)`s only the rtable;
+    // here we move the whole owned subquery out, mutate its rtable in place, and
+    // never put it back — the appendrel parent RTE no longer needs the subtree.)
+    let mut subquery = parse.rtable[(varno - 1) as usize]
+        .subquery
+        .take()
+        .expect("RTE_SUBQUERY with NULL subquery");
+    let rte_lateral = parse.rtable[(varno - 1) as usize].lateral;
+
+    // Make a modifiable copy of the subquery's rtable, so we can adjust
+    // upper-level Vars in it. (We already own the subquery; move its rtable out
+    // into our working list — the subquery itself is discarded afterwards.)
+    let mut rtable: PgVec<'mcx, RangeTblEntry<'mcx>> =
+        core::mem::replace(&mut subquery.rtable, PgVec::new_in(mcx));
+
+    // Upper-level vars in subquery are now one level closer to their parent than
+    // before. We don't have to worry about offsetting varnos, though, because the
+    // UNION leaf queries can't cross-reference each other.
+    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1);
+
+    // If the UNION ALL subquery had a LATERAL marker, propagate that to all its
+    // children.
+    if rte_lateral {
+        for child_rte in rtable.iter_mut() {
+            debug_assert!(child_rte.rtekind == RTEKind::RTE_SUBQUERY);
+            child_rte.lateral = true;
+        }
+    }
+
+    // Append child RTEs (and their perminfos) to parent rtable.
+    // C: CombineRangeTables(&root->parse->rtable, &root->parse->rteperminfos,
+    //                       rtable, subquery->rteperminfos);
+    // combine_range_tables consumes a `&mut Query` for the source; wrap the
+    // modified rtable + the subquery's perminfos in a transient Query.
+    {
+        let mut src = Query::new(mcx);
+        src.rtable = rtable;
+        src.rteperminfos = core::mem::replace(&mut subquery.rteperminfos, PgVec::new_in(mcx));
+        subselect::combine_range_tables(mcx, parse, &mut src);
+    }
+
+    // Recursively scan the subquery's setOperations tree and add AppendRelInfo
+    // nodes for leaf subqueries to the parent's append_rel_list. Also apply
+    // pull_up_subqueries to the leaf subqueries.
+    debug_assert!(subquery.setOperations.is_some());
+    let setop = subquery
+        .setOperations
+        .take()
+        .expect("UNION ALL subquery has no setOperations");
+    pull_up_union_leaf_queries(
+        mcx,
+        root,
+        parse,
+        &*setop,
+        varno,
+        &subquery,
+        rtoffset,
+    )?;
+
+    // Mark the parent as an append relation.
+    parse.rtable[(varno - 1) as usize].inh = true;
+
+    Ok(jtnode)
 }
 
-/// `is_simple_values(root, rte)` (prepjointree.c:2044). FAMILY 6 (RTE expanders).
-fn is_simple_values(_root: &PlannerInfo, _rte: &RangeTblEntry) -> bool {
-    panic!(
-        "is_simple_values: prepjointree FAMILY 6 (VALUES/function RTE expanders) not yet ported \
-         (separate lane)"
-    )
+/// `pull_up_union_leaf_queries(setOp, root, parentRTindex, setOpQuery,
+/// childRToffset)` (prepjointree.c:1699). Recursive guts of
+/// `pull_up_simple_union_all` / `flatten_simple_union_all`.
+///
+/// `set_op_query` is the Query containing the setOp node (whose tlist references
+/// all the setop output columns); when called from `pull_up_simple_union_all`
+/// this is *not* `root.parse`. `child_rt_offset` is where in the parent's range
+/// table the child RTEs were copied (0 for the flatten path).
+fn pull_up_union_leaf_queries<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    set_op: &Node<'mcx>,
+    parent_rt_index: i32,
+    set_op_query: &Query<'mcx>,
+    child_rt_offset: i32,
+) -> PgResult<()> {
+    match set_op {
+        Node::RangeTblRef(rtr) => {
+            // Calculate the index in the parent's range table.
+            let child_rt_index = child_rt_offset + rtr.rtindex;
+
+            // Build a suitable AppendRelInfo, and attach to parent's list.
+            let mut appinfo = types_pathnodes::AppendRelInfo {
+                parent_relid: parent_rt_index as u32,
+                child_relid: child_rt_index as u32,
+                parent_reltype: 0,
+                child_reltype: 0,
+                translated_vars: Vec::new(),
+                num_child_cols: 0,
+                parent_colnos: Vec::new(),
+                parent_reloid: 0,
+            };
+            make_setop_translation_list(root, set_op_query, child_rt_index, &mut appinfo);
+            root.append_rel_list.push(appinfo);
+
+            // Recursively apply pull_up_subqueries to the new child RTE. (We must
+            // build the AppendRelInfo first, because this will modify it; indeed,
+            // that's the only part of the upper query where Vars referencing
+            // childRTindex can exist at this point.)
+            //
+            // We can pass NULL containing-join info even if actually under an
+            // outer join, because the child's expressions don't propagate up to
+            // the join. We ignore the possibility that the recurse returns a
+            // different jointree node; the important thing is it replaced the
+            // child relid in the AppendRelInfo node.
+            let rtr = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+                rtindex: child_rt_index,
+            });
+            let _ = pull_up_subqueries_recurse(mcx, root, parse, rtr, None, None)?;
+            Ok(())
+        }
+        Node::SetOperationStmt(op) => {
+            // Recurse to reach leaf queries.
+            let larg = op
+                .larg
+                .as_ref()
+                .expect("SetOperationStmt with NULL larg");
+            pull_up_union_leaf_queries(
+                mcx,
+                root,
+                parse,
+                &**larg,
+                parent_rt_index,
+                set_op_query,
+                child_rt_offset,
+            )?;
+            let rarg = op
+                .rarg
+                .as_ref()
+                .expect("SetOperationStmt with NULL rarg");
+            pull_up_union_leaf_queries(
+                mcx,
+                root,
+                parse,
+                &**rarg,
+                parent_rt_index,
+                set_op_query,
+                child_rt_offset,
+            )?;
+            Ok(())
+        }
+        other => Err(types_error::PgError::error(alloc::format!(
+            "unrecognized node type: {:?}",
+            other.node_tag()
+        ))),
+    }
 }
 
-/// `pull_up_simple_values(root, jtnode, rte)` (prepjointree.c:1947). FAMILY 6.
-fn pull_up_simple_values<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-    _jtnode: Node<'mcx>,
-    _varno: i32,
-) -> PgResult<Node<'mcx>> {
-    panic!("pull_up_simple_values: prepjointree FAMILY 6 (RTE expanders) not yet ported")
+/// `make_setop_translation_list(query, newvarno, appinfo)` (prepjointree.c:1769).
+///
+/// Build the list of translations from parent Vars to child Vars for a UNION ALL
+/// member, plus the trivial reverse-translation array. Each translated Var is
+/// stored in the planner arena and referenced by `NodeId` (#274).
+fn make_setop_translation_list<'mcx>(
+    root: &mut PlannerInfo,
+    query: &Query<'mcx>,
+    newvarno: i32,
+    appinfo: &mut types_pathnodes::AppendRelInfo,
+) {
+    // Initialize reverse-translation array with all entries zero. (Entries for
+    // resjunk columns stay zero.)
+    appinfo.num_child_cols = query.targetList.len() as i32;
+    appinfo.parent_colnos = alloc::vec![0i16; query.targetList.len()];
+
+    let mut vars: Vec<NodeId> = Vec::new();
+    for tle in query.targetList.iter() {
+        if tle.resjunk {
+            continue;
+        }
+        let var = backend_nodes_core::makefuncs::make_var_from_target_entry(newvarno, tle)
+            .expect("make_var_from_target_entry");
+        let id = root.alloc_node(Expr::Var(var));
+        vars.push(id);
+        appinfo.parent_colnos[(tle.resno - 1) as usize] = tle.resno;
+    }
+    appinfo.translated_vars = vars;
 }
 
-/// `pull_up_constant_function(root, jtnode, rte, containing_appendrel)`
-/// (prepjointree.c:2103). FAMILY 6.
-fn pull_up_constant_function<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    _parse: &mut Query<'mcx>,
-    _jtnode: Node<'mcx>,
-    _varno: i32,
-    _containing_appendrel: Option<usize>,
-) -> PgResult<Node<'mcx>> {
-    panic!("pull_up_constant_function: prepjointree FAMILY 6 (RTE expanders) not yet ported")
+/// `is_simple_union_all(subquery)` (prepjointree.c:2215). FAMILY 3.
+///
+/// We require all the setops to be UNION ALL (no mixing) and there can't be any
+/// datatype coercions involved, ie, all the leaf queries must emit the same
+/// datatypes.
+fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
+    // Let's just make sure it's a valid subselect. (commandType is the only
+    // check we can make on the owned Query; the IsA(Query) is structural.)
+    if subquery.commandType != types_nodes::nodes::CmdType::CMD_SELECT {
+        return Err(types_error::PgError::error("subquery is bogus"));
+    }
+
+    // Is it a set-operation query at all?
+    let topop_node = match subquery.setOperations.as_ref() {
+        Some(n) => &**n,
+        None => return Ok(false),
+    };
+    let topop = match topop_node {
+        Node::SetOperationStmt(op) => op,
+        // castNode would error on a wrong tag; setOperations is always a
+        // SetOperationStmt when present.
+        _ => return Ok(false),
+    };
+
+    // Can't handle ORDER BY, LIMIT/OFFSET, locking, or WITH.
+    if !subquery.sortClause.is_empty()
+        || subquery.limitOffset.is_some()
+        || subquery.limitCount.is_some()
+        || !subquery.rowMarks.is_empty()
+        || !subquery.cteList.is_empty()
+    {
+        return Ok(false);
+    }
+
+    // Recursively check the tree of set operations.
+    is_simple_union_all_recurse(topop_node, subquery, &topop.colTypes)
 }
 
-/// `preprocess_function_rtes(root)` (prepjointree.c:903). FAMILY 6: const-simplify
-/// FUNCTION RTEs and inline SRFs. Until F6 lands this is a no-op on a query with
-/// no FUNCTION RTEs; if any FUNCTION RTE is present, panic loudly.
-fn preprocess_function_rtes<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
+/// `is_simple_union_all_recurse(setOp, setOpQuery, colTypes)`
+/// (prepjointree.c:2242).
+fn is_simple_union_all_recurse(
+    set_op: &Node,
+    set_op_query: &Query,
+    col_types: &[types_core::primitive::Oid],
+) -> PgResult<bool> {
+    // Since this function recurses, it could be driven to stack overflow.
+    backend_tcop_postgres_seams::check_stack_depth::call()?;
+
+    match set_op {
+        Node::RangeTblRef(rtr) => {
+            // rt_fetch(rtr->rtindex, setOpQuery->rtable)
+            let rte = &set_op_query.rtable[(rtr.rtindex - 1) as usize];
+            let subquery = rte
+                .subquery
+                .as_deref()
+                .expect("UNION ALL leaf RTE has NULL subquery");
+            // Leaf nodes are OK if they match the toplevel column types. We don't
+            // have to compare typmods or collations here.
+            backend_optimizer_util_vars::tlist::tlist_same_datatypes(
+                &subquery.targetList,
+                col_types,
+                true,
+            )
+        }
+        Node::SetOperationStmt(op) => {
+            // Must be UNION ALL.
+            if op.op != types_nodes::rawnodes::SetOperation::SETOP_UNION || !op.all {
+                return Ok(false);
+            }
+            // Recurse to check inputs.
+            let larg = op.larg.as_ref().expect("SetOperationStmt with NULL larg");
+            let rarg = op.rarg.as_ref().expect("SetOperationStmt with NULL rarg");
+            Ok(
+                is_simple_union_all_recurse(&**larg, set_op_query, col_types)?
+                    && is_simple_union_all_recurse(&**rarg, set_op_query, col_types)?,
+            )
+        }
+        other => Err(types_error::PgError::error(alloc::format!(
+            "unrecognized node type: {:?}",
+            other.node_tag()
+        ))),
+    }
+}
+
+/// `flatten_simple_union_all(root)` (prepjointree.c:2983). FAMILY 3.
+///
+/// If a query's `setOperations` tree consists entirely of simple UNION ALL
+/// operations, flatten it into an append relation (which we can process more
+/// intelligently than the general setops case). Otherwise, do nothing.
+pub fn flatten_simple_union_all<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
 ) -> PgResult<()> {
-    for rte in parse.rtable.iter() {
-        if rte.rtekind == RTEKind::RTE_FUNCTION {
-            panic!(
-                "preprocess_function_rtes: prepjointree FAMILY 6 (FUNCTION RTE const-simplify + \
-                 SRF inlining) not yet ported (separate lane)"
-            );
+    // Shouldn't be called unless query has setops.
+    debug_assert!(parse.setOperations.is_some());
+
+    // Can't optimize away a recursive UNION.
+    if root.hasRecursion {
+        return Ok(());
+    }
+
+    // Recursively check the tree of set operations. If not all UNION ALL with
+    // identical column types, punt.
+    {
+        let topop_node: &Node = &**parse
+            .setOperations
+            .as_ref()
+            .expect("flatten_simple_union_all: no setOperations");
+        let topop = match topop_node {
+            Node::SetOperationStmt(op) => op,
+            _ => return Ok(()),
+        };
+        if !is_simple_union_all_recurse(topop_node, parse, &topop.colTypes)? {
+            return Ok(());
+        }
+    }
+
+    // Locate the leftmost leaf query in the setops tree. The upper query's Vars
+    // all refer to this RTE (see transformSetOperationStmt). Walk down `larg`.
+    let leftmost_rti = {
+        let mut node: &Node = &**parse
+            .setOperations
+            .as_ref()
+            .expect("flatten_simple_union_all: no setOperations");
+        loop {
+            match node {
+                Node::SetOperationStmt(op) => {
+                    node = &**op.larg.as_ref().expect("setop NULL larg");
+                }
+                Node::RangeTblRef(rtr) => break rtr.rtindex,
+                _ => panic!("flatten_simple_union_all: leftmost jtnode is not a RangeTblRef"),
+            }
+        }
+    };
+    debug_assert!(
+        parse.rtable[(leftmost_rti - 1) as usize].rtekind == RTEKind::RTE_SUBQUERY
+    );
+
+    // Make a copy of the leftmost RTE and add it to the rtable. This copy
+    // represents the leftmost leaf query in its capacity as a member of the
+    // appendrel; the original represents the appendrel as a whole. (We must do
+    // things this way because the upper query's Vars have to be seen as
+    // referring to the whole appendrel.)
+    let child_rte = parse.rtable[(leftmost_rti - 1) as usize].clone_in(mcx)?;
+    parse.rtable.push(child_rte);
+    let child_rti = parse.rtable.len() as i32;
+
+    // Modify the setops tree to reference the child copy. We must walk down to
+    // the leftmost RangeTblRef again and mutate its rtindex.
+    {
+        let mut node: &mut Node = &mut **parse
+            .setOperations
+            .as_mut()
+            .expect("flatten_simple_union_all: no setOperations");
+        loop {
+            match node {
+                Node::SetOperationStmt(op) => {
+                    node = &mut **op.larg.as_mut().expect("setop NULL larg");
+                }
+                Node::RangeTblRef(rtr) => {
+                    rtr.rtindex = child_rti;
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    // Modify the formerly-leftmost RTE to mark it as an appendrel parent.
+    parse.rtable[(leftmost_rti - 1) as usize].inh = true;
+
+    // Form a RangeTblRef for the appendrel, and insert it into FROM. The top
+    // Query of a setops tree should have had an empty FromClause initially.
+    let rtr_node = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+        rtindex: leftmost_rti,
+    });
+    {
+        let jt = parse
+            .jointree
+            .as_mut()
+            .expect("flatten_simple_union_all: no jointree");
+        debug_assert!(jt.fromlist.is_empty());
+        jt.fromlist.push(alloc_in(mcx, rtr_node)?);
+    }
+
+    // Pull the setOperations tree out before subquery pullup (because of the
+    // assert in pull_up_simple_subquery). We still need to walk it to build the
+    // AppendRelInfos, so keep it in a local.
+    let topop = parse
+        .setOperations
+        .take()
+        .expect("flatten_simple_union_all: no setOperations");
+
+    // Build AppendRelInfo information, and apply pull_up_subqueries to the leaf
+    // queries of the UNION ALL. We must do that now because they weren't
+    // previously referenced by the jointree, and so were missed by the main
+    // invocation of pull_up_subqueries. (childRToffset is 0; the child RTEs were
+    // already in parse->rtable.) The setOpQuery here is `parse` itself; we hold
+    // `topop` separately so there's no aliasing with the `&mut parse` walk.
+    let topop_node = PgBox::into_inner(topop);
+    flatten_pull_up_union_leaf_queries(mcx, root, parse, &topop_node, leftmost_rti, 0)
+}
+
+/// `pull_up_union_leaf_queries((Node *) topop, root, leftmostRTI, parse, 0)`
+/// for the flatten path: here `setOpQuery == root->parse == parse`, but we
+/// cannot borrow `parse` both as the mutated target and as the immutable
+/// `set_op_query` arg. The only use of `set_op_query` is reading its
+/// `targetList` in `make_setop_translation_list` (via the leftmost-leaf tlist
+/// reference). We snapshot the needed targetlist by cloning it once up front.
+fn flatten_pull_up_union_leaf_queries<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    set_op: &Node<'mcx>,
+    parent_rt_index: i32,
+    child_rt_offset: i32,
+) -> PgResult<()> {
+    // Snapshot parse->targetList (the setOpQuery tlist) once; make_setop_*
+    // reads only the tlist. This avoids aliasing the &mut parse.
+    let tlist_snapshot = clone_targetlist(mcx, &parse.targetList)?;
+    let mut snapshot_query = Query::new(mcx);
+    snapshot_query.commandType = parse.commandType;
+    snapshot_query.targetList = tlist_snapshot;
+    pull_up_union_leaf_queries(
+        mcx,
+        root,
+        parse,
+        set_op,
+        parent_rt_index,
+        &snapshot_query,
+        child_rt_offset,
+    )
+}
+
+// ===========================================================================
+// FAMILY 6 — the RTE expanders (preprocess_function_rtes /
+// expand_virtual_generated_columns / pull_up_simple_values /
+// is_simple_values / pull_up_constant_function).
+// ===========================================================================
+
+/// `preprocess_function_rtes(root)` (prepjointree.c:914). Const-simplify each
+/// `RTE_FUNCTION`'s `functions` list and, where possible, inline a
+/// set-returning function into a subquery RTE.
+pub fn preprocess_function_rtes<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let n = parse.rtable.len();
+    for i in 0..n {
+        if parse.rtable[i].rtekind != RTEKind::RTE_FUNCTION {
+            continue;
+        }
+
+        // Apply const-simplification.
+        //   rte->functions = (List *) eval_const_expressions(root, (Node *) rte->functions);
+        // The C folds the whole `functions` list as one node tree; here the list
+        // is a typed `Vec<NodePtr>` of `RangeTblFunction` nodes, so fold each
+        // RangeTblFunction's `funcexpr` (the only fold-able subtree it carries).
+        {
+            let m = parse.rtable[i].functions.len();
+            for k in 0..m {
+                eval_const_expressions_in_rtfunc(mcx, &mut parse.rtable[i].functions[k])?;
+            }
+        }
+
+        // Check safety of expansion, and expand if possible. The C
+        // `inline_set_returning_function(root, rte)` reads the RTE's single
+        // FuncExpr + its pg_proc row and (for an inlinable SQL-language SRF)
+        // returns the inlined query; that whole gate ladder + inline core rides
+        // the clauses.c SRF-inliner seam (the function-call node universe + the
+        // SQL-function parse/rewrite path are not reachable here).
+        let funcquery = {
+            // Snapshot the RTE for the seam (a shallow clone is enough; the seam
+            // reads rtekind/funcordinality/functions).
+            let rte_snapshot = rte_shallow_clone(mcx, &parse.rtable[i])?;
+            backend_optimizer_util_clauses_seams::inline_set_returning_function::call(
+                mcx,
+                root,
+                &rte_snapshot,
+            )?
+        };
+
+        if let Some(funcquery) = funcquery {
+            // Successful expansion, convert the RTE to a subquery.
+            let rte = &mut parse.rtable[i];
+            rte.rtekind = RTEKind::RTE_SUBQUERY;
+            rte.subquery = Some(alloc_in(mcx, funcquery)?);
+            rte.security_barrier = false;
+
+            // Clear fields that should not be set in a subquery RTE. We leave
+            // rte->functions filled in for the moment, in case makeWholeRowVar
+            // needs to consult it; setrefs.c clears it later.
+            rte.funcordinality = false;
         }
     }
     Ok(())
 }
 
-/// `expand_virtual_generated_columns(root)` (prepjointree.c:991). FAMILY 6: expand
-/// virtual generated column references. Until F6 lands this is a no-op on queries
-/// with no RTE_RELATION carrying virtual generated columns; the actual detection
-/// needs `table_open`/`RelationGetDescr` (relcache), so we panic if any
-/// RTE_RELATION is present (we cannot prove the no-op without the relcache).
-fn expand_virtual_generated_columns<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &mut PlannerInfo,
-    parse: Query<'mcx>,
-) -> PgResult<Query<'mcx>> {
-    for rte in parse.rtable.iter() {
-        if rte.rtekind == RTEKind::RTE_RELATION {
-            panic!(
-                "expand_virtual_generated_columns: prepjointree FAMILY 6 (virtual generated \
-                 column expansion) not yet ported — needs table_open/RelationGetDescr to detect \
-                 has_generated_virtual (separate lane)"
-            );
+/// `eval_const_expressions(root, (Node *) rte->functions)` over a single
+/// `RangeTblFunction` node, folding its `funcexpr`. The C folds the whole list
+/// at once; per-element folding is the faithful analogue for the typed list.
+fn eval_const_expressions_in_rtfunc<'mcx>(
+    mcx: Mcx<'mcx>,
+    func: &mut NodePtr<'mcx>,
+) -> PgResult<()> {
+    if let Node::RangeTblFunction(rtf) = &mut **func {
+        if let Some(fe) = rtf.funcexpr.take() {
+            // funcexpr is a Node holding an Expr; fold the Expr.
+            let node = PgBox::into_inner(fe);
+            if let Node::Expr(e) = node {
+                let folded = backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, e)?;
+                rtf.funcexpr = Some(alloc_in(mcx, Node::Expr(folded))?);
+            } else {
+                rtf.funcexpr = Some(alloc_in(mcx, node)?);
+            }
         }
     }
+    Ok(())
+}
+
+/// `expand_virtual_generated_columns(root)` (prepjointree.c:969). Scan the
+/// rangetable for relations with virtual generated columns and replace all Var
+/// nodes referencing those columns with their generation expressions.
+///
+/// Returns a (possibly) modified copy of the query (the C returns `parse`,
+/// wholesale-replaced by `pullup_replace_vars` whenever any relation expands).
+pub fn expand_virtual_generated_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    mut parse: Query<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let mut rt_index = 0i32;
+    let n = parse.rtable.len();
+    for lc in 0..n {
+        rt_index += 1;
+
+        // Only normal relations can have virtual generated columns.
+        if parse.rtable[lc].rtekind != RTEKind::RTE_RELATION {
+            continue;
+        }
+
+        let relid = parse.rtable[lc].relid;
+
+        // `table_open(rte->relid, NoLock)` + `RelationGetDescr` + the per-attr
+        // `build_generation_expression` / `makeVar` targetlist construction ride
+        // the relcache + rewriter seam (build_generation_expression is unported,
+        // and the bare loop cannot prove the no-op without opening the relation).
+        // Returns None when the relation has no virtual generated columns.
+        let tlist = backend_optimizer_prep_prepjointree_seams::build_virtual_generated_columns_tlist::call(
+            mcx, root, relid, rt_index,
+        )?;
+
+        let tlist = match tlist {
+            None => continue,
+            Some(t) => t,
+        };
+
+        debug_assert!(!tlist.is_empty());
+        debug_assert!(!parse.rtable[lc].lateral);
+
+        // The relation's targetlist items are now in the appropriate form to
+        // insert into the query, except that we may need to wrap them in
+        // PlaceHolderVars. Set up required context data for pullup_replace_vars.
+        let target_rte: PgBox<'mcx, RangeTblEntry<'mcx>> =
+            alloc_in(mcx, rte_shallow_clone(mcx, &parse.rtable[lc])?)?;
+
+        let tlist_len = tlist.len();
+        let mut rvcontext = PullupReplaceVarsContext {
+            targetlist: tlist,
+            target_rte,
+            result_relation: parse.resultRelation,
+            // won't need these values
+            relids: None,
+            nullinfo: None,
+            varno: rt_index,
+            // this flag will be set below, if needed
+            wrap_option: ReplaceWrapOption::None,
+            rv_cache: rv_cache_new(tlist_len),
+        };
+
+        // If the query uses grouping sets, we need a PlaceHolderVar for each
+        // expression of the relation's targetlist items.
+        if !parse.groupingSets.is_empty() {
+            rvcontext.wrap_option = ReplaceWrapOption::All;
+        }
+
+        // Apply pullup variable replacement throughout the query tree.
+        // (pass NULL for outer_hasSubLinks)
+        let mut outer_has_sublinks: Option<bool> = None;
+        perform_pullup_replace_vars(
+            mcx,
+            root,
+            &mut parse,
+            &mut rvcontext,
+            &mut outer_has_sublinks,
+            None,
+        )?;
+
+        // table_close(rel, NoLock) — handled inside the seam.
+    }
+
     Ok(parse)
+}
+
+/// `pull_up_simple_values(root, jtnode, rte)` (prepjointree.c:1947).
+fn pull_up_simple_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    jtnode: Node<'mcx>,
+    varno: i32,
+) -> PgResult<Node<'mcx>> {
+    debug_assert_eq!(parse.rtable[(varno - 1) as usize].rtekind, RTEKind::RTE_VALUES);
+    debug_assert_eq!(parse.rtable[(varno - 1) as usize].values_lists.len(), 1);
+
+    // Need a modifiable copy of the VALUES list to hack on, just in case it's
+    // multiply referenced. `linitial(rte->values_lists)` is a `Node::List` of
+    // expressions; copy it.
+    let values_list: PgVec<'mcx, NodePtr<'mcx>> = {
+        let first = &parse.rtable[(varno - 1) as usize].values_lists[0];
+        match &**first {
+            Node::List(items) => {
+                let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+                out.try_reserve(items.len()).map_err(|_| mcx.oom(items.len()))?;
+                for it in items.iter() {
+                    out.push(alloc_in(mcx, it.clone_in(mcx)?)?);
+                }
+                out
+            }
+            other => {
+                // Single-expression VALUES row carried as a bare node.
+                let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+                out.push(alloc_in(mcx, other.clone_in(mcx)?)?);
+                out
+            }
+        }
+    };
+
+    // The VALUES RTE can't contain any Vars of level zero, let alone any that
+    // are join aliases, so no need to flatten join alias Vars.
+    debug_assert!(!nodelist_contains_vars_of_level(&values_list, 0));
+
+    // Set up required context data for pullup_replace_vars. In particular, we
+    // have to make the VALUES list look like a subquery targetlist.
+    let mut tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    tlist.try_reserve(values_list.len()).map_err(|_| mcx.oom(values_list.len()))?;
+    let mut attrno: i32 = 1;
+    for item in values_list.iter() {
+        let expr = match &**item {
+            Node::Expr(e) => e.clone_in(mcx)?,
+            _ => {
+                return Err(types_error::PgError::error(
+                    "pull_up_simple_values: VALUES item is not an expression",
+                ));
+            }
+        };
+        tlist.push(make_target_entry(mcx, expr, attrno as AttrNumber, None, false)?);
+        attrno += 1;
+    }
+
+    let target_rte: PgBox<'mcx, RangeTblEntry<'mcx>> =
+        alloc_in(mcx, rte_shallow_clone(mcx, &parse.rtable[(varno - 1) as usize])?)?;
+
+    let tlist_len = tlist.len();
+    let mut rvcontext = PullupReplaceVarsContext {
+        targetlist: tlist,
+        target_rte,
+        result_relation: 0,
+        // can't be any lateral references here
+        relids: None,
+        nullinfo: None,
+        varno,
+        wrap_option: ReplaceWrapOption::None,
+        rv_cache: rv_cache_new(tlist_len),
+    };
+
+    // outer_hasSubLinks is &parse->hasSubLinks.
+    let mut outer_has_sublinks: Option<bool> = Some(parse.hasSubLinks);
+
+    // Replace all of the top query's references to the RTE's outputs with copies
+    // of the adjusted VALUES expressions, being careful not to replace any of the
+    // jointree structure. We can assume there's no outer joins or appendrels in
+    // the dummy Query that surrounds a VALUES RTE.
+    perform_pullup_replace_vars(
+        mcx,
+        root,
+        parse,
+        &mut rvcontext,
+        &mut outer_has_sublinks,
+        None,
+    )?;
+    if let Some(v) = outer_has_sublinks {
+        parse.hasSubLinks = v;
+    }
+
+    // There should be no appendrels to fix, nor any outer joins and hence no
+    // PlaceHolderVars.
+    debug_assert!(root.append_rel_list.is_empty());
+
+    // Replace the VALUES RTE with a RESULT RTE. The VALUES RTE is the only rtable
+    // entry in the current query level, so this is easy.
+    debug_assert_eq!(parse.rtable.len(), 1);
+
+    // Create suitable RTE.
+    let mut new_rte = RangeTblEntry::new_in(mcx);
+    new_rte.rtekind = RTEKind::RTE_RESULT;
+    new_rte.eref = Some(alloc_in(mcx, make_alias(mcx, "*RESULT*")?)?);
+
+    // Replace rangetable.
+    let mut new_rtable: PgVec<'mcx, RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
+    new_rtable.push(new_rte);
+    parse.rtable = new_rtable;
+
+    // We could manufacture a new RangeTblRef, but the one we have is fine.
+    debug_assert_eq!(varno, 1);
+
+    Ok(jtnode)
+}
+
+/// `is_simple_values(root, rte)` (prepjointree.c:2044). Check a VALUES RTE in
+/// the range table to see if it's simple enough to pull up into the parent.
+fn is_simple_values<'mcx>(root: &PlannerInfo, parse: &Query<'mcx>, rte: &RangeTblEntry<'mcx>) -> bool {
+    debug_assert_eq!(rte.rtekind, RTEKind::RTE_VALUES);
+
+    // There must be exactly one VALUES list, else it's not semantically correct
+    // to replace the VALUES RTE with a RESULT RTE, nor would we have a unique set
+    // of expressions to substitute into the parent query.
+    if rte.values_lists.len() != 1 {
+        return false;
+    }
+
+    // Because VALUES can't appear under an outer join (or at least, we won't try
+    // to pull it up if it does), we need not worry about LATERAL, nor about
+    // validity of PHVs for the VALUES' outputs.
+
+    // Don't pull up a VALUES that contains any set-returning or volatile
+    // functions. The considerations here are basically identical to the
+    // restrictions on a pull-able subquery's targetlist.
+    if nodelist_expression_returns_set(&rte.values_lists)
+        || nodelist_contain_volatile_functions(&rte.values_lists).unwrap_or(true)
+    {
+        return false;
+    }
+
+    // Do not pull up a VALUES that's not the only RTE in its parent query. This
+    // is actually the only case that the parser will generate at the moment, and
+    // assuming this is true greatly simplifies pull_up_simple_values().
+    let _ = root;
+    if parse.rtable.len() != 1 {
+        return false;
+    }
+    // `rte != (RangeTblEntry *) linitial(root->parse->rtable)` — identity check;
+    // since rtable.len()==1, the only RTE is the first one, and the caller passed
+    // the sole RTE, so the identity always holds here.
+
+    true
+}
+
+/// `pull_up_constant_function(root, jtnode, rte, containing_appendrel)`
+/// (prepjointree.c:2103). Pull up an `RTE_FUNCTION` expression that was
+/// simplified to a constant.
+fn pull_up_constant_function<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &mut Query<'mcx>,
+    jtnode: Node<'mcx>,
+    varno: i32,
+    containing_appendrel: Option<usize>,
+) -> PgResult<Node<'mcx>> {
+    // Fail if the RTE has ORDINALITY — we don't implement that here.
+    if parse.rtable[(varno - 1) as usize].funcordinality {
+        return Ok(jtnode);
+    }
+
+    // Fail if RTE isn't a single, simple Const expr.
+    if parse.rtable[(varno - 1) as usize].functions.len() != 1 {
+        return Ok(jtnode);
+    }
+
+    // `rtf = linitial_node(RangeTblFunction, rte->functions)`; read its fields.
+    let (funcexpr, funccolcount, has_colnames): (Expr, i32, bool) = {
+        let func0 = &parse.rtable[(varno - 1) as usize].functions[0];
+        let rtf = match &**func0 {
+            Node::RangeTblFunction(rtf) => rtf,
+            _ => {
+                return Err(types_error::PgError::error(
+                    "pull_up_constant_function: RTE function is not a RangeTblFunction",
+                ));
+            }
+        };
+        // `if (!IsA(rtf->funcexpr, Const)) return jtnode;`
+        let fe_node = match rtf.funcexpr.as_deref() {
+            Some(n) => n,
+            None => return Ok(jtnode),
+        };
+        let fe = match fe_node {
+            Node::Expr(e) => e,
+            _ => return Ok(jtnode),
+        };
+        if !matches!(fe, Expr::Const(_)) {
+            return Ok(jtnode);
+        }
+        (fe.clone_in(mcx)?, rtf.funccolcount, !rtf.funccolnames.is_empty())
+    };
+
+    // If the function's result is not a scalar, we punt.
+    if funccolcount != 1 {
+        return Ok(jtnode); // definitely composite
+    }
+
+    // If it has a coldeflist, it certainly returns RECORD.
+    if has_colnames {
+        return Ok(jtnode); // must be a one-column RECORD type
+    }
+
+    // `functypclass = get_expr_result_type(rtf->funcexpr, &funcrettype, &tupdesc);`
+    let resolved = backend_utils_fmgr_funcapi::result_type::get_expr_result_type(
+        mcx,
+        Some(&Node::Expr(funcexpr.clone_in(mcx)?)),
+    )?;
+    if resolved.class != Some(types_nodes::funcapi::TypeFuncClass::Scalar) {
+        return Ok(jtnode); // must be a one-column composite type
+    }
+
+    // Create context for applying pullup_replace_vars.
+    let mut tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    tlist.push(make_target_entry(
+        mcx,
+        funcexpr,
+        1, /* resno */
+        None, /* resname */
+        false, /* resjunk */
+    )?);
+
+    let target_rte: PgBox<'mcx, RangeTblEntry<'mcx>> =
+        alloc_in(mcx, rte_shallow_clone(mcx, &parse.rtable[(varno - 1) as usize])?)?;
+
+    let tlist_len = tlist.len();
+    let mut rvcontext = PullupReplaceVarsContext {
+        targetlist: tlist,
+        target_rte,
+        result_relation: 0,
+        // Since this function was reduced to a Const, it doesn't contain any
+        // lateral references, even if it's marked as LATERAL.
+        relids: None,
+        nullinfo: None,
+        varno,
+        wrap_option: ReplaceWrapOption::None,
+        rv_cache: rv_cache_new(tlist_len),
+    };
+
+    // If the parent query uses grouping sets, we need a PlaceHolderVar for each
+    // expression of the subquery's targetlist items.
+    if !parse.groupingSets.is_empty() {
+        rvcontext.wrap_option = ReplaceWrapOption::All;
+    }
+
+    // Replace all of the top query's references to the RTE's output with copies
+    // of the funcexpr, being careful not to replace any of the jointree
+    // structure.
+    let mut outer_has_sublinks: Option<bool> = Some(parse.hasSubLinks);
+    perform_pullup_replace_vars(
+        mcx,
+        root,
+        parse,
+        &mut rvcontext,
+        &mut outer_has_sublinks,
+        containing_appendrel,
+    )?;
+    if let Some(v) = outer_has_sublinks {
+        parse.hasSubLinks = v;
+    }
+
+    // Convert the RTE to be RTE_RESULT type, signifying that we don't need to
+    // scan it anymore, and zero out RTE_FUNCTION-specific fields. Also make sure
+    // the RTE is not marked LATERAL, since elsewhere we don't expect RTE_RESULTs
+    // to be LATERAL.
+    {
+        let rte = &mut parse.rtable[(varno - 1) as usize];
+        rte.rtekind = RTEKind::RTE_RESULT;
+        rte.functions = PgVec::new_in(mcx);
+        rte.lateral = false;
+    }
+
+    // We can reuse the RangeTblRef node.
+    Ok(jtnode)
+}
+
+/// `makeTargetEntry((Expr *) expr, resno, resname, resjunk)` (makefuncs.c).
+fn make_target_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Expr,
+    resno: AttrNumber,
+    resname: Option<&str>,
+    resjunk: bool,
+) -> PgResult<types_nodes::primnodes::TargetEntry<'mcx>> {
+    Ok(types_nodes::primnodes::TargetEntry {
+        expr: Some(alloc_in(mcx, expr)?),
+        resno,
+        resname: match resname {
+            Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+            None => None,
+        },
+        ressortgroupref: 0,
+        resorigtbl: types_core::primitive::Oid::default(),
+        resorigcol: 0,
+        resjunk,
+    })
+}
+
+/// `makeAlias(aliasname, NIL)` (makefuncs.c) — an `Alias` with the given name and
+/// no column aliases.
+fn make_alias<'mcx>(mcx: Mcx<'mcx>, aliasname: &str) -> PgResult<types_nodes::rawnodes::Alias<'mcx>> {
+    Ok(types_nodes::rawnodes::Alias {
+        aliasname: Some(mcx::PgString::from_str_in(aliasname, mcx)?),
+        colnames: PgVec::new_in(mcx),
+    })
+}
+
+/// `expression_returns_set((Node *) list)` over a `Vec<NodePtr>` (a VALUES
+/// list-of-lists). The walker recurses into `List` nodes.
+fn nodelist_expression_returns_set(list: &PgVec<NodePtr>) -> bool {
+    for item in list.iter() {
+        if node_expression_returns_set(item) {
+            return true;
+        }
+    }
+    false
+}
+
+fn node_expression_returns_set(node: &Node) -> bool {
+    match node {
+        Node::List(items) => {
+            for it in items.iter() {
+                if node_expression_returns_set(it) {
+                    return true;
+                }
+            }
+            false
+        }
+        Node::Expr(e) => backend_nodes_core::nodefuncs::expression_returns_set(Some(e)),
+        _ => false,
+    }
+}
+
+/// `contain_volatile_functions((Node *) list)` over a `Vec<NodePtr>` (a VALUES
+/// list-of-lists).
+fn nodelist_contain_volatile_functions(list: &PgVec<NodePtr>) -> PgResult<bool> {
+    for item in list.iter() {
+        if contain_volatile_functions_node(item)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `contain_vars_of_level((Node *) list, level)` over a `Vec<NodePtr>`.
+fn nodelist_contains_vars_of_level(list: &PgVec<NodePtr>, level: i32) -> bool {
+    for item in list.iter() {
+        if node_contains_vars_of_level(item, level) {
+            return true;
+        }
+    }
+    false
+}
+
+fn node_contains_vars_of_level(node: &Node, level: i32) -> bool {
+    match node {
+        Node::List(items) => {
+            for it in items.iter() {
+                if node_contains_vars_of_level(it, level) {
+                    return true;
+                }
+            }
+            false
+        }
+        other => contain_vars_of_level(other, level),
+    }
 }
 
 // ===========================================================================
