@@ -371,6 +371,7 @@ pub fn init_all() {
     backend_utils_adt_network_selfuncs::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();
+    backend_utils_adt_pg_locale::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
     backend_utils_adt_quote::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
@@ -1596,7 +1597,17 @@ mod recurrence_guard {
         ("backend_commands_trigger", "tg_newtuple"),
         ("backend_commands_trigger", "trigger_constraint"),
         ("backend_commands_trigger", "trigger_constrrelid"),
+        ("backend_commands_trigger", "trigger_constrindid"),
         ("backend_commands_trigger", "trigger_name"),
+        // The live trigger carriers `commands/constraint.c`'s unique_key_recheck
+        // drives (the heap Relation + the OLD/NEW slot TID). Owned by the per-row
+        // AFTER-trigger firing substrate (AfterTriggerExecute re-resolves the
+        // Relation / materializes the slots), which is not yet ported — the
+        // firing engine builds the TriggerData with tg_relation/tg_trigslot/
+        // tg_newslot NULL and loud-panics on the per-row fetch. Install + DELETE
+        // when that substrate lands.
+        ("backend_commands_trigger", "tg_relation"),
+        ("backend_commands_trigger", "slot_tid"),
         ("backend_commands_trigger", "slot_attisnull"),
         ("backend_commands_trigger", "slot_is_current_xact_tuple"),
         ("backend_commands_trigger", "slot_getattr"),

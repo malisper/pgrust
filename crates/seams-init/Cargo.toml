@@ -367,6 +367,7 @@ backend-utils-adt-network-gist = { path = "../backend-utils-adt-network-gist" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-adt-pg-locale = { path = "../backend-utils-adt-pg-locale" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }
