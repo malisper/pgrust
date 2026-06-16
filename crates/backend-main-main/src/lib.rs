@@ -116,6 +116,11 @@ pub fn pg_main(mcx: Mcx<'static>, argv: &[&str]) -> PgResult<MainOutcome> {
 
     let progname = get_progname::call(argv.first().copied().unwrap_or(""));
 
+    // Store `progname` in the process globals home so the read-only `progname`
+    // seam (read by process_postgres_switches' bad-argument FATAL hint) can
+    // serve it; C keeps it in the `const char *progname` global.
+    backend_utils_init_small::globals::set_progname(progname.clone());
+
     // Platform-specific startup hacks (Windows only; a no-op here).
     startup_hacks(&progname);
 
@@ -299,6 +304,9 @@ pub fn ubsan_default_options() -> String {
 /// Install this unit's inward seams (`parse_dispatch_option`).
 pub fn init_seams() {
     backend_main_main_seams::parse_dispatch_option::set(parse_dispatch_option);
+    // `progname` (main.c global): read-only accessor served from the process
+    // globals home, where `pg_main` stores it after `get_progname(argv[0])`.
+    backend_tcop_postgres_seams::progname::set(backend_utils_init_small::globals::progname);
 }
 
 #[cfg(test)]

@@ -157,6 +157,23 @@ fn cluster_name_impl() -> String {
 /// those slots (falling back to the C `boot_val` while a slot is unset).
 pub fn init_seams() {
     backend_utils_misc_guc_tables_seams::cluster_name::set(cluster_name_impl);
+    // `PostPortNumber` (postmaster.c GUC) — served from the GUC slot it lives
+    // in (read by the lock-file writer via the port-path seam). Until the GUC
+    // machinery installs the slot, the C `boot_val` (DEF_PGPORT == 5432)
+    // applies — the same boot-val fallback `cluster_name_impl` uses.
+    backend_port_path_seams::post_port_number::set(post_port_number_impl);
+}
+
+/// `PostPortNumber` (guc_tables.c) — the runtime value of the `port` integer
+/// GUC. Falls back to the C `boot_val` (`DEF_PGPORT` == 5432) while the slot is
+/// unset (e.g. single-user mode that never configures a listen port).
+fn post_port_number_impl() -> i32 {
+    if vars::PostPortNumber.installed() {
+        vars::PostPortNumber.read()
+    } else {
+        // boot_val for `port` (guc_tables.c) is DEF_PGPORT (5432).
+        5432
+    }
 }
 
 #[cfg(test)]

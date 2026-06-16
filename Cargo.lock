@@ -10811,6 +10811,7 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-error",
+ "backend-utils-init-small",
  "backend-utils-misc-help-config",
  "backend-utils-misc-more",
  "backend-utils-mmgr-mcxt-seams",
@@ -19789,6 +19790,7 @@ dependencies = [
 name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
+ "backend-port-path-seams",
  "backend-utils-misc-guc-tables-seams",
  "types-error",
  "types-guc",

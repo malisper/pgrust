@@ -19,6 +19,9 @@ backend-utils-error = { path = "../backend-utils-error" }
 # Inward seam this unit OWNS (parse_dispatch_option).
 backend-main-main-seams = { path = "../backend-main-main-seams" }
 
+# Process globals home (stores `progname` for the read-only `progname` seam).
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+
 # Real ported subprograms reached by the dispatch switch.
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-utils-misc-help-config = { path = "../backend-utils-misc-help-config" }

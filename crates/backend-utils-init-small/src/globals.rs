@@ -486,6 +486,12 @@ thread_local! {
     /// database's primary directory, ie, its directory in the default
     /// tablespace.
     static DATABASE_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+
+    /// `const char *progname;` (main.c global) — the program name, set once at
+    /// startup by `get_progname(argv[0])`. Read for the bad-command-line FATAL
+    /// hint. The repo's main.c port computes it as a local; this global stands
+    /// in for the C process global so the `progname` seam can serve it.
+    static PROGNAME: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn MyClientSocket() -> Option<ClientSocket> {
@@ -556,6 +562,17 @@ pub fn TakeMyLatch() -> Option<Arc<Latch>> {
 
 pub fn DataDir() -> Option<String> {
     DATA_DIR.with_borrow(Clone::clone)
+}
+
+/// `progname` (main.c global): the program name. Returns an empty string
+/// before `set_progname` runs (mirroring a NULL/empty global read).
+pub fn progname() -> String {
+    PROGNAME.with_borrow(|p| p.clone().unwrap_or_default())
+}
+
+/// Set `progname` from `get_progname(argv[0])` at startup.
+pub fn set_progname(value: String) {
+    PROGNAME.replace(Some(value));
 }
 
 pub fn SetDataDir(value: Option<String>) {

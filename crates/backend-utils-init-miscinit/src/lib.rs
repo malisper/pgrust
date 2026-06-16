@@ -27,6 +27,7 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR, FATAL,
 };
 
+mod boot_paths;
 mod lockfile;
 mod process;
 mod startup_paths;
@@ -976,6 +977,20 @@ pub fn init_seams() {
     backend_common_exec_seams::set_pglocale_pgservice::set(
         startup_paths::set_pglocale_pgservice,
     );
+    // The path-computing tail of InitStandaloneProcess (find_my_exec /
+    // get_pkglib_path), homed in `boot_paths` next to the other tiny
+    // `common/`/`port/` boot helpers.
+    backend_common_exec_seams::resolve_standalone_paths::set(
+        boot_paths::resolve_standalone_paths,
+    );
+    // The small `src/port/path.c` + libc helpers miscinit's path/lock-file work
+    // reaches, homed in `boot_paths`. (`post_port_number` is owned where the GUC
+    // tables live and installed from there.)
+    backend_port_path_seams::make_absolute_path::set(boot_paths::make_absolute_path);
+    backend_port_path_seams::first_dir_separator::set(boot_paths::first_dir_separator_pub);
+    backend_port_path_seams::getppid::set(boot_paths::getppid);
+    backend_port_path_seams::pid_appears_live::set(boot_paths::pid_appears_live);
+    backend_port_path_seams::touch_file_times::set(boot_paths::touch_file_times);
     common_username_seams::get_user_name_or_exit::set(startup_paths::get_user_name_or_exit);
 }
 
