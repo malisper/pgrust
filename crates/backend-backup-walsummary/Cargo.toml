@@ -21,4 +21,4 @@ types-walsummarizer = { path = "../types-walsummarizer" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
-common-blkreftable-seams = { path = "../common-blkreftable-seams" }
+common-blkreftable = { path = "../common-blkreftable" }

@@ -3754,7 +3754,7 @@ dependencies = [
  "backend-backup-walsummary-seams",
  "backend-storage-file-fd-seams",
  "backend-utils-error",
- "common-blkreftable-seams",
+ "common-blkreftable",
  "libc",
  "mcx",
  "seam-core",
