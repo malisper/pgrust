@@ -226,6 +226,8 @@ backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }
 backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
 backend-libpq-be-secure-common = { path = "../backend-libpq-be-secure-common" }
+backend-libpq-be-secure = { path = "../backend-libpq-be-secure" }
+backend-libpq-be-secure-openssl = { path = "../backend-libpq-be-secure-openssl" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
@@ -284,6 +286,8 @@ backend-parser-analyze = { path = "../backend-parser-analyze" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-parser-gram-core = { path = "../backend-parser-gram-core" }
 backend-port-atomics = { path = "../backend-port-atomics" }
+backend-port-sysv-sema = { path = "../backend-port-sysv-sema" }
+backend-port-sysv-shmem = { path = "../backend-port-sysv-shmem" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
@@ -332,6 +336,7 @@ backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
 backend-storage-ipc-sinval = { path = "../backend-storage-ipc-sinval" }
+backend-storage-ipc-waiteventset = { path = "../backend-storage-ipc-waiteventset" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
 backend-storage-large-object = { path = "../backend-storage-large-object" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
