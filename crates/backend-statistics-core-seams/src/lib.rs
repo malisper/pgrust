@@ -24,15 +24,15 @@ seam_core::seam!(
     /// SEAMED, not in-crate: its body needs `multi_sort_init` /
     /// `multi_sort_add_dimension` / `build_sorted_items` /
     /// `multi_sort_compare_dim(s)` (extended_stats.c) plus per-column
-    /// `lookup_type_cache(...)->lt_opr` over the `VacAttrStats` matrix inside the
-    /// opaque `StatsBuildData`. It can `elog(ERROR, "cache lookup failed for
-    /// ordering operator ...")`, so the failure surface is carried on `Err`.
+    /// `lookup_type_cache(...)->lt_opr` over the `VacAttrStats` matrix carried by
+    /// the (now real) `StatsBuildData`. It can `elog(ERROR, "cache lookup failed
+    /// for ordering operator ...")`, so the failure surface is carried on `Err`.
     ///
     /// `dependency` is the array of `k` zero-based column indexes into the
     /// statistics object (NOT yet translated to attnums; the owner translates
     /// via `data->attnums[dependency[i]]`).
-    pub fn dependency_degree(
-        data: types_statistics::StatsBuildDataHandle,
+    pub fn dependency_degree<'mcx>(
+        data: &types_statistics::StatsBuildData<'mcx>,
         k: i32,
         dependency: &[types_core::AttrNumber],
     ) -> types_error::PgResult<f64>
@@ -62,8 +62,8 @@ seam_core::seam!(
     /// matrices) plus per-column `lookup_type_cache(...)->lt_opr` and the
     /// multi-sort comparator machinery — all in the not-yet-ported extended-stats
     /// build framework. Returns `None` when nothing was built (C `NULL`).
-    pub fn statext_mcv_build(
-        data: types_statistics::StatsBuildDataHandle,
+    pub fn statext_mcv_build<'mcx>(
+        data: &types_statistics::StatsBuildData<'mcx>,
         totalrows: f64,
         stattarget: i32,
     ) -> types_error::PgResult<Option<types_statistics::MCVList>>
@@ -216,9 +216,9 @@ seam_core::seam!(
     ///
     /// `combination` is the array of `k` zero-based column indexes into the
     /// statistics object (NOT yet translated to attnums).
-    pub fn ndistinct_for_combination(
+    pub fn ndistinct_for_combination<'mcx>(
         totalrows: f64,
-        data: types_statistics::StatsBuildDataHandle,
+        data: &types_statistics::StatsBuildData<'mcx>,
         k: i32,
         combination: &[i32],
     ) -> types_error::PgResult<f64>

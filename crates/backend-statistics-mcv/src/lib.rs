@@ -53,7 +53,7 @@ use types_core::Oid;
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_statistics::{
-    DimensionInfo, MCVItem, MCVList, StatsBuildDataHandle, STATS_MAX_DIMENSIONS,
+    DimensionInfo, MCVItem, MCVList, StatsBuildData, STATS_MAX_DIMENSIONS,
     STATS_MCVLIST_MAX_ITEMS, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC,
 };
 
@@ -184,12 +184,13 @@ pub fn get_mincount_for_mcv_list(samplerows: i32, totalrows: f64) -> f64 {
 ///
 /// SEAMED, not in-crate: the build kernel needs `build_mss` /
 /// `build_sorted_items` / `build_distinct_groups` / `build_column_frequencies`
-/// over the opaque `StatsBuildData` (the `VacAttrStats` matrix and `Datum`/`bool`
-/// value matrices in the not-yet-ported extended-stats build framework, plus the
-/// multi-sort support). Mirrors how the dependencies sibling seamed
-/// `dependency_degree`. Returns `None` when nothing was built (C `NULL`).
-pub fn statext_mcv_build(
-    data: StatsBuildDataHandle,
+/// over the real `StatsBuildData` carrier (the `VacAttrStats` matrix and
+/// `Datum`/`bool` value matrices) plus the multi-sort support, all owned by the
+/// not-yet-ported extended-stats build framework. Mirrors how the dependencies
+/// sibling seamed `dependency_degree`. Returns `None` when nothing was built
+/// (C `NULL`).
+pub fn statext_mcv_build<'mcx>(
+    data: &StatsBuildData<'mcx>,
     totalrows: f64,
     stattarget: i32,
 ) -> PgResult<Option<MCVList>> {
