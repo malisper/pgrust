@@ -493,6 +493,13 @@ fn flush_relations_all_buffers(
     BufferManager::global_expect().FlushRelationsAllBuffers(&locators)
 }
 
+/// `FlushRelationBuffers(rel)` installed seam (bufmgr.c) — flush every dirty
+/// buffer of the one relation. The owned relcache mirror carries the relation's
+/// `rd_locator`, which is all `FlushRelationBuffers` needs.
+fn flush_relation_buffers(rel: &types_rel::Relation) -> types_error::PgResult<()> {
+    BufferManager::global_expect().FlushRelationBuffers(&rel.rd_locator)
+}
+
 // --- lifecycle + relation-size seams (bufmgr.c) ---------------------------
 
 /// `UnlockBuffers()` installed seam (bufmgr.c) — release the in-progress
@@ -644,6 +651,7 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::flush_relations_all_buffers::set(
         flush_relations_all_buffers,
     );
+    backend_storage_buffer_bufmgr_seams::flush_relation_buffers::set(flush_relation_buffers);
     // F5: the per-backend checkpoint/bgwriter statistics counters — no-op
     // installs (behaviour-neutral, same posture as F2's count_buffer_write /
     // count_io_op_extend until the pgstat owner ports).

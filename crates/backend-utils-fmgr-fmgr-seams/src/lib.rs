@@ -169,6 +169,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PG_GETARG_INT64(n)` (fmgr.h): decode argument `n` as an `int8`.
+    pub fn pg_getarg_int64(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> i64
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_BOOL(n)` (fmgr.h): decode argument `n` as a `bool`.
+    pub fn pg_getarg_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> bool
+);
+
+seam_core::seam!(
+    /// `PG_RETURN_INT64(v)` (fmgr.h): clear `fcinfo->isnull` and return the
+    /// 64-bit integer as a `Datum`.
+    pub fn pg_return_int64(fcinfo: &mut FunctionCallInfoBaseData<'_>, v: i64) -> DatumWord
+);
+
+seam_core::seam!(
+    /// `PG_RETURN_DATUM(v)` (fmgr.h): clear `fcinfo->isnull` and return the
+    /// `Datum` unchanged (used for composite-row results
+    /// `HeapTupleGetDatum(...)`).
+    pub fn pg_return_datum(fcinfo: &mut FunctionCallInfoBaseData<'_>, v: DatumWord) -> DatumWord
+);
+
+seam_core::seam!(
     /// `PG_RETURN_BOOL(b)` (fmgr.h): clear `fcinfo->isnull` and return the
     /// boolean as a `Datum`.
     pub fn pg_return_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, b: bool) -> DatumWord

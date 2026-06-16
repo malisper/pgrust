@@ -1,0 +1,56 @@
+[package]
+name = "backend-commands-sequence"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_sequence"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }
+backend-access-sequence-seams = { path = "../backend-access-sequence-seams" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
+backend-access-common-bufmask-seams = { path = "../backend-access-common-bufmask-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-storage-page = { path = "../backend-storage-page" }
+backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-catalog = { path = "../types-catalog" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-wal = { path = "../types-wal" }
+types-acl = { path = "../types-acl" }
+types-datum = { path = "../types-datum" }

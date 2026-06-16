@@ -16,7 +16,9 @@ backend-access-transam-parallel-seams = { path = "../backend-access-transam-para
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
@@ -40,6 +42,7 @@ backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 types-acl = { path = "../types-acl" }
+types-cluster = { path = "../types-cluster" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }

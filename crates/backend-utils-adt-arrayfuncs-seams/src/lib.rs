@@ -302,6 +302,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array_builtin(names, n, NAMEOID)` (arrayfuncs.c), the array
+    /// half of `current_schemas` (name.c). Each input element is the
+    /// `NAMEDATALEN`-byte, NUL-padded `NameData` image of one schema name (the
+    /// `name` Datum the C `DirectFunctionCall1(namein, ...)` produced); the
+    /// elements are pass-by-reference fixed-length `name` values. An empty
+    /// input yields a zero-element array (not NULL). The result is the array
+    /// varlena's raw bytes allocated in `mcx`, so the caller can carry it on
+    /// the canonical by-reference `Datum`. `Err` carries the `MaxAllocSize` /
+    /// OOM `ereport(ERROR)` surface.
+    pub fn build_name_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[&[u8]],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// The element-deconstruct + per-element `OutputFunctionCall` walk of
     /// `array_to_text_internal` (arrayfuncs.c / varlena.c:5130-5178): given the
     /// already-detoasted array varlena bytes (`DatumGetArrayTypeP(v)` — the

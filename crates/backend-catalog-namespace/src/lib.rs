@@ -132,6 +132,15 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(
         crate::RangeVarGetRelidMaintainsTable,
     );
+    backend_catalog_namespace_seams::range_var_get_relid_from_text::set(
+        seam_range_var_get_relid_from_text,
+    );
+    backend_catalog_namespace_seams::range_var_get_and_check_creation_namespace::set(
+        seam_range_var_get_and_check_creation_namespace,
+    );
+    backend_catalog_namespace_seams::range_var_get_relid_owns_seq::set(
+        seam_range_var_get_relid_owns_seq,
+    );
     backend_catalog_namespace_seams::lookup_explicit_namespace::set(crate::LookupExplicitNamespace);
     backend_catalog_namespace_seams::funcname_get_candidates::set(seam_funcname_get_candidates);
     backend_catalog_namespace_seams::opername_get_candidates::set(seam_opername_get_candidates);
@@ -161,6 +170,7 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_ts_parser_oid::set(seam_get_ts_parser_oid);
     backend_catalog_namespace_seams::get_ts_template_oid::set(seam_get_ts_template_oid);
     backend_catalog_namespace_seams::get_statistics_object_oid::set(seam_get_statistics_object_oid);
+    backend_catalog_namespace_seams::fetch_search_path::set(crate::fetch_search_path);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
@@ -627,6 +637,102 @@ pub fn RangeVarGetRelidMaintainsTable(
             RangeVarCallbackMaintainsTable(relation, rel_id, old_rel_id)
         };
     RangeVarGetRelidExtended(mcx, relation, lockmode, 0, Some(&mut callback))
+}
+
+/* ===========================================================================
+ * K1 owned-tree `RangeVar` node bridges + the three sequence.c-facing seams.
+ *
+ * The namespace owner still consumes `types_tuple::access::RangeVar` (the
+ * non-lifetime, owned-string struct that `RangeVarGetRelid{,Extended}` and
+ * `RangeVarGetAndCheckCreationNamespace` operate on). The K1 owned-tree node
+ * `types_nodes::rawnodes::RangeVar<'mcx>` carries the same fields; we copy
+ * them into the access struct so the existing core functions resolve it.
+ * ======================================================================== */
+
+/// Faithful field copy of a K1 owned-tree `RangeVar` node into the access-layer
+/// `RangeVar` the namespace core consumes. `relname` is never NULL in a
+/// well-formed parse node; `alias` is irrelevant to the lookup (the core never
+/// reads it), so it is dropped.
+fn rangevar_from_node(rv: &types_nodes::rawnodes::RangeVar<'_>) -> RangeVar {
+    RangeVar {
+        catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
+        schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
+        relname: rv
+            .relname
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+        inh: rv.inh,
+        relpersistence: rv.relpersistence as u8,
+        location: rv.location,
+        ..RangeVar::default()
+    }
+}
+
+/// `RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(name)),
+/// lockmode, missing_ok)` (the SQL-function relation-name-to-OID idiom).
+fn seam_range_var_get_relid_from_text(
+    mcx: Mcx<'_>,
+    name: &str,
+    lockmode: LOCKMODE,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    /* textToQualifiedNameList(textval) — split the (possibly qualified) name
+     * on '.' per SplitIdentifierString, downcasing/dequoting. */
+    let parts = varlena_seams::text_to_qualified_name_list::call(mcx, name.as_bytes())?;
+    let names: Vec<Option<String>> =
+        parts.iter().map(|p| Some(p.as_str().to_string())).collect();
+    let relation = makeRangeVarFromNameList(&names)?;
+    RangeVarGetRelid(mcx, &relation, lockmode, missing_ok)
+}
+
+/// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`
+/// (sequence.c `DefineSequence` if_not_exists pre-check) over the K1 node.
+fn seam_range_var_get_and_check_creation_namespace(
+    relation: &types_nodes::rawnodes::RangeVar<'_>,
+) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("RangeVarGetAndCheckCreationNamespace");
+    let mut rv = rangevar_from_node(relation);
+    let mut existing_relid: Oid = InvalidOid;
+    RangeVarGetAndCheckCreationNamespace(
+        scratch.mcx(),
+        &mut rv,
+        NoLock,
+        Some(&mut existing_relid),
+    )?;
+    Ok(existing_relid)
+}
+
+/// `RangeVarGetRelidExtended(relation, ShareRowExclusiveLock,
+/// missing_ok ? RVR_MISSING_OK : 0, RangeVarCallbackOwnsRelation, NULL)`
+/// (sequence.c `AlterSequence` open-and-own-check) over the K1 node.
+///
+/// The `RangeVarCallbackOwnsRelation` callback is tablecmds.c's, not the
+/// namespace's; this bridge only marshals (the callback's only input from the
+/// `RangeVar` is `relname`) and delegates to the tablecmds owner via its seam.
+fn seam_range_var_get_relid_owns_seq(
+    relation: &types_nodes::rawnodes::RangeVar<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("RangeVarGetRelidOwnsSeq");
+    let mcx = scratch.mcx();
+    let rv = rangevar_from_node(relation);
+    let flags = if missing_ok { RVR_MISSING_OK } else { 0 };
+    let mut callback =
+        |relation: &RangeVar, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
+            backend_commands_tablecmds_seams::range_var_callback_owns_relation::call(
+                relation.relname.as_str(),
+                rel_id,
+                old_rel_id,
+            )
+        };
+    RangeVarGetRelidExtended(
+        mcx,
+        &rv,
+        types_storage::lock::ShareRowExclusiveLock,
+        flags,
+        Some(&mut callback),
+    )
 }
 
 /// `RangeVarGetRelidExtended` — given a `RangeVar` describing an existing

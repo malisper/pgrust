@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
@@ -289,6 +289,47 @@ seam_core::seam!(
     /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
     pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>
 );
+seam_core::seam!(
+    /// `fetch_search_path(includeImplicit)` (namespace.c): the active search
+    /// path as a list of namespace OIDs, copied into `mcx` (C: `list_copy`).
+    /// The implicitly-prepended namespaces are included only when
+    /// `include_implicit` is true. An empty path is an empty list (C: `NIL`).
+    /// `Err` carries the `recomputeNamespacePath` / temp-namespace-creation
+    /// `ereport(ERROR)` surface and OOM.
+    pub fn fetch_search_path<'mcx>(
+        mcx: Mcx<'mcx>,
+        include_implicit: bool,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
 // (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
 // function (guc.c:2246), not namespace.c's — and installed by the merged guc
 // owner. Consumers call it there.)
+
+
+
+seam_core::seam!(
+    /// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`
+    /// (namespace.c) — sequence.c `DefineSequence` if_not_exists pre-check.
+    /// Takes the K1 owned-tree `RangeVar` node (the node model CreateSeqStmt
+    /// carries). Returns any pre-existing relation OID (`InvalidOid` if none).
+    /// NOTE: the namespace owner is still on the legacy
+    /// `types_tuple::access::RangeVar` model and has not migrated to the K1
+    /// owned-tree node, so it cannot yet install this; this is the contract the
+    /// migrated owner will install. `Err` carries ACL/lookup ereports.
+    pub fn range_var_get_and_check_creation_namespace(
+        relation: &types_nodes::rawnodes::RangeVar<'_>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RangeVarGetRelidExtended(relation, ShareRowExclusiveLock,
+    /// missing_ok ? RVR_MISSING_OK : 0, RangeVarCallbackOwnsRelation, NULL)`
+    /// (namespace.c) — sequence.c `AlterSequence` open-and-own-check. Takes the
+    /// K1 owned-tree `RangeVar`. Returns `InvalidOid` when missing_ok and the
+    /// relation is absent. Same K1-node migration note as
+    /// `range_var_get_and_check_creation_namespace`.
+    pub fn range_var_get_relid_owns_seq(
+        relation: &types_nodes::rawnodes::RangeVar<'_>,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
