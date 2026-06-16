@@ -28,16 +28,17 @@ use types_storage::lock::XLTW_Oper;
 
 seam_core::seam!(
     /// `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (`access/valid.h`)
-    /// — does the tuple satisfy all `nkeys` scan keys? Owned by the heap AM scan
-    /// layer; SANCTIONED panic-until-keystone: the trimmed
-    /// [`types_tableam::scankey::ScanKeyData`] has no `sk_func`/`sk_argument`, so
-    /// the per-key comparison cannot run until the scan-key carrier keystone
-    /// (task #281) widens it. `nkeys == 0` (the executor seqscan path) never
-    /// reaches this seam. `Err` carries the comparison-function `ereport(ERROR)`.
+    /// — does the tuple satisfy all the scan keys (implicitly ANDed)? Owned by
+    /// the heap AM scan layer. Each key's `sk_func`/`sk_argument` drive the
+    /// per-key comparison (`FunctionCall2Coll`), so `mcx` is threaded through for
+    /// the tuple deform and the by-reference argument copies. `Err` carries the
+    /// comparison-function `ereport(ERROR)`. **Installed by
+    /// `backend-access-heap-heapam`.**
     pub fn heap_key_test<'mcx>(
+        mcx: Mcx<'mcx>,
         tuple: &FormedTuple<'mcx>,
         rel: &RelationData<'mcx>,
-        keys: &PgVec<'mcx, types_tableam::scankey::ScanKeyData>,
+        keys: &PgVec<'mcx, types_tableam::scankey::ScanKeyData<'mcx>>,
     ) -> PgResult<bool>
 );
 

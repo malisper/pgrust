@@ -30,12 +30,12 @@
 //! on a direction change collapses to resetting `rs_prefetch_block` to the
 //! current block.
 //!
-//! ## Scan keys (SANCTIONED)
+//! ## Scan keys
 //!
-//! The trimmed [`ScanKeyData`] carries no `sk_func`/`sk_argument`, so
-//! `HeapKeyTest` for `nkeys > 0` cannot run until the scan-key carrier keystone
-//! (task #281). It is declared as the [`heapam_seam::heap_key_test`] seam and
-//! panics until then; `nkeys == 0` (the executor seqscan path) is fully live.
+//! [`ScanKeyData`] carries the full `access/skey.h` key (`sk_func` +
+//! `sk_argument`), so [`heap_key_test`] (`HeapKeyTest`, `access/valid.h`)
+//! evaluates each key against a fetched tuple via `FunctionCall2Coll`. Installed
+//! as the [`heapam_seam::heap_key_test`] seam from this crate's `init_seams()`.
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::{
@@ -68,10 +68,11 @@ use backend_storage_page::{
     ItemIdIsNormal, ItemIdGetLength,
 };
 
-use backend_access_heap_heapam_seams as heapam_seam;
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
 use backend_storage_lmgr_predicate_seams as predicate_seam;
 use backend_access_common_syncscan_seams as syncscan_seam;
+use backend_utils_fmgr_fmgr_seams as fmgr_seam;
+use types_tableam::scankey::SK_ISNULL;
 use backend_access_heap_pruneheap_seams as prune_seam;
 use backend_utils_cache_relcache_seams as relcache_seam;
 use backend_utils_activity_pgstat_seams as pgstat_seam;
@@ -845,7 +846,7 @@ fn heapgettup<'mcx>(
                 if visible {
                     // skip any tuples that don't match the scan key
                     let matches = if nkeys > 0 {
-                        heap_key_test(&tuple, &sscan.rs_rd, &sscan.rs_key)?
+                        heap_key_test(mcx, &tuple, &sscan.rs_rd, &sscan.rs_key)?
                     } else {
                         true
                     };
@@ -961,7 +962,7 @@ fn heapgettup_pagemode<'mcx>(
 
             // skip any tuples that don't match the scan key
             let matches = if nkeys > 0 {
-                heap_key_test(&tuple, &sscan.rs_rd, &sscan.rs_key)?
+                heap_key_test(mcx, &tuple, &sscan.rs_rd, &sscan.rs_key)?
             } else {
                 true
             };
@@ -1001,16 +1002,77 @@ fn end_of_scan(sscan: &mut TableScanDescData<'_>) {
     scan.rs_inited = false;
 }
 
-/// `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, key)` (`access/valid.h`).
-/// SANCTIONED panic-until-keystone: the trimmed [`ScanKeyData`] has no
-/// `sk_func`/`sk_argument`, so the comparison cannot run until the scan-key
-/// carrier keystone (task #281). The seam panics; `nkeys == 0` never reaches it.
-fn heap_key_test<'mcx>(
+/// `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (`access/valid.h`)
+/// — test a heap tuple against an array of scan keys (implicitly ANDed),
+/// returning whether the tuple satisfies all of them. For each key: a
+/// `SK_ISNULL` key never matches; the keyed attribute is fetched with
+/// `heap_getattr` (a NULL attribute never matches); otherwise the comparison
+/// operator `FunctionCall2Coll(&sk_func, sk_collation, atp, sk_argument)` is
+/// invoked and its boolean result decides the match.
+pub(crate) fn heap_key_test<'mcx>(
+    mcx: Mcx<'mcx>,
     tuple: &FormedTuple<'mcx>,
-    rel: &Relation<'mcx>,
-    keys: &PgVec<'mcx, ScanKeyData>,
+    rel: &types_rel::RelationData<'mcx>,
+    keys: &[ScanKeyData<'mcx>],
 ) -> PgResult<bool> {
-    heapam_seam::heap_key_test::call(tuple, rel, keys)
+    // RelationGetDescr(rel).
+    let tupdesc = &rel.rd_att;
+    // Deform the tuple once and read each keyed attribute from the result
+    // (heap_getattr per key). heap_deform_tuple fills trailing columns beyond
+    // the stored natts with NULL, matching heap_getattr's missing-column path.
+    let deformed = backend_access_common_heaptuple::heap_deform_tuple(
+        mcx,
+        &tuple.tuple,
+        tupdesc,
+        &tuple.data,
+    )?;
+
+    for cur_key in keys {
+        if (cur_key.sk_flags & SK_ISNULL) != 0 {
+            return Ok(false);
+        }
+
+        // atp = heap_getattr(tuple, cur_key->sk_attno, tupdesc, &isnull);
+        // Heap scan keys reference user columns (sk_attno > 0). A column beyond
+        // the deformed array reads as NULL.
+        let idx = (cur_key.sk_attno - 1) as usize;
+        let (atp, isnull) = match deformed.get(idx) {
+            Some((v, n)) => (v.clone(), *n),
+            None => (types_tuple::backend_access_common_heaptuple::Datum::null(), true),
+        };
+
+        if isnull {
+            return Ok(false);
+        }
+
+        // test = FunctionCall2Coll(&cur_key->sk_func, cur_key->sk_collation,
+        //                          atp, cur_key->sk_argument);
+        let test = fmgr_seam::function_call2_coll_datum::call(
+            mcx,
+            cur_key.sk_func.fn_oid,
+            cur_key.sk_collation,
+            atp,
+            cur_key.sk_argument.clone(),
+        )?;
+
+        if !datum_get_bool(&test) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// `DatumGetBool(d)` — the low bit of the by-value word.
+#[inline]
+fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> bool {
+    use types_tuple::backend_access_common_heaptuple::Datum;
+    match d {
+        Datum::ByVal(w) => (*w & 1) != 0,
+        // A boolean comparison result is always by-value; any other arm is a
+        // wiring error in the comparison function.
+        _ => panic!("HeapKeyTest: comparison function returned a non-by-value Datum"),
+    }
 }
 
 // ===========================================================================
@@ -1025,7 +1087,7 @@ pub fn heap_beginscan<'mcx>(
     relation: Relation<'mcx>,
     snapshot: Option<SnapshotData>,
     nkeys: i32,
-    key: PgVec<'mcx, ScanKeyData>,
+    key: PgVec<'mcx, ScanKeyData<'mcx>>,
     parallel_scan: Option<std::sync::Arc<ParallelTableScanDescData>>,
     flags: u32,
 ) -> PgResult<std::boxed::Box<TableScanDescData<'mcx>>> {

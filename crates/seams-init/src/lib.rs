@@ -80,6 +80,7 @@ pub fn init_all() {
     backend_backup_server::init_seams();
     backend_backup_sink::init_seams();
     backend_backup_sink_support::init_seams();
+    backend_backup_throttle::init_seams();
     backend_bootstrap_bootstrap::init_seams();
     backend_catalog_catalog::init_seams();
     backend_catalog_storage::init_seams();
@@ -277,6 +278,7 @@ pub fn init_all() {
     backend_postmaster_checkpointer::init_seams();
     backend_postmaster_startup::init_seams();
     backend_postmaster_syslogger::init_seams();
+    backend_backup_walsummary::init_seams();
     backend_postmaster_walsummarizer::init_seams();
     backend_postmaster_walwriter::init_seams();
     backend_regex_core::init_seams();
