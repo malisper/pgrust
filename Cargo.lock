@@ -3786,6 +3786,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-heap-heapam-seams",
  "backend-access-index-indexam",
+ "backend-access-transam-xact-seams",
  "backend-catalog-catalog",
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",

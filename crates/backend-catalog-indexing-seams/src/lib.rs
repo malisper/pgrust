@@ -46,8 +46,9 @@ seam_core::seam!(
     /// is per-batch here rather than spanning batches, which is
     /// logic-invisible. `Err` carries the heap/index-mutation
     /// `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_depend(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_depend<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         forms: &[FormData_pg_depend],
     ) -> PgResult<()>
 );
@@ -127,8 +128,9 @@ seam_core::seam!(
     /// keeps the C batching (`MAX_CATALOG_MULTI_INSERT_BYTES`); the index-state
     /// lifecycle is per-batch here, which is logic-invisible. `Err` carries the
     /// heap/index-mutation `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_shdepend(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_shdepend<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         forms: &[FormData_pg_shdepend],
     ) -> PgResult<()>
 );
@@ -458,8 +460,9 @@ seam_core::seam!(
     /// caller-supplied row's `oid` is pre-allocated (the even-OID +
     /// wraparound-sort logic lives in the port). `Err` carries the heap/index
     /// mutation `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_enum(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_enum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         rows: &[types_catalog::pg_enum::PgEnumInsertRow],
     ) -> PgResult<()>
 );
