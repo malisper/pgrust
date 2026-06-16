@@ -91,6 +91,12 @@ pub use control_funcs::{
     XLogPutNextOid, XLogReportParameters, XLogRestorePoint,
 };
 
+pub mod startup;
+pub use startup::{
+    CheckRequiredParameterValues, CreateEndOfRecoveryRecord, CreateOverwriteContrecordRecord,
+    PerformRecoveryXLogAction, StartupXLOG, ValidateXLOGDirectoryStructure, XLogInitNewTimeline,
+};
+
 pub mod driver;
 pub use driver::{
     CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
@@ -647,8 +653,6 @@ macro_rules! xlog_driver_deferred {
 // `GetOldestRestartPoint`, `XLogGetReplicationSlotMinimumLSN`,
 // `XLogSetReplicationSlotMinimumLSN`, `XLogSetAsyncXactLSN`.
 xlog_driver_deferred! {
-    /// `StartupXLOG()` — the recovery + WAL-engine startup driver.
-    pub fn StartupXLOG();
     /// `ShutdownXLOG(code, arg)` — the WAL-engine shutdown driver.
     pub fn ShutdownXLOG(code: i32, arg: Datum<'static>);
     // `XLogPutNextOid`, `RequestXLogSwitch`, `XLogRestorePoint`,
@@ -789,6 +793,10 @@ pub fn init_seams() {
     // the XLogCtl / ControlFile shmem region). These front varsup (XLogPutNextOid),
     // the checkpointer (RequestXLogSwitch / UpdateFullPageWrites), and the
     // recovery driver (ReachedEndOfBackup / AllowCascadeReplication).
+    // `StartupXLOG()` — the WAL-engine startup driver (xlog.c). The startup
+    // process reaches it through the xlog-seams `startup_xlog` slot.
+    s::startup_xlog::set(startup::StartupXLOG);
+
     s::xlog_put_next_oid::set(control_funcs::XLogPutNextOid);
     s::request_xlog_switch::set(control_funcs::RequestXLogSwitch);
     s::update_full_page_writes::set(control_funcs::UpdateFullPageWrites);

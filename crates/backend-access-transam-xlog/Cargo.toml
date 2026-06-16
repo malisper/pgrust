@@ -32,9 +32,29 @@ backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xl
 backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
+# StartupXLOG driver cross-subsystem seams (all -seams crates, leaf deps).
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
+backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
+backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
+types-timeout = { path = "../types-timeout" }
 libc = "0.2"
 
 [dev-dependencies]
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
-backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
