@@ -135,6 +135,8 @@ pub fn init_seams() {
     fd_seams::file_size::set(vfd_io::FileSize);
     fd_seams::file_truncate::set(vfd_io::FileTruncate);
     fd_seams::file_path_name::set(vfd_io::FilePathName);
+    fd_seams::path_name_open_file::set(seams::path_name_open_file);
+    fd_seams::lstat_mtime::set(seams::lstat_mtime);
 
     // -- backend-storage-file-seams -----------------------------------------
     file_seams::with_allocated_dir::set(allocated_desc::with_allocated_dir);

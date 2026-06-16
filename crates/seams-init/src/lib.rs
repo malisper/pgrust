@@ -275,6 +275,7 @@ pub fn init_all() {
     backend_postmaster_checkpointer::init_seams();
     backend_postmaster_startup::init_seams();
     backend_postmaster_syslogger::init_seams();
+    backend_backup_walsummary::init_seams();
     backend_postmaster_walsummarizer::init_seams();
     backend_postmaster_walwriter::init_seams();
     backend_regex_core::init_seams();
