@@ -606,6 +606,16 @@ pub fn DataChecksumsEnabled() -> bool {
     unsafe { (*cf).data_checksum_version > 0 }
 }
 
+/// `ControlFile->checkPointCopy.{redo,ThisTimeLineID}` — the redo pointer + TLI
+/// of the last checkpoint/restartpoint recorded in the control file. The caller
+/// (`GetOldestRestartPoint`) holds `ControlFileLock`; this is the bare read.
+pub(crate) fn control_file_checkpoint_redo() -> (XLogRecPtr, TimeLineID) {
+    let cf = control_file_ptr();
+    debug_assert!(!cf.is_null());
+    // SAFETY: `cf` is the live `Control File` shmem image; lock held by caller.
+    unsafe { ((*cf).checkPointCopy.redo, (*cf).checkPointCopy.ThisTimeLineID) }
+}
+
 /// `GetDefaultCharSignedness()` (xlog.c:4649).
 pub fn GetDefaultCharSignedness() -> bool {
     let cf = control_file_ptr();
