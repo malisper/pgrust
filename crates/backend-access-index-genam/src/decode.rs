@@ -44,6 +44,7 @@ use types_catalog::pg_attribute::{
     Anum_pg_attribute_attcompression, Anum_pg_attribute_attgenerated,
     Anum_pg_attribute_atthasdef, Anum_pg_attribute_atthasmissing,
     Anum_pg_attribute_attidentity, Anum_pg_attribute_attinhcount,
+    Anum_pg_attribute_attmissingval,
     Anum_pg_attribute_attisdropped, Anum_pg_attribute_attislocal,
     Anum_pg_attribute_attlen, Anum_pg_attribute_attname,
     Anum_pg_attribute_attndims, Anum_pg_attribute_attnotnull,
@@ -62,7 +63,7 @@ use types_catalog::pg_class::{
     Anum_pg_class_relkind, Anum_pg_class_relminmxid, Anum_pg_class_relname,
     Anum_pg_class_relnamespace, Anum_pg_class_relnatts, Anum_pg_class_reloftype,
     Anum_pg_class_relowner, Anum_pg_class_relpages, Anum_pg_class_relpersistence,
-    Anum_pg_class_relreplident, Anum_pg_class_relrewrite,
+    Anum_pg_class_relreplident, Anum_pg_class_reloptions, Anum_pg_class_relrewrite,
     Anum_pg_class_relrowsecurity, Anum_pg_class_reltablespace,
     Anum_pg_class_reltoastrelid, Anum_pg_class_reltuples, Anum_pg_class_reltype,
 };
@@ -168,6 +169,22 @@ fn name_col(row: &[DeformedColumn<'_>], anum: i16, name: &str) -> PgResult<Strin
     Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
+/// A variable-length (by-reference) column read as its verbatim on-disk varlena
+/// bytes, or `None` for the C `isnull` (the `fastgetattr` result tested with
+/// `isnull`). Unlike [`col`], a NULL is not an error — variable-length tail
+/// columns (`reloptions`, `attmissingval`) are legitimately NULL. A column
+/// index past the deformed row's end is also treated as NULL (the C
+/// `heap_getattr` returns NULL for attributes beyond the stored tuple's
+/// natts).
+fn bytea_col_opt(row: &[DeformedColumn<'_>], anum: i16) -> Option<Vec<u8>> {
+    let idx = (anum - 1) as usize;
+    match row.get(idx) {
+        None => None,
+        Some((_, true)) => None,
+        Some((datum, false)) => Some(datum.as_ref_bytes().to_vec()),
+    }
+}
+
 // ===========================================================================
 // scan_pg_class — ScanPgRelation
 // ===========================================================================
@@ -240,6 +257,10 @@ fn decode_pg_class(row: &[DeformedColumn<'_>]) -> PgResult<seam::ScannedPgClass>
         relrewrite: col(row, Anum_pg_class_relrewrite, "relrewrite")?.as_oid(),
         relfrozenxid: col(row, Anum_pg_class_relfrozenxid, "relfrozenxid")?.as_u32(),
         relminmxid: col(row, Anum_pg_class_relminmxid, "relminmxid")?.as_u32(),
+        // The variable-length reloptions tail column (text[]): its verbatim
+        // varlena bytes, or None for the C isnull. RelationParseRelOptions feeds
+        // these to extractRelOptions.
+        reloptions: bytea_col_opt(row, Anum_pg_class_reloptions),
     })
 }
 
@@ -278,7 +299,7 @@ fn scan_pg_attribute(reloid: Oid, _natts: i16) -> PgResult<Vec<seam::ScannedPgAt
     let mut out = Vec::new();
     while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
         let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
-        out.push(decode_pg_attribute(&row)?);
+        out.push(decode_pg_attribute(smcx, &row)?);
     }
 
     scandesc.end()?;
@@ -287,33 +308,99 @@ fn scan_pg_attribute(reloid: Oid, _natts: i16) -> PgResult<Vec<seam::ScannedPgAt
     Ok(out)
 }
 
+/// `RelationBuildTupleDesc`'s `attmissingval` fetch (relcache.c): when the
+/// column has a missing value (`atthasmissing`), `heap_getattr(
+/// Anum_pg_attribute_attmissingval)` then `array_get_element(missingval, 1,
+/// &one, -1, attlen, attbyval, attalign)` extracts the single element. The
+/// `attmissingval` array is a 1-element 1-D array of the column's own type, so
+/// the element-1 fetch is element index 0 of the deconstructed array. Returns
+/// the element's value image (lifetime-free), or `None` for the C `missingNull`
+/// (no missing value for this column) — including the `atthasmissing`-false
+/// short-circuit.
+fn extract_attmissingval(
+    mcx: Mcx<'_>,
+    row: &[DeformedColumn<'_>],
+    atthasmissing: bool,
+    atttypid: Oid,
+    attlen: i16,
+    attbyval: bool,
+    attalign: i8,
+) -> PgResult<Option<types_tuple::heaptuple::MissingValueImage>> {
+    if !atthasmissing {
+        return Ok(None);
+    }
+    // missingval = heap_getattr(pg_attribute_tuple, Anum_pg_attribute_attmissingval,
+    //                           pg_attribute_desc->rd_att, &missingNull);
+    let bytes = match bytea_col_opt(row, Anum_pg_attribute_attmissingval) {
+        // if (missingNull) -> no missing value.
+        None => return Ok(None),
+        Some(b) => b,
+    };
+    // missval = array_get_element(missingval, 1, &one, -1, attlen, attbyval,
+    //                             attalign, &is_null);  Assert(!is_null);
+    // The single-element array is deconstructed; element 0 is the C "element 1".
+    let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes::call(
+        mcx, &bytes, atttypid, attlen, attbyval, attalign,
+    )?;
+    let (datum, is_null) = elems
+        .first()
+        .ok_or_else(|| PgError::error("attmissingval array has no element"))?;
+    // Assert(!is_null);
+    if *is_null {
+        return Err(PgError::error("attmissingval element is unexpectedly NULL"));
+    }
+    Ok(Some(types_tuple::heaptuple::MissingValueImage::from_datum(
+        datum,
+    )))
+}
+
 /// `GETSTRUCT(pg_attribute_tuple)` field-for-field into
 /// [`seam::ScannedPgAttribute`]. The `attrelid` column is read for the C-side
 /// sanity assert (`Assert(attp->attrelid == ...)`) but not carried (the
 /// relation owns its OID); reading it validates the row shape.
-fn decode_pg_attribute(row: &[DeformedColumn<'_>]) -> PgResult<seam::ScannedPgAttribute> {
+fn decode_pg_attribute<'mcx>(
+    mcx: Mcx<'mcx>,
+    row: &[DeformedColumn<'_>],
+) -> PgResult<seam::ScannedPgAttribute> {
     // Assert(attp->attrelid == RelationGetRelid(relation)) — validate presence.
     let _attrelid = col(row, Anum_pg_attribute_attrelid, "attrelid")?.as_oid();
+    let atttypid = col(row, Anum_pg_attribute_atttypid, "atttypid")?.as_oid();
+    let attlen = col(row, Anum_pg_attribute_attlen, "attlen")?.as_i16();
+    let attbyval = col(row, Anum_pg_attribute_attbyval, "attbyval")?.as_bool();
+    let attalign = col(row, Anum_pg_attribute_attalign, "attalign")?.as_char();
+    let atthasmissing =
+        col(row, Anum_pg_attribute_atthasmissing, "atthasmissing")?.as_bool();
     Ok(seam::ScannedPgAttribute {
         attname: name_col(row, Anum_pg_attribute_attname, "attname")?,
-        atttypid: col(row, Anum_pg_attribute_atttypid, "atttypid")?.as_oid(),
-        attlen: col(row, Anum_pg_attribute_attlen, "attlen")?.as_i16(),
+        atttypid,
+        attlen,
         attnum: col(row, Anum_pg_attribute_attnum, "attnum")?.as_i16(),
         atttypmod: col(row, Anum_pg_attribute_atttypmod, "atttypmod")?.as_i32(),
         attndims: col(row, Anum_pg_attribute_attndims, "attndims")?.as_i16(),
-        attbyval: col(row, Anum_pg_attribute_attbyval, "attbyval")?.as_bool(),
-        attalign: col(row, Anum_pg_attribute_attalign, "attalign")?.as_char(),
+        attbyval,
+        attalign,
         attstorage: col(row, Anum_pg_attribute_attstorage, "attstorage")?.as_char(),
         attcompression: col(row, Anum_pg_attribute_attcompression, "attcompression")?.as_char(),
         attnotnull: col(row, Anum_pg_attribute_attnotnull, "attnotnull")?.as_bool(),
         atthasdef: col(row, Anum_pg_attribute_atthasdef, "atthasdef")?.as_bool(),
-        atthasmissing: col(row, Anum_pg_attribute_atthasmissing, "atthasmissing")?.as_bool(),
+        atthasmissing,
         attidentity: col(row, Anum_pg_attribute_attidentity, "attidentity")?.as_char(),
         attgenerated: col(row, Anum_pg_attribute_attgenerated, "attgenerated")?.as_char(),
         attisdropped: col(row, Anum_pg_attribute_attisdropped, "attisdropped")?.as_bool(),
         attislocal: col(row, Anum_pg_attribute_attislocal, "attislocal")?.as_bool(),
         attinhcount: col(row, Anum_pg_attribute_attinhcount, "attinhcount")?.as_i16(),
         attcollation: col(row, Anum_pg_attribute_attcollation, "attcollation")?.as_oid(),
+        // If the column has a "missing" value, fetch + extract the single
+        // array element (relcache.c's attmissingval branch).
+        attmissingval: extract_attmissingval(
+            mcx,
+            row,
+            atthasmissing,
+            atttypid,
+            attlen,
+            attbyval,
+            attalign,
+        )?,
     })
 }
 
