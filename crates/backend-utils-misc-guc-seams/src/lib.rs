@@ -148,6 +148,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `work_mem` (guc.c global, KB): the per-operation working-memory limit.
+    /// Read by `ginInsertCleanup` (for a regular-insert cleanup) and other
+    /// memory-bounded operators.
+    pub fn work_mem() -> i32
+);
+
+seam_core::seam!(
+    /// `autovacuum_work_mem` (guc.c global, KB; `-1` means "use
+    /// maintenance_work_mem"): the memory limit an autovacuum worker uses.
+    /// Read by `ginInsertCleanup` when invoked from an autovacuum worker.
+    pub fn autovacuum_work_mem() -> i32
+);
+
+seam_core::seam!(
     /// `ProcessConfigFile(PGC_SIGHUP)` (guc.c): re-read postgresql.conf on a
     /// SIGHUP. `Err` carries a parse/apply `ereport(ERROR)`.
     pub fn process_config_file_sighup() -> types_error::PgResult<()>

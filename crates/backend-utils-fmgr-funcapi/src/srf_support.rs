@@ -295,13 +295,15 @@ pub fn per_MultiFuncCall<'mcx>(
     //   FuncCallContext *retval = (FuncCallContext *) fcinfo->flinfo->fn_extra;
     //   return retval;
     //
-    // The cross-call state lives in `fcinfo->flinfo->fn_extra`, which the
-    // trimmed call frame does not carry. Mirror PG and panic (lands with the
-    // fmgr call frame widening here).
+    // The call frame now carries `flinfo` (`Option<FmgrInfo>`), but the owned
+    // `FmgrInfo` (types_core::fmgr) does NOT model the `fn_extra` handler
+    // scratch slot the C cross-call state lives in — there is no typed
+    // `FuncCallContext` carrier on `flinfo` to read back. Mirror PG and panic
+    // until `FmgrInfo` grows a typed `fn_extra` (FuncCallContext) slot.
     panic!(
-        "per_MultiFuncCall: the FuncCallContext in fcinfo->flinfo->fn_extra is \
-         not reachable from the trimmed call frame; widen the fmgr call frame \
-         (flinfo) here"
+        "per_MultiFuncCall: the cross-call FuncCallContext lives in \
+         flinfo->fn_extra, which the owned FmgrInfo does not model; add a typed \
+         fn_extra (FuncCallContext) slot to FmgrInfo here"
     )
 }
 
@@ -371,15 +373,15 @@ pub fn srf_arg0_oid<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Option<Oid
     //   #define PG_ARGISNULL(n)  (fcinfo->args[n].isnull)
     //   #define PG_GETARG_OID(n) DatumGetObjectId(fcinfo->args[n].value)
     //
-    // The read needs `fcinfo->args[0]` (value + isnull), which the trimmed call
-    // frame does not carry (it holds only `resultinfo`). Mirror PG and panic at
-    // the call-frame boundary (lands with the fmgr call frame's `args`/`isnull`
-    // widening here).
-    let _ = fcinfo;
-    panic!(
-        "srf_arg0_oid: fcinfo->args[0] (value/isnull) is not reachable from the \
-         trimmed call frame; widen the fmgr call frame (args/isnull) here"
-    )
+    // The call frame now carries `args` (`Vec<NullableDatum>`); read
+    // `args[0]` directly: a NULL argument means "no filter" (`None`),
+    // otherwise read the Oid out of the by-value Datum word.
+    let arg0 = &fcinfo.args[0];
+    if arg0.isnull {
+        None
+    } else {
+        Some(arg0.value.as_oid())
+    }
 }
 
 /// `CStringGetTextDatum(s)` — build a `text *` Datum from a string in `mcx`
