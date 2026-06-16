@@ -11088,9 +11088,14 @@ dependencies = [
  "backend-commands-tablespace-seams",
  "backend-storage-file-fd",
  "backend-storage-file-fileset-seams",
+ "backend-storage-file-sharedfileset-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-lmgr-s-lock",
  "backend-utils-init-small-seams",
+ "backend-utils-mmgr-mcxt-seams",
  "common-hashfn",
  "types-core",
+ "types-datum",
  "types-error",
  "types-execparallel",
  "types-storage",
@@ -11131,6 +11136,7 @@ name = "backend-storage-file-sharedfileset-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-execparallel",
  "types-storage",
 ]
