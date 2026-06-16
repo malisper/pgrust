@@ -11,6 +11,9 @@
 //!  * `relation_is_updatable` (backend-rewrite-rewritehandler-seams) — the
 //!    auto-updatable-view event probe (consumers: misc.c
 //!    `pg_relation_is_updatable` / `pg_column_is_updatable`).
+//!  * `query_rewrite_canonical` (backend-rewrite-rewritehandler-seams) — the
+//!    value-typed `QueryRewrite` entry. The legacy opaque `query_rewrite`
+//!    contract is installed as a precise K1 panic boundary.
 
 use mcx::{Mcx, PgBox, PgString};
 use types_core::Oid;
@@ -34,9 +37,23 @@ pub fn init_seams() {
     );
     backend_rewrite_rewritehandler_seams::get_view_query::set(seam_get_view_query);
     backend_rewrite_rewritehandler_seams::relation_is_updatable::set(relation_is_updatable);
+    backend_rewrite_rewritehandler_seams::query_rewrite::set(seam_query_rewrite_legacy);
     backend_rewrite_rewritehandler_seams::query_rewrite_canonical::set(
         seam_query_rewrite_canonical,
     );
+}
+
+/// Legacy opaque `portalcmds::Query` entry. Collapsing this contract into the
+/// canonical value-typed `Query` belongs to K1 query unification, not this port.
+fn seam_query_rewrite_legacy<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _query: types_nodes::portalcmds::Query,
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::portalcmds::Query>> {
+    panic!(
+        "rewriteHandler legacy query_rewrite over portalcmds::Query reached: \
+         blocked on K1 Query-unification debt; use query_rewrite_canonical once \
+         parser/planner callers carry types_nodes::copy_query::Query"
+    )
 }
 
 /// `QueryRewrite(parsetree)` (rewriteHandler.c:4566) — the canonical top-level

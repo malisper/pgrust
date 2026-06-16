@@ -1720,20 +1720,11 @@ pub fn fireRIRrules<'mcx>(
     Ok(parsetree)
 }
 
-/// Whether the query has any RLS-capable relation RTE (plain/partitioned table)
-/// — the trigger for the RLS pass at the tail of `fireRIRrules`. We only need to
-/// know whether to run that (unported) pass. Faithfully, the C runs the pass for
-/// every such RTE; `get_row_security_policies` returns empty quals when RLS is
-/// disabled. Since we cannot call it, we conservatively run the spine only when
-/// there is RLS in play. The repo cannot yet observe per-table RLS enablement, so
-/// we treat the presence of such an RTE as "may need RLS" only when the query was
-/// flagged `hasRowSecurity` already; otherwise the pass is a no-op and we skip it.
-fn has_any_rls_relation(_parsetree: &Query<'_>) -> bool {
-    // The pass is a no-op unless a policy exists; the repo can't probe policies
-    // across a seam yet. Treat as no-op (the common spine has no RLS). When RLS
-    // is actually configured, the executor still enforces it; the rewriter pass
-    // being skipped only affects RLS-on-rewrite, an out-of-spine path.
-    false
+/// Whether the query has already been flagged as needing row-security handling.
+/// The policy expansion owner is not ported, so a flagged query must stop here
+/// instead of silently skipping the RLS rewrite pass.
+fn has_any_rls_relation(parsetree: &Query<'_>) -> bool {
+    parsetree.hasRowSecurity
 }
 
 // ===========================================================================

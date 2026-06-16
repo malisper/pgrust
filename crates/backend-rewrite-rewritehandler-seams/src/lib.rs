@@ -62,10 +62,8 @@ seam_core::seam!(
     /// `elog(ERROR)`s on a missing/malformed `_RETURN` rule, carried on `Err`.
     ///
     /// rewriteHandler.c's `get_view_query` reads `view->rd_rules`, the relcache
-    /// rewrite-rule array, which the ported `RelationData` does not yet model —
-    /// so this stays a seam-and-panic until rewriteHandler's view-rule access
-    /// lands. (Owner dir `backend-rewrite-rewritehandler` does not resolve to a
-    /// crate, so the seam-install guard does not require it to be installed.)
+    /// rewrite-rule array; the ported owner installs this over the relcache
+    /// `relation_rules` projection.
     pub fn get_view_query<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         view: &types_rel::Relation<'mcx>,
@@ -92,8 +90,7 @@ seam_core::seam!(
     /// `None` for the relation-level probe (C `NULL`) and `Some(col)` for the
     /// single-column probe (C `bms_make_singleton(col)`); `outer_reloids` is the
     /// C `NIL` recursion guard, always empty for the SQL-callable entry points.
-    /// Walks the view rewrite tree; can `ereport(ERROR)`. Owner unported, so this
-    /// panics until rewriteHandler lands.
+    /// Walks the view rewrite tree; can `ereport(ERROR)`.
     pub fn relation_is_updatable(
         reloid: types_core::Oid,
         include_triggers: bool,
