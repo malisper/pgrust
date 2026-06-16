@@ -1,0 +1,37 @@
+[package]
+name = "backend-storage-aio-methods"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_aio_methods"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-condvar = { path = "../types-condvar" }
+types-tuple = { path = "../types-tuple" }
+types-guc = { path = "../types-guc" }
+backend-utils-error = { path = "../backend-utils-error" }
+# Inward seams this crate installs (aio_shmem_size/aio_shmem_init/pgaio_init_backend).
+backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+# Size arithmetic (add_size/mul_size), faithfully overflow-checked.
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+# MaxBackends / NBuffers / MyProcNumber / MyBackendType / MyProc presence.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# SetConfigOption (io_max_concurrency dynamic-default forcing).
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+# Live GUC store reads (io_max_concurrency / io_max_combine_limit / io_method),
+# returning the boot value before any owner installs its variable accessor.
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+# The io_method / io_max_concurrency GUC-table variable accessor + hook slots
+# this unit owns (mirroring aio.c's `int io_method` / `int io_max_concurrency`).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# before_shmem_exit (pgaio_shutdown registration at backend init).
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+
+[dev-dependencies]

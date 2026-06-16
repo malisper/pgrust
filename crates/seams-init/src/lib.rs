@@ -350,6 +350,7 @@ pub fn init_all() {
     backend_storage_buffer_support::init_seams();
     backend_storage_buffer_bufmgr::init_seams();
     backend_storage_aio_read_stream::init_seams();
+    backend_storage_aio_methods::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();
