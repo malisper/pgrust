@@ -176,10 +176,11 @@ fn form_text_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Datum<'mcx>> {
     let datalen = data.len();
     let image: alloc::vec::Vec<u8> = if datalen + VARHDRSZ_SHORT <= VARATT_SHORT_MAX {
         // SET_VARSIZE_SHORT(p, datalen + VARHDRSZ_SHORT): the 1-byte header is
-        // `((len << 1) & 0x7F) | 0x01`.
+        // `(len << 1) | 0x01` (SET_VARSIZE_1B, varatt.h:237). `total` is bounded
+        // by VARATT_SHORT_MAX (0x7F) on this branch, so the shifted length fits.
         let total = datalen + VARHDRSZ_SHORT;
         let mut v = alloc::vec::Vec::with_capacity(total);
-        v.push((((total as u8) << 1) & 0x7F) | 0x01);
+        v.push(((total as u8) << 1) | 0x01);
         v.extend_from_slice(data);
         v
     } else {
