@@ -13409,6 +13409,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-nodeFuncs-seams",
+ "backend-regex-core",
+ "backend-utils-adt-formatting",
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-numeric",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-jsonpath",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-gram-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
 name = "backend-utils-adt-lsn-trigfuncs"
 version = "0.0.0"
 dependencies = [
@@ -16956,6 +16984,14 @@ name = "types-jsonb"
 version = "0.0.0"
 dependencies = [
  "types-datum",
+]
+
+[[package]]
+name = "types-jsonpath"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
+ "types-jsonb",
 ]
 
 [[package]]
