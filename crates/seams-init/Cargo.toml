@@ -381,6 +381,13 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-utf8-and-big5 = { path = "../backend-conv-utf8-and-big5" }
+backend-conv-utf8-and-cyrillic = { path = "../backend-conv-utf8-and-cyrillic" }
+backend-conv-utf8-and-euc2004 = { path = "../backend-conv-utf8-and-euc2004" }
+backend-conv-utf8-and-euc-cn = { path = "../backend-conv-utf8-and-euc-cn" }
+backend-conv-utf8-and-euc-jp = { path = "../backend-conv-utf8-and-euc-jp" }
+backend-conv-utf8-and-euc-kr = { path = "../backend-conv-utf8-and-euc-kr" }
+backend-conv-utf8-and-euc-tw = { path = "../backend-conv-utf8-and-euc-tw" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }

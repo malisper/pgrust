@@ -6769,6 +6769,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-utf8-and-big5"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-cyrillic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-cn"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-jp"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-kr"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-tw"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc2004"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -18193,6 +18270,13 @@ dependencies = [
  "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
+ "backend-conv-utf8-and-big5",
+ "backend-conv-utf8-and-cyrillic",
+ "backend-conv-utf8-and-euc-cn",
+ "backend-conv-utf8-and-euc-jp",
+ "backend-conv-utf8-and-euc-kr",
+ "backend-conv-utf8-and-euc-tw",
+ "backend-conv-utf8-and-euc2004",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",

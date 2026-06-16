@@ -134,6 +134,13 @@ pub fn init_all() {
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_typecmds::init_seams();
+    backend_conv_utf8_and_big5::init_seams();
+    backend_conv_utf8_and_cyrillic::init_seams();
+    backend_conv_utf8_and_euc2004::init_seams();
+    backend_conv_utf8_and_euc_cn::init_seams();
+    backend_conv_utf8_and_euc_jp::init_seams();
+    backend_conv_utf8_and_euc_kr::init_seams();
+    backend_conv_utf8_and_euc_tw::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
     backend_executor_execExpr::init_seams();
