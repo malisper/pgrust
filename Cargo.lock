@@ -3619,6 +3619,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-sink-support"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "backend-utils-activity-small",
+ "backend-utils-activity-status-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -18649,6 +18662,7 @@ dependencies = [
  "backend-backup-basebackup-target",
  "backend-backup-server",
  "backend-backup-sink",
+ "backend-backup-sink-support",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
