@@ -1840,7 +1840,7 @@ mod recurrence_guard {
         // DESIGN_DEBT (TD-TABLECMDS-F1F6-UNPORTED): tablecmds.c is a 22k-LOC giant
         // ported in families. Only FAMILY F0 (relation create/drop/truncate +
         // on_commit + small helpers) is landed in `backend-commands-tablecmds`
-        // (audited). The eleven seams below are tablecmds.c functions belonging to
+        // (audited). The seams below are tablecmds.c functions belonging to
         // the not-yet-ported families F1-F6 (the ALTER phase machine, column /
         // constraint / ALTER TYPE / inheritance-partition / RENAME / SET SCHEMA /
         // change-owner machinery, and the sequence-create driver). They are
@@ -1856,7 +1856,12 @@ mod recurrence_guard {
         ("backend_commands_tablecmds", "AlterTableNamespace"),
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
         ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
-        ("backend_commands_tablecmds", "at_exec_change_owner"),
+        // `at_exec_change_owner` retired from this list: the ALTER-phase spine
+        // (FAMILY F1, now landed) `::call`s it from `ATExecCmd`'s AT_ChangeOwner
+        // arm, so the guard classifies it as an OUTWARD dependency seam of
+        // tablecmds (real owner = the still-unported ATExecChangeOwner body),
+        // not an uninstalled inward contract. It loud-panics until that body
+        // lands and installs it.
         ("backend_commands_tablecmds", "rename_relation_internal"),
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
         // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's

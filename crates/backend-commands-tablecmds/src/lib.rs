@@ -27,6 +27,8 @@
 
 #![allow(non_snake_case)]
 
+mod at_column;
+mod at_phase;
 mod create;
 mod drop;
 mod f1_rename;
@@ -34,6 +36,10 @@ mod helpers;
 mod oncommit;
 mod smallfns;
 mod truncate;
+
+pub use at_phase::{
+    AlterTable, AlterTableGetLockLevel, AlterTableInternal, AlterTableUtilityContext,
+};
 
 use backend_commands_tablecmds_seams as seam;
 
