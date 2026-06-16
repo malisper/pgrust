@@ -11,18 +11,25 @@
 //! `stanullfrac`s, and the `have_mcvs` flags).
 
 use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_datum::datum::Datum;
 use types_datum::NullableDatum;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
-    NodeId, PlannerInfo, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
+    NodeId, PlannerInfo, RelId, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER,
+    JOIN_LEFT, JOIN_SEMI,
 };
+use types_selfuncs::{AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
+use crate::STATISTIC_KIND_MCV;
+
+use backend_utils_cache_lsyscache_seams as lsc;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 
 use crate::clamp_probability;
-use crate::examine::get_join_variables;
+use crate::examine::{get_join_variables, release_variable_stats};
+use crate::scalar::{get_variable_numdistinct, statistic_proc_security_check, stats_tuple_stanullfrac};
 
 /// The MCV statistics one side of a join contributes to [`eqjoinsel_inner`] /
 /// [`eqjoinsel_semi`]: the `(values, numbers)` of the side's `AttStatsSlot`
@@ -278,45 +285,170 @@ pub fn eqjoinsel_semi(
  * eqjoinsel / neqjoinsel drivers (selfuncs.c:2279 / 2829)
  * ------------------------------------------------------------------------- */
 
+/// Build the `(AttStatsSlot, JoinSide)` for one join side, fetching its MCV
+/// slot when `get_mcv_stats` is set and the support function passes the security
+/// check. Mirrors the per-side block in C `eqjoinsel`: the slot is fetched only
+/// for the `ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS` request after the
+/// both-sides existence probe; `stanullfrac` is read regardless of the security
+/// check. The MCV slot is owned by the returned `AttStatsSlot` so the borrowed
+/// `JoinSide` slices stay valid for the kernel call.
+fn build_join_side<'mcx>(
+    mcx: Mcx<'mcx>,
+    vardata: &VariableStatData,
+    opfuncoid: Oid,
+    get_mcv_stats: bool,
+) -> PgResult<(Option<AttStatsSlot<'mcx>>, Option<f32>, bool)> {
+    let stats_tuple = match vardata.stats_tuple {
+        None => return Ok((None, None, false)),
+        Some(t) => t,
+    };
+    // note we allow use of nullfrac regardless of security check
+    let stanullfrac = Some(stats_tuple_stanullfrac(stats_tuple));
+    let mut have_mcvs = false;
+    let mut slot = None;
+    if get_mcv_stats && statistic_proc_security_check(vardata, opfuncoid)? {
+        slot = lsc::get_attstatsslot::call(
+            mcx,
+            stats_tuple,
+            STATISTIC_KIND_MCV,
+            InvalidOid,
+            ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
+        )?;
+        have_mcvs = slot.is_some();
+    }
+    Ok((slot, stanullfrac, have_mcvs))
+}
+
+/// `find_join_input_rel(root, relids)` (selfuncs.c, static) — the RelOptInfo for
+/// `relids`: the base rel for a singleton, else the join rel.
+fn find_join_input_rel(root: &PlannerInfo, relids: &Relids) -> RelId {
+    use backend_optimizer_util_relnode_seams as rel_seams;
+    if rel_seams::relids_is_empty::call(relids) {
+        panic!("could not find RelOptInfo for given relids");
+    }
+    if let Some(relid) = rel_seams::relids_get_singleton_member::call(relids) {
+        rel_seams::find_base_rel::call(root, relid)
+    } else {
+        rel_seams::find_join_rel::call(root, relids)
+            .expect("could not find RelOptInfo for given relids")
+    }
+}
+
 /// `eqjoinsel(PG_FUNCTION_ARGS)` (selfuncs.c) — join selectivity of `=`.
-///
 /// Orchestrates [`eqjoinsel_inner`] / [`eqjoinsel_semi`] over the two examined
-/// join variables. The variable examination (`get_join_variables`), the
-/// `GETSTRUCT` `stanullfrac` reads, and the MCV-slot fetches are all on the
-/// keystone-blocked stats-acquisition path (see [`crate::examine`]); this
-/// driver reaches that panic. The arithmetic kernels above are fully ported and
-/// run once the keystone lands.
+/// join variables. 1:1 with the C body.
 pub fn eqjoinsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     collation: Oid,
     sjinfo: &SpecialJoinInfo,
 ) -> PgResult<f64> {
-    let (_vardata1, _vardata2, _join_is_reversed) =
-        get_join_variables(mcx, root, args, sjinfo)?;
-    // get_join_variables panics on the keystone block before reaching here; the
-    // remaining orchestration (get_variable_numdistinct on each side, the MCV
-    // slot fetches with the get_mcv_stats both-sides guard, the GETSTRUCT
-    // stanullfrac reads, the JOIN_INNER/LEFT/FULL vs JOIN_SEMI/ANTI dispatch
-    // feeding eqjoinsel_inner / eqjoinsel_semi, and the semijoin clamp
-    // Min(selec, inner_rel->rows * selec_inner)) is structurally present in C
-    // and built entirely on those blocked stats reads.
-    let _ = (operator, collation);
-    let _ = (
-        JOIN_INNER, JOIN_LEFT, JOIN_FULL, JOIN_SEMI, JOIN_ANTI,
-    );
-    unreachable!("get_join_variables panics on the keystone block above")
+    let (vardata1, vardata2, join_is_reversed) = get_join_variables(mcx, run, root, args, sjinfo)?;
+
+    let (nd1, isdefault1) = get_variable_numdistinct(root, &vardata1);
+    let (nd2, isdefault2) = get_variable_numdistinct(root, &vardata2);
+
+    let opfuncoid = lsc::get_opcode::call(operator)?;
+
+    // There is no use fetching one side's MCVs if we lack MCVs for the other,
+    // so verify both stats exist (the C "get_mcv_stats" both-sides probe).
+    let get_mcv_stats = vardata1.stats_tuple.is_some()
+        && vardata2.stats_tuple.is_some()
+        && lsc::get_attstatsslot::call(
+            mcx,
+            vardata1.stats_tuple.unwrap(),
+            STATISTIC_KIND_MCV,
+            InvalidOid,
+            0,
+        )?
+        .is_some()
+        && lsc::get_attstatsslot::call(
+            mcx,
+            vardata2.stats_tuple.unwrap(),
+            STATISTIC_KIND_MCV,
+            InvalidOid,
+            0,
+        )?
+        .is_some();
+
+    let (slot1, stanullfrac1, have_mcvs1) =
+        build_join_side(mcx, &vardata1, opfuncoid, get_mcv_stats)?;
+    let (slot2, stanullfrac2, have_mcvs2) =
+        build_join_side(mcx, &vardata2, opfuncoid, get_mcv_stats)?;
+
+    let empty_v: &[Datum] = &[];
+    let empty_n: &[f32] = &[];
+    let side1 = JoinSide {
+        values: slot1.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v),
+        numbers: slot1.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n),
+        stanullfrac: stanullfrac1,
+        have_mcvs: have_mcvs1,
+    };
+    let side2 = JoinSide {
+        values: slot2.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v),
+        numbers: slot2.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n),
+        stanullfrac: stanullfrac2,
+        have_mcvs: have_mcvs2,
+    };
+
+    // We need to compute the inner-join selectivity in all cases.
+    let selec_inner =
+        eqjoinsel_inner(opfuncoid, collation, &side1, &side2, nd1, nd2)?;
+
+    let mut selec = match sjinfo.jointype {
+        JOIN_INNER | JOIN_LEFT | JOIN_FULL => selec_inner,
+        JOIN_SEMI | JOIN_ANTI => {
+            // Look up the join's inner relation (min_righthand is sufficient).
+            let inner_rel = find_join_input_rel(root, &sjinfo.min_righthand);
+            let inner_rel_rows = root.rel(inner_rel).rows;
+            let vardata2_rel_rows = vardata2.rel.map(|r| root.rel(r).rows);
+            let vardata1_rel_rows = vardata1.rel.map(|r| root.rel(r).rows);
+
+            let s = if !join_is_reversed {
+                eqjoinsel_semi(
+                    opfuncoid, collation, &side1, &side2, nd1, nd2, isdefault1, isdefault2,
+                    vardata2_rel_rows, inner_rel_rows,
+                )?
+            } else {
+                let commop = lsc::get_commutator::call(operator)?;
+                let commopfuncoid = if OidIsValid(commop) {
+                    lsc::get_opcode::call(commop)?
+                } else {
+                    InvalidOid
+                };
+                eqjoinsel_semi(
+                    commopfuncoid, collation, &side2, &side1, nd2, nd1, isdefault2, isdefault1,
+                    vardata1_rel_rows, inner_rel_rows,
+                )?
+            };
+            // Clamp Ssemi <= N2 * Sinner (a semijoin can't exceed the inner join).
+            s.min(inner_rel_rows * selec_inner)
+        }
+        other => {
+            return Err(types_error::PgError::error(alloc::format!(
+                "unrecognized join type: {}",
+                other as i32
+            )))
+        }
+    };
+
+    release_variable_stats(vardata1);
+    release_variable_stats(vardata2);
+
+    selec = clamp_probability(selec);
+    Ok(selec)
 }
 
 /// `neqjoinsel(PG_FUNCTION_ARGS)` (selfuncs.c) — join selectivity of `<>`.
 /// For SEMI/ANTI joins the estimate is `1 - nullfrac`; otherwise it is
-/// `1 - eqjoinsel(negator)`. Both branches go through `get_join_variables` /
-/// `eqjoinsel`, which are keystone-blocked.
+/// `1 - eqjoinsel(negator)`. 1:1 with the C body.
 pub fn neqjoinsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     jointype: types_pathnodes::JoinType,
@@ -324,19 +456,29 @@ pub fn neqjoinsel<'mcx>(
     sjinfo: &SpecialJoinInfo,
 ) -> PgResult<f64> {
     if jointype == JOIN_SEMI || jointype == JOIN_ANTI {
-        // 1 - nullfrac of the appropriate (reversed?) side.
-        let (_leftvar, _rightvar, _reversed) = get_join_variables(mcx, root, args, sjinfo)?;
-        unreachable!("get_join_variables panics on the keystone block above")
-    } else {
-        // 1 - eqjoinsel(negator).
-        use backend_utils_cache_lsyscache_seams as lsc;
-        let eqop = lsc::get_negator::call(operator)?;
-        if OidIsValid(eqop) {
-            let result = eqjoinsel(mcx, root, eqop, args, collation, sjinfo)?;
-            Ok(1.0 - result)
+        // Either way, the selectivity estimate is 1 - nullfrac.
+        let (leftvar, rightvar, reversed) = get_join_variables(mcx, run, root, args, sjinfo)?;
+        let stats_tuple = if reversed {
+            rightvar.stats_tuple
         } else {
-            // Use default selectivity.
-            Ok(1.0 - crate::DEFAULT_EQ_SEL)
-        }
+            leftvar.stats_tuple
+        };
+        let nullfrac = match stats_tuple {
+            Some(t) => stats_tuple_stanullfrac(t) as f64,
+            None => 0.0,
+        };
+        release_variable_stats(leftvar);
+        release_variable_stats(rightvar);
+        Ok(1.0 - nullfrac)
+    } else {
+        // We want 1 - eqjoinsel() where the operator is this !='s negator.
+        let eqop = lsc::get_negator::call(operator)?;
+        let result = if OidIsValid(eqop) {
+            eqjoinsel(mcx, run, root, eqop, args, collation, sjinfo)?
+        } else {
+            // Use default selectivity (should we raise an error instead?).
+            crate::DEFAULT_EQ_SEL
+        };
+        Ok(1.0 - result)
     }
 }

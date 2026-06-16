@@ -22,6 +22,7 @@ use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
 
@@ -54,9 +55,10 @@ seam_core::seam!(
     /// `args` is the operator's two-element argument `List *` as a borrowed
     /// slice of node handles. Outputs that allocate (the detoasted stats) live
     /// in `mcx`. `Err` carries the recognition path's `ereport(ERROR)`s and OOM.
-    pub fn get_restriction_variable<'mcx>(
+    pub fn get_restriction_variable<'mcx, 'run>(
         mcx: Mcx<'mcx>,
-        root: &PlannerInfo,
+        run: &PlannerRun<'run>,
+        root: &mut PlannerInfo,
         args: &[NodeId],
         var_relid: i32,
     ) -> PgResult<Option<(VariableStatData, Expr, bool)>>
@@ -81,9 +83,10 @@ seam_core::seam!(
     /// expression. Outputs that allocate (the detoasted stats) live in `mcx`.
     /// The caller releases the result via [`release_variable_stats`]. `Err`
     /// carries the recognition path's `ereport(ERROR)`s and OOM.
-    pub fn examine_variable<'mcx>(
+    pub fn examine_variable<'mcx, 'run>(
         mcx: Mcx<'mcx>,
-        root: &PlannerInfo,
+        run: &PlannerRun<'run>,
+        root: &mut PlannerInfo,
         node: NodeId,
         var_relid: i32,
     ) -> PgResult<VariableStatData>
@@ -126,9 +129,10 @@ seam_core::seam!(
     /// live in `mcx`. `Err` carries the examine path's `ereport(ERROR)`s and
     /// OOM. Used by the join-selectivity estimators (`eqjoinsel`,
     /// `networkjoinsel`, ...).
-    pub fn get_join_variables<'mcx>(
+    pub fn get_join_variables<'mcx, 'run>(
         mcx: Mcx<'mcx>,
-        root: &PlannerInfo,
+        run: &PlannerRun<'run>,
+        root: &mut PlannerInfo,
         args: &[NodeId],
         sjinfo: &SpecialJoinInfo,
     ) -> PgResult<(VariableStatData, VariableStatData, bool)>

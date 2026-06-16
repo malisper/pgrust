@@ -55,6 +55,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid, Selectivity};
 use types_datum::datum::Datum;
 use types_error::{PgError, PgResult, ERROR};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{
     VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES, STATISTIC_KIND_DECHIST,
@@ -238,9 +239,10 @@ fn element_compare(d1: Datum, d2: Datum, typentry: &ElemCmpInfo) -> PgResult<i32
  * `root` is the planner state; `leftop` / `rightop` are the planner node
  * handles for the operator's operands (C `Node *`).
  * =========================================================================== */
-pub fn scalararraysel_containment(
-    mcx: Mcx<'_>,
-    root: &PlannerInfo,
+pub fn scalararraysel_containment<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     leftop: NodeId,
     rightop: NodeId,
     elemtype: Oid,
@@ -253,7 +255,7 @@ pub fn scalararraysel_containment(
     /*
      * rightop must be a variable, else punt.
      */
-    let vardata = examine_variable::call(mcx, root, rightop, var_relid)?;
+    let vardata = examine_variable::call(mcx, run, root, rightop, var_relid)?;
     /* RAII: ReleaseVariableStats on every exit path below. */
     let vardata = VarStatsGuard::new(vardata);
     if vardata.data().rel.is_none() {
@@ -475,9 +477,10 @@ fn slot_numbers(numbers: &[f32]) -> Option<&[f32]> {
  * `root` is the planner state; `args` is the operator's argument `List *` as a
  * borrowed slice of planner node handles.
  * =========================================================================== */
-pub fn arraycontsel(
-    mcx: Mcx<'_>,
-    root: &PlannerInfo,
+pub fn arraycontsel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     mut operator: Oid,
     args: &[NodeId],
     var_relid: i32,
@@ -489,7 +492,7 @@ pub fn arraycontsel(
      * variable), then punt and return a default estimate.
      */
     let (vardata, other, varonleft) =
-        match get_restriction_variable::call(mcx, root, args, var_relid)? {
+        match get_restriction_variable::call(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => return Ok(default_sel(operator)),
         };
