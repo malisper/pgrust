@@ -137,4 +137,27 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 # ereport(LOG) for the legacy invalid-inner-tuple notice (elog.c).
 backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 
+# --- F7-xlog deps (gistxlog.c WAL redo + record builders) ---
+
+# Decoded WAL record carrier (XLogReaderState) and the InHotStandby helper.
+types-wal = { path = "../types-wal" }
+
+# Page masking for WAL consistency checking (bufmask.c).
+backend-access-common-bufmask-seams = { path = "../backend-access-common-bufmask-seams" }
+
+# WAL-recovery substrate (xlogutils.c): XLogReadBufferForRedo /
+# XLogInitBufferForRedo + the standbyState global accessor.
+backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
+
+# Decoded-record block-tag accessor (xlogreader.c).
+backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+
+# WAL-insert side (xloginsert.c): XLogBeginInsert / XLogRegister* / XLogInsert /
+# XLogSetRecordFlags for the record builders.
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+
+# Hot-Standby recovery-conflict resolution (standby.c): the delete / page-reuse
+# redo legs reach ResolveRecoveryConflictWithSnapshot{,FullXid}.
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+
 [dev-dependencies]
