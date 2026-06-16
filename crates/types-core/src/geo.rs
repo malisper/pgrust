@@ -62,6 +62,33 @@ pub struct CIRCLE {
     pub radius: f64,
 }
 
+impl CIRCLE {
+    /// `DatumGetCircleP(datum)` analogue: decode a `circle`'s by-reference image
+    /// (`struct CIRCLE { Point center; float8 radius; }`, native byte order, 24
+    /// bytes) into the owned value.
+    ///
+    /// Panics on a too-short image — a caller bug, as C would misread too.
+    #[inline]
+    pub fn from_datum_bytes(bytes: &[u8]) -> CIRCLE {
+        let mut radius = [0u8; 8];
+        radius.copy_from_slice(&bytes[16..24]);
+        CIRCLE {
+            center: Point::from_datum_bytes(&bytes[0..16]),
+            radius: f64::from_ne_bytes(radius),
+        }
+    }
+
+    /// `CirclePGetDatum(c)` analogue: serialize this circle to its by-reference
+    /// on-disk image (`struct CIRCLE`, native byte order, 24 bytes).
+    #[inline]
+    pub fn to_datum_bytes(&self) -> [u8; 24] {
+        let mut out = [0u8; 24];
+        out[0..16].copy_from_slice(&self.center.to_datum_bytes());
+        out[16..24].copy_from_slice(&self.radius.to_ne_bytes());
+        out
+    }
+}
+
 /// `offsetof(PATH, p)` (geo_decls.h:115) -- the size of the fixed PATH header
 /// (`vl_len_`, `npts`, `closed`, `dummy`: four `int32`s), before the flexible
 /// array of `Point`. Used by the `path_in`/`path_add` integer-overflow guards.

@@ -18,9 +18,11 @@
 //! (mirror-pg-and-panic).
 
 use mcx::Mcx;
+use types_core::primitive::Oid;
+use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
-use types_pathnodes::{NodeId, PlannerInfo};
+use types_pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
 
 seam_core::seam!(
@@ -111,4 +113,45 @@ seam_core::seam!(
     /// (syscache-owned) `pg_statistic` row the selectivity code only holds as an
     /// opaque [`StatsTuple`].
     pub fn stats_tuple_stanullfrac(stats_tuple: StatsTuple) -> f32
+);
+
+seam_core::seam!(
+    /// `get_join_variables(root, args, sjinfo, &vardata1, &vardata2,
+    /// &join_is_reversed)` (selfuncs.c): examine the two operands of a join
+    /// clause, filling the [`VariableStatData`] for each side and reporting
+    /// whether the join was syntactically reversed relative to `args`.
+    /// `args` is the operator's two-element argument `List *` as a borrowed
+    /// slice of node handles. The caller releases each result via
+    /// [`release_variable_stats`]. Outputs that allocate (the detoasted stats)
+    /// live in `mcx`. `Err` carries the examine path's `ereport(ERROR)`s and
+    /// OOM. Used by the join-selectivity estimators (`eqjoinsel`,
+    /// `networkjoinsel`, ...).
+    pub fn get_join_variables<'mcx>(
+        mcx: Mcx<'mcx>,
+        root: &PlannerInfo,
+        args: &[NodeId],
+        sjinfo: &SpecialJoinInfo,
+    ) -> PgResult<(VariableStatData, VariableStatData, bool)>
+);
+
+seam_core::seam!(
+    /// `mcv_selectivity(vardata, opproc, collation, constval, varOnLeft,
+    /// &sumcommon)` (selfuncs.c): for a variable with a most-common-values
+    /// list, add up the fractions of the MCV entries that satisfy
+    /// `MCV OP CONST` (or `CONST OP MCV`, per `var_on_left`), and separately
+    /// the total fraction the MCV list represents (`sumcommon`). Returns
+    /// `(mcv_selec, sumcommon)`; both are `0.0` when there is no MCV slot
+    /// (C: the `false` from `get_attstatsslot`). The C `FmgrInfo *opproc`
+    /// crosses as the operator's underlying function OID (`get_opcode` result),
+    /// which the owner re-resolves; `collation` is the input collation. The MCV
+    /// values are matched against the bare-word [`Datum`] `constval`. `Err`
+    /// carries the syscache / fmgr `ereport(ERROR)`s and OOM.
+    pub fn mcv_selectivity<'mcx>(
+        mcx: Mcx<'mcx>,
+        vardata: &VariableStatData,
+        opproc_oid: Oid,
+        collation: Oid,
+        constval: Datum,
+        var_on_left: bool,
+    ) -> PgResult<(f64, f64)>
 );

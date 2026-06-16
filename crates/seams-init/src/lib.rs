@@ -91,6 +91,7 @@ pub fn init_all() {
     backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
     backend_catalog_pg_operator::init_seams();
+    backend_catalog_pg_aggregate::init_seams();
     backend_catalog_pg_type::init_seams();
     backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
@@ -318,6 +319,7 @@ pub fn init_all() {
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_network_gist::init_seams();
+    backend_utils_adt_network_selfuncs::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();

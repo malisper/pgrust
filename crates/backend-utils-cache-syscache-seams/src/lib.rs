@@ -556,6 +556,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` returning the held
+    /// `pg_aggregate` tuple (`AggregateCreate`'s REPLACE path,
+    /// pg_aggregate.c:690). Returns the owned [`FormedTuple`] copy (supplying the
+    /// not-replaced columns + the `t_self` update target for
+    /// `heap_modify_tuple`/`CatalogTupleUpdate`) together with the projected
+    /// [`AggRow`] (`oldagg->aggkind` / `oldagg->aggnumdirectargs`, which
+    /// `AggregateCreate` validates before the update). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid` ⇒ C falls through to the fresh-insert branch).
+    pub fn aggregate_tuple_by_fnoid<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<
+        Option<(
+            types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+            AggRow,
+        )>,
+    >
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(PROCOID, funcid)` projected to the [`FuncProcAttrs`]
     /// (`Form_pg_proc` `GETSTRUCT` scalars + the `SysCacheGetAttr` array
     /// columns `proallargtypes` / `proargmodes` / `proargnames` /

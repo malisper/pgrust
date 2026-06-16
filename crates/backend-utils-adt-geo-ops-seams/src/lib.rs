@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::geo::{Point, BOX};
+use types_core::geo::{Point, CIRCLE, BOX};
 use types_error::PgResult;
 
 // ---------------------------------------------------------------------------
@@ -137,4 +137,37 @@ seam_core::seam!(
 seam_core::seam!(
     /// `box_contain_pt(box, point)` (geo_ops.c): the box contains the point.
     pub fn box_contain_pt(b: &BOX, p: &Point) -> bool
+);
+
+// ---------------------------------------------------------------------------
+// polygon / circle containment + bounding box (geo_ops.c).  Consumed by the
+// GiST polygon/circle opclasses (gistproc.c `gist_poly_consistent` /
+// `gist_circle_consistent` / the polygon & circle strategy groups of
+// `gist_point_consistent`).
+//
+// The owned `Polygon` value (with its out-of-line `Vec<Point>`) lives in the
+// `backend-utils-adt-geo-ops` crate, not in `types-core`; these seams therefore
+// take the in-memory `POLYGON` varlena image (`DatumGetPolygonP`) as raw bytes
+// and decode it inside the owner (`Polygon::from_datum_image`), mirroring how
+// the C code receives a detoasted `POLYGON *`.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `(DatumGetPolygonP(query))->boundbox` (geo_decls.h): the bounding box of
+    /// the in-memory `POLYGON` varlena image. The `gist_poly_consistent` arm
+    /// feeds this to `rtree_internal_consistent`.
+    pub fn poly_query_boundbox(image: &[u8]) -> BOX
+);
+seam_core::seam!(
+    /// `poly_contain_pt(poly, point)` (geo_ops.c:4007): is the point in/on the
+    /// polygon? Takes the in-memory `POLYGON` varlena image (decoded by the
+    /// owner). `ereport`s an overflow (22003) on astronomical coordinates,
+    /// hence `PgResult`.
+    pub fn poly_contain_pt_image(image: &[u8], p: &Point) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `circle_contain_pt(circle, point)` (geo_ops.c:5081): is the point in/on
+    /// the circle? `ereport`s an overflow on astronomical coordinates, hence
+    /// `PgResult`.
+    pub fn circle_contain_pt(c: &CIRCLE, p: &Point) -> PgResult<bool>
 );

@@ -14,6 +14,68 @@ use types_opclass::ObjectWithArgs;
 use types_parsenodes::ObjectWithArgs as ParseObjectWithArgs;
 use types_parsenodes::ParseState;
 
+/// `FuncDetailCode` (parser/parse_func.h:23-31) — result code from
+/// `func_get_detail`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FuncDetailCode {
+    /// `FUNCDETAIL_NOTFOUND` — no matching function.
+    NotFound,
+    /// `FUNCDETAIL_MULTIPLE` — too many matching functions.
+    Multiple,
+    /// `FUNCDETAIL_NORMAL` — found a matching regular function.
+    Normal,
+    /// `FUNCDETAIL_PROCEDURE` — found a matching procedure.
+    Procedure,
+    /// `FUNCDETAIL_AGGREGATE` — found a matching aggregate function.
+    Aggregate,
+    /// `FUNCDETAIL_WINDOWFUNC` — found a matching window function.
+    WindowFunc,
+    /// `FUNCDETAIL_COERCION` — it's a type coercion request.
+    Coercion,
+}
+
+/// The out-parameters `func_get_detail` fills (parse_func.c): the matched
+/// function's OID + return type/set status, the expanded-variadic argument
+/// counts/type, and the true declared argument types. `AggregateCreate`'s
+/// `lookup_agg_function` reads `fdresult`/`funcid`/`rettype`/`retset`/`vatype`/
+/// `true_typeids` from this; the `nvargs` and `argdefaults` out-params are
+/// carried for completeness.
+#[derive(Clone, Debug)]
+pub struct FuncDetail<'mcx> {
+    /// the `FuncDetailCode` return value.
+    pub fdresult: FuncDetailCode,
+    /// `*funcid` — the matched `pg_proc` OID (`InvalidOid` when not found).
+    pub funcid: types_core::Oid,
+    /// `*rettype` — the function's return type.
+    pub rettype: types_core::Oid,
+    /// `*retset` — whether it returns a set.
+    pub retset: bool,
+    /// `*nvargs` — number of variadic arguments folded into the array.
+    pub nvargs: i32,
+    /// `*vatype` — the variadic array element type (`InvalidOid` if none).
+    pub vatype: types_core::Oid,
+    /// `*true_typeids` — the function's true declared argument types.
+    pub true_typeids: mcx::PgVec<'mcx, types_core::Oid>,
+}
+
+seam_core::seam!(
+    /// `func_get_detail(funcname, fargs, fargnames, nargs, argtypes,
+    /// expand_variadic, expand_defaults, include_out_arguments, &funcid,
+    /// &rettype, &retset, &nvargs, &vatype, &true_typeids, &argdefaults)`
+    /// (parser/parse_func.c): look the function up in the catalogs, do
+    /// polymorphic disambiguation, and report its OID + return type/set status
+    /// and true argument types. `AggregateCreate`'s `lookup_agg_function` calls
+    /// it with empty `fargs`/`fargnames`, `expand_variadic = false`,
+    /// `expand_defaults = false`, `include_out_arguments = false`, and a NULL
+    /// `argdefaults` out-param. The owner allocates `true_typeids` in `mcx`.
+    pub fn func_get_detail<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcname: &[String],
+        nargs: i32,
+        argtypes: &[Oid],
+    ) -> PgResult<FuncDetail<'mcx>>
+);
+
 seam_core::seam!(
     /// `LookupFuncName(funcname, nargs, argtypes, missing_ok)`
     /// (parse_func.c): resolve a possibly-qualified function name (a `List *`
