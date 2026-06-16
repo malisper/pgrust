@@ -7,7 +7,7 @@ use mcx::{Mcx, PgString, PgVec};
 use types_cash::CashLconv;
 use types_core::{Oid, PgWChar};
 use types_error::PgResult;
-use types_locale::PgLocale;
+use types_locale::{PgLocale, PgLocaleStruct};
 
 seam_core::seam!(
     /// `PGLC_localeconv()` (pg_locale.c): snapshot the monetary subset of
@@ -240,4 +240,81 @@ seam_core::seam!(
         src: &[u8],
         destsize: usize,
     ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_strlower(dst, dstsize, src, srclen, locale)` (pg_locale.c): lowercase
+    /// `src` under `locale`'s provider (libc/ICU/builtin). C fills a caller
+    /// buffer and returns the full result length (grow-and-retry on overflow);
+    /// the owned surface returns the complete folded bytes (no trailing NUL),
+    /// charged to `mcx`. `Err` carries the provider's `ereport(ERROR)` / OOM.
+    pub fn pg_strlower<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &[u8],
+        locale: &PgLocaleStruct,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_strupper(dst, dstsize, src, srclen, locale)` (pg_locale.c): uppercase
+    /// `src` under `locale`'s provider. See [`pg_strlower`].
+    pub fn pg_strupper<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &[u8],
+        locale: &PgLocaleStruct,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_strtitle(dst, dstsize, src, srclen, locale)` (pg_locale.c): titlecase
+    /// `src` (initcap) under `locale`'s provider. See [`pg_strlower`].
+    pub fn pg_strtitle<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &[u8],
+        locale: &PgLocaleStruct,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_strfold(dst, dstsize, src, srclen, locale)` (pg_locale.c): Unicode
+    /// case-fold `src` under `locale`'s provider (UTF-8 server only). See
+    /// [`pg_strlower`].
+    pub fn pg_strfold<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &[u8],
+        locale: &PgLocaleStruct,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `cache_locale_time(void)` (pg_locale.c): refresh the cached localized
+    /// day/month names from `LC_TIME` if stale. `Err` carries its
+    /// `strftime`/encoding-conversion `ereport(ERROR)` surface.
+    pub fn cache_locale_time() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `localized_full_months[]` (pg_locale.c): the 12 full month names
+    /// (January..December) for the current `LC_TIME`, each as database-encoded
+    /// NUL-free bytes copied into `mcx`. `None` when `LC_TIME` is the C locale
+    /// (DCH then uses the built-in English names).
+    pub fn localized_full_months<'mcx>(mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `localized_abbrev_months[]` (pg_locale.c): the 12 abbreviated month names.
+    /// See [`localized_full_months`].
+    pub fn localized_abbrev_months<'mcx>(mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `localized_full_days[]` (pg_locale.c): the 7 full day names
+    /// (Sunday..Saturday). See [`localized_full_months`].
+    pub fn localized_full_days<'mcx>(mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `localized_abbrev_days[]` (pg_locale.c): the 7 abbreviated day names.
+    /// See [`localized_full_months`].
+    pub fn localized_abbrev_days<'mcx>(mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, PgVec<'mcx, u8>>>
 );

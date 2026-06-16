@@ -5,6 +5,8 @@
 //! then a call panics loudly.
 
 use types_core::TimestampTz;
+use types_datetime::{fsec_t, pg_itm, Interval, TimeADT, TimeTzADT, Timestamp, Timestamp2TmResult};
+use types_pgtime::pg_tm;
 
 seam_core::seam!(
     /// `GetCurrentTimestamp()` (`utils/adt/timestamp.c`).
@@ -85,4 +87,49 @@ seam_core::seam!(
         typid: types_core::Oid,
         tzp: Option<i32>,
     ) -> types_error::PgResult<String>
+);
+
+seam_core::seam!(
+    /// `timestamp2tm(dt, &tzp, tm, &fsec, &tzn, attimezone)` (timestamp.c):
+    /// break a `Timestamp`/`TimestampTz` down into `tm`/`fsec` (+ zone when
+    /// `want_tz`). C returns `0`/`-1`; `Err(())` is the `-1` the caller maps to
+    /// "timestamp out of range".
+    pub fn timestamp2tm(dt: Timestamp, want_tz: bool) -> Result<Timestamp2TmResult, ()>
+);
+
+seam_core::seam!(
+    /// `tm2timestamp(tm, fsec, tzp, &result)` (timestamp.c): assemble a
+    /// `Timestamp` from broken-down time. `tz` is `Some` for the timestamptz
+    /// case. `Err(())` is the C `-1` out-of-range return.
+    pub fn tm2timestamp(tm: &pg_tm, fsec: fsec_t, tz: Option<i32>) -> Result<Timestamp, ()>
+);
+
+seam_core::seam!(
+    /// `interval2itm(span, itm)` (timestamp.c): expand an `Interval` into the
+    /// broken-down `pg_itm` form the DCH interval formatter consumes.
+    pub fn interval2itm(span: Interval) -> pg_itm
+);
+
+seam_core::seam!(
+    /// `tm2time(tm, fsec, &result)` (date.c): assemble a `TimeADT` from
+    /// broken-down time.
+    pub fn tm2time(tm: &pg_tm, fsec: fsec_t) -> TimeADT
+);
+
+seam_core::seam!(
+    /// `tm2timetz(tm, fsec, tz, &result)` (date.c): assemble a `TimeTzADT`.
+    pub fn tm2timetz(tm: &pg_tm, fsec: fsec_t, tz: i32) -> TimeTzADT
+);
+
+seam_core::seam!(
+    /// `AdjustTimestampForTypmod(&time, typmod, NULL)` (timestamp.c): round a
+    /// `Timestamp` to the typmod's sub-second precision. `Err` carries the C
+    /// `ereport(ERROR, "timestamp out of range")`.
+    pub fn adjust_timestamp_for_typmod(value: Timestamp, typmod: i32) -> types_error::PgResult<Timestamp>
+);
+
+seam_core::seam!(
+    /// `AdjustTimeForTypmod(&time, typmod)` (date.c): round a `TimeADT` to the
+    /// typmod's sub-second precision. Infallible in C.
+    pub fn adjust_time_for_typmod(time: TimeADT, typmod: i32) -> TimeADT
 );
