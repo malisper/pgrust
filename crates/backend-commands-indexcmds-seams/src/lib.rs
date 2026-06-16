@@ -4,9 +4,11 @@
 //! The owning unit (`backend-commands-indexcmds`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+use mcx::Mcx;
 use types_amapi::CompareType;
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::ddlnodes::IndexStmt;
 
 seam_core::seam!(
     /// `makeObjectName(name1, name2, label)` (indexcmds.c): build an object name
