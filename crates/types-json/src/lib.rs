@@ -13,9 +13,12 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use types_core::Oid;
+use types_error::PgResult;
 use types_tuple::Datum;
 
 /// C: `JsonTokenType` (`src/common/jsonapi.h`). The discriminant order matches
@@ -125,3 +128,108 @@ pub struct CompositeFieldForJson<'mcx> {
     /// C: the matching `outfuncoid` (or `InvalidOid` if null).
     pub outfuncoid: Oid,
 }
+
+// ---------------------------------------------------------------------------
+// The JSON lexer state + the SAX callback table (`src/common/jsonapi.h`).
+//
+// `JsonLexContext` is the lexer's running state, observed by the SAX callbacks
+// the json-text entry points install. In C the position fields are
+// `const char *` into the immutable input buffer; here the buffer is held once
+// as `input` and positions are byte offsets into it — bounds-checkable while
+// faithful to the pointer arithmetic the callbacks perform. The lexer is owned
+// by `common/jsonapi.c`; until that lands, `pg_parse_json` (the SAX driver) is
+// reached through `common-jsonapi-seams` and panics. The driver writes these
+// fields as it advances and hands the live `&JsonLexContext` to each callback.
+// ---------------------------------------------------------------------------
+
+/// C: `struct JsonLexContext` (`src/common/jsonapi.h`). The lexer's running
+/// state; the SAX callbacks read `token_type`/`lex_level`/`line_number`/the
+/// position offsets off the live context the parse driver threads to them.
+#[derive(Clone, Debug, Default)]
+pub struct JsonLexContext {
+    /// `char *input`: the JSON text being lexed (the whole buffer).
+    pub input: Vec<u8>,
+    /// `int input_length`: length of `input`.
+    pub input_length: usize,
+    /// `int input_encoding`: server encoding of `input`.
+    pub input_encoding: i32,
+    /// `JsonTokenType token_type`: the current token's type.
+    pub token_type: JsonTokenType,
+    /// `int lex_level`: current nesting depth (0 at top level).
+    pub lex_level: i32,
+    /// `char *token_start`: offset of the start of the current token.
+    pub token_start: usize,
+    /// `char *token_terminator`: offset one past the current token.
+    pub token_terminator: usize,
+    /// `char *prev_token_terminator`: offset one past the previous token.
+    pub prev_token_terminator: usize,
+    /// `int line_number`: 1-based line number of the current token.
+    pub line_number: i32,
+    /// `char *line_start`: offset of the start of the current line.
+    pub line_start: usize,
+}
+
+impl Default for JsonTokenType {
+    fn default() -> Self {
+        JsonTokenType::JSON_TOKEN_INVALID
+    }
+}
+
+impl JsonLexContext {
+    /// The byte at `off`, or the C NUL terminator (0) at/past the end.
+    #[inline]
+    pub fn byte_at(&self, off: usize) -> u8 {
+        self.input.get(off).copied().unwrap_or(0)
+    }
+}
+
+/// C: `JsonSemAction` (`src/common/jsonapi.h`) — the table of semantic-action
+/// callbacks `pg_parse_json` invokes as it walks the input. In C the callbacks
+/// are bare function pointers plus a `void *semstate`; here each is an owned
+/// boxed closure that captures the caller's state directly (the idiomatic
+/// substitute for the `void *semstate` + fn-pointer pair), so no separate
+/// state pointer is needed. The driver invokes whichever callbacks are
+/// `Some`; a `None` slot is the C `NULL` action (a no-op the driver skips,
+/// exactly as `pg_parse_json` does).
+///
+/// The callbacks mirror the C `json_struct_action` / `json_ofield_action` /
+/// `json_aelem_action` / `json_scalar_action` signatures: structural ones take
+/// the live `&JsonLexContext`; object-field ones add the field-name bytes and
+/// its `isnull` flag; array-element ones add the `isnull` flag; the scalar one
+/// adds the token bytes and its `JsonTokenType`. Every callback returns
+/// `PgResult<()>` — `Ok` is the C `JSON_SUCCESS`, `Err` is a raised
+/// `ereport(ERROR)` (the C callbacks that ereport map to this, and the
+/// `JSON_SEM_ACTION_FAILED` soft path is carried inside the `Err`).
+pub type JsonStructAction<'a> = Box<dyn FnMut(&JsonLexContext) -> PgResult<()> + 'a>;
+pub type JsonOfieldAction<'a> = Box<dyn FnMut(&JsonLexContext, &[u8], bool) -> PgResult<()> + 'a>;
+pub type JsonAelemAction<'a> = Box<dyn FnMut(&JsonLexContext, bool) -> PgResult<()> + 'a>;
+pub type JsonScalarAction<'a> =
+    Box<dyn FnMut(&JsonLexContext, &[u8], JsonTokenType) -> PgResult<()> + 'a>;
+
+/// C: `JsonSemAction` (`src/common/jsonapi.h`). All fields default to `None`
+/// (the C "null semantic action").
+#[derive(Default)]
+pub struct JsonSemAction<'a> {
+    /// `json_struct_action object_start`.
+    pub object_start: Option<JsonStructAction<'a>>,
+    /// `json_struct_action object_end`.
+    pub object_end: Option<JsonStructAction<'a>>,
+    /// `json_struct_action array_start`.
+    pub array_start: Option<JsonStructAction<'a>>,
+    /// `json_struct_action array_end`.
+    pub array_end: Option<JsonStructAction<'a>>,
+    /// `json_ofield_action object_field_start`.
+    pub object_field_start: Option<JsonOfieldAction<'a>>,
+    /// `json_ofield_action object_field_end`.
+    pub object_field_end: Option<JsonOfieldAction<'a>>,
+    /// `json_aelem_action array_element_start`.
+    pub array_element_start: Option<JsonAelemAction<'a>>,
+    /// `json_aelem_action array_element_end`.
+    pub array_element_end: Option<JsonAelemAction<'a>>,
+    /// `json_scalar_action scalar`.
+    pub scalar: Option<JsonScalarAction<'a>>,
+}
+
+/// Marker bound used by `JsObject`'s json-hash carrier so the populate machinery
+/// can hold an opaque hash without naming the dynahash crate.
+pub trait JsonHashTable: Any {}

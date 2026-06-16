@@ -30,6 +30,7 @@ use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{Expr, PlaceHolderVar};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, Relids};
 
 seam_core::seam!(
@@ -128,3 +129,115 @@ seam_core::seam!(
     /// `RELKIND_PARTITIONED_TABLE`).
     pub fn rte_kind_inh_relkind(root: &PlannerInfo, rti: i32) -> (i32, bool, i8)
 );
+
+/* ==========================================================================
+ * subselect.c outward seams — the not-yet-ported planner externals that
+ * `make_subplan`/`build_subplan`/`SS_process_ctes`/`finalize_plan` call.
+ * Each panics loudly until its real owner installs it ("mirror PG and panic").
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `subquery_planner(glob, subquery, parent_root, hasRecursion,
+    /// tuple_fraction, NULL)` (planner.c) — recursively plan a SubLink's /
+    /// CTE's sub-`Query`, returning the sub-`PlannerInfo` (subroot) plus the
+    /// chosen final `Plan` tree and its source `Path`.
+    ///
+    /// This is THE one true subselect producer dependency: the C planner entry
+    /// that turns an owned sub-`Query<'mcx>` into a planned subtree. Its owner
+    /// (`subquery_planner`/`standard_planner` in planner.c) is unported, so the
+    /// call is seamed here precisely (the carrier + interning is the
+    /// subselect.c deliverable). The seam runs the whole lower planner —
+    /// `subquery_planner` → `fetch_upper_rel(UPPERREL_FINAL)` →
+    /// `get_cheapest_fractional_path` / `cheapest_total_path` → `create_plan` —
+    /// and hands back the finished triple `(subroot, plan, path)` ready for
+    /// `intern_subplan`. `path` is returned as the [`PathId`] in the returned
+    /// subroot's path arena.
+    ///
+    /// `tuple_fraction` is the retrieval fraction; `has_recursion` mirrors the C
+    /// `hasRecursion` flag. The returned `Node<'mcx>` embeds the subplan's
+    /// `Plan` base.
+    pub fn plan_sublink_subquery<'mcx>(
+        root: &mut PlannerInfo,
+        run: &mut PlannerRun<'mcx>,
+        subquery: Query<'mcx>,
+        has_recursion: bool,
+        tuple_fraction: f64,
+    ) -> PgResult<SublinkPlanResult<'mcx>>
+);
+
+seam_core::seam!(
+    /// `cost_subplan(root, subplan, plan)` (costsize.c) — fill in a `SubPlan`'s
+    /// `startup_cost` / `per_call_cost` from the child plan's costs and the
+    /// `subLinkType`. Owner costsize.c does not yet expose this entry over the
+    /// owned `SubPlan`/`Plan` model. Mutates `subplan` in place.
+    pub fn cost_subplan<'a, 'mcx>(
+        root: &PlannerInfo,
+        subplan: &mut types_nodes::primnodes::SubPlan<'a>,
+        plan: &Node<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `materialize_finished_plan(subplan)` (createplan.c) — wrap a finished
+    /// `Plan` in a `Material` node (used by `build_subplan` for an
+    /// uncorrelated non-init subplan when `enable_material` and the top node
+    /// does not already materialize). Returns the new owned plan tree (a
+    /// `Material` node whose `lefttree` is the input). Owner createplan.c does
+    /// not yet expose this over the owned `Node` model.
+    pub fn materialize_finished_plan<'mcx>(plan: Node<'mcx>) -> PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecMaterializesOutput(nodeTag(plan))` (execAmi.c) — true if the plan
+    /// node type already materializes its output (so `build_subplan` need not
+    /// add a `Material`). Pure node-tag classification; owner execAmi.c is
+    /// unported.
+    pub fn exec_materializes_output(tag: types_nodes::nodes::NodeTag) -> bool
+);
+
+seam_core::seam!(
+    /// `(oprcanhash, oprcode)` of `pg_operator` row `opno`
+    /// (`SearchSysCache1(OPEROID)` in `hash_ok_operator`). `OperRow` does not
+    /// project `oprcanhash`, so this two-field projection is homed here.
+    /// `Ok(None)` would be a cache miss; C `elog(ERROR)`s, so we return the
+    /// pair directly and let an absent row be the seam owner's error.
+    pub fn oper_canhash_code(opno: Oid) -> PgResult<(bool, Oid)>
+);
+
+seam_core::seam!(
+    /// `find_minmax_agg_replacement_param(root, aggref)` (planagg.c) — if the
+    /// `Aggref` will be replaced by a Param referencing a MIN/MAX-optimization
+    /// initplan output during setrefs.c, return that Param's id; else `None`.
+    /// Used by `finalize_primnode`'s Aggref arm. Owner planagg.c is unported.
+    pub fn find_minmax_agg_replacement_param(
+        root: &PlannerInfo,
+        aggref: &types_nodes::primnodes::Aggref,
+    ) -> Option<i32>
+);
+
+seam_core::seam!(
+    /// `find_base_rel(root, scanrelid)->subroot->outer_params` (relnode.c +
+    /// pathnodes.h) — for `finalize_plan`'s `T_SubqueryScan` arm: the
+    /// sub-`PlannerInfo`'s `outer_params` set and a clone usable to recurse
+    /// into the subplan with the sub-root. Returns the [`PlanId`]-keyed subroot
+    /// plus its `outer_params` `Relids`. relnode.c is ported but does not yet
+    /// expose `subroot` retrieval over this model.
+    pub fn base_rel_subroot_outer_params(root: &PlannerInfo, scanrelid: i32) -> Relids
+);
+
+/// The triple a planned SubLink/CTE sub-`Query` yields from
+/// [`plan_sublink_subquery`] — the analogue of C's
+/// `subroot = subquery_planner(...); best_path = ...; plan = create_plan(...)`.
+#[derive(Debug)]
+pub struct SublinkPlanResult<'mcx> {
+    /// The sub-query's `PlannerInfo` (C `subroot`). Lifetime-free arena root.
+    pub subroot: PlannerInfo,
+    /// The finished `Plan` tree (`create_plan(subroot, best_path)`).
+    pub plan: Node<'mcx>,
+    /// The chosen `Path`'s handle in `subroot`'s path arena (C `best_path`),
+    /// or `None` for the dummy-path init case.
+    pub subpath: Option<types_pathnodes::PathId>,
+    /// The sub-query's interned `QueryId` (so the caller can read its
+    /// `targetList` back through the run for `generate_subquery_params`).
+    pub subquery_id: types_pathnodes::QueryId,
+}
