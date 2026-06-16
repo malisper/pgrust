@@ -497,7 +497,7 @@ fn set_pg_database_invalid_inplace<'mcx>(
     // flow (genam) re-deforms against the descriptor and re-forms the one column
     // — see the seam contract. The callback writes the little-endian int4 value
     // DATCONNLIMIT_INVALID_DB into the column the owner addresses.
-    let mut mutate = |datconnlimit_bytes: &mut [u8]| -> PgResult<()> {
+    let mut mutate = |datconnlimit_bytes: &mut [u8]| -> PgResult<bool> {
         let v = (cat::DATCONNLIMIT_INVALID_DB as i32).to_ne_bytes();
         if datconnlimit_bytes.len() != v.len() {
             return Err(PgError::error(
@@ -505,7 +505,8 @@ fn set_pg_database_invalid_inplace<'mcx>(
             ));
         }
         datconnlimit_bytes.copy_from_slice(&v);
-        Ok(())
+        // dropdb always overwrites datconnlimit → always dirty (always _finish).
+        Ok(true)
     };
 
     let tid = genam_seams::systable_inplace_update::call(

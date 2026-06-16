@@ -233,13 +233,25 @@ seam_core::seam!(
     /// `None` when the key found no live tuple. `Err` carries the
     /// parallel-mode / retry-exhaustion / buffer-lock / WAL `ereport(ERROR)`
     /// surface. The owning genam unit installs this from its `init_seams()`.
+    ///
+    /// `mutate` returns a "dirty" flag. The C callers run
+    /// `systable_inplace_update_begin` → mutate `GETSTRUCT(tup)` → conditionally
+    /// `systable_inplace_update_finish` *or* `systable_inplace_update_cancel`
+    /// (e.g. `index_update_stats` cancels — never WAL-logs — when no column
+    /// actually changed). The callback may both *read* the existing column bytes
+    /// (to compute that decision) and *write* the new image in place; returning
+    /// `Ok(true)` makes the owner run `_finish` (WAL + inplace cache inval),
+    /// `Ok(false)` makes it run `_cancel` (`heap_inplace_unlock`, no WAL). The
+    /// returned `t_self` (`Some` when a live tuple was found) is supplied in both
+    /// cases, so a caller that cancels can still issue its own
+    /// `CacheInvalidateRelcacheByTuple`.
     pub fn systable_inplace_update<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         relation: &types_rel::RelationData<'mcx>,
         index_id: Oid,
         index_ok: bool,
         keys: &[types_scan::scankey::ScanKeyData],
-        mutate: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+        mutate: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<bool>,
     ) -> types_error::PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
 );
 
