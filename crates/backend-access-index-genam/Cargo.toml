@@ -19,9 +19,15 @@ types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+types-catalog = { path = "../types-catalog" }
 
 backend-utils-error = { path = "../backend-utils-error" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }

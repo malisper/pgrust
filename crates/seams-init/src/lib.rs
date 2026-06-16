@@ -1665,40 +1665,17 @@ mod recurrence_guard {
         ("backend_commands_trigger", "RemoveTriggerById"),
         ("backend_commands_trigger", "renametrig"),
         //
-        // -- backend-access-index-genam (relcache-build scan helpers unported) --
+        // -- backend-access-index-genam (build_index_value_description unported) --
         // DESIGN_DEBT (TD-GENAM-RELCACHE-SCANS): the genam unit ported genam.c's
-        // systable_* primitive engine (begin/getnext/endscan, installed) but NOT
-        // these higher-level helpers. The 6 `relcache_*`/`scan_pg_*` seams are
-        // relcache.c's own systable scans (RelationGetIndexList /
-        // GetStatExtList / GetFKeyList / GetExclusionInfo / AttrDefaultFetch /
-        // CheckNNConstraintFetch) — relcache calls them OUTWARD, but the scan
-        // bodies (systable_beginscan over pg_index/pg_statistic_ext/pg_constraint/
-        // pg_attrdef + per-row deform + DeconstructFkConstraintRow / get_opcode /
-        // detoast) are not yet written in the genam owner (only the DTO structs
-        // exist). `build_index_value_description` (the per-key out-function +
-        // ACL-visibility render) is a genam.c function not yet bodied. Install +
-        // DELETE each as the genam unit ports the corresponding scan/render body.
-        // (`systable_inplace_update` — the buffer-locking begin/getnext retry +
-        // `heap_inplace_lock`/`heap_inplace_update_and_unlock`/`heap_inplace_unlock`
-        // loop — is now bodied + installed by the genam owner, so its allowlist
-        // entry was removed.)
-        ("backend_access_index_genam", "relcache_scan_pg_index"),
-        // `relcache_scan_pg_rewrite` (full-Query cache-ownership keystone): the
-        // `pg_rewrite` scan + per-row `Form_pg_rewrite` + `ev_qual`/`ev_action`
-        // node-string decode `RelationBuildRuleLock` now consumes to build the
-        // real value-typed `rd_rules` (RuleLock/RewriteRule with whole
-        // `Query<'static>` action trees in the CacheMemoryContext arena). Only
-        // the DTO struct (`ScannedPgRewrite`) exists in the genam owner; the
-        // scan body is not yet written, so the seam loud-panics
-        // (mirror-PG-and-panic) until genam ports it — exactly like the sibling
-        // pg_index/pg_statistic_ext/pg_constraint scans here. Install + DELETE
-        // when the genam owner adds the pg_rewrite scan-and-decode body.
-        ("backend_access_index_genam", "relcache_scan_pg_rewrite"),
-        ("backend_access_index_genam", "relcache_scan_pg_statistic_ext"),
-        ("backend_access_index_genam", "relcache_scan_pg_constraint_fkeys"),
-        ("backend_access_index_genam", "relcache_exclusion_info"),
-        ("backend_access_index_genam", "scan_pg_attrdef"),
-        ("backend_access_index_genam", "scan_pg_constraint_nncheck"),
+        // systable_* primitive engine (begin/getnext/endscan, installed) AND the
+        // relcache catalog scan-and-decode helpers (ScanPgRelation /
+        // RelationBuildTupleDesc's scan_pg_class/scan_pg_attribute +
+        // RelationGetIndexList / GetStatExtList / GetFKeyList / GetExclusionInfo /
+        // AttrDefaultFetch / CheckNNConstraintFetch — all bodied + installed in
+        // src/decode.rs, so their allowlist entries were removed). Only
+        // `build_index_value_description` (the per-key out-function +
+        // ACL-visibility render) remains a genam.c function not yet bodied;
+        // install + DELETE when the genam unit ports its render body.
         ("backend_access_index_genam", "build_index_value_description"),
         //
         // -- backend-utils-cache-relcache (FDW-routine cache slot not modeled) --
