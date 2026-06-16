@@ -1848,9 +1848,12 @@ name = "backend-access-index-genam"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-heap-heapam-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam",
  "backend-access-table-tableam",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xact-seams",
  "backend-catalog-index-seams",
  "backend-executor-execTuples-seams",
  "backend-utils-cache-relcache-seams",
@@ -4567,6 +4570,7 @@ dependencies = [
 name = "backend-catalog-objectaddress"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog-seams",
@@ -6529,6 +6533,58 @@ dependencies = [
  "types-core",
  "types-error",
  "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-indexcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-index-amapi",
+ "backend-access-table-table",
+ "backend-access-table-table-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-index",
+ "backend-catalog-index-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-constraint",
+ "backend-commands-comment",
+ "backend-commands-indexcmds-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-tablespace",
+ "backend-commands-tablespace-globals-seams",
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-var-seams",
+ "backend-parser-coerce",
+ "backend-parser-parse-oper",
+ "backend-utils-activity-small",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-amapi",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-pgstat",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -13455,11 +13511,15 @@ name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
  "backend-lib-binaryheap",
  "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-slot-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-time-snapmgr-seams",
+ "libc",
  "mcx",
  "types-core",
  "types-error",
@@ -16875,10 +16935,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-jsonpath-scan",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numutils",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-jsonpath",
+ "types-regex",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonpath-gram-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-fgram",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "port-pgstrcasecmp",
  "types-error",
  "types-jsonpath",
 ]
@@ -20456,6 +20547,7 @@ dependencies = [
  "backend-commands-extension",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
+ "backend-commands-indexcmds",
  "backend-commands-lockcmds",
  "backend-commands-matview",
  "backend-commands-opclasscmds",
@@ -20721,6 +20813,7 @@ dependencies = [
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-jsonfuncs",
+ "backend-utils-adt-jsonpath-gram",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",

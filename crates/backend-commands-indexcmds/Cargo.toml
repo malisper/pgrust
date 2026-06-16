@@ -1,0 +1,67 @@
+[package]
+name = "backend-commands-indexcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_indexcmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-amapi = { path = "../types-amapi" }
+types-tuple = { path = "../types-tuple" }
+types-tableam = { path = "../types-tableam" }
+types-catalog = { path = "../types-catalog" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+types-acl = { path = "../types-acl" }
+types-pgstat = { path = "../types-pgstat" }
+types-guc = { path = "../types-guc" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Real owner crates (leaf utilities / node helpers — no cycle: nothing depends
+# on indexcmds).
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-index = { path = "../backend-catalog-index" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-access-index-amapi = { path = "../backend-access-index-amapi" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-commands-tablespace = { path = "../backend-commands-tablespace" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-commands-comment = { path = "../backend-commands-comment" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+
+# Seams owned by this unit (installed from init_seams).
+backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
+
+# Seams consumed from other units.
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }

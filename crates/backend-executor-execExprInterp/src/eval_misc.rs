@@ -109,7 +109,7 @@ pub fn ExecEvalGroupingFunc<'mcx>(
     // (AggState->grouped_cols, not the rollup **array**).
     let parent = state
         .parent
-        .as_deref()
+        .map(|l| l.get())
         .expect("ExecEvalGroupingFunc: EEOP_GROUPING_FUNC step has no parent PlanState");
     let aggstate_any = parent.as_agg_state().expect(
         "ExecEvalGroupingFunc: castNode(AggState, state->parent) — the parent AggState is owned \
@@ -187,7 +187,7 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     // The parent ModifyTableState is owned by nodeModifyTable, which has not yet
     // threaded its `T_ModifyTableState` into `PlanStateNode`; `as_modify_table_state()`
     // yields the cast.
-    let parent = state.parent.as_deref().expect(
+    let parent = state.parent.map(|l| l.get()).expect(
         "ExecEvalMergeSupportFunc: EEOP_MERGE_SUPPORT_FUNC step has no parent PlanState",
     );
     let mtstate = parent.as_modify_table_state().expect(

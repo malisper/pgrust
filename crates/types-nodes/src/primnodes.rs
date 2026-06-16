@@ -2466,6 +2466,23 @@ fn clone_aggref<'b>(a: &Aggref, mcx: Mcx<'b>) -> PgResult<Aggref> {
     })
 }
 
+/// Box an mcx-owned `Query<'mcx>` into the lifetime-free `Expr` tree's `'static`
+/// notional `subselect` slot (the carrier [`SubLink::subselect`] /
+/// [`crate::parsenodes::RangeTblEntry`]-style embedded sub-query uses). The data
+/// is fully owned in `mcx`; this is a lifetime-parameter-only erase, the exact
+/// idiom [`clone_sublink`] performs inline (cf. `query_into_static` in the
+/// parser). Lives here, in the unsafe-permitting `types-nodes` crate, so
+/// `#![forbid(unsafe_code)]` callers (e.g. readfuncs) can reconstruct the slot.
+pub fn query_box_into_static<'b>(
+    q: crate::copy_query::Query<'b>,
+    mcx: Mcx<'b>,
+) -> PgResult<PgBox<'static, crate::copy_query::Query<'static>>> {
+    let boxed: PgBox<'b, crate::copy_query::Query<'b>> = alloc_in(mcx, q)?;
+    // SAFETY: fully owned in mcx; lifetime-parameter-only erase to the Expr
+    // tree's 'static notional lifetime (cf. clone_sublink / query_into_static).
+    Ok(unsafe { core::mem::transmute(boxed) })
+}
+
 /// Deep-clone a [`SubLink`]: `subselect` is an embedded owned `Query` deep-cloned
 /// via [`crate::copy_query::Query::clone_in`] then re-erased to `'static` (cf.
 /// `query_into_static`); `testexpr` recurses via [`Expr::clone_in`].
