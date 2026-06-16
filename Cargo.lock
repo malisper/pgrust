@@ -16465,10 +16465,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-database"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-autovacuum-ext-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-xact",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "types-autovacuum",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-database-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-function"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-proc-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-xact",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "portability-instr-time",
+ "types-core",
+ "types-error",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -21349,6 +21387,8 @@ dependencies = [
  "backend-tsearch-spell",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",
+ "backend-utils-activity-pgstat-database",
+ "backend-utils-activity-pgstat-function",
  "backend-utils-activity-pgstat-io",
  "backend-utils-activity-pgstat-replslot",
  "backend-utils-activity-pgstat-slru",

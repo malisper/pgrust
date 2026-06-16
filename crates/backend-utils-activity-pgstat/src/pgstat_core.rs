@@ -239,7 +239,22 @@ pub fn pgstat_prep_pending_entry(
     objid: u64,
     make_pending: impl FnOnce() -> Box<dyn Any>,
 ) -> PgResult<shmem::EntryRefPtr> {
-    let entry_ref = shmem::pgstat_get_entry_ref(kind, dboid, objid, true, None)?
+    pgstat_prep_pending_entry_created(kind, dboid, objid, None, make_pending)
+}
+
+/// `pgstat_prep_pending_entry(kind, dboid, objid, created_entry, ...)`
+/// (`pgstat.c`) — like [`pgstat_prep_pending_entry`], but reports through
+/// `created_entry` whether the *shared* entry had to be created (C's
+/// `bool *created_entry` out-param). `pgstat_init_function_usage` uses this to
+/// detect a concurrently-dropped function.
+pub fn pgstat_prep_pending_entry_created(
+    kind: PgStat_Kind,
+    dboid: Oid,
+    objid: u64,
+    created_entry: Option<&mut bool>,
+    make_pending: impl FnOnce() -> Box<dyn Any>,
+) -> PgResult<shmem::EntryRefPtr> {
+    let entry_ref = shmem::pgstat_get_entry_ref(kind, dboid, objid, true, created_entry)?
         .expect("pgstat_prep_pending_entry: get_entry_ref(create=true) returned None");
 
     // SAFETY: a just-resolved live reference.
@@ -257,6 +272,30 @@ pub fn pgstat_prep_pending_entry(
         });
     }
     Ok(entry_ref)
+}
+
+/// `pgstat_fetch_pending_entry(kind, dboid, objid)` (`pgstat.c`) — return this
+/// backend's reference to the shared entry only if it already exists AND
+/// currently carries a backend-private pending block; otherwise `None` (does
+/// not create). Used by `find_funcstat_entry` / `pgstat_end_function_usage`.
+pub fn pgstat_fetch_pending_entry(
+    kind: PgStat_Kind,
+    dboid: Oid,
+    objid: u64,
+) -> PgResult<Option<shmem::EntryRefPtr>> {
+    let entry_ref = shmem::pgstat_get_entry_ref(kind, dboid, objid, false, None)?;
+    match entry_ref {
+        None => Ok(None),
+        Some(er) => {
+            // SAFETY: a just-resolved live reference.
+            let e = unsafe { er.get() };
+            if e.pending.is_none() {
+                Ok(None)
+            } else {
+                Ok(Some(er))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

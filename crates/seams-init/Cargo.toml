@@ -401,6 +401,8 @@ backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgs
 backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
 backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-slru" }
 backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
+backend-utils-activity-pgstat-database = { path = "../backend-utils-activity-pgstat-database" }
+backend-utils-activity-pgstat-function = { path = "../backend-utils-activity-pgstat-function" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
