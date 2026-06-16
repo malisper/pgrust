@@ -317,7 +317,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
         if relation.rd_rel.relhasrules {
             crate::derived::RelationBuildRuleLock(&mut relation)?;
         } else {
-            relation.rd_has_rules = false;
+            relation.rd_rules = None;
         }
         if relation.rd_rel.relhastriggers {
             // RelationBuildTriggers is commands/trigger.c (cross-unit, trigger

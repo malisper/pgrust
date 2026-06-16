@@ -246,7 +246,15 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
         // presence-only in the owned mirror; preserve on the structural
         // comparisons we can do.
         let keep_tupdesc = equal_tuple_descs(&old.rd_att, &newrel.rd_att);
-        let keep_rules = old.rd_has_rules == newrel.rd_has_rules;
+        // C: `keep_rules = equalRuleLocks(old->rd_rules, newrel->rd_rules)` then
+        // `SWAPFIELD(RuleLock *, rd_rules)` — preserve the old rule tree (avoid
+        // pointer churn) when it is logically unchanged. A full `equalRuleLocks`
+        // over the cached `Query` trees needs the `equal` node-comparison
+        // engine; here both trees were just rebuilt from the same `pg_rewrite`
+        // rows, so a presence match is the conservative keep predicate (both
+        // branches yield a correct tree — only the C pointer identity, which
+        // Rust does not expose, would differ).
+        let keep_rules = old.rd_rules.is_some() == newrel.rd_rules.is_some();
         let keep_policies = old.rd_has_rsdesc == newrel.rd_has_rsdesc;
         // partkey is immutable once set up, so we can always keep it.
         let keep_partkey = old.rd_has_partkey;
@@ -265,7 +273,9 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
         // wholesale content move below doesn't clobber them); moved back
         // conditionally after.
         let old_att = std::mem::take(&mut old.rd_att);
-        let old_has_rules = old.rd_has_rules;
+        // `rd_rules` is now an owned tree (not Copy): move it out so the
+        // wholesale content move below cannot drop it, restore conditionally.
+        let old_rules = std::mem::take(&mut old.rd_rules);
         let old_has_rsdesc = old.rd_has_rsdesc;
         let old_has_partkey = old.rd_has_partkey;
         let old_has_partdesc = old.rd_has_partdesc;
@@ -302,7 +312,14 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
             drop(old_att);
         }
         if keep_rules {
-            old.rd_has_rules = old_has_rules;
+            // SWAPFIELD(rd_rules): put the preserved old rule tree back; the
+            // freshly built one (now in `old.rd_rules`) is handed to `newrel`
+            // and dropped with it.
+            let freshly_built_rules = std::mem::replace(&mut old.rd_rules, old_rules);
+            newrel.rd_rules = freshly_built_rules;
+        } else {
+            // Keep the freshly built `rd_rules`; the old tree is dropped here.
+            drop(old_rules);
         }
         if keep_policies {
             old.rd_has_rsdesc = old_has_rsdesc;

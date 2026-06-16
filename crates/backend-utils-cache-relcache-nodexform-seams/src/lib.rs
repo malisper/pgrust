@@ -128,11 +128,10 @@ seam_core::seam!(
     ) -> PgResult<Option<Vec<u8>>>
 );
 
-seam_core::seam!(
-    /// `RelationBuildRuleLock(relation)` (relcache.c): `systable_beginscan` of
-    /// `pg_rewrite` for `ev_class = relid` + per-row `stringToNode` rule-tree
-    /// build into `rd_rules` (rewrite owner). The built rule lock lives on the
-    /// entry behind the seam; the consumer only needs the acknowledgement. Can
-    /// `ereport(ERROR)`, carried on `Err`.
-    pub fn rule_lock(relid: Oid) -> PgResult<()>
-);
+// NOTE: the old `rule_lock(relid) -> ()` acknowledgement seam was RETIRED by the
+// full-Query cache-ownership keystone. `RelationBuildRuleLock` now builds the
+// real value-typed `rd_rules` (RuleLock/RewriteRule with whole `Query<'static>`
+// action trees) in-crate, allocating into the process-lifetime
+// `cache_memory_context()` arena and `stringToNode`-ing via the read.c seam +
+// the `pg_rewrite` scan via the genam `relcache_scan_pg_rewrite` seam. No
+// acknowledgement seam is needed.

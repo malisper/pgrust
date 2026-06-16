@@ -283,6 +283,54 @@ pub struct OwnedAttr {
     pub attnullability: i8,
 }
 
+/// `RewriteRule` (`rewrite/prs2lock.h`) — one rewrite rule, the unit the
+/// rule-application core of `rewriteHandler.c` reads off `rd_rules->rules[i]`.
+///
+/// The full-Query cache-ownership keystone: `actions` is the C
+/// `List *actions` — a list of whole, post-analysis `Query` trees loaded by
+/// `RelationBuildRuleLock` via `stringToNode(ev_action)`. Those trees outlive
+/// any single query's `'mcx` arena (they are cached for the relcache entry's —
+/// i.e. the backend's — lifetime, exactly as C copies them into
+/// `CacheMemoryContext`), so they are carried as the lifetime-free
+/// [`types_nodes::copy_query::Query`]`<'static>` allocated in the process-lifetime
+/// CacheMemoryContext arena (see `backend-utils-cache-relcache`'s
+/// `cache_memory_context()`). This is the faithful rendering of the C
+/// `RewriteRule` whose `qual`/`actions` pointers live in `CacheMemoryContext`,
+/// not an invented handle/registry.
+pub struct RewriteRule {
+    /// `Oid ruleId` — the `pg_rewrite` OID.
+    pub ruleId: Oid,
+    /// `CmdType event` — `CMD_SELECT`/`UPDATE`/`INSERT`/`DELETE` the rule fires on.
+    pub event: types_nodes::nodes::CmdType,
+    /// `bool enabled` — actually `char ev_enabled` in `pg_rewrite`
+    /// (`'O'`/`'D'`/`'R'`/`'A'`); kept as the raw char the relcache stores and
+    /// the executor's `check_enable_rule` compares.
+    pub enabled: u8,
+    /// `bool isInstead` — is this an INSTEAD rule?
+    pub isInstead: bool,
+    /// `Node *qual` — the rule qualification (`stringToNode(ev_qual)`), or
+    /// `None` for an unconditional rule. Cached in the CacheMemoryContext arena.
+    pub qual: Option<mcx::PgBox<'static, types_nodes::nodes::Node<'static>>>,
+    /// `List *actions` — the rule's action queries (`stringToNode(ev_action)`),
+    /// each a whole `Query` tree cached in the CacheMemoryContext arena.
+    pub actions: mcx::PgVec<'static, types_nodes::copy_query::Query<'static>>,
+}
+
+/// `RuleLock` (`rewrite/prs2lock.h`) — the set of rewrite rules attached to a
+/// relation, the C `RuleLock *rd_rules`.
+///
+/// `numLocks` is implicit in `rules.len()` (the C struct carries both; the Vec
+/// length is the single source of truth here). The whole structure lives in the
+/// process-lifetime CacheMemoryContext arena alongside the `Query` trees it
+/// owns, so it is `'static`-bound — it may borrow nothing from a per-query
+/// `'mcx`, exactly the C `CacheMemoryContext` lifetime invariant.
+pub struct RuleLock {
+    /// `RewriteRule **rules` — the rules, in the order
+    /// `RelationBuildRuleLock` read them from `pg_rewrite` (by `rulename`,
+    /// the `RewriteRelRulesIndexId` scan order).
+    pub rules: mcx::PgVec<'static, RewriteRule>,
+}
+
 /// `struct RelationData` (`utils/rel.h`) — the real, mutable relcache entry.
 ///
 /// Field order and names mirror the C struct (see `src/include/utils/rel.h`).
@@ -330,9 +378,16 @@ pub struct RelationData {
     /// `LockInfoData rd_lockInfo`.
     pub rd_lockInfo: LockInfoData,
 
-    /// `RuleLock *rd_rules` — rewrite rules. Node-vocabulary payload, seamed.
-    /// Presence only here; the rule tree is built/read via the derived family.
-    pub rd_has_rules: bool,
+    /// `RuleLock *rd_rules` — rewrite rules. The full-Query cache-ownership
+    /// keystone: this is now the REAL value-typed carrier (no longer a presence
+    /// flag). `None` is the C `rd_rules == NULL` (the relation has no rules);
+    /// `Some` holds the [`RuleLock`] whose `RewriteRule.actions` are whole
+    /// `Query<'static>` trees, all allocated in the process-lifetime
+    /// CacheMemoryContext arena so they live for the entry's (backend's)
+    /// lifetime, exactly as C copies them into `CacheMemoryContext`.
+    /// `RelationBuildRuleLock` builds it; `rewriteHandler.c`'s rule-application
+    /// core reads `rd_rules.rules[i].{event,qual,actions,isInstead,enabled}`.
+    pub rd_rules: Option<mcx::PgBox<'static, RuleLock>>,
     /// `TriggerDesc *trigdesc`. Presence only (seam vocabulary).
     pub rd_has_trigdesc: bool,
     /// `RowSecurityDesc *rd_rsdesc`. Presence only (seam vocabulary).
