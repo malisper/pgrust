@@ -16136,6 +16136,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-pg-locale"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-pg-locale-builtin-seams",
+ "backend-utils-adt-pg-locale-catalog-seams",
+ "backend-utils-adt-pg-locale-env-seams",
+ "backend-utils-adt-pg-locale-icu",
+ "backend-utils-adt-pg-locale-libc-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "common-string",
+ "libc",
+ "mcx",
+ "types-cash",
+ "types-core",
+ "types-error",
+ "types-locale",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-pg-locale-builtin-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-pg-locale-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-locale",
+]
+
+[[package]]
+name = "backend-utils-adt-pg-locale-catalog-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-pg-locale-env-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-pg-locale-icu"
 version = "0.0.0"
 dependencies = [
@@ -16153,6 +16205,16 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+ "types-locale",
+]
+
+[[package]]
+name = "backend-utils-adt-pg-locale-libc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
  "types-locale",
 ]
@@ -19337,6 +19399,7 @@ dependencies = [
  "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
+ "backend-utils-adt-pg-locale",
  "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-pseudotypes",
  "backend-utils-adt-quote",
