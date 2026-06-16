@@ -5,6 +5,21 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `compare_values_of_enum(tcache, arg1, arg2)` (typcache.c): the
+    /// enum-value comparison engine `enum_cmp_internal` (utils/adt/enum.c)
+    /// defers the odd-OID case to. `type_id` is the enum type OID (C resolves
+    /// the `TypeCacheEntry *` from it; the safe port keys the cache by OID).
+    /// Returns negative / zero / positive for `arg1` `<` / `=` / `>` `arg2` in
+    /// the enum's declared sort order. `Err` carries the cache-load /
+    /// catalog-scan `ereport(ERROR)` surface.
+    pub fn compare_values_of_enum(
+        type_id: types_core::primitive::Oid,
+        arg1: types_core::primitive::Oid,
+        arg2: types_core::primitive::Oid,
+    ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(type_id, flags)` (typcache.c): fetch (creating if
     /// necessary) the `TypeCacheEntry` for `type_id`. `flags` selects which
     /// optional fields to compute (`TYPECACHE_*`); callers needing only the

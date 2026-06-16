@@ -14,6 +14,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `timestamptz_pl_interval(timestamp, span)` (`utils/adt/timestamp.c`):
+    /// add an [`Interval`] to a [`TimestampTz`], the SQL `timestamptz + interval`
+    /// operator. uuid.c reaches it via `DirectFunctionCall2` from
+    /// `uuidv7(interval)`. Owned by `timestamp.c`; `Err` carries its
+    /// out-of-range `ereport(ERROR)`.
+    pub fn timestamptz_pl_interval(
+        timestamp: TimestampTz,
+        span: Interval,
+    ) -> types_error::PgResult<TimestampTz>
+);
+
+seam_core::seam!(
     /// Syntax-only timestamp parse used by `check_recovery_target_time`
     /// (xlogrecovery.c:4948): `ParseDateTime` + `DecodeDateTime` and a final
     /// `tm2timestamp` range check, returning `true` when the string parses to a

@@ -4269,6 +4269,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-table",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
@@ -4290,7 +4291,9 @@ dependencies = [
 name = "backend-catalog-pg-enum-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -13226,6 +13229,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-enum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-catalog-pg-enum-seams",
+ "backend-libpq-pqformat",
+ "backend-storage-ipc-procarray-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-scan",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-expanded-methods-seams"
 version = "0.0.0"
 dependencies = [
@@ -14039,6 +14067,24 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-uuid"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "common-hashfn",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+ "types-uuid",
 ]
 
 [[package]]
@@ -16218,6 +16264,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-strong-random-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep"
 version = "0.0.0"
 dependencies = [
@@ -17499,6 +17552,14 @@ name = "types-typcache"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-uuid"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-nodes",
 ]
 
 [[package]]

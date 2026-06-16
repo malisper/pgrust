@@ -876,6 +876,10 @@ fn set_locktag_tuple(tag: &mut LOCKTAG, dboid: Oid, reloid: Oid, blocknum: u32, 
 /// Install this unit's inward seams (the caller-shaped projected-row lookups
 /// in `backend-utils-cache-syscache-seams`).
 pub fn init_seams() {
+    backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
+    backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
+        projections::lookup_enum_by_typoid_name,
+    );
     backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
     backend_utils_cache_syscache_seams::search_relation_reloftype::set(projections::search_relation_reloftype);
     backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);
