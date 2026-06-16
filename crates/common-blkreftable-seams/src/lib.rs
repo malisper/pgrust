@@ -47,6 +47,39 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BlockRefTableGetEntry(brtab, rlocator, forknum, &limit_block)`
+    /// (blkreftable.c) — look up the entry for this relation fork. Returns
+    /// `Some(limit_block)` if an entry exists (the C non-NULL return that also
+    /// writes `*limit_block`), `None` if not. Used for the whole-database
+    /// existence test, where only the entry's presence and limit block matter.
+    pub fn block_ref_table_get_entry(
+        brtab: BlockRefTableHandle,
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+    ) -> Option<BlockNumber>
+);
+
+seam_core::seam!(
+    /// `BlockRefTableGetEntry(brtab, rlocator, forknum, &limit_block)` followed
+    /// by `BlockRefTableEntryGetBlocks(entry, start_blkno, stop_blkno, blocks,
+    /// nblocks)` (blkreftable.c). The `BlockRefTableEntry` lives inside the
+    /// table behind the opaque handle, so the lookup and the per-entry
+    /// block-extraction are bundled into one owner seam. Returns
+    /// `Some((limit_block, blocks))` when the entry exists (the modified block
+    /// numbers in `[start_blkno, stop_blkno)`, at most `nblocks`), or `None`
+    /// when there is no entry for this relation fork.
+    pub fn block_ref_table_get_entry_blocks<'mcx>(
+        mcx: Mcx<'mcx>,
+        brtab: BlockRefTableHandle,
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+        start_blkno: BlockNumber,
+        stop_blkno: BlockNumber,
+        nblocks: usize,
+    ) -> PgResult<Option<(BlockNumber, mcx::PgVec<'mcx, BlockNumber>)>>
+);
+
+seam_core::seam!(
     /// `WriteBlockRefTable(brtab, write_callback, write_callback_arg)`
     /// (blkreftable.c) — serialize the table. The backend streams the bytes
     /// through a write callback; the port returns the serialized bytes

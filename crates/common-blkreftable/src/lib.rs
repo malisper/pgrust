@@ -732,6 +732,62 @@ fn block_ref_table_mark_block_modified(
     Ok(())
 }
 
+/// `BlockRefTableGetEntry(brtab, rlocator, forknum, &limit_block)`
+/// (seam `block_ref_table_get_entry`): look up the entry; return its
+/// `limit_block` if present, else `None`.
+fn block_ref_table_get_entry(
+    brtab: BlockRefTableHandle,
+    rlocator: RelFileLocator,
+    forknum: ForkNumber,
+) -> Option<BlockNumber> {
+    let key = BlockRefTableKey { rlocator, forknum };
+    let raw = key.raw_bytes();
+    TABLES.with(|t| {
+        let tables = t.borrow();
+        let table = tables
+            .get(&brtab.0)
+            .expect("BlockRefTableGetEntry: unknown BlockRefTableHandle");
+        table.hash.get(&raw).map(|entry| entry.limit_block)
+    })
+}
+
+/// `BlockRefTableGetEntry(...)` + `BlockRefTableEntryGetBlocks(...)`
+/// (seam `block_ref_table_get_entry_blocks`): look up the entry and, if it
+/// exists, extract the modified block numbers in `[start_blkno, stop_blkno)`
+/// (at most `nblocks`).
+fn block_ref_table_get_entry_blocks<'mcx>(
+    mcx: Mcx<'mcx>,
+    brtab: BlockRefTableHandle,
+    rlocator: RelFileLocator,
+    forknum: ForkNumber,
+    start_blkno: BlockNumber,
+    stop_blkno: BlockNumber,
+    nblocks: usize,
+) -> PgResult<Option<(BlockNumber, PgVec<'mcx, BlockNumber>)>> {
+    let key = BlockRefTableKey { rlocator, forknum };
+    let raw = key.raw_bytes();
+    let result = TABLES.with(|t| {
+        let tables = t.borrow();
+        let table = tables
+            .get(&brtab.0)
+            .expect("BlockRefTableGetEntryBlocks: unknown BlockRefTableHandle");
+        table.hash.get(&raw).map(|entry| {
+            let limit_block = entry.limit_block;
+            let mut blocks: Vec<BlockNumber> = Vec::new();
+            entry_get_blocks(entry, start_blkno, stop_blkno, &mut blocks, nblocks);
+            (limit_block, blocks)
+        })
+    });
+    match result {
+        None => Ok(None),
+        Some((limit_block, blocks)) => {
+            let mut out = mcx::vec_with_capacity_in(mcx, blocks.len())?;
+            out.extend_from_slice(&blocks);
+            Ok(Some((limit_block, out)))
+        }
+    }
+}
+
 /// `WriteBlockRefTable(brtab, write_callback, write_callback_arg)`
 /// (seam `write_block_ref_table`): serialize the whole table and return the
 /// bytes (the backend would stream them through its write callback).
@@ -1081,6 +1137,10 @@ pub fn init_seams() {
     common_blkreftable_seams::block_ref_table_set_limit_block::set(block_ref_table_set_limit_block);
     common_blkreftable_seams::block_ref_table_mark_block_modified::set(
         block_ref_table_mark_block_modified,
+    );
+    common_blkreftable_seams::block_ref_table_get_entry::set(block_ref_table_get_entry);
+    common_blkreftable_seams::block_ref_table_get_entry_blocks::set(
+        block_ref_table_get_entry_blocks,
     );
     common_blkreftable_seams::write_block_ref_table::set(write_block_ref_table);
     common_blkreftable_seams::block_ref_table_reader_next_relation::set(
