@@ -43,7 +43,7 @@ use mcx::Mcx;
 use types_core::AttrNumber;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_statistics::{
-    MVDependencies, MVDependency, StatsBuildDataHandle, STATS_DEPS_MAGIC, STATS_DEPS_TYPE_BASIC,
+    MVDependencies, MVDependency, StatsBuildData, STATS_DEPS_MAGIC, STATS_DEPS_TYPE_BASIC,
     STATS_MAX_DIMENSIONS,
 };
 
@@ -238,9 +238,9 @@ impl DependencyGenerator {
 /// `nattnums` is `data->nattnums` and `data_attnums` is `data->attnums` (the
 /// build data cannot be dereferenced here — `data->attnums[...]` is mirrored by
 /// the explicit `data_attnums` slice the owner supplies at call time).
-pub fn statext_dependencies_build(
+pub fn statext_dependencies_build<'mcx>(
     mcx: Mcx<'_>,
-    data: StatsBuildDataHandle,
+    data: &StatsBuildData<'mcx>,
     nattnums: i32,
     data_attnums: &[AttrNumber],
 ) -> PgResult<Option<MVDependencies>> {

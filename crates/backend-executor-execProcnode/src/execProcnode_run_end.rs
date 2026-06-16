@@ -383,11 +383,13 @@ pub fn exec_end_node<'mcx>(
         //   case T_NamedTuplestoreScanState:
         //   case T_WorkTableScanState:
         //       break;
-        PlanStateNode::ValuesScan(_) | PlanStateNode::NamedTuplestoreScan(_) => Ok(()),
+        PlanStateNode::ValuesScan(_)
+        | PlanStateNode::NamedTuplestoreScan(_)
+        | PlanStateNode::WorkTableScan(_) => Ok(()),
 
         // The remaining C arms (T_SampleScanState/T_FunctionScanState/
-        // T_IncrementalSortState/T_AggState/T_LockRowsState/T_TidRangeScanState/
-        // T_WorkTableScanState) operate on node-state variants not yet present in
+        // T_IncrementalSortState/T_AggState/T_LockRowsState/T_TidRangeScanState)
+        // operate on node-state variants not yet present in
         // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.
         // The C `default: elog(ERROR, "unrecognized node type")` covers any tag
         // with no arm.

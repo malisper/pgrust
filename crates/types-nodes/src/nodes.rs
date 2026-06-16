@@ -366,6 +366,8 @@ pub enum Node<'mcx> {
     Unique(crate::nodeunique::Unique<'mcx>),
     /// `T_Sort`.
     Sort(crate::nodesort::Sort<'mcx>),
+    /// `T_Agg`.
+    Agg(crate::nodeagg::Agg<'mcx>),
     /// `T_WindowAgg`.
     WindowAgg(crate::nodewindowagg::WindowAgg<'mcx>),
     /// `T_TableFuncScan`.
@@ -946,6 +948,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(_) => T_Limit,
             Node::Unique(_) => crate::nodeunique::T_Unique,
             Node::Sort(_) => T_Sort,
+            Node::Agg(_) => crate::nodeagg::T_Agg,
             Node::WindowAgg(_) => crate::nodewindowagg::T_WindowAgg,
             Node::TableFuncScan(_) => T_TableFuncScan,
             Node::FunctionScan(_) => T_FunctionScan,
@@ -1202,6 +1205,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => &m.plan,
             Node::Unique(u) => &u.plan,
             Node::Sort(s) => &s.plan,
+            Node::Agg(a) => &a.plan,
             Node::WindowAgg(w) => &w.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
             Node::FunctionScan(f) => &f.scan.plan,
@@ -1264,6 +1268,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Unique(u) => Ok(Node::Unique(u.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
+            Node::Agg(a) => Ok(Node::Agg(a.clone_in(mcx)?)),
             Node::WindowAgg(w) => Ok(Node::WindowAgg(w.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
             Node::FunctionScan(f) => Ok(Node::FunctionScan(f.clone_in(mcx)?)),

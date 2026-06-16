@@ -130,12 +130,11 @@ pub fn ExecInitAgg<'mcx>(
     aggstate.numphases = num_phases;
 
     // aggcontexts = palloc0(sizeof(ExprContext *) * numGroupingSets);
-    let mut aggcontexts: PgVec<'mcx, PgBox<'mcx, types_nodes::execnodes::ExprContext<'mcx>>> =
+    // The per-grouping-set ExprContexts are created by ExecAssignExprContext /
+    // CreateExprContext below; in the owned model each is an EcxtId into the
+    // EState ExprContext pool (matching ps_ExprContext / AggStateData.aggcontexts).
+    let mut aggcontexts: PgVec<'mcx, types_nodes::EcxtId> =
         vec_with_capacity_in(mcx, num_grouping_sets as usize)?;
-    // The per-grouping-set ExprContexts are created by ExecAssignExprContext
-    // below; the AggStateData carries them as owned PgBox<ExprContext>, but the
-    // execUtils owner builds them in the EState pool (EcxtId). Bridging the two
-    // representations is execUtils-owned work: panic loudly until execUtils lands.
     let _ = &mut aggcontexts;
 
     // Create expression contexts. We need three or more: per-input-tuple
@@ -148,15 +147,18 @@ pub fn ExecInitAgg<'mcx>(
         estate,
         &mut aggstate.ss.ps,
     )?;
-    // C: aggstate->tmpcontext = aggstate->ss.ps.ps_ExprContext (an ExprContext*).
-    // The owned model's ps_ExprContext is an EcxtId into the EState pool, while
-    // AggStateData.tmpcontext is Option<PgBox<ExprContext>>; reconciling the two
-    // shapes is execUtils/types-nodes-owned. Until the ExprContext storage model
-    // is unified, the assignment cannot be expressed faithfully.
+    // aggstate->tmpcontext = aggstate->ss.ps.ps_ExprContext;
+    // Both are now EcxtId into the EState pool (P0 storage-model reconcile), so
+    // the alias is a plain id copy, faithful to the C `ExprContext *` alias.
+    aggstate.tmpcontext = aggstate.ss.ps.ps_ExprContext;
+    // The remaining ExecInitAgg steps depend on owners not yet ported (catalog
+    // reads, ExecInitNode, slot/projection setup, the per-phase ExecBuildAggTrans
+    // build, etc.); they run in the structurally-faithful block below once those
+    // land. Until then ExecInitAgg cannot complete — panic loudly.
     panic!(
-        "backend-executor-nodeAgg::ExecInitAgg: ExprContext storage model unresolved \
-         (AggState carries PgBox<ExprContext> but execUtils owns EcxtId-pooled \
-         ExprContexts); tmpcontext/aggcontexts/hashcontext assignment, the \
+        "backend-executor-nodeAgg::ExecInitAgg: the ExprContext storage model is \
+         reconciled (tmpcontext/aggcontexts/hashcontext are EcxtId pool ids, #165 \
+         P0), but the remainder still depends on unported owners — the \
          per-grouping-set ExecAssignExprContext loop, hash_create_memory, the \
          outer-plan init (ExecInitNode), source-slot setup \
          (ExecGetResultSlotOps/ExecCreateScanSlotFromOuterPlan), the resort slot \
@@ -184,11 +186,20 @@ pub fn ExecInitAgg<'mcx>(
                 estate,
                 &mut aggstate.ss.ps,
             )?;
+            aggcontexts.push(
+                aggstate
+                    .ss
+                    .ps
+                    .ps_ExprContext
+                    .expect("ExecAssignExprContext set ps_ExprContext"),
+            );
         }
+        aggstate.aggcontexts = Some(aggcontexts);
 
         if use_hashing {
-            // hash_create_memory(aggstate);
-            hash_create_memory(&mut aggstate)?;
+            // hash_create_memory(aggstate); — assigns aggstate->hashcontext from
+            // CreateWorkExprContext(estate) (an EcxtId).
+            hash_create_memory(&mut aggstate, estate)?;
         }
 
         // The per-output-tuple context.

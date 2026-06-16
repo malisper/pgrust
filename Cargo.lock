@@ -3859,24 +3859,35 @@ name = "backend-catalog-indexing"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-heap-heapam-seams",
+ "backend-access-index-genam-seams",
  "backend-access-index-indexam",
+ "backend-access-table-table",
  "backend-access-transam-xact-seams",
  "backend-catalog-catalog",
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
  "backend-executor-execTuples",
+ "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-array",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-datum",
  "types-error",
+ "types-foreigncmds",
  "types-nodes",
  "types-rel",
+ "types-scan",
+ "types-snapshot",
  "types-storage",
  "types-tableam",
  "types-tuple",
@@ -4175,6 +4186,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-collation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-table-table-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-collationcmds-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-constraint"
 version = "0.0.0"
 dependencies = [
@@ -4191,6 +4231,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ri-triggers-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-cache-inval-pc-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
@@ -4214,8 +4255,10 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-ri-triggers",
 ]
 
@@ -4778,6 +4821,7 @@ dependencies = [
 name = "backend-catalog-pg-type"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
@@ -6430,23 +6474,33 @@ dependencies = [
 name = "backend-commands-typecmds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-binary-upgrade-seams",
+ "backend-catalog-dependency-seams",
  "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaccess-seams",
  "backend-catalog-pg-cast",
+ "backend-catalog-pg-constraint-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-enum",
  "backend-catalog-pg-opclass-seams",
  "backend-catalog-pg-range",
+ "backend-catalog-pg-shdepend-seams",
  "backend-catalog-pg-type",
  "backend-catalog-pg-type-seams",
  "backend-commands-define-seams",
  "backend-commands-functioncmds-seams",
  "backend-commands-opclasscmds-seams",
+ "backend-commands-tablecmds-seams",
  "backend-commands-typecmds-seams",
  "backend-parser-coerce-seams",
  "backend-parser-func",
  "backend-parser-parse-type-seams",
+ "backend-utils-adt-acl-seams",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
@@ -6459,6 +6513,7 @@ dependencies = [
  "types-nodes",
  "types-opclass",
  "types-parsenodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -6656,6 +6711,7 @@ dependencies = [
  "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
  "backend-executor-nodeWindowAgg",
+ "backend-executor-nodeWorktablescan",
  "backend-nodes-core-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
@@ -7035,12 +7091,14 @@ dependencies = [
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
+ "backend-executor-nodeSubplan",
  "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeTableFuncscan",
  "backend-executor-nodeTidscan",
  "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
  "backend-executor-nodeWindowAgg",
+ "backend-executor-nodeWorktablescan",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-misc-stack-depth-seams",
@@ -9445,6 +9503,45 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-init-subselect"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-init-subselect-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -17630,6 +17727,7 @@ dependencies = [
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-collation",
  "backend-catalog-pg-constraint",
  "backend-catalog-pg-conversion",
  "backend-catalog-pg-database",
@@ -17752,6 +17850,7 @@ dependencies = [
  "backend-optimizer-path-small",
  "backend-optimizer-plan-analyzejoins",
  "backend-optimizer-plan-createplan",
+ "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
@@ -18677,8 +18776,10 @@ dependencies = [
 name = "types-statistics"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-datum",
+ "types-tuple",
 ]
 
 [[package]]

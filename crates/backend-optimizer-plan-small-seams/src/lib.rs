@@ -20,6 +20,7 @@
 extern crate alloc;
 
 use types_nodes::rawnodes::FromExpr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{JoinlistNode, PlannerInfo};
 
 seam_core::seam!(
@@ -35,7 +36,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `remove_useless_groupby_columns(root)` (initsplan.c:412): remove any
     /// redundant GROUP BY columns made unique by a relation's primary key.
-    pub fn remove_useless_groupby_columns(root: &mut PlannerInfo)
+    pub fn remove_useless_groupby_columns<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
 );
 
 seam_core::seam!(
@@ -44,13 +45,13 @@ seam_core::seam!(
     /// per-baserel target lists, generating PlaceHolderInfos as needed. The C
     /// `final_tlist` argument is always `root->processed_tlist`, which the owner
     /// reads off `root`, so no list is carried across the seam.
-    pub fn build_base_rel_tlists(root: &mut PlannerInfo)
+    pub fn build_base_rel_tlists<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
 );
 
 seam_core::seam!(
     /// `find_lateral_references(root)` (initsplan.c:658): mark Vars/PHVs needed
     /// by LATERAL references in the jointree.
-    pub fn find_lateral_references(root: &mut PlannerInfo)
+    pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
 );
 
 seam_core::seam!(
@@ -58,13 +59,13 @@ seam_core::seam!(
     /// structures by classifying the jointree's qual clauses (restriction vs
     /// join, EC building, SpecialJoinInfo formation) and return the target
     /// joinlist for `make_one_rel` to plan from.
-    pub fn deconstruct_jointree(root: &mut PlannerInfo) -> alloc::vec::Vec<JoinlistNode>
+    pub fn deconstruct_jointree<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>) -> types_error::PgResult<alloc::vec::Vec<JoinlistNode>>
 );
 
 seam_core::seam!(
     /// `create_lateral_join_info(root)` (initsplan.c:845): construct the lateral
     /// reference sets now that PlaceHolderVar eval levels are finalized.
-    pub fn create_lateral_join_info(root: &mut PlannerInfo)
+    pub fn create_lateral_join_info<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
 );
 
 seam_core::seam!(

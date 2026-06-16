@@ -54,6 +54,12 @@ pub struct Plan<'mcx> {
     /// `int plan_width` — average row width in bytes. Consumed alongside
     /// `plan_rows` when sizing the hash table.
     pub plan_width: i32,
+    /// `List *initPlan` — Init `SubPlan` nodes (un-correlated expr subselects).
+    /// `None` is the C `NIL`. Each element is a `SubPlan` expression node
+    /// (`nodes/primnodes.h`); the planner attaches a node's init-plans here, and
+    /// `ExecInitNode` walks this list building each one's `SubPlanState` via
+    /// `ExecInitSubPlan`.
+    pub initPlan: Option<PgVec<'mcx, crate::primnodes::SubPlan<'mcx>>>,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -89,6 +95,16 @@ impl Plan<'_> {
             }
             None => None,
         };
+        let initPlan = match &self.initPlan {
+            Some(list) => {
+                let mut out = vec_with_capacity_in(mcx, list.len())?;
+                for sp in list.iter() {
+                    out.push(sp.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(Plan {
             disabled_nodes: self.disabled_nodes,
             startup_cost: self.startup_cost,
@@ -101,6 +117,7 @@ impl Plan<'_> {
             parallel_aware: self.parallel_aware,
             parallel_safe: self.parallel_safe,
             plan_width: self.plan_width,
+            initPlan,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
