@@ -107,6 +107,12 @@ impl pg_atomic_uint64 {
         self.value.load(Ordering::SeqCst)
     }
 
+    /// `pg_atomic_fetch_add_u64(ptr, add_)` (`port/atomics.h`) — atomically add
+    /// `add_` and return the value `*ptr` held *before* the addition.
+    pub fn fetch_add(&self, add_: types_core::uint64) -> types_core::uint64 {
+        self.value.fetch_add(add_, Ordering::SeqCst)
+    }
+
     /// `pg_atomic_monotonic_advance_u64(ptr, target)` (`port/atomics.h`) —
     /// advance `*ptr` to `target` unless it is already at least `target`;
     /// returns the resulting value (always >= the prior value). Implemented

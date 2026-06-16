@@ -36,6 +36,8 @@ backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# json_render's array path detoasts the array varlena (DatumGetArrayTypeP).
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 # populate_record copies the cached composite tuple descriptor.
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # populate_domain enforces domain constraints via domain_check.

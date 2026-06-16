@@ -4871,6 +4871,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -6026,33 +6027,69 @@ dependencies = [
 name = "backend-commands-dbcommands"
 version = "0.0.0"
 dependencies = [
+ "backend-access-table-table",
+ "backend-access-transam-xact",
+ "backend-access-transam-xlog",
+ "backend-access-transam-xloginsert",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils",
+ "backend-catalog-aclchk",
+ "backend-catalog-catalog",
+ "backend-catalog-objectaccess",
  "backend-catalog-pg-authid-seams",
  "backend-catalog-pg-database-seams",
+ "backend-catalog-pg-db-role-setting",
+ "backend-catalog-pg-db-role-setting-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-catalog-pg-subscription-seams",
+ "backend-catalog-pg-tablespace-seams",
+ "backend-catalog-storage-seams",
+ "backend-commands-collationcmds-seams",
+ "backend-commands-comment",
  "backend-commands-dbcommands-seams",
+ "backend-commands-seclabel",
+ "backend-commands-tablespace",
  "backend-commands-tablespace-globals-seams",
  "backend-common-relpath",
+ "backend-postmaster-checkpointer",
  "backend-replication-slot",
+ "backend-replication-slot-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-copydir",
+ "backend-storage-file-fd",
  "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-smgr-md",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-pg-locale",
+ "backend-utils-adt-pg-locale-env-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-relmapper",
  "backend-utils-error",
+ "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
  "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr",
+ "common-extra-encnames-fgram",
+ "libc",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
  "types-storage",
  "types-tuple",
  "types-wal",
+ "types-wchar",
 ]
 
 [[package]]
@@ -16263,6 +16300,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-tupdesc",
  "backend-parser-coerce-seams",
@@ -16300,6 +16338,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

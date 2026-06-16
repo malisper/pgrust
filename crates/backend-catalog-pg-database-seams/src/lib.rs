@@ -161,3 +161,20 @@ seam_core::seam!(
         dbname: &str,
     ) -> PgResult<Option<ItemPointerData>>
 );
+
+seam_core::seam!(
+    /// `aclnewowner(DatumGetAclP(datacl), olddba, newowner)` (AlterDatabaseOwner,
+    /// dbcommands.c): re-assign ownership of the existing `datacl` aclitem[] from
+    /// `old_owner_id` to `new_owner_id`, returning the re-encoded aclitem[]
+    /// varlena bytes for the updated `pg_database` row. `datacl` crosses the
+    /// pg_database carrier as opaque varlena bytes by design; decoding the
+    /// aclitem[] and re-encoding the result needs the catalog/fmgr/varlena layer
+    /// the command layer does not own, so this whole `aclnewowner` step is one
+    /// owner call. `Err` carries the decode/`ereport(ERROR)` surface plus OOM.
+    pub fn aclnewowner_datacl<'mcx>(
+        mcx: Mcx<'mcx>,
+        old_datacl: &[u8],
+        old_owner_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);

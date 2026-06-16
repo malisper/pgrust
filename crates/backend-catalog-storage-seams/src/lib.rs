@@ -13,6 +13,54 @@ use types_core::ProcNumber;
 use types_error::PgResult;
 use types_storage::RelFileLocator;
 
+/// `CreateDBRelInfo` (`dbcommands.c`): one relation to be copied when creating
+/// a database — its physical identifier, oid, and permanence. Produced by the
+/// cross-database `pg_class` scan ([`scan_source_database_pg_class`]) and
+/// consumed by [`create_and_copy_relation_data`].
+#[derive(Clone, Copy, Debug)]
+pub struct CreateDBRelInfo {
+    /// `RelFileLocator rlocator` — physical relation identifier.
+    pub rlocator: RelFileLocator,
+    /// `Oid reloid` — relation oid.
+    pub reloid: Oid,
+    /// `bool permanent` — relation is permanent (vs. unlogged).
+    pub permanent: bool,
+}
+
+seam_core::seam!(
+    /// `ScanSourceDatabasePgClass(tbid, dbid, srcpath)` (dbcommands.c): the
+    /// cross-database raw buffered scan of the source database's `pg_class`
+    /// relation (`RelationMapOidToFilenumberForDatabase` + `LockRelationId` +
+    /// `smgropen`/`smgrnblocks` + `GetAccessStrategy(BAS_BULKREAD)` +
+    /// `RegisterSnapshot(GetLatestSnapshot())` + the block-by-block
+    /// `ReadBufferWithoutRelcache` / `LockBuffer` / page-item walk gated by
+    /// `HeapTupleSatisfiesVisibility`, with `ScanSourceDatabasePgClassTuple`'s
+    /// shared/storage/temp filter folded in). Returns the list of relations to
+    /// copy. The whole buffer/smgr/snapshot/visibility engine — none of which
+    /// the command layer owns — stays behind this seam (storage.c's domain),
+    /// exactly as `src-idiomatic` collapses it. Can `ereport(ERROR)`.
+    pub fn scan_source_database_pg_class<'mcx>(
+        mcx: Mcx<'mcx>,
+        tbid: Oid,
+        dbid: Oid,
+        srcpath: &str,
+    ) -> PgResult<PgVec<'mcx, CreateDBRelInfo>>
+);
+
+seam_core::seam!(
+    /// `CreateAndCopyRelationData(src_rlocator, dst_rlocator, permanent_data)`
+    /// (storage.c): create destination relation storage and copy every fork
+    /// block-by-block from the source, WAL-logging each block
+    /// (`RelationCreateStorage` + `RelationCopyStorageUsingBuffer` per fork +
+    /// `smgrimmedsync` for permanent rels). Owned by storage.c. Can
+    /// `ereport(ERROR)`.
+    pub fn create_and_copy_relation_data(
+        src_rlocator: RelFileLocator,
+        dst_rlocator: RelFileLocator,
+        permanent: bool,
+    ) -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `smgr_redo(record)` (storage.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
