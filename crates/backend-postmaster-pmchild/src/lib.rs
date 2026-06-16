@@ -601,6 +601,121 @@ pub fn MarkActiveChildBgworkerNotify(pid: i32) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ActiveChildList walk + in-place live-entry mutators (postmaster.c surface)
+// ---------------------------------------------------------------------------
+//
+// postmaster.c reaches into the *live* `PMChild` entries it gets back from
+// `AssignPostmasterChildSlot`/`AllocDeadEndChild` and the ones it walks in
+// `ActiveChildList`:
+//
+//   * after assigning, it does `bn->pid = ...; bn->rw = rw; bn->bkend_type =
+//     ...; bn->bgworker_notify = false;` on the entry that lives in the list
+//     (StartChildProcess / StartBackgroundWorker / BackendStartup);
+//   * `SignalChildren`/`CountChildren` `dlist_foreach(&ActiveChildList)` and may
+//     relabel `bp->bkend_type = B_WAL_SENDER` in place;
+//   * `PostmasterMarkPIDForWorkerNotify` walks the list and sets
+//     `bp->bgworker_notify = true` on the matching entry.
+//
+// Our `PMChild` is returned by value (`Copy`), so a caller's copy is detached
+// from the slab cell on the list. These accessors give the postmaster the
+// missing C semantics: locate the live cell by identity and mutate it in place,
+// and walk the list yielding a mutable view per entry. Identity mirrors
+// `find_active_index`: pool slots key on `child_slot` (> 0); dead-end children
+// (`child_slot == 0`) match by full value equality (the per-entry walk visitor
+// is the faithful path for mutating those, since it carries the cell itself).
+
+/// A mutable view of one live `ActiveChildList` entry, handed to the
+/// [`for_each_active_child`] visitor. Reads expose the C `bp->field`; the
+/// `set_*` methods mirror C's in-place `bp->field = ...` on the list entry.
+pub struct PMChildRef<'a> {
+    entry: &'a mut PMChild,
+}
+
+impl PMChildRef<'_> {
+    /// `bp->pid`.
+    pub fn pid(&self) -> i32 {
+        self.entry.pid
+    }
+    /// `bp->child_slot`.
+    pub fn child_slot(&self) -> i32 {
+        self.entry.child_slot
+    }
+    /// `bp->bkend_type`.
+    pub fn bkend_type(&self) -> BackendType {
+        self.entry.bkend_type
+    }
+    /// `bp->rw`.
+    pub fn rw(&self) -> Option<u32> {
+        self.entry.rw
+    }
+    /// `bp->bgworker_notify`.
+    pub fn bgworker_notify(&self) -> bool {
+        self.entry.bgworker_notify
+    }
+    /// A `Copy` snapshot of the live entry (the C `PMChild *` dereferenced).
+    pub fn get(&self) -> PMChild {
+        *self.entry
+    }
+
+    /// `bp->pid = pid`.
+    pub fn set_pid(&mut self, pid: i32) {
+        self.entry.pid = pid;
+    }
+    /// `bp->bkend_type = bkend_type`.
+    pub fn set_bkend_type(&mut self, bkend_type: BackendType) {
+        self.entry.bkend_type = bkend_type;
+    }
+    /// `bp->rw = rw` (`None` is the C `NULL`).
+    pub fn set_rw(&mut self, rw: Option<u32>) {
+        self.entry.rw = rw;
+    }
+    /// `bp->bgworker_notify = bgworker_notify`.
+    pub fn set_bgworker_notify(&mut self, bgworker_notify: bool) {
+        self.entry.bgworker_notify = bgworker_notify;
+    }
+}
+
+/// `dlist_foreach(iter, &ActiveChildList)` — walk every live child (pool and
+/// dead-end) in head-first order, handing the visitor a [`PMChildRef`] that can
+/// read and mutate the live list entry in place. This is the faithful stand-in
+/// for the C `dlist_iter`/`dlist_container` walk used by `SignalChildren`,
+/// `CountChildren`, and `PostmasterMarkPIDForWorkerNotify`.
+///
+/// The lock is held across the whole walk (the postmaster is single-threaded,
+/// so this matches C exactly); the visitor must not re-enter pmchild.
+pub fn for_each_active_child<F: FnMut(PMChildRef<'_>)>(mut f: F) {
+    let mut state = PMCHILD.lock().unwrap();
+    // Collect the head-first slab indices first to avoid borrowing `slab` and
+    // `active_child_list` simultaneously (the order is the C dlist order).
+    let indices: Vec<usize> = state.active_child_list.iter().copied().collect();
+    for idx in indices {
+        if let Some(entry) = state.slab[idx].as_mut() {
+            f(PMChildRef { entry });
+        }
+    }
+}
+
+/// Locate the live `ActiveChildList` entry for `pmchild` (by the same identity
+/// as [`find_active_index`]) and run `f` on a [`PMChildRef`] for it; returns
+/// `true` if the entry was found. The faithful stand-in for mutating the C
+/// `PMChild *` the postmaster holds after `AssignPostmasterChildSlot` /
+/// `AllocDeadEndChild` (e.g. `bn->rw = rw; bn->bkend_type = ...`).
+pub fn with_active_child<F: FnOnce(PMChildRef<'_>)>(pmchild: &PMChild, f: F) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    match find_active_index(&state, pmchild) {
+        Some(idx) => {
+            if let Some(entry) = state.slab[idx].as_mut() {
+                f(PMChildRef { entry });
+                true
+            } else {
+                false
+            }
+        }
+        None => false,
+    }
+}
+
 /// Set the `pid` of a live active child identified by `child_slot`
 /// (postmaster.c writes `bn->pid = pid` after a successful fork in
 /// `BackendStartup`/`StartChildProcess`/`StartBackgroundWorker`). Returns
@@ -702,6 +817,28 @@ pub fn ActiveChildListSnapshot() -> Vec<PMChild> {
         .iter()
         .filter_map(|&idx| state.slab[idx])
         .collect()
+}
+
+/// `bp->pid = pid` on the live entry identified by `pmchild`. Returns `true` if
+/// the entry was found in `ActiveChildList`.
+pub fn SetPostmasterChildPid(pmchild: &PMChild, pid: i32) -> bool {
+    with_active_child(pmchild, |mut r| r.set_pid(pid))
+}
+
+/// `bp->bkend_type = bkend_type` on the live entry identified by `pmchild`.
+pub fn SetPostmasterChildBackendType(pmchild: &PMChild, bkend_type: BackendType) -> bool {
+    with_active_child(pmchild, |mut r| r.set_bkend_type(bkend_type))
+}
+
+/// `bp->rw = rw` on the live entry identified by `pmchild`.
+pub fn SetPostmasterChildRw(pmchild: &PMChild, rw: Option<u32>) -> bool {
+    with_active_child(pmchild, |mut r| r.set_rw(rw))
+}
+
+/// `bp->bgworker_notify = bgworker_notify` on the live entry identified by
+/// `pmchild`.
+pub fn SetPostmasterChildBgworkerNotify(pmchild: &PMChild, bgworker_notify: bool) -> bool {
+    with_active_child(pmchild, |mut r| r.set_bgworker_notify(bgworker_notify))
 }
 
 /// Locate the `ActiveChildList` slab index of `pmchild` by identity. Pool slots

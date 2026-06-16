@@ -479,6 +479,123 @@ pub fn ForgetBackgroundWorker(rw_index: usize) -> PgResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// BackgroundWorkerList walk + rw_* accessors (postmaster.c surface)
+// ---------------------------------------------------------------------------
+//
+// postmaster.c walks `BackgroundWorkerList` with `dlist_foreach` /
+// `dlist_foreach_modify` (DetermineSleepTime, maybe_start_bgworkers) reading and
+// mutating each `rw->rw_*` field and, mid-walk, calling
+// `ForgetBackgroundWorker(rw)`. `BackgroundWorkerList` is a process-local
+// `thread_local!` here, so these give the postmaster the same access without
+// exposing the list's interior: index-keyed `rw_*` get/set and a
+// modify-safe walk whose visitor can request `Forget` (the deferred
+// `ForgetBackgroundWorker(rw); continue;` of `dlist_foreach_modify`).
+
+/// `dlist_length(&BackgroundWorkerList)` — number of registered workers.
+pub fn background_worker_list_len() -> usize {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow().len())
+}
+
+/// `rw->rw_pid` for the worker at list index `rw_index`.
+pub fn rw_pid(rw_index: usize) -> pid_t {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_pid)
+}
+/// `rw->rw_pid = pid`.
+pub fn set_rw_pid(rw_index: usize, pid: pid_t) {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_pid = pid);
+}
+/// `rw->rw_crashed_at`.
+pub fn rw_crashed_at(rw_index: usize) -> types_core::TimestampTz {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_crashed_at)
+}
+/// `rw->rw_crashed_at = ts`.
+pub fn set_rw_crashed_at(rw_index: usize, ts: types_core::TimestampTz) {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_crashed_at = ts);
+}
+/// `rw->rw_terminate`.
+pub fn rw_terminate(rw_index: usize) -> bool {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_terminate)
+}
+/// `rw->rw_terminate = terminate`.
+pub fn set_rw_terminate(rw_index: usize, terminate: bool) {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_terminate = terminate);
+}
+/// `rw->rw_shmem_slot`.
+pub fn rw_shmem_slot(rw_index: usize) -> i32 {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_shmem_slot)
+}
+/// `rw->rw_worker.bgw_restart_time`.
+pub fn rw_bgw_restart_time(rw_index: usize) -> i32 {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_restart_time)
+}
+/// `rw->rw_worker.bgw_start_time`.
+pub fn rw_bgw_start_time(rw_index: usize) -> BgWorkerStartTime {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_start_time)
+}
+/// `rw->rw_worker.bgw_notify_pid`.
+pub fn rw_bgw_notify_pid(rw_index: usize) -> pid_t {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_notify_pid)
+}
+/// `rw->rw_worker.bgw_name` as an owned (lossy) string (for `%s` logging).
+pub fn rw_bgw_name(rw_index: usize) -> String {
+    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].rw_worker.bgw_name))
+}
+/// `rw->rw_worker.bgw_type` as an owned (lossy) string (for `%s` logging).
+pub fn rw_bgw_type(rw_index: usize) -> String {
+    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].rw_worker.bgw_type))
+}
+/// A `Copy` snapshot of the whole `rw->rw_worker` registration (the value
+/// `postmaster_child_launch` copies into the worker's `StartupData`).
+pub fn rw_worker(rw_index: usize) -> BackgroundWorker {
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker)
+}
+
+/// What [`for_each_background_worker_modify`] should do with the entry after the
+/// visitor returns: mirror the body of `dlist_foreach_modify` over
+/// `BackgroundWorkerList` (continue to next, or `ForgetBackgroundWorker(rw)`
+/// then continue).
+pub enum BgwWalk {
+    /// Keep the entry and advance to the next (`continue;`).
+    Keep,
+    /// `ForgetBackgroundWorker(rw); continue;` — drop the entry from the list
+    /// (and free its shared slot) before advancing.
+    Forget,
+}
+
+/// `dlist_foreach_modify(iter, &BackgroundWorkerList)` — walk every registered
+/// worker, passing the visitor the list index of the current entry. The visitor
+/// reads/mutates via the `rw_*` accessors and returns [`BgwWalk`] to control
+/// removal, exactly mirroring the postmaster's `DetermineSleepTime` /
+/// `maybe_start_bgworkers` loops (where the body may `ForgetBackgroundWorker(rw)`
+/// and `continue`). Returning `Forget` performs [`ForgetBackgroundWorker`] for
+/// the current entry; on its `Err` the walk stops and the error propagates.
+pub fn for_each_background_worker_modify<F: FnMut(usize) -> BgwWalk>(
+    mut f: F,
+) -> PgResult<()> {
+    // dlist_foreach_modify caches the next node before running the body, so a
+    // body that removes the current node is safe. We walk by index and, on
+    // Forget, remove index i (the next entry shifts down into i), so we do not
+    // advance i in that case — equivalent to caching `next`.
+    let mut i = 0;
+    loop {
+        let len = background_worker_list_len();
+        if i >= len {
+            break;
+        }
+        match f(i) {
+            BgwWalk::Keep => {
+                i += 1;
+            }
+            BgwWalk::Forget => {
+                ForgetBackgroundWorker(i)?;
+                // The entry was removed; the next entry now occupies index i.
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ReportBackgroundWorkerPID
 // ---------------------------------------------------------------------------
 

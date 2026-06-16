@@ -96,3 +96,52 @@ fn slot_size_matches_c_field_sum() {
     assert_eq!(BACKGROUND_WORKER_SLOT_SIZE, 16 + worker);
     assert_eq!(BGW_ARRAY_HEADER_SIZE, 16);
 }
+
+#[test]
+fn rw_accessors_and_keep_walk() {
+    use types_bgworker::{BackgroundWorker, RegisteredBgWorker};
+
+    // Populate the process-local list directly (no shmem needed for the
+    // Keep-only path or the rw_* get/set surface).
+    BACKGROUND_WORKER_LIST.with(|l| {
+        let mut list = l.borrow_mut();
+        list.clear();
+        let mut w = BackgroundWorker::zeroed();
+        w.bgw_name[..3].copy_from_slice(b"foo");
+        w.bgw_restart_time = 5;
+        w.bgw_notify_pid = 71;
+        list.push(RegisteredBgWorker {
+            rw_worker: w,
+            rw_pid: 0,
+            rw_crashed_at: 0,
+            rw_shmem_slot: 0,
+            rw_terminate: false,
+        });
+    });
+
+    assert_eq!(background_worker_list_len(), 1);
+    assert_eq!(rw_pid(0), 0);
+    assert_eq!(rw_bgw_restart_time(0), 5);
+    assert_eq!(rw_bgw_notify_pid(0), 71);
+    assert_eq!(rw_bgw_name(0), "foo");
+
+    set_rw_pid(0, 999);
+    set_rw_crashed_at(0, 12345);
+    set_rw_terminate(0, true);
+    assert_eq!(rw_pid(0), 999);
+    assert_eq!(rw_crashed_at(0), 12345);
+    assert!(rw_terminate(0));
+
+    // Keep-only walk visits each entry, advancing past it.
+    let mut visited = 0;
+    for_each_background_worker_modify(|i| {
+        assert_eq!(i, 0);
+        visited += 1;
+        BgwWalk::Keep
+    })
+    .unwrap();
+    assert_eq!(visited, 1);
+    assert_eq!(background_worker_list_len(), 1);
+
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().clear());
+}

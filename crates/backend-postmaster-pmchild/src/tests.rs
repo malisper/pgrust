@@ -143,6 +143,66 @@ fn find_by_pid_walks_active_list() {
 }
 
 #[test]
+fn set_live_entry_fields_after_assign() {
+    let _g = SERIAL.lock().unwrap();
+    install_seams_once();
+    InitPostmasterChildSlots();
+
+    // Mirror StartBackgroundWorker: assign, then mutate the live entry.
+    let bn = AssignPostmasterChildSlot(BackendType::BgWorker).unwrap();
+    assert!(SetPostmasterChildPid(&bn, 4242));
+    assert!(SetPostmasterChildRw(&bn, Some(7)));
+    assert!(SetPostmasterChildBackendType(&bn, BackendType::BgWorker));
+    assert!(SetPostmasterChildBgworkerNotify(&bn, false));
+
+    // The live list entry (not the caller's stale Copy) carries the new state.
+    let live = FindPostmasterChildByPid(4242).expect("entry now has pid 4242");
+    assert_eq!(live.child_slot, bn.child_slot);
+    assert_eq!(live.rw, Some(7));
+    assert_eq!(live.bgworker_notify, false);
+
+    // A non-active entry is not found (returns false, no panic).
+    let bogus = PMChild {
+        pid: 0,
+        child_slot: 999_999,
+        bkend_type: BackendType::BgWorker,
+        rw: None,
+        bgworker_notify: false,
+    };
+    assert!(!SetPostmasterChildPid(&bogus, 1));
+
+    ReleasePostmasterChildSlot(live);
+}
+
+#[test]
+fn for_each_active_child_reads_and_mutates() {
+    let _g = SERIAL.lock().unwrap();
+    install_seams_once();
+    InitPostmasterChildSlots();
+
+    let a = AssignPostmasterChildSlot(BackendType::Backend).unwrap();
+    SetPostmasterChildPid(&a, 100);
+
+    // SignalChildren-style relabel + PostmasterMarkPIDForWorkerNotify-style set.
+    let mut seen = 0;
+    for_each_active_child(|mut r| {
+        seen += 1;
+        if r.pid() == 100 {
+            assert_eq!(r.bkend_type(), BackendType::Backend);
+            r.set_bkend_type(BackendType::WalSender);
+            r.set_bgworker_notify(true);
+        }
+    });
+    assert_eq!(seen, 1);
+
+    let live = FindPostmasterChildByPid(100).unwrap();
+    assert_eq!(live.bkend_type, BackendType::WalSender);
+    assert_eq!(live.bgworker_notify, true);
+
+    ReleasePostmasterChildSlot(live);
+}
+
+#[test]
 fn wal_sender_releases_into_backend_pool() {
     let _g = SERIAL.lock().unwrap();
     install_seams_once();
