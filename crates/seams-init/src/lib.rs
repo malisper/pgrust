@@ -1388,10 +1388,11 @@ mod recurrence_guard {
         // entry points are F3b. The begin seams are NOT installed (and the engine
         // loud-panics in the index writetup/comparetup arms), so the four
         // index-only seams stay seam-panics until F3b lands. (begin_index_gist
-        // has no live caller, so it is not flagged.) DELETE each entry as F3b
-        // installs its begin/put/get index seam.
+        // is called by backend-access-gist-build's sorted build.) DELETE each
+        // entry as F3b installs its begin/put/get index seam.
         ("backend_utils_sort_tuplesort", "tuplesort_begin_index_btree"),
         ("backend_utils_sort_tuplesort", "tuplesort_begin_index_hash"),
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_gist"),
         ("backend_utils_sort_tuplesort", "tuplesort_putindextuplevalues"),
         ("backend_utils_sort_tuplesort", "tuplesort_getindextuple"),
     ];
