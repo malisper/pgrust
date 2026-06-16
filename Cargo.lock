@@ -5574,6 +5574,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-proclang"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-proclang-seams",
+ "backend-parser-parse-func-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-commands-proclang-seams"
 version = "0.0.0"
 dependencies = [
@@ -14733,7 +14757,6 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
- "backend-commands-proclang-seams",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -16605,6 +16628,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-commands-proclang",
  "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-tablespace",

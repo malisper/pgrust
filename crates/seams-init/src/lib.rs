@@ -101,6 +101,7 @@ pub fn init_all() {
     backend_commands_cluster::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
+    backend_commands_proclang::init_seams();
     backend_commands_dbcommands::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
@@ -1016,11 +1017,9 @@ mod recurrence_guard {
         // (backend-catalog-aclchk-seams) is itself declared-but-uninstalled (same
         // unported aclchk.c owner), so it cannot be honestly installed yet. It
         // becomes a real install when aclchk.c lands (or is re-homed to
-        // aclchk-seams). (get_language_oid was RESOLVED: the mishomed
-        // functioncmds-seams decl was retired, the 3 consumers re-pointed at the
-        // correctly-homed backend-commands-proclang-seams::get_language_oid, and
-        // that seam is now installed by the merged syscache owner — proclang.c's
-        // sole logic is a LANGNAME-syscache OID lookup.)
+        // aclchk-seams). (get_language_oid is now installed by its real owner,
+        // backend-commands-proclang::init_seams; the proclang port wraps the
+        // syscache LANGNAME OID lookup with the missing-language error.)
         ("backend_commands_functioncmds", "aclcheck_error_type"),
         // NOTE: the PARAM_EXEC `execPlan`-link seams formerly listed here under
         // backend_executor_execProcnode were RELOCATED to execMain-seams (their

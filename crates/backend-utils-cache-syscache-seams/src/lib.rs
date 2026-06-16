@@ -712,6 +712,32 @@ seam_core::seam!(
     ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
 );
 
+seam_core::seam!(
+    /// `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid, CStringGetDatum(langname))`
+    /// (`get_language_oid`, proclang.c): the language's OID by name, or
+    /// `InvalidOid` on a cache miss. The missing-language error is the caller's
+    /// (`get_language_oid` raises `ERRCODE_UNDEFINED_OBJECT` when `!missing_ok`).
+    pub fn language_oid_by_name(langname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(LANGNAME, PointerGetDatum(languageName))` (proclang.c
+    /// pre-existing-definition check): the writable `pg_language` tuple by name
+    /// plus its deformed `oid`/`lanowner`, or `None` if no such language exists.
+    /// `CreateProceduralLanguage`'s replace branch needs the whole tuple
+    /// (`heap_modify_tuple` keeps `oid`/`lanowner`/`lanacl` from it) and the
+    /// `oldform->oid`.
+    pub fn language_tuple_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        langname: &str,
+    ) -> PgResult<
+        Option<(
+            types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+            types_catalog::pg_language::FormData_pg_language,
+        )>,
+    >
+);
+
 /* ---- CLUSTER pg_class / pg_index writable copies (backend-commands-cluster) */
 
 seam_core::seam!(

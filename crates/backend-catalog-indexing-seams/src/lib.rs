@@ -470,6 +470,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateProceduralLanguage`'s create branch: `langoid = GetNewOidWithIndex(
+    /// rel, LanguageOidIndexId, Anum_pg_language_oid)` + `heap_form_tuple(
+    /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)`
+    /// (proclang.c:159-163 + catalog/indexing.c + heapam). Returns the freshly
+    /// allocated `pg_language` OID. `lanacl` is always inserted NULL. `Err`
+    /// carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_language<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_language::PgLanguageInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CreateProceduralLanguage`'s replace branch: `tup = heap_modify_tuple(
+    /// oldtup, RelationGetDescr(rel), values, nulls, replaces)` +
+    /// `CatalogTupleUpdate(rel, &tup->t_self, tup)` (proclang.c:149-150 +
+    /// catalog/indexing.c + heapam). The `replaces[]` mask leaves
+    /// `oid`/`lanowner`/`lanacl` unchanged (taken from `oldtup`), so the existing
+    /// OID, ownership and ACL are preserved exactly as C. `oldtup` supplies both
+    /// the unchanged columns and the `t_self` update target. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_language<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_language::PgLanguageInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)`
     /// (catalog/catalog.c): allocate a fresh `pg_type` row OID that does not
     /// collide with any existing row, verified against `TypeOidIndexId`.
