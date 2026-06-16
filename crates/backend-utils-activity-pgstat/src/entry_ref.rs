@@ -18,6 +18,7 @@ use types_pgstat::pgstat_internal::{
     PgStatShared_HashEntry,
 };
 use types_storage::ilist::{dlist_head, dlist_node};
+use types_storage::{DsaArea, DshashTable};
 
 /// `PgStat_EntryRef` (`utils/pgstat_internal.h`) — a backend-local reference to
 /// a shared statistics entry, caching the resolved shared pointers and holding
@@ -112,21 +113,30 @@ pub const PGSTAT_ENTRY_REF_HASH_SIZE: usize = 128;
 /// references the shared-memory control block, the DSA area, and the shared
 /// hash, and holds this backend's current statistics snapshot.
 ///
-/// In C `dsa` and `shared_hash` are opaque handles into shared memory; the
-/// merged `backend-lib-dshash` / `backend-utils-mmgr-dsa` ports expose real
-/// pointer-based areas, so once `pgstat_shmem.c` is ported these will carry
-/// those real area references. For the F0 carrier they are `None` until the
-/// attach path (owned by the follow-on `pgstat_shmem.c` port) populates them.
+/// In C `dsa` and `shared_hash` are `dsa_area *` / `dshash_table *` — opaque
+/// backend-local handles into the shared DSA segment, created in
+/// `StatsShmemInit()` and attached per-backend in `pgstat_attach_shmem()`. The
+/// merged `backend-utils-mmgr-dsa` / `backend-lib-dshash` ports expose those
+/// areas as the raw `*mut DsaArea` / `*mut DshashTable` handles the C code
+/// holds (and that `dsa_get_address` / `dshash_find_or_insert` take by `*mut`),
+/// so these fields carry them directly — the faithful contract, not an opaque
+/// flag. `null` until the attach path binds them: C leaves them `NULL` in a
+/// process that has not yet attached, and `pgstat_attach_shmem` populates them
+/// with `dsa_attach_in_place` / `dshash_attach` against the area published in
+/// shared memory. Not owned: the pointees live in the shared DSA segment, whose
+/// lifetime is the segment, not this backend-local control block.
 pub struct PgStat_LocalState {
     /// `PgStat_ShmemControl *shmem` — the shared control block.
     pub shmem: Option<Box<PgStat_ShmemControl>>,
-    /// `dsa_area *dsa` — the DSA area the shared hash and entry bodies live in.
-    /// Modeled opaquely until the shmem-attach port lands; carried as a flag of
-    /// attachment for now.
-    pub dsa_attached: bool,
-    /// `dshash_table *shared_hash` — the shared stats hash. Same staging note
-    /// as [`dsa_attached`](Self::dsa_attached).
-    pub shared_hash_attached: bool,
+    /// `dsa_area *dsa` — the DSA area the shared hash and entry bodies live in,
+    /// as the backend-local `*mut DsaArea` handle the `dsa.c` substrate hands
+    /// back from `dsa_attach_in_place`. `null` until this backend has attached.
+    /// Not owned: the area lives in the shared segment.
+    pub dsa: *mut DsaArea,
+    /// `dshash_table *shared_hash` — the shared stats hash, as the
+    /// backend-local `*mut DshashTable` handle from `dshash_attach`. `null`
+    /// until attached. Not owned: the table lives in the shared DSA segment.
+    pub shared_hash: *mut DshashTable,
     /// `PgStat_Snapshot snapshot` — the current materialized statistics
     /// snapshot.
     pub snapshot: PgStat_Snapshot,
@@ -136,8 +146,8 @@ impl PgStat_LocalState {
     pub fn new() -> Self {
         PgStat_LocalState {
             shmem: None,
-            dsa_attached: false,
-            shared_hash_attached: false,
+            dsa: core::ptr::null_mut(),
+            shared_hash: core::ptr::null_mut(),
             snapshot: PgStat_Snapshot::default(),
         }
     }
