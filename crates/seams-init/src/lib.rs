@@ -166,6 +166,8 @@ pub fn init_all() {
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
     backend_nodes_equalfuncs::init_seams();
+    backend_nodes_outfuncs::init_seams();
+    backend_nodes_readfuncs::init_seams();
     backend_access_hash_core::init_seams();
     backend_access_hashfunc::init_seams();
     backend_access_hash_entry::init_seams();
