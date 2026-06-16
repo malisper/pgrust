@@ -136,3 +136,14 @@ seam_core::seam!(
         def: &types_nodes::ddlnodes::DefElem<'_>,
     ) -> types_error::PgResult<types_core::Oid>
 );
+
+seam_core::seam!(
+    /// `typeStringToTypeName(str, NULL)` (parse_type.c): parse a type-name string
+    /// into a raw-parser `TypeName` node (`raw_parser(RAW_PARSE_TYPE_NAME)`),
+    /// rejecting `SETOF`. Used by `pg_get_object_address` (objectaddress.c) to
+    /// turn the SQL `text[]` name/args elements of the type-bearing object types
+    /// into the `TypeName` node `get_object_address` expects. With the C
+    /// `escontext = NULL`, an empty/whitespace or `SETOF` string hard-raises
+    /// `"invalid type name \"%s\""`; carried on `Err`.
+    pub fn type_string_to_type_name(string: &str) -> PgResult<ParseTypeName>
+);
