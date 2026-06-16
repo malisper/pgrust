@@ -14163,6 +14163,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-xid8funcs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "backend-utils-time-snapmgr-seams",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-adt-xml-seams"
 version = "0.0.0"
 dependencies = [
