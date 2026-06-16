@@ -19654,6 +19654,7 @@ dependencies = [
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
+ "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",

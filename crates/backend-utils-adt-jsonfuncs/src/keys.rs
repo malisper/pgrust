@@ -266,14 +266,8 @@ pub fn json_object_keys<'mcx>(
 }
 
 /// `CStringGetTextDatum(nxt)` (jsonfuncs.c:631/779): build a `text` Datum from a
-/// key's raw bytes. The keys are object field names (UTF-8 text in a valid
-/// document); the funcapi `cstring_get_text_datum` seam builds the varlena.
+/// key's raw bytes. C uses `cstring_to_text` over server-encoded bytes (no
+/// UTF-8 validation), so the byte-faithful varlena builder is used.
 fn text_datum_from_bytes<'mcx>(mcx: Mcx<'mcx>, key: &[u8]) -> PgResult<Datum<'mcx>> {
-    let s = core::str::from_utf8(key).map_err(|_| {
-        ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg("invalid byte sequence in object key")
-            .into_error()
-    })?;
-    funcapi::cstring_get_text_datum::call(mcx, s)
+    backend_utils_adt_varlena_seams::bytes_to_varlena_v::call(mcx, key)
 }
