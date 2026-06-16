@@ -42,7 +42,7 @@ use types_startup::StartupData;
 use types_wal::RM_XACT_ID;
 use types_walsummarizer::{BlockTag, ReadRecordResult, WalSummarizerData, WalSummaryFile, XLogReaderHandle};
 
-use types_blkreftable::BlockRefTableHandle;
+use types_blkreftable::BlockRefTable;
 
 use backend_storage_ipc_shmem_seams as shmem;
 use backend_storage_ipc_dsm_core_seams as ipc;
@@ -912,7 +912,7 @@ fn summarize_wal_in(
     let mut summary_end_lsn: XLogRecPtr = switch_lsn;
     let mut fast_forward = true;
 
-    let brtab: BlockRefTableHandle = blkreftable::create_empty_block_ref_table::call(mcx)?;
+    let mut brtab: BlockRefTable = blkreftable::create_empty_block_ref_table::call(mcx)?;
 
     // Initialize private data for xlogreader + create xlogreader.
     let historic = !XLogRecPtrIsInvalid(switch_lsn);
@@ -938,7 +938,7 @@ fn summarize_wal_in(
         &mut switch_lsn,
         &mut summary_end_lsn,
         &mut fast_forward,
-        brtab,
+        &mut brtab,
     );
 
     xlogreader::summarizer_xlogreader_free::call(xlr);
@@ -965,7 +965,7 @@ fn summarize_wal_in(
 
         // The idiomatic blkreftable port returns the serialized bytes from
         // WriteBlockRefTable rather than streaming via WriteWalSummary.
-        let bytes = blkreftable::write_block_ref_table::call(mcx, brtab)?;
+        let bytes = blkreftable::write_block_ref_table::call(mcx, &brtab)?;
         walsummary::write_wal_summary_file::call(&temp_path, &final_path, &bytes)?;
 
         log_debug1(&format!(
@@ -1001,7 +1001,7 @@ fn summarize_wal_body(
     switch_lsn: &mut XLogRecPtr,
     summary_end_lsn: &mut XLogRecPtr,
     fast_forward: &mut bool,
-    brtab: BlockRefTableHandle,
+    brtab: &mut BlockRefTable,
 ) -> PgResult<XLogRecPtr> {
     let summary_start_lsn: XLogRecPtr;
 
@@ -1059,7 +1059,7 @@ fn summarize_wal_loop(
     switch_lsn: &mut XLogRecPtr,
     summary_end_lsn: &mut XLogRecPtr,
     fast_forward: &mut bool,
-    brtab: BlockRefTableHandle,
+    brtab: &mut BlockRefTable,
 ) -> PgResult<()> {
     loop {
         ProcessWalSummarizerInterrupts()?;
@@ -1132,9 +1132,9 @@ fn summarize_wal_loop(
         } else if !*fast_forward {
             // Record types that require extra block-reference-table updates.
             match rmid {
-                RM_DBASE_ID => SummarizeDbaseRecord(xlr, brtab)?,
-                RM_SMGR_ID => SummarizeSmgrRecord(xlr, brtab)?,
-                RM_XACT_ID => SummarizeXactRecord(mcx, xlr, brtab)?,
+                RM_DBASE_ID => SummarizeDbaseRecord(xlr, &mut *brtab)?,
+                RM_SMGR_ID => SummarizeSmgrRecord(xlr, &mut *brtab)?,
+                RM_XACT_ID => SummarizeXactRecord(mcx, xlr, &mut *brtab)?,
                 _ => {}
             }
         }
@@ -1151,7 +1151,7 @@ fn summarize_wal_loop(
                     // Ignore the FSM fork, which is not fully WAL-logged.
                     if forknum != FSM_FORKNUM {
                         blkreftable::block_ref_table_mark_block_modified::call(
-                            brtab, rlocator, forknum, blocknum,
+                            &mut *brtab, rlocator, forknum, blocknum,
                         )?;
                     }
                 }
@@ -1192,7 +1192,7 @@ fn truncate_path(mut s: String) -> String {
 // ===========================================================================
 
 /// `SummarizeDbaseRecord` -- special handling for WAL records with RM_DBASE_ID.
-fn SummarizeDbaseRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgResult<()> {
+fn SummarizeDbaseRecord(xlr: XLogReaderHandle, brtab: &mut BlockRefTable) -> PgResult<()> {
     let info = xlogreader::summarizer_rec_get_info::call(xlr) & !XLR_INFO_MASK;
     let data = xlogreader::summarizer_rec_get_data::call(xlr);
 
@@ -1203,13 +1203,13 @@ fn SummarizeDbaseRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> Pg
         let db_id = read_oid(&data, 0);
         let tablespace_id = read_oid(&data, 4);
         let rlocator = rlocator(tablespace_id, db_id, 0);
-        blkreftable::block_ref_table_set_limit_block::call(brtab, rlocator, MAIN_FORKNUM, 0)?;
+        blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rlocator, MAIN_FORKNUM, 0)?;
     } else if info == XLOG_DBASE_CREATE_WAL_LOG {
         // xl_dbase_create_wal_log_rec { db_id: Oid, tablespace_id: Oid }
         let db_id = read_oid(&data, 0);
         let tablespace_id = read_oid(&data, 4);
         let rlocator = rlocator(tablespace_id, db_id, 0);
-        blkreftable::block_ref_table_set_limit_block::call(brtab, rlocator, MAIN_FORKNUM, 0)?;
+        blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rlocator, MAIN_FORKNUM, 0)?;
     } else if info == XLOG_DBASE_DROP {
         // xl_dbase_drop_rec { db_id: Oid, ntablespaces: int, tablespace_ids[] }
         let db_id = read_oid(&data, 0);
@@ -1218,7 +1218,7 @@ fn SummarizeDbaseRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> Pg
         for i in 0..ntablespaces {
             let spc_oid = read_oid(&data, 8 + (i as usize) * 4);
             let rl = rlocator(spc_oid, db_id, 0);
-            blkreftable::block_ref_table_set_limit_block::call(brtab, rl, MAIN_FORKNUM, 0)?;
+            blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rl, MAIN_FORKNUM, 0)?;
         }
     }
     Ok(())
@@ -1229,7 +1229,7 @@ fn SummarizeDbaseRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> Pg
 // ===========================================================================
 
 /// `SummarizeSmgrRecord` -- special handling for WAL records with RM_SMGR_ID.
-fn SummarizeSmgrRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgResult<()> {
+fn SummarizeSmgrRecord(xlr: XLogReaderHandle, brtab: &mut BlockRefTable) -> PgResult<()> {
     let info = xlogreader::summarizer_rec_get_info::call(xlr) & !XLR_INFO_MASK;
     let data = xlogreader::summarizer_rec_get_data::call(xlr);
 
@@ -1241,7 +1241,7 @@ fn SummarizeSmgrRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgR
         // A new fork on disk: no point tracking which blocks were modified.
         // Ignore the FSM fork.
         if fork_num != FSM_FORKNUM {
-            blkreftable::block_ref_table_set_limit_block::call(brtab, rl, fork_num, 0)?;
+            blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rl, fork_num, 0)?;
         }
     } else if info == XLOG_SMGR_TRUNCATE {
         // xl_smgr_truncate { blkno: BlockNumber (4), rlocator: RelFileLocator
@@ -1253,10 +1253,10 @@ fn SummarizeSmgrRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgR
         // Truncated fork: no point tracking beyond the truncation point. Ignore
         // SMGR_TRUNCATE_FSM.
         if (flags & SMGR_TRUNCATE_HEAP) != 0 {
-            blkreftable::block_ref_table_set_limit_block::call(brtab, rl, MAIN_FORKNUM, blkno)?;
+            blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rl, MAIN_FORKNUM, blkno)?;
         }
         if (flags & SMGR_TRUNCATE_VM) != 0 {
-            blkreftable::block_ref_table_set_limit_block::call(brtab, rl, VISIBILITYMAP_FORKNUM, blkno)?;
+            blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,rl, VISIBILITYMAP_FORKNUM, blkno)?;
         }
     }
     Ok(())
@@ -1267,7 +1267,7 @@ fn SummarizeSmgrRecord(xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgR
 // ===========================================================================
 
 /// `SummarizeXactRecord` -- special handling for WAL records with RM_XACT_ID.
-fn SummarizeXactRecord(mcx: Mcx<'_>, xlr: XLogReaderHandle, brtab: BlockRefTableHandle) -> PgResult<()> {
+fn SummarizeXactRecord(mcx: Mcx<'_>, xlr: XLogReaderHandle, brtab: &mut BlockRefTable) -> PgResult<()> {
     let info = xlogreader::summarizer_rec_get_info::call(xlr) & !XLR_INFO_MASK;
     let xact_info = info & XLOG_XACT_OPMASK;
     let raw_info = xlogreader::summarizer_rec_get_info::call(xlr);
@@ -1280,7 +1280,7 @@ fn SummarizeXactRecord(mcx: Mcx<'_>, xlr: XLogReaderHandle, brtab: BlockRefTable
             let mut forknum: ForkNumber = MAIN_FORKNUM;
             loop {
                 if forknum != FSM_FORKNUM {
-                    blkreftable::block_ref_table_set_limit_block::call(brtab, *xloc, forknum, 0)?;
+                    blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,*xloc, forknum, 0)?;
                 }
                 if forknum == MAX_FORKNUM {
                     break;
@@ -1295,7 +1295,7 @@ fn SummarizeXactRecord(mcx: Mcx<'_>, xlr: XLogReaderHandle, brtab: BlockRefTable
             let mut forknum: ForkNumber = MAIN_FORKNUM;
             loop {
                 if forknum != FSM_FORKNUM {
-                    blkreftable::block_ref_table_set_limit_block::call(brtab, *xloc, forknum, 0)?;
+                    blkreftable::block_ref_table_set_limit_block::call(&mut *brtab,*xloc, forknum, 0)?;
                 }
                 if forknum == MAX_FORKNUM {
                     break;

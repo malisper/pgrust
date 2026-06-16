@@ -3867,6 +3867,7 @@ dependencies = [
  "types-blkreftable",
  "types-core",
  "types-error",
+ "types-storage",
  "types-walsummarizer",
 ]
 
@@ -19822,6 +19823,11 @@ dependencies = [
 [[package]]
 name = "types-blkreftable"
 version = "0.0.0"
+dependencies = [
+ "hashbrown",
+ "types-core",
+ "types-storage",
+]
 
 [[package]]
 name = "types-brin"
