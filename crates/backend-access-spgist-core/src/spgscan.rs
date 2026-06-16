@@ -641,7 +641,11 @@ pub fn spgrescan<'mcx>(
     resetSpGistScanOpaque(so(scan))?;
 
     // count an indexscan for stats.
-    pgstat_count_index_scan::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled);
+    pgstat_count_index_scan::call(
+        scan.index_relation.rd_id,
+        scan.index_relation.rd_rel.relisshared,
+        scan.index_relation.pgstat_enabled,
+    );
     if let Some(instr) = scan.instrument.as_mut() {
         instr.nsearches += 1;
     }

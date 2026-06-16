@@ -41,12 +41,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `pgstat_init_relation(rel)` (pgstat_relation.c): set the relcache
-    /// entry's `pgstat_enabled` / `pgstat_info` according to whether the
-    /// relation has storage (or is a partitioned table) and whether
-    /// `pgstat_track_counts` is on. Keyed by the relation OID; the owner reads
-    /// the relkind and mutates its per-relation pending-stats bookkeeping.
-    pub fn pgstat_init_relation(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
+    /// `pgstat_init_relation(rel)` (pgstat_relation.c): compute whether this
+    /// relation's cumulative statistics should be counted and RETURN that bit,
+    /// which the caller stores into the open relation's `pgstat_enabled`
+    /// (mirroring C's `rel->pgstat_enabled = ...`). C reads
+    /// `rel->rd_rel->relkind`: stats are counted only for relations with
+    /// storage (`RELKIND_HAS_STORAGE`) or partitioned tables
+    /// (`RELKIND_PARTITIONED_TABLE`), and then only when `pgstat_track_counts`
+    /// is on; otherwise the bit is false. `relid` is carried for the owner's
+    /// per-relation pending-stats bookkeeping (C also clears/sets
+    /// `rel->pgstat_info`, keyed by OID inside pgstat). Infallible (the C
+    /// function returns void and never errors).
+    pub fn pgstat_init_relation(
+        relid: types_core::primitive::Oid,
+        relkind: u8,
+    ) -> bool
 );
 
 seam_core::seam!(
@@ -92,9 +101,12 @@ seam_core::seam!(
 // (lazily creating one via `pgstat_assoc_relation`). Our `RelationData` carries
 // only `pgstat_enabled` (the pending-entry link is keyed by relation OID inside
 // pgstat, not back-pointered from the relcache), so each count seam carries
-// `(relid, pgstat_enabled)` — the narrowest faithful capability for the owner
-// to replicate the C gate without an ambient relcache lookup. The owner reads
-// `pgstat_enabled` off the caller's `RelationData`; callers pass it explicitly.
+// `(relid, relisshared, pgstat_enabled, ..)`. The owner replicates the C gate
+// off `pgstat_enabled` and forms the pgstat hash key's database OID from
+// `relisshared` — `dboid = relisshared ? InvalidOid : MyDatabaseId` — exactly
+// as C reads `rel->rd_rel->relisshared` in `pgstat_assoc_relation`, so
+// shared-catalog counts are attributed under `InvalidOid` instead of being
+// mis-keyed under `MyDatabaseId`. Callers pass both off their `RelationData`.
 
 seam_core::seam!(
     /// `pgstat_count_index_tuples(rel, n)` (pgstat.h macro): add `n` to the
@@ -103,6 +115,7 @@ seam_core::seam!(
     /// `rel->pgstat_enabled`; the macro never errors.
     pub fn pgstat_count_index_tuples(
         index_oid: types_core::primitive::Oid,
+        relisshared: bool,
         pgstat_enabled: bool,
         n: i64,
     )
@@ -112,42 +125,67 @@ seam_core::seam!(
     /// `pgstat_count_heap_fetch(rel)` (pgstat.h macro): increment the
     /// relation's pending `tuples_fetched` counter (only when
     /// `pgstat_should_count_relation`).
-    pub fn pgstat_count_heap_fetch(index_oid: types_core::primitive::Oid, pgstat_enabled: bool)
+    pub fn pgstat_count_heap_fetch(
+        index_oid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the
     /// relation's pending `numscans` counter (only when
     /// `pgstat_should_count_relation`). The macro never errors.
-    pub fn pgstat_count_index_scan(index_oid: types_core::primitive::Oid, pgstat_enabled: bool)
+    pub fn pgstat_count_index_scan(
+        index_oid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_scan(rel)` (pgstat.h macro): increment the relation's
     /// pending `numscans` counter (only when `pgstat_should_count_relation`).
     /// The macro never errors.
-    pub fn pgstat_count_heap_scan(relid: types_core::primitive::Oid, pgstat_enabled: bool)
+    pub fn pgstat_count_heap_scan(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_getnext(rel)` (pgstat.h macro): increment the
     /// relation's pending `tuples_returned` counter (only when
     /// `pgstat_should_count_relation`). The macro never errors.
-    pub fn pgstat_count_heap_getnext(relid: types_core::primitive::Oid, pgstat_enabled: bool)
+    pub fn pgstat_count_heap_getnext(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_insert(rel, n)` (pgstat_relation.c): add `n` to the
     /// relation's pending `tuples_inserted` counter (only when
     /// `pgstat_should_count_relation`). The function never errors.
-    pub fn pgstat_count_heap_insert(relid: types_core::primitive::Oid, pgstat_enabled: bool, n: i64)
+    pub fn pgstat_count_heap_insert(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+        n: i64,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_delete(rel)` (pgstat_relation.c): bump the relation's
     /// pending `tuples_deleted` counter (only when
     /// `pgstat_should_count_relation`). The function never errors.
-    pub fn pgstat_count_heap_delete(relid: types_core::primitive::Oid, pgstat_enabled: bool)
+    pub fn pgstat_count_heap_delete(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+        pgstat_enabled: bool,
+    )
 );
 
 seam_core::seam!(
@@ -158,6 +196,7 @@ seam_core::seam!(
     /// function never errors.
     pub fn pgstat_count_heap_update(
         relid: types_core::primitive::Oid,
+        relisshared: bool,
         pgstat_enabled: bool,
         hot: bool,
         newpage: bool,
@@ -171,6 +210,7 @@ seam_core::seam!(
     /// `!pgstat_should_count_relation`; never errors.
     pub fn pgstat_update_heap_dead_tuples(
         relid: types_core::primitive::Oid,
+        relisshared: bool,
         pgstat_enabled: bool,
         delta: i32,
     )

@@ -305,6 +305,7 @@ pub fn heap_abort_speculative<'mcx>(
     /* count deletion, as we counted the insertion too */
     backend_utils_activity_pgstat_seams::pgstat_count_heap_delete::call(
         relation.rd_id,
+        relation.rd_rel.relisshared,
         relation.pgstat_enabled,
     );
     Ok(())
