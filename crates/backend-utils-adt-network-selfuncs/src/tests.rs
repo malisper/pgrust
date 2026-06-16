@@ -302,7 +302,8 @@ fn hist_value_sel_no_match_is_zero() {
 fn networksel_rejects_unsupported_operator() {
     // inet_opr_codenum errors before any seam is consulted.
     let ctx = MemoryContext::new("test");
-    let root = PlannerInfo::default();
-    let res = networksel(ctx.mcx(), &root, 96, &[], 0);
+    let run = types_pathnodes::planner_run::PlannerRun::new(ctx.mcx());
+    let mut root = PlannerInfo::default();
+    let res = networksel(ctx.mcx(), &run, &mut root, 96, &[], 0);
     assert!(res.is_err());
 }

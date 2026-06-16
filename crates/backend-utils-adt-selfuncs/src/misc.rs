@@ -6,13 +6,14 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo};
 
 use backend_utils_cache_lsyscache_seams as lsc;
 
 use crate::clamp_probability;
-use crate::examine::{examine_variable, get_restriction_variable, release_variable_stats};
+use crate::examine::{get_restriction_variable, release_variable_stats};
 use crate::ineq::{histogram_selectivity, mcv_selectivity};
 
 /* ---------------------------------------------------------------------------
@@ -104,7 +105,8 @@ pub fn seam_estimate_num_groups(
 /// `get_restriction_variable`; the MCV/histogram merge math is fully ported.
 pub fn generic_restriction_selectivity<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     oproid: Oid,
     collation: Oid,
     args: &[NodeId],
@@ -113,7 +115,7 @@ pub fn generic_restriction_selectivity<'mcx>(
 ) -> PgResult<f64> {
     // If not var OP something or something OP var, punt.
     let (vardata, other, varonleft) =
-        match get_restriction_variable(mcx, root, args, var_relid)? {
+        match get_restriction_variable(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => return Ok(default_selectivity),
         };
@@ -195,11 +197,21 @@ pub fn estimate_array_length<'mcx>(
     root: &PlannerInfo,
     arrayexpr: NodeId,
 ) -> PgResult<f64> {
-    // The statistics path calls examine_variable (keystone-blocked) and the
-    // Const/ArrayExpr fast paths need the array varlena decode (unported). The
-    // examine_variable call below reaches the keystone panic; in C, when none of
-    // the recognized forms apply or no stats are found, the function returns the
-    // default guess of 10.
-    let _ = examine_variable(mcx, root, arrayexpr, 0);
+    // C `estimate_array_length` peels `strip_array_coercion`, then:
+    //   * a `Const` array -> `ArrayGetNItems(DatumGetArrayTypeP(...))`;
+    //   * an `ArrayExpr` -> `list_length(arrayexpr->elements)`;
+    //   * otherwise examines the variable's stats (DECHIST / element stats).
+    // The Const path needs the array-varlena decode (`DatumGetArrayTypeP` /
+    // `ArrayGetNItems`, the unported arrayfuncs varlena envelope), and the
+    // stats path needs `examine_variable`, whose seam carries `&PlannerRun` +
+    // `&mut PlannerInfo` that this `estimate_array_length` seam (consumed by
+    // costsize with a shared `&PlannerInfo` and no run) does not have. The
+    // `ArrayExpr` element-count fast path is the live tail; everything else
+    // falls back to the default guess of 10 (matching `scalararraysel`), which
+    // is what C returns when no recognized form yields a count.
+    let _ = mcx;
+    if let Expr::ArrayExpr(ae) = root.node(arrayexpr) {
+        return Ok(ae.elements.len() as f64);
+    }
     Ok(10.0)
 }

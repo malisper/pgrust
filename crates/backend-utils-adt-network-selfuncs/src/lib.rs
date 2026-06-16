@@ -75,6 +75,7 @@ use types_datum::datum::Datum;
 use types_error::{PgError, PgResult, ERROR};
 use types_network::inet_struct;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     NodeId, PlannerInfo, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
 };
@@ -270,9 +271,10 @@ fn mcv_population(mcv_numbers: &[f32], mcv_nvalues: i32) -> Selectivity {
 
 /// `networksel` — selectivity estimation for the subnet inclusion/overlap
 /// operators.
-pub fn networksel(
-    mcx: Mcx<'_>,
-    root: &PlannerInfo,
+pub fn networksel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
@@ -295,7 +297,7 @@ pub fn networksel(
      * then punt and return a default estimate.
      */
     let (vardata, other, varonleft) =
-        match get_restriction_variable::call(mcx, root, args, var_relid)? {
+        match get_restriction_variable::call(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => return Ok(default_sel(operator)),
         };
@@ -377,9 +379,10 @@ pub fn networksel(
 
 /// `networkjoinsel` — join selectivity estimation for the subnet
 /// inclusion/overlap operators.  Same structure as `eqjoinsel`.
-pub fn networkjoinsel(
-    mcx: Mcx<'_>,
-    root: &PlannerInfo,
+pub fn networkjoinsel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     sjinfo: &SpecialJoinInfo,
@@ -393,7 +396,7 @@ pub fn networkjoinsel(
     let opr_codenum = inet_opr_codenum(operator)?;
 
     let (vardata1, vardata2, join_is_reversed) =
-        get_join_variables::call(mcx, root, args, sjinfo)?;
+        get_join_variables::call(mcx, run, root, args, sjinfo)?;
     /* RAII: ReleaseVariableStats on every exit path below (both sides). */
     let vardata1 = VarStatsGuard::new(vardata1);
     let vardata2 = VarStatsGuard::new(vardata2);

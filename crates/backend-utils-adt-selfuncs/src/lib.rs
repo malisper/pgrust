@@ -17,24 +17,33 @@
 //! the `eqsel`/`neqsel`/`scalar*sel` dispatch) is ported 1:1 against the C and
 //! operates over the F0 [`VariableStatData`] / [`AttStatsSlot`] value model.
 //!
-//! The *statistics acquisition* layer — `examine_simple_variable`'s
-//! `SearchSysCache3(STATRELATTINH, ...)` lookup over the (still-opaque)
-//! `simple_rte_array`, the `Form_pg_statistic` `GETSTRUCT` field reads, the
-//! `get_actual_variable_range` index probe, and the `convert_to_scalar`
-//! type-dispatch — are private statics of selfuncs.c that depend on the
-//! unported syscache/RTE-carrier keystone and the unported per-type scalar
-//! conversion. Per the mirror-PG-and-panic rule they are kept structurally in
-//! place and panic loudly when reached, rather than restructured around. In the
-//! current repo `examine_simple_variable` always leaves `statsTuple == None`,
-//! so the stats-present branches are unreachable until that keystone lands; the
-//! stats-absent / default-estimate paths (the common case for an un-analyzed
-//! planner) are fully live.
+//! The *variable recognition* layer ([`examine`]) is now ported over the
+//! PlannerRun keystone: `examine_variable` / `examine_simple_variable` /
+//! `get_restriction_variable` / `get_join_variables` resolve the
+//! `simple_rte_array` through `&PlannerRun<'mcx>` (`planner_rt_fetch`), strip
+//! PlaceHolderVars/RelabelTypes, take the simple-Var fast path, walk index
+//! expressions / extended statistics, and recurse into subquery subroots, 1:1
+//! with the C.
+//!
+//! A few leaves remain seam-and-panic into genuinely-unported owners (see
+//! [`examine`]): `SearchSysCache3(STATRELATTINH, ...)` (the `pg_statistic`
+//! catcache probe — declared by the ported syscache unit but not yet installed,
+//! so a relation-column stats lookup raises the owner's panic),
+//! `statext_expressions_load` (extended-statistics tuple load), the CTE-subroot
+//! recursion (unported CTE planner), and the `Form_pg_statistic` `GETSTRUCT`
+//! field reads ([`scalar`], reached only after a live `statsTuple` exists). With
+//! `search_statrelattinh` uninstalled, `examine_simple_variable` cannot yet pin
+//! a `statsTuple` for a relation column, so the stats-absent / default-estimate
+//! paths (the common case for an un-analyzed planner) are the live behaviour and
+//! the `convert_to_scalar` / `get_actual_variable_range` ineq leaves stay
+//! seam-and-panic until that catcache wiring + per-type scalar conversion land.
 
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
 
+pub mod dispatch;
 pub mod entry;
 pub mod examine;
 pub mod ineq;
@@ -61,6 +70,11 @@ pub fn init_seams() {
     seams::stats_tuple_stanullfrac::set(scalar::seam_stats_tuple_stanullfrac);
     seams::mcv_selectivity::set(ineq::seam_mcv_selectivity);
     seams::estimate_num_groups::set(misc::seam_estimate_num_groups);
+
+    // The plancat selectivity-dispatch seams (`restriction_selectivity` /
+    // `join_selectivity` / `function_selectivity` reach these): map the
+    // operator's `oprrest`/`oprjoin` OID to the ported estimator.
+    dispatch::init_dispatch_seams();
 }
 
 /* ---------------------------------------------------------------------------
@@ -148,3 +162,10 @@ pub(crate) const TABLE_OID_ATTRIBUTE_NUMBER: i16 = -7;
 /// `BOOLOID` (pg_type.h) — the `bool` type OID, `16`. `get_variable_numdistinct`
 /// special-cases boolean columns to two distinct values.
 pub(crate) const BOOLOID: types_core::primitive::Oid = 16;
+
+/// `FirstLowInvalidHeapAttributeNumber` (sysattr.h) — the lower bound for
+/// system-column attnums, used to bias a column attnum into a `Bitmapset`
+/// member (`attno - FirstLowInvalidHeapAttributeNumber`) in `examine_variable`
+/// / `all_rows_selectable`. This repo pins it to `-7` (see
+/// `types_tuple::heaptuple`).
+pub(crate) const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: types_core::primitive::AttrNumber = -7;

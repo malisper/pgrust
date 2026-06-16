@@ -9,6 +9,7 @@ use types_core::primitive::{Oid, OidIsValid, Selectivity};
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo};
 use types_rangetypes::{RangeBound, RangeTypeP};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
@@ -79,9 +80,10 @@ pub fn default_range_selectivity(operator: Oid) -> f64 {
 ///
 /// `root` is the planner state; `args` is the operator's argument `List *` as a
 /// borrowed slice of planner node handles.
-pub fn rangesel(
-    mcx: Mcx<'_>,
-    root: &PlannerInfo,
+pub fn rangesel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     mut operator: Oid,
     args: &[NodeId],
     var_relid: i32,
@@ -91,7 +93,7 @@ pub fn rangesel(
      * then punt and return a default estimate.
      */
     let (vardata, other, varonleft) =
-        match get_restriction_variable::call(mcx, root, args, var_relid)? {
+        match get_restriction_variable::call(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => return Ok(default_range_selectivity(operator)),
         };
