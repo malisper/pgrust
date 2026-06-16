@@ -493,8 +493,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_incremental_sort_path(...)` (pathnode.c:3170).
-    pub fn create_incremental_sort_path(
+    pub fn create_incremental_sort_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         pathkeys: Vec<PathKey>,
@@ -968,7 +969,8 @@ seam_core::seam!(
     /// `cost_incremental_sort(path, root, pathkeys, presorted_keys,
     /// input_disabled_nodes, input_startup_cost, input_total_cost, input_tuples,
     /// width, comparison_cost, sort_mem, limit_tuples)`.
-    pub fn cost_incremental_sort(
+    pub fn cost_incremental_sort<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         pathkeys: &[PathKey],
@@ -981,7 +983,7 @@ seam_core::seam!(
         comparison_cost: Cost,
         sort_mem: i32,
         limit_tuples: f64,
-    )
+    ) -> types_error::PgResult<()>
 );
 seam_core::seam!(
     /// `cost_group(path, root, numGroupCols, numGroups, quals,

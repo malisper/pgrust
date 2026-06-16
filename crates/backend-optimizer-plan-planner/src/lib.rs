@@ -1427,6 +1427,7 @@ fn grouping_planner<'mcx>(
         let limit_for_sort = if have_postponed_srfs { -1.0 } else { limit_tuples };
         let ordered_rel = create_ordered_paths(
             root,
+            run,
             current_rel,
             &final_target,
             final_target_parallel_safe,
@@ -1905,6 +1906,7 @@ fn make_sort_input_target<'mcx>(
 /// is reached only when the input rel is parallel-safe.
 fn create_ordered_paths<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     input_rel: RelId,
     target: &PathTarget,
     target_parallel_safe: bool,
@@ -1969,6 +1971,7 @@ fn create_ordered_paths<'mcx>(
             } else {
                 backend_optimizer_util_pathnode::create::create_incremental_sort_path(
                     root,
+                    run,
                     ordered_rel,
                     input_path,
                     sort_pathkeys.clone(),

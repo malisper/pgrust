@@ -18272,6 +18272,8 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-clauses-seams",
@@ -18280,6 +18282,7 @@ dependencies = [
  "backend-optimizer-util-var-seams",
  "backend-parser-clause",
  "backend-parser-relation",
+ "backend-statistics-mvdistinct",
  "backend-utils-adt-array-selfuncs",
  "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-range-selfuncs",
@@ -18296,6 +18299,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-selfuncs",
+ "types-statistics",
 ]
 
 [[package]]

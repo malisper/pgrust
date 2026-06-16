@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use types_core::primitive::{Cost, Oid, Selectivity};
+use types_error::PgResult;
 use types_pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors};
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
@@ -96,13 +97,14 @@ fn cached_scansel(root: &PlannerInfo, rinfo: RinfoId, pathkey: &PathKey) -> Scan
  * ========================================================================== */
 
 /// `initial_cost_nestloop` (costsize.c:3266) — returns the filled workspace.
-pub fn initial_cost_nestloop(
-    root: &PlannerInfo,
+pub fn initial_cost_nestloop<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     jointype: JoinType,
     outer_path: PathId,
     inner_path: PathId,
     extra: &JoinPathExtraData,
-) -> JoinCostWorkspace {
+) -> PgResult<JoinCostWorkspace> {
     let mut workspace = JoinCostWorkspace_default();
 
     let mut disabled_nodes: i32;
@@ -123,7 +125,7 @@ pub fn initial_cost_nestloop(
     disabled_nodes += outer_disabled;
 
     let (inner_rescan_start_cost, inner_rescan_total_cost) =
-        crate::exprcost::cost_rescan(root, inner_path);
+        crate::exprcost::cost_rescan(run, root, inner_path)?;
 
     startup_cost += outer_startup + inner_startup;
     run_cost += outer_total - outer_startup;
@@ -148,7 +150,7 @@ pub fn initial_cost_nestloop(
     workspace.startup_cost = startup_cost;
     workspace.total_cost = startup_cost + run_cost;
     workspace.run_cost = run_cost;
-    workspace
+    Ok(workspace)
 }
 
 /// `final_cost_nestloop` (costsize.c:3389) — fills a `NestPath` (by `PathId`).
@@ -310,8 +312,9 @@ pub fn has_indexed_join_quals(root: &PlannerInfo, path_id: PathId) -> bool {
  * ========================================================================== */
 
 /// `initial_cost_mergejoin` (costsize.c:3551) — returns the filled workspace.
-pub fn initial_cost_mergejoin(
-    root: &PlannerInfo,
+pub fn initial_cost_mergejoin<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     jointype: JoinType,
     mergeclauses: &[RinfoId],
     outer_path: PathId,
@@ -320,7 +323,7 @@ pub fn initial_cost_mergejoin(
     innersortkeys: &[PathKey],
     outer_presorted_keys: i32,
     _extra: &JoinPathExtraData,
-) -> JoinCostWorkspace {
+) -> PgResult<JoinCostWorkspace> {
     let mut workspace = JoinCostWorkspace_default();
 
     let mut disabled_nodes: i32;
@@ -429,6 +432,7 @@ pub fn initial_cost_mergejoin(
         if ENABLE_INCREMENTAL_SORT && outer_presorted_keys > 0 {
             cost_incremental_sort_owned(
                 &mut sort_path,
+                run,
                 root,
                 outersortkeys,
                 outer_presorted_keys,
@@ -440,7 +444,7 @@ pub fn initial_cost_mergejoin(
                 0.0,
                 work_mem(),
                 -1.0,
-            );
+            )?;
         } else {
             cost_sort_owned(
                 &mut sort_path,
@@ -503,7 +507,7 @@ pub fn initial_cost_mergejoin(
     workspace.inner_rows = inner_rows;
     workspace.outer_skip_rows = outer_skip_rows;
     workspace.inner_skip_rows = inner_skip_rows;
-    workspace
+    Ok(workspace)
 }
 
 /// Build a dummy `Path` for `cost_sort` (C uses a stack `Path`).

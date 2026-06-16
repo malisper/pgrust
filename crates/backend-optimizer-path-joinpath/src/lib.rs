@@ -764,13 +764,15 @@ fn try_nestloop_path<'mcx>(
         return Ok(());
     }
 
+    let materialized_extra = extra.materialize(root);
     let workspace = jp::initial_cost_nestloop::call(
+        run,
         root,
         jointype,
         outer_path,
         inner_path,
-        &extra.materialize(root),
-    );
+        &materialized_extra,
+    )?;
 
     if jp::add_path_precheck::call(
         root,
@@ -843,13 +845,15 @@ fn try_partial_nestloop_path<'mcx>(
         return Ok(());
     }
 
+    let materialized_extra = extra.materialize(root);
     let workspace = jp::initial_cost_nestloop::call(
+        run,
         root,
         jointype,
         outer_path,
         inner_path,
-        &extra.materialize(root),
-    );
+        &materialized_extra,
+    )?;
     if !jp::add_partial_path_precheck::call(
         root,
         joinrel,
@@ -953,7 +957,9 @@ fn try_mergejoin_path<'mcx>(
         innersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
     }
 
+    let materialized_extra = extra.materialize(root);
     let workspace = jp::initial_cost_mergejoin::call(
+        run,
         root,
         jointype,
         mergeclauses,
@@ -962,8 +968,8 @@ fn try_mergejoin_path<'mcx>(
         &outersortkeys,
         &innersortkeys,
         outer_presorted_keys,
-        &extra.materialize(root),
-    );
+        &materialized_extra,
+    )?;
 
     if jp::add_path_precheck::call(
         root,
@@ -1039,7 +1045,9 @@ fn try_partial_mergejoin_path<'mcx>(
         innersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
     }
 
+    let materialized_extra = extra.materialize(root);
     let workspace = jp::initial_cost_mergejoin::call(
+        run,
         root,
         jointype,
         mergeclauses,
@@ -1048,8 +1056,8 @@ fn try_partial_mergejoin_path<'mcx>(
         &outersortkeys,
         &innersortkeys,
         outer_presorted_keys,
-        &extra.materialize(root),
-    );
+        &materialized_extra,
+    )?;
 
     if !jp::add_partial_path_precheck::call(
         root,

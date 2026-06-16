@@ -103,20 +103,22 @@ fn install_join_seams() {
     jp::path_is_reparameterizable_by_child::set(|_r, _p, _c| true);
 
     // preliminary cost + precheck: cheap, always accepted.
-    jp::initial_cost_nestloop::set(|_root, _jt, _o, _i, _extra| JoinCostWorkspace {
-        disabled_nodes: 0,
-        startup_cost: 0.0,
-        total_cost: 5.0,
-        run_cost: 5.0,
-        inner_run_cost: 0.0,
-        inner_rescan_run_cost: 0.0,
-        outer_rows: 0.0,
-        inner_rows: 0.0,
-        outer_skip_rows: 0.0,
-        inner_skip_rows: 0.0,
-        numbuckets: 0,
-        numbatches: 0,
-        inner_rows_total: 0.0,
+    jp::initial_cost_nestloop::set(|_run, _root, _jt, _o, _i, _extra| {
+        Ok(JoinCostWorkspace {
+            disabled_nodes: 0,
+            startup_cost: 0.0,
+            total_cost: 5.0,
+            run_cost: 5.0,
+            inner_run_cost: 0.0,
+            inner_rescan_run_cost: 0.0,
+            outer_rows: 0.0,
+            inner_rows: 0.0,
+            outer_skip_rows: 0.0,
+            inner_skip_rows: 0.0,
+            numbuckets: 0,
+            numbatches: 0,
+            inner_rows_total: 0.0,
+        })
     });
     jp::add_path_precheck::set(|_root, _pr, _dn, _su, _tot, _pk, _ro| true);
 

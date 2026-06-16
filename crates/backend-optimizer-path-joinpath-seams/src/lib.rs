@@ -192,19 +192,25 @@ seam_core::seam!(
  * ==================================================================== */
 
 seam_core::seam!(
-    /// `initial_cost_nestloop(...)`.
-    pub fn initial_cost_nestloop(
-        root: &PlannerInfo,
+    /// `initial_cost_nestloop(...)`. Threads `run` + `&mut root` (the rescan
+    /// cost path estimates the Memoize distinct-param count via
+    /// `estimate_num_groups`, which examines exprs through the [`PlannerRun`]).
+    pub fn initial_cost_nestloop<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         jointype: JoinType,
         outer_path: PathId,
         inner_path: PathId,
         extra: &JoinPathExtraData,
-    ) -> JoinCostWorkspace
+    ) -> types_error::PgResult<JoinCostWorkspace>
 );
 seam_core::seam!(
-    /// `initial_cost_mergejoin(...)`.
-    pub fn initial_cost_mergejoin(
-        root: &PlannerInfo,
+    /// `initial_cost_mergejoin(...)`. Threads `run` + `&mut root` (the
+    /// incremental-sort source-cost path estimates group counts via
+    /// `estimate_num_groups`).
+    pub fn initial_cost_mergejoin<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         jointype: JoinType,
         mergeclauses: &[RinfoId],
         outer_path: PathId,
@@ -213,7 +219,7 @@ seam_core::seam!(
         innersortkeys: &[PathKey],
         outer_presorted_keys: i32,
         extra: &JoinPathExtraData,
-    ) -> JoinCostWorkspace
+    ) -> types_error::PgResult<JoinCostWorkspace>
 );
 seam_core::seam!(
     /// `initial_cost_hashjoin(...)`.

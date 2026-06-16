@@ -16,6 +16,7 @@ types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }
+types-statistics = { path = "../types-statistics" }
 types-acl = { path = "../types-acl" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
@@ -29,6 +30,9 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-clause = { path = "../backend-parser-clause" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-statistics-mvdistinct = { path = "../backend-statistics-mvdistinct" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }

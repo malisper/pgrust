@@ -1491,8 +1491,9 @@ pub fn create_set_projection_path(
 }
 
 /// `create_incremental_sort_path(...)` (pathnode.c:3170).
-pub fn create_incremental_sort_path(
+pub fn create_incremental_sort_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     subpath: PathId,
     pathkeys: Vec<PathKey>,
@@ -1516,6 +1517,7 @@ pub fn create_incremental_sort_path(
     }));
     let wm = seam::work_mem::call();
     seam::cost_incremental_sort::call(
+        run,
         root,
         id,
         &pathkeys,
@@ -1528,7 +1530,7 @@ pub fn create_incremental_sort_path(
         0.0,
         wm,
         limit_tuples,
-    );
+    )?;
     Ok(id)
 }
 

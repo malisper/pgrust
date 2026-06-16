@@ -4,6 +4,7 @@
 
 
 use types_core::primitive::Cost;
+use types_error::PgResult;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     AggStrategy, NodeId, PathId, PathNode, PlannerInfo, AGG_HASHED, AGG_MIXED,
@@ -268,11 +269,20 @@ pub fn cost_windowagg(
  * ========================================================================== */
 
 /// `cost_rescan` (costsize.c:4640) — returns `(rescan_startup, rescan_total)`.
-pub fn cost_rescan(root: &PlannerInfo, path_id: PathId) -> (Cost, Cost) {
+///
+/// `run` is threaded for the Memoize arm, whose `cost_memoize_rescan` estimates
+/// the distinct parameter count via `estimate_num_groups` (which examines the
+/// param expressions through the [`PlannerRun`] RTE store). `root` is `&mut` for
+/// the same reason (the examine path re-interns stripped expressions).
+pub fn cost_rescan<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+) -> PgResult<(Cost, Cost)> {
     use types_nodes::nodes;
     let node = root.path(path_id);
     let base = node.base();
-    match base.pathtype {
+    let result = match base.pathtype {
         x if x == nodes::T_FunctionScan => (0.0, base.total_cost - base.startup_cost),
         x if x == types_nodes::nodehashjoin::T_HashJoin => {
             let num_batches = match node {
@@ -315,14 +325,24 @@ pub fn cost_rescan(root: &PlannerInfo, path_id: PathId) -> (Cost, Cost) {
             }
             (0.0, run_cost)
         }
-        x if x == types_nodes::nodememoize::T_Memoize => cost_memoize_rescan(root, path_id),
+        x if x == types_nodes::nodememoize::T_Memoize => {
+            return cost_memoize_rescan(run, root, path_id)
+        }
         _ => (base.startup_cost, base.total_cost),
-    }
+    };
+    Ok(result)
 }
 
 /// `cost_memoize_rescan` (costsize.c:2541) — returns
-/// `(rescan_startup_cost, rescan_total_cost)`. Also sets `MemoizePath.est_entries`.
-pub fn cost_memoize_rescan(root: &PlannerInfo, mpath_id: PathId) -> (Cost, Cost) {
+/// `(rescan_startup_cost, rescan_total_cost)` and records
+/// `MemoizePath.est_entries`. Now that the cost-model rescan path threads `run`
+/// + `&mut root` (for the `estimate_num_groups` distinct-param estimate), this
+/// matches the C 1:1, including the `mpath->est_entries` write.
+pub fn cost_memoize_rescan<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    mpath_id: PathId,
+) -> PgResult<(Cost, Cost)> {
     let (subpath, calls, param_exprs) = match root.path(mpath_id) {
         PathNode::MemoizePath(mp) => (
             mp.subpath.expect("cost_memoize_rescan: subpath must be set"),
@@ -359,7 +379,7 @@ pub fn cost_memoize_rescan(root: &PlannerInfo, mpath_id: PathId) -> (Cost, Cost)
     // estimate on the distinct number of parameter values
     let mut estinfo = EstimationInfo::default();
     let mut ndistinct =
-        selfuncs::estimate_num_groups::call(root, &param_exprs, calls, Some(&mut estinfo));
+        selfuncs::estimate_num_groups::call(run, root, &param_exprs, calls, Some(&mut estinfo))?;
 
     // When the estimation fell back on using a default value, it's a bit too
     // risky to assume that it's ok to use a Memoize node.  The use of a default
@@ -373,6 +393,11 @@ pub fn cost_memoize_rescan(root: &PlannerInfo, mpath_id: PathId) -> (Cost, Cost)
 
     let pg_uint32_max = u32::MAX as f64;
     let est_entries = Min(Min(ndistinct, est_cache_entries), pg_uint32_max);
+
+    // Store the number of entries -- 0 means unknown (C: mpath->est_entries).
+    if let PathNode::MemoizePath(mp) = root.path_mut(mpath_id) {
+        mp.est_entries = est_entries as u32;
+    }
 
     let evict_ratio = 1.0 - Min(est_cache_entries, ndistinct) / ndistinct;
 
@@ -389,59 +414,7 @@ pub fn cost_memoize_rescan(root: &PlannerInfo, mpath_id: PathId) -> (Cost, Cost)
     let mut startup_cost = input_startup_cost * (1.0 - hit_ratio);
     startup_cost += cpu_tuple_cost();
 
-    // Set est_entries. This requires &mut; the cost_rescan caller has &root, so
-    // we record it through a separate write performed by the path-mut path. The
-    // est_entries write is a planner-state refinement that does not alter the
-    // returned cost; if the caller holds only &root we skip the write (the
-    // executor will then choose the size itself, as C documents for est=0).
-    let _ = est_entries;
-
-    (startup_cost, total_cost)
-}
-
-/// `cost_memoize_rescan` variant that also records `MemoizePath.est_entries`
-/// (used when a `&mut PlannerInfo` is available).
-pub fn cost_memoize_rescan_set_entries(root: &mut PlannerInfo, mpath_id: PathId) -> (Cost, Cost) {
-    // Recompute est_entries with read access, then store it.
-    let (subpath, calls, param_exprs) = match root.path(mpath_id) {
-        PathNode::MemoizePath(mp) => (
-            mp.subpath.expect("cost_memoize_rescan: subpath must be set"),
-            mp.calls,
-            mp.param_exprs.clone(),
-        ),
-        _ => panic!("backend-optimizer-path-costsize::cost_memoize_rescan: path is not a MemoizePath"),
-    };
-    let (tuples, width) = {
-        let sp = root.path(subpath).base();
-        (
-            sp.rows,
-            sp.pathtarget
-                .as_ref()
-                .expect("cost_memoize_rescan: subpath pathtarget must be set")
-                .width,
-        )
-    };
-    let hash_mem_bytes = ps::get_hash_memory_limit::call();
-    let mut est_entry_bytes =
-        relation_byte_size(tuples, width) + cz::exec_estimate_cache_entry_overhead_bytes::call(tuples);
-    for &pe in &param_exprs {
-        est_entry_bytes += get_expr_width(root, pe) as f64;
-    }
-    let est_cache_entries = (hash_mem_bytes / est_entry_bytes).floor();
-    let mut estinfo = EstimationInfo::default();
-    let mut ndistinct =
-        selfuncs::estimate_num_groups::call(root, &param_exprs, calls, Some(&mut estinfo));
-    // Same SELFLAG_USED_DEFAULT override as cost_memoize_rescan (costsize.c:2589):
-    // est_entries is computed from the corrected ndistinct.
-    if (estinfo.flags & SELFLAG_USED_DEFAULT) != 0 {
-        ndistinct = calls;
-    }
-    let pg_uint32_max = u32::MAX as f64;
-    let est_entries = Min(Min(ndistinct, est_cache_entries), pg_uint32_max);
-    if let PathNode::MemoizePath(mp) = root.path_mut(mpath_id) {
-        mp.est_entries = est_entries as u32;
-    }
-    cost_memoize_rescan(root, mpath_id)
+    Ok((startup_cost, total_cost))
 }
 
 /* ==========================================================================

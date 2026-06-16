@@ -166,6 +166,7 @@ pub fn generate_useful_gather_paths<'mcx>(
             } else {
                 subpath = pathnode::create_incremental_sort_path::call(
                     root,
+                    run,
                     rel,
                     subpath,
                     useful_pathkeys.clone(),

@@ -108,6 +108,17 @@ pub struct PlannerRun<'mcx> {
 }
 
 impl<'mcx> PlannerRun<'mcx> {
+    /// The planner-run [`Mcx`] this store was created in. Recovered from a
+    /// backing store's allocator handle (every `PgVec` field is allocated in the
+    /// same context), so a consumer holding only `&PlannerRun<'mcx>` can reach
+    /// the run's allocator without it being threaded as a separate parameter —
+    /// the safe-Rust analogue of allocating in the planner's per-query
+    /// `MemoryContext` (which C reaches via the global `CurrentMemoryContext`).
+    #[inline]
+    pub fn mcx(&self) -> Mcx<'mcx> {
+        *self.queries.allocator()
+    }
+
     /// Create an empty query store in the given planner-run context.
     #[inline]
     pub fn new(mcx: Mcx<'mcx>) -> Self {

@@ -161,7 +161,7 @@ pub fn create_index_paths<'mcx>(
             let bitmapqual = choose_bitmap_and(mcx, root, run, rel, this_path_set)?;
             let required_outer = path_req_outer(root, bitmapqual);
             let relid = root.rel(rel).relid;
-            let loop_count = get_loop_count(root, relid, &required_outer);
+            let loop_count = get_loop_count(run, root, relid, &required_outer)?;
             let bpath = pathnode::create_bitmap_heap_path::call(
                 root,
                 run,
@@ -570,7 +570,7 @@ pub fn build_index_paths<'mcx>(
 
     // Compute loop_count for cost estimation.
     let relid = root.rel(rel).relid;
-    let loop_count = get_loop_count(root, relid, &outer_relids);
+    let loop_count = get_loop_count(run, root, relid, &outer_relids)?;
 
     // 2. Compute index ordering pathkeys, if relevant.
     let pathkeys_possibly_useful = scantype != ScanTypeControl::BitmapScan

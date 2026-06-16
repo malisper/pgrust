@@ -667,7 +667,7 @@ pub fn choose_bitmap_and<'mcx>(
     // For each surviving index, consider it as AND-group leader.
     for i in 0..npaths {
         let mut paths_set: Vec<PathId> = vec![pathinfoarray[i].path];
-        let mut costsofar = bitmap_scan_cost_est(root, rel, pathinfoarray[i].path);
+        let mut costsofar = bitmap_scan_cost_est(run, root, rel, pathinfoarray[i].path)?;
         let mut qualsofar: Vec<NodeId> = pathinfoarray[i]
             .quals
             .iter()

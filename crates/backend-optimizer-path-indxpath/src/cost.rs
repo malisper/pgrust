@@ -4,6 +4,8 @@
 use core::cmp::Ordering;
 
 use types_core::primitive::{Cost, Index};
+use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PathId, PlannerInfo, RelId, Relids, JOIN_SEMI};
 
 use backend_optimizer_path_costsize_seams as costsize;
@@ -48,36 +50,51 @@ pub fn approximate_joinrel_size(root: &PlannerInfo, relids: &Relids) -> f64 {
 /// (indxpath.c:2381) — if `outer_relid` is on the inside of any semijoin that
 /// `cur_relid` is on the outside of, replace `rowcount` with the estimated
 /// number of unique rows from the semijoin RHS (when that's smaller).
-pub fn adjust_rowcount_for_semijoins(
-    root: &PlannerInfo,
+pub fn adjust_rowcount_for_semijoins<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     cur_relid: Index,
     outer_relid: Index,
     mut rowcount: f64,
-) -> f64 {
+) -> PgResult<f64> {
+    // Snapshot the matching semijoins first: estimate_num_groups needs `&mut
+    // root` (it re-interns stripped grouping expressions into the node arena),
+    // which can't be borrowed while iterating `root.join_info_list`.
+    let mut candidates: alloc::vec::Vec<(Relids, alloc::vec::Vec<types_pathnodes::NodeId>)> =
+        alloc::vec::Vec::new();
     for sjinfo in &root.join_info_list {
         if sjinfo.jointype == JOIN_SEMI
             && relids_seam::relids_is_member::call(cur_relid as i32, &sjinfo.syn_lefthand)
             && relids_seam::relids_is_member::call(outer_relid as i32, &sjinfo.syn_righthand)
         {
-            // Estimate number of unique-ified rows.
-            let nraw = approximate_joinrel_size(root, &sjinfo.syn_righthand);
-            let nunique =
-                selfuncs::estimate_num_groups::call(root, &sjinfo.semi_rhs_exprs, nraw, None);
-            if rowcount > nunique {
-                rowcount = nunique;
-            }
+            candidates.push((sjinfo.syn_righthand.clone(), sjinfo.semi_rhs_exprs.clone()));
         }
     }
-    rowcount
+
+    for (syn_righthand, semi_rhs_exprs) in candidates {
+        // Estimate number of unique-ified rows.
+        let nraw = approximate_joinrel_size(root, &syn_righthand);
+        let nunique =
+            selfuncs::estimate_num_groups::call(run, root, &semi_rhs_exprs, nraw, None)?;
+        if rowcount > nunique {
+            rowcount = nunique;
+        }
+    }
+    Ok(rowcount)
 }
 
 /// `get_loop_count(root, cur_relid, outer_relids)` (indxpath.c:2328) — estimate
 /// the number of times an inner indexscan parameterized by `outer_relids` will
 /// be re-executed (the smallest outer-rel row count, semijoin-adjusted).
-pub fn get_loop_count(root: &PlannerInfo, cur_relid: Index, outer_relids: &Relids) -> f64 {
+pub fn get_loop_count<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    cur_relid: Index,
+    outer_relids: &Relids,
+) -> PgResult<f64> {
     // For a non-parameterized path, just return 1.0 quickly.
     if outer_relids.is_none() {
-        return 1.0;
+        return Ok(1.0);
     }
 
     let mut result = 0.0_f64;
@@ -104,7 +121,7 @@ pub fn get_loop_count(root: &PlannerInfo, cur_relid: Index, outer_relids: &Relid
 
         // Check to see if rel is on the inside of any semijoins.
         let rowcount =
-            adjust_rowcount_for_semijoins(root, cur_relid, outer_relid as Index, outer_rows);
+            adjust_rowcount_for_semijoins(run, root, cur_relid, outer_relid as Index, outer_rows)?;
 
         // Remember smallest row count estimate among the outer rels.
         if result == 0.0 || result > rowcount {
@@ -113,9 +130,9 @@ pub fn get_loop_count(root: &PlannerInfo, cur_relid: Index, outer_relids: &Relid
     }
     // Return 1.0 if we found no valid relations (shouldn't happen).
     if result > 0.0 {
-        result
+        Ok(result)
     } else {
-        1.0
+        Ok(1.0)
     }
 }
 
@@ -152,7 +169,12 @@ pub fn path_usage_comparator(root: &PlannerInfo, a: PathId, b: PathId) -> Orderi
 /// `param_info`, force `parallel_workers = 0`, cost it via
 /// `cost_bitmap_heap_scan` (told the loop count via `get_loop_count`), and
 /// return the resulting `total_cost`.
-pub fn bitmap_scan_cost_est(root: &mut PlannerInfo, rel: RelId, ipath: PathId) -> Cost {
+pub fn bitmap_scan_cost_est<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    ipath: PathId,
+) -> PgResult<Cost> {
     use types_nodes::nodes::NodeTag;
     use types_pathnodes::{BitmapHeapPath, Path, PathNode};
 
@@ -165,7 +187,7 @@ pub fn bitmap_scan_cost_est(root: &mut PlannerInfo, rel: RelId, ipath: PathId) -
         .map(|ppi| relids_seam::relids_copy::call(&ppi.ppi_req_outer))
         .unwrap_or(None);
     let relid = root.rel(rel).relid;
-    let loop_count = get_loop_count(root, relid, &req_outer);
+    let loop_count = get_loop_count(run, root, relid, &req_outer)?;
 
     // Set up a (throwaway) BitmapHeapPath.
     let reltarget = root.rel(rel).reltarget.clone();
@@ -199,7 +221,7 @@ pub fn bitmap_scan_cost_est(root: &mut PlannerInfo, rel: RelId, ipath: PathId) -
     // Now we can do cost_bitmap_heap_scan.
     pathnode::cost_bitmap_heap_scan::call(root, bpath_id, rel, ipath, loop_count);
 
-    root.path(bpath_id).base().total_cost
+    Ok(root.path(bpath_id).base().total_cost)
 }
 
 /// `bitmap_and_cost_est(root, rel, paths)` (indxpath.c:2059) — estimate the cost
@@ -210,10 +232,10 @@ pub fn bitmap_scan_cost_est(root: &mut PlannerInfo, rel: RelId, ipath: PathId) -
 /// `bitmap_scan_cost_est`. `paths` are the component bitmapqual handles.
 pub fn bitmap_and_cost_est<'mcx>(
     root: &mut PlannerInfo,
-    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     paths: alloc::vec::Vec<PathId>,
 ) -> Result<Cost, types_error::PgError> {
     let apath_id = pathnode::create_bitmap_and_path::call(root, run, rel, paths)?;
-    Ok(bitmap_scan_cost_est(root, rel, apath_id))
+    bitmap_scan_cost_est(run, root, rel, apath_id)
 }

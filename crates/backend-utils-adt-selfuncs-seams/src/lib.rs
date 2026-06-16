@@ -30,19 +30,33 @@ seam_core::seam!(
     /// `estimate_num_groups(root, groupExprs, input_rows, NULL, estinfo)`
     /// (selfuncs.c) — estimate the number of distinct groups the given grouping
     /// expressions take over `input_rows` rows. The expression list crosses as a
-    /// borrowed slice of arena node handles (`SpecialJoinInfo.semi_rhs_exprs`).
+    /// borrowed slice of arena node handles (`SpecialJoinInfo.semi_rhs_exprs`,
+    /// the planner's grouping target list, ...).
+    ///
+    /// `run` threads the planner-run RTE/Query store: the owner body examines
+    /// each grouping expression via `examine_variable(run.mcx(), run, root,
+    /// ...)`, which resolves `simple_rte_array` through the [`PlannerRun`] and
+    /// pins `pg_statistic` tuples. The allocation context is recovered from
+    /// [`PlannerRun::mcx`] (matching how C reaches `CurrentMemoryContext`), so no
+    /// separate `mcx` parameter is threaded — `run` is already plumbed through
+    /// the cost-model call sites. `root` is `&mut` because `examine_variable`
+    /// re-interns the stripped (PHV/RelabelType-free) expression into the planner
+    /// node arena.
     ///
     /// `estinfo` mirrors the C `EstimationInfo *estinfo` out-parameter: callers
     /// that pass `Some(&mut info)` receive estimation flags back (the owner ORs
     /// in [`types_selfuncs::SELFLAG_USED_DEFAULT`] when it falls back on a
     /// default), exactly as C does. `None` mirrors C `NULL` (the `pgset`
     /// argument is always `NULL` in the repo's callers, so it is omitted).
-    pub fn estimate_num_groups(
-        root: &PlannerInfo,
+    ///
+    /// `Err` carries the examine path's `ereport(ERROR)`s and OOM.
+    pub fn estimate_num_groups<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         group_exprs: &[NodeId],
         input_rows: f64,
         estinfo: Option<&mut EstimationInfo>,
-    ) -> f64
+    ) -> PgResult<f64>
 );
 
 seam_core::seam!(

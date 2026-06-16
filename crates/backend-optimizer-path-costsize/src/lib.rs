@@ -28,6 +28,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_core::primitive::{BlockNumber, Cardinality, Cost};
+use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     GatherMergePath, GatherPath, ParamPathInfo, Path, PathId, PathKey, PathNode,
     PlannerInfo, QualCost, RelId, RelOptInfo, RinfoId, JOIN_INNER,
@@ -671,7 +673,8 @@ pub(crate) fn cost_sort_owned(
 }
 
 /// `cost_incremental_sort` (costsize.c:2000) — fills a path (by `PathId`).
-pub fn cost_incremental_sort(
+pub fn cost_incremental_sort<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     pathkeys: &[PathKey],
@@ -684,8 +687,9 @@ pub fn cost_incremental_sort(
     comparison_cost: Cost,
     sort_mem: i32,
     limit_tuples: f64,
-) {
+) -> PgResult<()> {
     let (s, t) = cost_incremental_sort_compute(
+        run,
         root,
         pathkeys,
         presorted_keys,
@@ -696,18 +700,20 @@ pub fn cost_incremental_sort(
         comparison_cost,
         sort_mem,
         limit_tuples,
-    );
+    )?;
     let p = root.path_mut(path_id).base_mut();
     p.rows = input_tuples;
     p.disabled_nodes = input_disabled_nodes;
     p.startup_cost = s;
     p.total_cost = t;
+    Ok(())
 }
 
 /// `cost_incremental_sort` over an owned `Path` (helper for mergejoin).
-pub(crate) fn cost_incremental_sort_owned(
+pub(crate) fn cost_incremental_sort_owned<'mcx>(
     path: &mut Path,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     pathkeys: &[PathKey],
     presorted_keys: i32,
     input_disabled_nodes: i32,
@@ -718,8 +724,9 @@ pub(crate) fn cost_incremental_sort_owned(
     comparison_cost: Cost,
     sort_mem: i32,
     limit_tuples: f64,
-) {
+) -> PgResult<()> {
     let (s, t) = cost_incremental_sort_compute(
+        run,
         root,
         pathkeys,
         presorted_keys,
@@ -730,16 +737,22 @@ pub(crate) fn cost_incremental_sort_owned(
         comparison_cost,
         sort_mem,
         limit_tuples,
-    );
+    )?;
     path.rows = input_tuples;
     path.disabled_nodes = input_disabled_nodes;
     path.startup_cost = s;
     path.total_cost = t;
+    Ok(())
 }
 
 /// Shared arithmetic of `cost_incremental_sort`; returns `(startup, total)`.
-fn cost_incremental_sort_compute(
-    root: &PlannerInfo,
+///
+/// `run` + `&mut root` thread the distinct-group estimate (`estimate_num_groups`
+/// over the presorted keys), which examines those expressions through the
+/// [`PlannerRun`] RTE store.
+fn cost_incremental_sort_compute<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     pathkeys: &[PathKey],
     presorted_keys: i32,
     input_startup_cost: Cost,
@@ -749,7 +762,7 @@ fn cost_incremental_sort_compute(
     comparison_cost: Cost,
     sort_mem: i32,
     limit_tuples: f64,
-) -> (Cost, Cost) {
+) -> PgResult<(Cost, Cost)> {
     let input_run_cost = input_total_cost - input_startup_cost;
     let mut input_groups: f64;
 
@@ -789,7 +802,7 @@ fn cost_incremental_sort_compute(
 
     if !unknown_varno {
         input_groups =
-            selfuncs::estimate_num_groups::call(root, &presorted_exprs, input_tuples, None);
+            selfuncs::estimate_num_groups::call(run, root, &presorted_exprs, input_tuples, None)?;
     }
 
     let group_tuples = input_tuples / input_groups;
@@ -809,7 +822,7 @@ fn cost_incremental_sort_compute(
 
     debug_assert!(ENABLE_INCREMENTAL_SORT);
 
-    (startup_cost, startup_cost + run_cost)
+    Ok((startup_cost, startup_cost + run_cost))
 }
 
 /* ==========================================================================

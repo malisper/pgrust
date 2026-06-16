@@ -176,7 +176,8 @@ fn cost_sort_seam(
     );
 }
 
-fn cost_incremental_sort_seam(
+fn cost_incremental_sort_seam<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     pathkeys: &[types_pathnodes::PathKey],
@@ -189,8 +190,9 @@ fn cost_incremental_sort_seam(
     comparison_cost: types_core::primitive::Cost,
     sort_mem: i32,
     limit_tuples: f64,
-) {
+) -> types_error::PgResult<()> {
     crate::cost_incremental_sort(
+        run,
         root,
         path,
         pathkeys,
@@ -203,7 +205,7 @@ fn cost_incremental_sort_seam(
         comparison_cost,
         sort_mem,
         limit_tuples,
-    );
+    )
 }
 
 fn cost_agg_seam<'mcx>(
