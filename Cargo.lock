@@ -3551,6 +3551,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-manifest"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline",
+ "backend-access-transam-xlog-seams",
+ "backend-backup-sink",
+ "backend-storage-file-buffile",
+ "backend-timezone-localtime",
+ "backend-timezone-strftime",
+ "backend-utils-adt-encode",
+ "backend-utils-adt-json",
+ "backend-utils-error",
+ "common-checksum-helper",
+ "common-cryptohash-seams",
+ "common-sha2",
+ "common-wchar",
+ "mcx",
+ "types-core",
+ "types-crypto",
+ "types-error",
+ "types-nodes",
+ "types-pgtime",
+ "types-storage",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-backup-server"
 version = "0.0.0"
 dependencies = [
