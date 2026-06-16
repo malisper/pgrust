@@ -637,26 +637,10 @@ pub fn CheckAttributeType<'mcx>(
  *		heap_create		- Create an uncataloged heap relation
  * ---------------------------------------------------------------- */
 
-/// The frozen-xid / min-mxid `heap_create` writes through its
-/// `relfrozenxid` / `relminmxid` out-parameters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HeapCreateXids {
-    /// `*relfrozenxid`.
-    pub relfrozenxid: TransactionId,
-    /// `*relminmxid` (the underlying `uint32` `MultiXactId`).
-    pub relminmxid: u32,
-}
-
-/// The created relation plus the frozen-xid out-parameters `heap_create`
-/// computes (in C, `rel` is the return value and the xids are written through
-/// out-params).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HeapCreateResult {
-    /// The new relcache entry's OID (`heap_create`'s return `Relation`).
-    pub rel: Oid,
-    /// The frozen-xid / min-mxid out-parameters.
-    pub xids: HeapCreateXids,
-}
+/// `heap_create`'s frozen-xid / created-relation carriers. Defined in the
+/// seams crate (so the cross-unit `heap_create` seam can name them without an
+/// owner dependency); re-exported here for the owner-internal callers.
+pub use backend_catalog_heap_seams::{HeapCreateResult, HeapCreateXids};
 
 /// `heap_create` — create an uncataloged heap relation.
 ///
