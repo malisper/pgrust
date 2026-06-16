@@ -158,6 +158,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The relation-RTE branch of `set_relation_column_names` (ruleutils.c
+    /// 4390-4412): open the relation (`relation_open(relid, AccessShareLock)`),
+    /// read its current `TupleDesc`, and return one entry per *physical* column
+    /// — the live `attname` for a live column, `None` for a dropped column
+    /// (`attisdropped`). Reads the catalog and takes a lock, so it can
+    /// `ereport(ERROR)`; allocated in `mcx`. This is the only catalog-coupled
+    /// step of the name-resolution engine for a plain relation; the engine that
+    /// *consumes* the names is fully ported in `backend-utils-adt-ruleutils`.
+    /// Owner: the relcache/table-AM substrate (not the deparse engine).
+    pub fn ruleutils_relation_real_colnames<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// The function-RTE branch of `set_relation_column_names` (ruleutils.c
+    /// 4434-4439): `expandRTE(rte, 1, 0, VAR_RETURNING_DEFAULT, -1, true
+    /// /* include dropped */, &colnames, NULL)` — the up-to-date column names of
+    /// a `RTE_FUNCTION` returning a composite, with dropped columns included as
+    /// empty strings (which the engine maps to `None`). Returns one entry per
+    /// column (`None` for a dropped column). Reads type catalogs, so it can
+    /// `ereport(ERROR)`; allocated in `mcx`. Owner: the parser's `parse_relation`
+    /// (`expandRTE`), not the deparse engine.
+    pub fn ruleutils_expand_function_rte_colnames<'mcx>(
+        mcx: Mcx<'mcx>,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `generate_collation_name(collid)` (ruleutils.c): the schema-qualified,
     /// quoted collation name for a collation OID, allocated in `mcx`. Reads
     /// `pg_collation`/`pg_namespace`, so it can `ereport(ERROR)` (cache lookup
