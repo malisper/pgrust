@@ -290,6 +290,138 @@ fn catalog_tuple_insert_pg_attrdef<'mcx>(
     Ok(attrdef_oid)
 }
 
+/* ======================================================================== *
+ * pg_index — UpdateIndexRelation (catalog/index.c).
+ * ======================================================================== */
+
+/// `buildint2vector(int2s, n)` (utils/adt/int.c): the on-disk `int2vector`
+/// image — a varlena whose header (`SET_VARSIZE`, then `ndim=1`,
+/// `dataoffset=0`, `elemtype=INT2OID`, `dim1=n`, `lbound1=0`) is followed by the
+/// `n` `int16` values. `Int2VectorSize(n) = offsetof(int2vector, values) + n *
+/// sizeof(int16) = 24 + 2n`. Returned as the verbatim `Datum::ByRef` bytes.
+fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<Datum<'mcx>> {
+    const INT2OID: u32 = 21;
+    const HEADER: usize = 24;
+    let n = int2s.len();
+    let total = HEADER + n * core::mem::size_of::<i16>();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    buf[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    buf[12..16].copy_from_slice(&INT2OID.to_ne_bytes());
+    buf[16..20].copy_from_slice(&(n as i32).to_ne_bytes());
+    buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    for (i, v) in int2s.iter().enumerate() {
+        let off = HEADER + i * 2;
+        buf[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+    }
+    Ok(Datum::ByRef(buf))
+}
+
+/// `buildoidvector(oids, n)` (utils/adt/oid.c): the on-disk `oidvector` image —
+/// the same `int2vector`-shaped fixed-layout struct, but `elemtype=OIDOID` and
+/// 4-byte `Oid` values. `OidVectorSize(n) = offsetof(oidvector, values) + n *
+/// sizeof(Oid) = 24 + 4n`. Returned as the verbatim `Datum::ByRef` bytes.
+fn buildoidvector<'mcx>(
+    mcx: Mcx<'mcx>,
+    oids: &[types_core::primitive::Oid],
+) -> PgResult<Datum<'mcx>> {
+    const OIDOID: u32 = 26;
+    const HEADER: usize = 24;
+    let n = oids.len();
+    let total = HEADER + n * core::mem::size_of::<u32>();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    buf[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    buf[12..16].copy_from_slice(&OIDOID.to_ne_bytes());
+    buf[16..20].copy_from_slice(&(n as i32).to_ne_bytes());
+    buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    for (i, v) in oids.iter().enumerate() {
+        let off = HEADER + i * 4;
+        buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+    }
+    Ok(Datum::ByRef(buf))
+}
+
+/// `UpdateIndexRelation` (catalog/index.c): build the full 21-column `pg_index`
+/// row from the typed [`cat::pg_index::PgIndexInsertRow`],
+/// `heap_form_tuple(RelationGetDescr(pg_index), values, nulls)`, and
+/// `CatalogTupleInsert(pg_index, tuple)`.
+fn catalog_tuple_insert_pg_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_index::PgIndexInsertRow,
+) -> PgResult<()> {
+    use cat::pg_index as pi;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
+    for _ in 0..pi::Natts_pg_index {
+        values.push(Datum::null());
+        nulls.push(false);
+    }
+
+    // values[Anum_pg_index_indexrelid - 1] = ObjectIdGetDatum(indexoid); ...
+    values[pi::Anum_pg_index_indexrelid as usize - 1] = Datum::from_oid(row.indexrelid);
+    values[pi::Anum_pg_index_indrelid as usize - 1] = Datum::from_oid(row.indrelid);
+    values[pi::Anum_pg_index_indnatts as usize - 1] = Datum::from_i16(row.indnatts);
+    values[pi::Anum_pg_index_indnkeyatts as usize - 1] = Datum::from_i16(row.indnkeyatts);
+    values[pi::Anum_pg_index_indisunique as usize - 1] = Datum::from_bool(row.indisunique);
+    values[pi::Anum_pg_index_indnullsnotdistinct as usize - 1] =
+        Datum::from_bool(row.indnullsnotdistinct);
+    values[pi::Anum_pg_index_indisprimary as usize - 1] = Datum::from_bool(row.indisprimary);
+    values[pi::Anum_pg_index_indisexclusion as usize - 1] = Datum::from_bool(row.indisexclusion);
+    values[pi::Anum_pg_index_indimmediate as usize - 1] = Datum::from_bool(row.indimmediate);
+    values[pi::Anum_pg_index_indisclustered as usize - 1] = Datum::from_bool(row.indisclustered);
+    values[pi::Anum_pg_index_indisvalid as usize - 1] = Datum::from_bool(row.indisvalid);
+    values[pi::Anum_pg_index_indcheckxmin as usize - 1] = Datum::from_bool(row.indcheckxmin);
+    values[pi::Anum_pg_index_indisready as usize - 1] = Datum::from_bool(row.indisready);
+    values[pi::Anum_pg_index_indislive as usize - 1] = Datum::from_bool(row.indislive);
+    values[pi::Anum_pg_index_indisreplident as usize - 1] = Datum::from_bool(row.indisreplident);
+
+    // values[indkey] = PointerGetDatum(buildint2vector(...)); the attnums are
+    // AttrNumber (== int16).
+    let indkey_i16: mcx::PgVec<'mcx, i16> = {
+        let mut v: mcx::PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, row.indkey.len())?;
+        for a in &row.indkey {
+            v.push(*a as i16);
+        }
+        v
+    };
+    values[pi::Anum_pg_index_indkey as usize - 1] = buildint2vector(mcx, &indkey_i16)?;
+    values[pi::Anum_pg_index_indcollation as usize - 1] = buildoidvector(mcx, &row.indcollation)?;
+    values[pi::Anum_pg_index_indclass as usize - 1] = buildoidvector(mcx, &row.indclass)?;
+    values[pi::Anum_pg_index_indoption as usize - 1] = buildint2vector(mcx, &row.indoption)?;
+
+    // exprsDatum = ii_Expressions != NIL ? CStringGetTextDatum(nodeToString(...))
+    // : (Datum) 0; nulls[indexprs] = (exprsDatum == 0).
+    match &row.indexprs {
+        Some(text) => {
+            values[pi::Anum_pg_index_indexprs as usize - 1] = cstring_to_text_datum(mcx, text)?;
+        }
+        None => nulls[pi::Anum_pg_index_indexprs as usize - 1] = true,
+    }
+    // predDatum likewise.
+    match &row.indpred {
+        Some(text) => {
+            values[pi::Anum_pg_index_indpred as usize - 1] = cstring_to_text_datum(mcx, text)?;
+        }
+        None => nulls[pi::Anum_pg_index_indpred as usize - 1] = true,
+    }
+
+    // tuple = heap_form_tuple(RelationGetDescr(pg_index), values, nulls);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // CatalogTupleInsert(pg_index, tuple); heap_freetuple(tuple);
+    CatalogTupleInsert(mcx, rel, &mut tup)
+}
+
 /// Install the F3 DDL-cluster catalog-write seams. Wired from
 /// [`crate::init_seams`].
 pub fn install() {
@@ -301,5 +433,8 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_attrdef::set(
         catalog_tuple_insert_pg_attrdef,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_index::set(
+        catalog_tuple_insert_pg_index,
     );
 }
