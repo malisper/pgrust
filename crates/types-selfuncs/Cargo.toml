@@ -13,3 +13,4 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }

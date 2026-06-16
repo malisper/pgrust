@@ -106,9 +106,11 @@ backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
 backend-commands-explain = { path = "../backend-commands-explain" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
+backend-commands-lockcmds = { path = "../backend-commands-lockcmds" }
 backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
 backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
+backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
@@ -304,6 +306,7 @@ backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetyp
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
+backend-utils-adt-float = { path = "../backend-utils-adt-float" }
 backend-utils-adt-quote = { path = "../backend-utils-adt-quote" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-version = { path = "../backend-utils-adt-version" }
@@ -352,6 +355,7 @@ backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }

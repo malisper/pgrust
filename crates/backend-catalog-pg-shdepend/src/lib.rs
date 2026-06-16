@@ -1057,7 +1057,7 @@ pub fn copyTemplateDependencies(templateDbId: Oid, newDbId: Oid) -> PgResult<()>
 
             /* If slots are full, insert a batch of tuples */
             if batch.len() == max_slots {
-                indexing_seams::catalog_tuples_multi_insert_pg_shdepend::call(&sdepRel, &batch)?;
+                indexing_seams::catalog_tuples_multi_insert_pg_shdepend::call(ctx.mcx(), &sdepRel, &batch)?;
                 batch.clear();
             }
             Ok(true)
@@ -1066,7 +1066,7 @@ pub fn copyTemplateDependencies(templateDbId: Oid, newDbId: Oid) -> PgResult<()>
 
     /* Insert any tuples left in the buffer */
     if !batch.is_empty() {
-        indexing_seams::catalog_tuples_multi_insert_pg_shdepend::call(&sdepRel, &batch)?;
+        indexing_seams::catalog_tuples_multi_insert_pg_shdepend::call(ctx.mcx(), &sdepRel, &batch)?;
     }
 
     sdepRel.close(RowExclusiveLock)?;

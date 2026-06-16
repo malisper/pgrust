@@ -317,7 +317,15 @@ fn conv_cte<'mcx>(
         ctematerialized: cte_materialize(c.ctematerialized),
         ctequery: node_opt(mcx, c.ctequery)?,
         search_clause: child_opt(mcx, c.search_clause, conv_cte_search)?,
-        cycle_clause: child_opt(mcx, c.cycle_clause, conv_cte_cycle)?,
+        cycle_clause: if c.cycle_clause.is_null() {
+            None
+        } else {
+            let cc = conv_cte_cycle(mcx, c.cycle_clause)?;
+            Some(mcx::alloc_in(
+                mcx,
+                types_nodes::nodes::Node::CTECycleClause(cc),
+            )?)
+        },
         location: c.location,
         cterecursive: c.cterecursive,
         cterefcount: c.cterefcount,
