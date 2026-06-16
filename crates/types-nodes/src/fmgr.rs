@@ -34,6 +34,14 @@ use crate::nodes::Node;
 /// `types_core::fmgr::FmgrInfo` carried by value (`None` is the C NULL frame),
 /// and C's `fmNodePtr context` borrows the call's context node (`None` is C's
 /// NULL — set only by trigger/SRF/aggregate dispatch).
+///
+/// Deliberately distinct from `types_fmgr::fmgr::FunctionCallInfoBaseData` (the
+/// low-level fmgr-ABI carrier). WONTFIX dual-home — see DESIGN_DEBT.md "two
+/// `FunctionCallInfoBaseData` homes": this is the `no_std`+`'mcx` executor frame
+/// (arena/`Node` links); the fmgr copy is `std`, lifetime-free, with by-ref side
+/// channels. Neither crate deps the other (both on leaf `types-core`); unifying
+/// needs a cycle and/or breaks `no_std`, and they never meet (the
+/// `function_call_invoke` seam is value-based).
 #[derive(Debug, Default)]
 pub struct FunctionCallInfoBaseData<'mcx> {
     /// `FmgrInfo *flinfo` — the resolved lookup info this call dispatches
