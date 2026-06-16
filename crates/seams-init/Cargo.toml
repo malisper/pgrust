@@ -317,6 +317,7 @@ backend-replication-libpqwalreceiver = { path = "../backend-replication-libpqwal
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
+backend-replication-repl-scanner = { path = "../backend-replication-repl-scanner" }
 backend-replication-syncrep = { path = "../backend-replication-syncrep" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }

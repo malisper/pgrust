@@ -13550,6 +13550,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-repl-scanner"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scansup-seams",
+ "backend-replication-repl-scanner-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-repl-scanner-seams"
 version = "0.0.0"
 dependencies = [
@@ -20451,6 +20464,7 @@ dependencies = [
  "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
+ "backend-replication-repl-scanner",
  "backend-replication-slot",
  "backend-replication-syncrep",
  "backend-replication-syncrep-scanner",
