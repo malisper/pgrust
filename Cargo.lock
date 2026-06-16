@@ -5721,6 +5721,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-variable"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogprefetcher",
+ "backend-commands-variable-seams",
+ "backend-libpq-pqcomm",
+ "backend-postmaster-syslogger",
+ "backend-timezone-localtime",
+ "backend-timezone-pgtz",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr",
+ "common-encnames-seams",
+ "common-path-seams",
+ "common-string",
+ "mcx",
+ "state-pgtz",
+ "types-core",
+ "types-datetime",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
+name = "backend-commands-variable-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-common-exec-seams"
 version = "0.0.0"
 dependencies = [
@@ -16164,6 +16210,7 @@ dependencies = [
  "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-trigger",
+ "backend-commands-variable",
  "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
