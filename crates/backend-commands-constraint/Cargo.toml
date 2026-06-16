@@ -1,0 +1,35 @@
+[package]
+name = "backend-commands-constraint"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_constraint"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+types-datum = { path = "../types-datum" }
+types-tableam = { path = "../types-tableam" }
+types-snapshot = { path = "../types-snapshot" }
+types-storage = { path = "../types-storage" }
+types-ri-triggers = { path = "../types-ri-triggers" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Ported owners called directly (acyclic: nothing depends on constraint).
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-index-indexam = { path = "../backend-access-index-indexam" }
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-executor-execIndexing = { path = "../backend-executor-execIndexing" }
+
+# Unported owners reached through their seam crates (panic until owner lands).
+backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }

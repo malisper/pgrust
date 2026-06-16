@@ -155,6 +155,44 @@ seam_core::seam!(
     /// `trigger->tgname` — raw name bytes, copied into `mcx`.
     pub fn trigger_name<'mcx>(mcx: Mcx<'mcx>, trigger: TriggerRef) -> PgResult<PgVec<'mcx, u8>>
 );
+seam_core::seam!(
+    /// `trigger->tgconstrindid` — the OID of the unique/exclusion index backing
+    /// the constraint whose deferred recheck the trigger fires (read by
+    /// `constraint.c`'s `unique_key_recheck` to `index_open` the index).
+    pub fn trigger_constrindid(trigger: TriggerRef) -> Oid
+);
+
+// ---- the live trigger carriers `unique_key_recheck` (constraint.c) drives ----
+//
+// Unlike `ri_triggers.c` (which reads only scalars/attributes off the trigger
+// relation), `commands/constraint.c`'s `unique_key_recheck` drives the table-AM
+// and index-AM against the *live* `tg_relation` and the inserted/updated tuple's
+// TID.  Those carriers are owned by the per-row AFTER-trigger firing substrate
+// (`AfterTriggerExecute` re-resolves the `Relation` and materializes the OLD/NEW
+// `TupleTableSlot`s), which is not yet ported — `AfterTriggerExecute` currently
+// builds the `TriggerData` with `tg_relation`/`tg_trigslot`/`tg_newslot` left
+// NULL and loud-panics on the per-row tuple fetch.  These owner-homed seams
+// therefore have no producer yet; a call panics loudly (mirror-PG-and-panic).
+
+seam_core::seam!(
+    /// `trigdata->tg_relation` — the heap relation the trigger fired on, aliased
+    /// into the caller's `mcx` (the C `Relation` pointer alias; the bumped
+    /// refcount the alias represents is released when the value drops).  Driving
+    /// the table-AM / `index_open` / `index_insert` against this relation is what
+    /// distinguishes `unique_key_recheck` from the OID-only RI accessors above.
+    pub fn tg_relation<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+    ) -> PgResult<types_rel::Relation<'mcx>>
+);
+seam_core::seam!(
+    /// `slot->tts_tid` — the TID stored in one of the trigger manager's OLD/NEW
+    /// `TupleTableSlot`s (the slot is owned by the firing substrate's `EState`,
+    /// so the TID is resolved on the owner side, exactly like `slot_getattr`).
+    pub fn slot_tid(
+        slot: TupleTableSlotRef,
+    ) -> types_tuple::heaptuple::ItemPointerData
+);
 
 // ---- slot value access (executor/execTuples.c, access/common) --------------
 

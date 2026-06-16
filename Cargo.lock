@@ -5718,6 +5718,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-constraint"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam",
+ "backend-access-table-tableam",
+ "backend-catalog-index-seams",
+ "backend-commands-trigger-seams",
+ "backend-executor-execIndexing",
+ "backend-executor-execUtils",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-ri-triggers",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-conversioncmds"
 version = "0.0.0"
 dependencies = [
@@ -6904,6 +6928,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-rel",
  "types-ri-triggers",
  "types-tableam",
  "types-tuple",
