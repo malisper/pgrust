@@ -17,6 +17,9 @@ use types_pgstat::activity_pgstat::{
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
+use types_pgstat::activity_pgstat::PgStat_Backend;
+use types_core::init::BackendType;
+use types_core::ProcNumber;
 
 seam_core::seam!(
     /// `pgstat_prepare_report_checksum_failure(dboid)` (pgstat_database.c):
@@ -311,6 +314,33 @@ seam_core::seam!(
     /// `pgstat_reset_wait_event_storage()` (wait_event.c): reset wait-event
     /// reporting back to the process-local word during proc teardown.
     pub fn pgstat_reset_wait_event_storage()
+);
+
+seam_core::seam!(
+    /// `pgstat_fetch_entry(PGSTAT_KIND_BACKEND, InvalidOid, procNumber)`
+    /// (`pgstat.c`), specialized to `PGSTAT_KIND_BACKEND` — fetch a copy of one
+    /// backend's variable-numbered stats body by proc number, or `None` when no
+    /// (live) entry exists. `pgstat_fetch_entry` is the variable-kind snapshot
+    /// fetch in the (not-yet-ported) `pgstat.c` core (it drives
+    /// `pgstat_build_snapshot` / the snapshot simplehash); until that lands this
+    /// is seam-and-panic. `Err` carries its `palloc` / `MemoryContextAlloc`
+    /// out-of-memory `ereport` surface.
+    pub fn pgstat_fetch_entry_backend(
+        proc_number: ProcNumber,
+    ) -> types_error::PgResult<Option<PgStat_Backend>>
+);
+
+seam_core::seam!(
+    /// The PID-resolution prefix of `pgstat_fetch_stat_backend_by_pid`:
+    /// `BackendPidGetProc(pid)` else `AuxiliaryPidGetProc(pid)` (procarray.c),
+    /// `GetNumberFromPGProc(proc)` (proc.h), then
+    /// `pgstat_get_beentry_by_proc_number(procNumber)` (backend_status.c) to read
+    /// the backend's advertised `st_backendType` / `st_procpid`. Returns
+    /// `(proc_number, st_backend_type, st_procpid)`, or `None` when the pid is
+    /// not a live (auxiliary or regular) backend with a beentry. The beentry
+    /// accessor (`pgstat_get_beentry_by_proc_number`) is unported, so this is
+    /// seam-and-panic. Shared-memory scan; cannot `ereport`.
+    pub fn pgstat_backend_pid_lookup(pid: i32) -> Option<(ProcNumber, BackendType, i32)>
 );
 
 seam_core::seam!(
