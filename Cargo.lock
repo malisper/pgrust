@@ -16186,6 +16186,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-nodes",
  "types-scan",
  "types-storage",
  "types-tableam",
