@@ -14919,6 +14919,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-predicate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-twophase-rmgr",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-lib-ilist",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-pgstat",
+ "types-rel",
+ "types-relcache-entry",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-lmgr-predicate-seams"
 version = "0.0.0"
 dependencies = [
@@ -20099,6 +20134,7 @@ dependencies = [
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-predicate",
  "backend-storage-lmgr-proc",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
