@@ -12,14 +12,13 @@
 //! (`arcbatch`, `statebatch`) are subsumed by the arena vectors and are not
 //! modeled.
 //!
-//! # Memory model (SCAFFOLD STAGE)
+//! # Memory model
 //!
 //! The C engine `MALLOC`/`REALLOC`/`FREE`s every growable array out of its own
 //! transient compile context. The faithful port charges those against `mcx`,
 //! and the allocating functions take an `Mcx<'mcx>` and return `RegResult<_>`
-//! (true-OOM -> `REG_ESPACE`). At this scaffold stage the arena/array fields
-//! are plain [`alloc::vec::Vec`]; the `Mcx` threading lands with the family
-//! logic (the allocating entry points already carry `Mcx`).
+//! (true-OOM -> `REG_ESPACE`). The arena/array fields are plain
+//! [`alloc::vec::Vec`]; the allocating entry points carry `Mcx`.
 
 extern crate alloc;
 

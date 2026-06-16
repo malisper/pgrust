@@ -765,6 +765,8 @@ pub fn init_seams() {
         Ok(rels)
     });
     backend_catalog_pg_inherits_seams::type_inherits_from::set(typeInheritsFrom);
+    // index_create (catalog/index.c) partition-index parent link.
+    backend_catalog_pg_inherits_seams::store_single_inheritance::set(StoreSingleInheritance);
 }
 
 #[cfg(test)]

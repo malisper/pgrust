@@ -28,3 +28,16 @@ seam_core::seam!(
         superclass_type_id: Oid,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `StoreSingleInheritance(relationId, parentOid, seqNumber)`
+    /// (pg_inherits.c): insert a single `pg_inherits` row recording that
+    /// `relationId` inherits from `parentOid` at ordinal `seqNumber`. Called by
+    /// `index_create` (catalog/index.c) to link a partition index to its parent
+    /// index. `Err` carries the catalog-insert `ereport(ERROR)`s.
+    pub fn store_single_inheritance(
+        relation_id: Oid,
+        parent_oid: Oid,
+        seq_number: i32,
+    ) -> PgResult<()>
+);

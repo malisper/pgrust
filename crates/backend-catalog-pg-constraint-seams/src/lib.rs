@@ -153,3 +153,72 @@ seam_core::seam!(
         objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
     ) -> PgResult<()>
 );
+
+pub use types_catalog::pg_constraint::ConstraintCategory;
+
+seam_core::seam!(
+    /// `ConstraintNameIsUsed(conCat, objId, conname)` (pg_constraint.c): is the
+    /// given constraint name already in use for the relation / domain `objId`?
+    /// Scans `pg_constraint` by `conname` + namespace. `Err` carries the
+    /// catalog-scan `ereport(ERROR)`s.
+    pub fn constraint_name_is_used(
+        mcx: Mcx<'_>,
+        con_cat: ConstraintCategory,
+        obj_id: Oid,
+        conname: &str,
+    ) -> PgResult<bool>
+);
+
+/// Arguments to [`create_constraint_entry`], trimmed to the fields
+/// `index_constraint_create` (catalog/index.c) supplies for a PRIMARY KEY /
+/// UNIQUE / EXCLUDE index constraint. The C `CreateConstraintEntry` takes the
+/// full ~30-parameter list; the foreign-key legs (`foreignRelId`, the
+/// `pfEqOp`/`ppEqOp`/`ffEqOp` arrays, the FK action chars, `fkDeleteSetCols`),
+/// the CHECK-expression legs (`conExpr`/`conBin`), and `domainId` are all
+/// NULL/`InvalidOid`/`' '`/`0` at this call site and are not carried; the owner
+/// re-supplies those constants. `isEnforced` / `isValidated` are both `true`
+/// here.
+#[derive(Debug)]
+pub struct CreateConstraintEntryArgs<'a> {
+    /// `const char *constraintName`.
+    pub constraint_name: &'a str,
+    /// `Oid constraintNamespace`.
+    pub constraint_namespace: Oid,
+    /// `char constraintType`.
+    pub constraint_type: i8,
+    /// `bool isDeferrable`.
+    pub is_deferrable: bool,
+    /// `bool isDeferred`.
+    pub is_deferred: bool,
+    /// `Oid parentConstrId`.
+    pub parent_constr_id: Oid,
+    /// `Oid relId` — `RelationGetRelid(heapRelation)`.
+    pub rel_id: Oid,
+    /// `const int16 *constraintKey` — `indexInfo->ii_IndexAttrNumbers`,
+    /// `constraintNKeys = ii_NumIndexKeyAttrs` elements.
+    pub constraint_key: &'a [i16],
+    /// `int constraintNTotalKeys` — `indexInfo->ii_NumIndexAttrs`.
+    pub constraint_n_total_keys: i32,
+    /// `Oid indexRelId`.
+    pub index_rel_id: Oid,
+    /// `const Oid *exclOp` — `indexInfo->ii_ExclusionOps`
+    /// (`None` for non-exclusion constraints), `constraintNKeys` elements.
+    pub excl_op: Option<&'a [Oid]>,
+    /// `bool conIsLocal`.
+    pub con_is_local: bool,
+    /// `int16 conInhCount`.
+    pub con_inh_count: i16,
+    /// `bool conNoInherit`.
+    pub con_no_inherit: bool,
+    /// `bool conPeriod` — `is_without_overlaps`.
+    pub con_period: bool,
+    /// `bool is_internal`.
+    pub is_internal: bool,
+}
+
+seam_core::seam!(
+    /// `CreateConstraintEntry(...)` (pg_constraint.c): construct a
+    /// `pg_constraint` entry and its dependencies. Returns the new constraint's
+    /// OID. `Err` carries the catalog-mutation `ereport(ERROR)`s.
+    pub fn create_constraint_entry(mcx: Mcx<'_>, args: CreateConstraintEntryArgs<'_>) -> PgResult<Oid>
+);

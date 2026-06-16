@@ -108,4 +108,13 @@ pub fn init_seams() {
     // The nodefuncs family (`nodeFuncs.c`) owns `backend-nodes-nodeFuncs-seams`
     // and installs its expression-inspection seams.
     nodefuncs::init_seams();
+
+    // print family (`nodes/print.c`): the three ad-hoc printers this crate owns
+    // and can fully evaluate (`print_rt`/`print_expr`/`print_tl`). `print_pathkeys`
+    // and `print_slot` stay UNINSTALLED — they route to their genuine unported
+    // owners (the planner EC arena and the printtup slot runtime) and panic on
+    // call (`mirror-pg-and-panic`).
+    seams::print_rt::set(print::print_rt);
+    seams::print_expr::set(print::print_expr);
+    seams::print_tl::set(print::print_tl);
 }

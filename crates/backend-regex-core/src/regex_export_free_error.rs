@@ -210,7 +210,7 @@ static RERRS: &[Rerr] = &[
 /// `pg_regerror(int errcode, const regex_t *preg, char *errbuf, size_t
 /// errbuf_size)` — format a `REG_*` code into its human-readable message.
 ///
-/// The scaffold seam adapters only ever take the "real, normal error code"
+/// The seam adapters only ever take the "real, normal error code"
 /// path (the `default:` arm of C's switch): they pass a concrete `REG_*` code
 /// and want the explanation text. They never use `REG_ATOI`/`REG_ITOA`, which
 /// require a caller-supplied name/number string in `errbuf`. This function

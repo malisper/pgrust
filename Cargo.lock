@@ -4062,9 +4062,11 @@ dependencies = [
 name = "backend-bootstrap-bootstrap-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -4328,16 +4330,27 @@ dependencies = [
  "backend-access-table-table-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
+ "backend-bootstrap-bootstrap-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-dependency-seams",
  "backend-catalog-heap-seams",
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-constraint-seams",
+ "backend-catalog-pg-inherits-seams",
  "backend-commands-matview-deps-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-commands-trigger-seams",
  "backend-nodes-core",
  "backend-nodes-core-seams",
  "backend-nodes-equalfuncs-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-rewrite-rewritemanip-seams",
+ "backend-storage-lmgr-lmgr-seams",
  "backend-utils-activity-backend-progress-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
@@ -4345,10 +4358,12 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "mcx",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
  "types-tableam",
  "types-tuple",
 ]
@@ -4359,6 +4374,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-cluster",
  "types-core",
  "types-datum",
@@ -9727,6 +9743,7 @@ version = "0.0.0"
 dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -10542,6 +10559,7 @@ dependencies = [
  "backend-nodes-readfuncs-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
@@ -13988,17 +14006,21 @@ dependencies = [
 name = "backend-rewrite-rewritehandler"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation-seams",
  "backend-access-common-tupdesc",
  "backend-access-table-table",
  "backend-catalog-pg-depend",
  "backend-commands-view-seams",
+ "backend-foreign-foreign-seams",
  "backend-nodes-core",
  "backend-parser-coerce",
  "backend-parser-relation",
  "backend-rewrite-core",
  "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-format-type",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
  "mcx",
  "types-acl",
  "types-core",
