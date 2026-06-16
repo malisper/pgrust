@@ -10,6 +10,7 @@
 //! call, exactly as the C `FileSet *` argument requires.
 
 use backend_storage_file_fileset_seams as seams;
+use backend_storage_file_sharedfileset_seams as shared_seams;
 use types_execparallel::FileSetHandle;
 use types_storage::fileset::FileSet;
 
@@ -26,7 +27,9 @@ fn as_ref<'a>(handle: FileSetHandle) -> &'a FileSet {
     unsafe { &*(handle.0 as *const FileSet) }
 }
 
-/// Install every `backend-storage-file-fileset` seam.
+/// Install every `backend-storage-file-fileset` seam, plus the
+/// `backend-storage-file-sharedfileset-seams` set this unit also owns
+/// (`sharedfileset.c` is part of this same `backend-storage-file` unit).
 ///
 /// `FileSetInit`/`FileSetDeleteAll` are consumed by `sharedfileset.c` (the
 /// sibling owner in this same unit), which calls this crate's public functions
@@ -40,4 +43,11 @@ pub fn init_seams() {
     seams::file_set_delete::set(|fileset, name, error_on_failure| {
         super::FileSetDelete(as_ref(fileset), name, error_on_failure)
     });
+
+    // sharedfileset.c (same unit): the parallel-hash / parallel-tuplesort
+    // shared-temp-file protocol. These marshal-and-delegate to the real ported
+    // functions in `super::sharedfileset`.
+    shared_seams::SharedFileSetInit::set(super::sharedfileset::SharedFileSetInit);
+    shared_seams::SharedFileSetAttach::set(super::sharedfileset::SharedFileSetAttach);
+    shared_seams::SharedFileSetDeleteAll::set(super::sharedfileset::SharedFileSetDeleteAll);
 }

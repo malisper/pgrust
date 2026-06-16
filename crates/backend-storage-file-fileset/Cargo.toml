@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-execparallel = { path = "../types-execparallel" }
@@ -17,5 +18,9 @@ common-hashfn = { path = "../common-hashfn" }
 
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-file-fileset-seams = { path = "../backend-storage-file-fileset-seams" }
+backend-storage-file-sharedfileset-seams = { path = "../backend-storage-file-sharedfileset-seams" }
+backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
