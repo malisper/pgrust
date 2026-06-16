@@ -2007,6 +2007,23 @@ pub fn XLogRecGetXid(state: &XLogReaderState<'_>) -> TransactionId {
         .xid()
 }
 
+/// `XLogRecGetPrev(decoder)` (xlogreader.h) — `(decoder)->record->header.xl_prev`,
+/// the LSN of the previous record in the WAL chain.
+pub fn XLogRecGetPrev(state: &XLogReaderState<'_>) -> XLogRecPtr {
+    current(state)
+        .expect("XLogRecGetPrev requires a decoded current record")
+        .header()
+        .prev()
+}
+
+/// `XLogRecGetDataLen(decoder)` (xlogreader.h) —
+/// `(decoder)->record->main_data_len`, the length of the record's main data area.
+pub fn XLogRecGetDataLen(state: &XLogReaderState<'_>) -> uint32 {
+    current(state)
+        .expect("XLogRecGetDataLen requires a decoded current record")
+        .main_data_len()
+}
+
 /// `XLogRecMaxBlockId(decoder)` (xlogreader.h) —
 /// `(decoder)->record->max_block_id`, the highest block id registered in the
 /// reader's current record (`-1` when none). `XLogRecHasAnyBlockRefs` is

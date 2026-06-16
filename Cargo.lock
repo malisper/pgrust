@@ -3566,6 +3566,7 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "backend-access-rmgrdesc-xactdesc",
  "backend-access-transam-rmgr",
  "backend-access-transam-timeline-seams",
  "backend-access-transam-varsup-seams",
@@ -12778,6 +12779,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-auxprocess"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc",
+ "backend-utils-activity-status-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-more-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "backend-utils-resowner-resowner-seams",
+ "mcx",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-postmaster-auxprocess-seams"
 version = "0.0.0"
 dependencies = [
@@ -20905,6 +20930,7 @@ dependencies = [
  "backend-port-sysv-sema",
  "backend-port-sysv-shmem",
  "backend-postmaster-autovacuum",
+ "backend-postmaster-auxprocess",
  "backend-postmaster-bgworker",
  "backend-postmaster-bgwriter",
  "backend-postmaster-checkpointer",

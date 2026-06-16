@@ -205,7 +205,7 @@ pub fn perform_wal_recovery<'mcx>(
             }
 
             // Have we reached our recovery target?
-            if crate::stop::recovery_stops_before(st, record) {
+            if crate::stop::recovery_stops_before(st, mcx, record)? {
                 reached_recovery_target = true;
                 break;
             }
@@ -226,7 +226,7 @@ pub fn perform_wal_recovery<'mcx>(
             apply_wal_record(st, record, &mut replay_tli)?;
 
             // Exit loop if we reached inclusive recovery target.
-            if crate::stop::recovery_stops_after(st, record) {
+            if crate::stop::recovery_stops_after(st, mcx, record)? {
                 reached_recovery_target = true;
                 break;
             }
