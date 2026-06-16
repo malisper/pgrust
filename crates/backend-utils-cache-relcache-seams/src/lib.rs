@@ -665,3 +665,15 @@ seam_core::seam!(
         cache: types_spgist::SpGistCache,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationSetNewRelfilenumber(relation, persistence)` (relcache.c):
+    /// assign a new relfilenumber to a relation, creating new physical
+    /// storage (the rewriting forms of ALTER TABLE / TRUNCATE / sequence
+    /// rewrite). Keyed by the relation OID; `persistence` is the target
+    /// `relpersistence`. `Err` carries the smgr/catalog `ereport(ERROR)`s.
+    pub fn relation_set_new_relfilenumber(
+        relation: types_core::primitive::Oid,
+        persistence: i8,
+    ) -> types_error::PgResult<()>
+);

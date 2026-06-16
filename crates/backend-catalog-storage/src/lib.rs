@@ -1175,6 +1175,22 @@ pub fn relation_set_new_filelocator_storage(
     smgr::smgrclose(key)
 }
 
+/// The init-fork creation leg of `fill_seq_with_data` (sequence.c) for an
+/// unlogged sequence: `srel = smgropen(rlocator, INVALID_PROC_NUMBER);
+/// smgrcreate(srel, INIT_FORKNUM, false); log_smgrcreate(&rlocator,
+/// INIT_FORKNUM)`. The transient `SMgrRelation` is created here; the matching
+/// `smgrclose` is done by the caller (after the fork is filled+flushed) through
+/// `relation_close_smgr`.
+pub fn smgr_create_init_fork_and_log(rlocator: RelFileLocator) -> PgResult<()> {
+    // srel = smgropen(rel->rd_locator, INVALID_PROC_NUMBER);
+    let srel = smgr::smgropen(rlocator, INVALID_PROC_NUMBER)?;
+    let key = srel.smgr_rlocator;
+    // smgrcreate(srel, INIT_FORKNUM, false);
+    smgr::smgrcreate(key, INIT_FORKNUM, false)?;
+    // log_smgrcreate(&rel->rd_locator, INIT_FORKNUM);
+    log_smgrcreate(rlocator, INIT_FORKNUM)
+}
+
 /// The pg_class-update leg of `RelationSetNewRelfilenumber` (relcache.c:3818-3952)
 /// for a non-mapped relation: `table_open(pg_class)`, locked copy of the pg_class
 /// row, set `relfilenode = new_relfilenumber` and (for non-sequence relkinds)
@@ -1255,4 +1271,5 @@ pub fn init_seams() {
     storage_seam::update_pg_class_relfilenumber::set(update_pg_class_relfilenumber);
     storage_seam::relation_preserve_storage::set(RelationPreserveStorage);
     storage_seam::relation_set_new_filelocator_storage::set(relation_set_new_filelocator_storage);
+    storage_seam::smgr_create_init_fork_and_log::set(smgr_create_init_fork_and_log);
 }

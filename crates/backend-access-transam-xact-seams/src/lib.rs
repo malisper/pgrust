@@ -291,3 +291,18 @@ seam_core::seam!(
     /// read-only flag. snapbuild.c's SnapBuildExportSnapshot sets it true.
     pub fn set_xact_read_only(value: bool)
 );
+
+seam_core::seam!(
+    /// `PreventCommandIfReadOnly(cmdname)` (utility.c): raise
+    /// `ERRCODE_READ_ONLY_SQL_TRANSACTION` "cannot execute %s in a read-only
+    /// transaction" if `XactReadOnly` is set (and the command is not allowed in
+    /// recovery). `Ok(())` when the command may proceed.
+    pub fn prevent_command_if_read_only(cmdname: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PreventCommandIfParallelMode(cmdname)` (utility.c): raise
+    /// `ERRCODE_INVALID_TRANSACTION_STATE` "cannot execute %s during a parallel
+    /// operation" if `IsInParallelMode()`. `Ok(())` otherwise.
+    pub fn prevent_command_if_parallel_mode(cmdname: &str) -> PgResult<()>
+);

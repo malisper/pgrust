@@ -15,6 +15,7 @@ pub mod pg_conversion;
 pub mod pg_enum;
 pub mod pg_inherits;
 pub mod pg_range;
+pub mod pg_sequence;
 pub mod object_access;
 pub mod pg_aggregate;
 pub mod catalog_shdepend;

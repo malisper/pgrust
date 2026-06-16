@@ -111,6 +111,7 @@ backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
+backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }

@@ -15,3 +15,4 @@ types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }
 types-opclass = { path = "../types-opclass" }
 types-parsenodes = { path = "../types-parsenodes" }
+types-nodes = { path = "../types-nodes" }

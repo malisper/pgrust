@@ -143,3 +143,38 @@ seam_core::seam!(
         reverse_self: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `deleteDependencyRecordsForClass(classId, objectId, refclassId,
+    /// deptype)` (dependency.c): delete pg_depend rows for the given object
+    /// that have the given referenced class and dependency type. Returns the
+    /// count removed. `Err` carries the catalog-scan/delete `ereport(ERROR)`s.
+    pub fn delete_dependency_records_for_class(
+        class_id: Oid,
+        object_id: Oid,
+        ref_class_id: Oid,
+        deptype: types_catalog::catalog_dependency::DependencyType,
+    ) -> PgResult<i64>
+);
+
+seam_core::seam!(
+    /// `recordDependencyOn(depender, referenced, behavior)` (dependency.c):
+    /// record a single pg_depend dependency edge. `Err` carries the
+    /// catalog-insert `ereport(ERROR)`s.
+    pub fn record_dependency_on(
+        depender: ObjectAddress,
+        referenced: ObjectAddress,
+        behavior: types_catalog::catalog_dependency::DependencyType,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sequenceIsOwned(seqId, deptype, &tableId, &colId)` (pg_depend.c):
+    /// whether the sequence has an owned-by dependency of the given type;
+    /// `Ok(Some((tableId, colId)))` if so, `Ok(None)` otherwise. `Err` carries
+    /// the catalog-scan `ereport(ERROR)`s.
+    pub fn sequence_is_owned(
+        seq_id: Oid,
+        deptype: types_catalog::catalog_dependency::DependencyType,
+    ) -> PgResult<Option<(Oid, i32)>>
+);

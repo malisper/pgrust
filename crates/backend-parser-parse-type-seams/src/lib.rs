@@ -115,3 +115,14 @@ seam_core::seam!(
     /// catalog-path `ereport(ERROR)`s; an absent type is `Ok(InvalidOid)`.
     pub fn func_name_as_type<'mcx>(funcname: &[PgString<'_>]) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `typenameTypeId(pstate, defGetTypeName(def))` (sequence.c
+    /// `init_params` AS-type leg): the owner runs `defGetTypeName` over the
+    /// `DefElem`'s raw-parser `TypeName` value node and resolves it to a type
+    /// OID. Raises if the type does not exist or is only a shell. `Err`
+    /// carries that surface.
+    pub fn typename_type_id_from_defelem(
+        def: &types_nodes::ddlnodes::DefElem<'_>,
+    ) -> types_error::PgResult<types_core::Oid>
+);
