@@ -71,6 +71,17 @@ mod sublinks;
 
 pub use sublinks::pull_up_sublinks;
 
+// Re-exported for the planner-entry unit (`subquery_planner`), which drives the
+// whole prepjointree spine. These are already `pub fn` in their modules; the
+// re-export only widens crate-level visibility so the planner can name them.
+pub use pullup::{
+    expand_virtual_generated_columns, flatten_simple_union_all, preprocess_function_rtes,
+    pull_up_subqueries,
+};
+pub use result_rtes::remove_useless_result_rtes;
+// `reduce_outer_joins` is defined as a `pub fn` directly in this lib.rs, so it is
+// already crate-visible (no re-export needed).
+
 // FAMILY 5 helpers re-exported for FAMILY 2 (`pull_up_subqueries`, still
 // seam-and-panicked): `get_nullingrels` builds the per-RTE nullingrel table the
 // `pullup_replace_vars` path reads. Ported now (a leaf read-only walker); its

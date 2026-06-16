@@ -1,0 +1,90 @@
+//! Seam declarations for the `backend-optimizer-plan-setrefs` unit
+//! (`optimizer/plan/setrefs.c`).
+//!
+//! These are the genuine cross-subsystem externals reached from setrefs.c that
+//! would otherwise cycle (or whose owners are unported). Each is an OUTWARD seam
+//! that loud-panics until its owner installs it from `init_seams()`. None of the
+//! expression/plan-walking logic is seamed — that is real in-crate code over the
+//! `Node`/`Expr` model.
+
+#![allow(non_snake_case)]
+
+extern crate alloc;
+
+seam_core::seam!(
+    /// Append a `PlanInvalItem` to `glob->invalItems`
+    /// (`record_plan_function_dependency` / `record_plan_type_dependency`).
+    ///
+    /// C builds `makeNode(PlanInvalItem)`, sets `cacheId` and
+    /// `hashValue = GetSysCacheHashValue1(cacheId, ObjectIdGetDatum(oid))`, and
+    /// `lappend`s it onto `glob->invalItems`. `PlanInvalItem` is not a
+    /// `node_arena` `Expr`; plancache owns the inval-item node space and the
+    /// syscache hash, so the hash computation + append are performed by the owner
+    /// over the opaque `NodeId` list. `cache_id` is the syscache identifier
+    /// (PROCOID / TYPEOID); `oid` the function/type OID.
+    pub fn record_inval_item(
+        inval_items: &mut alloc::vec::Vec<types_pathnodes::NodeId>,
+        cache_id: i32,
+        oid: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Copy the `RTEPermissionInfo` payload at `src_index` of a query's
+    /// `rteperminfos` into `glob->finalrteperminfos` (the `add_rte_to_flat_rtable`
+    /// `addRTEPermissionInfo` + `memcpy` step). parse_relation owns the perminfo
+    /// list, which is carried here as opaque `NodeId` handles, so the copy is
+    /// performed by the owner. `new_index` is the 0-based slot the new perminfo
+    /// will occupy (= `newrte->perminfoindex - 1`).
+    pub fn copy_rte_permission_info(
+        finalrteperminfos: &mut alloc::vec::Vec<types_pathnodes::NodeId>,
+        new_index: usize,
+        src_index: usize,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IS_DUMMY_REL(fetch_upper_rel(subroot, UPPERREL_FINAL, NULL))`
+    /// (`add_rtes_to_flat_rtable`) — is the subquery's final upper rel dummy?
+    /// The upper-rel fetch + dummy test lives with the path/relnode owner.
+    pub fn subroot_final_rel_is_dummy(
+        glob: &types_pathnodes::PlannerGlobal,
+        subroot_index: usize,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `copyObject(list_nth(root->multiexpr_params[subqueryid-1], colno-1))`
+    /// (`fix_param_node`) — resolve a `PARAM_MULTIEXPR` Param to its replacement
+    /// expression. `multiexpr_params` carries opaque `NodeId` handles owned by
+    /// subselect; the owner resolves+copies. `subqueryid`/`colno` are 1-based.
+    pub fn multiexpr_param_lookup(
+        root: &types_pathnodes::PlannerInfo,
+        subqueryid: usize,
+        colno: usize,
+    ) -> types_error::PgResult<types_nodes::primnodes::Expr>
+);
+
+seam_core::seam!(
+    /// `find_minmax_agg_replacement_param`'s per-`minmax_aggs` test+pick: for the
+    /// `MinMaxAggInfo` at `idx`, if `mminfo->aggfnoid == aggref->aggfnoid` (caller
+    /// pre-checks the aggfnoid) and `equal(mminfo->target, cur_target_expr)`,
+    /// return `mminfo->param`. `minmax_aggs` carries opaque `NodeId` handles owned
+    /// by planagg; the owner resolves the `MinMaxAggInfo`.
+    pub fn minmax_replacement_param(
+        root: &types_pathnodes::PlannerInfo,
+        idx: usize,
+        aggfnoid: types_core::Oid,
+        cur_target_expr: &types_nodes::primnodes::Expr,
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Param>>
+);
+
+seam_core::seam!(
+    /// `mark_partial_aggref(agg, aggsplit)` (planner.c) — adjust an `Aggref` to
+    /// represent a partial-aggregation phase. Lives in planner.c (which this unit
+    /// must not touch); routed through this seam for `convert_combining_aggrefs`.
+    pub fn mark_partial_aggref(
+        agg: &mut types_nodes::primnodes::Aggref,
+        aggsplit: types_nodes::AggSplit,
+    ) -> types_error::PgResult<()>
+);
