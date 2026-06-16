@@ -7897,6 +7897,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execReplication"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-amapi-seams",
+ "backend-access-index-indexam",
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-index-seams",
+ "backend-catalog-pg-class-seams",
+ "backend-commands-trigger-seams",
+ "backend-executor-execIndexing-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execReplication-seams",
+ "backend-executor-execTuples",
+ "backend-executor-execTuples-seams",
+ "backend-executor-nodeModifyTable-seams",
+ "backend-replication-logical-conflict",
+ "backend-replication-logical-relation",
+ "backend-replication-logical-worker-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache",
+ "backend-utils-cache-relcache-nodexform-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-replication",
+ "types-scan",
+ "types-slot",
+ "types-snapshot",
+ "types-sortsupport",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execReplication-seams"
 version = "0.0.0"
 dependencies = [
@@ -17027,8 +17080,10 @@ name = "backend-utils-cache-relcache-nodexform-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -19118,6 +19173,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
+ "backend-executor-execReplication",
  "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",

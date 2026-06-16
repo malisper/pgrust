@@ -163,6 +163,7 @@ pub fn init_all() {
     backend_executor_execParallel::init_seams();
     backend_executor_execPartition::init_seams();
     backend_executor_execProcnode::init_seams();
+    backend_executor_execReplication::init_seams();
     backend_executor_execScan::init_seams();
     backend_executor_execTuples::init_seams();
     backend_executor_execUtils::init_seams();

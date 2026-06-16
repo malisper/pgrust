@@ -89,6 +89,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationBuildPublicationDesc(rel, &pubdesc)` (relcache.c): traverse
+    /// `pg_publication*` to build the relation's `rd_pubdesc` and hand it back
+    /// by value (the C builds it on the relcache entry and the caller reads its
+    /// fields directly). Unlike [`publication_desc`] (which only acknowledges
+    /// the cache build), the apply-side executor `CheckCmdReplicaIdentity`
+    /// needs the descriptor's row-filter / column-list / generated-column
+    /// validity flags. The publication-catalog traversal (`pg_publication.c`'s
+    /// validity computation) is the unported owner's; this panics until it
+    /// lands. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_build_publication_desc(
+        rel: &types_rel::Relation<'_>,
+    ) -> PgResult<types_catalog::pg_publication::PublicationDesc>
+);
+
+seam_core::seam!(
     /// `get_attoptions(relid, attnum)` (lsyscache.c, via
     /// `SearchSysCache2(ATTNUM)` + `SysCacheGetAttr(attoptions)`): the raw
     /// `pg_attribute.attoptions` reloptions text array for one index column, or
