@@ -151,8 +151,18 @@ pub const STATUS_ERROR: i32 = -1;
 
 /// `PG_DIR_MODE_OWNER` — `0700`, was C `int` (`common/file_perm.h`).
 pub const PG_DIR_MODE_OWNER: i32 = 0o700;
+/// `USE_POSTGRES_DATES` (`miscadmin.h`).
+pub const USE_POSTGRES_DATES: i32 = 0;
 /// `USE_ISO_DATES` (`miscadmin.h`).
 pub const USE_ISO_DATES: i32 = 1;
+/// `USE_SQL_DATES` (`miscadmin.h`).
+pub const USE_SQL_DATES: i32 = 2;
+/// `USE_GERMAN_DATES` (`miscadmin.h`).
+pub const USE_GERMAN_DATES: i32 = 3;
+/// `DATEORDER_YMD` (`miscadmin.h`).
+pub const DATEORDER_YMD: i32 = 0;
+/// `DATEORDER_DMY` (`miscadmin.h`).
+pub const DATEORDER_DMY: i32 = 1;
 /// `DATEORDER_MDY` (`miscadmin.h`).
 pub const DATEORDER_MDY: i32 = 2;
 /// `INTSTYLE_POSTGRES` (`miscadmin.h`).

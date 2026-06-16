@@ -1,0 +1,46 @@
+[package]
+name = "backend-commands-schemacmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_schemacmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
+types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
+
+# Inward seam this unit owns.
+backend-commands-schemacmds-seams = { path = "../backend-commands-schemacmds-seams" }
+
+# Directly ported foundation crates (no cycle).
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
+backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+
+# Cross-subsystem externals via their owners' -seams crates.
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-tcop-utility-fc-seams = { path = "../backend-tcop-utility-fc-seams" }
+backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }

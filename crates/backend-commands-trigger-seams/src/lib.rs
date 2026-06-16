@@ -9,6 +9,8 @@
 //! foreign handle. The owning unit installs these from its `init_seams()`; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
@@ -411,4 +413,12 @@ seam_core::seam!(
         transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
         is_crosspart_update: bool,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RemoveTriggerById(trigOid)` (commands/trigger.c): the per-class
+    /// `OCLASS_TRIGGER` drop handler dependency.c's `doDeletion` invokes for a
+    /// `pg_trigger` object. Removes the trigger's catalog row. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveTriggerById(trigOid: Oid) -> PgResult<()>
 );

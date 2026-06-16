@@ -10,6 +10,7 @@ use types_core::primitive::{Oid, OidIsValid, Selectivity};
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::{NodeId, PlannerInfo};
 use types_rangetypes::{MultirangeTypeP, RangeBound};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_MULTIRANGE_INEQ_SEL};
 
@@ -110,9 +111,9 @@ pub fn default_multirange_selectivity(operator: Oid) -> f64 {
 /// operators.
 pub fn multirangesel(
     mcx: Mcx<'_>,
-    root: Datum,
+    root: &PlannerInfo,
     mut operator: Oid,
-    args: Datum,
+    args: &[NodeId],
     var_relid: i32,
 ) -> PgResult<Selectivity> {
     /*

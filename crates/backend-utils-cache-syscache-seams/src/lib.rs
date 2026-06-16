@@ -233,6 +233,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACENAME, CStringGetDatum(name))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner` reads. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`), so the caller raises the schema's own
+    /// "does not exist" error. The installer owns the `ReleaseSysCache`; `Err`
+    /// carries OOM from the name copy.
+    pub fn namespace_owner_row_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        name: &str,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(schemaoid))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner_oid` reads. `Ok(None)` on a
+    /// cache miss, so the caller raises the `elog(ERROR, "cache lookup failed
+    /// for schema %u")`. The installer owns the `ReleaseSysCache`.
+    pub fn namespace_owner_row_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        schemaoid: Oid,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid, typname, nsp)`.
     pub fn get_type_oid(typname: &str, namespace_id: Oid) -> PgResult<Oid>
 );
@@ -2123,4 +2148,68 @@ seam_core::seam!(
     pub fn read_constraint_form(
         tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     ) -> PgResult<types_catalog::pg_constraint::FormData_pg_constraint>
+);
+
+/* ------------------------------------------------------------------------
+ *  OID-keyed existence probes (catalog/dependency.c's per-class
+ *  `SearchSysCacheExists1` "did this object get concurrently dropped?"
+ *  checks, modeled after `reloid_exists`). Each is a single catcache probe;
+ *  `Err` carries the catcache lookup's own error surface.
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(proc_oid))`: whether a
+    /// `pg_proc` row exists for `proc_oid`.
+    pub fn procoid_exists(proc_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(OPEROID, ObjectIdGetDatum(oper_oid))`: whether a
+    /// `pg_operator` row exists for `oper_oid`.
+    pub fn operoid_exists(oper_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(TYPEOID, ObjectIdGetDatum(type_oid))`: whether a
+    /// `pg_type` row exists for `type_oid`.
+    pub fn typeoid_exists(type_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(COLLOID, ObjectIdGetDatum(coll_oid))`: whether a
+    /// `pg_collation` row exists for `coll_oid`.
+    pub fn colloid_exists(coll_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(TSCONFIGOID, ObjectIdGetDatum(cfg_oid))`: whether
+    /// a `pg_ts_config` row exists for `cfg_oid`.
+    pub fn tsconfigoid_exists(cfg_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(TSDICTOID, ObjectIdGetDatum(dict_oid))`: whether a
+    /// `pg_ts_dict` row exists for `dict_oid`.
+    pub fn tsdictoid_exists(dict_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(NAMESPACEOID, ObjectIdGetDatum(nsp_oid))`: whether
+    /// a `pg_namespace` row exists for `nsp_oid`.
+    pub fn namespaceoid_exists(nsp_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(cacheId, ObjectIdGetDatum(key))` for a *dynamic*
+    /// `cacheId` (dependency.c `DropObjectById`): looks the tuple up by OID and
+    /// returns its heap TID (`tup->t_self`) for a subsequent `CatalogTupleDelete`,
+    /// or `None` on a cache miss (the caller raises its own "cache lookup failed"
+    /// error). `ReleaseSysCache` is folded in (only the TID escapes). NOTE: not
+    /// installed — the syscache owner models caches statically and this generic
+    /// dynamic-`cacheId` primitive is not yet ported; tracked in
+    /// `CONTRACT_RECONCILE_PENDING`.
+    pub fn search_syscache1_tid(
+        cache_id: i32,
+        key: Oid,
+    ) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
 );

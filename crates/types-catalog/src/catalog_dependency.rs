@@ -91,3 +91,57 @@ pub struct FormData_pg_depend {
     /// See `DependencyType` codes.
     pub deptype: i8,
 }
+
+/* ===========================================================================
+ * Deletion-engine accumulator types and flag bits (catalog/dependency.c).
+ * Owned by backend-catalog-dependency; defined here so the owner crate carries
+ * real value types (no opaque handle in the owner).
+ * ========================================================================= */
+
+/// `ObjectAddressExtra` (dependency.c) — per-target deletion state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectAddressExtra {
+    /// Bitmask, see the `DEPFLAG_*` bits.
+    pub flags: i32,
+    /// Object whose deletion forced this one.
+    pub dependee: ObjectAddress,
+}
+
+/// `struct ObjectAddresses` (dependency.c) — expansible list of
+/// `ObjectAddress`, optionally with parallel `extras`.
+///
+/// Owned-tree shape: the `refs`/`extras` `Vec`s grow on demand; `numrefs`
+/// tracks the logical length and a non-empty `extras` is the C
+/// `addrs->extras != NULL` flag. `maxrefs` mirrors the C initial capacity for
+/// documentation parity only.
+#[derive(Clone, Debug, Default)]
+pub struct ObjectAddresses {
+    /// The collected addresses.
+    pub refs: Vec<ObjectAddress>,
+    /// Parallel per-target extra state, or empty if not used.
+    pub extras: Vec<ObjectAddressExtra>,
+    /// Current number of references (== `refs.len()`).
+    pub numrefs: i32,
+    /// Current size of the C palloc'd array(s); documentation only.
+    pub maxrefs: i32,
+}
+
+/* `ObjectAddressExtra` flag bits (dependency.c). */
+/// `DEPFLAG_ORIGINAL` — an original deletion target.
+pub const DEPFLAG_ORIGINAL: i32 = 0x0001;
+/// `DEPFLAG_NORMAL` — reached via normal dependency.
+pub const DEPFLAG_NORMAL: i32 = 0x0002;
+/// `DEPFLAG_AUTO` — reached via auto dependency.
+pub const DEPFLAG_AUTO: i32 = 0x0004;
+/// `DEPFLAG_INTERNAL` — reached via internal dependency.
+pub const DEPFLAG_INTERNAL: i32 = 0x0008;
+/// `DEPFLAG_PARTITION` — reached via partition dependency.
+pub const DEPFLAG_PARTITION: i32 = 0x0010;
+/// `DEPFLAG_EXTENSION` — reached via extension dependency.
+pub const DEPFLAG_EXTENSION: i32 = 0x0020;
+/// `DEPFLAG_REVERSE` — reverse internal/extension link.
+pub const DEPFLAG_REVERSE: i32 = 0x0040;
+/// `DEPFLAG_IS_PART` — has a partition dependency.
+pub const DEPFLAG_IS_PART: i32 = 0x0080;
+/// `DEPFLAG_SUBOBJECT` — subobject of another deletable object.
+pub const DEPFLAG_SUBOBJECT: i32 = 0x0100;

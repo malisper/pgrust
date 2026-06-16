@@ -30,4 +30,15 @@ backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 # Engine callees crossed as seams (owners are sibling-spine deps).
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+# F1 per-catalog typed-insert seam bodies: form the catalog tuple from the
+# crossed *InsertRow (heap_form_tuple over the catalog tupdesc), allocate row
+# OIDs (GetNewOidWithIndex), then call the F0 engine above. The catalog-row
+# constant/carrier types live in types-catalog. No dependency cycle: neither
+# backend-catalog-catalog nor backend-access-common-heaptuple depends on this
+# crate (verified via cargo tree).
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+types-catalog = { path = "../types-catalog" }

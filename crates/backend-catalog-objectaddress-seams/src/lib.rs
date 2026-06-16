@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use mcx::{Mcx, PgString};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
@@ -92,4 +94,29 @@ seam_core::seam!(
     /// relkind to the `ObjectType` used in error messages. Total mapping
     /// (unknown relkinds return `OBJECT_TABLE`); cannot `ereport`.
     pub fn get_relkind_objtype(relkind: u8) -> ObjectType
+);
+
+seam_core::seam!(
+    /// `get_object_catcache_oid(classId)` (objectaddress.c) — the syscache id for
+    /// looking up a row in catalog `classId` by its OID, or `-1` when the catalog
+    /// has no by-OID syscache (use the systable path then).
+    pub fn get_object_catcache_oid(class_id: Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `get_object_attnum_oid(classId)` (objectaddress.c) — the attribute number
+    /// of the OID column in catalog `classId`.
+    pub fn get_object_attnum_oid(class_id: Oid) -> PgResult<i16>
+);
+
+seam_core::seam!(
+    /// `get_object_oid_index(classId)` (objectaddress.c) — the OID index relation
+    /// for catalog `classId` (used to drive a `systable` scan).
+    pub fn get_object_oid_index(class_id: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_object_class_descr(classId)` (objectaddress.c) — a human-readable
+    /// description of catalog `classId`, used in error messages.
+    pub fn get_object_class_descr(class_id: Oid) -> PgResult<&'static str>
 );

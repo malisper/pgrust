@@ -272,7 +272,7 @@ pub fn EnumValuesCreate(enumTypeOid: Oid, vals: &[&str]) -> PgResult<()> {
         });
     }
 
-    indexing_seams::catalog_tuples_multi_insert_pg_enum::call(&pg_enum, &rows)?;
+    indexing_seams::catalog_tuples_multi_insert_pg_enum::call(enum_ctx.mcx(), &pg_enum, &rows)?;
 
     pg_enum.close(RowExclusiveLock)?;
 
@@ -417,7 +417,7 @@ pub fn AddEnumLabel(
                  */
                 let midpoint: f32 = (nbr_sort + other_sort) / 2.0;
                 if midpoint == nbr_sort || midpoint == other_sort {
-                    RenumberEnumType(&pg_enum, &existing)?;
+                    RenumberEnumType(mcx, &pg_enum, &existing)?;
                     /* Clean up and start over. */
                     continue 'restart;
                 }
@@ -505,7 +505,7 @@ pub fn AddEnumLabel(
         enumsortorder: newelemorder,
         enumlabel: namestrcpy(newVal),
     };
-    indexing_seams::catalog_tuple_insert_pg_enum::call(&pg_enum, &row)?;
+    indexing_seams::catalog_tuple_insert_pg_enum::call(mcx, &pg_enum, &row)?;
 
     pg_enum.close(RowExclusiveLock)?;
 
@@ -592,7 +592,7 @@ pub fn RenameEnumLabel(enumTypeOid: Oid, oldVal: &str, newVal: &str) -> PgResult
         enumsortorder: old_member.enumsortorder,
         enumlabel: namestrcpy(newVal),
     };
-    indexing_seams::catalog_tuple_update_pg_enum::call(&pg_enum, old_member.tid, &row)?;
+    indexing_seams::catalog_tuple_update_pg_enum::call(mcx, &pg_enum, old_member.tid, &row)?;
 
     pg_enum.close(RowExclusiveLock)?;
 
@@ -605,8 +605,9 @@ pub fn RenameEnumLabel(enumTypeOid: Oid, oldVal: &str, newVal: &str) -> PgResult
 
 /// RenumberEnumType — renumber existing enum elements to have sort positions
 /// 1..n. `existing` is the members sorted by `enumsortorder`.
-fn RenumberEnumType(
-    pg_enum: &types_rel::RelationData<'_>,
+fn RenumberEnumType<'mcx>(
+    mcx: Mcx<'mcx>,
+    pg_enum: &types_rel::Relation<'mcx>,
     existing: &[EnumMember],
 ) -> PgResult<()> {
     let nelems = existing.len();
@@ -624,7 +625,7 @@ fn RenumberEnumType(
                 enumsortorder: newsortorder,
                 enumlabel: m.enumlabel,
             };
-            indexing_seams::catalog_tuple_update_pg_enum::call(pg_enum, m.tid, &row)?;
+            indexing_seams::catalog_tuple_update_pg_enum::call(mcx, pg_enum, m.tid, &row)?;
         }
     }
 

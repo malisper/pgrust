@@ -212,3 +212,31 @@ seam_core::seam!(
         was_logged: bool,
     ) -> types_error::PgResult<(i32, mcx::PgString<'mcx>)>
 );
+
+seam_core::seam!(
+    /// `log_executor_stats` (postgres.c GUC) — whether per-query executor
+    /// resource-usage statistics logging is enabled. `pquery.c`'s `PortalRun` /
+    /// `PortalRunMulti` read it to gate `ResetUsage` / `ShowUsage`. Pure read of
+    /// the postgres.c-owned GUC.
+    pub fn log_executor_stats() -> bool
+);
+
+seam_core::seam!(
+    /// `ResetUsage()` (postgres.c): snapshot the current resource usage as the
+    /// baseline for the next `ShowUsage`. Infallible in C.
+    pub fn reset_usage()
+);
+
+seam_core::seam!(
+    /// `ShowUsage(title)` (postgres.c): log the resource usage delta since the
+    /// last `ResetUsage` under `title`. Infallible in C.
+    pub fn show_usage(title: &str)
+);
+
+seam_core::seam!(
+    /// `whereToSendOutput` (postgres.c) — the current output destination for
+    /// this backend (`DestNone` / `DestDebug` / `DestRemote`). `NotifyMyFrontEnd`
+    /// (async.c) reads it to decide between framing a NotificationResponse and
+    /// `elog(INFO)`. Pure read of the postgres.c-owned per-backend global.
+    pub fn where_to_send_output() -> types_dest::dest::CommandDest
+);

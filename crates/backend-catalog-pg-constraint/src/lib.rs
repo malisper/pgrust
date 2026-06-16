@@ -426,7 +426,7 @@ pub fn CreateConstraintEntry(
     conDesc.close(RowExclusiveLock)?;
 
     /* Handle set of auto dependencies */
-    let addrs_auto = dependency_seams::new_object_addresses::call()?;
+    let mut addrs_auto = dependency_seams::new_object_addresses::call()?;
 
     if OidIsValid(relId) {
         /*
@@ -440,7 +440,7 @@ pub fn CreateConstraintEntry(
                     objectId: relId,
                     objectSubId: constraintKey[i as usize] as i32,
                 };
-                dependency_seams::add_exact_object_address::call(relobject, addrs_auto)?;
+                dependency_seams::add_exact_object_address::call(relobject, &mut addrs_auto)?;
             }
         } else {
             let relobject = ObjectAddress {
@@ -448,7 +448,7 @@ pub fn CreateConstraintEntry(
                 objectId: relId,
                 objectSubId: 0,
             };
-            dependency_seams::add_exact_object_address::call(relobject, addrs_auto)?;
+            dependency_seams::add_exact_object_address::call(relobject, &mut addrs_auto)?;
         }
     }
 
@@ -459,14 +459,14 @@ pub fn CreateConstraintEntry(
             objectId: domainId,
             objectSubId: 0,
         };
-        dependency_seams::add_exact_object_address::call(domobject, addrs_auto)?;
+        dependency_seams::add_exact_object_address::call(domobject, &mut addrs_auto)?;
     }
 
-    dependency_seams::record_object_address_dependencies::call(conobject, addrs_auto, DEPENDENCY_AUTO)?;
+    dependency_seams::record_object_address_dependencies::call(conobject, &mut addrs_auto, DEPENDENCY_AUTO)?;
     dependency_seams::free_object_addresses::call(addrs_auto)?;
 
     /* Handle set of normal dependencies */
-    let addrs_normal = dependency_seams::new_object_addresses::call()?;
+    let mut addrs_normal = dependency_seams::new_object_addresses::call()?;
 
     if OidIsValid(foreignRelId) {
         /*
@@ -480,7 +480,7 @@ pub fn CreateConstraintEntry(
                     objectId: foreignRelId,
                     objectSubId: foreignKey[i as usize] as i32,
                 };
-                dependency_seams::add_exact_object_address::call(relobject, addrs_normal)?;
+                dependency_seams::add_exact_object_address::call(relobject, &mut addrs_normal)?;
             }
         } else {
             let relobject = ObjectAddress {
@@ -488,7 +488,7 @@ pub fn CreateConstraintEntry(
                 objectId: foreignRelId,
                 objectSubId: 0,
             };
-            dependency_seams::add_exact_object_address::call(relobject, addrs_normal)?;
+            dependency_seams::add_exact_object_address::call(relobject, &mut addrs_normal)?;
         }
     }
 
@@ -504,7 +504,7 @@ pub fn CreateConstraintEntry(
             objectId: indexRelId,
             objectSubId: 0,
         };
-        dependency_seams::add_exact_object_address::call(relobject, addrs_normal)?;
+        dependency_seams::add_exact_object_address::call(relobject, &mut addrs_normal)?;
     }
 
     if foreignNKeys > 0 {
@@ -525,21 +525,21 @@ pub fn CreateConstraintEntry(
             let pp = ppEqOp[i as usize];
             let ff = ffEqOp[i as usize];
             oprobject.objectId = pf;
-            dependency_seams::add_exact_object_address::call(oprobject, addrs_normal)?;
+            dependency_seams::add_exact_object_address::call(oprobject, &mut addrs_normal)?;
             if pp != pf {
                 oprobject.objectId = pp;
-                dependency_seams::add_exact_object_address::call(oprobject, addrs_normal)?;
+                dependency_seams::add_exact_object_address::call(oprobject, &mut addrs_normal)?;
             }
             if ff != pf {
                 oprobject.objectId = ff;
-                dependency_seams::add_exact_object_address::call(oprobject, addrs_normal)?;
+                dependency_seams::add_exact_object_address::call(oprobject, &mut addrs_normal)?;
             }
         }
     }
 
     dependency_seams::record_object_address_dependencies::call(
         conobject,
-        addrs_normal,
+        &mut addrs_normal,
         DEPENDENCY_NORMAL,
     )?;
     dependency_seams::free_object_addresses::call(addrs_normal)?;
@@ -1253,7 +1253,7 @@ pub fn AlterConstraintNamespaces(
     oldNspId: Oid,
     newNspId: Oid,
     isType: bool,
-    objsMoved: dependency_seams::ObjectAddressesHandle,
+    objsMoved: &mut types_catalog::catalog_dependency::ObjectAddresses,
 ) -> PgResult<()> {
     let con_ctx = MemoryContext::new("pg_constraint");
     let conRel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
@@ -1274,7 +1274,7 @@ pub fn AlterConstraintNamespaces(
             objectSubId: 0,
         };
 
-        if dependency_seams::object_address_present::call(thisobj, objsMoved)? {
+        if dependency_seams::object_address_present::call(thisobj, &*objsMoved)? {
             return Ok(true);
         }
 
@@ -2079,6 +2079,7 @@ pub fn init_seams() {
     seams::constraint_type_oids::set(constraint_type_oids);
     seams::get_relation_constraint_oid::set(get_relation_constraint_oid);
     seams::get_domain_constraint_oid::set(get_domain_constraint_oid);
+    seams::RemoveConstraintById::set(RemoveConstraintById);
 }
 
 /* ===========================================================================

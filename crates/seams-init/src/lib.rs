@@ -8,6 +8,7 @@ pub fn init_all() {
     // One line per ported crate, kept sorted:
     contrib_amcheck_verify_nbtree::init_seams();
     backend_archive_shell_archive::init_seams();
+    backend_commands_async::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -79,13 +80,17 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_indexing::init_seams();
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
+    backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_type::init_seams();
     backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
@@ -94,6 +99,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
@@ -101,10 +107,14 @@ pub fn init_all() {
     backend_commands_dropcmds::init_seams();
     backend_commands_explain::init_seams();
     backend_commands_foreigncmds::init_seams();
+    backend_commands_lockcmds::init_seams();
     backend_commands_functioncmds::init_seams();
     backend_commands_opclasscmds::init_seams();
     backend_commands_matview::init_seams();
+    backend_commands_schemacmds::init_seams();
     backend_commands_portalcmds::init_seams();
+    backend_commands_seclabel::init_seams();
+    backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
@@ -273,6 +283,7 @@ pub fn init_all() {
     backend_tcop_backend_startup::init_seams();
     backend_tcop_dest::init_seams();
     backend_tcop_fastpath::init_seams();
+    backend_tcop_pquery::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
     backend_timezone_strftime::init_seams();
@@ -288,6 +299,7 @@ pub fn init_all() {
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
+    backend_utils_adt_float::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
@@ -301,6 +313,7 @@ pub fn init_all() {
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
+    backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();
     backend_utils_adt_version::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
@@ -344,6 +357,7 @@ pub fn init_all() {
     backend_utils_mmgr_portalmem::init_seams();
     backend_utils_sort_sortsupport::init_seams();
     backend_utils_sort_storage::init_seams();
+    backend_utils_sort_tuplesort::init_seams();
     backend_utils_time_combocid::init_seams();
     backend_utils_time_snapmgr::init_seams();
     common_checksum_helper::init_seams();
@@ -717,6 +731,22 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
+        // DESIGN_DEBT (TD-DEPENDENCY-REMOVEFUNC): dependency.c's `doDeletion` calls
+        // `remove_function_tuple` (the pg_proc `RemoveFunctionById` catalog delete)
+        // for OCLASS_PROC. functioncmds.c is a CONSUMER of this seam (it also calls
+        // it at ddl_core.rs:1163); the real owner is pg_proc.c's RemoveFunctionById,
+        // which is unported, so nobody installs it. Loud-panics until pg_proc lands.
+        ("backend_commands_functioncmds", "remove_function_tuple"),
+        // NOTE (TD-SYSCACHE-DYNAMIC-TID): dependency.c's generic `DropObjectById`
+        // calls `backend_utils_cache_syscache::search_syscache1_tid` — a new
+        // generic `SearchSysCache1(cacheId, ...)` primitive for a DYNAMIC cacheId,
+        // returning the matched tuple's t_self for CatalogTupleDelete. Its owner
+        // dir `backend-utils-cache-syscache` is NOT a complete CATALOG unit
+        // (syscache.c is owned by backend-utils-cache-small), so the
+        // `every_declared_seam_is_installed_by_its_owner` guard already exempts it
+        // (the owner isn't `complete`) — no allowlist entry is needed here (adding
+        // one is flagged stale). The debt is recorded in DESIGN_DEBT.md; install
+        // when the dynamic-cacheId SearchSysCache1 primitive lands.
         // DESIGN_DEBT (TD-SRF-INLINE-QUERY): `inline_set_returning_function` is the
         // full SET-returning-function inliner (clauses.c:5134) that
         // `preprocess_function_rtes` (prepjointree.c:931) calls to turn a FUNCTION
@@ -816,7 +846,7 @@ mod recurrence_guard {
         // relcache GinOptions keystone lands.
         ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
         ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
-        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): five heapam-seams whose real
+        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): six heapam-seams whose real
         // bodies are NOT in the merged heap-AM slice yet — sanctioned
         // mirror-pg-and-panic on a complete owner. Each is `::call`ed in a live
         // consumer but the owner has no contract-matching body:
@@ -833,7 +863,15 @@ mod recurrence_guard {
         //   * index_compute_xid_horizon_for_tuples — the full index-buffer
         //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
         //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
+        //   * heap_multi_insert — heapam.c's slot-based batch heap insert (one
+        //     WAL record per page, buffer extension, toast via
+        //     heap_prepare_insert, visibility-map clears). The merged heap-AM
+        //     slice ports only the page-count helper `heap_multi_insert_pages`;
+        //     the batch engine is unwritten. `CatalogTuplesMultiInsertWithInfo`
+        //     (catalog/indexing.c, now ported in backend-catalog-indexing) is the
+        //     live consumer.
         // DELETE each entry when its driver lands in the heap-AM port.
+        ("backend_access_heap_heapam", "heap_multi_insert"),
         ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
         ("backend_access_heap_heapam", "insert_one_tuple"),
         ("backend_access_heap_heapam", "log_heap_visible"),
@@ -1356,6 +1394,25 @@ mod recurrence_guard {
         // Installing needs an arena->owned TypeName bridge (a contract reconcile),
         // not a bare `::set`. See DESIGN_DEBT.md.
         ("backend_parser_driver", "raw_parse_type_name"),
+        // DESIGN_DEBT (TD-TUPLESORT-INDEX-VARIANTS, F3b): the tuplesort unit's
+        // INDEX-tuple sort variants — `tuplesort_begin_index_btree`
+        // (nbtsort.c `_bt_leafbuild`), `tuplesort_begin_index_hash`
+        // (hash.c index build), `tuplesort_putindextuplevalues` +
+        // `tuplesort_getindextuple` (both index builds). F3a landed the engine +
+        // the heap/datum variants (begin_heap/begin_datum + the variant-agnostic
+        // put/get/performsort/end/rescan/markpos/get_stats seams); the index
+        // variants' `comparetup_index_*` / `writetup_index` / `readtup_index` +
+        // `removeabbrev_index` (tuplesortvariants.c) and their `begin_index_*`
+        // entry points are F3b. The begin seams are NOT installed (and the engine
+        // loud-panics in the index writetup/comparetup arms), so the four
+        // index-only seams stay seam-panics until F3b lands. (begin_index_gist
+        // is called by backend-access-gist-build's sorted build.) DELETE each
+        // entry as F3b installs its begin/put/get index seam.
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_btree"),
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_hash"),
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_gist"),
+        ("backend_utils_sort_tuplesort", "tuplesort_putindextuplevalues"),
+        ("backend_utils_sort_tuplesort", "tuplesort_getindextuple"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

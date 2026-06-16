@@ -22,14 +22,34 @@
 //!    `apply_sort_comparator` sort-support seam) so the engine's qsort/heap
 //!    actually orders tuples.
 //!
+//! STAGE F2 (this crate, external-merge tape engine over the real
+//! [`LogicalTapeSet`] — direct `logtape::*` calls, no new seams):
+//!  - `inittapes` / `inittapestate` / `selectnewtape` / `init_slab_allocator`;
+//!  - `mergeruns` (the balanced k-way merge: `TSS_BUILDRUNS` →
+//!    `TSS_SORTEDONTAPE` / `TSS_FINALMERGE`), `mergeonerun`, `beginmerge`,
+//!    `mergereadnext`, `dumptuples`, `getlen`, `markrunend`,
+//!    `merge_read_buffer_size`;
+//!  - the `gettuple_common` `TSS_SORTEDONTAPE` (forward + backward) and
+//!    `TSS_FINALMERGE` paths, and the `rescan` / `markpos` / `restorepos` tape
+//!    paths;
+//!  - the gate-critical variant byte-serialization `WRITETUP` / `READTUP` for
+//!    the heap (`MinimalTuple`) and datum variants — over the
+//!    `backend-access-common-heaptuple` flat-blob codec.
+//!
+//! The C slab allocator (`union SlabSlot` arena recycled by `READTUP` /
+//! `RELEASE_SLAB_SLOT`) is a tuple-body recycling optimization. In the owned
+//! model `SortTuple.tuple` owns its bytes and is freed on drop, so the slab is
+//! re-modeled as an index free-list whose `RELEASE_SLAB_SLOT` is a body-drop
+//! (`lastReturnedTuple` recycling is implicit in Rust ownership); the
+//! `slabAllocatorUsed` flag still disables `USEMEM`/`LACKMEM` exactly as C.
+//!
 //! DEFERRED:
-//!  - the external-merge tape engine (`inittapes` / `mergeruns` / `dumptuples` /
-//!    etc.) is stubbed as PRIVATE intra-crate fns that loud-panic until F2 fills
-//!    them — they are reached only once a sort overflows `workMem`;
-//!  - the variant byte-serialization + tuple-forming put/get entry points
-//!    (`writetup` / `readtup` / `tuplesort_puttupleslot` / `tuplesort_getdatum`
-//!    etc.) and the index/cluster variants are F4;
-//!  - the public `tuplesort_*` seams are NOT installed here (that is F3);
+//!  - the tuple-forming put/get entry points (`tuplesort_puttupleslot` /
+//!    `_putdatum` / `_gettupleslot` / `_getdatum` / `_putindextuplevalues` /
+//!    `_getindextuple`) and the cluster/index variant
+//!    `comparetup` / `writetup` / `readtup` / `removeabbrev` are F4 — those
+//!    variants' `WRITETUP` / `READTUP` still loud-panic;
+//!  - the public `tuplesort_*` seams are NOT installed here (that is F3/F4);
 //!  - parallel (`Sharedsort` / `SortCoordinate`) is a sanctioned 1:1 seam-panic
 //!    (the serial NULL-coordinate path is complete and gate-critical).
 //!
@@ -47,17 +67,19 @@
 #![allow(dead_code)]
 
 use mcx::{vec_with_capacity_in, McxOwned, MemoryContext, Mcx, PgBox, PgVec};
-use types_core::Oid;
+use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::{
-    Tuplesortstate, TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType,
+    TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType,
     TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
 };
 use types_sortsupport::SortSupportData;
-use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple};
+use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
 
 use backend_utils_sort_storage_seams::LogicalTapeSet;
+use backend_utils_sort_storage::logtape;
+use backend_access_common_heaptuple as heaptuple;
 
 // ===========================================================================
 // Constants (tuplesort.c).
@@ -692,20 +714,99 @@ fn comparetup_heap<'mcx>(
 }
 
 /// `comparetup_heap_tiebreak(a, b, state)` (tuplesortvariants.c) — full-tuple
-/// tiebreak (deform both MinimalTuples, compare remaining keys + abbreviated
-/// full comparator). F4 fills the deform path; until then, with a single sort
-/// key (`onlyKey` set) the tiebreak is never reached, so a multi-key heap sort
-/// loud-panics here, matching the F1/F4 split.
+/// tiebreak: when the leading key has an abbreviation, run the authoritative
+/// full comparator on the leading column; then walk the remaining sort keys
+/// (`nkey = 1..nKeys`), deforming both MinimalTuples to fetch each column.
+///
+/// The C `heap_getattr(&ltup, attno, tupDesc, &isnull)` reads one column of a
+/// HeapTupleData laid over the MinimalTuple bytes; here the owned model deforms
+/// the whole tuple once per side and indexes the resulting column array. The
+/// deform cost is a faithful behaviour match (a single sort comparison can
+/// fetch any subset of columns).
 fn comparetup_heap_tiebreak<'mcx>(
     state: &TuplesortStateImpl<'mcx>,
-    _a: &SortTuple<'mcx>,
-    _b: &SortTuple<'mcx>,
+    a: &SortTuple<'mcx>,
+    b: &SortTuple<'mcx>,
 ) -> PgResult<i32> {
-    // No subsequent keys => equal (the C loop body never runs).
+    // No abbreviation and no subsequent keys => equal (the C loop never runs).
     if state.base.nKeys <= 1 && state.base.sortKeys[0].abbrev_converter.is_none() {
         return Ok(0);
     }
-    panic!("tuplesort: comparetup_heap_tiebreak (multi-key / abbreviated) not yet ported (tuplesortvariants.c, F4)")
+
+    let mcx = state.mcx();
+    let tup_desc = match &state.base.arg {
+        SortVariantArg::Heap { tupDesc } => tupDesc,
+        _ => {
+            return Err(PgError::error(
+                "tuplesort comparetup_heap_tiebreak: arg is not a TupleDesc",
+            ))
+        }
+    };
+
+    // Deform both MinimalTuples to the full column arrays (heap_getattr per
+    // column in C; one deform per side here).
+    let lcols = heap_deform_sort_minimal(mcx, a, tup_desc)?;
+    let rcols = heap_deform_sort_minimal(mcx, b, tup_desc)?;
+
+    let sort_key0 = &state.base.sortKeys[0];
+    if sort_key0.abbrev_converter.is_some() {
+        let attno = sort_key0.ssup_attno;
+        let idx = (attno as usize).saturating_sub(1);
+        let (datum1, isnull1) = &lcols[idx];
+        let (datum2, isnull2) = &rcols[idx];
+        let compare = apply_sort_abbrev_full_comparator(
+            datum1.clone_in(mcx)?,
+            *isnull1,
+            datum2.clone_in(mcx)?,
+            *isnull2,
+            sort_key0,
+        )?;
+        if compare != 0 {
+            return Ok(compare);
+        }
+    }
+
+    // sortKey++; for (nkey = 1; nkey < base->nKeys; nkey++, sortKey++)
+    for nkey in 1..state.base.nKeys as usize {
+        let sort_key = &state.base.sortKeys[nkey];
+        let idx = (sort_key.ssup_attno as usize).saturating_sub(1);
+        let (datum1, isnull1) = &lcols[idx];
+        let (datum2, isnull2) = &rcols[idx];
+        let compare = apply_sort_comparator(
+            datum1.clone_in(mcx)?,
+            *isnull1,
+            datum2.clone_in(mcx)?,
+            *isnull2,
+            sort_key,
+        )?;
+        if compare != 0 {
+            return Ok(compare);
+        }
+    }
+
+    Ok(0)
+}
+
+/// Deform the `MinimalTuple` body a heap `SortTuple` carries into its full
+/// column array (the C `heap_getattr` over a HeapTupleData laid on the minimal
+/// tuple). Returns `(Datum, isnull)` per attribute.
+fn heap_deform_sort_minimal<'mcx>(
+    mcx: Mcx<'mcx>,
+    stup: &SortTuple<'mcx>,
+    tup_desc: &TupleDescData<'mcx>,
+) -> PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>> {
+    let mtup = match &stup.tuple {
+        Some(TupleBody::Minimal(m)) => m,
+        _ => {
+            return Err(PgError::error(
+                "tuplesort comparetup_heap_tiebreak: non-minimal tuple body",
+            ))
+        }
+    };
+    let blob = backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
+        .map_err(flat_err)?;
+    backend_access_common_heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
+        .map_err(flat_err)
 }
 
 /// `comparetup_datum(a, b, state)` (tuplesortvariants.c): a single-key Datum
@@ -722,11 +823,43 @@ fn comparetup_datum<'mcx>(
     if compare != 0 {
         return Ok(compare);
     }
-    // comparetup_datum_tiebreak (abbreviated full comparator over stup.tuple): F4.
+    // comparetup_datum_tiebreak: if we have abbreviations, then `tuple` holds
+    // the original value; run the authoritative full comparator on it.
+    comparetup_datum_tiebreak(state, a, b)
+}
+
+/// `comparetup_datum_tiebreak(a, b, state)` (tuplesortvariants.c): when the
+/// (single) sort key has an abbreviation converter, the abbreviated leading
+/// comparison was inconclusive, so re-compare the original full values which
+/// the datum sort stores in `stup.tuple` (`TupleBody::Datum`). With no
+/// abbreviation the result is unconditionally 0 (equal), exactly as in C.
+fn comparetup_datum_tiebreak<'mcx>(
+    state: &TuplesortStateImpl<'mcx>,
+    a: &SortTuple<'mcx>,
+    b: &SortTuple<'mcx>,
+) -> PgResult<i32> {
+    let sort_key = &state.base.sortKeys[0];
     if sort_key.abbrev_converter.is_none() {
         return Ok(0);
     }
-    panic!("tuplesort: comparetup_datum_tiebreak (abbreviated) not yet ported (tuplesortvariants.c, F4)")
+    let mcx = state.mcx();
+    // PointerGetDatum(a->tuple): the original full value stored alongside.
+    let datum1 = datum_body_value(mcx, a)?;
+    let datum2 = datum_body_value(mcx, b)?;
+    apply_sort_abbrev_full_comparator(
+        datum1, a.isnull1, datum2, b.isnull1, sort_key,
+    )
+}
+
+/// `PointerGetDatum(stup->tuple)` for a datum `SortTuple`: the original
+/// (full-representation) value the put path stored in `TupleBody::Datum`.
+fn datum_body_value<'mcx>(mcx: Mcx<'mcx>, stup: &SortTuple<'mcx>) -> PgResult<Datum<'mcx>> {
+    match &stup.tuple {
+        Some(TupleBody::Datum(d)) => d.clone_in(mcx),
+        _ => Err(PgError::error(
+            "tuplesort comparetup_datum_tiebreak: tuple body is not a Datum",
+        )),
+    }
 }
 
 /// `ApplySortComparator(datum1, isnull1, datum2, isnull2, ssup)`
@@ -767,6 +900,322 @@ fn apply_sort_comparator<'mcx>(
     }
 
     Ok(compare)
+}
+
+/// `ApplySortAbbrevFullComparator(datum1, isnull1, datum2, isnull2, ssup)`
+/// (sortsupport.h): the NULL-handling wrapper around `ssup->abbrev_full_comparator`
+/// (the authoritative comparator used when an abbreviated comparison was
+/// inconclusive). Mirrors the C inline exactly.
+fn apply_sort_abbrev_full_comparator<'mcx>(
+    datum1: Datum<'mcx>,
+    isnull1: bool,
+    datum2: Datum<'mcx>,
+    isnull2: bool,
+    ssup: &SortSupportData<'mcx>,
+) -> PgResult<i32> {
+    let compare: i32;
+
+    if isnull1 {
+        if isnull2 {
+            compare = 0; // NULL "=" NULL
+        } else if ssup.ssup_nulls_first {
+            compare = -1; // NULL "<" NOT_NULL
+        } else {
+            compare = 1; // NULL ">" NOT_NULL
+        }
+    } else if isnull2 {
+        if ssup.ssup_nulls_first {
+            compare = 1; // NOT_NULL ">" NULL
+        } else {
+            compare = -1; // NOT_NULL "<" NULL
+        }
+    } else {
+        let mut c = backend_utils_sort_sortsupport_seams::apply_sort_abbrev_full_comparator::call(
+            datum1, datum2, ssup,
+        )?;
+        if ssup.ssup_reverse {
+            c = -c;
+        }
+        return Ok(c);
+    }
+
+    Ok(compare)
+}
+
+// ===========================================================================
+// WRITETUP / READTUP dispatch (replaces base.writetup / base.readtup fn-ptr).
+//
+// The tape engine (`dumptuples`, `mergeonerun`, `gettuple_common` tape paths)
+// drives these. They are per-variant (tuplesortvariants.c); F2 fills the
+// gate-critical heap (`MinimalTuple`) + datum variants over the
+// `backend-access-common-heaptuple` flat-blob codec, leaving cluster/index for
+// F4. The `LEN_WORD_SIZE` length framing (a leading `u32` byte count, plus a
+// trailing copy when `TUPLESORT_RANDOMACCESS`) is identical across variants.
+// ===========================================================================
+
+/// `sizeof(unsigned int)` — the on-tape length-word framing size.
+const LEN_WORD_SIZE: usize = 4;
+
+/// The number of leading bytes of a flat `MinimalTuple` blob that are NOT
+/// written to the tape: the C `MINIMAL_TUPLE_DATA_OFFSET` (`offsetof(struct,
+/// t_infomask2)` == `t_len`(4) + `mt_padding`(6) == 10). `writetup_heap` writes
+/// only the body starting at this offset; `readtup_heap` reconstructs the head.
+const MINIMAL_TUPLE_DATA_OFFSET: usize = 10;
+
+/// `WRITETUP(state, tape, stup)` — `(*state->base.writetup)(state, tape, stup)`.
+///
+/// Split-borrow shape: the tape lives in `state.tapeset`, the tuple in
+/// `state.memtuples`; C aliases both through `state`. We pass the tape set +
+/// slot and the SortTuple by reference so the caller resolves the borrows.
+fn writetup<'mcx>(
+    variant: SortVariantKind,
+    sortopt: i32,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    stup: &SortTuple<'mcx>,
+) -> PgResult<()> {
+    match variant {
+        SortVariantKind::Heap => writetup_heap(sortopt, tapeset, tape, stup),
+        SortVariantKind::Datum => writetup_datum(sortopt, tapeset, tape, stup),
+        SortVariantKind::Cluster
+        | SortVariantKind::IndexBtree
+        | SortVariantKind::IndexHash => panic!(
+            "tuplesort: writetup for {variant:?} not yet ported (tuplesortvariants.c, F4)"
+        ),
+    }
+}
+
+/// `READTUP(state, stup, tape, len)` — reconstruct a [`SortTuple`] from `len`
+/// on-tape bytes (the length word already consumed by `getlen`). The mcx is the
+/// engine bundle's context; the body lands there (the owned-model slab).
+fn readtup<'mcx>(
+    variant: SortVariantKind,
+    base: &TuplesortPublic<'mcx>,
+    mcx: Mcx<'mcx>,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    len: u32,
+) -> PgResult<SortTuple<'mcx>> {
+    match variant {
+        SortVariantKind::Heap => readtup_heap(base, mcx, tapeset, tape, len),
+        SortVariantKind::Datum => readtup_datum(base, mcx, tapeset, tape, len),
+        SortVariantKind::Cluster
+        | SortVariantKind::IndexBtree
+        | SortVariantKind::IndexHash => panic!(
+            "tuplesort: readtup for {variant:?} not yet ported (tuplesortvariants.c, F4)"
+        ),
+    }
+}
+
+/// `LogicalTapeReadExact(tape, ptr, len)` (logtape.h): read exactly `len` bytes
+/// or `elog(ERROR, "unexpected end of tape")`.
+fn logical_tape_read_exact<'mcx>(
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    dst: &mut [u8],
+) -> PgResult<()> {
+    let n = logtape::logical_tape_read(tapeset, tape, dst)?;
+    if n != dst.len() {
+        return Err(PgError::error("unexpected end of tape"));
+    }
+    Ok(())
+}
+
+/// `writetup_heap(state, tape, stup)` (tuplesortvariants.c): write the
+/// `MinimalTuple` body to tape. We serialize the owned [`FormedMinimalTuple`] to
+/// its flat C-ABI blob (`minimal_tuple_to_flat`), then write the same
+/// `tupbody`/`tuplen` framing C does over the raw blob.
+fn writetup_heap<'mcx>(
+    sortopt: i32,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    stup: &SortTuple<'mcx>,
+) -> PgResult<()> {
+    let mcx = *tapeset_mcx(tapeset);
+    let mtup = match &stup.tuple {
+        Some(TupleBody::Minimal(m)) => m,
+        _ => return Err(PgError::error("tuplesort writetup_heap: non-minimal tuple body")),
+    };
+    let blob = backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
+        .map_err(flat_err)?;
+    // tupbody = blob + MINIMAL_TUPLE_DATA_OFFSET; tupbodylen = t_len - offset.
+    let t_len = mtup.tuple.t_len as usize;
+    debug_assert_eq!(t_len, blob.len());
+    let tupbodylen = t_len - MINIMAL_TUPLE_DATA_OFFSET;
+    let tuplen = (tupbodylen + LEN_WORD_SIZE) as u32;
+
+    logtape::logical_tape_write(tapeset, tape, &tuplen.to_ne_bytes())?;
+    logtape::logical_tape_write(tapeset, tape, &blob[MINIMAL_TUPLE_DATA_OFFSET..t_len])?;
+    if sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        logtape::logical_tape_write(tapeset, tape, &tuplen.to_ne_bytes())?;
+    }
+    Ok(())
+}
+
+/// `readtup_heap(state, stup, tape, len)` (tuplesortvariants.c): read the
+/// `MinimalTuple` body back, reconstruct the flat blob, decode to a
+/// [`FormedMinimalTuple`], and re-extract `datum1` via the leading sort key's
+/// `ssup_attno` (`heap_getattr` in C).
+fn readtup_heap<'mcx>(
+    base: &TuplesortPublic<'mcx>,
+    mcx: Mcx<'mcx>,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    len: u32,
+) -> PgResult<SortTuple<'mcx>> {
+    let tupbodylen = len as usize - LEN_WORD_SIZE;
+    let tuplen = tupbodylen + MINIMAL_TUPLE_DATA_OFFSET;
+
+    // Rebuild the flat blob: leading t_len word (== tuplen), then read tupbody.
+    let mut blob: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, tuplen)?;
+    blob.resize(tuplen, 0);
+    blob[0..4].copy_from_slice(&(tuplen as u32).to_ne_bytes());
+    logical_tape_read_exact(
+        tapeset,
+        tape,
+        &mut blob[MINIMAL_TUPLE_DATA_OFFSET..MINIMAL_TUPLE_DATA_OFFSET + tupbodylen],
+    )?;
+    if base.sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        let mut trail = [0u8; LEN_WORD_SIZE];
+        logical_tape_read_exact(tapeset, tape, &mut trail)?;
+    }
+
+    let tupdesc = match &base.arg {
+        SortVariantArg::Heap { tupDesc } => tupDesc,
+        _ => return Err(PgError::error("tuplesort readtup_heap: arg is not a TupleDesc")),
+    };
+    // heap_getattr(&htup, sortKeys[0].ssup_attno, tupDesc, &isnull1): deform the
+    // (just-read) tuple and pick the leading sort column.
+    let attno = base.sortKeys[0].ssup_attno;
+    let cols = backend_access_common_heaptuple::flat::heap_deform_minimal_tuple_flat(
+        mcx, &blob, tupdesc,
+    )
+    .map_err(flat_err)?;
+    let (datum1, isnull1) = {
+        let idx = (attno as usize).saturating_sub(1);
+        let (d, n) = &cols[idx];
+        (d.clone_in(mcx)?, *n)
+    };
+    let mtup =
+        backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, &blob).map_err(flat_err)?;
+    Ok(SortTuple {
+        tuple: Some(TupleBody::Minimal(mtup)),
+        datum1,
+        isnull1,
+        srctape: 0,
+    })
+}
+
+/// `writetup_datum(state, tape, stup)` (tuplesortvariants.c). The C writes
+/// either nothing (NULL), the bare `Datum` word (`!base->tuples`), or the
+/// separately-stored pass-by-ref value (`stup->tuple`). In the owned model the
+/// pass-by-ref bytes live in `TupleBody::Datum(ByRef(..))` and the by-value word
+/// in `datum1` (`tuple == None`).
+fn writetup_datum<'mcx>(
+    sortopt: i32,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    stup: &SortTuple<'mcx>,
+) -> PgResult<()> {
+    // The on-tape payload bytes (waddr/tuplen in C).
+    let payload: &[u8];
+    let byval_word_bytes;
+    if stup.isnull1 {
+        // waddr = NULL; tuplen = 0;
+        payload = &[];
+    } else if stup.tuple.is_none() {
+        // !base->tuples: write the Datum word itself (sizeof(Datum) bytes).
+        byval_word_bytes = (stup.datum1.as_usize()).to_ne_bytes();
+        payload = &byval_word_bytes;
+    } else {
+        // base->tuples: write the pass-by-ref value bytes.
+        match &stup.tuple {
+            Some(TupleBody::Datum(Datum::ByRef(b))) => payload = b,
+            _ => {
+                return Err(PgError::error(
+                    "tuplesort writetup_datum: tuple body is not a by-ref Datum",
+                ))
+            }
+        }
+    }
+
+    let writtenlen = (payload.len() + LEN_WORD_SIZE) as u32;
+    logtape::logical_tape_write(tapeset, tape, &writtenlen.to_ne_bytes())?;
+    logtape::logical_tape_write(tapeset, tape, payload)?;
+    if sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        logtape::logical_tape_write(tapeset, tape, &writtenlen.to_ne_bytes())?;
+    }
+    Ok(())
+}
+
+/// `readtup_datum(state, stup, tape, len)` (tuplesortvariants.c).
+fn readtup_datum<'mcx>(
+    base: &TuplesortPublic<'mcx>,
+    mcx: Mcx<'mcx>,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    len: u32,
+) -> PgResult<SortTuple<'mcx>> {
+    let tuplen = len as usize - LEN_WORD_SIZE;
+
+    let stup = if tuplen == 0 {
+        // it's NULL.
+        SortTuple {
+            tuple: None,
+            datum1: Datum::ByVal(0),
+            isnull1: true,
+            srctape: 0,
+        }
+    } else if !base.tuples {
+        // bare Datum word.
+        debug_assert_eq!(tuplen, core::mem::size_of::<usize>());
+        let mut word = [0u8; core::mem::size_of::<usize>()];
+        logical_tape_read_exact(tapeset, tape, &mut word)?;
+        SortTuple {
+            tuple: None,
+            datum1: Datum::ByVal(usize::from_ne_bytes(word)),
+            isnull1: false,
+            srctape: 0,
+        }
+    } else {
+        // pass-by-ref value bytes.
+        let mut raddr: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, tuplen)?;
+        raddr.resize(tuplen, 0);
+        logical_tape_read_exact(tapeset, tape, &mut raddr)?;
+        // stup->datum1 = PointerGetDatum(raddr); stup->tuple = raddr; the owned
+        // model carries the bytes once (datum1 mirrors the by-ref value).
+        SortTuple {
+            tuple: Some(TupleBody::Datum(Datum::ByRef(mcx::slice_in(mcx, &raddr)?))),
+            datum1: Datum::ByRef(raddr),
+            isnull1: false,
+            srctape: 0,
+        }
+    };
+
+    if base.sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        let mut trail = [0u8; LEN_WORD_SIZE];
+        logical_tape_read_exact(tapeset, tape, &mut trail)?;
+    }
+    Ok(stup)
+}
+
+/// Map a `MinimalTupleFlatError` to a `PgError` (the flat codec's structural
+/// errors become a sort error; a `Pg` variant carries its own error through).
+fn flat_err(
+    e: backend_access_common_heaptuple::flat::MinimalTupleFlatError,
+) -> PgError {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match e {
+        MinimalTupleFlatError::Pg(err) => err,
+        other => PgError::error(format!("tuplesort minimal-tuple codec: {other:?}")),
+    }
+}
+
+/// The bundle context recovered from the tape set's allocator (used to land the
+/// READTUP body in the engine bundle's `'mcx` arena).
+#[inline]
+fn tapeset_mcx<'a, 'mcx>(tapeset: &'a LogicalTapeSet<'mcx>) -> &'a Mcx<'mcx> {
+    tapeset.freeBlocks.allocator()
 }
 
 // ===========================================================================
@@ -882,10 +1331,61 @@ fn placeholder_tuple<'mcx>() -> SortTuple<'mcx> {
 }
 
 /// `REMOVEABBREV(state, state->memtuples, state->memtupcount)` over all current
-/// memtuples — the abbreviation-abort fixup. F4 fills the per-variant
-/// removeabbrev; with single-key (`onlyKey`) sorts this is unreachable.
-fn remove_abbrev_all<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
-    panic!("tuplesort: removeabbrev (abbreviation abort fixup) not yet ported (tuplesortvariants.c, F4)")
+/// memtuples — the abbreviation-abort fixup that rewrites each `datum1` back to
+/// the original (non-abbreviated) leading-key value. Dispatched per variant
+/// (the C `base.removeabbrev` fn-ptr); heap + datum land here, the
+/// index/cluster removeabbrev fill in F4.
+fn remove_abbrev_all<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    match state.variant {
+        SortVariantKind::Heap => removeabbrev_heap(state),
+        SortVariantKind::Datum => removeabbrev_datum(state),
+        SortVariantKind::Cluster
+        | SortVariantKind::IndexBtree
+        | SortVariantKind::IndexHash => panic!(
+            "tuplesort: removeabbrev for {:?} not yet ported (tuplesortvariants.c, F4)",
+            state.variant
+        ),
+    }
+}
+
+/// `removeabbrev_heap(state, stups, count)` (tuplesortvariants.c): for each
+/// memtuple, re-extract `datum1` from the leading sort column of the stored
+/// MinimalTuple (`heap_getattr(&htup, sortKeys[0].ssup_attno, tupDesc, &isnull1)`).
+fn removeabbrev_heap<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    let mcx = state.mcx();
+    let attno = state.base.sortKeys[0].ssup_attno;
+    let idx = (attno as usize).saturating_sub(1);
+    let count = state.memtupcount as usize;
+    for i in 0..count {
+        let tup_desc = match &state.base.arg {
+            SortVariantArg::Heap { tupDesc } => tupDesc,
+            _ => {
+                return Err(PgError::error(
+                    "tuplesort removeabbrev_heap: arg is not a TupleDesc",
+                ))
+            }
+        };
+        let cols = heap_deform_sort_minimal(mcx, &state.memtuples[i], tup_desc)?;
+        let (datum, isnull) = &cols[idx];
+        let datum = datum.clone_in(mcx)?;
+        let isnull = *isnull;
+        state.memtuples[i].datum1 = datum;
+        state.memtuples[i].isnull1 = isnull;
+    }
+    Ok(())
+}
+
+/// `removeabbrev_datum(state, stups, count)` (tuplesortvariants.c): each
+/// `datum1` is rewritten to `PointerGetDatum(stups[i].tuple)` — the original
+/// full value stored alongside in `TupleBody::Datum`.
+fn removeabbrev_datum<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    let mcx = state.mcx();
+    let count = state.memtupcount as usize;
+    for i in 0..count {
+        let datum = datum_body_value(mcx, &state.memtuples[i])?;
+        state.memtuples[i].datum1 = datum;
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -1027,10 +1527,146 @@ pub fn tuplesort_gettuple_common<'mcx>(
                 Ok(Some(out))
             }
         }
-        TupSortStatus::SortedOnTape | TupSortStatus::FinalMerge => {
-            // The on-tape / final-merge fetch paths (slab recycling, getlen +
-            // READTUP, backward seek, mergereadnext) fill in F2.
-            panic!("tuplesort: gettuple_common tape path not yet ported (tuplesort.c, F2)")
+        TupSortStatus::SortedOnTape => {
+            debug_assert!(forward || state.base.sortopt & TUPLESORT_RANDOMACCESS != 0);
+            debug_assert!(state.slabAllocatorUsed);
+
+            // The slot that held the previously-returned tuple can be reused;
+            // in the owned model the body is freed by drop — clear the marker.
+            state.lastReturnedTuple = None;
+
+            let variant = state.variant;
+            let mcx = state.mcx();
+            let result = state.result_tape.expect("gettuple_common: no result_tape");
+
+            if forward {
+                if state.eof_reached {
+                    return Ok(None);
+                }
+                let tuplen = {
+                    let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                    getlen(tapeset, result, true)?
+                };
+                if tuplen != 0 {
+                    let TuplesortStateImpl { base, tapeset, .. } = state;
+                    let tapeset = tapeset.as_mut().expect("gettuple: no tapeset");
+                    let stup = readtup(variant, base, mcx, tapeset, result, tuplen)?;
+                    state.lastReturnedTuple = Some(0);
+                    return Ok(Some(stup));
+                } else {
+                    state.eof_reached = true;
+                    return Ok(None);
+                }
+            }
+
+            // Backward.
+            if state.eof_reached {
+                // Back up over the trailing zero length word to the last
+                // tuple's ending length word.
+                let nmoved = {
+                    let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                    logtape::logical_tape_backspace(tapeset, result, 2 * LEN_WORD_SIZE)?
+                };
+                if nmoved == 0 {
+                    return Ok(None);
+                } else if nmoved != 2 * LEN_WORD_SIZE {
+                    return Err(PgError::error("unexpected tape position"));
+                }
+                state.eof_reached = false;
+            } else {
+                // Back up over the previously-returned tuple's ending length.
+                let nmoved = {
+                    let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                    logtape::logical_tape_backspace(tapeset, result, LEN_WORD_SIZE)?
+                };
+                if nmoved == 0 {
+                    return Ok(None);
+                } else if nmoved != LEN_WORD_SIZE {
+                    return Err(PgError::error("unexpected tape position"));
+                }
+                let tuplen = {
+                    let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                    getlen(tapeset, result, false)?
+                };
+
+                // Back up to the ending length word of the tuple before it.
+                let nmoved = {
+                    let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                    logtape::logical_tape_backspace(
+                        tapeset,
+                        result,
+                        tuplen as usize + 2 * LEN_WORD_SIZE,
+                    )?
+                };
+                if nmoved == tuplen as usize + LEN_WORD_SIZE {
+                    // The prev tuple is the first in the file.
+                    return Ok(None);
+                } else if nmoved != tuplen as usize + 2 * LEN_WORD_SIZE {
+                    return Err(PgError::error("bogus tuple length in backward scan"));
+                }
+            }
+
+            let tuplen = {
+                let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                getlen(tapeset, result, false)?
+            };
+
+            // Back up to just after the initial length word, then READTUP.
+            let nmoved = {
+                let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                logtape::logical_tape_backspace(tapeset, result, tuplen as usize)?
+            };
+            if nmoved != tuplen as usize {
+                return Err(PgError::error("bogus tuple length in backward scan"));
+            }
+            let TuplesortStateImpl { base, tapeset, .. } = state;
+            let tapeset = tapeset.as_mut().expect("gettuple: no tapeset");
+            let stup = readtup(variant, base, mcx, tapeset, result, tuplen)?;
+            state.lastReturnedTuple = Some(0);
+            Ok(Some(stup))
+        }
+        TupSortStatus::FinalMerge => {
+            debug_assert!(forward);
+            debug_assert!(state.slabAllocatorUsed);
+
+            // Reusable slot of the previously-returned tuple — drop marker.
+            state.lastReturnedTuple = None;
+
+            // This mirrors the inner loop of mergeonerun().
+            if state.memtupcount > 0 {
+                let src_tape_index = state.memtuples[0].srctape;
+                let src_tape = state.inputTapes[src_tape_index as usize];
+
+                // Pull the next tuple from the same tape FIRST (mergereadnext
+                // does not touch memtuples[0]).
+                let next = mergereadnext(state, src_tape)?;
+
+                // *stup = memtuples[0]: move the heap top out to return it.
+                let out = core::mem::replace(&mut state.memtuples[0], placeholder_tuple());
+                state.lastReturnedTuple = Some(0);
+
+                match next {
+                    Some(mut newtup) => {
+                        // Replace the (now-vacated) heap top with the new tuple.
+                        // `tuplesort_heap_replace_top` treats slot 0 as the hole
+                        // and sifts children up, so the placeholder at slot 0 is
+                        // never read.
+                        newtup.srctape = src_tape_index;
+                        tuplesort_heap_replace_top(state, newtup)?;
+                    }
+                    None => {
+                        // End of run on this tape: remove the top node and close
+                        // the tape to release its read buffer early. The slot 0
+                        // placeholder is overwritten by delete_top's sift.
+                        tuplesort_heap_delete_top(state)?;
+                        state.nInputRuns -= 1;
+                        let tapeset = state.tapeset.as_mut().expect("gettuple: no tapeset");
+                        logtape::logical_tape_close(tapeset, src_tape);
+                    }
+                }
+                return Ok(Some(out));
+            }
+            Ok(None)
         }
         _ => Err(PgError::error("invalid tuplesort state")),
     }
@@ -1399,8 +2035,14 @@ pub fn tuplesort_rescan<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<
             Ok(())
         }
         TupSortStatus::SortedOnTape => {
-            // LogicalTapeRewindForRead(result_tape, 0): F2.
-            panic!("tuplesort: rescan tape path not yet ported (tuplesort.c, F2)")
+            let result = state.result_tape.expect("rescan: no result_tape");
+            let tapeset = state.tapeset.as_mut().expect("rescan: no tapeset");
+            logtape::logical_tape_rewind_for_read(tapeset, result, 0)?;
+            state.eof_reached = false;
+            state.markpos_block = 0;
+            state.markpos_offset = 0;
+            state.markpos_eof = false;
+            Ok(())
         }
         _ => Err(PgError::error("invalid tuplesort state")),
     }
@@ -1416,8 +2058,15 @@ pub fn tuplesort_markpos<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult
             Ok(())
         }
         TupSortStatus::SortedOnTape => {
-            // LogicalTapeTell(result_tape, ...): F2.
-            panic!("tuplesort: markpos tape path not yet ported (tuplesort.c, F2)")
+            let result = state.result_tape.expect("markpos: no result_tape");
+            let (block, offset) = {
+                let tapeset = state.tapeset.as_mut().expect("markpos: no tapeset");
+                logtape::logical_tape_tell(tapeset, result)?
+            };
+            state.markpos_block = block;
+            state.markpos_offset = offset;
+            state.markpos_eof = state.eof_reached;
+            Ok(())
         }
         _ => Err(PgError::error("invalid tuplesort state")),
     }
@@ -1433,8 +2082,14 @@ pub fn tuplesort_restorepos<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgRes
             Ok(())
         }
         TupSortStatus::SortedOnTape => {
-            // LogicalTapeSeek(result_tape, ...): F2.
-            panic!("tuplesort: restorepos tape path not yet ported (tuplesort.c, F2)")
+            let result = state.result_tape.expect("restorepos: no result_tape");
+            let (block, offset) = (state.markpos_block, state.markpos_offset);
+            {
+                let tapeset = state.tapeset.as_mut().expect("restorepos: no tapeset");
+                logtape::logical_tape_seek(tapeset, result, block, offset)?;
+            }
+            state.eof_reached = state.markpos_eof;
+            Ok(())
         }
         _ => Err(PgError::error("invalid tuplesort state")),
     }
@@ -1444,40 +2099,61 @@ pub fn tuplesort_restorepos<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgRes
 // tuplesort_get_stats / updatemax / method+space names (tuplesort.c).
 // ===========================================================================
 
-/// `tuplesort_updatemax(state)` (tuplesort.c).
+/// `tuplesort_updatemax(state)` (tuplesort.c): persist the running max-space.
 fn tuplesort_updatemax(state: &mut TuplesortStateImpl<'_>) {
-    let space_used: i64;
-    let is_space_disk: bool;
+    let (max_space, is_max_space_disk, max_space_status) = computed_max_space(state);
+    state.maxSpace = max_space;
+    state.isMaxSpaceDisk = is_max_space_disk;
+    state.maxSpaceStatus = max_space_status;
+}
 
-    if let Some(ts) = &state.tapeset {
-        is_space_disk = true;
-        space_used = backend_utils_sort_storage::logtape::logical_tape_set_blocks(ts) * BLCKSZ;
+/// The (maxSpace, isMaxSpaceDisk, maxSpaceStatus) `tuplesort_updatemax` would
+/// settle on, computed WITHOUT mutating `state` (the `&self` core shared by the
+/// `&mut` `tuplesort_updatemax` and the `&` get-stats seam path).
+fn computed_max_space(
+    state: &TuplesortStateImpl<'_>,
+) -> (i64, bool, TupSortStatus) {
+    let (space_used, is_space_disk) = if let Some(ts) = &state.tapeset {
+        (
+            backend_utils_sort_storage::logtape::logical_tape_set_blocks(ts) * BLCKSZ,
+            true,
+        )
     } else {
-        is_space_disk = false;
-        space_used = state.allowedMem - state.availMem;
-    }
+        (state.allowedMem - state.availMem, false)
+    };
 
     if (is_space_disk && !state.isMaxSpaceDisk)
         || (is_space_disk == state.isMaxSpaceDisk && space_used > state.maxSpace)
     {
-        state.maxSpace = space_used;
-        state.isMaxSpaceDisk = is_space_disk;
-        state.maxSpaceStatus = state.status;
+        (space_used, is_space_disk, state.status)
+    } else {
+        (state.maxSpace, state.isMaxSpaceDisk, state.maxSpaceStatus)
     }
 }
 
 /// `tuplesort_get_stats(state, stats)` (tuplesort.c).
 pub fn tuplesort_get_stats(state: &mut TuplesortStateImpl<'_>) -> TuplesortInstrumentation {
     tuplesort_updatemax(state);
+    tuplesort_get_stats_ref(state)
+}
 
-    let space_type = if state.isMaxSpaceDisk {
+/// `tuplesort_get_stats` read-only core (`&self`): the seam contract hands a
+/// shared `&Tuplesortstate`. The C body's only mutation is `tuplesort_updatemax`
+/// persisting the running max into `state.maxSpace*`; those fields exist only to
+/// compare against FUTURE updatemax calls, and a get-stats call reads back
+/// exactly the value updatemax would settle on — so computing it locally
+/// (without persisting) is observably identical for the stats report.
+pub fn tuplesort_get_stats_ref(state: &TuplesortStateImpl<'_>) -> TuplesortInstrumentation {
+    let (max_space, is_max_space_disk, max_space_status) = computed_max_space(state);
+
+    let space_type = if is_max_space_disk {
         TuplesortSpaceType::SORT_SPACE_TYPE_DISK
     } else {
         TuplesortSpaceType::SORT_SPACE_TYPE_MEMORY
     };
-    let space_used = (state.maxSpace + 1023) / 1024;
+    let space_used = (max_space + 1023) / 1024;
 
-    let sort_method = match state.maxSpaceStatus {
+    let sort_method = match max_space_status {
         TupSortStatus::SortedInMem => {
             if state.boundUsed {
                 TuplesortMethod::SORT_TYPE_TOP_N_HEAPSORT
@@ -1563,32 +2239,445 @@ pub fn tuplesort_reset<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<(
 }
 
 // ===========================================================================
-// Tape engine — DEFERRED to F2 (private loud-panic stubs, NOT seams, NOT todo).
-// These are reached only once a sort overflows workMem (`inittapes`) or in the
-// parallel paths. F2 fills the bodies over the landed `LogicalTapeSet`.
+// External-merge tape engine (tuplesort.c) — F2. Over the real LogicalTapeSet
+// via direct `logtape::*` calls (no seams; `backend-utils-sort-storage` does not
+// depend on tuplesort, so the edge is acyclic).
 // ===========================================================================
 
-/// `inittapes(state, mergeruns)` (tuplesort.c) — DEFERRED to F2.
-fn inittapes<'mcx>(_state: &mut TuplesortStateImpl<'mcx>, _mergeruns: bool) -> PgResult<()> {
-    panic!("tuplesort: inittapes (external-merge tape engine) not yet ported (tuplesort.c, F2)")
+/// `merge_read_buffer_size(avail_mem, nInputTapes, nInputRuns, maxOutputTapes)`
+/// (tuplesort.c): the per-input-tape read-buffer size for one merge pass.
+fn merge_read_buffer_size(
+    avail_mem: i64,
+    n_input_tapes: i32,
+    n_input_runs: i32,
+    max_output_tapes: i32,
+) -> i64 {
+    // nOutputRuns = (nInputRuns + nInputTapes - 1) / nInputTapes  (round up)
+    let n_output_runs = (n_input_runs + n_input_tapes - 1) / n_input_tapes;
+    let n_output_tapes = n_output_runs.min(max_output_tapes);
+
+    // Max((avail_mem - TAPE_BUFFER_OVERHEAD * nOutputTapes) / nInputTapes, 0)
+    ((avail_mem - TAPE_BUFFER_OVERHEAD * n_output_tapes as i64) / n_input_tapes as i64).max(0)
 }
 
-/// `dumptuples(state, alltuples)` (tuplesort.c) — DEFERRED to F2.
-fn dumptuples<'mcx>(_state: &mut TuplesortStateImpl<'mcx>, _alltuples: bool) -> PgResult<()> {
-    panic!("tuplesort: dumptuples (external-merge tape engine) not yet ported (tuplesort.c, F2)")
+/// `inittapes(state, mergeruns)` (tuplesort.c): initialize for tape sorting.
+/// Called only once a sort overflows `workMem`.
+fn inittapes<'mcx>(state: &mut TuplesortStateImpl<'mcx>, mergeruns: bool) -> PgResult<()> {
+    debug_assert!(!state.leader());
+
+    if mergeruns {
+        // Compute number of input tapes to use when merging.
+        state.maxTapes = tuplesort_merge_order(state.allowedMem);
+    } else {
+        // Workers can sometimes produce a single run, output without merge.
+        debug_assert!(state.worker());
+        state.maxTapes = MINORDER;
+    }
+
+    // Create the tape set + decrease availMem for the tape buffers.
+    inittapestate(state, state.maxTapes)?;
+    let mcx = state.mcx();
+    // shared ? &shared->fileset : NULL → serial path always passes NULL/worker -1.
+    let ts = logtape::logical_tape_set_create(mcx, false, state.worker)?;
+    state.tapeset = Some(ts);
+
+    state.currentRun = 0;
+
+    // Initialize logical tape arrays.
+    state.inputTapes = PgVec::new_in(mcx);
+    state.nInputTapes = 0;
+    state.nInputRuns = 0;
+
+    // outputTapes = palloc0(maxTapes * sizeof(LogicalTape *)): a slot array of
+    // tape indices, grown as `selectnewtape` creates tapes.
+    state.outputTapes = PgVec::new_in(mcx);
+    state.nOutputTapes = 0;
+    state.nOutputRuns = 0;
+
+    state.status = TupSortStatus::BuildRuns;
+
+    selectnewtape(state)?;
+    Ok(())
 }
 
-/// `mergeruns(state)` (tuplesort.c) — DEFERRED to F2.
-fn mergeruns<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
-    panic!("tuplesort: mergeruns (external-merge tape engine) not yet ported (tuplesort.c, F2)")
+/// `inittapestate(state, maxTapes)` (tuplesort.c): generic tape-management
+/// state setup; decrease `availMem` for tape buffers.
+fn inittapestate<'mcx>(state: &mut TuplesortStateImpl<'mcx>, max_tapes: i32) -> PgResult<()> {
+    // tapeSpace = (int64) maxTapes * TAPE_BUFFER_OVERHEAD;
+    let tape_space = max_tapes as i64 * TAPE_BUFFER_OVERHEAD;
+
+    // if (tapeSpace + GetMemoryChunkSpace(memtuples) < allowedMem) USEMEM(tapeSpace);
+    let memtuples_space =
+        state.memtupsize as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64;
+    if tape_space + memtuples_space < state.allowedMem {
+        state.usemem(tape_space);
+    }
+
+    // PrepareTempTablespaces(): the temp-tablespace selection is a no-op here
+    // (logtape creates its BufFile in the default temp tablespace via buffile).
+    Ok(())
 }
 
-/// `worker_nomergeruns(state)` (tuplesort.c) — parallel worker, DEFERRED to F3.
+/// `selectnewtape(state)` (tuplesort.c): select the next output tape (creating
+/// one until `maxTapes`, then round-robin into the existing tapes).
+fn selectnewtape<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    if state.nOutputTapes < state.maxTapes {
+        // Create a new tape to hold the next run.
+        debug_assert!(state.nOutputRuns == state.nOutputTapes);
+        let tapeset = state.tapeset.as_mut().expect("selectnewtape: no tapeset");
+        let new_tape = logtape::logical_tape_create(tapeset)?;
+        state.destTape = Some(new_tape);
+        // outputTapes[nOutputTapes] = destTape; nOutputTapes++.
+        state.outputTapes.push(new_tape);
+        state.nOutputTapes += 1;
+        state.nOutputRuns += 1;
+    } else {
+        // Reached max tapes: append to an existing tape, round-robin.
+        let idx = (state.nOutputRuns % state.nOutputTapes) as usize;
+        state.destTape = Some(state.outputTapes[idx]);
+        state.nOutputRuns += 1;
+    }
+    Ok(())
+}
+
+/// `init_slab_allocator(state, numSlots)` (tuplesort.c). The C arena recycles
+/// fixed-size tuple-body slots during merge; the owned model frees tuple bodies
+/// by drop, so the arena is a behaviour-preserving index free-list whose only
+/// observable effect is `slabAllocatorUsed = true` (which disables
+/// USEMEM/LACKMEM tuple accounting, exactly as C). We still `USEMEM` the slot
+/// bytes so the disk/memory `maxSpace` accounting matches C.
+fn init_slab_allocator<'mcx>(state: &mut TuplesortStateImpl<'mcx>, num_slots: i32) -> PgResult<()> {
+    let mcx = state.mcx();
+    if num_slots > 0 {
+        // palloc(numSlots * SLAB_SLOT_SIZE) + USEMEM the same.
+        let mut slab: PgVec<'mcx, SlabSlot> = vec_with_capacity_in(mcx, num_slots as usize)?;
+        // Build the free-list chain: slot i -> i+1, last -> None.
+        for i in 0..num_slots as usize {
+            slab.push(SlabSlot {
+                nextfree: if i + 1 < num_slots as usize {
+                    Some(i + 1)
+                } else {
+                    None
+                },
+            });
+        }
+        state.slab = slab;
+        state.slabFreeHead = Some(0);
+        state.usemem(num_slots as i64 * SLAB_SLOT_SIZE as i64);
+    } else {
+        state.slab = PgVec::new_in(mcx);
+        state.slabFreeHead = None;
+    }
+    state.slabAllocatorUsed = true;
+    Ok(())
+}
+
+/// `dumptuples(state, alltuples)` (tuplesort.c): sort the in-memory tuples and
+/// write the current initial run out to `destTape`.
+fn dumptuples<'mcx>(state: &mut TuplesortStateImpl<'mcx>, alltuples: bool) -> PgResult<()> {
+    // Nothing to do if we still fit in memory and have array slots (unless this
+    // is the final call during initial run generation).
+    if state.memtupcount < state.memtupsize && !state.lackmem() && !alltuples {
+        return Ok(());
+    }
+
+    // Final call might require no sorting; avoid a completely empty run (but a
+    // worker must produce at least one tape, even if empty).
+    if state.memtupcount == 0 && state.currentRun > 0 {
+        return Ok(());
+    }
+
+    debug_assert!(state.status == TupSortStatus::BuildRuns);
+
+    if state.currentRun == INT_MAX {
+        return Err(PgError::error(
+            "cannot have more than 2147483647 runs for an external sort",
+        ));
+    }
+
+    if state.currentRun > 0 {
+        selectnewtape(state)?;
+    }
+
+    state.currentRun += 1;
+
+    // Sort all accumulated tuples for this run.
+    tuplesort_sort_memtuples(state)?;
+
+    // WRITETUP each tuple to destTape.
+    let memtupwrite = state.memtupcount;
+    let variant = state.variant;
+    let sortopt = state.base.sortopt;
+    let dest = state.destTape.expect("dumptuples: no destTape");
+    for i in 0..memtupwrite as usize {
+        // Split borrow: the tape set + the i-th tuple both live in `state`.
+        // Pull the tuple out, write it, put it back (it is dropped after the
+        // run anyway when memtupcount resets; C reuses the array slot).
+        let stup = core::mem::replace(&mut state.memtuples[i], placeholder_tuple());
+        let tapeset = state.tapeset.as_mut().expect("dumptuples: no tapeset");
+        let res = writetup(variant, sortopt, tapeset, dest, &stup);
+        state.memtuples[i] = stup;
+        res?;
+    }
+
+    state.memtupcount = 0;
+
+    // FREEMEM the tuple memory we accounted, and reset tupleMem.
+    state.freemem(state.tupleMem);
+    state.tupleMem = 0;
+
+    // markrunend(destTape): write the zero-length end-of-run marker.
+    let tapeset = state.tapeset.as_mut().expect("dumptuples: no tapeset");
+    markrunend(tapeset, dest)?;
+    Ok(())
+}
+
+/// `mergeruns(state)` (tuplesort.c): the balanced k-way merge of all completed
+/// initial runs. Ends in `TSS_SORTEDONTAPE` (materialized) or `TSS_FINALMERGE`
+/// (on-the-fly final merge).
+fn mergeruns<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    debug_assert!(state.status == TupSortStatus::BuildRuns);
+    debug_assert!(state.memtupcount == 0);
+
+    // If there are multiple runs to merge, abbreviated keys won't have been
+    // stored; disable abbreviation from this point on.
+    if let Some(sk0) = state.base.sortKeys.first_mut() {
+        if sk0.abbrev_converter.is_some() {
+            sk0.abbrev_converter = None;
+            sk0.comparator = sk0.abbrev_full_comparator;
+            sk0.abbrev_abort = None;
+            sk0.abbrev_full_comparator = None;
+        }
+    }
+
+    let mcx = state.mcx();
+
+    // FREEMEM(GetMemoryChunkSpace(memtuples)); pfree(memtuples): we no longer
+    // need the large memtuples array. Account the freed bytes, then drop it.
+    let old_memtuples_space =
+        state.memtupsize as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64;
+    state.freemem(old_memtuples_space);
+    state.memtuples = PgVec::new_in(mcx);
+
+    // Initialize the slab allocator (one slot per input tape + one for the
+    // last-returned tuple). For pass-by-val Datums no slab is needed.
+    if state.base.tuples {
+        init_slab_allocator(state, state.nOutputTapes + 1)?;
+    } else {
+        init_slab_allocator(state, 0)?;
+    }
+
+    // Allocate the heap memtuples array (one tuple per input tape).
+    state.memtupsize = state.nOutputTapes;
+    state.memtuples = vec_with_capacity_in(mcx, state.nOutputTapes as usize)?;
+    state.usemem(state.nOutputTapes as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64);
+
+    // Use all remaining memory for tape buffers; redistributed each pass.
+    state.tape_buffer_mem = state.availMem as usize;
+    state.usemem(state.tape_buffer_mem as i64);
+
+    loop {
+        // Start a new pass when all input runs have been consumed.
+        if state.nInputRuns == 0 {
+            // Close the old, emptied input tapes.
+            if state.nInputTapes > 0 {
+                for tapenum in 0..state.nInputTapes as usize {
+                    let t = state.inputTapes[tapenum];
+                    let tapeset = state.tapeset.as_mut().expect("mergeruns: no tapeset");
+                    logtape::logical_tape_close(tapeset, t);
+                }
+            }
+
+            // Previous pass's outputs become next pass's inputs.
+            state.inputTapes = core::mem::replace(&mut state.outputTapes, PgVec::new_in(mcx));
+            state.nInputTapes = state.nOutputTapes;
+            state.nInputRuns = state.nOutputRuns;
+
+            // Reset output tape variables (tapes created on demand).
+            state.outputTapes = PgVec::new_in(mcx);
+            state.nOutputTapes = 0;
+            state.nOutputRuns = 0;
+
+            // Redistribute tape-buffer memory among the new input/output tapes.
+            let input_buffer_size = merge_read_buffer_size(
+                state.tape_buffer_mem as i64,
+                state.nInputTapes,
+                state.nInputRuns,
+                state.maxTapes,
+            );
+
+            // Prepare the new input tapes for the merge pass.
+            for tapenum in 0..state.nInputTapes as usize {
+                let t = state.inputTapes[tapenum];
+                let tapeset = state.tapeset.as_mut().expect("mergeruns: no tapeset");
+                logtape::logical_tape_rewind_for_read(tapeset, t, input_buffer_size as usize)?;
+            }
+
+            // If one run left on each input tape and no materialization needed,
+            // do the final merge on-the-fly.
+            if (state.base.sortopt & TUPLESORT_RANDOMACCESS) == 0
+                && state.nInputRuns <= state.nInputTapes
+                && !state.worker()
+            {
+                let tapeset = state.tapeset.as_mut().expect("mergeruns: no tapeset");
+                logtape::logical_tape_set_forget_free_space(tapeset);
+                beginmerge(state)?;
+                state.status = TupSortStatus::FinalMerge;
+                return Ok(());
+            }
+        }
+
+        // Select an output tape, then merge one run from each input tape.
+        selectnewtape(state)?;
+        mergeonerun(state)?;
+
+        // If inputs are empty and we output only one run, we're done.
+        if state.nInputRuns == 0 && state.nOutputRuns <= 1 {
+            break;
+        }
+    }
+
+    // Done: the result is a single run on a single tape.
+    let result = state.outputTapes[0];
+    state.result_tape = Some(result);
+    if !state.worker() {
+        let tapeset = state.tapeset.as_mut().expect("mergeruns: no tapeset");
+        logtape::logical_tape_freeze(tapeset, result)?;
+    } else {
+        worker_freeze_result_tape(state)?;
+    }
+    state.status = TupSortStatus::SortedOnTape;
+
+    // Close all the now-empty input tapes.
+    for tapenum in 0..state.nInputTapes as usize {
+        let t = state.inputTapes[tapenum];
+        let tapeset = state.tapeset.as_mut().expect("mergeruns: no tapeset");
+        logtape::logical_tape_close(tapeset, t);
+    }
+    Ok(())
+}
+
+/// `mergeonerun(state)` (tuplesort.c): merge one run from each input tape onto
+/// `destTape`.
+fn mergeonerun<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    beginmerge(state)?;
+    debug_assert!(state.slabAllocatorUsed);
+
+    let variant = state.variant;
+    let sortopt = state.base.sortopt;
+    let dest = state.destTape.expect("mergeonerun: no destTape");
+
+    // Repeatedly extract the lowest tuple in the heap, write it out, replace it
+    // with the next tuple from the same input tape.
+    while state.memtupcount > 0 {
+        let src_tape_index = state.memtuples[0].srctape;
+        let src_tape = state.inputTapes[src_tape_index as usize];
+
+        // WRITETUP(state, destTape, &memtuples[0]).
+        {
+            let stup0 = core::mem::replace(&mut state.memtuples[0], placeholder_tuple());
+            let tapeset = state.tapeset.as_mut().expect("mergeonerun: no tapeset");
+            let res = writetup(variant, sortopt, tapeset, dest, &stup0);
+            state.memtuples[0] = stup0;
+            res?;
+        }
+
+        // RELEASE_SLAB_SLOT: drop the written-out tuple body (owned model).
+        // (handled when memtuples[0] is replaced below.)
+
+        // Pull next tuple from the same tape and replace the heap top.
+        match mergereadnext(state, src_tape)? {
+            Some(mut stup) => {
+                stup.srctape = src_tape_index;
+                tuplesort_heap_replace_top(state, stup)?;
+            }
+            None => {
+                tuplesort_heap_delete_top(state)?;
+                state.nInputRuns -= 1;
+            }
+        }
+    }
+
+    // Write the end-of-run marker on the output tape.
+    let tapeset = state.tapeset.as_mut().expect("mergeonerun: no tapeset");
+    markrunend(tapeset, dest)?;
+    Ok(())
+}
+
+/// `beginmerge(state)` (tuplesort.c): fill the merge heap with the first tuple
+/// from each active input tape.
+fn beginmerge<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    debug_assert!(state.memtupcount == 0);
+
+    let active_tapes = state.nInputTapes.min(state.nInputRuns);
+
+    for src_tape_index in 0..active_tapes {
+        let src_tape = state.inputTapes[src_tape_index as usize];
+        if let Some(mut tup) = mergereadnext(state, src_tape)? {
+            tup.srctape = src_tape_index;
+            tuplesort_heap_insert(state, tup)?;
+        }
+    }
+    Ok(())
+}
+
+/// `mergereadnext(state, srcTape, stup)` (tuplesort.c): read the next tuple from
+/// one merge input tape. Returns `None` on end-of-run (zero length word).
+fn mergereadnext<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    src_tape: usize,
+) -> PgResult<Option<SortTuple<'mcx>>> {
+    let variant = state.variant;
+    let mcx = state.mcx();
+    // Disjoint field borrows: `base` (shared) is a distinct field from `tapeset`
+    // (mutable), so the compiler allows them simultaneously — no `unsafe`.
+    let TuplesortStateImpl { base, tapeset, .. } = state;
+    let tapeset = tapeset.as_mut().expect("mergereadnext: no tapeset");
+
+    // tuplen = getlen(srcTape, true); if 0 -> EOF.
+    let tuplen = getlen(tapeset, src_tape, true)?;
+    if tuplen == 0 {
+        return Ok(None);
+    }
+    // READTUP(state, stup, srcTape, tuplen).
+    let stup = readtup(variant, base, mcx, tapeset, src_tape, tuplen)?;
+    Ok(Some(stup))
+}
+
+/// `getlen(tape, eofOK)` (tuplesort.c): read the next length word; `eofOK`
+/// tolerates a zero (end-of-run) word, otherwise it is an error.
+fn getlen<'mcx>(tapeset: &mut LogicalTapeSet<'mcx>, tape: usize, eof_ok: bool) -> PgResult<u32> {
+    let mut buf = [0u8; LEN_WORD_SIZE];
+    let n = logtape::logical_tape_read(tapeset, tape, &mut buf)?;
+    if n != LEN_WORD_SIZE {
+        return Err(PgError::error("unexpected end of tape"));
+    }
+    let len = u32::from_ne_bytes(buf);
+    if len == 0 && !eof_ok {
+        return Err(PgError::error("unexpected end of data"));
+    }
+    Ok(len)
+}
+
+/// `markrunend(tape)` (tuplesort.c): write the zero-length end-of-run marker.
+fn markrunend<'mcx>(tapeset: &mut LogicalTapeSet<'mcx>, tape: usize) -> PgResult<()> {
+    let len: u32 = 0;
+    logtape::logical_tape_write(tapeset, tape, &len.to_ne_bytes())
+}
+
+/// `worker_nomergeruns(state)` (tuplesort.c) — parallel worker, F3 seam-panic.
 fn worker_nomergeruns<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
     panic!("tuplesort: worker_nomergeruns (parallel sort) not yet ported (tuplesort.c, F3)")
 }
 
-/// `leader_takeover_tapes(state)` (tuplesort.c) — parallel leader, DEFERRED F3.
+/// `worker_freeze_result_tape(state)` (tuplesort.c) — parallel worker, F3
+/// seam-panic. Only reached from `mergeruns` on the `WORKER` path; the serial
+/// (gate-critical) path takes the `LogicalTapeFreeze` branch instead.
+fn worker_freeze_result_tape<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    panic!("tuplesort: worker_freeze_result_tape (parallel sort) not yet ported (tuplesort.c, F3)")
+}
+
+/// `leader_takeover_tapes(state)` (tuplesort.c) — parallel leader, F3 seam-panic.
 fn leader_takeover_tapes<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
     panic!("tuplesort: leader_takeover_tapes (parallel sort) not yet ported (tuplesort.c, F3)")
 }
@@ -1662,6 +2751,546 @@ pub fn with_sort<R>(
         .downcast_ref::<OwnedSort>()
         .expect("tuplesort: carrier payload is not this unit's engine");
     owned.with(f)
+}
+
+// ===========================================================================
+// tuplesortvariants.c — the heap + datum begin entry points + put/get seams.
+//
+// KEY COST (the F3 blocker): each `begin_*` builds its `base.sortKeys` / `arg`
+// inside the engine bundle's OWN context (the C `MemoryContextSwitchTo(
+// base->maincontext)`). `OwnedSort::try_new`'s build closure is universal over
+// `'mcx`, so it cannot capture a borrow of the caller's `'mcx`-lifetimed
+// `TupleDesc`/params. We therefore snapshot the caller params into
+// lifetime-free owned values (`std::vec::Vec`, plain scalars) BEFORE the
+// closure, then rebuild everything (TupleDesc clone, SortSupport setup) inside
+// the closure over the bundle's own `sx` arena — a faithful deep copy
+// (`base->arg = tupDesc; /* assume we need not copy tupDesc */` becomes an
+// explicit clone into the sort context, behaviour-preserving).
+// ===========================================================================
+
+/// A lifetime-free snapshot of a caller `TupleDesc` (the fields a sort needs).
+/// `constr` is not carried — a sort `TupleDesc` (a plan result type) never has
+/// catalog constraints, and the sort never reads them; we assert that here.
+struct TupleDescSnapshot {
+    natts: i32,
+    tdtypeid: Oid,
+    tdtypmod: i32,
+    tdrefcount: i32,
+    attrs: std::vec::Vec<FormData_pg_attribute>,
+    compact_attrs: std::vec::Vec<CompactAttribute>,
+}
+
+impl TupleDescSnapshot {
+    fn capture(td: &TupleDescData<'_>) -> PgResult<Self> {
+        if td.constr.is_some() {
+            return Err(PgError::error(
+                "tuplesort: a sort TupleDesc unexpectedly carries constraints",
+            ));
+        }
+        Ok(TupleDescSnapshot {
+            natts: td.natts,
+            tdtypeid: td.tdtypeid,
+            tdtypmod: td.tdtypmod,
+            tdrefcount: td.tdrefcount,
+            attrs: td.attrs.iter().copied().collect(),
+            compact_attrs: td.compact_attrs.iter().copied().collect(),
+        })
+    }
+
+    /// Rebuild a `TupleDescData<'sx>` in the bundle's own context.
+    fn rebuild<'sx>(&self, sx: Mcx<'sx>) -> PgResult<TupleDescData<'sx>> {
+        Ok(TupleDescData {
+            natts: self.natts,
+            tdtypeid: self.tdtypeid,
+            tdtypmod: self.tdtypmod,
+            tdrefcount: self.tdrefcount,
+            constr: None,
+            compact_attrs: mcx::slice_in(sx, &self.compact_attrs)?,
+            attrs: mcx::slice_in(sx, &self.attrs)?,
+        })
+    }
+}
+
+/// `tuplesort_begin_heap(tupDesc, nkeys, attNums, sortOperators, sortCollations,
+/// nullsFirstFlags, workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c).
+///
+/// Returns the carrier the consumers see; the engine bundle is built in its own
+/// context with a deep-cloned `tupDesc` + per-column SortSupport.
+fn tuplesort_begin_heap_state(
+    tup_desc: &TupleDescData<'_>,
+    nkeys: i32,
+    att_nums: &[AttrNumber],
+    sort_operators: &[Oid],
+    sort_collations: &[Oid],
+    nulls_first_flags: &[bool],
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<OwnedSort> {
+    debug_assert!(nkeys > 0);
+
+    // Snapshot the caller params (lifetime-free) for the universal closure.
+    let snap = TupleDescSnapshot::capture(tup_desc)?;
+    let att_nums: std::vec::Vec<AttrNumber> = att_nums.to_vec();
+    let sort_operators: std::vec::Vec<Oid> = sort_operators.to_vec();
+    let sort_collations: std::vec::Vec<Oid> = sort_collations.to_vec();
+    let nulls_first_flags: std::vec::Vec<bool> = nulls_first_flags.to_vec();
+
+    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+        let mut state = tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::Heap)?;
+
+        state.base.nKeys = nkeys;
+        // base.removeabbrev/comparetup/writetup/readtup are the variant tag.
+        state.base.haveDatum1 = true;
+        // base->arg = tupDesc (deep clone into the sort context).
+        let tupdesc = snap.rebuild(sx)?;
+
+        // Prepare SortSupport data for each column.
+        let mut sort_keys: PgVec<'_, SortSupportData<'_>> = vec_with_capacity_in(sx, nkeys as usize)?;
+        for i in 0..nkeys as usize {
+            debug_assert!(att_nums[i] != 0);
+            debug_assert!(sort_operators[i] != 0);
+
+            let mut sort_key = SortSupportData::new(sx);
+            sort_key.ssup_collation = sort_collations[i];
+            sort_key.ssup_nulls_first = nulls_first_flags[i];
+            sort_key.ssup_attno = att_nums[i];
+            // Convey if abbreviation optimization is applicable in principle.
+            sort_key.abbreviate = i == 0 && state.base.haveDatum1;
+
+            backend_utils_sort_sortsupport_seams::prepare_sort_support_from_ordering_op::call(
+                sort_operators[i],
+                &mut sort_key,
+            )?;
+            sort_keys.push(sort_key);
+        }
+
+        // The "onlyKey" optimization cannot be used with abbreviated keys.
+        if nkeys == 1 && sort_keys[0].abbrev_converter.is_none() {
+            state.base.onlyKey = Some(0);
+        }
+
+        state.base.arg = SortVariantArg::Heap { tupDesc: tupdesc };
+        state.base.sortKeys = sort_keys;
+
+        Ok(state)
+    })
+}
+
+/// `tuplesort_begin_datum(datumType, sortOperator, sortCollation, nullsFirstFlag,
+/// workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c).
+fn tuplesort_begin_datum_state(
+    datum_type: Oid,
+    sort_operator: Oid,
+    sort_collation: Oid,
+    nulls_first_flag: bool,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<OwnedSort> {
+    // lookup necessary attributes of the datum type (outside the closure — the
+    // seam call is lifetime-agnostic).
+    let (typlen, typbyval) =
+        backend_utils_cache_lsyscache_seams::get_typlenbyval::call(datum_type)?;
+
+    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+        let mut state = tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::Datum)?;
+
+        state.base.nKeys = 1; // always a one-column sort
+        state.base.haveDatum1 = true;
+        // arg->datumType / arg->datumTypeLen; base->tuples = !typbyval.
+        state.base.arg = SortVariantArg::Datum {
+            datumType: datum_type,
+            datumTypeLen: typlen,
+        };
+        state.base.tuples = !typbyval;
+
+        // Prepare SortSupport data (single key).
+        let mut sort_key = SortSupportData::new(sx);
+        sort_key.ssup_collation = sort_collation;
+        sort_key.ssup_nulls_first = nulls_first_flag;
+        // Abbreviation is possible here only for by-reference types.
+        sort_key.abbreviate = !typbyval;
+
+        backend_utils_sort_sortsupport_seams::prepare_sort_support_from_ordering_op::call(
+            sort_operator,
+            &mut sort_key,
+        )?;
+
+        // The "onlyKey" optimization cannot be used with abbreviated keys.
+        if sort_key.abbrev_converter.is_none() {
+            state.base.onlyKey = Some(0);
+        }
+
+        let mut sort_keys: PgVec<'_, SortSupportData<'_>> = vec_with_capacity_in(sx, 1)?;
+        sort_keys.push(sort_key);
+        state.base.sortKeys = sort_keys;
+
+        Ok(state)
+    })
+}
+
+/// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c): copy the slot's
+/// tuple into sort storage as a `MinimalTuple` and set up `datum1` from the
+/// leading sort column.
+fn tuplesort_puttupleslot_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    slot: &TupleTableSlot<'mcx>,
+) -> PgResult<()> {
+    let mcx = state.mcx();
+    let tup_desc = match &state.base.arg {
+        SortVariantArg::Heap { tupDesc } => tupDesc,
+        _ => {
+            return Err(PgError::error(
+                "tuplesort_puttupleslot: arg is not a TupleDesc",
+            ))
+        }
+    };
+
+    // copy the tuple into sort storage: ExecCopySlotMinimalTuple(slot). The
+    // owned slot carries the deformed value/null arrays; form a MinimalTuple
+    // over them in the sort context.
+    let tuple: FormedMinimalTuple<'mcx> = heaptuple::heap_form_minimal_tuple(
+        mcx,
+        tup_desc,
+        &slot.tts_values,
+        &slot.tts_isnull,
+        0,
+    )
+    .map_err(|e| PgError::error(format!("tuplesort_puttupleslot heap_form_minimal_tuple: {e:?}")))?;
+
+    // set up first-column key value (heap_getattr(&htup, sortKeys[0].ssup_attno,
+    // tupDesc, &isnull1)): the deformed value is already in the slot's array.
+    let attno = state.base.sortKeys[0].ssup_attno;
+    let idx = (attno as usize).saturating_sub(1);
+    let datum1 = slot.tts_values[idx].clone_in(mcx)?;
+    let isnull1 = slot.tts_isnull[idx];
+
+    let tuplen = tuple.data.len() as i64;
+    let use_abbrev = state.base.sortKeys[0].abbrev_converter.is_some() && !isnull1;
+
+    let stup = SortTuple {
+        tuple: Some(TupleBody::Minimal(tuple)),
+        datum1,
+        isnull1,
+        srctape: 0,
+    };
+    tuplesort_puttuple_common(state, stup, use_abbrev, tuplen)
+}
+
+/// `tuplesort_putdatum(state, val, isNull)` (tuplesortvariants.c).
+fn tuplesort_putdatum_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    val: Datum<'mcx>,
+    is_null: bool,
+) -> PgResult<()> {
+    let mcx = state.mcx();
+    let tuples = state.base.tuples;
+
+    let stup = if is_null || !tuples {
+        // Pass-by-value types or null values stored directly in datum1.
+        let datum1 = if !is_null {
+            val.clone_in(mcx)?
+        } else {
+            Datum::ByVal(0) // zeroed representation for NULLs
+        };
+        SortTuple {
+            tuple: None, // no separate storage
+            datum1,
+            isnull1: is_null,
+            srctape: 0,
+        }
+    } else {
+        // Non-null pass-by-reference: copy into memory we control (datumCopy).
+        // The copied value is the canonical copy; datum1 mirrors it (or the
+        // abbreviated key when abbreviation is in play).
+        let copy = val.clone_in(mcx)?;
+        SortTuple {
+            tuple: Some(TupleBody::Datum(copy.clone_in(mcx)?)),
+            datum1: copy,
+            isnull1: false,
+            srctape: 0,
+        }
+    };
+
+    let use_abbrev =
+        tuples && state.base.sortKeys[0].abbrev_converter.is_some() && !is_null;
+    tuplesort_puttuple_common(state, stup, use_abbrev, 0)
+}
+
+/// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev=NULL)`
+/// (tuplesortvariants.c): fetch the next tuple into `slot`; `false` (slot
+/// cleared) at end of sort. The owned slot is filled by deforming the fetched
+/// MinimalTuple into its value/null arrays (the C `ExecStoreMinimalTuple`).
+fn tuplesort_gettupleslot_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    forward: bool,
+    _copy: bool,
+    slot: &mut TupleTableSlot<'mcx>,
+) -> PgResult<bool> {
+    let mcx = state.mcx();
+    let stup = tuplesort_gettuple_common(state, forward)?;
+
+    match stup {
+        Some(SortTuple {
+            tuple: Some(TupleBody::Minimal(mtup)),
+            ..
+        }) => {
+            // ExecStoreMinimalTuple(mtup, slot, copy): deform into the slot's
+            // value arrays (the owned virtual-slot representation). `copy` is a
+            // no-op here — the fetched tuple is already an owned copy out of the
+            // engine arena.
+            store_minimal_into_slot(mcx, slot, &mtup)?;
+            Ok(true)
+        }
+        // Non-minimal body / no body at end of sort: clear the slot.
+        _ => {
+            clear_slot(slot);
+            Ok(false)
+        }
+    }
+}
+
+/// `tuplesort_getdatum(state, forward, copy, &val, &isNull, abbrev=NULL)`
+/// (tuplesortvariants.c): returns `(found, val, isNull)`.
+fn tuplesort_getdatum_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    forward: bool,
+    _copy: bool,
+) -> PgResult<(bool, Datum<'mcx>, bool)> {
+    let mcx = state.mcx();
+    let tuples = state.base.tuples;
+    let stup = match tuplesort_gettuple_common(state, forward)? {
+        None => return Ok((false, Datum::ByVal(0), false)),
+        Some(s) => s,
+    };
+
+    if stup.isnull1 || !tuples {
+        Ok((true, stup.datum1.clone_in(mcx)?, stup.isnull1))
+    } else {
+        // use stup.tuple because stup.datum1 may be an abbreviation.
+        let val = match &stup.tuple {
+            Some(TupleBody::Datum(d)) => d.clone_in(mcx)?,
+            _ => {
+                return Err(PgError::error(
+                    "tuplesort_getdatum: by-ref tuple body missing",
+                ))
+            }
+        };
+        Ok((true, val, false))
+    }
+}
+
+/// Deform a `MinimalTuple` into the slot's value/null arrays + mark it stored
+/// (the owned-model `ExecStoreMinimalTuple` over a virtual slot). The slot's
+/// descriptor governs the column count.
+fn store_minimal_into_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut TupleTableSlot<'mcx>,
+    mtup: &FormedMinimalTuple<'mcx>,
+) -> PgResult<()> {
+    let tup_desc = slot
+        .tts_tupleDescriptor
+        .as_ref()
+        .ok_or_else(|| PgError::error("tuplesort gettupleslot: slot has no descriptor"))?;
+    let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, mtup).map_err(flat_err)?;
+    let cols = heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
+        .map_err(flat_err)?;
+
+    let natts = tup_desc.natts as usize;
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
+    for (d, n) in cols.iter() {
+        values.push(d.clone_in(mcx)?);
+        isnull.push(*n);
+    }
+    slot.tts_values = values;
+    slot.tts_isnull = isnull;
+    slot.tts_nvalid = tup_desc.natts as AttrNumber;
+    slot.mark_not_empty();
+    Ok(())
+}
+
+/// `ExecClearTuple(slot)` over the owned slot: empty the payload arrays + mark
+/// empty.
+fn clear_slot(slot: &mut TupleTableSlot<'_>) {
+    slot.tts_values.clear();
+    slot.tts_isnull.clear();
+    slot.mark_empty();
+}
+
+// ===========================================================================
+// init_seams() — install this unit's inward `tuplesort_*` access-method seams.
+//
+// Installed (F3a): the variant-agnostic engine seams + the heap/datum-reachable
+// begin entry points. The INDEX variants (begin_index_btree/hash/gist,
+// putindextuplevalues, getindextuple) are F3b: their variant comparetup/
+// writetup/readtup are still seam-panics inside the engine, and their begin
+// entry points are not installed here — they remain seam-panics (the
+// allowlisted CONTRACT_RECONCILE_PENDING entries) until F3b lands.
+// ===========================================================================
+
+/// Install every inward seam this unit owns and can serve (F3a surface).
+pub fn init_seams() {
+    use backend_utils_sort_tuplesort_seams as sx;
+
+    sx::tuplesort_begin_heap::set(seam_begin_heap);
+    sx::tuplesort_begin_datum::set(seam_begin_datum);
+    sx::tuplesort_set_bound::set(seam_set_bound);
+    sx::tuplesort_puttupleslot::set(seam_puttupleslot);
+    sx::tuplesort_putdatum::set(seam_putdatum);
+    sx::tuplesort_performsort::set(seam_performsort);
+    sx::tuplesort_gettupleslot::set(seam_gettupleslot);
+    sx::tuplesort_getdatum::set(seam_getdatum);
+    sx::tuplesort_get_stats::set(seam_get_stats);
+    sx::tuplesort_end::set(seam_end);
+    sx::tuplesort_rescan::set(seam_rescan);
+    sx::tuplesort_markpos::set(seam_markpos);
+    sx::tuplesort_restorepos::set(seam_restorepos);
+}
+
+fn seam_begin_heap<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup_desc: &TupleDescData<'mcx>,
+    nkeys: i32,
+    att_nums: &[AttrNumber],
+    sort_operators: &[Oid],
+    sort_collations: &[Oid],
+    nulls_first_flags: &[bool],
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<Tuplesortstate<'mcx>> {
+    let owned = tuplesort_begin_heap_state(
+        tup_desc,
+        nkeys,
+        att_nums,
+        sort_operators,
+        sort_collations,
+        nulls_first_flags,
+        work_mem,
+        sortopt,
+    )?;
+    into_carrier(mcx, owned)
+}
+
+fn seam_begin_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    datum_type: Oid,
+    sort_operator: Oid,
+    sort_collation: Oid,
+    nulls_first_flag: bool,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<Tuplesortstate<'mcx>> {
+    let owned = tuplesort_begin_datum_state(
+        datum_type,
+        sort_operator,
+        sort_collation,
+        nulls_first_flag,
+        work_mem,
+        sortopt,
+    )?;
+    into_carrier(mcx, owned)
+}
+
+fn seam_set_bound<'mcx>(state: &mut Tuplesortstate<'mcx>, bound: i64) -> PgResult<()> {
+    with_sort_mut(state, |s| {
+        tuplesort_set_bound(s, bound);
+        Ok(())
+    })
+}
+
+fn seam_puttupleslot<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    slot: &TupleTableSlot,
+) -> PgResult<()> {
+    // The carrier's engine is `for<'mcx>`-universal; the slot is borrowed at the
+    // caller's lifetime. Re-borrow it inside the universal closure: the slot's
+    // payload is consumed (cloned) into the engine arena, so a transient
+    // lifetime mismatch is sound (no borrow escapes).
+    with_sort_mut(state, |s| {
+        // SAFETY: re-tie the slot ref to the engine's universal `'mcx`. The slot
+        // is only READ (cloned) here; nothing from `s` is stored into it, so no
+        // borrow outlives the call. Mirrors the C `void *` aliasing.
+        let slot: &TupleTableSlot = unsafe { core::mem::transmute(slot) };
+        tuplesort_puttupleslot_impl(s, slot)
+    })
+}
+
+fn seam_putdatum<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    val: Datum<'mcx>,
+    is_null: bool,
+) -> PgResult<()> {
+    with_sort_mut(state, move |s| {
+        // SAFETY: re-tie the value's lifetime to the engine's universal `'mcx`;
+        // it is immediately cloned (datumCopy) into the engine arena.
+        let val: Datum = unsafe { core::mem::transmute(val) };
+        tuplesort_putdatum_impl(s, val, is_null)
+    })
+}
+
+fn seam_performsort<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
+    with_sort_mut(state, tuplesort_performsort)
+}
+
+fn seam_gettupleslot<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    forward: bool,
+    copy: bool,
+    slot: &mut TupleTableSlot,
+) -> PgResult<bool> {
+    with_sort_mut(state, |s| {
+        // SAFETY: re-tie the slot's lifetime to the engine's universal `'mcx`;
+        // the engine writes freshly-allocated (engine-arena) values into the
+        // slot, which lives at least as long as the carrier. Mirrors C aliasing.
+        let slot: &mut TupleTableSlot = unsafe { core::mem::transmute(slot) };
+        tuplesort_gettupleslot_impl(s, forward, copy, slot)
+    })
+}
+
+fn seam_getdatum<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    forward: bool,
+    copy: bool,
+) -> PgResult<(bool, Datum<'mcx>, bool)> {
+    with_sort_mut(state, |s| {
+        let (found, val, isnull) = tuplesort_getdatum_impl(s, forward, copy)?;
+        // SAFETY: re-tie the returned value's lifetime to the carrier's `'mcx`.
+        // The value was allocated in the engine bundle's context, which the
+        // carrier keeps alive at least as long as the caller's `'mcx`.
+        let val: Datum<'mcx> = unsafe { core::mem::transmute(val) };
+        Ok((found, val, isnull))
+    })
+}
+
+fn seam_get_stats<'mcx>(state: &Tuplesortstate<'mcx>) -> TuplesortInstrumentation {
+    // The seam contract is `&Tuplesortstate`; the read-only stats core computes
+    // the same instrumentation the `&mut` path would, without persisting the
+    // running-max fields (see `tuplesort_get_stats_ref`).
+    with_sort(state, tuplesort_get_stats_ref)
+}
+
+fn seam_end<'mcx>(mut state: PgBox<'mcx, Tuplesortstate<'mcx>>) -> PgResult<()> {
+    // `tuplesort_end` = `tuplesort_free` (close tape files via
+    // LogicalTapeSetClose, release memtuples) + MemoryContextDelete. Run the
+    // explicit free through the carrier first (so temp files are closed), then
+    // drop the carrier (which drops the engine bundle + its context).
+    with_sort_mut(&mut state, |s| {
+        tuplesort_free(s);
+    });
+    drop(state);
+    Ok(())
+}
+
+fn seam_rescan<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
+    with_sort_mut(state, tuplesort_rescan)
+}
+
+fn seam_markpos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
+    with_sort_mut(state, tuplesort_markpos)
+}
+
+fn seam_restorepos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
+    with_sort_mut(state, tuplesort_restorepos)
 }
 
 #[cfg(test)]

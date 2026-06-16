@@ -291,3 +291,15 @@ seam_core::seam!(
     /// read-only flag. snapbuild.c's SnapBuildExportSnapshot sets it true.
     pub fn set_xact_read_only(value: bool)
 );
+
+seam_core::seam!(
+    /// `bool XactReadOnly` (xact.c global): the current transaction's read-only
+    /// flag. variable.c's `check_transaction_read_only` reads it.
+    pub fn xact_read_only() -> bool
+);
+
+seam_core::seam!(
+    /// `int XactIsoLevel` (xact.c global): the current transaction's isolation
+    /// level. variable.c's `check_transaction_isolation` reads it.
+    pub fn xact_iso_level() -> i32
+);

@@ -620,7 +620,7 @@ pub fn StoreSingleInheritance(relationId: Oid, parentOid: Oid, seqNumber: i32) -
         inhseqno: seqNumber,
         inhdetachpending: false,
     };
-    indexing_seams::catalog_tuple_insert_pg_inherits::call(&inhRelation, &row)?;
+    indexing_seams::catalog_tuple_insert_pg_inherits::call(ctx.mcx(), &inhRelation, &row)?;
 
     // table_close(inhRelation, RowExclusiveLock);
     inhRelation.close(RowExclusiveLock)?;

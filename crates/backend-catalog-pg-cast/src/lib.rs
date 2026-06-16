@@ -147,10 +147,10 @@ pub fn CastCreate(
         castcontext,
         castmethod,
     };
-    let castid: Oid = indexing_seams::catalog_tuple_insert_pg_cast::call(&relation, &row)?;
+    let castid: Oid = indexing_seams::catalog_tuple_insert_pg_cast::call(cast_ctx.mcx(), &relation, &row)?;
 
     // addrs = new_object_addresses();
-    let addrs = dependency_seams::new_object_addresses::call()?;
+    let mut addrs = dependency_seams::new_object_addresses::call()?;
 
     /* make dependency entries */
     // ObjectAddressSet(myself, CastRelationId, castid);
@@ -159,20 +159,20 @@ pub fn CastCreate(
     /* dependency on source type */
     dependency_seams::add_exact_object_address::call(
         ObjectAddressSet(TYPE_RELATION_ID, sourcetypeid),
-        addrs,
+        &mut addrs,
     )?;
 
     /* dependency on target type */
     dependency_seams::add_exact_object_address::call(
         ObjectAddressSet(TYPE_RELATION_ID, targettypeid),
-        addrs,
+        &mut addrs,
     )?;
 
     /* dependency on function */
     if OidIsValid(funcid) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(PROCEDURE_RELATION_ID, funcid),
-            addrs,
+            &mut addrs,
         )?;
     }
 
@@ -180,18 +180,18 @@ pub fn CastCreate(
     if OidIsValid(incastid) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(CastRelationId, incastid),
-            addrs,
+            &mut addrs,
         )?;
     }
     if OidIsValid(outcastid) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(CastRelationId, outcastid),
-            addrs,
+            &mut addrs,
         )?;
     }
 
     // record_object_address_dependencies(&myself, addrs, behavior);
-    dependency_seams::record_object_address_dependencies::call(myself, addrs, behavior)?;
+    dependency_seams::record_object_address_dependencies::call(myself, &mut addrs, behavior)?;
     // free_object_addresses(addrs);
     dependency_seams::free_object_addresses::call(addrs)?;
 

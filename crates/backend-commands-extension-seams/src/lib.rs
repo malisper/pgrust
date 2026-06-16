@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use mcx::{Mcx, PgString};
 use types_core::primitive::Oid;
 use types_error::PgResult;
@@ -36,4 +38,12 @@ seam_core::seam!(
     /// named extension, or `InvalidOid` with `missing_ok = true`. With
     /// `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT` (`Err`).
     pub fn get_extension_oid(extname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RemoveExtensionById(extId)` (commands/extension.c): the per-class
+    /// `OCLASS_EXTENSION` drop handler dependency.c's `doDeletion` invokes for a
+    /// `pg_extension` object. Removes the extension's catalog row. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveExtensionById(extId: Oid) -> PgResult<()>
 );

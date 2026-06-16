@@ -69,4 +69,7 @@ pub fn init_seams() {
     // implicit "uninstalled seam" abort. Replace with the real per-call
     // FuncCallContext machinery when it lands.
     backend_utils_fmgr_funcapi_seams::value_srf_unported::set(srf_support::value_srf_unported);
+    backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::set(
+        result_type::get_expr_result_tupdesc,
+    );
 }
