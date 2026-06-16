@@ -4370,6 +4370,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-storage"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-visibilitymap",
+ "backend-access-table-table",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert",
+ "backend-access-transam-xlogutils",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-storage-seams",
+ "backend-common-relpath",
+ "backend-storage-freespace",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-seams",
+ "backend-storage-smgr-smgr",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-syscache",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-catalog-storage-seams"
 version = "0.0.0"
 dependencies = [
@@ -11880,6 +11917,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -14904,6 +14942,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-tuplesort"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-sort-sortsupport-seams",
+ "backend-utils-sort-storage",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-slot",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-sort-tuplesort-seams"
 version = "0.0.0"
 dependencies = [
@@ -15633,6 +15690,7 @@ dependencies = [
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
+ "backend-catalog-storage",
  "backend-catalog-toasting",
  "backend-commands-amcmds",
  "backend-commands-cluster",

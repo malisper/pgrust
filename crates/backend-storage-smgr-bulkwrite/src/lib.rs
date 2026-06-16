@@ -113,7 +113,7 @@ pub fn smgr_bulk_start_rel<'mcx>(
 
 /// `smgr_bulk_start_smgr()` (bulk_write.c:99-121) — start a bulk write on a
 /// relation fork without a relcache entry.
-fn smgr_bulk_start_smgr<'mcx>(
+pub fn smgr_bulk_start_smgr<'mcx>(
     mcx: Mcx<'mcx>,
     smgr_rlocator: RelFileLocatorBackend,
     forknum: ForkNumber,
@@ -377,6 +377,7 @@ fn internal(what: &str) -> PgError {
 /// Install every seam this unit OWNS (`backend-storage-smgr-bulkwrite-seams`).
 pub fn init_seams() {
     seam::smgr_bulk_start_rel::set(smgr_bulk_start_rel);
+    seam::smgr_bulk_start_smgr::set(smgr_bulk_start_smgr);
     seam::smgr_bulk_get_buf::set(smgr_bulk_get_buf);
     seam::smgr_bulk_write::set(smgr_bulk_write);
     seam::smgr_bulk_finish::set(smgr_bulk_finish);

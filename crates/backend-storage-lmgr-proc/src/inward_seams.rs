@@ -17,7 +17,7 @@ use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
 use types_storage::storage::{
-    LWLockWaitState, ProcWaitStatus, VirtualTransactionId, DELAY_CHKPT_START,
+    LWLockWaitState, ProcWaitStatus, VirtualTransactionId, DELAY_CHKPT_COMPLETE, DELAY_CHKPT_START,
     PGPROC_MAX_CACHED_SUBXIDS,
 };
 use types_storage::{proclist_node, LWLockMode};
@@ -315,6 +315,16 @@ fn set_delay_chkpt_start(on: bool) {
             p.delayChkptFlags |= DELAY_CHKPT_START;
         } else {
             p.delayChkptFlags &= !DELAY_CHKPT_START;
+        }
+    });
+}
+
+fn set_delay_chkpt_complete(on: bool) {
+    with_my_proc(|p| {
+        if on {
+            p.delayChkptFlags |= DELAY_CHKPT_COMPLETE;
+        } else {
+            p.delayChkptFlags &= !DELAY_CHKPT_COMPLETE;
         }
     });
 }
@@ -865,6 +875,7 @@ pub(crate) fn install() {
     seams::set_my_proc_status_flags::set(set_my_proc_status_flags);
     seams::prepared_xact_procno::set(prepared_xact_procno);
     seams::set_delay_chkpt_start::set(set_delay_chkpt_start);
+    seams::set_delay_chkpt_complete::set(set_delay_chkpt_complete);
 
     // wait-queue PGPROC accessors
     seams::pgproc_number::set(pgproc_number);
