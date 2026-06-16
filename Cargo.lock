@@ -13802,7 +13802,11 @@ dependencies = [
 name = "backend-utils-adt-geo-ops"
 version = "0.0.0"
 dependencies = [
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-float",
+ "backend-utils-adt-float-seams",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-misc-stack-depth-seams",
  "types-core",
  "types-error",
 ]
