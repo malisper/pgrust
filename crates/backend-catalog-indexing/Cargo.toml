@@ -48,3 +48,4 @@ types-catalog = { path = "../types-catalog" }
 # bytes. arrayfuncs depends only on lsyscache-seams (no cycle).
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 types-datum = { path = "../types-datum" }
+types-array = { path = "../types-array" }
