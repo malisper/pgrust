@@ -34,7 +34,8 @@ use types_gin::{GinMetaPageData, GinNullCategory};
 use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
 use types_storage::storage::Buffer;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck, TIDBitmap};
+use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -268,7 +269,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `gininsert(...)` (gininsert.c) — the `aminsert` callback.
-    pub fn gininsert<'mcx>(
+    pub fn gininsert<'mcx, 'a>(
         mcx: Mcx<'mcx>,
         index_relation: &Relation<'mcx>,
         values: &[Datum<'mcx>],
@@ -277,7 +278,7 @@ seam_core::seam!(
         heap_relation: &Relation<'mcx>,
         check_unique: IndexUniqueCheck,
         index_unchanged: bool,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<bool>
 );
 

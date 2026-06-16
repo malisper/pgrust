@@ -33,6 +33,7 @@ use types_scan::scankey::{ScanKeyData, StrategyNumber};
 use types_tuple::heaptuple::ItemPointerData;
 
 use crate::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use crate::index_info_carrier::IndexInfoCarrier;
 use crate::relscan::{IndexScanDesc, IndexScanDescData};
 
 /// `T_IndexAmRoutine` (`nodes/nodetags.h`) as a bare `u32` (`types-tableam`
@@ -115,14 +116,6 @@ pub type IndexAmTranslateCompareType = fn(CompareType, Oid) -> StrategyNumber;
 /// shape. Validators that return a soft-error result instead are reached by
 /// name from their AM crate, not stored here.
 pub type IndexAmValidate = fn(Oid) -> bool;
-
-/// `struct IndexInfo` (`nodes/execnodes.h`) — opaque to the index-AM dispatch
-/// layer: indexam.c only forwards it to `aminsert`/`aminsertcleanup`, never
-/// reading it. Owned by the executor/catalog code that builds it; carried here
-/// as a type-erased payload so the AM callback can downcast it.
-pub struct IndexInfo {
-    pub payload: Option<Box<dyn core::any::Any>>,
-}
 
 /// `struct PlannerInfo` (`nodes/pathnodes.h`) — opaque to `types-tableam`
 /// (which sits below `types-nodes` and cannot name the planner structs).
@@ -273,14 +266,14 @@ pub struct IndexAmRoutine {
 
     /* ---- required interface functions invoked by indexam.c ---- */
     /// `ambuild(heapRelation, indexRelation, indexInfo)` — build a new index.
-    /// `indexInfo` is the type-erased [`IndexInfo`] carrier (the dispatch layer
-    /// cannot name `types_nodes::execnodes::IndexInfo`); the AM adapter
-    /// downcasts it.
-    pub ambuild: for<'mcx> fn(
+    /// `indexInfo` is the lifetime-preserving [`IndexInfoCarrier`] (the dispatch
+    /// layer sits below `types-nodes` and cannot name
+    /// `types_nodes::execnodes::IndexInfo<'mcx>`); the AM adapter downcasts it.
+    pub ambuild: for<'mcx, 'a> fn(
         mcx: Mcx<'mcx>,
         heap_relation: &Relation<'mcx>,
         index_relation: &Relation<'mcx>,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<IndexBuildResult>,
 
     /// `ambuildempty(indexRelation)` — build an empty index for the init fork.
@@ -290,7 +283,7 @@ pub struct IndexAmRoutine {
     /// `aminsert(indexRelation, values, isnull, heap_tid, heapRelation,
     /// checkUnique, indexUnchanged, indexInfo)`.
     #[allow(clippy::type_complexity)]
-    pub aminsert: for<'mcx> fn(
+    pub aminsert: for<'mcx, 'a> fn(
         mcx: Mcx<'mcx>,
         index_relation: &Relation<'mcx>,
         values: &[Datum<'mcx>],
@@ -299,7 +292,7 @@ pub struct IndexAmRoutine {
         heap_relation: &Relation<'mcx>,
         check_unique: IndexUniqueCheck,
         index_unchanged: bool,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<bool>,
 
     /// `ambulkdelete(info, stats, callback, callback_state)`. The deletion
@@ -344,10 +337,10 @@ pub struct IndexAmRoutine {
     /* ---- optional interface functions ("can be NULL" in C) ---- */
     /// `aminsertcleanup(indexRelation, indexInfo)`.
     pub aminsertcleanup: Option<
-        for<'mcx> fn(
+        for<'mcx, 'a> fn(
             mcx: Mcx<'mcx>,
             index_relation: &Relation<'mcx>,
-            index_info: &mut IndexInfo,
+            index_info: &mut IndexInfoCarrier<'a, 'mcx>,
         ) -> PgResult<()>,
     >,
 

@@ -362,6 +362,15 @@ pub struct IndexInfo<'mcx> {
     pub ii_Context: Option<Mcx<'mcx>>,
 }
 
+/// Let `IndexInfo<'mcx>` ride through the index-AM dispatch vtable's
+/// `IndexInfoCarrier<'mcx>` (the F0 `types-tableam` crate sits below this one
+/// and cannot name `IndexInfo<'mcx>`, so it carries it type-erased). The blanket
+/// impl in `types-tableam` then provides `IndexInfoLive`. The tag is the
+/// canonical one reserved for this struct in the carrier's home.
+impl<'mcx> types_tableam::IndexInfoTagged<'mcx> for IndexInfo<'mcx> {
+    const TAG: types_tableam::AmOpaqueTag = types_tableam::INDEX_INFO_TAG;
+}
+
 /// `TriggerDesc` (utils/reltrigger.h) — the full per-relation trigger set
 /// (array of [`Trigger`] + the per-event/transition flags), re-exported from
 /// the leaf [`types_trigger`] crate so consumers keep the `execnodes::TriggerDesc`

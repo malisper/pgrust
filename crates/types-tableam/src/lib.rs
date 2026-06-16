@@ -13,12 +13,16 @@
 pub mod amapi;
 pub mod amopaque;
 pub mod genam;
+pub mod index_info_carrier;
 pub mod relscan;
 pub mod scankey;
 pub mod tableam;
 
-pub use amapi::{IndexAmRoutine, IndexInfo, IndexUniqueCheck, TIDBitmap};
+pub use amapi::{IndexAmRoutine, IndexUniqueCheck, TIDBitmap};
 pub use amopaque::{AmOpaque, AmOpaqueTag, AmOpaqueType};
+pub use index_info_carrier::{
+    IndexInfoCarrier, IndexInfoLive, IndexInfoTagged, INDEX_INFO_TAG,
+};
 pub use genam::{
     IndexBulkDeleteResult, IndexOrderByDistance, IndexScanInstrumentation, IndexVacuumInfo,
     SharedIndexScanInstrumentation,

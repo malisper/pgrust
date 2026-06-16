@@ -270,21 +270,15 @@ fn CatalogIndexInsert<'mcx>(
             IndexUniqueCheck::UNIQUE_CHECK_NO
         };
 
-        // The index AM does the rest. The dispatch layer's `IndexInfo`
-        // (`types_tableam::amapi::IndexInfo`) is a `'static`-erased
-        // (`Box<dyn Any>`) carrier that only the exclusion/expression-index
-        // `aminsert` paths downcast and read. The real `IndexInfo<'mcx>` is
-        // lifetime-bound and cannot be erased into `'static`; but catalog
-        // indexes are btree-only (the keystone invariant — never exclusion /
-        // expression / partial), and `btinsert` ignores its `IndexInfo`
-        // argument entirely. So the erased carrier crosses empty
-        // (`payload: None`), which is behaviour-identical to the C call for
-        // every AM that can index a system catalog. (An AM that *did* read the
-        // payload would require erasing the real `IndexInfo<'mcx>`, gated on a
-        // future amapi `IndexInfo` carrier widening — out of scope for the
-        // catalog engine, which never reaches such an AM.)
+        // The index AM does the rest. The dispatch layer carries the real
+        // `IndexInfo<'mcx>` through the `'mcx`-safe `IndexInfoCarrier` (#342):
+        // the catalog's own `indstate.index_infos[i]` rides across type-erased
+        // (`types-tableam` sits below `types-nodes` and cannot name
+        // `IndexInfo<'mcx>`) and the AM adapter downcasts it back. (`btinsert`
+        // ignores it; an exclusion/expression AM would downcast and read it.)
         let index_desc = indstate.index_descs[i].alias();
-        let mut am_index_info = types_tableam::amapi::IndexInfo { payload: None };
+        let mut am_index_info =
+            types_tableam::index_info_carrier::IndexInfoCarrier::new(&mut indstate.index_infos[i]);
         backend_access_index_indexam::index_insert(
             mcx,
             &index_desc,              // index relation

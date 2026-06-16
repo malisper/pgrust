@@ -54,7 +54,8 @@ use types_storage::buf::{
     BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 use types_storage::lock::{AccessShareLock, ShareUpdateExclusiveLock};
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::access::RELKIND_INDEX;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -124,7 +125,7 @@ fn brin_get_auto_summarize(_idx_rel: &Relation<'_>) -> bool {
 
 // ===========================================================================
 // BrinInsertState (brin.c:192) — the per-command insert state cached in
-// IndexInfo.payload (C's `ii_AmCache`).
+// C's `indexInfo->ii_AmCache` (the `Opaque` field of `IndexInfo`).
 // ===========================================================================
 
 /// `struct BrinInsertState` (brin.c:192): running state spanning multiple
@@ -179,7 +180,7 @@ pub fn brininsert<'mcx>(
     _heap_rel: &Relation<'mcx>,
     _check_unique: IndexUniqueCheck,
     _index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     let _ = index_info;
     let autosummarize = brin_get_auto_summarize(idx_rel);
@@ -188,8 +189,9 @@ pub fn brininsert<'mcx>(
     // revmap-access state and `BrinDesc` are built once per command and reused
     // for every `brininsert` call. That cache is a pure performance hint — it
     // changes no on-disk state and produces identical results to rebuilding it
-    // each call. Our `IndexInfo.payload` carrier is `Box<dyn Any + 'static>`,
-    // which cannot hold the `'mcx`-bound revmap/`BrinDesc`, so we rebuild the
+    // each call. The carrier now hands us the real `IndexInfo<'mcx>` (#342),
+    // but `ii_AmCache` itself is the `'static`-erased `Opaque` (`Box<dyn Any>`)
+    // and cannot hold the `'mcx`-bound revmap/`BrinDesc`, so we rebuild the
     // insert state on every call (behaviour-preserving, like the
     // `RelationGetTargetBlock` no-op in the pageops layer). `brininsertcleanup`
     // is then a no-op (nothing is cached).
@@ -356,11 +358,11 @@ fn brininsert_loop<'mcx>(
 pub fn brininsertcleanup<'mcx>(
     _mcx: Mcx<'mcx>,
     _index: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<()> {
     // C frees the `BrinInsertState` cached in `indexInfo->ii_AmCache` and
     // terminates its revmap. Since `brininsert` does not cache the state (see
-    // the note there — the `'static` `IndexInfo.payload` carrier cannot hold the
+    // the note there — the `'static` `ii_AmCache` `Opaque` cannot hold the
     // `'mcx`-bound revmap), and releases the revmap at the end of each call,
     // there is nothing to clean up here.
     Ok(())
