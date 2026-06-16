@@ -847,6 +847,7 @@ pub fn init_seams() {
     s::parse_type_string::set(seam_parse_type_string);
     s::name_list_to_string::set(seam_name_list_to_string);
     s::typename_type_id::set(seam_typename_type_id);
+    s::lookup_type_name_oid_from_names::set(seam_lookup_type_name_oid_from_names);
     s::typename_to_string::set(seam_typename_to_string);
     s::typename_to_string_node::set(seam_typename_to_string_node);
     s::lookup_type_name_oid::set(seam_lookup_type_name_oid);
@@ -1005,6 +1006,15 @@ fn seam_typename_type_id(type_name: &types_opclass::TypeName) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("typenameTypeId");
     let tn = from_opclass_typename(type_name);
     typenameTypeId(scratch.mcx(), None, &tn)
+}
+
+/// `typeTypeId(LookupTypeName(NULL, typeName, NULL, false))` over the trimmed
+/// `types_opclass::TypeName` — the shell-allowing OID resolver `AlterTypeOwner`
+/// uses (returns a shell type rather than rejecting it).
+fn seam_lookup_type_name_oid_from_names(type_name: &types_opclass::TypeName) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+    let tn = from_opclass_typename(type_name);
+    LookupTypeNameOid(scratch.mcx(), None, &tn, false)
 }
 
 /// `TypeNameToString(typeName)` over the trimmed `types_opclass::TypeName`.

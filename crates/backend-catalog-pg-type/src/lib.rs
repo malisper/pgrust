@@ -868,9 +868,203 @@ fn remove_type_catalog_row(typeOid: Oid) -> PgResult<i8> {
     Ok(typtype)
 }
 
+// ===========================================================================
+// F3/F4 single-row pg_type mutators (commands/typecmds.c ALTER TYPE/DOMAIN).
+//
+// Each owns the pg_type WRITE for one ALTER path: open pg_type
+// (RowExclusiveLock), read the row's form for any values needed, call the
+// narrow `catalog_tuple_update_*_pg_type` indexing seam (heap_modify_tuple over
+// only the targeted columns), then perform the GenerateTypeDependencies +
+// InvokeObjectPostAlterHook calls where C does, and close. typecmds does NO
+// datum writes and NO GenerateTypeDependencies of its own.
+// ===========================================================================
+
+/// `AlterTypeOwnerInternal`'s SINGLE-ROW write (typecmds.c:3985): set
+/// `typowner = new_owner_id` and (when typacl non-NULL)
+/// `typacl = aclnewowner(...)` on the held tuple, then `CatalogTupleUpdate`. No
+/// recursion to array/multirange here (typecmds does that).
+fn set_type_owner(type_oid: Oid, new_owner_id: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("AlterTypeOwnerInternal");
+    let rel = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+    indexing_seams::catalog_tuple_update_typowner_typacl_pg_type::call(
+        &rel,
+        type_oid,
+        new_owner_id,
+    )?;
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `AlterTypeNamespaceInternal`'s single-row `typnamespace` write
+/// (typecmds.c:4233) + `CatalogTupleUpdate`. typecmds calls this only when
+/// `oldNspOid != nspOid`.
+fn set_type_namespace(type_oid: Oid, nsp_oid: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("AlterTypeNamespaceInternal");
+    let rel = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+    indexing_seams::catalog_tuple_update_typnamespace_pg_type::call(&rel, type_oid, nsp_oid)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// AlterDomain* single-row `typnotnull` write + `CatalogTupleUpdate`.
+fn set_type_not_null(type_oid: Oid, not_null: bool) -> PgResult<()> {
+    let ctx = MemoryContext::new("AlterDomainNotNull");
+    let rel = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+    indexing_seams::catalog_tuple_update_typnotnull_pg_type::call(&rel, type_oid, not_null)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `AlterDomainDefault`'s pg_type write (typecmds.c:2707): replace
+/// `typdefault`/`typdefaultbin` (`None` = SQL NULL), `CatalogTupleUpdate`, then
+/// `GenerateTypeDependencies(newtuple, defaultExpr, NULL, 0, false, false,
+/// false, true)` + `InvokeObjectPostAlterHook`.
+fn set_domain_default(
+    type_oid: Oid,
+    default_value: Option<String>,
+    default_bin: Option<String>,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("AlterDomainDefault");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TypeRelationId, RowExclusiveLock)?;
+
+    indexing_seams::catalog_tuple_update_typdefault_pg_type::call(
+        &rel,
+        type_oid,
+        default_value,
+        default_bin.clone(),
+    )?;
+
+    /* Rebuild dependencies (GenerateTypeDependencies on the new tuple). The
+     * cooked defaultExpr crosses as its nodeToString binary text. */
+    let typeForm = fetch_type_form_internal(type_oid)?;
+    generate_type_dependencies(
+        mcx,
+        &typeForm,
+        default_bin, /* defaultExpr (binary text) */
+        None,        /* don't have typacl handy */
+        0,           /* relation kind is n/a */
+        false,       /* a domain isn't an implicit array */
+        false,       /* nor is it any kind of dependent type */
+        false,       /* don't touch extension membership */
+        true,        /* We do need to rebuild dependencies */
+    )?;
+
+    invoke_object_post_alter_hook(TypeRelationId, type_oid, 0, InvalidOid, false)?;
+
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `AlterTypeRecurse`'s per-row update (typecmds.c:4561): the gated `replaces[]`
+/// write via the narrow indexing seam, `GenerateTypeDependencies(newtup, NULL,
+/// NULL, 0, is_implicit_array, is_implicit_array, false, true)`,
+/// `InvokeObjectPostAlterHook`. Returns the row's `typarray` OID so typecmds can
+/// recurse to the array type.
+fn alter_type_recurse_update(
+    type_oid: Oid,
+    is_implicit_array: bool,
+    attr: types_catalog::pg_type::TypeAttrUpdate,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("AlterTypeRecurse");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TypeRelationId, RowExclusiveLock)?;
+
+    let arrtypoid =
+        indexing_seams::catalog_tuple_update_attrs_pg_type::call(&rel, type_oid, attr)?;
+
+    /* Rebuild dependencies for this type. */
+    let typeForm = fetch_type_form_internal(type_oid)?;
+    generate_type_dependencies(
+        mcx,
+        &typeForm,
+        None,              /* don't have defaultExpr handy */
+        None,              /* don't have typacl handy */
+        0,                 /* we rejected composite types above */
+        is_implicit_array, /* it might be an array */
+        is_implicit_array, /* dependent iff it's array */
+        false,             /* don't touch extension membership */
+        true,
+    )?;
+
+    invoke_object_post_alter_hook(TypeRelationId, type_oid, 0, InvalidOid, false)?;
+
+    rel.close(RowExclusiveLock)?;
+    Ok(arrtypoid)
+}
+
+/// `AlterTypeRecurse`'s domain scan (typecmds.c:4682): `systable_beginscan(
+/// pg_type, InvalidOid, false, NULL, 1, key[typbasetype = base_type_oid])`,
+/// returning the OIDs of rows with `typbasetype = base_type_oid` AND
+/// `typtype == TYPTYPE_DOMAIN`. The full-table (non-index) scan + per-row
+/// `GETSTRUCT` deform run here; typecmds re-fires `AlterTypeRecurse` over each.
+fn scan_domains_over_basetype(base_type_oid: Oid) -> PgResult<Vec<Oid>> {
+    use types_catalog::pg_type::{Anum_pg_type_typbasetype, TYPTYPE_DOMAIN};
+
+    let ctx = MemoryContext::new("scan_domains_over_basetype");
+    let relation = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+
+    let key = [{
+        let mut k = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut k,
+            Anum_pg_type_typbasetype,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            HeapDatum::from_oid(base_type_oid),
+        )?;
+        k
+    }];
+
+    /* systable_beginscan(catalog, InvalidOid, false, NULL, 1, key) — a
+     * non-index full scan over pg_type (there is no index on typbasetype). */
+    let mut scan =
+        genam_seams::systable_beginscan::call(&relation, InvalidOid, false, None, &key)?;
+
+    let mut result: Vec<Oid> = Vec::new();
+    loop {
+        let scratch = MemoryContext::new("scan_domains_over_basetype row");
+        let Some(tup) = genam_seams::systable_getnext::call(scratch.mcx(), scan.desc_mut())? else {
+            break;
+        };
+
+        /* GETSTRUCT(Form_pg_type): deform the scanned tuple against pg_type's
+         * descriptor and read oid (attnum 1) + typtype (attnum 7). */
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            scratch.mcx(),
+            &tup.tuple,
+            &relation.rd_att,
+            &tup.data,
+        )?;
+
+        let domain_oid = cols[(Anum_pg_type_oid - 1) as usize].0.as_oid();
+        let typtype = cols[(types_catalog::pg_type::Anum_pg_type_typtype - 1) as usize]
+            .0
+            .as_char();
+
+        /* Shouldn't have a nonzero typbasetype in a non-domain, but let's check */
+        if typtype != TYPTYPE_DOMAIN {
+            continue;
+        }
+        result.push(domain_oid);
+    }
+    scan.end()?;
+
+    relation.close(RowExclusiveLock)?;
+    Ok(result)
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_type_seams as s;
     s::get_new_type_oid::set(get_new_type_oid);
+    s::set_type_owner::set(set_type_owner);
+    s::set_type_namespace::set(set_type_namespace);
+    s::set_type_not_null::set(set_type_not_null);
+    s::set_domain_default::set(|type_oid, default_value, default_bin| {
+        set_domain_default(type_oid, default_value, default_bin)
+    });
+    s::alter_type_recurse_update::set(alter_type_recurse_update);
+    s::scan_domains_over_basetype::set(scan_domains_over_basetype);
     s::remove_type_catalog_row::set(remove_type_catalog_row);
     s::type_create::set(TypeCreate);
     s::rename_type_internal::set(|type_oid, new_name, nsp| {

@@ -225,10 +225,10 @@ pub struct PgConstraintInsertRow {
 
 /// The fields `CatalogTupleUpdate` needs to write back for the in-place
 /// mutators (`AdjustNotNullInheritance` / `RenameConstraintById` /
-/// `AlterConstraintNamespaces` / `ConstraintSetParentConstraint`): the columns
-/// those paths scribble on a copied tuple before re-storing it. The owner
-/// re-forms the tuple at `tid` from the existing row with these fields
-/// overwritten.
+/// `AlterConstraintNamespaces` / `ConstraintSetParentConstraint` /
+/// `AlterDomainValidateConstraint`): the columns those paths scribble on a
+/// copied tuple before re-storing it. The owner re-forms the tuple at `tid`
+/// from the existing row with these fields overwritten.
 #[derive(Clone, Debug)]
 pub struct ConstraintFieldUpdate {
     pub conname: [u8; 64],
@@ -236,6 +236,9 @@ pub struct ConstraintFieldUpdate {
     pub conislocal: bool,
     pub coninhcount: i16,
     pub conparentid: Oid,
+    /// `convalidated` — flipped to `true` by `AlterDomainValidateConstraint`;
+    /// the other mutator sites carry through the row's existing value.
+    pub convalidated: bool,
 }
 
 /// A `SearchSysCache1(CONSTROID)` projection: the scalar `Form_pg_constraint`
