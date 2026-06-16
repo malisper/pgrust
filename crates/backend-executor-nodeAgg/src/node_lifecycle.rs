@@ -855,10 +855,10 @@ pub fn ExecEndAgg<'mcx>(
     // fires the registered reset callbacks; the owned ExprContext model runs
     // those on reset of its per-tuple context.
     for setno in 0..num_grouping_sets as usize {
-        rescan_expr_context_aggcontext(node, setno);
+        rescan_expr_context_aggcontext(node, setno, estate)?;
     }
     if node.hashcontext.is_some() {
-        rescan_expr_context_hashcontext(node);
+        rescan_expr_context_hashcontext(node, estate)?;
     }
 
     // outerPlan = outerPlanState(node); ExecEndNode(outerPlan);
@@ -872,19 +872,32 @@ pub fn ExecEndAgg<'mcx>(
 /// `ReScanExprContext(aggstate->aggcontexts[setno])` — fire the per-set
 /// aggregate context's reset callbacks. The owned `ExprContext` carries its
 /// per-tuple context, whose `reset` runs the LIFO callbacks.
-fn rescan_expr_context_aggcontext<'mcx>(node: &mut AggStateData<'mcx>, setno: usize) {
-    if let Some(aggcontexts) = node.aggcontexts.as_mut() {
-        if let Some(cxt) = aggcontexts.get_mut(setno) {
-            cxt.ecxt_per_tuple_memory.reset();
-        }
+fn rescan_expr_context_aggcontext<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    setno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // `aggcontexts[setno]` is an EcxtId into the EState pool; ReScanExprContext
+    // fires its shutdown callbacks and resets its per-tuple memory.
+    if let Some(ecxt) = node
+        .aggcontexts
+        .as_ref()
+        .and_then(|a| a.get(setno).copied())
+    {
+        backend_executor_execUtils_seams::re_scan_expr_context::call(estate, ecxt)?;
     }
+    Ok(())
 }
 
 /// `ReScanExprContext(aggstate->hashcontext)`.
-fn rescan_expr_context_hashcontext<'mcx>(node: &mut AggStateData<'mcx>) {
-    if let Some(cxt) = node.hashcontext.as_mut() {
-        cxt.ecxt_per_tuple_memory.reset();
+fn rescan_expr_context_hashcontext<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if let Some(ecxt) = node.hashcontext {
+        backend_executor_execUtils_seams::re_scan_expr_context::call(estate, ecxt)?;
     }
+    Ok(())
 }
 
 /// `IsParallelWorker()` (parallel.h) — am I a parallel worker backend? Owned by
@@ -971,7 +984,7 @@ pub fn ExecReScanAgg<'mcx>(
     // in them. (Rescan rather than reset because transfns may have registered
     // callbacks that need to be run now.)
     for setno in 0..num_grouping_sets as usize {
-        rescan_expr_context_aggcontext(node, setno);
+        rescan_expr_context_aggcontext(node, setno, estate)?;
     }
 
     // Release first tuple of group, if we have made a copy.
@@ -995,7 +1008,7 @@ pub fn ExecReScanAgg<'mcx>(
         node.hash_spill_mode = false;
         node.hash_ngroups_current = 0;
 
-        rescan_expr_context_hashcontext(node);
+        rescan_expr_context_hashcontext(node, estate)?;
         if let Some(tablecxt) = node.hash_tablecxt.as_mut() {
             tablecxt.reset();
         }
