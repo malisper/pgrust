@@ -637,6 +637,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_input_is_valid_common()` post-parse work (misc.c:804-814):
+    /// `getTypeInputInfo(typoid, &typiofunc, &typioparam)` + `fmgr_info_cxt` +
+    /// `InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,
+    /// &converted)`. Attempts the soft conversion of `str` to the already-
+    /// resolved type `typoid` with `typmod`, recording any soft error into
+    /// `escontext`. Returns the C `bool` (true = the value is valid input).
+    /// `Err` carries any hard `ereport(ERROR)` from the type-I/O resolution.
+    pub fn input_is_valid_by_type(
+        typoid: Oid,
+        typmod: i32,
+        str_: &[u8],
+        escontext: &mut types_error::SoftErrorContext,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `OutputFunctionCall(&outputproc, value)` (fmgr.c) as `array_out` drives
     /// it: call the element type's text output function on a materialized
     /// element value, returning the printable bytes (NUL excluded) in `mcx`.
