@@ -1,0 +1,168 @@
+//! File-local globals of `tcop/postgres.c`.
+//!
+//! These are the per-backend variables declared at the top of `postgres.c`
+//! (and the two `static struct`s for `ResetUsage`/`ShowUsage`). Each C backend
+//! is a process owning its own copy, so each is a `thread_local!` cell here,
+//! never a shared static — exactly as `backend-utils-init-small`'s `globals.c`
+//! port does for `globals.c`.
+
+#![allow(non_upper_case_globals)]
+
+use std::cell::Cell;
+
+use types_dest::dest::CommandDest;
+use types_storage::ProcSignalReason;
+use types_storage::storage::NUM_PROCSIGNALS;
+
+thread_local! {
+    /// `const char *debug_query_string;` (postgres.c:88) — the client-supplied
+    /// query string. `None` mirrors the C `NULL`. Only the reset-to-NULL path
+    /// (`reset_debug_query_string`) is in this family's scope; the simple/extended
+    /// query loop that sets it is F1/F2 (planner-gated).
+    static DEBUG_QUERY_STRING: Cell<Option<&'static str>> = const { Cell::new(None) };
+
+    /// `CommandDest whereToSendOutput = DestDebug;` (postgres.c:91) — the output
+    /// destination for this backend.
+    static WHERE_TO_SEND_OUTPUT: Cell<CommandDest> = const { Cell::new(CommandDest::Debug) };
+
+    /// `static bool xact_started = false;` (postgres.c:129) — whether a
+    /// `start_xact_command` is in effect (`StartTransactionCommand` has been
+    /// issued for the current message). Read by `enable_statement_timeout`'s
+    /// assertion.
+    static XACT_STARTED: Cell<bool> = const { Cell::new(false) };
+
+    /// `static bool DoingCommandRead = false;` (postgres.c:136) — true while the
+    /// backend is in `PostgresMain`'s blocking read for the next client command.
+    static DOING_COMMAND_READ: Cell<bool> = const { Cell::new(false) };
+
+    /// `static const char *userDoption = NULL;` (postgres.c:153) — the `-D`
+    /// switch value (data directory), captured by `process_postgres_switches`.
+    static USER_DOPTION: Cell<Option<&'static str>> = const { Cell::new(None) };
+
+    /// `static bool EchoQuery = false;` (postgres.c:154) — the `-E` switch
+    /// (echo queries, single-user mode).
+    static ECHO_QUERY: Cell<bool> = const { Cell::new(false) };
+
+    /// `static bool UseSemiNewlineNewline = false;` (postgres.c:155) — the `-j`
+    /// switch (use `;\n\n` as the interactive command delimiter).
+    static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
+
+    /// `static volatile sig_atomic_t RecoveryConflictPending = false;`
+    /// (postgres.c:158).
+    static RECOVERY_CONFLICT_PENDING: Cell<bool> = const { Cell::new(false) };
+
+    /// `static volatile sig_atomic_t RecoveryConflictPendingReasons[NUM_PROCSIGNALS];`
+    /// (postgres.c:159) — per-reason pending flags for recovery conflicts.
+    static RECOVERY_CONFLICT_PENDING_REASONS: Cell<[bool; NUM_PROCSIGNALS]> =
+        const { Cell::new([false; NUM_PROCSIGNALS]) };
+}
+
+// `debug_query_string`.
+
+#[inline]
+pub fn debug_query_string() -> Option<&'static str> {
+    DEBUG_QUERY_STRING.get()
+}
+
+#[inline]
+pub fn set_debug_query_string(value: Option<&'static str>) {
+    DEBUG_QUERY_STRING.set(value);
+}
+
+// `whereToSendOutput`.
+
+#[inline]
+pub fn where_to_send_output() -> CommandDest {
+    WHERE_TO_SEND_OUTPUT.get()
+}
+
+#[inline]
+pub fn set_where_to_send_output(value: CommandDest) {
+    WHERE_TO_SEND_OUTPUT.set(value);
+}
+
+// `xact_started`.
+
+#[inline]
+pub fn xact_started() -> bool {
+    XACT_STARTED.get()
+}
+
+#[inline]
+pub fn set_xact_started(value: bool) {
+    XACT_STARTED.set(value);
+}
+
+// `DoingCommandRead`.
+
+#[inline]
+pub fn doing_command_read() -> bool {
+    DOING_COMMAND_READ.get()
+}
+
+#[inline]
+pub fn set_doing_command_read(value: bool) {
+    DOING_COMMAND_READ.set(value);
+}
+
+// `userDoption`.
+
+#[inline]
+pub fn user_doption() -> Option<&'static str> {
+    USER_DOPTION.get()
+}
+
+#[inline]
+pub fn set_user_doption(value: Option<&'static str>) {
+    USER_DOPTION.set(value);
+}
+
+// `EchoQuery`.
+
+#[inline]
+pub fn echo_query() -> bool {
+    ECHO_QUERY.get()
+}
+
+#[inline]
+pub fn set_echo_query(value: bool) {
+    ECHO_QUERY.set(value);
+}
+
+// `UseSemiNewlineNewline`.
+
+#[inline]
+pub fn use_semi_newline_newline() -> bool {
+    USE_SEMI_NEWLINE_NEWLINE.get()
+}
+
+#[inline]
+pub fn set_use_semi_newline_newline(value: bool) {
+    USE_SEMI_NEWLINE_NEWLINE.set(value);
+}
+
+// `RecoveryConflictPending`.
+
+#[inline]
+pub fn recovery_conflict_pending() -> bool {
+    RECOVERY_CONFLICT_PENDING.get()
+}
+
+#[inline]
+pub fn set_recovery_conflict_pending(value: bool) {
+    RECOVERY_CONFLICT_PENDING.set(value);
+}
+
+// `RecoveryConflictPendingReasons[reason]`.
+
+#[inline]
+pub fn recovery_conflict_pending_reason(reason: ProcSignalReason) -> bool {
+    RECOVERY_CONFLICT_PENDING_REASONS.get()[reason as usize]
+}
+
+#[inline]
+pub fn set_recovery_conflict_pending_reason(reason: ProcSignalReason, value: bool) {
+    let mut arr = RECOVERY_CONFLICT_PENDING_REASONS.get();
+    arr[reason as usize] = value;
+    RECOVERY_CONFLICT_PENDING_REASONS.set(arr);
+}
