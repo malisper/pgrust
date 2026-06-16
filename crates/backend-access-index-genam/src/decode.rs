@@ -95,6 +95,17 @@ use types_catalog::pg_statistic_ext::{
     StatisticExtRelationId, StatisticExtRelidIndexId,
     Anum_pg_statistic_ext_oid, Anum_pg_statistic_ext_stxrelid,
 };
+use types_catalog::pg_trigger::{
+    TriggerRelationId, TriggerRelidNameIndexId, Anum_pg_trigger_oid,
+    Anum_pg_trigger_tgargs, Anum_pg_trigger_tgattr, Anum_pg_trigger_tgconstraint,
+    Anum_pg_trigger_tgconstrindid, Anum_pg_trigger_tgconstrrelid,
+    Anum_pg_trigger_tgdeferrable, Anum_pg_trigger_tgenabled,
+    Anum_pg_trigger_tgfoid, Anum_pg_trigger_tginitdeferred,
+    Anum_pg_trigger_tgisinternal, Anum_pg_trigger_tgname, Anum_pg_trigger_tgnargs,
+    Anum_pg_trigger_tgnewtable, Anum_pg_trigger_tgoldtable,
+    Anum_pg_trigger_tgparentid, Anum_pg_trigger_tgqual, Anum_pg_trigger_tgrelid,
+    Anum_pg_trigger_tgtype,
+};
 
 use crate::{systable_beginscan, systable_getnext};
 
@@ -183,6 +194,68 @@ fn bytea_col_opt(row: &[DeformedColumn<'_>], anum: i16) -> Option<Vec<u8>> {
         Some((_, true)) => None,
         Some((datum, false)) => Some(datum.as_ref_bytes().to_vec()),
     }
+}
+
+/// `NameStr(field)` for a nullable `NameData` column (`DirectFunctionCall1(
+/// nameout, datum)` after a `fastgetattr` + `isnull` test). Returns `None` for
+/// the C `isnull` (and for a column index past the deformed row's end, which
+/// `heap_getattr` reports NULL). The non-null name is read up to its first NUL.
+fn name_col_opt(row: &[DeformedColumn<'_>], anum: i16) -> Option<String> {
+    let idx = (anum - 1) as usize;
+    match row.get(idx) {
+        None => None,
+        Some((_, true)) => None,
+        Some((datum, false)) => {
+            let bytes = datum.as_ref_bytes();
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+        }
+    }
+}
+
+/// `VARDATA_ANY(varlena)` — the payload bytes of a stored varlena image, past
+/// its header. Handles both the 4-byte (`VARATT_IS_4B_U`) and 1-byte short
+/// (`VARATT_IS_1B`) header forms; the relcache-build catalog reads operate on
+/// the inline (non-external) `tgargs` bytea the storage layer hands back, as
+/// C's `DatumGetByteaPP` does (it only un-short-headers / inline-decompresses,
+/// never an out-of-line TOAST fetch on this path).
+fn vardata_any(image: &[u8]) -> PgResult<&[u8]> {
+    if image.is_empty() {
+        return Err(PgError::error("tgargs varlena image is empty"));
+    }
+    let h = image[0];
+    if h & 0x01 == 0x01 {
+        // VARATT_IS_1B: short (1-byte) header; payload starts at offset 1.
+        // The external (1B_E) form (va_header == 0x01 exactly) would need a
+        // TOAST fetch, which this catalog-read path never produces.
+        if h == 0x01 {
+            return Err(PgError::error(
+                "tgargs is an external TOAST pointer (unexpected on the relcache build path)",
+            ));
+        }
+        Ok(&image[1..])
+    } else {
+        // VARATT_IS_4B_U: 4-byte header; payload starts at offset 4 (VARHDRSZ).
+        if image.len() < 4 {
+            return Err(PgError::error("tgargs 4B varlena image too short"));
+        }
+        Ok(&image[4..])
+    }
+}
+
+/// Split a `tgargs` bytea payload (`VARDATA_ANY`) into its `tgnargs` arguments.
+/// C does `p = VARDATA_ANY(val); for (i) { tgargs[i] = pstrdup(p); p += strlen(p)
+/// + 1; }` — each argument is a NUL-terminated C string laid end to end.
+fn split_tgargs(payload: &[u8], tgnargs: i16) -> Vec<String> {
+    let mut out = Vec::with_capacity(tgnargs.max(0) as usize);
+    let mut p = payload;
+    for _ in 0..tgnargs {
+        let end = p.iter().position(|&b| b == 0).unwrap_or(p.len());
+        out.push(String::from_utf8_lossy(&p[..end]).into_owned());
+        // Advance past the string and its NUL (strlen(p) + 1).
+        p = if end + 1 <= p.len() { &p[end + 1..] } else { &[] };
+    }
+    out
 }
 
 // ===========================================================================
@@ -592,6 +665,86 @@ fn relcache_scan_pg_statistic_ext(relid: Oid) -> PgResult<Vec<Oid>> {
 }
 
 // ===========================================================================
+// relcache_scan_pg_trigger — RelationBuildTriggers
+// ===========================================================================
+
+/// `RelationBuildTriggers(relation)`'s `pg_trigger` scan (commands/trigger.c).
+fn relcache_scan_pg_trigger(relid: Oid) -> PgResult<Vec<seam::ScannedPgTrigger>> {
+    let scratch = MemoryContext::new("RelationBuildTriggers scan");
+    let smcx = scratch.mcx();
+
+    // ScanKeyInit(&skey, Anum_pg_trigger_tgrelid, BTEqualStrategyNumber,
+    //             F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(relation)));
+    let skey = [scan_key_init(
+        Anum_pg_trigger_tgrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?];
+
+    // tgrel = table_open(TriggerRelationId, AccessShareLock);
+    // tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true, NULL,
+    //                             1, &skey);  -- name order.
+    let relation = table_open(smcx, TriggerRelationId, AccessShareLock)?;
+    let mut scandesc =
+        systable_beginscan(&relation, TriggerRelidNameIndexId, true, None, &skey)?;
+
+    let mut out = Vec::new();
+    while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
+        let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+
+        // tgnargs / tgnattr govern the two var-width array columns.
+        let tgnargs = col(&row, Anum_pg_trigger_tgnargs, "tgnargs")?.as_i16();
+
+        // build->tgnattr = pg_trigger->tgattr.dim1; the int2vector elements.
+        // tgattr is the first var-width field (always present, BKI_FORCE_NOT_NULL).
+        let tgattr =
+            int2vector_elems(col(&row, Anum_pg_trigger_tgattr, "tgattr")?.as_ref_bytes())?;
+
+        // tgargs: bytea of tgnargs NUL-terminated strings. C errors if NULL.
+        let tgargs = if tgnargs > 0 {
+            let image = bytea_col_opt(&row, Anum_pg_trigger_tgargs).ok_or_else(|| {
+                PgError::error(alloc::format!(
+                    "tgargs is null in trigger for relation {relid}"
+                ))
+            })?;
+            split_tgargs(vardata_any(&image)?, tgnargs)
+        } else {
+            Vec::new()
+        };
+
+        out.push(seam::ScannedPgTrigger {
+            tgoid: col(&row, Anum_pg_trigger_oid, "pg_trigger.oid")?.as_oid(),
+            // build->tgname = nameout(NameGetDatum(&pg_trigger->tgname)).
+            tgname: name_col(&row, Anum_pg_trigger_tgname, "tgname")?,
+            tgfoid: col(&row, Anum_pg_trigger_tgfoid, "tgfoid")?.as_oid(),
+            tgtype: col(&row, Anum_pg_trigger_tgtype, "tgtype")?.as_i16(),
+            tgenabled: col(&row, Anum_pg_trigger_tgenabled, "tgenabled")?.as_char(),
+            tgisinternal: col(&row, Anum_pg_trigger_tgisinternal, "tgisinternal")?.as_bool(),
+            tgparentid: col(&row, Anum_pg_trigger_tgparentid, "tgparentid")?.as_oid(),
+            tgconstrrelid: col(&row, Anum_pg_trigger_tgconstrrelid, "tgconstrrelid")?.as_oid(),
+            tgconstrindid: col(&row, Anum_pg_trigger_tgconstrindid, "tgconstrindid")?.as_oid(),
+            tgconstraint: col(&row, Anum_pg_trigger_tgconstraint, "tgconstraint")?.as_oid(),
+            tgdeferrable: col(&row, Anum_pg_trigger_tgdeferrable, "tgdeferrable")?.as_bool(),
+            tginitdeferred: col(&row, Anum_pg_trigger_tginitdeferred, "tginitdeferred")?.as_bool(),
+            tgnargs,
+            tgattr,
+            tgargs,
+            // tgqual = TextDatumGetCString(fastgetattr(... tgqual ...)) / NULL.
+            tgqual: text_col_opt(smcx, &row, Anum_pg_trigger_tgqual)?,
+            // tgoldtable/tgnewtable = nameout(...) / NULL (NameData columns).
+            tgoldtable: name_col_opt(&row, Anum_pg_trigger_tgoldtable),
+            tgnewtable: name_col_opt(&row, Anum_pg_trigger_tgnewtable),
+        });
+    }
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    drop(scratch);
+    Ok(out)
+}
+
+// ===========================================================================
 // relcache_scan_pg_constraint_fkeys — RelationGetFKeyList
 // ===========================================================================
 
@@ -920,6 +1073,7 @@ pub fn init_decode_seams() {
     seam::relcache_scan_pg_index::set(relcache_scan_pg_index);
     seam::relcache_scan_pg_rewrite::set(relcache_scan_pg_rewrite);
     seam::relcache_scan_pg_statistic_ext::set(relcache_scan_pg_statistic_ext);
+    seam::relcache_scan_pg_trigger::set(relcache_scan_pg_trigger);
     seam::relcache_scan_pg_constraint_fkeys::set(relcache_scan_pg_constraint_fkeys);
     seam::relcache_exclusion_info::set(relcache_exclusion_info);
     seam::scan_pg_attrdef::set(scan_pg_attrdef);

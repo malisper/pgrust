@@ -41,3 +41,9 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # types-relcache-entry (relcache-entry already transitively pulls types-nodes
 # via types-tuple), so a direct dep adds no cycle.
 types-nodes = { path = "../types-nodes" }
+
+# `rd_trigdesc` (the relation's TriggerDesc, built by RelationBuildTriggers and
+# CopyTriggerDesc'd into the CacheMemoryContext arena) is the value-typed
+# `types_trigger::TriggerDesc<'static>`. `types-trigger` is a leaf (mcx +
+# types-core only) and does NOT depend on relcache-entry, so this is acyclic.
+types-trigger = { path = "../types-trigger" }

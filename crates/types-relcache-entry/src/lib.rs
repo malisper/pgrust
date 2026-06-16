@@ -429,7 +429,20 @@ pub struct RelationData {
     /// `RelationBuildRuleLock` builds it; `rewriteHandler.c`'s rule-application
     /// core reads `rd_rules.rules[i].{event,qual,actions,isInstead,enabled}`.
     pub rd_rules: Option<mcx::PgBox<'static, RuleLock>>,
-    /// `TriggerDesc *trigdesc`. Presence only (seam vocabulary).
+    /// `TriggerDesc *trigdesc` — the relation's triggers. Built by
+    /// `RelationBuildTriggers` (commands/trigger.c), which scans `pg_trigger`,
+    /// assembles the [`types_trigger::TriggerDesc`] (each `Trigger`'s name /
+    /// args / qual / attr arrays), and `CopyTriggerDesc`s it into the
+    /// process-lifetime CacheMemoryContext arena, so the descriptor lives for
+    /// the entry's (backend's) lifetime exactly as C copies it into
+    /// `CacheMemoryContext`. `None` is the C `trigdesc == NULL` (no triggers).
+    /// The build family's owned->borrowed projection copies it into the trimmed
+    /// `types_rel::RelationData.rd_trigdesc` (`'mcx`) when it serves a consumer.
+    pub rd_trigdesc: Option<mcx::PgBox<'static, types_trigger::TriggerDesc<'static>>>,
+    /// `bool` mirror of `trigdesc != NULL` — the relcache build family's
+    /// presence flag, kept alongside [`Self::rd_trigdesc`] so the seam-level
+    /// readers (`with_rel(|r| r.rd_has_trigdesc)`) and the C `relhastriggers`
+    /// reconciliation stay cheap.
     pub rd_has_trigdesc: bool,
     /// `RowSecurityDesc *rd_rsdesc`. Presence only (seam vocabulary).
     pub rd_has_rsdesc: bool,

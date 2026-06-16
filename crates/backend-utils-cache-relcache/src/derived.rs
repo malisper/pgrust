@@ -732,6 +732,219 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
 }
 
 /* ==========================================================================
+ * RelationBuildTriggers / SetTriggerFlags -- the relation's TriggerDesc.
+ *
+ * Logically commands/trigger.c, but the build runs on the not-yet-inserted
+ * descriptor during the relcache build (so it takes `&mut RelationData`, like
+ * RelationBuildRuleLock) and the `pg_trigger` scan + per-row Form/var-column
+ * decode is the genam cross-unit primitive (`relcache_scan_pg_trigger` seam).
+ * The assembled TriggerDesc is allocated in the process-lifetime
+ * CacheMemoryContext arena (`cache_memory_context`) — the faithful
+ * `CopyTriggerDesc(... into CacheMemoryContext)` rendering — so it lives for
+ * the entry's (backend's) lifetime with no `'mcx` borrow.
+ * ======================================================================== */
+
+/// `SetTriggerFlags(trigdesc, trigger)` (commands/trigger.c): OR the trigger's
+/// hint flags into the `TriggerDesc` so the executor can skip searching for a
+/// kind of trigger the relation does not have.
+fn SetTriggerFlags(trigdesc: &mut types_trigger::TriggerDesc<'static>, tgtype: i16, trigger: &types_trigger::Trigger<'static>) {
+    use types_catalog::pg_trigger::{
+        TRIGGER_FOR_DELETE, TRIGGER_FOR_INSERT, TRIGGER_FOR_UPDATE, TRIGGER_TYPE_AFTER,
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_INSTEAD,
+        TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE,
+        TRIGGER_TYPE_UPDATE,
+    };
+
+    trigdesc.trig_insert_before_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT);
+    trigdesc.trig_insert_after_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_INSERT);
+    trigdesc.trig_insert_instead_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_INSERT);
+    trigdesc.trig_insert_before_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_INSERT,
+    );
+    trigdesc.trig_insert_after_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_AFTER,
+        TRIGGER_TYPE_INSERT,
+    );
+    trigdesc.trig_update_before_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_UPDATE);
+    trigdesc.trig_update_after_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_UPDATE);
+    trigdesc.trig_update_instead_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_UPDATE);
+    trigdesc.trig_update_before_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_UPDATE,
+    );
+    trigdesc.trig_update_after_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_AFTER,
+        TRIGGER_TYPE_UPDATE,
+    );
+    trigdesc.trig_delete_before_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_DELETE);
+    trigdesc.trig_delete_after_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE);
+    trigdesc.trig_delete_instead_row |=
+        TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_DELETE);
+    trigdesc.trig_delete_before_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_DELETE,
+    );
+    trigdesc.trig_delete_after_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_AFTER,
+        TRIGGER_TYPE_DELETE,
+    );
+    // there are no row-level truncate triggers
+    trigdesc.trig_truncate_before_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_TRUNCATE,
+    );
+    trigdesc.trig_truncate_after_statement |= TRIGGER_TYPE_MATCHES(
+        tgtype,
+        TRIGGER_TYPE_STATEMENT,
+        TRIGGER_TYPE_AFTER,
+        TRIGGER_TYPE_TRUNCATE,
+    );
+
+    // TRIGGER_USES_TRANSITION_TABLE(name) == (name != NULL).
+    let has_new = trigger.tgnewtable.is_some();
+    let has_old = trigger.tgoldtable.is_some();
+    trigdesc.trig_insert_new_table |= TRIGGER_FOR_INSERT(tgtype) && has_new;
+    trigdesc.trig_update_old_table |= TRIGGER_FOR_UPDATE(tgtype) && has_old;
+    trigdesc.trig_update_new_table |= TRIGGER_FOR_UPDATE(tgtype) && has_new;
+    trigdesc.trig_delete_old_table |= TRIGGER_FOR_DELETE(tgtype) && has_old;
+}
+
+/// `RelationBuildTriggers(relation)` (commands/trigger.c): build `rd_trigdesc`
+/// from `pg_trigger`. Called during build on the not-yet-inserted descriptor,
+/// so it takes `&mut RelationData`.
+///
+/// C scans `pg_trigger` by `tgrelid = RelationGetRelid` under
+/// `TriggerRelidNameIndexId` (name order, so triggers fire in name order),
+/// builds a working `Trigger[]`, sets the `TriggerDesc` hint flags via
+/// `SetTriggerFlags`, then `CopyTriggerDesc`s the whole thing into
+/// `CacheMemoryContext`. Here the `pg_trigger` scan + per-row Form/var-column
+/// decode is the genam cross-unit primitive (`relcache_scan_pg_trigger`); the
+/// assembled `TriggerDesc` is allocated directly in the process-lifetime
+/// [`cache_memory_context`] arena (so the copy-into-cache is implicit — every
+/// owned `Trigger` field already lands there). An empty scan stores `None`
+/// (the C `numtrigs == 0` path returns without setting `trigdesc`).
+pub fn RelationBuildTriggers(relation: &mut RelationData) -> PgResult<()> {
+    let cache_mcx = cache_memory_context();
+
+    // `systable_beginscan(pg_trigger, TriggerRelidNameIndexId, tgrelid = rd_id)`
+    // + per-row `GETSTRUCT(Form_pg_trigger)` + the four var-width columns
+    // (`tgattr`/`tgargs`/`tgqual`/`tgoldtable`/`tgnewtable`), genam-owned.
+    let scanned = genam_seam::relcache_scan_pg_trigger::call(relation.rd_id)?;
+
+    // There might not be any triggers (C: pfree(triggers); return;).
+    if scanned.is_empty() {
+        relation.rd_trigdesc = None;
+        return Ok(());
+    }
+
+    let numtrigs = scanned.len();
+    let mut trigdesc = types_trigger::TriggerDesc::new_in(cache_mcx);
+    let mut triggers: mcx::PgVec<'static, types_trigger::Trigger<'static>> =
+        mcx::PgVec::new_in(cache_mcx);
+    triggers.try_reserve(numtrigs).map_err(|_| cache_mcx.oom(numtrigs))?;
+
+    for row in scanned {
+        // build->tgname = nameout(...); the args/attr arrays + qual/transition
+        // tables, all copied into the cache arena (CopyTriggerDesc's pstrdups).
+        let tgname = mcx::PgString::from_str_in(&row.tgname, cache_mcx)
+            .map_err(|_| cache_mcx.oom(row.tgname.len()))?;
+
+        // build->tgnattr = pg_trigger->tgattr.dim1; the int2vector elements.
+        let mut tgattr: mcx::PgVec<'static, i16> = mcx::PgVec::new_in(cache_mcx);
+        tgattr.try_reserve(row.tgattr.len()).map_err(|_| cache_mcx.oom(row.tgattr.len()))?;
+        for &a in &row.tgattr {
+            tgattr.push(a);
+        }
+        let tgnattr = tgattr.len() as i16;
+
+        // build->tgargs[i] = pstrdup(p); one PgString per argument.
+        let mut tgargs: mcx::PgVec<'static, mcx::PgString<'static>> = mcx::PgVec::new_in(cache_mcx);
+        tgargs.try_reserve(row.tgargs.len()).map_err(|_| cache_mcx.oom(row.tgargs.len()))?;
+        for arg in &row.tgargs {
+            let s = mcx::PgString::from_str_in(arg, cache_mcx).map_err(|_| cache_mcx.oom(arg.len()))?;
+            tgargs.push(s);
+        }
+
+        let tgqual = match &row.tgqual {
+            Some(q) => Some(
+                mcx::PgString::from_str_in(q, cache_mcx).map_err(|_| cache_mcx.oom(q.len()))?,
+            ),
+            None => None,
+        };
+        let tgoldtable = match &row.tgoldtable {
+            Some(t) => Some(
+                mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
+            ),
+            None => None,
+        };
+        let tgnewtable = match &row.tgnewtable {
+            Some(t) => Some(
+                mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
+            ),
+            None => None,
+        };
+
+        triggers.push(types_trigger::Trigger {
+            tgoid: row.tgoid,
+            tgname,
+            tgfoid: row.tgfoid,
+            tgtype: row.tgtype,
+            tgenabled: row.tgenabled,
+            tgisinternal: row.tgisinternal,
+            // build->tgisclone = OidIsValid(pg_trigger->tgparentid).
+            tgisclone: OidIsValid(row.tgparentid),
+            tgconstrrelid: row.tgconstrrelid,
+            tgconstrindid: row.tgconstrindid,
+            tgconstraint: row.tgconstraint,
+            tgdeferrable: row.tgdeferrable,
+            tginitdeferred: row.tginitdeferred,
+            tgnargs: row.tgnargs,
+            tgnattr,
+            tgattr,
+            tgargs,
+            tgqual,
+            tgoldtable,
+            tgnewtable,
+        });
+    }
+
+    // for (i = 0; i < numtrigs; i++) SetTriggerFlags(trigdesc, &triggers[i]);
+    for trig in triggers.iter() {
+        SetTriggerFlags(&mut trigdesc, trig.tgtype, trig);
+    }
+
+    trigdesc.numtriggers = numtrigs as i32;
+    trigdesc.triggers = triggers;
+
+    let boxed = mcx::alloc_in(cache_mcx, trigdesc).map_err(|_| cache_mcx.oom(0))?;
+    relation.rd_trigdesc = Some(boxed);
+    Ok(())
+}
+
+/* ==========================================================================
  * Bitmapset helper (Bitmapset over offset members, kept sorted/deduped to
  * match `bms_add_member`/`bms_equal` ordering used by the bitmap builders).
  * ======================================================================== */

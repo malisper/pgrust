@@ -184,6 +184,61 @@ pub struct ScannedPgRewrite {
     pub ev_action: Option<String>,
 }
 
+/// One decoded `pg_trigger` row as `RelationBuildTriggers` (commands/trigger.c)
+/// consumes it: the `Form_pg_trigger` scalar fields plus the four
+/// variable-length columns the builder needs (`tgattr` int2vector, `tgargs`
+/// bytea, `tgqual`/`tgoldtable`/`tgnewtable`). Returned as owner-vocabulary
+/// values (no trigger types — the relcache trigger builder marshals these into
+/// its owned `Trigger`/`TriggerDesc`). The scan order is the
+/// `TriggerRelidNameIndexId` order (by `tgname`), so triggers fire in name
+/// order.
+#[derive(Clone, Debug)]
+pub struct ScannedPgTrigger {
+    /// `Form_pg_trigger.oid` — the trigger OID (`Trigger.tgoid`).
+    pub tgoid: Oid,
+    /// `NameData tgname` — the trigger's name (`NameStr`).
+    pub tgname: String,
+    /// `Oid tgfoid` — OID of the function to call.
+    pub tgfoid: Oid,
+    /// `int16 tgtype` — `TRIGGER_TYPE_*` bitmask.
+    pub tgtype: i16,
+    /// `char tgenabled` — firing config (`TRIGGER_FIRES_*`).
+    pub tgenabled: i8,
+    /// `bool tgisinternal`.
+    pub tgisinternal: bool,
+    /// `OidIsValid(tgparentid)` — `Trigger.tgisclone` is derived from whether
+    /// the parent trigger OID is valid (the relcache builder does
+    /// `tgisclone = OidIsValid(pg_trigger->tgparentid)`).
+    pub tgparentid: Oid,
+    /// `Oid tgconstrrelid`.
+    pub tgconstrrelid: Oid,
+    /// `Oid tgconstrindid`.
+    pub tgconstrindid: Oid,
+    /// `Oid tgconstraint`.
+    pub tgconstraint: Oid,
+    /// `bool tgdeferrable`.
+    pub tgdeferrable: bool,
+    /// `bool tginitdeferred`.
+    pub tginitdeferred: bool,
+    /// `int16 tgnargs` — number of `tgargs` strings.
+    pub tgnargs: i16,
+    /// `int2vector tgattr` — the UPDATE OF column numbers (empty when
+    /// `tgattr.dim1 == 0`). `Trigger.tgnattr` is its length.
+    pub tgattr: Vec<AttrNumber>,
+    /// `bytea tgargs` — the `tgnargs` textual arguments. C reads
+    /// `VARDATA_ANY(val)` then splits the `tgnargs` NUL-terminated strings;
+    /// the decode returns them already split. Empty when `tgnargs == 0` (the
+    /// C `tgargs == NULL`).
+    pub tgargs: Vec<String>,
+    /// `pg_node_tree tgqual` — the WHEN expression as `nodeToString` text, or
+    /// `None` for the C `isnull` (no WHEN clause).
+    pub tgqual: Option<String>,
+    /// `NameData tgoldtable` — OLD transition-table name, or `None` (NULL).
+    pub tgoldtable: Option<String>,
+    /// `NameData tgnewtable` — NEW transition-table name, or `None` (NULL).
+    pub tgnewtable: Option<String>,
+}
+
 /// One key column's resolved exclusion info as `RelationGetExclusionInfo`
 /// consumes it: the operator OID (`conexclop`), its underlying procedure OID
 /// (`get_opcode`), and its opfamily strategy number
@@ -248,6 +303,19 @@ seam_core::seam!(
     /// stxrelid = relid)` then `systable_getnext`, collecting each object OID.
     /// Can `ereport(ERROR)`, carried on `Err`.
     pub fn relcache_scan_pg_statistic_ext(relid: Oid) -> PgResult<Vec<Oid>>
+);
+
+seam_core::seam!(
+    /// `RelationBuildTriggers`'s scan (commands/trigger.c):
+    /// `systable_beginscan(pg_trigger, TriggerRelidNameIndexId, tgrelid =
+    /// relid)` then `systable_getnext` + `GETSTRUCT(Form_pg_trigger)` plus the
+    /// `fastgetattr` reads of the four variable-length columns (`tgattr`
+    /// int2vector, `tgargs` bytea split into `tgnargs` strings, and the
+    /// `tgqual`/`tgoldtable`/`tgnewtable` text/name columns) for each row.
+    /// Returns every matching decoded row in scan (`tgname`) order so triggers
+    /// are built in name order. Can `ereport(ERROR)` (catalog read failure,
+    /// null `tgargs`), carried on `Err`.
+    pub fn relcache_scan_pg_trigger(relid: Oid) -> PgResult<Vec<ScannedPgTrigger>>
 );
 
 seam_core::seam!(

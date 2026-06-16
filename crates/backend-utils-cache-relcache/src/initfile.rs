@@ -349,8 +349,13 @@ fn finish_relcache_entries() -> PgResult<()> {
                 restart = true;
             }
             if with_rel(rd, |r| r.rd_rel.relhastriggers && !r.rd_has_trigdesc) {
-                xunit::RelationBuildTriggers(rd)?;
+                with_rel_mut(rd, crate::derived::RelationBuildTriggers)?;
                 with_rel_mut(rd, |r| {
+                    // RelationBuildTriggers sets r.rd_trigdesc; keep the presence
+                    // flag in sync and flip relhastriggers off if the scan was
+                    // empty (C: relhastriggers gets corrected when no triggers
+                    // actually exist).
+                    r.rd_has_trigdesc = r.rd_trigdesc.is_some();
                     if !r.rd_has_trigdesc {
                         r.rd_rel.relhastriggers = false;
                     }
@@ -1218,6 +1223,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
 
         // C: reset all the derived/per-xact fields to their fresh state.
         rel.rd_rules = None;
+        rel.rd_trigdesc = None;
         rel.rd_has_trigdesc = false;
         rel.rd_has_rsdesc = false;
         rel.rd_has_partkey = false;
@@ -1830,12 +1836,6 @@ mod xunit {
         // C: Desc_pg_* (the genbki Schema_pg_* arrays). Outward seam to the
         // bootstrap-catalog-data owner; installed from its `init_seams()`.
         backend_utils_cache_relcache_seams::catalog_schema_attrs::call(reltype)
-    }
-    /// `RelationBuildTriggers(rel)` (trigger.c): scan `pg_trigger`, build
-    /// `rel->trigdesc`. Mutates the relcache entry in place; the trigger unit is
-    /// not yet ported. Panics until it lands.
-    pub(super) fn RelationBuildTriggers(_rel: types_core::primitive::Oid) -> PgResult<()> {
-        panic!("relcache-initfile: RelationBuildTriggers (backend-commands-trigger not yet ported)")
     }
     /// `RelationBuildRowSecurity(rel)` (policy.c): scan `pg_policy`, build
     /// `rel->rd_rsdesc`. Mutates the relcache entry in place; the policy unit is

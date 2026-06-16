@@ -38,3 +38,4 @@ pub mod pg_policy;
 pub mod pg_publication;
 pub mod pg_parameter_acl;
 pub mod pg_subscription;
+pub mod pg_trigger;

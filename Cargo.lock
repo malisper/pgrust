@@ -18961,6 +18961,7 @@ dependencies = [
  "types-spgist",
  "types-storage",
  "types-tableam",
+ "types-trigger",
  "types-tuple",
  "types-wal",
 ]
@@ -22173,6 +22174,7 @@ dependencies = [
  "types-reloptions",
  "types-storage",
  "types-tableam",
+ "types-trigger",
  "types-tuple",
 ]
 

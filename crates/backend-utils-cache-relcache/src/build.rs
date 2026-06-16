@@ -165,15 +165,107 @@ fn project_entry<'mcx>(
         rd_opfamily,
         rd_indoption,
         rd_indcollation,
-        // rd_trigdesc is built by RelationBuildTriggers (commands/trigger.c, F1).
-        // Until that lands the trimmed slice carries None (the C NULL); the
-        // entry's presence flag rd_has_trigdesc tracks whether the relation has
-        // triggers at all.
-        rd_trigdesc: None,
+        // rd_trigdesc: deep-copy the entry's cache-arena TriggerDesc (built by
+        // RelationBuildTriggers) into `mcx` for the cross-unit value-slice. C
+        // hands the consumer the cache's `trigdesc` pointer; the owned model
+        // projects a copy charged to the caller's context (`None` is the C
+        // NULL — no triggers).
+        rd_trigdesc: match &r.rd_trigdesc {
+            Some(td) => Some(project_trigdesc(mcx, td)?),
+            None => None,
+        },
         // Mirror of the entry's `pgstat_enabled`; the pgstat count seams read
         // it off this trimmed handle to replicate the C count macros' gate.
         pgstat_enabled: r.pgstat_enabled,
     })
+}
+
+/// Deep-copy the entry's cache-arena `TriggerDesc` into `mcx` for the
+/// cross-unit value-slice (`types_rel::RelationData.rd_trigdesc`). Mirrors
+/// `CopyTriggerDesc` (every `Trigger` field — name / attr / args / qual /
+/// transition tables — is duplicated), but copying into the caller's `mcx`
+/// instead of `CacheMemoryContext`.
+fn project_trigdesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &types_trigger::TriggerDesc<'_>,
+) -> PgResult<mcx::PgBox<'mcx, types_trigger::TriggerDesc<'mcx>>> {
+    let mut td = types_trigger::TriggerDesc::new_in(mcx);
+    // Copy the hint flags verbatim.
+    td.numtriggers = src.numtriggers;
+    td.trig_insert_before_row = src.trig_insert_before_row;
+    td.trig_insert_after_row = src.trig_insert_after_row;
+    td.trig_insert_instead_row = src.trig_insert_instead_row;
+    td.trig_insert_before_statement = src.trig_insert_before_statement;
+    td.trig_insert_after_statement = src.trig_insert_after_statement;
+    td.trig_update_before_row = src.trig_update_before_row;
+    td.trig_update_after_row = src.trig_update_after_row;
+    td.trig_update_instead_row = src.trig_update_instead_row;
+    td.trig_update_before_statement = src.trig_update_before_statement;
+    td.trig_update_after_statement = src.trig_update_after_statement;
+    td.trig_delete_before_row = src.trig_delete_before_row;
+    td.trig_delete_after_row = src.trig_delete_after_row;
+    td.trig_delete_instead_row = src.trig_delete_instead_row;
+    td.trig_delete_before_statement = src.trig_delete_before_statement;
+    td.trig_delete_after_statement = src.trig_delete_after_statement;
+    td.trig_truncate_before_statement = src.trig_truncate_before_statement;
+    td.trig_truncate_after_statement = src.trig_truncate_after_statement;
+    td.trig_insert_new_table = src.trig_insert_new_table;
+    td.trig_update_old_table = src.trig_update_old_table;
+    td.trig_update_new_table = src.trig_update_new_table;
+    td.trig_delete_old_table = src.trig_delete_old_table;
+
+    let mut triggers: PgVec<'mcx, types_trigger::Trigger<'mcx>> = mcx::PgVec::new_in(mcx);
+    triggers
+        .try_reserve(src.triggers.len())
+        .map_err(|_| mcx.oom(src.triggers.len()))?;
+    for t in src.triggers.iter() {
+        let tgname = PgString::from_str_in(t.tgname.as_str(), mcx)?;
+        let mut tgattr: PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+        tgattr.try_reserve(t.tgattr.len()).map_err(|_| mcx.oom(t.tgattr.len()))?;
+        for &a in t.tgattr.iter() {
+            tgattr.push(a);
+        }
+        let mut tgargs: PgVec<'mcx, PgString<'mcx>> = mcx::PgVec::new_in(mcx);
+        tgargs.try_reserve(t.tgargs.len()).map_err(|_| mcx.oom(t.tgargs.len()))?;
+        for a in t.tgargs.iter() {
+            tgargs.push(PgString::from_str_in(a.as_str(), mcx)?);
+        }
+        let tgqual = match &t.tgqual {
+            Some(q) => Some(PgString::from_str_in(q.as_str(), mcx)?),
+            None => None,
+        };
+        let tgoldtable = match &t.tgoldtable {
+            Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        };
+        let tgnewtable = match &t.tgnewtable {
+            Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        };
+        triggers.push(types_trigger::Trigger {
+            tgoid: t.tgoid,
+            tgname,
+            tgfoid: t.tgfoid,
+            tgtype: t.tgtype,
+            tgenabled: t.tgenabled,
+            tgisinternal: t.tgisinternal,
+            tgisclone: t.tgisclone,
+            tgconstrrelid: t.tgconstrrelid,
+            tgconstrindid: t.tgconstrindid,
+            tgconstraint: t.tgconstraint,
+            tgdeferrable: t.tgdeferrable,
+            tginitdeferred: t.tginitdeferred,
+            tgnargs: t.tgnargs,
+            tgnattr: t.tgnattr,
+            tgattr,
+            tgargs,
+            tgqual,
+            tgoldtable,
+            tgnewtable,
+        });
+    }
+    td.triggers = triggers;
+    mcx::alloc_in(mcx, td).map_err(|_| mcx.oom(0))
 }
 
 /// Project the owned `FormPgClass` mirror into the cross-unit trimmed form,
@@ -322,13 +414,18 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
             relation.rd_rules = None;
         }
         if relation.rd_rel.relhastriggers {
-            // RelationBuildTriggers is commands/trigger.c (cross-unit, trigger
-            // F1). Routed through the relcache-seams declaration; trigger F1
-            // installs it. Until then the seam panics loudly (uninstalled —
-            // tracked in seams-init's CONTRACT_RECONCILE_PENDING).
-            backend_utils_cache_relcache_seams::relation_build_triggers::call(relation.rd_id)?;
-            relation.rd_has_trigdesc = true;
+            // RelationBuildTriggers (commands/trigger.c): scan pg_trigger, build
+            // the TriggerDesc, and store it on the not-yet-inserted descriptor.
+            // The catalog-read leg is OWN logic over the genam
+            // `relcache_scan_pg_trigger` primitive; the descriptor is allocated
+            // in the CacheMemoryContext arena (see derived::RelationBuildTriggers).
+            crate::derived::RelationBuildTriggers(&mut relation)?;
+            // C: RelationBuildTriggers sets relation->trigdesc; the presence flag
+            // tracks whether the scan actually found triggers (an empty scan
+            // leaves trigdesc NULL even though relhastriggers was set).
+            relation.rd_has_trigdesc = relation.rd_trigdesc.is_some();
         } else {
+            relation.rd_trigdesc = None;
             relation.rd_has_trigdesc = false;
         }
         if relation.rd_rel.relrowsecurity {

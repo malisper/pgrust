@@ -30,6 +30,8 @@ types-core = { path = "../types-core" }
 # two-phase rebuild ordering.
 types-catalog = { path = "../types-catalog" }
 types-rel = { path = "../types-rel" }
+# `rd_trigdesc` value types (Trigger / TriggerDesc) built by RelationBuildTriggers.
+types-trigger = { path = "../types-trigger" }
 # The owned relcache entry-store type family (`RelationData` + companions),
 # relocated to its own crate in F0' so the relcache seams crate can name it.
 types-relcache-entry = { path = "../types-relcache-entry" }
