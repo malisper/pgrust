@@ -25,6 +25,7 @@ fn empty_plan<'mcx>() -> Plan<'mcx> {
         righttree: None,
         extParam: None,
         allParam: None,
+        initPlan: None,
     }
 }
 
