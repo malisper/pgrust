@@ -32,8 +32,8 @@ fn dummy_info(name: &'static str, fixed: bool) -> PgStat_KindInfo {
 #[test]
 fn entry_ref_default_is_unbound() {
     let r = PgStat_EntryRef::new();
-    assert!(r.shared_entry.is_none());
-    assert!(r.shared_stats.is_none());
+    assert!(r.shared_entry.is_null());
+    assert!(r.shared_stats.is_null());
     assert!(r.pending.is_none());
     assert_eq!(r.generation, 0);
 }
