@@ -210,6 +210,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The combined `systable_inplace_update_begin` → mutate → finish standard
+    /// flow (genam.c), specialized to the "overwrite a fixed-size header field"
+    /// use the catalog callers (`dropdb` marking `datconnlimit` invalid,
+    /// `vac_update_datfrozenxid`, etc.) need. C exposes three primitives
+    /// (`_begin` returns an exclusive-locked buffer + the live `oldtup`, the
+    /// caller mutates `GETSTRUCT(tup)`, then `_finish` calls
+    /// `heap_inplace_update_and_unlock`); the locked buffer + `SysScanDesc` are
+    /// scan-internal state that cannot cross a seam without leaking the buffer
+    /// lock across the consumer's `?`, so the owner runs the whole flow and the
+    /// per-row mutation is supplied as a callback (AGENTS.md "shared-state
+    /// access goes through a callback shape").
+    ///
+    /// The owner: `systable_inplace_update_begin(relation, index_id, index_ok,
+    /// NULL, keys)` (the buffer-locking retry loop) → if no live tuple, returns
+    /// `Ok(None)` (the C `*oldtupcopy = NULL`); else builds a writable copy of
+    /// the tuple's user-data area, invokes `mutate(&mut new_data)` (the C
+    /// `datform->field = ...` in-place edit — the area cannot change size), then
+    /// `systable_inplace_update_finish` (`heap_inplace_update_and_unlock`) and
+    /// `systable_endscan`. Returns the updated tuple's `t_self` (so a caller can
+    /// follow with a transactional `CatalogTupleDelete`, as `dropdb` does), or
+    /// `None` when the key found no live tuple. `Err` carries the
+    /// parallel-mode / retry-exhaustion / buffer-lock / WAL `ereport(ERROR)`
+    /// surface. The owning genam unit installs this from its `init_seams()`.
+    pub fn systable_inplace_update<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation: &types_rel::RelationData<'mcx>,
+        index_id: Oid,
+        index_ok: bool,
+        keys: &[types_scan::scankey::ScanKeyData],
+        mutate: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+    ) -> types_error::PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
+);
+
+seam_core::seam!(
     /// `BuildIndexValueDescription(indexRelation, values, isnull)` (genam.c):
     /// build a "(key_names) = (key_values)" description of an index entry,
     /// or `Ok(None)` when the current user lacks rights to see the key values
