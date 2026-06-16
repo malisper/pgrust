@@ -38,6 +38,8 @@ backend-access-nbtree-build-seams = { path = "../backend-access-nbtree-build-sea
 
 # Outward seam crates (callees in not-yet-ported owners).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# `BTreeShmemSize`/`BTreeShmemInit` (nbtutils.c) seams summed/called by ipci.c.
+backend-access-nbtree-seams = { path = "../backend-access-nbtree-seams" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
@@ -59,3 +61,9 @@ backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray
 backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# nbtutils.c BTVacInfo shared state: BtreeVacuumLock interlock (lwlock) +
+# "BTree Vacuum State" ShmemInitStruct / add_size / mul_size carving.
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+# BTreeShmemInit seeds the cycle counter with time(NULL).
+libc = "0.2"

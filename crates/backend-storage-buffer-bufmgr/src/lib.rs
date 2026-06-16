@@ -678,4 +678,12 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::fsm_buffer_get_page::set(fsm_buffer_get_page);
     backend_storage_buffer_bufmgr_seams::fsm_buffer_set_page::set(fsm_buffer_set_page);
     backend_storage_buffer_bufmgr_seams::smgr_extend_page::set(smgr_extend_page);
+    // Shared-memory sizing + placement (buf_init.c) — the ipci.c
+    // `CalculateShmemSize` / `CreateOrAttachShmemStructs` entry points.
+    backend_storage_buffer_bufmgr_seams::buffer_manager_shmem_size::set(
+        mgr::BufferManagerShmemSize,
+    );
+    backend_storage_buffer_bufmgr_seams::buffer_manager_shmem_init::set(
+        mgr::BufferManagerShmemInit,
+    );
 }

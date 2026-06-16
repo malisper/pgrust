@@ -23,7 +23,7 @@ use types_cache::syscache::{
     ObjectOwnerAcl, RolePasswordLookup, TypeOwnerAcl,
 };
 use types_acl::AclItem;
-use types_catalog::pg_aggregate::AggRow;
+use types_catalog::pg_aggregate::{AggFormData, AggRow};
 use types_nodes::nodes::NodePtr;
 use types_partition::PartrelTupleData;
 
@@ -563,6 +563,23 @@ seam_core::seam!(
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises its
     /// own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
     pub fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<AggRow>>
+);
+
+seam_core::seam!(
+    /// `aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid));
+    /// aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple)` plus the two
+    /// `CATALOG_VARLEN` `agginitval` / `aggminitval` `SysCacheGetAttr` text
+    /// columns (nodeAgg.c `ExecInitAgg`'s `fetch_agg_form`). Projects the full
+    /// [`AggFormData`] (every aggregate support-function Oid + the transition
+    /// type/space columns + the `aggfinalextra`/`aggmfinalextra` flags +
+    /// `aggfinalmodify`/`aggmfinalmodify` + `aggkind` + the nullable initial-value
+    /// texts) so the executor can read it all from the one pinned tuple as the C
+    /// does. `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises
+    /// its own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
+    pub fn agg_form_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        aggfnoid: Oid,
+    ) -> PgResult<Option<AggFormData>>
 );
 
 seam_core::seam!(
