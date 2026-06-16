@@ -196,6 +196,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lstat(filename, &st)` behind the fd owner (dbcommands.c
+    /// `remove_dbtablespaces` / `check_db_file_conflict`): like [`stat_file`] but
+    /// does not follow a symlink (the `pg_tblspc/<oid>` entries are symlinks, so
+    /// the database commands lstat them to test for the per-database
+    /// subdirectory's existence and `S_ISDIR`). `Ok(None)` mirrors C's
+    /// `missing_ok && errno == ENOENT`.
+    pub fn lstat_file(filename: &str, missing_ok: bool) -> PgResult<Option<StatInfo>>
+);
+
+seam_core::seam!(
     /// `AllocateDir(dirname)` + the full `ReadDir` walk + `FreeDir`
     /// (genfile.c). Returns one [`DirEntryInfo`] per entry (including `.`/`..`
     /// and the per-file `stat`; the caller applies the dot-dir / hidden-file /
@@ -616,6 +626,13 @@ seam_core::seam!(
     /// failing `errno` (the caller, `recovery_create_dbdir`, builds the
     /// `ereport(PANIC)`).
     pub fn pg_mkdir_p(path: &str) -> Result<(), i32>
+);
+
+seam_core::seam!(
+    /// `rmdir(path)` (libc, reached via movedb in dbcommands.c): remove the
+    /// (empty) directory `path`. Returns `Ok(())` on success; on failure returns
+    /// the failing `errno` (the caller builds the `elog(ERROR)`).
+    pub fn rmdir(path: &str) -> Result<(), i32>
 );
 
 seam_core::seam!(

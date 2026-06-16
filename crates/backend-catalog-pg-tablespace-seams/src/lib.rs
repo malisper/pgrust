@@ -58,6 +58,20 @@ seam!(
 );
 
 seam!(
+    /// `table_beginscan_catalog(rel, 0, NULL)` + `heap_getnext` loop over the
+    /// whole `pg_tablespace` relation (`dbcommands.c`'s
+    /// `CreateDatabaseUsingFileCopy` / `remove_dbtablespaces` /
+    /// `check_db_file_conflict` each iterate every tablespace), returning the
+    /// `((Form_pg_tablespace) GETSTRUCT(tuple))->oid` of every row in scan
+    /// order. The caller has opened `rel` (`AccessShareLock`) and filters out
+    /// `GLOBALTABLESPACE_OID` / does its own `GetDatabasePath` + `stat`/`rmtree`
+    /// per oid, so only the bare oid list crosses.
+    pub fn scan_all_tablespace_oids<'mcx>(
+        rel: &Relation<'mcx>,
+    ) -> PgResult<Vec<Oid>>
+);
+
+seam!(
     /// `table_beginscan_catalog` over `Anum_pg_tablespace_oid == spc_oid`
     /// (`F_OIDEQ`) + `heap_getnext`, returning the `pstrdup(NameStr(spcname))`
     /// of the match (palloc'd in `mcx`) or `None`.
