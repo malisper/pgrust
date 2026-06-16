@@ -826,8 +826,34 @@ fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadloc
     panic!("ProcLockWakeup over the lock.c-built LockSpace arena: lock.c not yet ported")
 }
 
+/// `ProcGlobal->checkpointerProc` — the checkpointer's advertised proc number
+/// (`INVALID_PROC_NUMBER` while not running). Read by `RequestCheckpoint` /
+/// `ForwardSyncRequest` to wake the checkpointer.
+fn checkpointer_proc() -> ProcNumber {
+    crate::proc_shmem::with_proc_global(|pg| pg.checkpointerProc)
+}
+
+/// `ProcGlobal->checkpointerProc = MyProcNumber` — the checkpointer advertises
+/// its own proc number at startup.
+fn set_checkpointer_proc_to_self() -> PgResult<()> {
+    let me = crate::proc_shmem::my_proc_number();
+    crate::proc_shmem::with_proc_global(|pg| pg.checkpointerProc = me);
+    Ok(())
+}
+
+/// `ProcGlobal->walwriterProc = MyProcNumber` — the walwriter advertises its
+/// own proc number at startup so backends can wake it while it sleeps.
+fn set_walwriter_proc_to_self() -> PgResult<()> {
+    let me = crate::proc_shmem::my_proc_number();
+    crate::proc_shmem::with_proc_global(|pg| pg.walwriterProc = me);
+    Ok(())
+}
+
 /// Install every inward seam this unit owns.
 pub(crate) fn install() {
+    seams::checkpointer_proc::set(checkpointer_proc);
+    seams::set_checkpointer_proc_to_self::set(set_checkpointer_proc_to_self);
+    seams::set_walwriter_proc_to_self::set(set_walwriter_proc_to_self);
     seams::init_process::set(init_process);
     seams::proc_lock_wakeup::set(proc_lock_wakeup);
     seams::proc_lw_waiting::set(proc_lw_waiting);

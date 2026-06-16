@@ -35,11 +35,16 @@ fn rescan_expr_context_owned(_econtext_idx: i32) -> PgResult<()> {
 /// per-tuple memory. Owned by `backend-executor-execUtils`; not yet wired (see
 /// `rescan_expr_context_owned`).
 #[inline]
-fn reset_expr_context_tmp() -> PgResult<()> {
-    panic!(
-        "ResetExprContext (executor/executor.h) is not yet wired: \
-         backend-executor-execUtils owns it"
-    )
+fn reset_expr_context_tmp<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // ResetExprContext(aggstate->tmpcontext): tmpcontext is an EcxtId into the
+    // EState pool; reset its per-tuple memory through the execUtils seam.
+    if let Some(ecxt) = aggstate.tmpcontext {
+        backend_executor_execUtils_seams::reset_expr_context::call(estate, ecxt)?;
+    }
+    Ok(())
 }
 
 /// `ExecQual(state, econtext)` (executor/executor.h) over the Agg's owned
@@ -195,8 +200,8 @@ pub fn agg_retrieve_direct<'mcx>(
         };
 
         // tmpcontext->ecxt_innertuple = econtext->ecxt_outertuple;
-        let econtext_outertuple = econtext_outertuple_slot(aggstate);
-        set_tmpcontext_innertuple(aggstate, econtext_outertuple);
+        let econtext_outertuple = econtext_outertuple_slot(aggstate, estate);
+        set_tmpcontext_innertuple(aggstate, estate, econtext_outertuple);
 
         // node->aggstrategy of the current phase.
         let node_aggstrategy = phase_aggstrategy(aggstate);
@@ -273,7 +278,7 @@ pub fn agg_retrieve_direct<'mcx>(
 
                 // set up for first advance_aggregates call
                 // tmpcontext->ecxt_outertuple = firstSlot;
-                set_tmpcontext_outertuple(aggstate, Some(first_slot));
+                set_tmpcontext_outertuple(aggstate, estate, Some(first_slot));
 
                 // Process each outer-plan tuple, and then fetch the next one,
                 // until we exhaust the outer plan or cross a group boundary.
@@ -288,7 +293,7 @@ pub fn agg_retrieve_direct<'mcx>(
                     crate::transition::advance_aggregates(aggstate, estate)?;
 
                     // Reset per-input-tuple context after each tuple.
-                    reset_expr_context_tmp()?;
+                    reset_expr_context_tmp(aggstate, estate)?;
 
                     let outerslot = crate::node_lifecycle::fetch_input_tuple(aggstate, estate)?;
                     if tup_is_null(outerslot, estate) {
@@ -296,7 +301,7 @@ pub fn agg_retrieve_direct<'mcx>(
 
                         // if we built hash tables, finalize any spills
                         if aggstate.aggstrategy == AGG_MIXED && aggstate.current_phase == 1 {
-                            crate::spill::hashagg_finish_initial_spills(aggstate, mcx)?;
+                            crate::spill::hashagg_finish_initial_spills(aggstate, estate, mcx)?;
                         }
 
                         if has_grouping_sets {
@@ -309,7 +314,7 @@ pub fn agg_retrieve_direct<'mcx>(
                     }
                     // set up for next advance_aggregates call
                     // tmpcontext->ecxt_outertuple = outerslot;
-                    set_tmpcontext_outertuple(aggstate, outerslot);
+                    set_tmpcontext_outertuple(aggstate, estate, outerslot);
 
                     // If we are grouping, check whether we've crossed a group
                     // boundary.
@@ -317,7 +322,7 @@ pub fn agg_retrieve_direct<'mcx>(
                     let node_numcols = phase_numcols(aggstate);
                     if node_aggstrategy != AGG_PLAIN && node_numcols > 0 {
                         // tmpcontext->ecxt_innertuple = firstSlot;
-                        set_tmpcontext_innertuple(aggstate, Some(first_slot));
+                        set_tmpcontext_innertuple(aggstate, estate, Some(first_slot));
                         if !exec_qual_tmpcontext(phase_eqfunction(
                             aggstate,
                             (node_numcols - 1) as usize,
@@ -332,7 +337,7 @@ pub fn agg_retrieve_direct<'mcx>(
 
             // Use the representative input tuple for any references to
             // non-aggregated input columns. econtext->ecxt_outertuple = firstSlot;
-            set_econtext_outertuple(aggstate, Some(first_slot));
+            set_econtext_outertuple(aggstate, estate, Some(first_slot));
         }
 
         debug_assert!(aggstate.projected_set >= 0);
@@ -340,7 +345,7 @@ pub fn agg_retrieve_direct<'mcx>(
         let current_set = aggstate.projected_set;
 
         // prepare_projection_slot(aggstate, econtext->ecxt_outertuple, currentSet);
-        let proj_input = econtext_outertuple_slot(aggstate)
+        let proj_input = econtext_outertuple_slot(aggstate, estate)
             .expect("agg_retrieve_direct: econtext->ecxt_outertuple not set");
         crate::finalize::prepare_projection_slot(aggstate, proj_input, current_set, estate)?;
 
@@ -439,41 +444,54 @@ fn phase_eqfunction<'a, 'mcx>(
 
 /// `econtext->ecxt_outertuple` where econtext is the node's per-output-tuple
 /// context (`aggstate->ss.ps.ps_ExprContext`).
-fn econtext_outertuple_slot(aggstate: &AggStateData<'_>) -> Option<SlotId> {
-    // The scaffold carries the per-output econtext through the EState pool by
-    // id (`ps_ExprContext`); its outertuple link is reached through the owner.
-    // Until the owner lands, the link is read from the node's owned slot fields
-    // via the tmpcontext mirror set above. We model `econtext->ecxt_outertuple`
-    // as the outer tuple last linked into the tmpcontext, matching the C data
-    // flow in this function (the value originates from econtext and is mirrored
-    // into tmpcontext->ecxt_innertuple at the top of each loop).
+fn econtext_outertuple_slot<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<SlotId> {
+    // The per-output econtext is carried through the EState pool by id
+    // (`ps_ExprContext`); its outertuple link is reached by resolving the id.
+    // We model `econtext->ecxt_outertuple` as the outer tuple last linked into
+    // the tmpcontext, matching the C data flow in this function (the value
+    // originates from econtext and is mirrored into tmpcontext->ecxt_innertuple
+    // at the top of each loop).
     aggstate
         .tmpcontext
-        .as_ref()
-        .and_then(|tc| tc.ecxt_outertuple)
+        .and_then(|id| estate.ecxt(id).ecxt_outertuple)
 }
 
 /// `tmpcontext->ecxt_innertuple = slot`.
-fn set_tmpcontext_innertuple(aggstate: &mut AggStateData<'_>, slot: Option<SlotId>) {
-    if let Some(tc) = aggstate.tmpcontext.as_mut() {
-        tc.ecxt_innertuple = slot;
+fn set_tmpcontext_innertuple<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: Option<SlotId>,
+) {
+    if let Some(id) = aggstate.tmpcontext {
+        estate.ecxt_mut(id).ecxt_innertuple = slot;
     }
 }
 
 /// `tmpcontext->ecxt_outertuple = slot`.
-fn set_tmpcontext_outertuple(aggstate: &mut AggStateData<'_>, slot: Option<SlotId>) {
-    if let Some(tc) = aggstate.tmpcontext.as_mut() {
-        tc.ecxt_outertuple = slot;
+fn set_tmpcontext_outertuple<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: Option<SlotId>,
+) {
+    if let Some(id) = aggstate.tmpcontext {
+        estate.ecxt_mut(id).ecxt_outertuple = slot;
     }
 }
 
 /// `econtext->ecxt_outertuple = slot` for the per-output-tuple context. The
-/// per-output econtext is owned by the EState pool (`ps_ExprContext`); the
-/// owner installs the real linkage. The local mirror keeps the in-function
-/// data flow faithful (the value is consumed by `prepare_projection_slot`).
-fn set_econtext_outertuple(aggstate: &mut AggStateData<'_>, slot: Option<SlotId>) {
-    if let Some(tc) = aggstate.tmpcontext.as_mut() {
-        tc.ecxt_outertuple = slot;
+/// per-output econtext is owned by the EState pool (`ps_ExprContext`); the local
+/// mirror onto the tmpcontext keeps the in-function data flow faithful (the
+/// value is consumed by `prepare_projection_slot`).
+fn set_econtext_outertuple<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: Option<SlotId>,
+) {
+    if let Some(id) = aggstate.tmpcontext {
+        estate.ecxt_mut(id).ecxt_outertuple = slot;
     }
 }
 

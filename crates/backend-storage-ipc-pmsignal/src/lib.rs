@@ -143,6 +143,9 @@ pub fn init_seams() {
     backend_storage_ipc_pmsignal_seams::send_postmaster_signal_start_autovac::set(
         pmsignal::send_postmaster_signal_start_autovac,
     );
+    backend_storage_ipc_pmsignal_seams::send_postmaster_signal_xlog_is_shutdown::set(
+        pmsignal::send_postmaster_signal_xlog_is_shutdown,
+    );
     backend_storage_ipc_pmsignal_seams::pm_signal_shmem_size::set(pmsignal::PMSignalShmemSize);
     backend_storage_ipc_pmsignal_seams::pm_signal_shmem_init::set(pmsignal::PMSignalShmemInit);
     backend_storage_ipc_pmsignal_seams::register_postmaster_child_active::set(

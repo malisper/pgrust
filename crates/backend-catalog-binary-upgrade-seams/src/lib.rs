@@ -77,6 +77,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read-and-reset `binary_upgrade_next_heap_pg_class_oid` /
+    /// `binary_upgrade_next_toast_pg_class_oid` (`catalog/binary_upgrade.h`) the
+    /// way `heap_create_with_catalog` (catalog/heap.c) consumes it during a
+    /// `pg_upgrade` restore: returns the global's value and clears it to
+    /// `InvalidOid`. `is_toast` selects the toast vs. heap global. Returns
+    /// `InvalidOid` when the global was not set (the caller raises the "OID
+    /// value not set" error, except for the toast case where an unset value is
+    /// expected — there may be no TOAST table). A plain global read/store —
+    /// infallible.
+    pub fn consume_next_pg_class_oid(is_toast: bool) -> Oid
+);
+
+seam_core::seam!(
+    /// Read-and-reset `binary_upgrade_next_heap_pg_class_relfilenumber` /
+    /// `binary_upgrade_next_toast_pg_class_relfilenumber`
+    /// (`catalog/binary_upgrade.h`) the way `heap_create_with_catalog`
+    /// (catalog/heap.c) consumes it during a `pg_upgrade` restore: returns the
+    /// global's value and clears it to `InvalidOid`. `is_toast` selects the
+    /// toast vs. heap global. Returns `InvalidRelFileNumber` when unset (the
+    /// caller raises "relfilenumber value not set"). A plain global read/store —
+    /// infallible.
+    pub fn consume_next_pg_class_relfilenumber(is_toast: bool) -> Oid
+);
+
+seam_core::seam!(
     /// Read-and-reset `binary_upgrade_next_pg_type_oid`
     /// (`catalog/binary_upgrade.h`) the way `TypeShellMake` / `TypeCreate`
     /// (pg_type.c) consume it during a `pg_upgrade` restore: it returns the

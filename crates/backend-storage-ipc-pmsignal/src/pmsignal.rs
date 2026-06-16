@@ -261,6 +261,12 @@ pub fn send_postmaster_signal_start_autovac() {
     SendPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_LAUNCHER);
 }
 
+/// `SendPostmasterSignal(PMSIGNAL_XLOG_IS_SHUTDOWN)` — the checkpointer's
+/// signal that it finished writing the shutdown checkpoint.
+pub fn send_postmaster_signal_xlog_is_shutdown() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_XLOG_IS_SHUTDOWN);
+}
+
 /// `CheckPostmasterSignal` — check whether `reason` was signaled, clearing the
 /// flag if so. Called by the postmaster after receiving `SIGUSR1`.
 ///

@@ -46,6 +46,34 @@ seam_core::seam!(
     pub fn pgstat_init_relation(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// `pgstat_create_relation(rel)` (pgstat_relation.c): create the pending
+    /// per-relation stats entry transactionally (`pgstat_create_transactional(
+    /// PGSTAT_KIND_RELATION, rel->rd_rel->relisshared ? InvalidOid :
+    /// MyDatabaseId, RelationGetRelid(rel))`) plus `pgstat_init_relation(rel)`,
+    /// so the entry is dropped if the transaction aborts. Keyed by the
+    /// relation OID; `relisshared` selects the database OID the way the C reads
+    /// `rel->rd_rel->relisshared`.
+    pub fn pgstat_create_relation(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_drop_relation(rel)` (pgstat_relation.c): drop the per-relation
+    /// stats entry transactionally (`pgstat_drop_transactional(
+    /// PGSTAT_KIND_RELATION, rel->rd_rel->relisshared ? InvalidOid :
+    /// MyDatabaseId, RelationGetRelid(rel))`) and unlink the relcache entry's
+    /// pending-stats pointer, so the entry is removed when the transaction
+    /// commits. Keyed by the relation OID; `relisshared` selects the database
+    /// OID as the C reads `rel->rd_rel->relisshared`.
+    pub fn pgstat_drop_relation(
+        relid: types_core::primitive::Oid,
+        relisshared: bool,
+    ) -> types_error::PgResult<()>
+);
+
 // --- per-relation count seams (pgstat.h macros / pgstat_relation.c) ---
 //
 // The C count macros gate on `pgstat_should_count_relation(rel)`, which checks

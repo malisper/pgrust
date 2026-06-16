@@ -58,3 +58,15 @@ seam_core::seam!(
         retry_on_error: bool,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `RememberSyncRequest(const FileTag *ftag, SyncRequestType type)` (sync.c)
+    /// — record (or forget/filter) a sync request directly in the checkpointer's
+    /// local `pendingOps` / `pendingUnlinks`. This is the path `AbsorbSyncRequests`
+    /// (checkpointer.c) drives once it has drained the shmem request queue.
+    /// `Err` carries the C `palloc` out-of-memory `ereport`.
+    pub fn remember_sync_request(
+        ftag: FileTag,
+        request_type: SyncRequestType,
+    ) -> PgResult<()>
+);

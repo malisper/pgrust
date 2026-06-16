@@ -449,6 +449,14 @@ impl BufferManager {
         &self.strategy_control
     }
 
+    /// `StrategyNotifyBgWriter(bgwprocno)` (freelist.c) — set (or clear, with
+    /// `-1`) the bgwriter proc number the next `StrategyGetBuffer` will wake.
+    /// Forwards to the strategy control block. The background writer calls this
+    /// to register for a next-allocation wakeup before hibernating.
+    pub fn StrategyNotifyBgWriter(&self, bgwprocno: i32) -> types_error::PgResult<()> {
+        self.strategy_control.notify_bgwriter(bgwprocno)
+    }
+
     /// `GetBufferDescriptor(buf_id)->tag = tag` — set a victim's new tag under
     /// the caller-held header spinlock (`BufferAlloc` / `InvalidateVictimBuffer`).
     #[allow(dead_code)]

@@ -534,3 +534,89 @@ seam_core::seam!(
     /// owner, so this panics until xlog installs it.
     pub fn get_fake_lsn_for_unlogged_rel() -> XLogRecPtr
 );
+
+// ---------------------------------------------------------------------------
+// Checkpointer-consumed seams (checkpointer.c reaches these in xlog.c /
+// xlogrecovery.c). The owning unit holds the `CheckpointState` machine and the
+// shmem WAL-write driver, so these run inside the xlog owner.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `CreateCheckPoint(flags)` (xlog.c:6951) — perform a checkpoint with the
+    /// given `CHECKPOINT_*` flags. Returns `true` if a checkpoint was performed
+    /// (`false` only when it was skipped because nothing changed). The xlog
+    /// owner holds the `CheckpointState` machine. Can `ereport(ERROR)`.
+    pub fn create_checkpoint(flags: i32) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `CreateRestartPoint(flags)` (xlog.c:7655) — establish a restartpoint
+    /// during recovery. Returns `true` if a new restartpoint was established.
+    /// Can `ereport(ERROR)`.
+    pub fn create_restartpoint(flags: i32) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ShutdownXLOG(code, arg)` (xlog.c) — write the shutdown checkpoint (or a
+    /// restartpoint in recovery) and shut down the WAL machinery. Can
+    /// `ereport(ERROR)`.
+    pub fn shutdown_xlog() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLastSegSwitchData(&last_switch_lsn)` (xlog.c) — return
+    /// `(lastSegSwitchTime, lastSegSwitchLSN)` under `info_lck`. The time is a
+    /// `pg_time_t` (seconds). Infallible (a spinlock read).
+    pub fn get_last_seg_switch_data() -> (i64, XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `GetLastImportantRecPtr()` (xlog.c) — start of the last WAL record that
+    /// mattered for archiving / replication. Infallible (a per-lock scan).
+    pub fn get_last_important_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `RequestXLogSwitch(mark_unimportant)` (xlog.c) — force a WAL segment
+    /// switch and return the resulting switch LSN. Can `ereport(ERROR)`.
+    pub fn request_xlog_switch(mark_unimportant: bool) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `UpdateFullPageWrites()` (xlog.c) — propagate a SIGHUP change of
+    /// `full_page_writes` into shmem, writing `XLOG_FPW_CHANGE` if needed. Can
+    /// `ereport(ERROR)` (it inserts WAL).
+    pub fn update_full_page_writes() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogArchiveTimeout` (xlog.c GUC, seconds) — `archive_timeout`. A plain
+    /// global read; infallible.
+    pub fn xlog_archive_timeout() -> i32
+);
+
+seam_core::seam!(
+    /// `CheckPointSegments` (xlog.c global) — the floating segment budget used
+    /// by `IsCheckpointOnSchedule`. A `double`; infallible read.
+    pub fn check_point_segments() -> f64
+);
+
+seam_core::seam!(
+    /// Store post-sync metrics into `CheckpointStats` (xlog.c global):
+    /// `ckpt_sync_rels`, `ckpt_longest_sync`, `ckpt_agg_sync_time`. sync.c
+    /// reports its aggregate fsync timings up to xlog.c through this. Pure
+    /// bookkeeping; infallible.
+    pub fn checkpoint_stats_set(
+        ckpt_sync_rels: i32,
+        ckpt_longest_sync: u64,
+        ckpt_agg_sync_time: u64,
+    )
+);
+
+seam_core::seam!(
+    /// `XLogBackgroundFlush()` (xlog.c) — flush as much WAL to disk as is
+    /// cheaply available; called by a stopping walsender to trigger pending WAL
+    /// to be written out. Returns whether it flushed anything (discarded by the
+    /// walsender caller).
+    pub fn xlog_background_flush() -> bool
+);

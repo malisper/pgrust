@@ -108,10 +108,11 @@ pub fn AggGetTempMemoryContext<'mcx>(
         // AggCheckCallContext, C returns a pointer to the AggState-owned
         // context; the non-Copy owned `MemoryContext` handle can't be moved out
         // of the borrow — the handoff is the unported call-frame back-reference.
-        let _ = aggstate.tmpcontext.as_ref();
+        let _ = aggstate.tmpcontext;
         panic!(
             "backend_executor_nodeAgg::AggGetTempMemoryContext: live-AggState \
-             tmpcontext handoff — unported call-frame back-reference"
+             tmpcontext handoff — the tmpcontext is an EcxtId into the EState pool, \
+             but this fmgr call-frame back-reference does not thread the EState"
         );
     }
     None

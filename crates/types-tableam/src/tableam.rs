@@ -325,4 +325,41 @@ pub struct TableAmRoutine {
         newrlocator: &RelFileLocator,
         persistence: i8,
     ) -> PgResult<(u32, u32)>,
+
+    /// `scan_analyze_next_block(scan, stream)` (`access/tableam.h`) — the
+    /// outer-loop callback of `acquire_sample_rows`: pin and share-lock the next
+    /// block to be sampled, leaving it the scan's current page. Returns `false`
+    /// when the read stream is exhausted (no more blocks to sample).
+    ///
+    /// In C the second argument is `ReadStream *`, and the heap callback's only
+    /// use of it is `read_stream_next_buffer(stream, NULL)` — pull the next
+    /// already-pinned buffer. The read stream lives in `commands/analyze.c`
+    /// (which sits far above this types crate), so rather than naming the
+    /// higher-layer `ReadStream` type in the vtable we cross it as the
+    /// `next_buffer` closure the owner builds over its stream — the same
+    /// closure-across-layers technique the index-build callback uses. The
+    /// closure returns the next pinned `Buffer`, or `InvalidBuffer` (0) at the
+    /// end of the stream.
+    pub scan_analyze_next_block: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        next_buffer: &mut dyn FnMut() -> PgResult<types_storage::buf::Buffer>,
+    ) -> PgResult<bool>,
+
+    /// `scan_analyze_next_tuple(scan, OldestXmin, liverows, deadrows, slot)`
+    /// (`access/tableam.h`) — the inner-loop callback of `acquire_sample_rows`:
+    /// advance over the current block's line pointers, classifying each tuple
+    /// for the live/dead counters, and store the next sampleable tuple into
+    /// `slot`, returning `true` (leaving the buffer locked) or `false` at the
+    /// end of the block (releasing the buffer lock + pin and clearing `slot`).
+    /// `liverows`/`deadrows` are the running totals `acquire_sample_rows`
+    /// maintains across blocks.
+    pub scan_analyze_next_tuple: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        oldest_xmin: TransactionId,
+        liverows: &mut f64,
+        deadrows: &mut f64,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>,
 }

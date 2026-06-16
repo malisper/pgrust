@@ -13,8 +13,18 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use mcx::Mcx;
 use types_core::{AttrNumber, Oid};
-use types_datum::Datum;
+use types_tuple::pg_type::FormData_pg_type;
+// The canonical `'mcx` byte-lane value type (`ByVal(usize)` / `ByRef(PgVec<u8>)`).
+// Statistic values that may be pass-by-reference (text/numeric/varchar/…) must
+// live in this safe byte lane, NOT a bare `usize` word (which cannot carry the
+// referenced bytes and would dangle when copied into a temporary context).
+use types_tuple::{Datum, HeapTuple, TupleDesc};
+
+/// `STATISTIC_NUM_SLOTS` (`catalog/pg_statistic.h:127`): the number of
+/// statistic-kind slots in a `pg_statistic` row (and thus in [`VacAttrStats`]).
+pub const STATISTIC_NUM_SLOTS: usize = 5;
 
 /// `STATS_MAX_DIMENSIONS` (`statistics/statistics.h`): the maximum number of
 /// columns/expressions an extended statistics object may cover.
@@ -79,15 +89,15 @@ pub const STATS_MCVLIST_MAX_ITEMS: i32 = MAX_STATISTICS_TARGET;
 /// the invariant `values.len() == isnull.len() == ndimensions` is upheld by the
 /// (de)serializers and the build loop.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct MCVItem {
+pub struct MCVItem<'mcx> {
     /// frequency of this combination
     pub frequency: f64,
     /// frequency if independent
     pub base_frequency: f64,
     /// NULL flags
     pub isnull: Vec<bool>,
-    /// item values
-    pub values: Vec<Datum>,
+    /// item values (the safe `'mcx` byte lane)
+    pub values: Vec<Datum<'mcx>>,
 }
 
 /// `MCVList` (`statistics/statistics.h`).
@@ -106,7 +116,7 @@ pub struct MCVItem {
 /// The owned mirror replaces the FAM with an owned `Vec<MCVItem>`; the invariant
 /// `items.len() == nitems` is upheld by the (de)serializers and the build loop.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct MCVList {
+pub struct MCVList<'mcx> {
     /// magic constant marker
     pub magic: u32,
     /// type of MCV list (BASIC)
@@ -118,7 +128,7 @@ pub struct MCVList {
     /// OIDs of data types
     pub types: [Oid; STATS_MAX_DIMENSIONS],
     /// array of MCV items
-    pub items: Vec<MCVItem>,
+    pub items: Vec<MCVItem<'mcx>>,
 }
 
 /// `DimensionInfo` (`statistics/extended_stats_internal.h`): (de)serialization
@@ -161,13 +171,140 @@ pub struct DimensionInfo {
 /// } SortItem;
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SortItem {
-    pub values: Vec<Datum>,
+pub struct SortItem<'mcx> {
+    pub values: Vec<Datum<'mcx>>,
     pub isnull: Vec<bool>,
     pub count: i32,
 }
 
-/// Opaque handle to a `StatsBuildData` (`statistics/extended_stats_internal.h`).
+/* ---------------------------------------------------------------------------
+ * VacAttrStats (`commands/vacuum.h:116`) — per-column ANALYZE working state.
+ * ------------------------------------------------------------------------- */
+
+/// `AnalyzeAttrFetchFunc` (`commands/vacuum.h:108`):
+/// `Datum (*)(VacAttrStatsP stats, int rownum, bool *isNull)`.
+///
+/// The fetch function projects the `rownum`-th sampled value of the analyzed
+/// column out of the `VacAttrStats` working state, setting `*isNull`. Producers
+/// (`std_fetch_func` / `ind_fetch_func`) and the consumers (the `compute_stats`
+/// routines) all live in the not-yet-ported ANALYZE driver
+/// (`backend-commands-analyze`); this carrier models the field faithfully as the
+/// safe function-pointer alias over the owned [`VacAttrStats`].
+pub type AnalyzeAttrFetchFunc =
+    for<'mcx> fn(stats: &VacAttrStats<'mcx>, rownum: i32, is_null: &mut bool) -> Datum<'mcx>;
+
+/// `AnalyzeAttrComputeStatsFunc` (`commands/vacuum.h:111`):
+/// `void (*)(VacAttrStatsP, AnalyzeAttrFetchFunc, int samplerows, double totalrows)`.
+///
+/// The type-specific statistics-computation routine selected by the column's
+/// `typanalyze` function. It fills the output fields of `VacAttrStats`. Lives in
+/// the ANALYZE driver; modeled faithfully here as a function-pointer alias over
+/// the owned [`VacAttrStats`].
+pub type AnalyzeAttrComputeStatsFunc = for<'mcx> fn(
+    stats: &mut VacAttrStats<'mcx>,
+    fetchfunc: AnalyzeAttrFetchFunc,
+    samplerows: i32,
+    totalrows: f64,
+);
+
+/// `VacAttrStats` (`commands/vacuum.h:116`) — the per-column working state the
+/// ANALYZE machinery passes through the type-specific `typanalyze` /
+/// `compute_stats` routines and the extended-statistics build framework.
+///
+/// Field-for-field mirror of the C struct. Two model adaptations follow this
+/// repo's conventions:
+///
+///   * the C `Datum *stavalues[]` / `float4 *stanumbers[]` heap arrays become
+///     owned `Vec<Datum>` / `Vec<f32>` per slot (the safe value lane; the C
+///     `numvalues[n]` / `numnumbers[n]` lengths are the corresponding
+///     `Vec::len()`, kept as explicit fields to stay 1:1 with the C struct and
+///     the catalog write);
+///   * `MemoryContext anl_context` becomes [`mcx::Mcx`], `Form_pg_type attrtype`
+///     becomes `Option<FormData_pg_type>` (NULL before set up), `TupleDesc`
+///     becomes the repo `TupleDesc`, and `HeapTuple *rows` becomes
+///     `Vec<HeapTuple>` (the std-fetch sample-row access info).
+///
+/// The C `Datum *exprvals` / `bool *exprnulls` index-fetch flat buffers become
+/// owned `Vec`s with the same `rowstride` semantics.
+pub struct VacAttrStats<'mcx> {
+    /* ----- set up by main ANALYZE code before invoking typanalyze ----- */
+    /// `attstattarget` — -1 to use default.
+    pub attstattarget: i32,
+    /// `attrtypid` — type of data being analyzed.
+    pub attrtypid: Oid,
+    /// `attrtypmod` — typmod of data being analyzed.
+    pub attrtypmod: i32,
+    /// `attrtype` — copy of the `pg_type` row for `attrtypid` (`Form_pg_type`).
+    pub attrtype: Option<FormData_pg_type>,
+    /// `attrcollid` — collation of data being analyzed.
+    pub attrcollid: Oid,
+    /// `anl_context` — where to save long-lived data (`MemoryContext`).
+    pub anl_context: Option<Mcx<'mcx>>,
+
+    /* ----- filled in by the typanalyze routine (unless it returns false) ----- */
+    /// `compute_stats` — type-specific statistics-computation function pointer.
+    pub compute_stats: Option<AnalyzeAttrComputeStatsFunc>,
+    /// `minrows` — minimum # of rows wanted for stats.
+    pub minrows: i32,
+    /// `extra_data` — for extra type-specific data (C `void *`).
+    ///
+    /// The type-specific payload (e.g. `StdAnalyzeData`) lives in the ANALYZE
+    /// driver; carried here as the owner-resolved identity tag mirroring the C
+    /// `void *`.
+    pub extra_data: u64,
+
+    /* ----- filled in by the compute_stats routine (zero-initialized) ----- */
+    /// `stats_valid`.
+    pub stats_valid: bool,
+    /// `stanullfrac` — fraction of entries that are NULL.
+    pub stanullfrac: f32,
+    /// `stawidth` — average width of column values.
+    pub stawidth: i32,
+    /// `stadistinct` — # distinct values.
+    pub stadistinct: f32,
+    /// `stakind[STATISTIC_NUM_SLOTS]`.
+    pub stakind: [i16; STATISTIC_NUM_SLOTS],
+    /// `staop[STATISTIC_NUM_SLOTS]`.
+    pub staop: [Oid; STATISTIC_NUM_SLOTS],
+    /// `stacoll[STATISTIC_NUM_SLOTS]`.
+    pub stacoll: [Oid; STATISTIC_NUM_SLOTS],
+    /// `numnumbers[STATISTIC_NUM_SLOTS]` — length of each `stanumbers[n]`.
+    pub numnumbers: [i32; STATISTIC_NUM_SLOTS],
+    /// `stanumbers[STATISTIC_NUM_SLOTS]` — owned mirror of `float4 *stanumbers[]`.
+    pub stanumbers: [Vec<f32>; STATISTIC_NUM_SLOTS],
+    /// `numvalues[STATISTIC_NUM_SLOTS]` — length of each `stavalues[n]`.
+    pub numvalues: [i32; STATISTIC_NUM_SLOTS],
+    /// `stavalues[STATISTIC_NUM_SLOTS]` — owned mirror of `Datum *stavalues[]`
+    /// (the safe `'mcx` byte value lane).
+    pub stavalues: [Vec<Datum<'mcx>>; STATISTIC_NUM_SLOTS],
+
+    /* ----- describe the stavalues[n] element types ----- */
+    /// `statypid[STATISTIC_NUM_SLOTS]`.
+    pub statypid: [Oid; STATISTIC_NUM_SLOTS],
+    /// `statyplen[STATISTIC_NUM_SLOTS]`.
+    pub statyplen: [i16; STATISTIC_NUM_SLOTS],
+    /// `statypbyval[STATISTIC_NUM_SLOTS]`.
+    pub statypbyval: [bool; STATISTIC_NUM_SLOTS],
+    /// `statypalign[STATISTIC_NUM_SLOTS]` (C `char`).
+    pub statypalign: [i8; STATISTIC_NUM_SLOTS],
+
+    /* ----- private to the main ANALYZE code ----- */
+    /// `tupattnum` — attribute number within tuples.
+    pub tupattnum: i32,
+    /// `rows` — access info for the std fetch function (C `HeapTuple *rows`).
+    pub rows: Vec<HeapTuple<'mcx>>,
+    /// `tupDesc` — tuple descriptor for `rows`.
+    pub tup_desc: TupleDesc<'mcx>,
+    /// `exprvals` — access info for the index fetch function (C `Datum *exprvals`).
+    pub exprvals: Vec<Datum<'mcx>>,
+    /// `exprnulls` — companion nulls for `exprvals` (C `bool *exprnulls`).
+    pub exprnulls: Vec<bool>,
+    /// `rowstride` — stride between rows in `exprvals`/`exprnulls`.
+    pub rowstride: i32,
+}
+
+/// `StatsBuildData` (`statistics/extended_stats_internal.h:61`) — a unified
+/// representation of the sampled data the extended statistics is built on.
 ///
 /// ```c
 /// typedef struct StatsBuildData {
@@ -179,15 +316,34 @@ pub struct SortItem {
 ///     bool         **nulls;
 /// } StatsBuildData;
 /// ```
-/// The `VacAttrStats` matrix and the `Datum`/`bool` value matrices live in the
-/// not-yet-ported vacuum / multi-sort subsystem (the combined
-/// `backend-statistics-core` unit). The functional-dependency builder cannot
-/// dereference them: it reaches the build data by this identity handle and the
-/// owner-side seam (`dependency_degree`) does the per-column sort/group work.
-/// This is the idiomatic stand-in for the C `StatsBuildData *` pointer, NOT a
-/// transcribed byte blob.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StatsBuildDataHandle(pub u64);
+///
+/// The owned mirror replaces the C pointer-of-pointer arrays with owned `Vec`s:
+///
+///   * `attnums` -> `Vec<AttrNumber>` (length `nattnums`);
+///   * `stats` (the `VacAttrStats *` matrix) -> `Vec<VacAttrStats<'mcx>>`
+///     (one per analyzed column, length `nattnums`);
+///   * `values` / `nulls` (the `nattnums`-by-`numrows` value/null matrices) ->
+///     `Vec<Vec<Datum>>` / `Vec<Vec<bool>>` (outer length `nattnums`, each inner
+///     length `numrows`).
+///
+/// The build-side seams (`statext_mcv_build` / `dependency_degree` /
+/// `ndistinct_for_combination`) take this carrier by reference; their bodies
+/// (multi-sort support, `lookup_type_cache(...)->lt_opr`, `build_sorted_items`)
+/// are filled by the ANALYZE owner when it lands.
+pub struct StatsBuildData<'mcx> {
+    /// `numrows` — number of sampled rows.
+    pub numrows: i32,
+    /// `nattnums` — number of analyzed columns/expressions.
+    pub nattnums: i32,
+    /// `attnums` — analyzed attribute numbers (length `nattnums`).
+    pub attnums: Vec<AttrNumber>,
+    /// `stats` — per-column `VacAttrStats` (length `nattnums`).
+    pub stats: Vec<VacAttrStats<'mcx>>,
+    /// `values` — per-column sampled value arrays (outer `nattnums`, inner `numrows`).
+    pub values: Vec<Vec<Datum<'mcx>>>,
+    /// `nulls` — per-column sampled null flags (outer `nattnums`, inner `numrows`).
+    pub nulls: Vec<Vec<bool>>,
+}
 
 /// `MVDependency` (`statistics/statistics.h`).
 ///
