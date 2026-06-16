@@ -88,6 +88,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heap_multi_insert(relation, slots, ntuples, cid, options, bistate)`
+    /// (heapam.c) — insert multiple heap tuples in one operation (one WAL
+    /// record per page, the page locked once). C takes `TupleTableSlot **slots`
+    /// and writes each stored TID back into `slots[i]->tts_tid`; the repo
+    /// carries the heap tuples as owned [`FormedTuple`] values, so the batch is
+    /// taken by value and the inserted tuples are returned with `t_self`
+    /// stamped (and the header/`t_tableOid` set), in input order — exactly the
+    /// information the caller (`CatalogTuplesMultiInsertWithInfo`) needs to feed
+    /// `CatalogIndexInsert`. `cid` is the command id; `options` is the
+    /// `HEAP_INSERT_*` bitmask; `bistate` is the optional bulk-insert carrier.
+    /// `Err` carries the insert `ereport(ERROR)` surface. **Owned by the heapam
+    /// insert family (heapam.c); uninstalled — and panics — until that family
+    /// lands.**
+    pub fn heap_multi_insert<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tuples: PgVec<'mcx, types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+        cid: types_core::xact::CommandId,
+        options: i32,
+        bistate: Option<&mut types_tableam::tableam::BulkInsertStateData>,
+    ) -> PgResult<PgVec<'mcx, types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
     /// `heap_insert(relation, tup, cid, options, bistate)` (heapam.c) — insert
     /// one heap tuple stamped with the current xid and the given `cid`.
     /// `options` is the `HEAP_INSERT_*` bitmask; `bistate` is the optional

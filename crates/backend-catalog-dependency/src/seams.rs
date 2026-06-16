@@ -1,12 +1,12 @@
 //! Inward seam installation for `backend-catalog-dependency`.
 //!
-//! The collection seams thread an opaque `ObjectAddressesHandle` between
-//! cross-crate callers; each is resolved against the backend-local registry in
-//! [`crate`]. Each seam is a thin marshal + delegate to the real engine.
+//! The collection seams pass the owned `ObjectAddresses` value across the
+//! crate boundary directly. Each seam is a thin marshal + delegate to the real
+//! engine.
 
 use backend_catalog_dependency_seams as seams;
 use mcx::MemoryContext;
-use types_catalog::catalog_dependency::{DependencyType, ObjectAddress};
+use types_catalog::catalog_dependency::{DependencyType, ObjectAddress, ObjectAddresses};
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::parsenodes::DropBehavior;
@@ -16,29 +16,27 @@ pub use seams::{
     PERFORM_DELETION_QUIETLY, PERFORM_DELETION_SKIP_EXTENSIONS, PERFORM_DELETION_SKIP_ORIGINAL,
 };
 
-fn seam_new_object_addresses() -> PgResult<seams::ObjectAddressesHandle> {
-    Ok(crate::registry_new())
+fn seam_new_object_addresses() -> PgResult<ObjectAddresses> {
+    Ok(crate::new_object_addresses())
 }
 
 fn seam_add_exact_object_address(
     object: ObjectAddress,
-    addrs: seams::ObjectAddressesHandle,
+    addrs: &mut ObjectAddresses,
 ) -> PgResult<()> {
-    crate::registry_with_mut(addrs, |a| crate::add_exact_object_address(&object, a));
+    crate::add_exact_object_address(&object, addrs);
     Ok(())
 }
 
 fn seam_object_address_present(
     object: ObjectAddress,
-    addrs: seams::ObjectAddressesHandle,
+    addrs: &ObjectAddresses,
 ) -> PgResult<bool> {
-    Ok(crate::registry_with(addrs, |a| {
-        crate::object_address_present(&object, a)
-    }))
+    Ok(crate::object_address_present(&object, addrs))
 }
 
-fn seam_free_object_addresses(addrs: seams::ObjectAddressesHandle) -> PgResult<()> {
-    crate::registry_free(addrs);
+fn seam_free_object_addresses(_addrs: ObjectAddresses) -> PgResult<()> {
+    // Owned value dropped here, releasing its storage.
     Ok(())
 }
 
@@ -89,12 +87,10 @@ fn seam_perform_multiple_deletions(
 
 fn seam_record_object_address_dependencies(
     depender: ObjectAddress,
-    refs: seams::ObjectAddressesHandle,
+    refs: &mut ObjectAddresses,
     behavior: DependencyType,
 ) -> PgResult<()> {
-    crate::registry_with_mut(refs, |a| {
-        crate::record_object_address_dependencies(&depender, a, behavior)
-    })
+    crate::record_object_address_dependencies(&depender, refs, behavior)
 }
 
 fn seam_record_dependency_on_single_rel_expr(

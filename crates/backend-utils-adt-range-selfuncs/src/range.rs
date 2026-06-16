@@ -9,6 +9,7 @@ use types_core::primitive::{Oid, OidIsValid, Selectivity};
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::{NodeId, PlannerInfo};
 use types_rangetypes::{RangeBound, RangeTypeP};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
@@ -76,13 +77,13 @@ pub fn default_range_selectivity(operator: Oid) -> f64 {
 
 /// `rangesel(PG_FUNCTION_ARGS)` — restriction selectivity for range operators.
 ///
-/// `root` / `args` are the raw fmgr argument words (`PG_GETARG_POINTER(0)` /
-/// `PG_GETARG_POINTER(2)`): the planner `PlannerInfo *` and operator `List *`.
+/// `root` is the planner state; `args` is the operator's argument `List *` as a
+/// borrowed slice of planner node handles.
 pub fn rangesel(
     mcx: Mcx<'_>,
-    root: Datum,
+    root: &PlannerInfo,
     mut operator: Oid,
-    args: Datum,
+    args: &[NodeId],
     var_relid: i32,
 ) -> PgResult<Selectivity> {
     /*

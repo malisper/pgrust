@@ -7,6 +7,8 @@
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 
+use backend_utils_adt_tsvector_ext_seams::ArrayElem;
+
 seam_core::seam!(
     /// Deconstruct a 1-D `float4[]` weight array (`win`, the detoasted array
     /// varlena bytes) into its element values, allocating the result in `mcx`.
@@ -22,4 +24,28 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         win: &[u8],
     ) -> PgResult<PgVec<'mcx, f32>>
+);
+
+seam_core::seam!(
+    /// `deconstruct_array_builtin(arr, TEXTOID, ...)` (tsvector_op.c) — explode
+    /// a 1-D `text[]` datum into its elements (with NULL flags).
+    pub fn deconstruct_text_array(arr: &[u8]) -> PgResult<Vec<ArrayElem>>
+);
+
+seam_core::seam!(
+    /// `deconstruct_array_builtin(arr, CHAROID, ...)` (tsvector_op.c) — explode
+    /// a 1-D `"char"[]` datum into its elements (each a single byte).
+    pub fn deconstruct_char_array(arr: &[u8]) -> PgResult<Vec<ArrayElem>>
+);
+
+seam_core::seam!(
+    /// `construct_array_builtin(elems, n, TEXTOID)` (tsvector_op.c) — build a
+    /// `text[]` datum from owned element byte strings.
+    pub fn construct_text_array(elems: &[Vec<u8>]) -> PgResult<Vec<u8>>
+);
+
+seam_core::seam!(
+    /// `construct_array_builtin(elems, n, INT2OID)` (tsvector_op.c) — build an
+    /// `int2[]` datum.
+    pub fn construct_int2_array(elems: &[i16]) -> PgResult<Vec<u8>>
 );
