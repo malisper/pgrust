@@ -116,6 +116,12 @@ pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
 /// `PG_WAIT_IPC | 0` (= 134217728, matching c2rust).
 pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
 
+/// `WAIT_EVENT_SAFE_SNAPSHOT` — "Waiting to obtain a valid snapshot for a
+/// `READ ONLY DEFERRABLE` transaction." 52nd entry (0-based 51) of the IPC
+/// section of `wait_event_names.txt`. Used by predicate.c's
+/// `GetSafeSnapshot` via `ProcWaitForSignal`.
+pub const WAIT_EVENT_SAFE_SNAPSHOT: u32 = PG_WAIT_IPC + 51;
+
 /// `WAIT_EVENT_EXECUTE_GATHER` — "Waiting for activity from a child process
 /// while executing a Gather plan node." 14th entry (0-based 13) of the IPC
 /// section of `wait_event_names.txt` (APPEND_READY, ARCHIVE_CLEANUP_COMMAND,

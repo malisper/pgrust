@@ -346,6 +346,7 @@ pub fn init_all() {
     backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lock::init_seams();
     backend_storage_lmgr_lmgr::init_seams();
+    backend_storage_lmgr_predicate::init_seams();
     backend_storage_lmgr_proc::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();

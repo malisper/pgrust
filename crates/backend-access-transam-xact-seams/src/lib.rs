@@ -328,6 +328,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bool XactDeferrable` (xact.c global): the current transaction's
+    /// deferrable flag. predicate.c's `GetSerializableTransactionSnapshot`
+    /// reads it (`XactReadOnly && XactDeferrable` routes to `GetSafeSnapshot`).
+    pub fn xact_deferrable() -> bool
+);
+
+seam_core::seam!(
     /// `int XactIsoLevel` (xact.c global): the current transaction's isolation
     /// level. variable.c's `check_transaction_isolation` reads it.
     pub fn xact_iso_level() -> i32
