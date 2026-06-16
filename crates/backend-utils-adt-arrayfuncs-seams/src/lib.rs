@@ -412,6 +412,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `deconstruct_array(DatumGetArrayTypeP(bytes), elmtype, elmlen, elmbyval,
+    /// elmalign, ...)` (arrayfuncs.c) operating on the on-disk array byte image
+    /// `bytes`, like [`deconstruct_array_bytes`], but returning each element as
+    /// the canonical *value-carrying* [`DatumV`] (`ByVal` word / `ByRef` bytes
+    /// copied into `mcx`) rather than the bare-word [`Datum`]. The bare-word
+    /// form encodes a by-reference element as a pointer into the (scratch) array
+    /// buffer, which cannot be carried past the buffer's lifetime; the value
+    /// form captures the element payload by value, so callers that must outlive
+    /// the array buffer (e.g. `RelationBuildTupleDesc`'s `attmissingval`
+    /// extraction, which stores the element into the relcache entry) read it
+    /// here. Fallible on the `ereport(ERROR)` surface (malformed array) /
+    /// detoast.
+    pub fn deconstruct_array_values_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, (DatumV<'mcx>, bool)>>
+);
+
+seam_core::seam!(
     /// `(oidvector *) DatumGetPointer(datum)` then read `->values[0 ..
     /// ->dim1]` (e.g. `proargtypes`, `pg_index.indclass`) operating on the
     /// on-disk `oidvector` byte image `bytes` (a `Datum::ByRef` attribute

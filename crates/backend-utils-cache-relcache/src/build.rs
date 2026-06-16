@@ -232,9 +232,11 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
         // Reset the invalidated flag for this attempt.
         with_state(|st| st.in_progress_list[in_progress_offset].invalidated = false);
 
-        // Read pg_class for the target (catalog scan — cross-unit seam).
-        let relp = match ScanPgRelation(targetRelId, true, false)? {
-            Some(relp) => relp,
+        // Read pg_class for the target (catalog scan — cross-unit seam). The
+        // reloptions text[] bytes ride alongside the form for
+        // RelationParseRelOptions (C hands it the whole pg_class_tuple).
+        let (relp, reloptions) = match ScanPgRelation(targetRelId, true, false)? {
+            Some(pair) => pair,
             None => {
                 // No pg_class row: pop our in_progress entry and return NULL.
                 with_state(|st| {
@@ -310,7 +312,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
         }
 
         // Parse reloptions into rd_options.
-        RelationParseRelOptions(&mut relation)?;
+        RelationParseRelOptions(&mut relation, reloptions.as_deref())?;
 
         // Rules / triggers / row-security (derived family — own logic, separate
         // branch). C builds them when the pg_class flags are set, else NULLs.
@@ -408,13 +410,16 @@ pub(crate) fn take_scratch() -> Option<Box<RelationData>> {
 /// (`table_open` + `systable_beginscan`/`systable_getnext` and the `GETSTRUCT`
 /// deform into `Form_pg_class`) is the genuine cross-unit seam (genam owner +
 /// the `pg_class` deform primitive); this routine's caller orchestration is own
-/// logic. Returns the owned `pg_class` form for the found row, `None` for the C
-/// NULL (no row). Seam-and-panic until the catalog-read owner lands.
+/// logic. Returns the owned `pg_class` form for the found row plus the verbatim
+/// `reloptions` `text[]` varlena bytes (`None` for the C `isnull`; consumed
+/// separately by `RelationParseRelOptions`, exactly as C passes the whole
+/// `pg_class_tuple` to it), or `None` for the C NULL (no row). Seam-and-panic
+/// until the catalog-read owner lands.
 pub fn ScanPgRelation(
     targetRelId: Oid,
     indexOK: bool,
     force_non_historic: bool,
-) -> PgResult<Option<FormPgClass>> {
+) -> PgResult<Option<(FormPgClass, Option<Vec<u8>>)>> {
     // C: must have selected a database before reading pg_class. The owned model
     // surfaces the same guard once the database-id state lands; the catalog read
     // below is the cross-unit primitive that gates this.
@@ -451,8 +456,11 @@ pub fn ScanPgRelation(
     // Marshal the owner-vocabulary ScannedPgClass into the owned FormPgClass
     // mirror (the C "memcpy of CLASS_TUPLE_SIZE into rd_rel"). The variable-
     // length tail columns (relacl/reloptions/relpartbound) are not cached in
-    // rd_rel; reloptions is consumed separately by RelationParseRelOptions.
-    Ok(Some(FormPgClass {
+    // rd_rel; reloptions is consumed separately by RelationParseRelOptions, so
+    // it is returned alongside the form (the C `pg_class_tuple` the relcache
+    // hands to RelationParseRelOptions).
+    let reloptions = scanned.reloptions.clone();
+    Ok(Some((FormPgClass {
         relname: scanned.relname,
         relnamespace: scanned.relnamespace,
         reltype: scanned.reltype,
@@ -482,7 +490,7 @@ pub fn ScanPgRelation(
         relrewrite: scanned.relrewrite,
         relfrozenxid: scanned.relfrozenxid,
         relminmxid: scanned.relminmxid,
-    }))
+    }, reloptions)))
 }
 
 /// `AllocateRelationDesc(relp)` (relcache.c): `palloc0` a fresh descriptor and
@@ -549,6 +557,10 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
     let mut attrs: Vec<OwnedAttr> = vec![OwnedAttr::default(); natts as usize];
     let mut filled = vec![false; natts as usize];
     let mut need = natts;
+    // attrmiss = NULL; lazily allocated relnatts-long when the first column with
+    // a missing value is seen (C: MemoryContextAllocZero(relnatts *
+    // sizeof(AttrMissing))). `None` until then is the C NULL `attrmiss`.
+    let mut attrmiss: Option<Vec<types_relcache_entry::OwnedAttrMissing>> = None;
 
     for attp in &rows {
         let attnum = attp.attnum;
@@ -561,21 +573,25 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
                 .into_error());
         }
 
-        // The "missing" value path (attmissingval array element) is not yet
-        // representable: the owned entry's TupleConstr carries no AttrMissing
-        // array and the genam scan row does not carry the attmissingval Datum.
-        // Seam-and-panic precisely when a column actually has a missing value.
+        // If the column has a "missing" value, put it in the attrmiss array.
+        // The genam scan already performed heap_getattr(attmissingval) +
+        // array_get_element (extracting element 1 of the single-element array);
+        // a present value crosses as a lifetime-free MissingValueImage, `None`
+        // for the C `missingNull` (no missing value for this column).
         if attp.atthasmissing {
-            return Err(ereport(ERROR)
-                .errmsg_internal(format!(
-                    "relcache-build: RelationBuildTupleDesc attmissingval fetch \
-                     (heap_getattr(Anum_pg_attribute_attmissingval) + array_get_element \
-                     into AttrMissing) is not yet representable in the owned entry \
-                     (no AttrMissing carrier; genam scan row drops attmissingval) — \
-                     column {} of relation \"{}\"",
-                    attnum, relname
-                ))
-                .into_error());
+            if let Some(image) = &attp.attmissingval {
+                let arr = attrmiss
+                    .get_or_insert_with(|| {
+                        vec![
+                            types_relcache_entry::OwnedAttrMissing::default();
+                            natts as usize
+                        ]
+                    });
+                arr[(attnum - 1) as usize] = types_relcache_entry::OwnedAttrMissing {
+                    am_present: true,
+                    am_value: Some(image.clone()),
+                };
+            }
         }
 
         let idx = (attnum - 1) as usize;
@@ -647,6 +663,7 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
         || constr.has_generated_stored
         || constr.has_generated_virtual
         || ndef > 0
+        || attrmiss.is_some()
         || relation.rd_rel.relchecks > 0
     {
         // Install the constr now so AttrDefaultFetch/CheckNNConstraintFetch
@@ -657,6 +674,15 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
             AttrDefaultFetch(relation, ndef)?;
         }
         // (C: else constr->num_defval = 0 — the empty Vec already encodes that.)
+
+        // constr->missing = attrmiss; (the empty Vec encodes the C NULL when no
+        // column had a missing value, but we only reach here with attrmiss set
+        // if attrmiss.is_some()).
+        if let Some(arr) = attrmiss {
+            if let Some(c) = relation.rd_att.constr.as_mut() {
+                c.missing = arr;
+            }
+        }
 
         // CHECK and NOT NULLs.
         if relation.rd_rel.relchecks > 0
@@ -699,48 +725,48 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
 /// dispatch + storing the parsed result; the parse itself (`extractRelOptions`,
 /// access/common/reloptions.c, deforming the reloptions column and invoking the
 /// AM `amoptions`) is the cross-unit primitive.
-pub fn RelationParseRelOptions(relation: &mut RelationData) -> PgResult<()> {
+pub fn RelationParseRelOptions(
+    relation: &mut RelationData,
+    reloptions: Option<&[u8]>,
+) -> PgResult<()> {
     // C resets rd_options to NULL, then dispatches on relkind: tables/views/
     // matviews/toast/partitioned-tables use the generic (NULL amoptions) path;
     // indexes use rd_indam->amoptions; everything else returns with no options.
     relation.rd_options = None;
     let relkind = relation.rd_rel.relkind as u8;
-    match relkind {
-        // amoptsfn = NULL; fall through to extractRelOptions below.
+    // amoptsfn: NULL for the table-shaped relkinds; rd_indam->amoptions for the
+    // index relkinds; for everything else the C returns with no options.
+    let amoptions: Option<Oid> = match relkind {
         RELKIND_RELATION
         | RELKIND_TOASTVALUE
         | RELKIND_VIEW
         | RELKIND_MATVIEW
-        | RELKIND_PARTITIONED_TABLE => {}
-        // amoptsfn = rd_indam->amoptions; fall through.
-        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => {}
+        | RELKIND_PARTITIONED_TABLE => None,
+        // amoptsfn = rd_indam->amoptions — modeled as the index AM's handler OID
+        // the am_reloptions seam dispatches on (rd_amhandler).
+        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => Some(relation.rd_amhandler),
         // Everything else: no options, return.
         _ => return Ok(()),
-    }
-    // extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn): deforming the
-    // pg_class.reloptions column and invoking the AM amoptions is the
-    // reloptions-unit / catalog-deform cross-unit primitive. Seam-and-panic.
+    };
+
+    // extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn): parse the
+    // pg_class.reloptions text[] (carried alongside the form by ScanPgRelation,
+    // the C `pg_class_tuple` argument) into the parsed-options struct. The
+    // relkind dispatch + AM amoptions invocation live in the reloptions owner,
+    // reached through the extract_rel_options seam. C copies the result into
+    // CacheMemoryContext; the owned value is moved into rd_options directly.
     //
-    // The reloptions Datum itself is a variable-length pg_class tail column that
-    // the genam `scan_pg_class` seam does NOT carry (it returns only the fixed
-    // CLASS_TUPLE_SIZE form; `reloptions` is documented as "consumed separately
-    // by RelationParseRelOptions"). No seam yet produces the reloptions Datum
-    // for a relid, and there is no `extractRelOptions` seam (the reloptions unit
-    // exposes only the per-AM amoptions builders). So the deform input does not
-    // exist in the owned model: this is a genuinely-unported primitive, not a
-    // present-but-unwired one. (When reloptions are absent the C result is NULL
-    // and rd_options stays None; that no-option case is observable only after
-    // the deform, so the cross-unit read gates it — the nailed-catalog boot path
-    // does not reach here, formrdesc fills rd_options itself.)
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: RelationParseRelOptions extractRelOptions \
-             (pg_class.reloptions Datum is not carried by the genam scan_pg_class \
-             seam, and no extractRelOptions seam exists; reloptions deform + AM \
-             amoptions, access/common/reloptions.c) is a genuinely-unported \
-             cross-unit primitive",
-        )
-        .into_error())
+    // For the table-shaped relkinds (the user-table path) the owner parses with
+    // the in-crate heap/view/partitioned-table parsers (no further seam). For
+    // an index whose reloptions are non-NULL the owner drives the AM
+    // am_reloptions callback, which is itself genuinely unported (uninstalled
+    // amapi seam) — so an index with reloptions set still bottoms out there,
+    // precisely.
+    relation.rd_options =
+        backend_access_common_reloptions_seams::extract_rel_options::call(
+            relkind, reloptions, amoptions,
+        )?;
+    Ok(())
 }
 
 /// `formrdesc(relationName, relationReltype, isshared, natts, attrs)`
