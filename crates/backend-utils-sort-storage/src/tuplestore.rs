@@ -722,6 +722,33 @@ pub fn tuplestore_gettupleslot<'mcx>(
     }
 }
 
+/// `tuplestore_gettupleslot(state, forward, copy, slot)` (tuplestore.c) over a
+/// *standalone* slot, for callers with no `EState`/`SlotId` pool (`pquery.c`'s
+/// `RunFromStore`). `mcx` is the context the fetched `MinimalTuple` is formed
+/// in (the caller's hold context).
+pub fn tuplestore_gettupleslot_standalone<'s, 'm>(
+    mcx: Mcx<'m>,
+    carrier: &mut types_nodes::Tuplestorestate<'s>,
+    forward: bool,
+    copy: bool,
+    slot: &mut types_nodes::tuptable::SlotData<'m>,
+) -> PgResult<bool> {
+    let got = with_store(carrier, |state, _ctx| tuplestore_gettuple(mcx, state, forward))?;
+    match got {
+        Some((blob, _should_free)) => {
+            let _ = copy;
+            let mtup = flat::minimal_tuple_from_flat(mcx, &blob).map_err(flat_err)?;
+            // shouldFree = true: the slot takes ownership of the formed tuple.
+            execTuples::exec_store_minimal_tuple_payload::call(mcx, mtup, slot, true)?;
+            Ok(true)
+        }
+        None => {
+            execTuples::exec_clear_tuple_payload::call(slot)?;
+            Ok(false)
+        }
+    }
+}
+
 /// `tuplestore_advance(state, forward)`.
 pub fn tuplestore_advance(
     carrier: &mut types_nodes::Tuplestorestate<'_>,

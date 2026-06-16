@@ -279,6 +279,7 @@ backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
+backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }

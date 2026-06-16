@@ -175,6 +175,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_gettupleslot(state, forward, copy, slot)` (tuplestore.c)
+    /// over a *standalone* slot — the form `pquery.c`'s `RunFromStore` needs.
+    ///
+    /// `RunFromStore` replays a held cursor's tuplestore in the caller's
+    /// memory context using a `MakeSingleTupleTableSlot` slot; it has no
+    /// `EState`/`SlotId` pool, so it cannot use the `SlotId`+`&mut EStateData`
+    /// form above. This takes the payload-bearing [`SlotData`] directly.
+    /// Returns `false` when the store is exhausted in the requested direction;
+    /// reading a tuple can `ereport(ERROR)`. `mcx` is the context the fetched
+    /// `MinimalTuple` is formed in (the caller's hold context).
+    pub fn tuplestore_gettupleslot_standalone<'s, 'm>(
+        mcx: mcx::Mcx<'m>,
+        state: &mut types_nodes::Tuplestorestate<'s>,
+        forward: bool,
+        copy: bool,
+        slot: &mut types_nodes::tuptable::SlotData<'m>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `tuplestore_puttupleslot(state, slot)` (tuplestore.c): append a copy of
     /// the slot's tuple to the store. Re-signed off the header-only provisional
     /// shape once the MinimalTuple payload-bearing carrier + EState slot pool
