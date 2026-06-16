@@ -193,3 +193,15 @@ seam_core::seam!(
         tuple_xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckTableForSerializableConflictIn(relation)` (predicate.c): when a
+    /// whole table is deleted/truncated in a serializable transaction, record
+    /// an rw-conflict in to this transaction from each transaction holding a
+    /// predicate lock on the table (a relation-granularity sweep). Called by
+    /// `heap_drop_with_catalog`. `Err` carries the serialization-failure
+    /// `ereport(ERROR)`.
+    pub fn check_table_for_serializable_conflict_in(
+        relation: &types_rel::Relation<'_>,
+    ) -> types_error::PgResult<()>
+);
