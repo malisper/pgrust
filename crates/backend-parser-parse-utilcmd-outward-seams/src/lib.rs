@@ -1,0 +1,225 @@
+//! Outward dependency seams for `backend-parser-parse-utilcmd`
+//! (`parser/parse_utilcmd.c`).
+//!
+//! These mirror the C signatures of callees whose owners are genuinely
+//! catalog/relcache/partcache-bound and are not reachable from this crate. Each
+//! seam panics by default; a future owner port installs the real body via
+//! `::set(...)`. No `todo!()`/`unimplemented!()` — every unported leaf is a
+//! loud declared seam-and-panic.
+
+#![allow(non_snake_case)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
+
+use mcx::{Mcx, PgBox, PgString, PgVec};
+use types_core::Oid;
+use types_error::PgResult;
+use types_nodes::nodes::Node;
+use types_nodes::parsestmt::ParseState;
+
+type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
+
+seam_core::seam!(
+    /// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`
+    /// (catalog/namespace.c): look up the creation namespace, permission-check &
+    /// lock it, check for a preexisting relation of the same name, and update
+    /// `relation->relpersistence` if the namespace is temporary. Returns
+    /// `(existing_relid, namespace_name)`: `existing_relid` is `InvalidOid` if
+    /// no preexisting relation, and `namespace_name` is the resolved namespace
+    /// name (C `get_namespace_name(namespaceid)`), used to schema-qualify the
+    /// relation. The (mutated) `RangeVar` node is threaded in/out.
+    pub fn RangeVarGetAndCheckCreationNamespace<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: NodeBox<'mcx>,
+        if_not_exists: bool,
+    ) -> PgResult<(NodeBox<'mcx>, Oid, Option<PgString<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// `generateSerialExtraStmts(cxt, column, seqtypid, seqoptions, for_identity,
+    /// col_exists, &snamespace, &sname)` (parse_utilcmd.c): generate the CREATE
+    /// SEQUENCE + ALTER SEQUENCE ... OWNED BY statements for a serial/identity
+    /// column, determine the sequence name (`ChooseRelationName` /
+    /// `RangeVarGetCreationNamespace` / `get_namespace_name`), set the column's
+    /// `identitySequence`, and return the chosen `(snamespace, sname)` plus the
+    /// "before" statements to prepend to `cxt.blist` and the "after" statements
+    /// to append to the appropriate list. Catalog/relcache/sequence-bound.
+    ///
+    /// Returns `(snamespace, sname, before_stmts, after_stmts)`. The caller
+    /// appends `before_stmts` to `cxt.blist`; `after_stmts` go to `cxt.blist`
+    /// when `col_exists`, else to `cxt.alist`. The column's
+    /// `identitySequence` is set on the returned `column` node.
+    pub fn generateSerialExtraStmts<'mcx>(
+        mcx: Mcx<'mcx>,
+        column: NodeBox<'mcx>,
+        relation: NodeBox<'mcx>,
+        rel_oid: Oid,
+        is_alter: bool,
+        stmt_type: &str,
+        seqtypid: Oid,
+        seqoptions: PgVec<'mcx, NodeBox<'mcx>>,
+        for_identity: bool,
+        col_exists: bool,
+    ) -> PgResult<(
+        NodeBox<'mcx>,
+        Option<PgString<'mcx>>,
+        Option<PgString<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+    )>
+);
+
+seam_core::seam!(
+    /// `quote_qualified_identifier(namespace, ident)` (utils/adt/ruleutils.c):
+    /// build the dotted, quoted-as-needed identifier text used to construct the
+    /// `nextval('...')` argument for a SERIAL column's DEFAULT.
+    pub fn quote_qualified_identifier<'mcx>(
+        mcx: Mcx<'mcx>,
+        qualifier: Option<&str>,
+        ident: &str,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `transformColumnType(cxt, column)` (parse_utilcmd.c): verify the column's
+    /// declared type (and any COLLATE) via `typenameType` / `LookupCollation`.
+    /// For the IDENTITY path the caller also needs the resolved type OID, so
+    /// this returns `((Form_pg_type) GETSTRUCT(ctype))->oid`. Catalog/syscache.
+    pub fn transformColumnType<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &ParseState<'mcx>,
+        column: &Node<'mcx>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `transformTableLikeClause(cxt, table_like_clause)` (parse_utilcmd.c):
+    /// expand `LIKE <srctable>` into recreated column definitions by reading the
+    /// source relation's `TupleDesc`, defaults, identity, storage, compression,
+    /// comments and NOT NULL constraints through the relcache. Returns the new
+    /// `(columns, nnconstraints, alist, likeclauses)` to fold into the context.
+    /// Relcache/catalog/syscache-bound.
+    pub fn transformTableLikeClause<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &ParseState<'mcx>,
+        relation: NodeBox<'mcx>,
+        table_like_clause: NodeBox<'mcx>,
+        isforeign: bool,
+    ) -> PgResult<(
+        PgVec<'mcx, NodeBox<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+    )>
+);
+
+seam_core::seam!(
+    /// `transformOfType(cxt, ofTypename)` (parse_utilcmd.c): expand an
+    /// `OF typename` clause into inherited column definitions, reading the
+    /// composite type's rowtype `TupleDesc` (`typenameType` /
+    /// `lookup_rowtype_tupdesc`). Returns the generated `ColumnDef`s.
+    pub fn transformOfType<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &ParseState<'mcx>,
+        of_typename: NodeBox<'mcx>,
+    ) -> PgResult<PgVec<'mcx, NodeBox<'mcx>>>
+);
+
+seam_core::seam!(
+    /// The catalog-resident leaf of `transformIndexConstraint` (parse_utilcmd.c):
+    /// the ALTER TABLE ADD CONSTRAINT USING INDEX path (`get_relname_relid` /
+    /// `index_open` / opclass+collation checks), the inherited-table column
+    /// search (`table_openrv`), the WITHOUT OVERLAPS type check
+    /// (`type_is_range`/`type_is_multirange`/`typenameTypeId`), and the
+    /// `SystemAttributeByName` lookups. Given a built `IndexStmt`, the
+    /// constraint, and the accumulator state, finishes building the index
+    /// definition (mutating the `IndexStmt` and appending any
+    /// PRIMARY-KEY-implied not-null constraints). Returns the finished
+    /// `(IndexStmt, extra_nnconstraints)`.
+    pub fn transformIndexConstraintCatalog<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &ParseState<'mcx>,
+        constraint: NodeBox<'mcx>,
+        index: NodeBox<'mcx>,
+        relation: NodeBox<'mcx>,
+        rel_oid: Oid,
+        isalter: bool,
+        columns: PgVec<'mcx, NodeBox<'mcx>>,
+        inh_relations: PgVec<'mcx, NodeBox<'mcx>>,
+    ) -> PgResult<(NodeBox<'mcx>, PgVec<'mcx, NodeBox<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// `transformIndexStmt(relid, stmt, queryString)` (parse_utilcmd.c): open the
+    /// parent relation by OID, add it to the rtable, transform the WHERE
+    /// predicate and any index-element expressions, then check that only the
+    /// base rel is mentioned. Relcache-bound (`relation_open` /
+    /// `addRangeTableEntryForRelation`).
+    pub fn transformIndexStmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodeBox<'mcx>,
+        query_string: &str,
+    ) -> PgResult<NodeBox<'mcx>>
+);
+
+seam_core::seam!(
+    /// `transformStatsStmt(relid, stmt, queryString)` (parse_utilcmd.c): open the
+    /// parent relation by OID, add it to the rtable, and transform the stat
+    /// expressions. Relcache-bound.
+    pub fn transformStatsStmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodeBox<'mcx>,
+        query_string: &str,
+    ) -> PgResult<NodeBox<'mcx>>
+);
+
+seam_core::seam!(
+    /// `transformAlterTableStmt(relid, stmt, queryString, &beforeStmts,
+    /// &afterStmts)` (parse_utilcmd.c): parse analysis for ALTER TABLE — the
+    /// per-subcommand relcache dispatch (`relation_open` / `RelationGetDescr` /
+    /// `get_attnum` / `getIdentitySequence` / the USING-clause `transformExpr` /
+    /// ALTER SEQUENCE generation). Returns `(stmt, beforeStmts, afterStmts)`.
+    pub fn transformAlterTableStmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodeBox<'mcx>,
+        query_string: &str,
+    ) -> PgResult<(
+        NodeBox<'mcx>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+        PgVec<'mcx, NodeBox<'mcx>>,
+    )>
+);
+
+seam_core::seam!(
+    /// `transformPartitionBound(pstate, parent, spec)` (parse_utilcmd.c):
+    /// transform a partition `FOR VALUES` bound against the parent's
+    /// `PartitionKey` (`RelationGetPartitionKey`, `get_partition_*`,
+    /// `transformExpr`/`coerce_to_target_type`/`evaluate_expr`). Relcache/
+    /// partcache/planner-bound. Carries the bound `Node` in and out.
+    pub fn transformPartitionBound<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &ParseState<'mcx>,
+        parent_relid: Oid,
+        spec: NodeBox<'mcx>,
+    ) -> PgResult<NodeBox<'mcx>>
+);
+
+seam_core::seam!(
+    /// The catalog/relcache leaf of `transformRuleStmt` (parse_utilcmd.c):
+    /// `table_openrv(stmt->relation, AccessExclusiveLock)`, building the fake
+    /// OLD/NEW range-table entries, running each action statement through
+    /// analyze.c (`transformStmt`) and the WHERE qual through
+    /// `transformWhereClause`, and validating OLD/NEW usage. Returns the
+    /// analysed `(actions, where_clause)`.
+    pub fn transformRuleStmtCatalog<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &types_nodes::ddlnodes::RuleStmt<'mcx>,
+        query_string: &str,
+    ) -> PgResult<(
+        PgVec<'mcx, types_nodes::copy_query::Query<'mcx>>,
+        Option<Node<'mcx>>,
+    )>
+);

@@ -582,6 +582,9 @@ pub fn init_seams() {
     s::allow_system_table_mods::set(|| get_bool("allow_system_table_mods").unwrap_or(false));
     s::maintenance_work_mem::set(|| get_int("maintenance_work_mem").unwrap_or(0));
     s::work_mem::set(|| get_int("work_mem").unwrap_or(0));
+    s::standard_conforming_strings::set(|| {
+        get_bool("standard_conforming_strings").unwrap_or(true)
+    });
     s::autovacuum_work_mem::set(|| get_int("autovacuum_work_mem").unwrap_or(-1));
     s::cluster_name::set(|| get_string("cluster_name").flatten().unwrap_or_default());
 

@@ -889,7 +889,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 }
             }
             JSONTYPE_NUMERIC => {
-                let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+                let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
                 if key_scalar {
                     // always quote keys
                     jb = JsonbValue {
@@ -947,7 +947,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 // the lexer/parser is the jsonapi subsystem, so the seam parses
                 // the text into standalone jsonb bytes which are then spliced
                 // into `result` by the iterator loop — an identical tree.
-                let json = catalog_fmgr::text_datum_bytes::call(val)?;
+                let json = catalog_fmgr::text_datum_bytes::call(mcx, val)?;
                 let parsed = jsonb_seam::parse_to_jsonb::call(mcx, &json, false)?;
                 splice_jsonb_tokens(result, &parsed)?;
             }
@@ -982,7 +982,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
             }
             // C default: OidOutputFunctionCall + checkStringLen, as a string.
             JSONTYPE_NULL | JSONTYPE_OTHER => {
-                let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+                let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
                 checkStringLen(outputstr.len())?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
@@ -1092,7 +1092,7 @@ fn array_to_jsonb_internal<'mcx>(
     array: &Datum<'mcx>,
     result: &mut JsonbInState,
 ) -> PgResult<()> {
-    let arr = catalog_fmgr::deconstruct_array::call(array)?;
+    let arr = catalog_fmgr::deconstruct_array::call(mcx, array)?;
 
     // nitems = ArrayGetNItems(ndim, dim). The overflow guard lives in the seam
     // (deconstruct_array owns ArrayGetNItems); here we recompute the product to
@@ -1140,7 +1140,7 @@ fn composite_to_jsonb<'mcx>(
     composite: &Datum<'mcx>,
     result: &mut JsonbInState,
 ) -> PgResult<()> {
-    let fields = catalog_fmgr::walk_composite::call(composite)?;
+    let fields = catalog_fmgr::walk_composite::call(mcx, composite)?;
 
     result.res = pushJsonbValue(&mut result.parse_state, JsonbIteratorToken::WJB_BEGIN_OBJECT, None)?;
 

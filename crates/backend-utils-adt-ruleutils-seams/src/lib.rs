@@ -158,6 +158,92 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The relation-RTE branch of `set_relation_column_names` (ruleutils.c
+    /// 4390-4412): open the relation (`relation_open(relid, AccessShareLock)`),
+    /// read its current `TupleDesc`, and return one entry per *physical* column
+    /// — the live `attname` for a live column, `None` for a dropped column
+    /// (`attisdropped`). Reads the catalog and takes a lock, so it can
+    /// `ereport(ERROR)`; allocated in `mcx`. This is the only catalog-coupled
+    /// step of the name-resolution engine for a plain relation; the engine that
+    /// *consumes* the names is fully ported in `backend-utils-adt-ruleutils`.
+    /// Owner: the relcache/table-AM substrate (not the deparse engine).
+    pub fn ruleutils_relation_real_colnames<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// The function-RTE branch of `set_relation_column_names` (ruleutils.c
+    /// 4434-4439): `expandRTE(rte, 1, 0, VAR_RETURNING_DEFAULT, -1, true
+    /// /* include dropped */, &colnames, NULL)` — the up-to-date column names of
+    /// a `RTE_FUNCTION` returning a composite, with dropped columns included as
+    /// empty strings (which the engine maps to `None`). Returns one entry per
+    /// column (`None` for a dropped column). Reads type catalogs, so it can
+    /// `ereport(ERROR)`; allocated in `mcx`. Owner: the parser's `parse_relation`
+    /// (`expandRTE`), not the deparse engine.
+    pub fn ruleutils_expand_function_rte_colnames<'mcx>(
+        mcx: Mcx<'mcx>,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `generate_operator_name(operid, arg1, arg2)` (ruleutils.c, static): the
+    /// possibly-schema-qualified operator name to use in deparsed output. C's
+    /// body calls `OpernameGetCandidates` / `OpernameGetOprid` (parse_oper.c) to
+    /// decide whether the unqualified name would re-parse to the same operator,
+    /// and `get_namespace_name_or_temp` to qualify if not. Those parser/catalog
+    /// helpers are unported (a later ruleutils family / parse_oper), so the
+    /// expression deparser (F1) reaches this name generator through a seam; the
+    /// owner installs the body when the catalog-def-builder family lands. Reads
+    /// the catalog, so it can `ereport(ERROR)`. Allocated in `mcx`.
+    pub fn generate_operator_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        operid: Oid,
+        arg1: Oid,
+        arg2: Oid,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `generate_function_name(funcid, nargs, argnames, argtypes, has_variadic,
+    /// use_variadic_p, inGroupBy)` (ruleutils.c, static): the
+    /// possibly-schema-qualified function name to use in deparsed output, and
+    /// (when `want_use_variadic`) whether `VARIADIC` should be printed. C's body
+    /// calls `func_get_detail` (parse_func.c) to decide whether the unqualified
+    /// name + argtypes would re-resolve to the same function. That parser helper
+    /// is unported, so the expression deparser (F1) reaches this name generator
+    /// through a seam; the owner installs the body when the catalog-def-builder
+    /// family lands. Returns `(name, use_variadic)`. Reads the catalog, so it can
+    /// `ereport(ERROR)`. Allocated in `mcx`.
+    pub fn generate_function_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+        nargs: i32,
+        argnames: PgVec<'mcx, Option<PgString<'mcx>>>,
+        argtypes: PgVec<'mcx, Oid>,
+        has_variadic: bool,
+        want_use_variadic: bool,
+        in_group_by: bool,
+    ) -> PgResult<(PgString<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `get_rte_attribute_name(rte, attnum)` (parser/parse_relation.c): the
+    /// column name for a (possibly system-) column number of an RTE, used by
+    /// ruleutils' `get_variable` for system columns (`attnum < 0`). C consults
+    /// the RTE's alias/eref column lists and the fixed system-column names. The
+    /// parser owner is unported, so ruleutils' expression deparser reaches it
+    /// through a seam. Allocated in `mcx`; can `ereport(ERROR)`.
+    pub fn get_rte_attribute_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+        attnum: i16,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `generate_collation_name(collid)` (ruleutils.c): the schema-qualified,
     /// quoted collation name for a collation OID, allocated in `mcx`. Reads
     /// `pg_collation`/`pg_namespace`, so it can `ereport(ERROR)` (cache lookup
