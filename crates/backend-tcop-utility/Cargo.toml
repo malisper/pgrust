@@ -12,9 +12,13 @@ crate-type = ["rlib"]
 [dependencies]
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-portal = { path = "../types-portal" }
 types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }
