@@ -12753,6 +12753,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-utils-error",
+ "interfaces-libpq-fe-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+ "types-pgstat",
+ "types-walreceiver",
+]
+
+[[package]]
 name = "backend-replication-libpqwalreceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -13689,6 +13704,38 @@ dependencies = [
  "types-core",
  "types-error",
 ]
+
+[[package]]
+name = "backend-snowball-dict-snowball"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-snowball-dict-snowball-seams",
+ "backend-snowball-runtime",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-dict-snowball-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-runtime"
+version = "0.0.0"
 
 [[package]]
 name = "backend-statistics-core-seams"
@@ -19370,6 +19417,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interfaces-libpq-fe-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+]
+
+[[package]]
 name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -19897,6 +19954,7 @@ dependencies = [
  "backend-postmaster-walsummarizer",
  "backend-postmaster-walwriter",
  "backend-regex-core",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
  "backend-replication-logical-launcher",
@@ -19915,6 +19973,7 @@ dependencies = [
  "backend-replication-walsender",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
@@ -20457,6 +20516,13 @@ version = "0.0.0"
 dependencies = [
  "types-datum",
  "types-jsonb",
+]
+
+[[package]]
+name = "types-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

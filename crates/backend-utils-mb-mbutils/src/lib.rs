@@ -1416,6 +1416,7 @@ pub fn init_seams() {
         InitializeClientEncoding(ctx.mcx())
     });
     seams::pg_server_to_any::set(pg_server_to_any);
+    seams::pg_any_to_server::set(pg_any_to_server);
     seams::pg_get_client_encoding::set(pg_get_client_encoding);
     seams::pg_encoding_mblen::set(|encoding, mbstr| {
         common_wchar::pg_encoding_mblen(encoding, mbstr).unwrap_or(1)
