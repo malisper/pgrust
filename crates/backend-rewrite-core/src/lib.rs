@@ -21,23 +21,27 @@
 //!   `ReplaceVarsFromTargetList` (+ callback), `ReplaceVarFromTargetList`.
 //! * [`relids`] — the inline `ExprRelids` word-vector set algebra.
 //!
-//! # Genuine remaining gaps (NOT stubbed)
+//! # Rule-action manipulation primitives
 //!
-//! The rule-rewriter helpers `getInsertSelectQuery`, `AddQual` and
-//! `AddInvertedQual` also live in rewriteManip.c but belong to the rule-action
-//! rewrite path (`rewriteHandler.c`, the sibling `backend-rewrite-core` files
-//! which are still `todo`). They have no consumer in the parser / `prepjointree`
-//! / `subselect` Var-manipulation path this unit serves, and
-//! `getInsertSelectQuery`'s C signature returns both a borrow of the sub-Query
-//! and a mutable link to it (`Query ***subquery_ptr`), which has no caller here.
-//! They are intentionally not defined (no own-logic stubs); they land with the
-//! rewriteHandler rule engine.
+//! [`manip_rule`] holds the rule-action node-manipulation helpers the RIR / DML
+//! rule engine (`rewriteHandler.c`, sibling lane) consumes: `AddQual`,
+//! `AddInvertedQual`, `CombineRangeTables` (rewriteManip.c) and the one
+//! jointree-list helper `adjustJoinTreeList` (rewriteHandler.c). They are
+//! defined over the owned `Query<'mcx>` / `Expr` model.
 //!
-//! `CombineRangeTables` (rewriteManip.c:347) is the faithful home for the
-//! range-table merge helper. It DOES have a consumer in the ported tree
-//! (`backend-optimizer-plan-subselect-pullup`, which currently carries a private
-//! `combine_range_tables` copy); relocating it here is a follow-up that touches
-//! that audited sibling crate, so it is left as a documented gap for now.
+//! `getInsertSelectQuery` lives in [`insert_select`]; its C `Query
+//! ***subquery_ptr` out-parameter is always `NULL` at the rewriteDefine.c call
+//! sites, so the owned form returns a plain borrow.
+//!
+//! `CombineRangeTables` (rewriteManip.c:347) is given its faithful home here.
+//! `backend-optimizer-plan-subselect-pullup` still carries a private
+//! `combine_range_tables` copy (a `&mut Query`-shaped specialization); folding it
+//! onto this one is a follow-up that touches that audited sibling crate.
+//!
+//! `contain_vars_of_level` is an `optimizer/util/var.c` function, already
+//! faithfully ported and exported as
+//! `backend_optimizer_util_vars::var::contain_vars_of_level`; it is intentionally
+//! NOT duplicated here (the rule engine calls the var.c owner directly).
 //!
 //! # The C "cheat and modify in-place" mutators
 //!
@@ -67,6 +71,7 @@ extern crate alloc;
 pub mod change;
 pub mod increment;
 pub mod insert_select;
+pub mod manip_rule;
 pub mod nulling;
 pub mod offset;
 pub mod relids;
@@ -83,6 +88,7 @@ pub use change::{
 };
 pub use increment::{IncrementVarSublevelsUp, IncrementVarSublevelsUp_rtable, SetVarReturningType};
 pub use insert_select::getInsertSelectQuery;
+pub use manip_rule::{adjustJoinTreeList, AddInvertedQual, AddQual, CombineRangeTables};
 pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
 pub use offset::OffsetVarNodes;
 pub use replace::{
