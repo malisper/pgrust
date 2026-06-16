@@ -9,6 +9,7 @@
 
 use types_error::PgResult;
 use types_foreigncmds::ImportPlannedStmt;
+use types_nodes::nodes::Node;
 
 seam_core::seam!(
     /// `ProcessUtility(pstmt, queryString, false, PROCESS_UTILITY_SUBCOMMAND,
@@ -22,5 +23,22 @@ seam_core::seam!(
     pub fn process_utility_import_subcommand(
         pstmt: ImportPlannedStmt,
         query_string: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `schemacmds.c`'s `CreateSchemaCommand` subcommand loop: build a wrapper
+    /// `PlannedStmt` (`commandType = CMD_UTILITY`, `canSetTag = false`,
+    /// `utilityStmt = stmt`, `stmt_location`, `stmt_len`) and run it via
+    /// `ProcessUtility(wrapper, queryString, false, PROCESS_UTILITY_SUBCOMMAND,
+    /// NULL, NULL, None_Receiver, NULL)`. `stmt` is one raw parsetree from
+    /// `transformCreateSchemaStmtElements`. The owner constructs the wrapper +
+    /// supplies the fixed call-site arguments. Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn process_utility_create_schema_subcommand(
+        stmt: &Node<'_>,
+        query_string: &str,
+        stmt_location: i32,
+        stmt_len: i32,
     ) -> PgResult<()>
 );

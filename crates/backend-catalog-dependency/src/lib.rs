@@ -35,16 +35,12 @@
 //! exactly as the sibling `backend-catalog-pg-depend` port does. `Mcx<'mcx>`
 //! threads the deformation/allocation.
 //!
-//! ## Inward seams — the `ObjectAddresses` handle
+//! ## Inward seams — the `ObjectAddresses` collection
 //!
-//! Cross-crate callers (pg_constraint/pg_cast/pg_range/…) thread an opaque
-//! `ObjectAddressesHandle` between the collection seams. The real
-//! [`ObjectAddresses`] values live in a backend-local registry here; each seam
-//! resolves the handle to its value. Within this crate the engine uses owned
-//! `ObjectAddresses` values directly.
-
-use core::cell::RefCell;
-use std::collections::HashMap;
+//! Cross-crate callers (pg_constraint/pg_cast/pg_range/…) pass the owned
+//! [`ObjectAddresses`] value directly across the collection seams, mirroring
+//! C's `ObjectAddresses *` pointer thread. Within this crate the engine uses
+//! owned `ObjectAddresses` values too.
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 
@@ -1572,57 +1568,6 @@ fn DeleteInitPrivs(object: &ObjectAddress) -> PgResult<()> {
     }
 
     relPriv.close(RowExclusiveLock)
-}
-
-/* ===========================================================================
- * ObjectAddresses handle registry (inward-seam backing).
- * ========================================================================= */
-
-thread_local! {
-    static ADDRS_REGISTRY: RefCell<HashMap<u64, ObjectAddresses>> = RefCell::new(HashMap::new());
-    static ADDRS_NEXT_ID: core::cell::Cell<u64> = const { core::cell::Cell::new(1) };
-}
-
-pub(crate) fn registry_new() -> backend_catalog_dependency_seams::ObjectAddressesHandle {
-    let id = ADDRS_NEXT_ID.with(|c| {
-        let id = c.get();
-        c.set(id + 1);
-        id
-    });
-    ADDRS_REGISTRY.with(|r| r.borrow_mut().insert(id, new_object_addresses()));
-    backend_catalog_dependency_seams::ObjectAddressesHandle(id)
-}
-
-pub(crate) fn registry_with_mut<R>(
-    h: backend_catalog_dependency_seams::ObjectAddressesHandle,
-    f: impl FnOnce(&mut ObjectAddresses) -> R,
-) -> R {
-    ADDRS_REGISTRY.with(|r| {
-        let mut map = r.borrow_mut();
-        let addrs = map
-            .get_mut(&h.0)
-            .expect("ObjectAddressesHandle not in registry (use-after-free)");
-        f(addrs)
-    })
-}
-
-pub(crate) fn registry_with<R>(
-    h: backend_catalog_dependency_seams::ObjectAddressesHandle,
-    f: impl FnOnce(&ObjectAddresses) -> R,
-) -> R {
-    ADDRS_REGISTRY.with(|r| {
-        let map = r.borrow();
-        let addrs = map
-            .get(&h.0)
-            .expect("ObjectAddressesHandle not in registry (use-after-free)");
-        f(addrs)
-    })
-}
-
-pub(crate) fn registry_free(h: backend_catalog_dependency_seams::ObjectAddressesHandle) {
-    ADDRS_REGISTRY.with(|r| {
-        r.borrow_mut().remove(&h.0);
-    });
 }
 
 pub use seams::init_seams;

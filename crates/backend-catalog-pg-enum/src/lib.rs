@@ -272,7 +272,7 @@ pub fn EnumValuesCreate(enumTypeOid: Oid, vals: &[&str]) -> PgResult<()> {
         });
     }
 
-    indexing_seams::catalog_tuples_multi_insert_pg_enum::call(&pg_enum, &rows)?;
+    indexing_seams::catalog_tuples_multi_insert_pg_enum::call(enum_ctx.mcx(), &pg_enum, &rows)?;
 
     pg_enum.close(RowExclusiveLock)?;
 

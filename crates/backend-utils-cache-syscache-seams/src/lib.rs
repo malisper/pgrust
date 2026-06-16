@@ -233,6 +233,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACENAME, CStringGetDatum(name))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner` reads. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`), so the caller raises the schema's own
+    /// "does not exist" error. The installer owns the `ReleaseSysCache`; `Err`
+    /// carries OOM from the name copy.
+    pub fn namespace_owner_row_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        name: &str,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(schemaoid))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner_oid` reads. `Ok(None)` on a
+    /// cache miss, so the caller raises the `elog(ERROR, "cache lookup failed
+    /// for schema %u")`. The installer owns the `ReleaseSysCache`.
+    pub fn namespace_owner_row_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        schemaoid: Oid,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid, typname, nsp)`.
     pub fn get_type_oid(typname: &str, namespace_id: Oid) -> PgResult<Oid>
 );
