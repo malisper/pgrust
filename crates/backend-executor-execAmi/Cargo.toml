@@ -49,6 +49,7 @@ backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
 backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }

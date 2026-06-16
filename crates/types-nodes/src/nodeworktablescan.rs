@@ -13,7 +13,12 @@ use alloc::boxed::Box;
 
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Scan;
+use crate::nodes::NodeTag;
 pub use crate::noderecursiveunion::RecursiveUnionStateData;
+
+/// `T_WorkTableScanState` (nodes/nodetags.h, PostgreSQL 18.3 generated order:
+/// NamedTuplestoreScanState=416, WorkTableScanState=417, ForeignScanState=418).
+pub const T_WorkTableScanState: NodeTag = NodeTag(417);
 
 /// `WorkTableScan` plan node (plannodes.h):
 ///
