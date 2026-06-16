@@ -17,13 +17,14 @@
 //! * `pull_up_sublinks` — FAMILY 1, **ported here** (see [`sublinks`]) now that
 //!   the SubLink owned-`Query` carrier keystone (#273) has landed; installed by
 //!   [`init_seams`].
-//! * `pull_up_subqueries` (FAMILY 2) — deferred to FAMILY 5 +
-//!   the `AppendRelInfo.translated_vars` walkable-carrier keystone (#274);
-//!   installed as a seam-and-panic body.
+//! * `pull_up_subqueries` (FAMILY 2/3/6) — **ported here** (see [`pullup`]) now
+//!   that the `AppendRelInfo.translated_vars` walkable-carrier keystone (#274)
+//!   and `Expr::clone_in` (#280) have landed; installed by [`init_seams`] along
+//!   with `flatten_simple_union_all` (FAMILY 3) and
+//!   `preprocess_function_rtes` / `expand_virtual_generated_columns` (FAMILY 6).
 //!
 //! `subquery_planner` (planner.c, still unported) calls all of them, so all are
-//! declared and installed; only FAMILY 2 panics loudly until its keystone lands
-//! (the sanctioned seam-and-panic contract).
+//! declared and installed with real bodies.
 //!
 //! ## Model notes (`reduce_outer_joins`)
 //!
