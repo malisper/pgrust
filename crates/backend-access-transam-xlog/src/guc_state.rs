@@ -21,6 +21,8 @@ std::thread_local! {
     static MIN_WAL_SIZE_MB: Cell<i32> = const { Cell::new(80) };
     /// `double CheckPointCompletionTarget` (xlog.c GUC global).
     static CHECKPOINT_COMPLETION_TARGET: Cell<f64> = const { Cell::new(0.9) };
+    /// `bool EnableHotStandby = false;` (xlog.c:146) — the `hot_standby` GUC.
+    static ENABLE_HOT_STANDBY: Cell<bool> = const { Cell::new(false) };
 }
 
 // --- max_wal_size_mb accessors (conf->variable) -----------------------------
@@ -97,6 +99,10 @@ pub fn install() {
     vars::CheckPointCompletionTarget.install(GucVarAccessors {
         get: get_checkpoint_completion_target,
         set: set_checkpoint_completion_target,
+    });
+    vars::EnableHotStandby.install(GucVarAccessors {
+        get: || ENABLE_HOT_STANDBY.with(Cell::get),
+        set: |v| ENABLE_HOT_STANDBY.with(|c| c.set(v)),
     });
 
     hooks::assign_max_wal_size.install(assign_max_wal_size_hook);
