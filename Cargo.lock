@@ -16426,6 +16426,7 @@ name = "backend-utils-activity-pgstat"
 version = "0.0.0"
 dependencies = [
  "backend-lib-dshash",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
