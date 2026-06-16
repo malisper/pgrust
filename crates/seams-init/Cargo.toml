@@ -112,6 +112,7 @@ backend-commands-statscmds = { path = "../backend-commands-statscmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
+backend-commands-extension = { path = "../backend-commands-extension" }
 backend-commands-explain = { path = "../backend-commands-explain" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-lockcmds = { path = "../backend-commands-lockcmds" }
@@ -320,6 +321,7 @@ backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-network-gist = { path = "../backend-utils-adt-network-gist" }
+backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
