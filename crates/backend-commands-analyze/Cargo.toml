@@ -1,0 +1,81 @@
+[package]
+name = "backend-commands-analyze"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_analyze"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-nodes = { path = "../types-nodes" }
+types-slot = { path = "../types-slot" }
+types-statistics = { path = "../types-statistics" }
+types-vacuum = { path = "../types-vacuum" }
+types-tableam = { path = "../types-tableam" }
+types-sortsupport = { path = "../types-sortsupport" }
+types-pgstat = { path = "../types-pgstat" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+
+# own inward seam crates
+backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
+# own outward seam crate (unported / unreachable externals)
+backend-commands-analyze-rt-seams = { path = "../backend-commands-analyze-rt-seams" }
+
+# landed dependencies called directly
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-access-common-next = { path = "../backend-access-common-next" }
+backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
+backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
+backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
+backend-utils-activity-small-seams = { path = "../backend-utils-activity-small-seams" }
+pg-prng = { path = "../pg-prng" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-reloptions = { path = "../types-reloptions" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
+backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+types-datum = { path = "../types-datum" }
+types-cache = { path = "../types-cache" }
+types-cluster = { path = "../types-cluster" }
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }

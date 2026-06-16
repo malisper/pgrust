@@ -5767,6 +5767,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-analyze"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-next",
+ "backend-access-common-tupdesc-seams",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-heap-visibilitymap",
+ "backend-access-table-table",
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-xact",
+ "backend-catalog-index-seams",
+ "backend-catalog-indexing",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-inherits",
+ "backend-commands-analyze-rt-seams",
+ "backend-commands-analyze-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-vacuum-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execTuples",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-parser-parse-oper",
+ "backend-parser-relation",
+ "backend-storage-ipc-procarray-seams",
+ "backend-utils-activity-small-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-scalar-datum-core",
+ "backend-utils-cache-attoptcache",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-sampling",
+ "backend-utils-sort-sortsupport",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "pg-prng",
+ "seam-core",
+ "types-cache",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pgstat",
+ "types-rel",
+ "types-reloptions",
+ "types-slot",
+ "types-sortsupport",
+ "types-statistics",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-commands-analyze-rt-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-statistics",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-commands-analyze-seams"
 version = "0.0.0"
 dependencies = [
