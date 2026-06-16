@@ -1165,3 +1165,21 @@ seam_core::seam!(
         row: &types_catalog::pg_attrdef::PgAttrdefInsertRow,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `UpdateIndexRelation`'s pg_index INSERT (catalog/index.c): build the full
+    /// 21-column `pg_index` row from a typed [`PgIndexInsertRow`] (the
+    /// `IndexInfo` scalars, the `buildint2vector`/`buildoidvector`-packed
+    /// `indkey`/`indcollation`/`indclass`/`indoption` vectors, and the
+    /// `nodeToString` `indexprs`/`indpred` `pg_node_tree` images), then
+    /// `heap_form_tuple(RelationGetDescr(pg_index), values, nulls)` +
+    /// `CatalogTupleInsert(pg_index, tuple)`. `rel` is the open pg_index
+    /// relation. `indexprs`/`indpred` are stored NULL when `None` (the C
+    /// `exprsDatum`/`predDatum == (Datum) 0`). `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_index<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_index::PgIndexInsertRow,
+    ) -> PgResult<()>
+);

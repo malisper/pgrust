@@ -1066,7 +1066,11 @@ pub fn get_extension_name<'mcx>(mcx: Mcx<'mcx>, ext_oid: Oid) -> PgResult<Option
     }
     let bytes: &[u8] = match &value {
         Datum::ByRef(b) => b,
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error("get_extension_name: extname is by-value"))
         }
     };

@@ -246,6 +246,12 @@ pub fn make_expanded_object_read_only_internal_v<'mcx>(
         // A by-value datum is never an expanded-object pointer; return it
         // unchanged (matching the internal helper's "not RW → return d").
         Datum::ByVal(v) => return Ok(Datum::ByVal(*v)),
+        // A live `Datum::Expanded` would short-circuit here as already-RW, and
+        // the other arms are never expanded varlenas — none has a producer that
+        // reaches this seam yet.
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("make_expanded_object_read_only_internal_v: non-varlena Datum arm (Cstring/Composite/Expanded/Internal) not yet produced — wave 2")
+        }
     };
     match make_expanded_object_read_only_internal(mcx, bytes)? {
         Some(ro) => Ok(Datum::ByRef(ro)),

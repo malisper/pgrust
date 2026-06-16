@@ -533,6 +533,9 @@ fn byval_datum(datum: &Datum) -> usize {
         Datum::ByRef(_) => {
             panic!("byval_datum: by-value attribute handed a Datum::ByRef")
         }
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("byval_datum: by-value attribute handed a non-flat Datum (Cstring/Composite/Expanded/Internal) — not yet produced, wave 2")
+        }
     }
 }
 
@@ -2281,8 +2284,13 @@ pub fn DatumGetHeapTupleHeader<'mcx>(
 ) -> PgResult<FormedTuple<'mcx>> {
     let image: &[u8] = match datum {
         Datum::ByRef(b) => b,
+        // A composite carried as a live tuple needs no byte decode — re-home it.
+        Datum::Composite(t) => return t.clone_in(mcx),
         Datum::ByVal(_) => {
             panic!("DatumGetHeapTupleHeader called on a by-value (non-composite) Datum")
+        }
+        Datum::Cstring(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("DatumGetHeapTupleHeader called on a non-composite Datum (Cstring/Expanded/Internal)")
         }
     };
 

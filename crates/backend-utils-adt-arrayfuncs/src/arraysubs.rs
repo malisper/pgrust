@@ -44,6 +44,9 @@ fn value_word(value: &DatumV<'_>) -> Datum {
     match value {
         DatumV::ByVal(w) => Datum::from_usize(*w),
         DatumV::ByRef(b) => Datum::from_usize(b.as_ptr() as usize),
+        DatumV::Cstring(_) | DatumV::Composite(_) | DatumV::Expanded(_) | DatumV::Internal(_) => {
+            panic!("arraysubs::value_word: Cstring/Composite/Expanded/Internal replacement value not yet produced — wave 2")
+        }
     }
 }
 

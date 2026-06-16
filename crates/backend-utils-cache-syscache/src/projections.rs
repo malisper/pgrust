@@ -135,7 +135,11 @@ const Anum_pg_amproc_amproc: i32 = 6;
 fn byval<'mcx>(value: Datum<'mcx>) -> PgResult<Datum<'mcx>> {
     match value {
         Datum::ByVal(_) => Ok(value),
-        Datum::ByRef(_) => Err(PgError::error(
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error(
             "syscache projection: expected a by-value attribute",
         )),
     }
@@ -163,7 +167,11 @@ fn getattr_name<'mcx>(
     let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
     let bytes = match &value {
         Datum::ByRef(b) => &b[..],
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error("syscache projection: name attribute is by-value"))
         }
     };
@@ -455,7 +463,11 @@ fn getattr_option_bytes<'mcx>(
     }
     match &value {
         Datum::ByRef(b) => Ok(Some(mcx::slice_in(mcx, &b[..])?)),
-        Datum::ByVal(_) => Err(PgError::error(
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error(
             "syscache projection: *options attribute is by-value",
         )),
     }
@@ -949,7 +961,11 @@ fn getattr_name_bytes<'mcx>(
     let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
     let bytes = match &value {
         Datum::ByRef(b) => &b[..],
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error("syscache projection: name attribute is by-value"))
         }
     };
@@ -1155,7 +1171,11 @@ pub(crate) fn get_conkey_array(tup: &FormedTuple<'_>) -> PgResult<ConKeyArray> {
     let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, Anum_pg_constraint_conkey as i32)?;
     match &value {
         Datum::ByRef(b) => read_conkey_array(mcx, b),
-        Datum::ByVal(_) => Err(PgError::error("conkey is not a by-reference array")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("conkey is not a by-reference array")),
     }
 }
 
@@ -1179,7 +1199,11 @@ pub(crate) fn heap_get_conkey(
     }
     match &value {
         Datum::ByRef(b) => Ok(Some(read_conkey_array(mcx, b)?)),
-        Datum::ByVal(_) => Err(PgError::error("conkey is not a by-reference array")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("conkey is not a by-reference array")),
     }
 }
 
@@ -1196,14 +1220,22 @@ pub(crate) fn deconstruct_fk_arrays(
         let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, attnum as i32)?;
         match &value {
             Datum::ByRef(b) => read_conkey_array(mcx, b),
-            Datum::ByVal(_) => Err(PgError::error("FK array column is not by-reference")),
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => Err(PgError::error("FK array column is not by-reference")),
         }
     };
     let read_oid = |attnum: i16| -> PgResult<OidArray> {
         let value = SysCacheGetAttrNotNull(mcx, CONSTROID, tup, attnum as i32)?;
         match &value {
             Datum::ByRef(b) => read_oid_array(mcx, b),
-            Datum::ByVal(_) => Err(PgError::error("FK array column is not by-reference")),
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => Err(PgError::error("FK array column is not by-reference")),
         }
     };
 
@@ -1221,7 +1253,11 @@ pub(crate) fn deconstruct_fk_arrays(
     } else {
         match &value {
             Datum::ByRef(b) => Some(read_conkey_array(mcx, b)?),
-            Datum::ByVal(_) => {
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 return Err(PgError::error("confdelsetcols is not a by-reference array"))
             }
         }
@@ -1666,7 +1702,11 @@ pub(crate) fn lookup_proc<'mcx>(mcx: Mcx<'mcx>, function_id: Oid) -> PgResult<Op
     } else {
         let bytes = match &proconfig_datum {
             Datum::ByRef(b) => &b[..],
-            Datum::ByVal(_) => {
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 return Err(PgError::error(
                     "syscache projection: proconfig attribute is by-value",
                 ))
@@ -1734,7 +1774,11 @@ pub(crate) fn lookup_proc_result_info<'mcx>(
     let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
     let bytes = match &proargtypes_datum {
         Datum::ByRef(b) => &b[..],
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error(
                 "syscache projection: proargtypes attribute is by-value",
             ))
@@ -1775,7 +1819,11 @@ pub(crate) fn pg_index_indclass<'mcx>(
     let indclass_datum = SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indclass)?;
     let bytes = match &indclass_datum {
         Datum::ByRef(b) => &b[..],
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error(
                 "syscache projection: indclass attribute is by-value",
             ))
@@ -1835,7 +1883,11 @@ pub(crate) fn amutils_index_form(
         SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indoption)?;
     let bytes = match &indoption_datum {
         Datum::ByRef(b) => &b[..],
-        Datum::ByVal(_) => {
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error(
                 "syscache projection: indoption attribute is by-value",
             ))
@@ -2019,7 +2071,11 @@ fn getattr_acl<'mcx>(
     }
     match &value {
         Datum::ByRef(b) => Ok(Some(decode_acl(mcx, &b[..])?)),
-        Datum::ByVal(_) => Err(PgError::error(
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error(
             "syscache ACL projection: aclitem[] column is by-value",
         )),
     }

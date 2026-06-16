@@ -193,7 +193,11 @@ fn name_text_of(d: &Datum) -> PgResult<String> {
                 .map(|s| s.to_string())
                 .map_err(|_| PgError::error("name column is not valid UTF-8"))
         }
-        Datum::ByVal(_) => Err(PgError::error("name column is by-value")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("name column is by-value")),
     }
 }
 

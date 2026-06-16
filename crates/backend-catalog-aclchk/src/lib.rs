@@ -1049,7 +1049,11 @@ fn scan_owner_for_catalog(mcx: Mcx<'_>, classid: Oid, objectid: Oid) -> PgResult
     debug_assert!(!*owner_null);
     let owner_id: Oid = match owner_val {
         Datum::ByVal(v) => *v as u32,
-        Datum::ByRef(_) => {
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error("object_ownercheck: owner column is by-reference"))
         }
     };

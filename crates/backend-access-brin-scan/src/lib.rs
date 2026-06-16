@@ -52,7 +52,9 @@ extern crate alloc;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 
-use types_amapi::{IndexAmRoutine, T_IndexAmRoutine};
+use types_amapi::{
+    AmCostEstimate, IndexAmRoutine, IndexBuildResult, IndexPath, PlannerInfo, T_IndexAmRoutine,
+};
 use types_brin::{BrinDesc, BrinMemTuple, BrinOpcInfo, BrinValues};
 use types_core::primitive::{BlockNumber, OffsetNumber, Size};
 use types_core::InvalidOid;
@@ -178,6 +180,22 @@ pub fn brinhandler() -> IndexAmRoutine {
         amtranslatestrategy: None,
         amtranslatecmptype: None,
 
+        // Build / options / plan-time callbacks (#340). BRIN sets ambuild,
+        // ambuildempty, amcostestimate, amoptions (brin.c:280-289) and NULLs
+        // amgettreeheight/amproperty/ambuildphasename/amadjustmembers
+        // (brin.c:288,290,291,293). The set callbacks (brinbuild/brinbuildempty
+        // in brin_build, brincostestimate in selfuncs.c, brinoptions in
+        // brin_inclusion/brin minmax) are not ported in this tree — sanctioned
+        // panic legs, reached only via the #341 index.c dispatch.
+        ambuild: brinbuild_am,
+        ambuildempty: brinbuildempty_am,
+        amcostestimate: brincostestimate_am,
+        amgettreeheight: None,
+        amoptions: brinoptions_am,
+        amproperty: None,
+        ambuildphasename: None,
+        amadjustmembers: None,
+
         // Insert / vacuum callbacks — NOT this F2-scan unit's logic. Reached by
         // name only through the vtable; the serial scan path never invokes them.
         // Adapters seam-and-panic into the F3 insert/vacuum unit.
@@ -204,6 +222,48 @@ pub fn brinhandler() -> IndexAmRoutine {
         aminitparallelscan: None,
         amparallelrescan: None,
     }
+}
+
+// ===========================================================================
+// Build / options / plan-time vtable adapters (#340). See the doc comment in
+// `brinhandler` for why these are sanctioned panic legs (reached via the #341
+// index.c dispatch — none of the BRIN build/options fns are ported here).
+// ===========================================================================
+
+/// `ambuild` adapter — `brinbuild` (brin_build) is unported; reached via #341.
+fn brinbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &Relation<'mcx>,
+    _index_relation: &Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!("brinbuild: BRIN index build (brin.c) not yet ported — reached via the index.c dispatch (#341)")
+}
+
+/// `ambuildempty` adapter — `brinbuildempty` (brin_build) is unported; reached
+/// via #341.
+fn brinbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
+    panic!("brinbuildempty: BRIN empty-index build (brin.c) not yet ported — reached via #341")
+}
+
+/// `amcostestimate` adapter — `brincostestimate` (selfuncs.c) is unported;
+/// reached via #341.
+fn brincostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("brincostestimate: index cost estimation (selfuncs.c) not yet reachable from brin (#341)")
+}
+
+/// `amoptions` adapter — `brinoptions` is unported; reached via #341.
+fn brinoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    panic!("brinoptions: BRIN reloptions parse (brin.c) not yet ported — reached via #341")
 }
 
 // ===========================================================================

@@ -1952,7 +1952,11 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
 fn byval_word(value: &DatumV<'_>) -> types_datum::Datum {
     match value {
         DatumV::ByVal(word) => types_datum::Datum::from_usize(*word),
-        DatumV::ByRef(_) => {
+        DatumV::ByRef(_)
+        | DatumV::Cstring(_)
+        | DatumV::Composite(_)
+        | DatumV::Expanded(_)
+        | DatumV::Internal(_) => {
             panic!("Memoize: scalar slot word expected, found a by-reference value")
         }
     }
