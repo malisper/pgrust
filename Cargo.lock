@@ -5332,12 +5332,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-extension"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-indexing",
+ "backend-commands-extension-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-tables",
+ "common-extra-encnames-fgram",
+ "common-path-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-extension-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -5808,9 +5840,9 @@ dependencies = [
  "backend-catalog-dependency-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-catalog-storage-seams",
  "backend-commands-define-seams",
- "backend-commands-extension-seams",
  "backend-commands-sequence-seams",
  "backend-commands-tablecmds-seams",
  "backend-parser-parse-type-seams",
@@ -17065,6 +17097,7 @@ dependencies = [
  "backend-commands-define",
  "backend-commands-dropcmds",
  "backend-commands-explain",
+ "backend-commands-extension",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
  "backend-commands-lockcmds",
