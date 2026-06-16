@@ -161,9 +161,9 @@ fn setup() {
             record("is_bootstrap_processing_mode");
             false
         });
-        backend_utils_activity_pgstat_seams::pgstat_init_relation::set(|relid| {
+        backend_utils_activity_pgstat_seams::pgstat_init_relation::set(|relid, _relkind| {
             record(std::format!("pgstat_init_relation({relid})"));
-            Ok(())
+            true
         });
         backend_access_transam_xact_seams::set_xact_accessed_temp_namespace::set(|| {
             record("set_xact_accessed_temp_namespace");

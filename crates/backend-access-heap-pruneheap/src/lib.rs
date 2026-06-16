@@ -372,6 +372,7 @@ pub fn heap_page_prune_opt<'mcx>(
             if presult.ndeleted > presult.nnewlpdead {
                 pgstat_seam::pgstat_update_heap_dead_tuples::call(
                     relation.rd_id,
+                    relation.rd_rel.relisshared,
                     relation.pgstat_enabled,
                     presult.ndeleted - presult.nnewlpdead,
                 );
