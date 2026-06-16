@@ -283,6 +283,7 @@ pub fn init_all() {
     backend_parser_parse_type::init_seams();
     backend_parser_relation::init_seams();
     backend_parser_analyze::init_seams();
+    backend_parser_parse_utilcmd::init_seams();
     backend_parser_small1::init_seams();
     backend_parser_gram_core::init_seams();
     backend_port_atomics::init_seams();
@@ -342,7 +343,9 @@ pub fn init_all() {
     backend_storage_large_object::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();
+    backend_storage_lmgr_lock::init_seams();
     backend_storage_lmgr_lmgr::init_seams();
+    backend_storage_lmgr_predicate::init_seams();
     backend_storage_lmgr_proc::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();

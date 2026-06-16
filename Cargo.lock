@@ -4215,16 +4215,20 @@ dependencies = [
  "backend-catalog-heap-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess",
+ "backend-catalog-partition",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-shdepend-seams",
+ "backend-catalog-pg-subscription-seams",
  "backend-catalog-pg-type",
  "backend-catalog-storage-seams",
  "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-commands-typecmds",
  "backend-storage-lmgr-lmgr",
+ "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-syscache-seams",
@@ -12029,6 +12033,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-parse-utilcmd"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs",
+ "backend-parser-parse-utilcmd-outward-seams",
+ "backend-parser-parse-utilcmd-seams",
+ "backend-parser-small1",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-parse-utilcmd-outward-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-parser-parse-utilcmd-seams"
 version = "0.0.0"
 dependencies = [
@@ -14879,6 +14911,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-lock"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-deadlock-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "common-hashfn-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-deadlock",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lock-seams"
 version = "0.0.0"
 dependencies = [
@@ -14916,6 +14970,41 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-predicate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-twophase-rmgr",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-lib-ilist",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-pgstat",
+ "types-rel",
+ "types-relcache-entry",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20060,6 +20149,7 @@ dependencies = [
  "backend-parser-parse-oper",
  "backend-parser-parse-target",
  "backend-parser-parse-type",
+ "backend-parser-parse-utilcmd",
  "backend-parser-relation",
  "backend-parser-small1",
  "backend-port-atomics",
@@ -20121,7 +20211,9 @@ dependencies = [
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
+ "backend-storage-lmgr-lock",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-predicate",
  "backend-storage-lmgr-proc",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
