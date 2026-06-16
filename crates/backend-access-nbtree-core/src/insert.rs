@@ -561,21 +561,27 @@ fn build_index_value_desc<'mcx>(
 }
 
 /// `_bt_allocbuf(rel, heaprel)` (nbtpage.c) — allocate a new write-locked nbtree
-/// page. The page.rs copy is private and already panics here (no FSM /
-/// ConditionalLockBuffer / ExtendBufferedRel seam); re-stated for the split /
-/// new-root paths that need a fresh page.
+/// page. The page.rs copy is private and already panics here; re-stated for the
+/// split / new-root paths that need a fresh page. GetFreeIndexPage and
+/// ConditionalLockBuffer now have seams, but the extend tail needs an
+/// EB_LOCK_FIRST-only (extension-lock-taking) ExtendBufferedRel seam that does
+/// not exist (the one seam bakes in EB_SKIP_EXTENSION_LOCK).
 fn _bt_allocbuf<'mcx>(
     _mcx: Mcx<'mcx>,
     _rel: &Relation<'mcx>,
     _heaprel: &Relation<'mcx>,
 ) -> PgResult<Buffer> {
-    panic!("_bt_allocbuf: GetFreeIndexPage / ConditionalLockBuffer / ExtendBufferedRel(EB_LOCK_FIRST) not yet ported")
+    panic!("_bt_allocbuf: ExtendBufferedRel(EB_LOCK_FIRST, extension-lock-taking) seam not yet ported")
 }
 
 /// `_bt_conditionallockbuf(rel, buf)` (nbtpage.c) — conditionally BT_WRITE-lock a
-/// pinned buffer. No ConditionalLockBuffer seam exists (page.rs panics here too).
-fn _bt_conditionallockbuf<'mcx>(_rel: &Relation<'mcx>, _buf: Buffer) -> bool {
-    panic!("_bt_conditionallockbuf: ConditionalLockBuffer not yet ported")
+/// pinned buffer. (The !RelationUsesLocalBuffers valgrind client request is
+/// debug-only and not modeled.)
+fn _bt_conditionallockbuf<'mcx>(_rel: &Relation<'mcx>, buf: Buffer) -> bool {
+    match bufmgr::conditional_lock_buffer::call(buf) {
+        Ok(got) => got,
+        Err(e) => panic!("_bt_conditionallockbuf: ConditionalLockBuffer failed: {e:?}"),
+    }
 }
 
 /// `_bt_vacuum_cycleid(rel)` (nbtutils.c) — the active VACUUM cycle ID, from the

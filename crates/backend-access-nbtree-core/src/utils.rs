@@ -543,14 +543,19 @@ fn skip_increment(_rel: &Relation, _arg: &Datum) -> (Datum<'static>, bool) {
     panic!("_bt_array_increment: opclass skip-support increment not yet ported")
 }
 
-/// `_bt_parallel_done(scan)` (nbtree.c).
+/// `_bt_parallel_done(scan)` (nbtree.c). nbtree.c is ported and exposes a
+/// `bt_parallel_done` seam, but it needs the scan's `parallel_scan` handle, which
+/// the core split does not carry on `BTScanOpaqueData` (only the full `NbtScan`
+/// in nbtree.c has it); the parallel branch is unreachable from this layer.
 fn bt_parallel_done(_so: &mut BTScanOpaqueData) {
-    panic!("_bt_start_prim_scan: _bt_parallel_done (nbtree.c) not yet ported")
+    panic!("_bt_start_prim_scan: _bt_parallel_done needs the NbtScan parallel_scan handle, unreachable from BTScanOpaqueData in the core split")
 }
 
-/// `_bt_parallel_primscan_schedule(scan, currPage)` (nbtree.c).
+/// `_bt_parallel_primscan_schedule(scan, currPage)` (nbtree.c). Same blocker as
+/// `bt_parallel_done`: the nbtree.c seam needs the `parallel_scan` handle (+rel)
+/// the core split's `BTScanOpaqueData` does not carry.
 fn bt_parallel_primscan_schedule(_so: &mut BTScanOpaqueData, _curr_page: BlockNumber) {
-    panic!("_bt_advance_array_keys: _bt_parallel_primscan_schedule (nbtree.c) not yet ported")
+    panic!("_bt_advance_array_keys: _bt_parallel_primscan_schedule needs the NbtScan parallel_scan handle, unreachable from BTScanOpaqueData in the core split")
 }
 
 /// `_bt_getbuf(rel, blkno, BT_READ)` (nbtpage.c) — pin+lock a block. Delegates
