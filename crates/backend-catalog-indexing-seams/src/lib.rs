@@ -441,6 +441,63 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)`
+    /// (catalog/catalog.c): allocate a fresh `pg_type` row OID that does not
+    /// collide with any existing row, verified against `TypeOidIndexId`.
+    /// Returned to the `pg_type.c` port so its forced-OID / binary-upgrade /
+    /// new-OID branch (`TypeShellMake` / `TypeCreate`) keeps the OID-assignment
+    /// decision in the owner. `Err` carries the index-probe error surface.
+    pub fn get_new_oid_with_index_pg_type<'mcx>(rel: &types_rel::Relation<'mcx>) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `TypeShellMake` / `TypeCreate`'s new-row path: `heap_form_tuple(
+    /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` +
+    /// `heap_freetuple` for one `pg_type` row (catalog/indexing.c + heapam). The
+    /// row's fixed columns plus the three `CATALOG_VARLEN` columns
+    /// (`typdefaultbin` `pg_node_tree` text, `typdefault` text, `typacl`
+    /// `aclitem[]`) cross as the deformed [`PgTypeInsertRow`]; `None` for a
+    /// varlen column is `nulls[Anum_pg_type_* - 1] = true`. The owner has
+    /// already assigned `row.fields.oid` (forced / binary-upgrade / new). `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_type(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_type::PgTypeInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TypeCreate`'s shell-replacement path: locate the existing shell row by
+    /// `oid` (the caller read it off `SearchSysCacheCopy2(TYPENAMENSP)`),
+    /// `heap_modify_tuple(tup, RelationGetDescr(rel), values, nulls, replaces)`
+    /// with every column replaced *except* `oid` (`replaces[Anum_pg_type_oid -
+    /// 1] = false`), then `CatalogTupleUpdate(rel, &tup->t_self, tup)`
+    /// (catalog/indexing.c + heapam). The replacement columns cross as the
+    /// deformed [`PgTypeInsertRow`]; `row.fields.oid` identifies the row to
+    /// rewrite. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_type(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_type::PgTypeInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RenameTypeInternal`'s rename path: `SearchSysCacheCopy1(TYPEOID,
+    /// type_oid)` (the owner re-fetches the held tuple), `namestrcpy(&typ->
+    /// typname, new_type_name)`, then `CatalogTupleUpdate(rel, &tuple->t_self,
+    /// tuple)` (catalog/indexing.c + heapam). Only the `typname` column changes.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s (including the
+    /// `cache lookup failed for type %u` `elog(ERROR)` when the row is gone,
+    /// which the C raises before reaching this point — here a missing row is an
+    /// internal error).
+    pub fn catalog_tuple_update_typname_pg_type(
+        rel: &RelationData<'_>,
+        type_oid: Oid,
+        new_type_name: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(pg_enum, EnumOidIndexId, Anum_pg_enum_oid)`
     /// (catalog/catalog.c): allocate a fresh OID that does not collide with any
     /// existing `pg_enum` row, verified against `EnumOidIndexId`. Returned to
