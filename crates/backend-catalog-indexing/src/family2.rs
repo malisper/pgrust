@@ -338,56 +338,57 @@ fn acl_new_owner_datum<'mcx>(
     old_owner: Oid,
     new_owner: Oid,
 ) -> PgResult<Datum<'mcx>> {
-    use backend_utils_adt_arrayfuncs::foundation;
     use types_acl::acl::AclItem;
 
     // The acl column is a 1-D, no-nulls `aclitem[]` (16-byte fixed-width,
-    // 'd'-aligned elements). Parse the element bytes directly from the array
-    // image (the repo's Datum element lane forges pointers through the unported
-    // detoast subsystem; aclitem is fixed-width by-reference, so we read the
-    // data area at aligned 16-byte strides instead).
-    let ndim = foundation::arr_ndim(acl_bytes);
-    let nelems = if ndim == 0 {
-        0
-    } else {
-        let dims = foundation::arr_dims(mcx, acl_bytes)?;
-        dims.first().copied().unwrap_or(0).max(0) as usize
-    };
-    let data_off = foundation::arr_data_ptr_off(acl_bytes);
-    let mut old_acl: Vec<AclItem> = Vec::with_capacity(nelems);
-    let mut off = 0usize;
-    for _ in 0..nelems {
-        off = foundation::att_align_nominal(off, b'd');
-        let base = data_off + off;
-        if base + 16 > acl_bytes.len() {
+    // 'd'-aligned, by-reference elements). Read it through the canonical array
+    // value lane (`deconstruct_array_values`), which yields each element as a
+    // real `Datum::ByRef` carrying its verbatim 16 stored bytes — no
+    // pointer-word surrogate, no hand-rolled stride walk.
+    let elems = backend_utils_adt_arrayfuncs::construct::deconstruct_array_values_bytes(
+        mcx,
+        acl_bytes,
+        ACLITEMOID,
+        16,
+        false,
+        b'd' as core::ffi::c_char,
+    )?;
+    let mut old_acl: Vec<AclItem> = Vec::with_capacity(elems.len());
+    for (val, isnull) in elems.iter() {
+        if *isnull {
+            // A stored ACL is always no-nulls (check_acl); a null here means a
+            // corrupt catalog image.
+            return Err(PgError::error("null aclitem array element"));
+        }
+        let b = val.as_ref_bytes();
+        if b.len() < 16 {
             return Err(PgError::error("short aclitem array"));
         }
-        let b = &acl_bytes[base..base + 16];
         old_acl.push(AclItem {
             ai_grantee: u32::from_ne_bytes([b[0], b[1], b[2], b[3]]),
             ai_grantor: u32::from_ne_bytes([b[4], b[5], b[6], b[7]]),
             ai_privs: u64::from_ne_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
         });
-        off += 16;
     }
 
     // newAcl = aclnewowner(oldAcl, oldOwner, newOwner);
     let new_acl =
         backend_utils_adt_acl::acl_ops::aclnewowner(mcx, &old_acl, old_owner, new_owner)?;
 
-    // Re-encode the aclitem[] image directly (16-byte fixed-width elements).
-    let images: Vec<[u8; 16]> = new_acl
-        .iter()
-        .map(|item| {
-            let mut buf = [0u8; 16];
-            buf[0..4].copy_from_slice(&item.ai_grantee.to_ne_bytes());
-            buf[4..8].copy_from_slice(&item.ai_grantor.to_ne_bytes());
-            buf[8..16].copy_from_slice(&item.ai_privs.to_ne_bytes());
-            buf
-        })
-        .collect();
-    let refs: Vec<&[u8]> = images.iter().map(|a| &a[..]).collect();
-    let bytes = build_array_image(mcx, &refs, ACLITEMOID, 16, b'd')?;
+    // Re-encode the aclitem[] image through the canonical array value lane:
+    // each `AclItem` becomes a `Datum::ByRef` of its 16-byte image, and
+    // `construct_array_values` lays out the 1-D, no-nulls `aclitem[]` varlena.
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(new_acl.len());
+    for item in new_acl.iter() {
+        let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, 16)?;
+        buf.extend_from_slice(&item.ai_grantee.to_ne_bytes());
+        buf.extend_from_slice(&item.ai_grantor.to_ne_bytes());
+        buf.extend_from_slice(&item.ai_privs.to_ne_bytes());
+        values.push(Datum::ByRef(buf));
+    }
+    let bytes = backend_utils_adt_arrayfuncs::construct::construct_array_values(
+        mcx, &values, ACLITEMOID, 16, false, b'd',
+    )?;
     Ok(Datum::ByRef(bytes))
 }
 
