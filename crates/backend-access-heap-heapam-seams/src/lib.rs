@@ -17,7 +17,7 @@ use types_core::primitive::{OffsetNumber, TransactionId};
 use types_nbtree::TmIndexDeleteOp;
 use types_snapshot::SnapshotData;
 use types_storage::Buffer;
-use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
+use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
 use types_core::xact::CommandId;
 use types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
@@ -477,4 +477,58 @@ seam_core::seam!(
         buf: Buffer,
         offnum: OffsetNumber,
     ) -> PgResult<HeapTupleHeaderData<'mcx>>
+);
+
+seam_core::seam!(
+    /// `heap_inplace_lock(relation, oldtup, buffer, release_callback, arg)`
+    /// (heapam.c) — take the heavyweight tuple lock + exclusive buffer lock that
+    /// protects an inplace update from a concurrent `heap_update`, registering
+    /// the shared inplace cache invals first. Returns C's `bool`: `true` when the
+    /// buffer is left exclusive-locked (caller proceeds to
+    /// `heap_inplace_update_and_unlock`); `false` when the lock could not be
+    /// taken — the buffer was released, `release_callback` was run (C's
+    /// `systable_endscan`), and the caller must retry. `oldtup` carries the
+    /// on-page tuple's identity (`t_self`); the body re-materializes the live
+    /// page state through `buffer`. `Err` carries the visibility / lock
+    /// `ereport(ERROR)` surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_inplace_lock<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        oldtup: &HeapTupleData<'mcx>,
+        buffer: Buffer,
+        release_callback: &mut dyn FnMut() -> PgResult<()>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `heap_inplace_update_and_unlock(relation, oldtup, tuple, buffer)`
+    /// (heapam.c) — the core of `systable_inplace_update_finish`: WAL-log then
+    /// overwrite the on-page user-data area of `oldtup` with `tuple`'s
+    /// (same-length) new image, mark the buffer dirty, release the buffer +
+    /// tuple lock, and flush the inplace cache invalidations. `oldtup` and
+    /// `tuple` share `t_self`; `new_data` is the new user-data byte area
+    /// (`(char*) tuple->t_data + t_hoff`, exactly `newlen` bytes). `Err` carries
+    /// the length-mismatch `ereport(ERROR)` (raised before the critical
+    /// section). **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_inplace_update_and_unlock<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        oldtup: &HeapTupleData<'mcx>,
+        tuple: &HeapTupleData<'mcx>,
+        new_data: &[u8],
+        buffer: Buffer,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_inplace_unlock(relation, oldtup, buffer)` (heapam.c) — the reverse
+    /// of `heap_inplace_lock` and the core of `systable_inplace_update_cancel`:
+    /// drop the exclusive buffer lock + the inplace tuple lock and forget the
+    /// pending inplace invals, without WAL-logging anything. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn heap_inplace_unlock<'mcx>(
+        relation: &Relation<'mcx>,
+        oldtup: &HeapTupleData<'mcx>,
+        buffer: Buffer,
+    ) -> PgResult<()>
 );

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
+contrib-amcheck-verify-common = { path = "../contrib-amcheck-verify-common" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
@@ -137,6 +138,7 @@ backend-commands-vacuum = { path = "../backend-commands-vacuum" }
 backend-commands-vacuumparallel = { path = "../backend-commands-vacuumparallel" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
+backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
 backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }

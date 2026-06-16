@@ -257,6 +257,107 @@ pub fn deconstruct_array<'mcx>(
     Ok(out)
 }
 
+/// `deconstruct_array(array, elmtype, elmlen, elmbyval, elmalign, ...)`
+/// (arrayfuncs.c) over the 6-arm value lane: yield each element as a real
+/// [`types_tuple::Datum<'mcx>`] value, NOT the bare-word pointer surrogate that
+/// [`deconstruct_array`] produces for a by-reference element.
+///
+/// This is the read-side counterpart of [`construct_md_array_values`]. The C
+/// `deconstruct_array` stores a by-reference element's *address into the array
+/// buffer* in its output Datum (`fetch_att` → `PointerGetDatum`); the owned
+/// model has no global address space, so [`deconstruct_array`]'s by-reference
+/// output Datum carries only the in-buffer offset and is not dereferenceable by
+/// a consumer. Here, instead, each element is materialized into the canonical
+/// value lane: a by-value element becomes [`types_tuple::Datum::ByVal`] (the
+/// `fetch_att` scalar word); a by-reference element becomes
+/// [`types_tuple::Datum::ByRef`] carrying the element's verbatim stored bytes
+/// copied out of the array data area (varlena incl. its natural header for
+/// `elmlen == -1`; the fixed `elmlen` bytes for `elmlen > 0`; the
+/// NUL-terminated image for `elmlen == -2`). The element walk
+/// (`fetch_att` / `att_addlength_pointer` / `att_align_nominal`, null-bitmap
+/// handling) is byte-for-byte identical to [`deconstruct_array`].
+pub fn deconstruct_array_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, (types_tuple::Datum<'mcx>, bool)>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    // Assert(ARR_ELEMTYPE(array) == elmtype);
+    debug_assert_eq!(foundation::arr_elemtype(array), elmtype);
+
+    let ndim = foundation::arr_ndim(array);
+    let dims = foundation::arr_dims(mcx, array)?;
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims)?;
+
+    let mut out =
+        mcx::vec_with_capacity_in::<(TDatum<'mcx>, bool)>(mcx, nelems as usize)?;
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1;
+    let mut p = foundation::arr_data_ptr_off(array);
+    let bitmap = foundation::arr_nullbitmap_off(array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push((TDatum::null(), true));
+        } else if elmbyval {
+            // By-value: fetch_att reads `elmlen` bytes into the scalar word.
+            let word = foundation::fetch_att(array, p, true, elmlen).as_usize();
+            p = foundation::att_addlength_pointer(p, elmlen, array, p);
+            p = foundation::att_align_nominal(p, elmalign);
+            out.push((TDatum::ByVal(word), false));
+        } else {
+            // By-reference: the element occupies `[p .. next)` (before the
+            // per-element alignment padding). Copy that exact span into the
+            // canonical ByRef value (the faithful idiomatic stand-in for C's
+            // bare pointer into the array buffer — the bytes the C pointer would
+            // address, captured by value).
+            let next = foundation::att_addlength_pointer(p, elmlen, array, p);
+            let bytes = array.get(p..next).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push((TDatum::ByRef(slice_to_pgvec(mcx, bytes)?), false));
+            p = foundation::att_align_nominal(next, elmalign);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// `deconstruct_array_values` over an on-disk array byte image: detoast the
+/// array varlena (`DatumGetArrayTypeP`), then run the value-lane element walk.
+/// The owned-model entry point for reading a by-reference array *column* Datum
+/// (carried as [`types_tuple::Datum::ByRef`]) into real per-element values.
+pub fn deconstruct_array_values_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, (types_tuple::Datum<'mcx>, bool)>> {
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    deconstruct_array_values(mcx, &arr, elmtype, elmlen as i32, elmbyval, elmalign as u8)
+}
+
 /// Seam adapter for `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype,
 /// elmlen, elmbyval, elmalign, ...)` (arrayfuncs.c). The seam takes the raw
 /// array `Datum` and the element's `(typlen, typbyval, typalign)` exactly as
@@ -1969,6 +2070,40 @@ pub fn deconstruct_text_array<'mcx>(
         let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
         let s = text_to_pgstring(mcx, &bytes)?;
         out.push(s);
+    }
+    Ok(out)
+}
+
+/// Seam `deconstruct_text_array_nullable` —
+/// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, &elems,
+/// &nulls, &nelems)` (arrayfuncs.c), preserving per-element NULLs. Unlike
+/// [`deconstruct_text_array`] (which rejects NULLs), this returns the C
+/// `(elems[i], nulls[i])` pairs as `Option<PgString>` (`None` ⇒ the C
+/// `nulls[i] == true`), so a caller can apply its own object-specific
+/// null-error message (e.g. `textarray_to_strvaluelist`'s "name or argument
+/// lists may not contain nulls"). The on-disk array byte image is detoasted
+/// (`DatumGetArrayTypeP`), then walked element by element, each non-null
+/// `text` element projected to its UTF-8 string. Fallible on detoast /
+/// malformed array / invalid UTF-8.
+pub fn deconstruct_text_array_nullable<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
+    // arr = DatumGetArrayTypeP(array);
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
+    let pairs = deconstruct_array(mcx, &arr, foundation::TEXTOID, elmlen, elmbyval, elmalign)?;
+
+    let mut out = mcx::vec_with_capacity_in::<Option<PgString<'mcx>>>(mcx, pairs.len())?;
+    for (d, isnull) in pairs.iter() {
+        if *isnull {
+            out.push(None);
+            continue;
+        }
+        // Each element Datum is a text varlena pointer word; project it to its
+        // UTF-8 payload through the detoast/text owner.
+        let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
+        out.push(Some(text_to_pgstring(mcx, &bytes)?));
     }
     Ok(out)
 }

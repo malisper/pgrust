@@ -396,6 +396,23 @@ pub use ObjectType::{
     View as OBJECT_VIEW,
 };
 
+impl ObjectType {
+    /// `(ObjectType) itype` — the C cast `pg_get_object_address` (objectaddress.c)
+    /// applies to a non-negative `read_objtype_from_string` result. The
+    /// `ObjectType` discriminants are contiguous `0 ..= 51`; an out-of-range
+    /// value (the C `-1` "unmapped" sentinel) yields `None`.
+    pub fn from_i32(value: i32) -> Option<ObjectType> {
+        const LAST: i32 = ObjectType::View as i32;
+        if (0..=LAST).contains(&value) {
+            // SAFETY: `ObjectType` is `#[repr(u32)]` with contiguous
+            // discriminants `0 ..= LAST`; `value` is in that range.
+            Some(unsafe { core::mem::transmute::<u32, ObjectType>(value as u32) })
+        } else {
+            None
+        }
+    }
+}
+
 /// `DropBehavior` (`nodes/parsenodes.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]

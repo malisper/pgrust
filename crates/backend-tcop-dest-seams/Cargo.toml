@@ -14,4 +14,5 @@ seam-core = { path = "../seam-core" }
 types-dest = { path = "../types-dest" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-portal = { path = "../types-portal" }
 types-tuple = { path = "../types-tuple" }

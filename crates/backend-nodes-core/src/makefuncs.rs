@@ -482,7 +482,7 @@ pub fn make_json_is_predicate(
 /// the memory-context handle (which the C also initializes) are not modeled
 /// here. `ii_Summarizing`/`ii_WithoutOverlaps`/`ii_IndexUnchanged` are likewise
 /// not modeled, so their inputs are accepted but unused.
-pub fn make_index_info(
+pub fn make_index_info<'mcx>(
     numattrs: i32,
     numkeyattrs: i32,
     amoid: Oid,
@@ -494,7 +494,7 @@ pub fn make_index_info(
     concurrent: bool,
     summarizing: bool,
     withoutoverlaps: bool,
-) -> IndexInfo<'static> {
+) -> IndexInfo<'mcx> {
     // Asserts mirrored from the C (ii_NumIndexKeyAttrs != 0,
     // ii_NumIndexKeyAttrs <= ii_NumIndexAttrs).
     debug_assert!(numkeyattrs != 0);

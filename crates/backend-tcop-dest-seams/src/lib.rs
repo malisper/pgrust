@@ -16,6 +16,7 @@ use types_dest::CommandDest;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::tuptable::SlotData;
+use types_portal::{CommandTag, QueryCompletion};
 use types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
@@ -90,4 +91,50 @@ seam_core::seam!(
     /// CommandComplete ('C') message ending a replication command. Can
     /// `ereport` on a send error.
     pub fn end_replication_command(command_tag: String) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BeginCommand(CommandTag commandTag, CommandDest dest)` (tcop/dest.c) —
+    /// initialize the destination at the start of a command. "Nothing to do at
+    /// present" in C, but the call is kept so the dispatch point is faithful.
+    /// `PostgresMain`'s `exec_simple_query` / `exec_execute_message` call it.
+    pub fn begin_command(command_tag: CommandTag, dest: CommandDest)
+);
+
+seam_core::seam!(
+    /// `EndCommand(const QueryCompletion *qc, CommandDest dest, bool
+    /// force_undecorated_output)` (tcop/dest.c) — clean up the destination at
+    /// the end of a command, emitting the protocol `CommandComplete` ('C')
+    /// message for the remote dests. Can `ereport` on a send error, carried on
+    /// `Err`.
+    ///
+    /// The leading `mcx: Mcx<'mcx>` is the context the completion-tag
+    /// `StringInfo` is built in (C uses a stack `char[]`); the caller supplies
+    /// its per-command/message context.
+    pub fn end_command<'mcx>(
+        mcx: Mcx<'mcx>,
+        qc: &QueryCompletion,
+        dest: CommandDest,
+        force_undecorated_output: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `NullCommand(CommandDest dest)` (tcop/dest.c) — tell the destination an
+    /// empty query string was recognized, emitting the protocol
+    /// `EmptyQueryResponse` ('I') message for the remote dests. Can `ereport` on
+    /// a send error, carried on `Err`.
+    pub fn null_command(dest: CommandDest) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ReadyForQuery(CommandDest dest)` (tcop/dest.c) — tell the destination we
+    /// are ready for a new query, emitting the protocol `ReadyForQuery` ('Z')
+    /// message (carrying the transaction-block status code) and flushing the
+    /// output for the remote dests. Can `ereport` on a send error, carried on
+    /// `Err`.
+    ///
+    /// The leading `mcx: Mcx<'mcx>` is the context the `'Z'` message
+    /// `StringInfo` is built in (C uses a stack `StringInfoData`).
+    pub fn ready_for_query<'mcx>(mcx: Mcx<'mcx>, dest: CommandDest) -> types_error::PgResult<()>
 );

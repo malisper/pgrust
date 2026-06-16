@@ -856,6 +856,7 @@ pub fn init_seams() {
     s::lookup_type_name_oid_owa::set(seam_lookup_type_name_oid_owa);
     s::func_name_as_type::set(seam_func_name_as_type);
     s::typename_type_id_from_defelem::set(seam_typename_type_id_from_defelem);
+    s::type_string_to_type_name::set(seam_type_string_to_type_name);
 }
 
 /// Bridge the K1 owned-tree `types_nodes::rawnodes::TypeName<'mcx>` (carried in
@@ -982,6 +983,20 @@ fn seam_parse_type_string(string: &str, soft: bool) -> PgResult<Option<(Oid, i32
         parseTypeString(scratch.mcx(), string, Some(&mut escontext))
     } else {
         parseTypeString(scratch.mcx(), string, None)
+    }
+}
+
+/// `typeStringToTypeName(str, NULL)` — parse a type-name string into a
+/// raw-parser `TypeName` node, rejecting `SETOF`. With `escontext = NULL` the
+/// `fail:` routes hard-raise, so the result is always a real `TypeName` (or an
+/// `Err`); the `Ok(None)` arm is unreachable here.
+fn seam_type_string_to_type_name(string: &str) -> PgResult<TypeName> {
+    match typeStringToTypeName(string, None)? {
+        Some(tn) => Ok(tn),
+        // Unreachable: with escontext = None the fail_type_string route raises
+        // (Err) instead of returning Ok(None). Mirror the C: a NULL TypeName out
+        // of typeStringToTypeName with no soft-error sink cannot occur.
+        None => unreachable!("typeStringToTypeName(str, NULL) never returns NULL"),
     }
 }
 
