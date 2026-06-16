@@ -28,3 +28,13 @@ backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 # The sort-support comparator-invocation seams (ApplySortComparator etc.).
 backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
+# MinimalTuple flat-blob codec (writetup_heap/readtup_heap byte serialization +
+# heap_deform_minimal_tuple_flat for the readtup_heap datum1 re-extraction).
+# This crate does NOT depend on sort-storage/tuplesort, so the edge is acyclic.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+
+[dev-dependencies]
+# An in-memory BufFile provider for the external-merge tape tests (a leaf-crate
+# test binary cannot install the workspace's real buffile/fd seams).
+backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
+types-storage = { path = "../types-storage" }
