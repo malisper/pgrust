@@ -520,15 +520,17 @@ pub fn RelationParseRelOptions(relation: &mut RelationData) -> PgResult<()> {
 /// `formrdesc(relationName, relationReltype, isshared, natts, attrs)`
 /// (relcache.c): build a hardcoded bootstrap relcache entry for a nailed
 /// system catalog without catalog access, and install it in `RelationIdCache`.
-/// **Own logic**; the hardcoded `FormData_pg_attribute` rows (`attrs`) are the
-/// `Schema_pg_*` arrays the caller passes (catalog-header data).
+/// **Own logic**; the hardcoded `FormData_pg_attribute` rows are the genbki
+/// `Schema_pg_*` arrays carried in `schema` (catalog-header data, plus the
+/// catalog relation OID for `rd_id` — the C `attrs[0]->attrelid`).
 pub fn formrdesc(
     relationName: &str,
     relationReltype: Oid,
     isshared: bool,
     natts: i32,
-    attrs: &[OwnedAttr],
+    schema: &types_relcache_entry::BootstrapCatalogSchema,
 ) -> PgResult<Oid> {
+    let attrs: &[OwnedAttr] = &schema.attrs;
     // palloc0 the descriptor; nailed, pinned, valid bootstrap entry.
     let mut relation = RelationData::new_blank();
     relation.rd_refcnt = 1;
@@ -578,16 +580,11 @@ pub fn formrdesc(
     let _ = has_not_null;
 
     // rd_id is the attrelid of the first hardcoded attribute (every Schema_pg_*
-    // row carries the catalog's OID in attrelid).
-    relation.rd_id = if natts > 0 {
-        // The OwnedAttr mirror does not carry attrelid (it is the relation's own
-        // OID, identical for every row); the bootstrap caller sets rd_id from
-        // the known catalog OID. Until the RelationMapUpdateMap / bootstrap
-        // owner lands, formrdesc is only reachable through that path.
-        relation.rd_id
-    } else {
-        relation.rd_id
-    };
+    // row carries the catalog's OID in attrelid). The OwnedAttr mirror drops
+    // attrelid (it is identical for every row), so the genbki bootstrap-data
+    // owner carries it on `BootstrapCatalogSchema.relid`; this is the C
+    // `relation->rd_id = attrs[0]->attrelid`.
+    relation.rd_id = schema.relid;
     relation.rd_rel.relfilenode = InvalidOid;
 
     // RelationMapUpdateMap (bootstrap), RelationInitLockInfo,

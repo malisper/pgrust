@@ -37,8 +37,20 @@
 //!     `pg_plan_query`/`pg_plan_queries`, `start_xact_command`/`finish_xact_command`,
 //!     `check_log_statement`, `drop_unnamed_stmt`.
 //!
-//! NOT in this crate: `PostgresSingleUserMain` (standalone single-user entry)
-//! and `InteractiveBackend` (its stdin reader); the extended-query
+//!   * **F0b — the single-user standalone entry** ([`single_user`]):
+//!     `PostgresSingleUserMain`, the `--single` (`DISPATCH_SINGLE`) driver. It
+//!     runs the standalone bootstrap (`InitStandaloneProcess`,
+//!     `InitializeGUCOptions`, `process_postgres_switches`, `SelectConfigFiles`,
+//!     `checkDataDir`/`ChangeToDataDir`/`CreateDataDirLockFile`,
+//!     `InitializeMaxBackends`/`InitializeFastPathLocks`,
+//!     `CreateSharedMemoryAndSemaphores`, `InitProcess`) then hands off to
+//!     [`main_loop::PostgresMain`]. It seam-panics into the still-unported
+//!     `LocalProcessControlFile`/`process_shared_preload_libraries`/
+//!     `process_shmem_requests`/`InitializeShmemGUCs`/
+//!     `InitializeWalConsistencyChecking`/`PgStartTime` callees.
+//!
+//! NOT in this crate:
+//! `InteractiveBackend` (the single-user stdin reader); the extended-query
 //! (`exec_parse_message`/`exec_bind_message`/`exec_execute_message`/describe)
 //! pipeline (F2, plancache-gated); the F2-coupled logging helpers
 //! `errdetail_execute`/`errdetail_params`. The `pg_parse_query`/`pg_plan_query`
@@ -56,6 +68,7 @@ pub mod interrupt;
 pub mod logging;
 pub mod main_loop;
 pub mod simple_query;
+pub mod single_user;
 
 #[cfg(test)]
 mod tests;
@@ -150,4 +163,12 @@ pub fn init_seams() {
     // the `postgres_main` seam carried; backend-startup's BackendMain hands off
     // here after BackendInitialize + InitProcess.
     s::postgres_main::set(main_loop::PostgresMain);
+
+    // --- F0b: the single-user standalone backend entry
+    // (PostgresSingleUserMain). main()'s DISPATCH_SINGLE arm hands off here for
+    // `--single`. The driver runs the standalone bootstrap (config files,
+    // data-dir lock, shmem create/init, InitProcess) and then PostgresMain. It
+    // seam-panics into the still-unported control-file/preload/shmem-request/
+    // runtime-GUC/PgStartTime callees (boot gaps #4/#5/#6).
+    s::postgres_single_user_main::set(single_user::PostgresSingleUserMain);
 }
