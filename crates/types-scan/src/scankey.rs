@@ -115,7 +115,7 @@ impl<'mcx> ScanKeyData<'mcx> {
             sk_strategy: self.sk_strategy,
             sk_subtype: self.sk_subtype,
             sk_collation: self.sk_collation,
-            sk_func: self.sk_func,
+            sk_func: self.sk_func.clone(),
             sk_argument: self.sk_argument.clone_in(mcx)?,
             sk_subkeys,
         })

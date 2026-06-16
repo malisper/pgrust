@@ -373,16 +373,21 @@ pub fn build_pertrans_for_aggref<'mcx>(
     //                            numTransArgs, pertrans->aggCollation,
     //                            (Node *) aggstate, NULL);
     //
-    // build_aggregate_transfn_expr (parse_agg.c), fmgr_info / fmgr_info_set_expr
-    // / InitFunctionCallInfoData (fmgr.c) and the fmgr call-frame allocation are
-    // owned by the not-yet-ported parse-agg / fmgr units; no seam is declared
-    // for them. Panic loudly here (mirror-PG-and-panic). The remaining owned
-    // arithmetic below is kept verbatim (unreachable) so it lands once those
-    // owners do.
+    // build_aggregate_transfn_expr (parse_agg.c, #224 — installed),
+    // fmgr_info + fmgr_info_set_expr (fmgr.c — now installed: the resolved
+    // transfn FmgrInfo can be stamped with the transfnexpr so the transfn reads
+    // its declared arg types via get_fn_expr_argtype) are available. The
+    // remaining blocker is InitFunctionCallInfoData allocating the transfn call
+    // frame (`transfn_fcinfo`) carrying `(Node *) aggstate` as the fmgr context
+    // — the #324/#165 agg call-frame channel, still gated on the
+    // PlanState-ownership keystone. Panic loudly here (mirror-PG-and-panic). The
+    // remaining owned arithmetic below is kept verbatim (unreachable) so it
+    // lands once that owner does.
     panic!(
-        "backend-parser-parse-agg / backend-utils-fmgr: build_pertrans_for_aggref needs \
-         build_aggregate_transfn_expr + fmgr_info/fmgr_info_set_expr + \
-         InitFunctionCallInfoData (transfn call frame), none exposed by this unit's seams yet \
+        "backend-utils-fmgr (InitFunctionCallInfoData): build_pertrans_for_aggref needs the \
+         transfn call frame (transfn_fcinfo carrying (Node *) aggstate as context) — the \
+         #324/#165 agg call-frame channel, still gated on the PlanState-ownership keystone. \
+         build_aggregate_transfn_expr + fmgr_info + fmgr_info_set_expr are installed \
          (numTransArgs={num_trans_args}, numDirectArgs={num_direct_args})"
     );
 

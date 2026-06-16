@@ -2714,11 +2714,11 @@ fn build_types_cache_entry(st: &TypCacheState<'_>, type_id: Oid) -> types_cache:
         typalign: e.typalign,
         typstorage: e.typstorage,
         rng_collation: e.rng_collation,
-        rng_cmp_proc_finfo: e.rng_cmp_proc_finfo,
-        rng_canonical_finfo: e.rng_canonical_finfo,
-        rng_subdiff_finfo: e.rng_subdiff_finfo,
-        hash_proc_finfo: e.hash_proc_finfo,
-        hash_extended_proc_finfo: e.hash_extended_proc_finfo,
+        rng_cmp_proc_finfo: e.rng_cmp_proc_finfo.clone(),
+        rng_canonical_finfo: e.rng_canonical_finfo.clone(),
+        rng_subdiff_finfo: e.rng_subdiff_finfo.clone(),
+        hash_proc_finfo: e.hash_proc_finfo.clone(),
+        hash_extended_proc_finfo: e.hash_extended_proc_finfo.clone(),
         rngelemtype: e
             .rngelemtype
             .map(|oid| Box::new(build_types_cache_entry(st, oid))),

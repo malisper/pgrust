@@ -7,6 +7,11 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+// `FmgrInfo.fn_expr` carries the call-expression node erased behind
+// `alloc::rc::Rc<dyn Any>` (the no-`types-nodes` rule). types-core is
+// otherwise `core`-only; pull in `alloc` for that single shared pointer.
+extern crate alloc;
+
 pub mod catalog;
 pub mod cmdtag;
 pub mod fmgr;

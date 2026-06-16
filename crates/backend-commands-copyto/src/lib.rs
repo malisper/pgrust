@@ -320,8 +320,8 @@ fn copy_to_text_like_one_row(
             let np = pgstring_bytes(&cstate.opts.null_print_client);
             copy_send_string(cstate, &np)?;
         } else {
-            let finfo = cstate.out_functions[(attnum - 1) as usize];
-            let string = fmgr_s::output_function_call::call(cstate.mcx, &finfo, value)?;
+            let finfo = &cstate.out_functions[(attnum - 1) as usize];
+            let string = fmgr_s::output_function_call::call(cstate.mcx, finfo, value)?;
             let string: alloc::vec::Vec<u8> = string.to_vec();
 
             if is_csv {
@@ -363,10 +363,10 @@ fn copy_to_binary_one_row(
         if *isnull {
             copy_send_int32(cstate, -1)?;
         } else {
-            let finfo = cstate.out_functions[(attnum - 1) as usize];
+            let finfo = &cstate.out_functions[(attnum - 1) as usize];
             // outputbytes = SendFunctionCall(...) — header already stripped to
             // VARSIZE - VARHDRSZ payload bytes by the seam.
-            let outputbytes = fmgr_s::send_function_call::call(cstate.mcx, &finfo, value)?;
+            let outputbytes = fmgr_s::send_function_call::call(cstate.mcx, finfo, value)?;
             let outputbytes: alloc::vec::Vec<u8> = outputbytes.to_vec();
             copy_send_int32(cstate, outputbytes.len() as i32)?;
             copy_send_data(cstate, &outputbytes)?;

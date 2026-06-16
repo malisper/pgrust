@@ -1963,7 +1963,72 @@ fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmg
         fn_strict: f.fn_strict,
         fn_retset: f.fn_retset,
         fn_stats: f.fn_stats,
+        // C: `fmgr_info()` leaves `fn_expr = NULL`; a later
+        // `fmgr_info_set_expr()` stamps the call-expression node on.
+        fn_expr: None,
     })
+}
+
+/// `fmgr_info_set_expr(expr, finfo)` (fmgr.h: `finfo->fn_expr = expr`) — the
+/// `fmgr_info_set_expr` seam. Boxes the owned call-expression `Expr` into the
+/// `FmgrInfo.fn_expr` erased carrier (`types-core` names only `dyn Any`; this
+/// crate depends on `types-nodes` and supplies the concrete `Expr`). C stores
+/// the bare `Node *`; the owned model shares the node through the refcounted
+/// erased box. The downcast type used by the readers below is exactly this
+/// `types_nodes::primnodes::Expr`.
+fn fmgr_info_set_expr_seam(
+    finfo: &mut types_core::fmgr::FmgrInfo,
+    expr: &types_nodes::primnodes::Expr,
+) {
+    finfo.fn_expr = Some(types_core::fmgr::FnExprErased::new(expr.clone()));
+}
+
+/// Recover the `&Expr` a prior `fmgr_info_set_expr` stamped onto the frame's
+/// `flinfo->fn_expr`. `None` is C's "`flinfo == NULL || flinfo->fn_expr ==
+/// NULL`" (then `get_fn_expr_*` returns the InvalidOid fall-through). The
+/// downcast is to the one concrete type the setter ever boxes; a mismatch is
+/// impossible (only `fmgr_info_set_expr_seam` writes the slot) but maps to the
+/// same `None` fall-through.
+fn fcinfo_fn_expr<'a>(
+    fcinfo: &'a types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> Option<&'a types_nodes::primnodes::Expr> {
+    fcinfo
+        .flinfo
+        .as_ref()?
+        .fn_expr
+        .as_ref()?
+        .downcast_ref::<types_nodes::primnodes::Expr>()
+}
+
+/// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` (fmgr.h) — the `get_fn_expr_argtype`
+/// seam over the `types_nodes` call frame. C: `if (!flinfo || !flinfo->fn_expr)
+/// return InvalidOid; return get_call_expr_argtype(flinfo->fn_expr, argnum);`.
+/// The `IsA` dispatch lives in nodeFuncs (it knows the `Expr` field shapes).
+fn get_fn_expr_argtype_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    argnum: i32,
+) -> PgResult<Oid> {
+    match fcinfo_fn_expr(fcinfo) {
+        None => Ok(InvalidOid),
+        Some(expr) => {
+            backend_nodes_nodeFuncs_seams::get_call_expr_argtype_expr::call(expr, argnum)
+        }
+    }
+}
+
+/// `get_fn_expr_rettype(fcinfo->flinfo)` (fmgr.h) — the `get_fn_expr_rettype`
+/// seam. C: `if (!flinfo || !flinfo->fn_expr) return InvalidOid; return
+/// exprType(flinfo->fn_expr);`. `exprType` is the nodeFuncs `expr_type_info`
+/// read.
+fn get_fn_expr_rettype_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> PgResult<Oid> {
+    match fcinfo_fn_expr(fcinfo) {
+        None => Ok(InvalidOid),
+        Some(expr) => {
+            Ok(backend_nodes_nodeFuncs_seams::expr_type_info::call(expr)?.typid)
+        }
+    }
 }
 
 /// `OidFunctionCall1(functionId, PointerGetDatum(deserialize_deflist(options)))`
@@ -2599,6 +2664,9 @@ fn convert_via_proc_counted_seam<'mcx>(
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
     backend_utils_fmgr_fmgr_seams::fmgr_info::set(fmgr_info_resolve);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::set(fmgr_info_set_expr_seam);
+    backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::set(get_fn_expr_argtype_seam);
+    backend_utils_fmgr_fmgr_seams::get_fn_expr_rettype::set(get_fn_expr_rettype_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
     backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);

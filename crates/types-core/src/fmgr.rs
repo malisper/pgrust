@@ -100,7 +100,25 @@ impl PgAbiValues {
 /// (`types-nodes`) and the call-site step payloads carry their own typed
 /// `fn_addr`, so types-core (which must not depend on types-nodes) keeps only
 /// the raw address `fmgr_info()` resolved. `0` means unresolved.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// `fn_expr` is the faithful rendering of C's `fmNodePtr fn_expr` — the
+/// call-expression node `fmgr_info_set_expr()` stamps onto a resolved
+/// `FmgrInfo` so that `get_fn_expr_argtype`/`get_fn_expr_rettype` can read the
+/// declared argument/result types (load-bearing for polymorphic, by-ref, and
+/// ordered-set transition/finalize functions). The node value lives in the
+/// `types-nodes` arena vocabulary (`primnodes::Expr`), which types-core must
+/// not name; it is therefore carried *erased* through [`FnExprErased`]
+/// (`Arc<dyn Any>`). A crate that does depend on `types-nodes` boxes the
+/// owned `Expr` in and downcasts it back out — the established cross-layer
+/// erased-bridge idiom, not a new opaque-handle divergence (it is the only
+/// sound representation of a no-`types-nodes` struct pointing at an arena
+/// `Node`). The `Rc` keeps `FmgrInfo` `Clone` (C copies the bare pointer; the
+/// owned model shares the node).
+///
+/// Adding `fn_expr` costs `FmgrInfo` its `Copy`/`Eq`/`PartialEq` derives (an
+/// `Rc<dyn Any>` is neither): callers move/clone the struct and never compare
+/// two `FmgrInfo`s for equality (C compares neither).
+#[derive(Clone, Debug, Default)]
 pub struct FmgrInfo {
     /// `PGFunction fn_addr` — resolved call address, as an opaque pointer value
     /// (`0` = unresolved). The typed callable is re-derived at the step payload
@@ -117,11 +135,61 @@ pub struct FmgrInfo {
     pub fn_retset: bool,
     /// `unsigned char fn_stats` — collect stats if `track_functions > this`.
     pub fn_stats: u8,
+    /// `fmNodePtr fn_expr` — the call-expression node `fmgr_info_set_expr()`
+    /// stamps on, carried erased ([`FnExprErased`]). `None` is C's `NULL`
+    /// (no call expression — `get_fn_expr_*` then return `InvalidOid`/`false`).
+    /// Default / `empty()` leave it `None`, matching `fmgr_info()`'s zeroed
+    /// frame before `fmgr_info_set_expr()`.
+    pub fn_expr: Option<FnExprErased>,
+}
+
+/// Erased carrier for `FmgrInfo.fn_expr` (C's `fmNodePtr`).
+///
+/// The call-expression node is a `types_nodes::primnodes::Expr` — a type
+/// types-core must not name (the no-`types-nodes` rule). It is held behind
+/// `Rc<dyn Any>` so types-core only names `core::any::Any`: a crate that
+/// depends on `types-nodes` constructs it from an owned `Expr`
+/// ([`FnExprErased::new`]) and downcasts it back ([`FnExprErased::downcast_ref`])
+/// to read argument/result types. `Rc` (not `Box`) so `FmgrInfo` stays `Clone`
+/// — C copies the bare `fn_expr` pointer when an `FmgrInfo` is copied; the
+/// owned model shares the node through the reference count, equivalently
+/// non-owning from the node's perspective (the arena owns the `Expr`).
+///
+/// `Rc<dyn Any>` is *not* `Send`/`Sync` — and `types_nodes::primnodes::Expr`
+/// is itself neither (it holds arena `PgBox`/`Rc`/`Cell`/`dyn ExpandedObject`
+/// non-thread-shared payloads), so a `Send + Sync` bound would be unsatisfiable
+/// anyway. This matches the single-backend execution model: an `FmgrInfo` (like
+/// every `Expr`-bearing executor structure) lives on one backend's thread, never
+/// crossing a thread boundary, exactly as C's per-backend `FmgrInfo` does.
+#[derive(Clone)]
+pub struct FnExprErased(alloc::rc::Rc<dyn core::any::Any>);
+
+impl FnExprErased {
+    /// Box an owned call-expression node into the erased carrier. `T` is the
+    /// `types-nodes` expression type (`primnodes::Expr`); only a
+    /// `types-nodes`-depending crate names it.
+    pub fn new<T: core::any::Any>(expr: T) -> Self {
+        Self(alloc::rc::Rc::new(expr))
+    }
+
+    /// Downcast the erased node back to `&T` (the concrete expression type a
+    /// `types-nodes`-depending reader knows), or `None` if it is some other
+    /// type. Mirrors C reading through the `fmNodePtr`.
+    pub fn downcast_ref<T: core::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl core::fmt::Debug for FnExprErased {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The erased node has no Debug; mirror C's opaque pointer.
+        f.write_str("FnExprErased(<fn_expr node>)")
+    }
 }
 
 impl FmgrInfo {
     /// An unresolved `FmgrInfo` (`fn_oid = InvalidOid`, no address, not strict).
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             fn_addr: 0,
             fn_oid: 0,
@@ -129,6 +197,7 @@ impl FmgrInfo {
             fn_strict: false,
             fn_retset: false,
             fn_stats: 0,
+            fn_expr: None,
         }
     }
 }
@@ -157,3 +226,51 @@ pub const F_CHAREQ: crate::primitive::RegProcedure = 61;
 /// `F_CHARNE` (`catalog/fmgroids.h`) — `charne`, pg_proc OID 70
 /// (`pg_proc.dat`).
 pub const F_CHARNE: crate::primitive::RegProcedure = 70;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A stand-in for a `types-nodes` `Expr` (types-core can't name the real
+    // one): proves the erased `fn_expr` round-trips through `Arc<dyn Any>` and
+    // downcasts back to the concrete reader type, the mechanism the
+    // `fmgr_info_set_expr` / `get_fn_expr_*` seams rely on.
+    #[derive(Debug, PartialEq)]
+    struct FakeExpr {
+        argtypes: [u32; 2],
+    }
+
+    #[test]
+    fn fn_expr_erased_round_trips() {
+        let mut finfo = FmgrInfo::empty();
+        assert!(finfo.fn_expr.is_none());
+
+        // fmgr_info_set_expr: stamp the call-expression node.
+        let expr = FakeExpr { argtypes: [23, 25] };
+        finfo.fn_expr = Some(FnExprErased::new(expr));
+
+        // get_fn_expr_*: a types-nodes-aware reader downcasts it back.
+        let recovered = finfo
+            .fn_expr
+            .as_ref()
+            .and_then(|e| e.downcast_ref::<FakeExpr>())
+            .expect("fn_expr downcasts to the stamped type");
+        assert_eq!(recovered.argtypes, [23, 25]);
+
+        // Cloning the FmgrInfo shares the node (Rc), as C copies the pointer.
+        let cloned = finfo.clone();
+        let recovered2 = cloned
+            .fn_expr
+            .as_ref()
+            .and_then(|e| e.downcast_ref::<FakeExpr>())
+            .expect("cloned fn_expr still downcasts");
+        assert_eq!(recovered2.argtypes, [23, 25]);
+
+        // A wrong-type downcast yields None (no panic), the C NULL fall-through.
+        assert!(finfo
+            .fn_expr
+            .as_ref()
+            .and_then(|e| e.downcast_ref::<u64>())
+            .is_none());
+    }
+}

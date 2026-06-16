@@ -516,7 +516,7 @@ fn index_getprocinfo(
         let _ = (procnum, optsproc);
     }
 
-    crate::core_entry_store::with_relation(index_oid, |rd| rd.rd_supportinfo[pi])
+    crate::core_entry_store::with_relation(index_oid, |rd| rd.rd_supportinfo[pi].clone())
 }
 
 fn index_opclass_missing_options_error(

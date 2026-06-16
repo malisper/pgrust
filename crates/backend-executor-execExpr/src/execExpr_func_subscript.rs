@@ -469,7 +469,11 @@ pub(crate) fn exec_init_func<'mcx>(
     let fcinfo_data = mcx::alloc_in(
         mcx,
         types_nodes::fmgr::FunctionCallInfoBaseData {
-            flinfo: Some(flinfo),
+            // C: the frame points at the one `flinfo`; the owned frame carries
+            // an `FmgrInfo` copy. `FmgrInfo` is no longer `Copy` (it carries the
+            // erased `fn_expr`), so clone the lookup info into the frame and keep
+            // the original for the Func step below.
+            flinfo: Some(flinfo.clone()),
             context: None,
             resultinfo: None,
             fncollation: inputcollid,

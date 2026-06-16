@@ -288,7 +288,7 @@ pub fn extract_variadic_args<'mcx>(
                 backend_utils_fmgr_fmgr_seams::pg_argisnull::call(fcinfo, argnum as usize);
             // types_res[i] = get_fn_expr_argtype(fcinfo->flinfo, i + variadic_start);
             let mut argtype =
-                backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, argnum);
+                backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, argnum)?;
             let value: DatumV<'mcx>;
 
             // Turn a constant (more or less literal) value that's of unknown

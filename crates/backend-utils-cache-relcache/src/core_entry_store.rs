@@ -581,15 +581,20 @@ pub(crate) fn rd_create_subid_of(rel: Oid) -> SubTransactionId {
  * so the deep copy is a by-value field clone.
  * ======================================================================== */
 
-/// Helper: copy a `PgVec<T: Copy>` into an owned `Vec<T>`.
-fn copy_vec<T: Copy>(v: &mcx::PgVec<'_, T>) -> Vec<T> {
-    v.iter().copied().collect()
+/// Helper: clone a `PgVec<T: Clone>` into an owned `Vec<T>`. (`Clone`, not
+/// `Copy`: `partsupfunc` is `Vec<FmgrInfo>`, and `FmgrInfo` carries the erased
+/// `fn_expr` so it is no longer `Copy`. C `memcpy`s the `FmgrInfo` array; the
+/// owned model clones it.)
+fn copy_vec<T: Clone>(v: &mcx::PgVec<'_, T>) -> Vec<T> {
+    v.iter().cloned().collect()
 }
 
-/// Helper: re-project an owned `&[T: Copy]` into a fresh `PgVec` in `mcx`.
-fn project_vec<'mcx, T: Copy>(mcx: mcx::Mcx<'mcx>, src: &[T]) -> mcx::PgVec<'mcx, T> {
+/// Helper: re-project an owned `&[T: Clone]` into a fresh `PgVec` in `mcx`.
+fn project_vec<'mcx, T: Clone>(mcx: mcx::Mcx<'mcx>, src: &[T]) -> mcx::PgVec<'mcx, T> {
     let mut out = mcx::PgVec::new_in(mcx);
-    out.extend_from_slice(src);
+    for item in src {
+        out.push(item.clone());
+    }
     out
 }
 

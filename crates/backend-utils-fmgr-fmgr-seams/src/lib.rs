@@ -171,10 +171,41 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `fmgr_info_set_expr(expr, finfo)` (fmgr.h macro: `finfo->fn_expr = expr`):
+    /// stamp the call-expression node `expr` onto a resolved `FmgrInfo` so the
+    /// later `get_fn_expr_*` readers can recover the declared argument/result
+    /// types (load-bearing for polymorphic / by-ref / ordered-set transition and
+    /// finalize functions). `types_core::FmgrInfo.fn_expr` carries the node
+    /// erased (`FnExprErased`); the owner (which depends on `types-nodes`) boxes
+    /// the owned `Expr` into it. C stores the bare `Node *`; the owned model
+    /// shares the node value through a refcounted box.
+    pub fn fmgr_info_set_expr(
+        finfo: &mut types_core::fmgr::FmgrInfo,
+        expr: &types_nodes::primnodes::Expr,
+    )
+);
+
+seam_core::seam!(
     /// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` (fmgr.h): the actual
     /// declared type OID of call-expression argument `argnum`, or `InvalidOid`
-    /// when not determinable. Derived from the widened frame's `flinfo`.
-    pub fn get_fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData<'_>, argnum: i32) -> Oid
+    /// when not determinable. Reads the call-expression node off the frame's
+    /// `flinfo->fn_expr` (the erased carrier `fmgr_info_set_expr` stamped) and
+    /// runs the `get_call_expr_argtype` `IsA` dispatch. `Err` carries the
+    /// `get_base_element_type` / `exprType` syscache `ereport` (C longjmps from
+    /// the `Oid`-returning function).
+    pub fn get_fn_expr_argtype(
+        fcinfo: &FunctionCallInfoBaseData<'_>,
+        argnum: i32,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_fn_expr_rettype(fcinfo->flinfo)` (fmgr.h): the result type OID of the
+    /// call expression (`exprType(flinfo->fn_expr)`), or `InvalidOid` when the
+    /// frame has no `flinfo` / no stamped `fn_expr`. Reads the erased
+    /// `flinfo->fn_expr` node and runs `exprType`. `Err` carries the `exprType`
+    /// syscache `ereport`.
+    pub fn get_fn_expr_rettype(fcinfo: &FunctionCallInfoBaseData<'_>) -> PgResult<Oid>
 );
 
 seam_core::seam!(

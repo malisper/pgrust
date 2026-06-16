@@ -1659,7 +1659,7 @@ pub(crate) fn get_record_type_from_argument<'mcx>(
     cache: &mut PopulateRecordCacheLocal<'mcx>,
 ) -> PgResult<()> {
     // cache->argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
-    cache.argtype = backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, 0);
+    cache.argtype = backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, 0)?;
     // prepare_column_cache(&cache->c, argtype, -1, fn_mcxt, false);
     prepare_column_cache(mcx, &mut cache.c, cache.argtype, -1, false)?;
     if cache.c.typcat != TypeCat::Composite && cache.c.typcat != TypeCat::CompositeDomain {
