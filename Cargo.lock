@@ -14990,15 +14990,20 @@ dependencies = [
 name = "backend-storage-lmgr-lock"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-deadlock-seams",
+ "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc",
  "backend-storage-lmgr-proc-seams",
+ "backend-utils-error",
  "backend-utils-hash-dynahash-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-resowner-seams",
  "common-hashfn-seams",
  "mcx",
  "seam-core",
@@ -19120,6 +19125,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-portal",
+ "types-storage",
 ]
 
 [[package]]
