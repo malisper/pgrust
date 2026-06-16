@@ -13852,6 +13852,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-gin"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-gin-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonpath",
+ "backend-utils-adt-numeric",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-jsonb",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-gin-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-op"
 version = "0.0.0"
 dependencies = [
@@ -17343,6 +17371,7 @@ dependencies = [
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
+ "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
