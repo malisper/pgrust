@@ -220,7 +220,7 @@ pub fn query_planner<'mcx>(
     initsplan_seam::add_base_rels_to_query::call(root, jointree_of(run, root));
 
     /* Remove any redundant GROUP BY columns */
-    initsplan_seam::remove_useless_groupby_columns::call(root);
+    initsplan_seam::remove_useless_groupby_columns::call(root, run);
 
     /*
      * Examine the targetlist and join tree, adding entries to baserel
@@ -234,13 +234,13 @@ pub fn query_planner<'mcx>(
      *
      * build_base_rel_tlists(root, root->processed_tlist);
      */
-    initsplan_seam::build_base_rel_tlists::call(root);
+    initsplan_seam::build_base_rel_tlists::call(root, run);
 
     joininfo::placeholder::find_placeholders_in_jointree(root)?;
 
-    initsplan_seam::find_lateral_references::call(root);
+    initsplan_seam::find_lateral_references::call(root, run);
 
-    let mut joinlist = initsplan_seam::deconstruct_jointree::call(root);
+    let mut joinlist = initsplan_seam::deconstruct_jointree::call(root, run)?;
 
     /*
      * Reconsider any postponed outer-join quals now that we have built up
@@ -301,7 +301,7 @@ pub fn query_planner<'mcx>(
      * Construct the lateral reference sets now that we have finalized
      * PlaceHolderVar eval levels.
      */
-    initsplan_seam::create_lateral_join_info::call(root);
+    initsplan_seam::create_lateral_join_info::call(root, run);
 
     /*
      * Match foreign keys to equivalence classes and join quals.  This must be
