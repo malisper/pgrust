@@ -53,12 +53,11 @@ seam_core::seam!(
     pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool>
 );
 
-seam_core::seam!(
-    /// `object_ownercheck(classid, objectid, roleid)` (catalog/aclchk.c):
-    /// whether `roleid` owns the catalog object. Catalog lookup; can
-    /// `ereport(ERROR)`.
-    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
-);
+// NOTE: `object_ownercheck` (catalog/aclchk.c) was a mis-homed OUTWARD seam
+// here (adt-acl merely called it); it is canonically declared in
+// `backend-catalog-aclchk-seams` and installed by the ported aclchk owner.
+// The lone consumer of this duplicate slot (ri-triggers) was re-pointed to the
+// canonical seam, so this declaration was removed.
 
 seam_core::seam!(
     /// `initialize_acl()` (acl.c): set up the ACL framework (role membership

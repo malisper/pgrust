@@ -745,6 +745,17 @@ seam_core::seam!(
     pub fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool>
 );
 seam_core::seam!(
+    /// `SearchSysCache1(SEQRELID, ObjectIdGetDatum(seqid))` + `GETSTRUCT`
+    /// projected to the `pg_sequence` row (sequence.c
+    /// `SearchSysCache1`/`SearchSysCacheCopy1`). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the caller raises `cache lookup failed for
+    /// sequence %u`. The projected row is a by-value copy out of the catcache,
+    /// so a caller that mutates it (`AlterSequence`) treats it as its own.
+    pub fn search_seqrelid(
+        seqid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_sequence::FormData_pg_sequence>>
+);
+seam_core::seam!(
     /// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` (syscache.c): the
     /// writable pg_class row and its `t_self`; `None` on a cache miss.
     pub fn search_syscache_copy_pg_class<'mcx>(

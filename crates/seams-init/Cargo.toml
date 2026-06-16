@@ -97,6 +97,7 @@ backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
 backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
+backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
@@ -115,12 +116,15 @@ backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-lockcmds = { path = "../backend-commands-lockcmds" }
 backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
 backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
+backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
+backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-typecmds = { path = "../backend-commands-typecmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }
 backend-executor-execExpr = { path = "../backend-executor-execExpr" }
@@ -310,6 +314,7 @@ backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
+backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }

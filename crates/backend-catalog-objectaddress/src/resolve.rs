@@ -1403,7 +1403,7 @@ pub fn check_object_ownership<'mcx>(
                 address.objectId,
                 roleid,
             )? {
-                return backend_commands_functioncmds_seams::aclcheck_error_type::call(
+                return backend_catalog_aclchk_seams::aclcheck_error_type::call(
                     ACLCHECK_NOT_OWNER,
                     address.objectId,
                 );
@@ -1426,7 +1426,7 @@ pub fn check_object_ownership<'mcx>(
                 contypid,
                 roleid,
             )? {
-                return backend_commands_functioncmds_seams::aclcheck_error_type::call(
+                return backend_catalog_aclchk_seams::aclcheck_error_type::call(
                     ACLCHECK_NOT_OWNER,
                     contypid,
                 );
@@ -1540,7 +1540,7 @@ pub fn check_object_ownership<'mcx>(
                 typeid,
                 roleid,
             )? {
-                return backend_commands_functioncmds_seams::aclcheck_error_type::call(
+                return backend_catalog_aclchk_seams::aclcheck_error_type::call(
                     ACLCHECK_NOT_OWNER,
                     typeid,
                 );

@@ -16,6 +16,7 @@ types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-cluster = { path = "../types-cluster" }
 types-parsenodes = { path = "../types-parsenodes" }
+types-nodes = { path = "../types-nodes" }
 types-opclass = { path = "../types-opclass" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
