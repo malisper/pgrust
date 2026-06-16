@@ -399,6 +399,8 @@ backend-utils-activity-pgstat-io = { path = "../backend-utils-activity-pgstat-io
 backend-utils-activity-pgstat-wal = { path = "../backend-utils-activity-pgstat-wal" }
 backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgstat-replslot" }
 backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
+backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-slru" }
+backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
