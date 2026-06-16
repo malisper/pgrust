@@ -16,10 +16,12 @@
 //! reaches them via `DirectFunctionCall2`.
 //!
 //! The `gist_poly_*` / `gist_circle_*` support procedures (and the
-//! polygon/circle strategy groups of `gist_point_consistent`) need the
-//! `POLYGON` / `CIRCLE` types and `poly_contain_pt` / `circle_contain_pt`,
-//! which are not yet ported; those dispatch arms seam-and-panic
-//! (mirror-PG-and-panic) until their owners land.
+//! polygon/circle strategy groups of `gist_point_consistent`) reach the
+//! `POLYGON` / `CIRCLE` predicates (`poly_contain_pt` / `circle_contain_pt`) and
+//! the polygon bounding box through `backend-utils-adt-geo-ops` (now landed).
+//! Both opclasses store boxes as GiST index entries, so the leaf and inner
+//! consistency checks share `rtree_internal_consistent`; the query polygon is
+//! carried as its in-memory varlena image and decoded inside the geo-ops owner.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -30,7 +32,7 @@ use backend_utils_adt_geo_ops_seams as geo;
 use types_network::{inet_struct, GistInetKey};
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
-use types_core::geo::{Point, BOX};
+use types_core::geo::{Point, CIRCLE, BOX};
 use types_core::primitive::{Oid, OffsetNumber};
 use types_error::{PgError, PgResult};
 use types_gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
@@ -53,6 +55,20 @@ pub const F_GIST_BOX_UNION: Oid = 2583;
 pub const F_GIST_BOX_SAME: Oid = 2584;
 /// `gist_box_distance` (pg_proc.dat oid 3998).
 pub const F_GIST_BOX_DISTANCE: Oid = 3998;
+
+/// `gist_poly_consistent` (pg_proc.dat oid 2585).
+pub const F_GIST_POLY_CONSISTENT: Oid = 2585;
+/// `gist_poly_compress` (pg_proc.dat oid 2586).
+pub const F_GIST_POLY_COMPRESS: Oid = 2586;
+/// `gist_poly_distance` (pg_proc.dat oid 3288).
+pub const F_GIST_POLY_DISTANCE: Oid = 3288;
+
+/// `gist_circle_consistent` (pg_proc.dat oid 2591).
+pub const F_GIST_CIRCLE_CONSISTENT: Oid = 2591;
+/// `gist_circle_compress` (pg_proc.dat oid 2592).
+pub const F_GIST_CIRCLE_COMPRESS: Oid = 2592;
+/// `gist_circle_distance` (pg_proc.dat oid 3280).
+pub const F_GIST_CIRCLE_DISTANCE: Oid = 3280;
 
 /// `gist_point_compress` (pg_proc.dat oid 1030).
 pub const F_GIST_POINT_COMPRESS: Oid = 1030;
@@ -794,6 +810,97 @@ fn rtree_internal_consistent(
 }
 
 // ===========================================================================
+// Polygon ops
+// ===========================================================================
+
+/// `gist_poly_compress` (gistproc.c) — represent a polygon by its bounding box.
+fn gist_poly_compress<'mcx>(
+    mcx: Mcx<'mcx>,
+    entry: &GISTENTRY<'mcx>,
+) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
+    if entry.leafkey {
+        // POLYGON *in = DatumGetPolygonP(entry->key);
+        // r = palloc(sizeof(BOX)); memcpy(r, &in->boundbox, sizeof(BOX));
+        let r = geo::poly_query_boundbox::call(entry.key.as_ref_bytes());
+        let retval = gistentryinit(box_datum(mcx, &r)?, entry.rel, entry.page, entry.offset, false);
+        return mcx::alloc_in(mcx, retval);
+    }
+    mcx::alloc_in(mcx, entry.clone())
+}
+
+/// `gist_poly_consistent` (gistproc.c) — the GiST consistent method for polygons.
+/// All cases are inexact (`*recheck = true`). The index entries are bounding
+/// boxes, so even leaf nodes use `rtree_internal_consistent`.
+fn gist_poly_consistent<'mcx>(
+    entry: &GISTENTRY<'mcx>,
+    query: &Datum<'mcx>,
+    strategy: StrategyNumber,
+) -> PgResult<GistConsistentResult> {
+    // All cases served by this function are inexact.
+    // (The C NULL key / NULL query guard is unreachable in the typed dispatch:
+    // the key is always a 32-byte BOX image and the query a POLYGON image.)
+    let key = entry_box(entry);
+    let bbox = geo::poly_query_boundbox::call(query.as_ref_bytes());
+    let result = rtree_internal_consistent(&key, &bbox, strategy)?;
+    Ok(GistConsistentResult {
+        matched: result,
+        recheck: true,
+    })
+}
+
+// ===========================================================================
+// Circle ops
+// ===========================================================================
+
+/// `gist_circle_compress` (gistproc.c) — represent a circle by its bounding box.
+fn gist_circle_compress<'mcx>(
+    mcx: Mcx<'mcx>,
+    entry: &GISTENTRY<'mcx>,
+) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
+    if entry.leafkey {
+        let in_ = CIRCLE::from_datum_bytes(entry.key.as_ref_bytes());
+        let r = circle_bbox(&in_);
+        let retval = gistentryinit(box_datum(mcx, &r)?, entry.rel, entry.page, entry.offset, false);
+        return mcx::alloc_in(mcx, retval);
+    }
+    mcx::alloc_in(mcx, entry.clone())
+}
+
+/// The bounding box of a circle (`gist_circle_compress` / `gist_circle_consistent`).
+#[inline]
+fn circle_bbox(c: &CIRCLE) -> BOX {
+    BOX {
+        high: Point {
+            x: c.center.x + c.radius,
+            y: c.center.y + c.radius,
+        },
+        low: Point {
+            x: c.center.x - c.radius,
+            y: c.center.y - c.radius,
+        },
+    }
+}
+
+/// `gist_circle_consistent` (gistproc.c) — the GiST consistent method for circles.
+/// Inexact (`*recheck = true`); the index entries are bounding boxes, so even
+/// leaf nodes use `rtree_internal_consistent`.
+fn gist_circle_consistent<'mcx>(
+    entry: &GISTENTRY<'mcx>,
+    query: &Datum<'mcx>,
+    strategy: StrategyNumber,
+) -> PgResult<GistConsistentResult> {
+    // All cases served by this function are inexact.
+    let key = entry_box(entry);
+    let q = CIRCLE::from_datum_bytes(query.as_ref_bytes());
+    let bbox = circle_bbox(&q);
+    let result = rtree_internal_consistent(&key, &bbox, strategy)?;
+    Ok(GistConsistentResult {
+        matched: result,
+        recheck: true,
+    })
+}
+
+// ===========================================================================
 // Point ops
 // ===========================================================================
 
@@ -979,15 +1086,48 @@ fn gist_point_consistent<'mcx>(
                 recheck: false,
             })
         }
-        PolygonStrategyNumberGroup | CircleStrategyNumberGroup => {
-            // These groups call gist_poly_consistent / gist_circle_consistent
-            // and poly_contain_pt / circle_contain_pt, which need the POLYGON /
-            // CIRCLE types and the geo containment functions — none ported yet.
-            // mirror-PG-and-panic until those owners land.
-            panic!(
-                "gist_point_consistent: polygon/circle query groups need \
-                 POLYGON/CIRCLE + poly_contain_pt/circle_contain_pt, not yet ported"
-            )
+        PolygonStrategyNumberGroup => {
+            // POLYGON *query = PG_GETARG_POLYGON_P(1);
+            // result = DirectFunctionCall5(gist_poly_consistent, entry, query,
+            //          RTOverlapStrategyNumber, 0, &recheck);
+            let r = gist_poly_consistent(entry, query, RTOverlapStrategyNumber)?;
+            let mut result = r.matched;
+            let mut recheck = r.recheck;
+
+            if is_leaf && result {
+                // Leaf page: quick check showed overlap of the polygon's
+                // bounding box and the point. Confirm the point is in/on the
+                // polygon. The leaf key has high == low (a degenerate box / the
+                // point itself).
+                let box_ = entry_box(entry);
+                debug_assert!(box_.high.x == box_.low.x && box_.high.y == box_.low.y);
+                result = geo::poly_contain_pt_image::call(query.as_ref_bytes(), &box_.high)?;
+                recheck = false;
+            }
+            Ok(GistConsistentResult {
+                matched: result,
+                recheck,
+            })
+        }
+        CircleStrategyNumberGroup => {
+            // CIRCLE *query = PG_GETARG_CIRCLE_P(1);
+            // result = DirectFunctionCall5(gist_circle_consistent, entry, query,
+            //          RTOverlapStrategyNumber, 0, &recheck);
+            let q = CIRCLE::from_datum_bytes(query.as_ref_bytes());
+            let r = gist_circle_consistent(entry, query, RTOverlapStrategyNumber)?;
+            let mut result = r.matched;
+            let mut recheck = r.recheck;
+
+            if is_leaf && result {
+                let box_ = entry_box(entry);
+                debug_assert!(box_.high.x == box_.low.x && box_.high.y == box_.low.y);
+                result = geo::circle_contain_pt::call(&q, &box_.high)?;
+                recheck = false;
+            }
+            Ok(GistConsistentResult {
+                matched: result,
+                recheck,
+            })
         }
         _ => Err(unrecognized_strategy(strategy)),
     }
@@ -1042,6 +1182,36 @@ fn gist_box_distance<'mcx>(
     Ok(GistDistanceResult {
         distance,
         recheck: false,
+    })
+}
+
+/// `gist_circle_distance` (gistproc.c) — the inexact GiST distance for circles
+/// (lossy: distance from the point to the entry's MBR; `*recheck = true`).
+fn gist_circle_distance<'mcx>(
+    entry: &GISTENTRY<'mcx>,
+    query: &Datum<'mcx>,
+    strategy: StrategyNumber,
+) -> PgResult<GistDistanceResult> {
+    let q = Point::from_datum_bytes(query.as_ref_bytes());
+    let distance = gist_bbox_distance(entry, &q, strategy)?;
+    Ok(GistDistanceResult {
+        distance,
+        recheck: true,
+    })
+}
+
+/// `gist_poly_distance` (gistproc.c) — the inexact GiST distance for polygons
+/// (lossy: distance from the point to the entry's MBR; `*recheck = true`).
+fn gist_poly_distance<'mcx>(
+    entry: &GISTENTRY<'mcx>,
+    query: &Datum<'mcx>,
+    strategy: StrategyNumber,
+) -> PgResult<GistDistanceResult> {
+    let q = Point::from_datum_bytes(query.as_ref_bytes());
+    let distance = gist_bbox_distance(entry, &q, strategy)?;
+    Ok(GistDistanceResult {
+        distance,
+        recheck: true,
     })
 }
 
@@ -1131,6 +1301,8 @@ fn dispatch_consistent<'mcx>(
     match proc_oid {
         F_GIST_BOX_CONSISTENT => gist_box_consistent(entry, is_leaf, query, strategy),
         F_GIST_POINT_CONSISTENT => gist_point_consistent(entry, is_leaf, query, strategy),
+        F_GIST_POLY_CONSISTENT => gist_poly_consistent(entry, query, strategy),
+        F_GIST_CIRCLE_CONSISTENT => gist_circle_consistent(entry, query, strategy),
         F_INET_GIST_CONSISTENT => {
             let key = GistInetKey::from_datum_bytes(entry.key.as_ref_bytes());
             let q = inet_struct::from_datum_bytes(query.as_ref_bytes());
@@ -1186,9 +1358,10 @@ fn dispatch_compress<'mcx>(
             }
             mcx::alloc_in(mcx, entry.clone())
         }
-        // box/polygon/circle store boxes directly: the box opclass has no
-        // compress proc (gistproc.c: "we do not need compress"). gist_poly /
-        // gist_circle compress need POLYGON/CIRCLE, not yet ported.
+        F_GIST_POLY_COMPRESS => gist_poly_compress(mcx, entry),
+        F_GIST_CIRCLE_COMPRESS => gist_circle_compress(mcx, entry),
+        // The box opclass has no compress proc (gistproc.c: "we store boxes as
+        // boxes ... so we do not need compress").
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1278,6 +1451,8 @@ fn dispatch_distance<'mcx>(
     match proc_oid {
         F_GIST_POINT_DISTANCE => gist_point_distance(entry, is_leaf, query, strategy),
         F_GIST_BOX_DISTANCE => gist_box_distance(entry, query, strategy),
+        F_GIST_CIRCLE_DISTANCE => gist_circle_distance(entry, query, strategy),
+        F_GIST_POLY_DISTANCE => gist_poly_distance(entry, query, strategy),
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1386,6 +1561,29 @@ mod tests {
         assert_eq!(u.high.y, 2.0);
         assert_eq!(u.low.x, 0.0);
         assert_eq!(u.low.y, -1.0);
+    }
+
+    #[test]
+    fn circle_bbox_expands_by_radius() {
+        let c = CIRCLE {
+            center: Point { x: 5.0, y: 3.0 },
+            radius: 2.0,
+        };
+        let b = circle_bbox(&c);
+        assert_eq!(b.high.x, 7.0);
+        assert_eq!(b.high.y, 5.0);
+        assert_eq!(b.low.x, 3.0);
+        assert_eq!(b.low.y, 1.0);
+    }
+
+    #[test]
+    fn circle_datum_roundtrip() {
+        let c = CIRCLE {
+            center: Point { x: -1.5, y: 2.25 },
+            radius: 4.0,
+        };
+        let back = CIRCLE::from_datum_bytes(&c.to_datum_bytes());
+        assert_eq!(c, back);
     }
 
     #[test]

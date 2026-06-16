@@ -1,0 +1,40 @@
+[package]
+name = "backend-catalog-pg-aggregate"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_catalog_pg_aggregate"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-acl = { path = "../types-acl" }
+types-tuple = { path = "../types-tuple" }
+types-catalog = { path = "../types-catalog" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-storage = { path = "../types-storage" }
+
+# Own inward seam (AggregateCreate), installed from init_seams().
+backend-catalog-pg-aggregate-seams = { path = "../backend-catalog-pg-aggregate-seams" }
+
+# Foundation crates called directly (no cycle).
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-catalog-dependency = { path = "../backend-catalog-dependency" }
+
+# Cross-owner seams (loud-panic until the owner lands).
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
+backend-parser-parse-oper-seams = { path = "../backend-parser-parse-oper-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

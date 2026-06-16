@@ -955,6 +955,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
         projections::pg_index_has_predicate,
     );
+    backend_utils_cache_syscache_seams::rule_tuple_by_relname::set(
+        projections::rule_tuple_by_relname,
+    );
+    backend_utils_cache_syscache_seams::class_relkind_namespace::set(
+        projections::class_relkind_namespace,
+    );
     backend_utils_cache_syscache_seams::collation_qualified_name::set(
         projections::collation_qualified_name,
     );

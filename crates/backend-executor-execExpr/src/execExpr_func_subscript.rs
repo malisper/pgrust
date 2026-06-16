@@ -928,60 +928,504 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
 /// and each subscript expression, emit the SUBSCRIPTS/OLD/ASSIGN/FETCH steps,
 /// and backpatch the null-jump targets.
 pub(crate) fn exec_init_subscripting_ref<'mcx>(
-    _mcx: mcx::Mcx<'mcx>,
-    _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
     sbsref: &types_nodes::primnodes::SubscriptingRef,
-    _state: &mut ExprState<'mcx>,
-    _resv: types_nodes::execexpr::ResultCellId,
+    state: &mut ExprState<'mcx>,
+    resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
+    use types_nodes::execexpr::{
+        ExprEvalOp, ExprEvalStepData, SubscriptExecSteps, SubscriptingRefState,
+    };
+
     // C: bool isAssignment = (sbsref->refassgnexpr != NULL);
     //    int nupper = list_length(sbsref->refupperindexpr);
     //    int nlower = list_length(sbsref->reflowerindexpr);
-    let _is_assignment = sbsref.refassgnexpr.is_some();
-    let _nupper = sbsref.refupperindexpr.len() as i32;
-    let _nlower = sbsref.reflowerindexpr.len() as i32;
+    let is_assignment = sbsref.refassgnexpr.is_some();
+    let nupper = sbsref.refupperindexpr.len() as i32;
+    let nlower = sbsref.reflowerindexpr.len() as i32;
 
     // C: sbsroutines = getSubscriptingRoutines(sbsref->refcontainertype, NULL);
     //    if (!sbsroutines)
     //        ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
     //                errmsg("cannot subscript type %s because it does not support
-    //                        subscripting", format_type_be(sbsref->refcontainertype)),
-    //                ...);
+    //                        subscripting", format_type_be(sbsref->refcontainertype)), ...);
+    let sbsroutines = backend_utils_cache_lsyscache_seams::get_subscripting_routines::call(
+        sbsref.refcontainertype,
+    )?;
+    let sbsroutines = match sbsroutines {
+        Some((routines, _typelem)) => routines,
+        None => {
+            // C: format_type_be(refcontainertype) for the error message.
+            let typname = backend_utils_adt_format_type_seams::format_type_be_owned::call(sbsref.refcontainertype)?;
+            return Err(types_error::PgError::error(format!(
+                "cannot subscript type {typname} because it does not support subscripting"
+            ))
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+        }
+    };
+
+    // C: sbsrefstate = palloc0(MAXALIGN(sizeof(SubscriptingRefState)) +
+    //                          (nupper + nlower) * (sizeof(Datum) + 2*sizeof(bool)));
+    //    sbsrefstate->isassignment = isAssignment;
+    //    sbsrefstate->numupper = nupper; sbsrefstate->numlower = nlower;
+    //    /* set up per-subscript arrays */ ... upperindex/lowerindex/
+    //    upperprovided/lowerprovided/upperindexnull/lowerindexnull
     //
-    // `getSubscriptingRoutines` (backend-utils-adt subscripting: looks up the
-    // type's `SubscriptRoutines` via the typsubscript support function) is the
-    // FIRST cross-unit call and has no exported seam in this repo. Everything
-    // downstream is gated on its `SubscriptRoutines`:
+    // The single-block carve becomes typed owned vectors; the index arrays are
+    // zero-initialized (filled by the SUBSCRIPTS step at runtime from the arena
+    // cells the subscript expressions write).
+    let mut sbsrefstate = SubscriptingRefState {
+        isassignment: is_assignment,
+        numupper: nupper,
+        numlower: nlower,
+        upperprovided: Some(zeroed_bools(mcx, nupper)?),
+        upperindex: Some(zeroed_datums(mcx, nupper)?),
+        upperindexnull: Some(zeroed_bools(mcx, nupper)?),
+        lowerprovided: Some(zeroed_bools(mcx, nlower)?),
+        lowerindex: Some(zeroed_datums(mcx, nlower)?),
+        lowerindexnull: Some(zeroed_bools(mcx, nlower)?),
+        upper_cells: Some(zeroed_cells(mcx, nupper)?),
+        lower_cells: Some(zeroed_cells(mcx, nlower)?),
+        ..SubscriptingRefState::default()
+    };
+
+    // C: memset(&methods, 0, sizeof(methods));
+    //    sbsroutines->exec_setup(sbsref, sbsrefstate, &methods);
     //
-    //  * the `SubscriptingRefState` workspace can be laid out (own logic:
-    //    isassignment/numupper/numlower + the upper/lower index+provided+null
-    //    arrays modeled as `PgVec`s, the C `palloc0(MAXALIGN(...) + (nupper +
-    //    nlower)*(sizeof(Datum)+2*sizeof(bool)))` single-block carve),
-    //  * but `sbsroutines->exec_setup(sbsref, sbsrefstate, &methods)` fills the
-    //    `SubscriptExecSteps` (the `sbs_check_subscripts` / `sbs_fetch` /
-    //    `sbs_fetch_old` / `sbs_assign` subroutine pointers + `fetch_strict`)
-    //    that the EEOP_SBSREF_SUBSCRIPTS / _OLD / _ASSIGN / _FETCH steps must
-    //    carry and that the `!isAssignment && fetch_strict` JUMP_IF_NULL and the
-    //    assignment `sbs_assign`/`sbs_fetch_old` presence checks branch on.
+    // exec_setup is the type-specific compilation hook; named by the
+    // SubscriptRoutines handler discriminant, it fills the SubscriptExecSteps
+    // method discriminants and the typed workspace. Run it here (the array
+    // family lives in this crate; jsonb etc. would be their owners).
+    let mut methods = SubscriptExecSteps::default();
+    subscript_exec_setup(&sbsroutines, sbsref, &mut sbsrefstate, &mut methods)?;
+
+    // C: ExecInitExprRec(sbsref->refexpr, state, resv, resnull);
+    let refexpr = sbsref
+        .refexpr
+        .as_deref()
+        .expect("SubscriptingRef.refexpr is NULL");
+    crate::execExpr_core::exec_init_expr_rec(mcx, refexpr, state, resv)?;
+
+    // adjust_jumps records the step indices needing a backpatch to the end.
+    let mut adjust_jumps: mcx::PgVec<'mcx, usize> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+    // C: if (!isAssignment && sbsroutines->fetch_strict) {
+    //        scratch->opcode = EEOP_JUMP_IF_NULL; scratch->d.jump.jumpdone = -1;
+    //        ExprEvalPushStep(state, scratch);
+    //        adjust_jumps = lappend_int(adjust_jumps, state->steps_len - 1); }
+    if !is_assignment && sbsroutines.fetch_strict {
+        let jump = types_nodes::execexpr::ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_JUMP_IF_NULL,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::Jump { jumpdone: -1 },
+        };
+        crate::execExpr_core::expr_eval_push_step(mcx, state, jump)?;
+        adjust_jumps.push((state.steps_len - 1) as usize);
+    }
+
+    // C: Evaluate upper subscripts. For each, if NULL it's an omitted slice
+    //    bound (upperprovided=false, upperindexnull=true); else
+    //    upperprovided=true and ExecInitExprRec(e, state,
+    //    &sbsrefstate->upperindex[i], &sbsrefstate->upperindexnull[i]).
     //
-    // The container/subscript/assign argument descent below it
-    // (`ExecInitExprRec(sbsref->refexpr, ..., resv)`, each subscript into
-    // `&sbsrefstate->{upper,lower}index[i]` / `[i]null`, and — gated by
-    // `isAssignmentIndirectionExpr(sbsref->refassgnexpr)` (this family's own
-    // helper, ported above) — the EEOP_SBSREF_OLD step + the
-    // innermost_caseval/innermost_casenull save/restore around
-    // `ExecInitExprRec(sbsref->refassgnexpr, ..., &replacevalue/&replacenull)`)
-    // is this unit's own logic and is expressible against the landed result-cell
-    // arena + `Func`/`SbsRef` step vocab — but it cannot run before the
-    // `SubscriptRoutines` (and thus the step subroutine pointers) exist. Per
-    // "mirror PG and panic", route loudly at the first unported owner.
-    panic!(
-        "execExpr-func-subscript: ExecInitSubscriptingRef — getSubscriptingRoutines(\
-         refcontainertype) (backend-utils-adt subscripting) has no exported seam; its \
-         SubscriptRoutines->exec_setup fills the SubscriptExecSteps (sbs_check_subscripts/\
-         sbs_fetch/sbs_fetch_old/sbs_assign + fetch_strict) the EEOP_SBSREF_* steps carry and \
-         branch on. The SubscriptingRefState workspace layout, the container/subscript/assign \
-         argument descent, and the isAssignmentIndirectionExpr-gated SBSREF_OLD step are this \
-         unit's own logic and land once the getSubscriptingRoutines seam is exported."
-    );
+    // In the owned model each provided subscript compiles into a fresh arena
+    // cell recorded in upper_cells[i]; the SUBSCRIPTS step gathers the cells
+    // into upperindex/upperindexnull at runtime.
+    for (i, e) in sbsref.refupperindexpr.iter().enumerate() {
+        match e {
+            None => {
+                sbsrefstate.upperprovided.as_mut().unwrap()[i] = false;
+                sbsrefstate.upperindexnull.as_mut().unwrap()[i] = true;
+            }
+            Some(e) => {
+                sbsrefstate.upperprovided.as_mut().unwrap()[i] = true;
+                let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+                crate::execExpr_core::exec_init_expr_rec(mcx, e, state, cell)?;
+                sbsrefstate.upper_cells.as_mut().unwrap()[i] = Some(cell);
+            }
+        }
+    }
+
+    // C: Evaluate lower subscripts similarly.
+    for (i, e) in sbsref.reflowerindexpr.iter().enumerate() {
+        match e {
+            None => {
+                sbsrefstate.lowerprovided.as_mut().unwrap()[i] = false;
+                sbsrefstate.lowerindexnull.as_mut().unwrap()[i] = true;
+            }
+            Some(e) => {
+                sbsrefstate.lowerprovided.as_mut().unwrap()[i] = true;
+                let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+                crate::execExpr_core::exec_init_expr_rec(mcx, e, state, cell)?;
+                sbsrefstate.lower_cells.as_mut().unwrap()[i] = Some(cell);
+            }
+        }
+    }
+
+    // In C all the SBSREF steps point at one shared `palloc`'d
+    // SubscriptingRefState. In the owned model a Box cannot be aliased across
+    // several steps, so each step carries its own structural copy via
+    // `clone_state*` (below). This is behavior-preserving: the init-time fields
+    // (provided/cells/numupper/...) are identical, and the runtime conversion
+    // arrays (upperindex/workspace) are re-derived per step by SUBSCRIPTS/the
+    // fetch/assign bodies from the same arena cells — the steps run in sequence
+    // on one ExprState, and SUBSCRIPTS' converted workspace is regenerated by
+    // each consuming step (each carries the same converted-from cells).
+    let sbsrefstate_box = mcx::alloc_in(mcx, sbsrefstate)?;
+
+    // C: SBSREF_SUBSCRIPTS checks and converts all subscripts at once.
+    //    if (methods.sbs_check_subscripts) {
+    //        scratch->opcode = EEOP_SBSREF_SUBSCRIPTS;
+    //        scratch->d.sbsref_subscript.subscriptfunc = methods.sbs_check_subscripts;
+    //        scratch->d.sbsref_subscript.state = sbsrefstate;
+    //        scratch->d.sbsref_subscript.jumpdone = -1;
+    //        ExprEvalPushStep(state, scratch);
+    //        adjust_jumps = lappend_int(adjust_jumps, state->steps_len - 1); }
+    if let Some(check) = methods.sbs_check_subscripts {
+        let step = types_nodes::execexpr::ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_SBSREF_SUBSCRIPTS,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::SbsRefSubscript {
+                subscriptfunc: Some(check),
+                state: Some(clone_state(mcx, &sbsrefstate_box)?),
+                jumpdone: -1,
+            },
+        };
+        crate::execExpr_core::expr_eval_push_step(mcx, state, step)?;
+        adjust_jumps.push((state.steps_len - 1) as usize);
+    }
+
+    if is_assignment {
+        // C: if (!methods.sbs_assign) ereport(ERROR, ERRCODE_FEATURE_NOT_SUPPORTED,
+        //        "type %s does not support subscripted assignment");
+        if methods.sbs_assign.is_none() {
+            let typname = backend_utils_adt_format_type_seams::format_type_be_owned::call(sbsref.refcontainertype)?;
+            return Err(types_error::PgError::error(format!(
+                "type {typname} does not support subscripted assignment"
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+
+        // C: if (isAssignmentIndirectionExpr(sbsref->refassgnexpr)) { ... OLD ... }
+        let nested = is_assignment_indirection_expr(sbsref.refassgnexpr.as_deref());
+        let prev_cell = if nested {
+            // C: if (!methods.sbs_fetch_old) ereport(ERROR, ...);
+            let fetch_old = methods.sbs_fetch_old.ok_or_else(|| {
+                types_error::PgError::error(
+                    "type does not support subscripted assignment",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            })?;
+            // The OLD step writes prevvalue/prevnull; alias them to an arena
+            // cell so the nested CaseTestExpr can read them.
+            let prev_cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+            // C: scratch->opcode = EEOP_SBSREF_OLD;
+            //    scratch->d.sbsref.subscriptfunc = methods.sbs_fetch_old;
+            //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
+            let step = types_nodes::execexpr::ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_SBSREF_OLD,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::SbsRef {
+                    subscriptfunc: Some(fetch_old),
+                    state: Some(clone_state_with_prev(mcx, &sbsrefstate_box, prev_cell)?),
+                },
+            };
+            crate::execExpr_core::expr_eval_push_step(mcx, state, step)?;
+            Some(prev_cell)
+        } else {
+            None
+        };
+
+        // C: save/restore innermost_caseval/casenull around evaluating the
+        //    replacement value into &replacevalue/&replacenull. The owned model
+        //    has a single innermost_caseval ResultCellId carrying both
+        //    value+null (the ResultCell pairs them), aliased here to prev_cell
+        //    (which the SBSREF_OLD step populates).
+        let save_caseval = state.innermost_caseval;
+        if let Some(prev_cell) = prev_cell {
+            state.innermost_caseval = Some(prev_cell);
+        }
+
+        // C: ExecInitExprRec(sbsref->refassgnexpr, state,
+        //                    &sbsrefstate->replacevalue, &sbsrefstate->replacenull);
+        let replace_cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+        let refassgnexpr = sbsref
+            .refassgnexpr
+            .as_deref()
+            .expect("SubscriptingRef.refassgnexpr present for assignment");
+        crate::execExpr_core::exec_init_expr_rec(mcx, refassgnexpr, state, replace_cell)?;
+
+        state.innermost_caseval = save_caseval;
+
+        // C: scratch->opcode = EEOP_SBSREF_ASSIGN;
+        //    scratch->d.sbsref.subscriptfunc = methods.sbs_assign;
+        //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
+        let step = types_nodes::execexpr::ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_SBSREF_ASSIGN,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::SbsRef {
+                subscriptfunc: methods.sbs_assign,
+                state: Some(clone_state_for_assign(
+                    mcx,
+                    &sbsrefstate_box,
+                    replace_cell,
+                    prev_cell,
+                )?),
+            },
+        };
+        crate::execExpr_core::expr_eval_push_step(mcx, state, step)?;
+        let _ = replace_cell;
+    } else {
+        // C: array fetch is much simpler.
+        //    scratch->opcode = EEOP_SBSREF_FETCH;
+        //    scratch->d.sbsref.subscriptfunc = methods.sbs_fetch;
+        //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
+        let step = types_nodes::execexpr::ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_SBSREF_FETCH,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::SbsRef {
+                subscriptfunc: methods.sbs_fetch,
+                state: Some(clone_state(mcx, &sbsrefstate_box)?),
+            },
+        };
+        crate::execExpr_core::expr_eval_push_step(mcx, state, step)?;
+    }
+
+    // C: adjust jump targets — SBSREF_SUBSCRIPTS.jumpdone / JUMP_IF_NULL.jumpdone
+    //    = state->steps_len.
+    let target = state.steps_len;
+    let steps = state.steps.as_mut().unwrap();
+    for &j in adjust_jumps.iter() {
+        match &mut steps[j].d {
+            ExprEvalStepData::SbsRefSubscript { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, -1);
+                *jumpdone = target;
+            }
+            ExprEvalStepData::Jump { jumpdone } => {
+                debug_assert_eq!(*jumpdone, -1);
+                *jumpdone = target;
+            }
+            _ => unreachable!("subscript adjust_jumps step is neither SBSREF_SUBSCRIPTS nor JUMP_IF_NULL"),
+        }
+    }
+
+    // scratch is unused here (we push our own fully-formed steps); silence it.
+    let _ = scratch;
+    Ok(())
+}
+
+/// Allocate a zero-initialized `PgVec<bool>` of length `n` (the C
+/// `palloc0`-carved `bool` index sub-arrays).
+fn zeroed_bools<'mcx>(mcx: mcx::Mcx<'mcx>, n: i32) -> PgResult<mcx::PgVec<'mcx, bool>> {
+    let mut v = mcx::vec_with_capacity_in(mcx, n.max(0) as usize)?;
+    for _ in 0..n.max(0) {
+        v.push(false);
+    }
+    Ok(v)
+}
+
+/// Allocate a zero-initialized `PgVec<Datum>` of length `n`.
+fn zeroed_datums<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    n: i32,
+) -> PgResult<mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>>> {
+    let mut v = mcx::vec_with_capacity_in(mcx, n.max(0) as usize)?;
+    for _ in 0..n.max(0) {
+        v.push(types_tuple::backend_access_common_heaptuple::Datum::null());
+    }
+    Ok(v)
+}
+
+/// Allocate a `PgVec<Option<ResultCellId>>` of length `n`, all `None`.
+fn zeroed_cells<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    n: i32,
+) -> PgResult<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ResultCellId>>> {
+    let mut v = mcx::vec_with_capacity_in(mcx, n.max(0) as usize)?;
+    for _ in 0..n.max(0) {
+        v.push(None);
+    }
+    Ok(v)
+}
+
+/// Deep-clone a populated `SubscriptingRefState` into a fresh box for a step.
+/// The C steps share one `palloc`'d struct; the owned steps each carry their
+/// own copy. The init-time fields (provided/cells/numupper/...) are identical
+/// across steps and the runtime index/workspace conversion is per-step and
+/// independent (each step re-derives the converted subscripts), so per-step
+/// copies are behavior-preserving.
+fn clone_state<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>,
+) -> PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    clone_state_inner(mcx, src, None, None)
+}
+
+/// As [`clone_state`] but recording the `prev_cell` alias for an OLD step.
+fn clone_state_with_prev<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>,
+    prev_cell: types_nodes::execexpr::ResultCellId,
+) -> PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    clone_state_inner(mcx, src, None, Some(prev_cell))
+}
+
+/// As [`clone_state`] but recording the `replace_cell` (and optional
+/// `prev_cell`) for an ASSIGN step.
+fn clone_state_for_assign<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>,
+    replace_cell: types_nodes::execexpr::ResultCellId,
+    prev_cell: Option<types_nodes::execexpr::ResultCellId>,
+) -> PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    clone_state_inner(mcx, src, Some(replace_cell), prev_cell)
+}
+
+fn clone_state_inner<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>,
+    replace_cell: Option<types_nodes::execexpr::ResultCellId>,
+    prev_cell: Option<types_nodes::execexpr::ResultCellId>,
+) -> PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    use types_nodes::execexpr::SubscriptingRefState;
+    let s = &**src;
+    let clone_bools = |v: &Option<mcx::PgVec<'mcx, bool>>| -> PgResult<Option<mcx::PgVec<'mcx, bool>>> {
+        match v {
+            None => Ok(None),
+            Some(b) => {
+                let mut nv = mcx::vec_with_capacity_in(mcx, b.len())?;
+                for &x in b.iter() {
+                    nv.push(x);
+                }
+                Ok(Some(nv))
+            }
+        }
+    };
+    let clone_cells = |v: &Option<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ResultCellId>>>|
+     -> PgResult<Option<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ResultCellId>>>> {
+        match v {
+            None => Ok(None),
+            Some(b) => {
+                let mut nv = mcx::vec_with_capacity_in(mcx, b.len())?;
+                for &x in b.iter() {
+                    nv.push(x);
+                }
+                Ok(Some(nv))
+            }
+        }
+    };
+    let dst = SubscriptingRefState {
+        isassignment: s.isassignment,
+        workspace: s.workspace,
+        numupper: s.numupper,
+        upperprovided: clone_bools(&s.upperprovided)?,
+        upperindex: Some(zeroed_datums(mcx, s.numupper)?),
+        upperindexnull: clone_bools(&s.upperindexnull)?,
+        numlower: s.numlower,
+        lowerprovided: clone_bools(&s.lowerprovided)?,
+        lowerindex: Some(zeroed_datums(mcx, s.numlower)?),
+        lowerindexnull: clone_bools(&s.lowerindexnull)?,
+        replacevalue: types_tuple::backend_access_common_heaptuple::Datum::null(),
+        replacenull: false,
+        prevvalue: types_tuple::backend_access_common_heaptuple::Datum::null(),
+        prevnull: false,
+        upper_cells: clone_cells(&s.upper_cells)?,
+        lower_cells: clone_cells(&s.lower_cells)?,
+        replace_cell,
+        prev_cell,
+    };
+    mcx::alloc_in(mcx, dst)
+}
+
+/// `sbsroutines->exec_setup(sbsref, sbsrefstate, &methods)` (nodes/subscripting.h)
+/// — the type-specific compilation hook. Dispatches on the
+/// [`SubscriptHandler`] discriminant to the per-type `exec_setup` body. The
+/// array family (`array_exec_setup`, arraysubs.c) lives here; other handlers
+/// would be reached at their owners.
+fn subscript_exec_setup<'mcx>(
+    routines: &types_nodes::execexpr::SubscriptRoutines,
+    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut types_nodes::execexpr::SubscriptExecSteps,
+) -> PgResult<()> {
+    use types_nodes::execexpr::SubscriptHandler;
+    match routines.handler {
+        SubscriptHandler::Array | SubscriptHandler::RawArray => {
+            array_exec_setup(sbsref, sbsrefstate, methods)
+        }
+    }
+}
+
+/// `array_exec_setup(sbsref, sbsrefstate, methods)` (arraysubs.c) — set up the
+/// array subscript workspace and method discriminants.
+fn array_exec_setup<'mcx>(
+    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut types_nodes::execexpr::SubscriptExecSteps,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{
+        ArraySubWorkspace, SubscriptMethod, SubscriptWorkspace, MAXDIM,
+    };
+
+    // C: bool is_slice = (sbsrefstate->numlower != 0);
+    let is_slice = sbsrefstate.numlower != 0;
+
+    // C: if (sbsrefstate->numupper > MAXDIM) ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    //        "number of array dimensions (%d) exceeds the maximum allowed (%d)");
+    if sbsrefstate.numupper > MAXDIM as i32 {
+        return Err(types_error::PgError::error(format!(
+            "number of array dimensions ({}) exceeds the maximum allowed ({})",
+            sbsrefstate.numupper, MAXDIM
+        ))
+        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+
+    // C: if (numlower != 0 && numupper != numlower)
+    //        elog(ERROR, "upper and lower index lists are not same length");
+    if sbsrefstate.numlower != 0 && sbsrefstate.numupper != sbsrefstate.numlower {
+        return Err(types_error::PgError::error(
+            "upper and lower index lists are not same length",
+        ));
+    }
+
+    // C: workspace = palloc(sizeof(ArraySubWorkspace));
+    //    workspace->refelemtype = sbsref->refelemtype;
+    //    workspace->refattrlength = get_typlen(sbsref->refcontainertype);
+    //    get_typlenbyvalalign(sbsref->refelemtype, &refelemlength, &refelembyval, &refelemalign);
+    let refattrlength =
+        backend_utils_cache_lsyscache_seams::get_typlen::call(sbsref.refcontainertype)?;
+    let lbva =
+        backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(sbsref.refelemtype)?;
+    let mut workspace = ArraySubWorkspace {
+        refelemtype: sbsref.refelemtype,
+        refattrlength,
+        refelemlength: lbva.typlen,
+        refelembyval: lbva.typbyval,
+        refelemalign: lbva.typalign as u8,
+        ..ArraySubWorkspace::default()
+    };
+    let _ = &mut workspace;
+    sbsrefstate.workspace = SubscriptWorkspace::Array(workspace);
+
+    // C: pass back step functions.
+    //    methods->sbs_check_subscripts = array_subscript_check_subscripts;
+    //    if (is_slice) { fetch=fetch_slice; assign=assign_slice; fetch_old=fetch_old_slice; }
+    //    else          { fetch=fetch;       assign=assign;       fetch_old=fetch_old; }
+    methods.sbs_check_subscripts = Some(SubscriptMethod::ArrayCheckSubscripts);
+    if is_slice {
+        methods.sbs_fetch = Some(SubscriptMethod::ArrayFetchSlice);
+        methods.sbs_assign = Some(SubscriptMethod::ArrayAssignSlice);
+        methods.sbs_fetch_old = Some(SubscriptMethod::ArrayFetchOldSlice);
+    } else {
+        methods.sbs_fetch = Some(SubscriptMethod::ArrayFetch);
+        methods.sbs_assign = Some(SubscriptMethod::ArrayAssign);
+        methods.sbs_fetch_old = Some(SubscriptMethod::ArrayFetchOld);
+    }
+    Ok(())
 }
