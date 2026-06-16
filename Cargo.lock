@@ -1644,6 +1644,7 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-access-nbt-validate",
  "backend-access-nbtree-nbtree",
+ "backend-access-spg-validate",
  "backend-access-spgist-core",
  "backend-utils-cache-syscache-seams",
  "mcx",
@@ -1666,6 +1667,20 @@ dependencies = [
  "types-error",
  "types-opclass",
  "types-tableam",
+]
+
+[[package]]
+name = "backend-access-index-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-parser-coerce-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -15442,6 +15457,7 @@ dependencies = [
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-amapi",
+ "backend-access-index-amvalidate",
  "backend-access-index-genam",
  "backend-access-index-indexam",
  "backend-access-nbt-compare",
