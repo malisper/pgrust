@@ -1,0 +1,31 @@
+[package]
+name = "backend-commands-vacuumparallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_vacuumparallel"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-vacuum = { path = "../types-vacuum" }
+types-storage = { path = "../types-storage" }
+types-dsa = { path = "../types-dsa" }
+types-execparallel = { path = "../types-execparallel" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+
+# own seam crate is the shared vacuum hub; inward consumer contract lives in
+# the vacuumlazy seam crate.
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+
+# parallel-query infrastructure seams.
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

@@ -469,6 +469,22 @@ pub struct QueryId(pub u32);
 #[repr(transparent)]
 pub struct RangeTblEntryId(pub u32);
 
+/// `PlanRowMark *` — an element of `PlannerInfo::rowMarks` /
+/// `PlannerGlobal::finalrowmarks`. In C both are `List *` of owned
+/// `PlanRowMark *` (`preprocess_rowmarks` builds the per-query list; setrefs'
+/// `set_plan_references` flat-copies each into `glob->finalrowmarks`). Those
+/// owned `PlanRowMark`s pin to `'mcx` were they to carry one, but the struct is
+/// scalar-only and lifetime-free; either way [`PlannerInfo`]/[`PlannerGlobal`]
+/// are deliberately lifetime-free arena worlds, so the owned values live in the
+/// [`planner_run::PlannerRun`] rowmark store and these lists carry the
+/// [`PlanRowMarkId`] handles, resolved with
+/// [`planner_run::PlannerRun::resolve_rowmark`] — exactly as
+/// [`RangeTblEntryId`] backs `simple_rte_array` / `finalrtable`. A
+/// [`PlanRowMarkId`] is the dense 0-based intern index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct PlanRowMarkId(pub u32);
+
 /* ==========================================================================
  * PlannerGlobal (pathnodes.h:95-182) — global state for an entire planner
  * invocation, shared across all sub-Query levels. Trimmed to the scalar/handle
@@ -513,8 +529,15 @@ pub struct PlannerGlobal {
     pub prunable_relids: Relids,
     /// `List *finalrteperminfos`.
     pub finalrteperminfos: Vec<NodeId>,
-    /// `List *finalrowmarks`.
-    pub finalrowmarks: Vec<NodeId>,
+    /// `List *finalrowmarks` — the rowmarks for the finished plan
+    /// (`set_plan_references` flat-copies each `root->rowMarks` `PlanRowMark`
+    /// here). C holds owned `PlanRowMark *`; the owned values live in the
+    /// [`planner_run::PlannerRun`] rowmark store (same store as `rowMarks`
+    /// resolves through) and this list carries the [`PlanRowMarkId`] handles,
+    /// resolved with [`planner_run::PlannerRun::resolve_rowmark`]. (Was
+    /// `Vec<NodeId>`, the wrong id-space — a `PlanRowMark` is not a `node_arena`
+    /// `Expr`.)
+    pub finalrowmarks: Vec<PlanRowMarkId>,
     /// `List *resultRelations`.
     pub result_relations: Vec<i32>,
     /// `List *appendRelations`.
@@ -2140,9 +2163,18 @@ pub struct PlannerInfo {
     pub append_rel_list: Vec<AppendRelInfo>,
     /// `List *row_identity_vars` — RowIdentityVarInfos (opaque node handles).
     pub row_identity_vars: Vec<NodeId>,
-    /// `List *rowMarks` — PlanRowMarks (opaque node handles).
+    /// `List *rowMarks` — owned `PlanRowMark *` built by `preprocess_rowmarks`
+    /// (planmain.c). C holds the owned values; here the [`PlanRowMark`] values
+    /// live in the [`planner_run::PlannerRun`] rowmark store and this list
+    /// carries the [`PlanRowMarkId`] handles, resolved with
+    /// [`planner_run::PlannerRun::resolve_rowmark`] (and the
+    /// [`planner_run::planner_rowmark_fetch`] accessor). `preprocess_targetlist`
+    /// (preptlist) reads `rc->rti`/`rc->allMarkTypes`/`rc->rowmarkId` through it
+    /// to build resjunk Vars; `set_plan_references` (setrefs) flat-copies each
+    /// into `glob->finalrowmarks`. (Was `Vec<NodeId>`, the wrong id-space — a
+    /// `PlanRowMark` is not a `node_arena` `Expr`.)
     #[allow(non_snake_case)]
-    pub rowMarks: Vec<NodeId>,
+    pub rowMarks: Vec<PlanRowMarkId>,
     /// `PlaceHolderInfo **placeholder_array` — array indexed by phid (handles
     /// into `ph_info_arena`; `None` for empty slots).
     pub placeholder_array: Vec<Option<PhInfoId>>,

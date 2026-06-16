@@ -91,3 +91,41 @@ pub struct DictISpell<'mcx> {
     /// C `obj`: the built `IspellDict`, behind the spell unit's handle.
     pub obj: SpellHandle,
 }
+
+/// Opaque handle to a live Snowball stemmer environment (`struct SN_env *z`)
+/// plus its `stem` method, owned by the snowball runtime
+/// (`backend-snowball-runtime`, the libstemmer `api.c`/`utilities.c`
+/// substrate).
+///
+/// C embeds a raw `struct SN_env *z` and a `int (*stem)(struct SN_env *)`
+/// function pointer in `DictSnowball`. Those are raw addresses into the
+/// runtime's hidden-header `symbol*` buffers (the runtime reads a
+/// `[capacity, length]` header at negative offsets), and naming the runtime's
+/// `*mut SN_env` here would invert the type/backend layering. So — exactly as
+/// [`DictISpell`] holds its `IspellDict obj` behind [`SpellHandle`] — the live
+/// environment + stem fn live behind this token; the dict unit
+/// (`backend-snowball-dict-snowball`) resolves it to the real `*mut SN_env` +
+/// stem fn it minted from the runtime's `STEMMER_MODULES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnowballEnvHandle(pub u64);
+
+/// `DictSnowball` (`dict_snowball.c`): the Snowball-dictionary state object the
+/// `dsnowball_init` template builds and `dsnowball_lexize` consumes.
+///
+/// C is `{ struct SN_env *z; StopList stoplist; bool needrecode;
+/// int (*stem)(struct SN_env *); MemoryContext dictCtx; }` held behind the
+/// dictionary cache's `void *dictData`. The live `z`/`stem` belong to the
+/// snowball runtime, so they live behind the opaque [`SnowballEnvHandle`]; the
+/// stop list is owned inline.
+#[derive(Debug)]
+pub struct DictSnowball<'mcx> {
+    /// C `z` + `stem`: the live stemmer environment and its stem method,
+    /// behind the runtime's handle (`InvalidOid`-like `None` until a Language
+    /// option is parsed).
+    pub z: Option<SnowballEnvHandle>,
+    /// C `stoplist`: the optional `StopWords` list (empty if none configured).
+    pub stoplist: StopList<'mcx>,
+    /// C `needrecode`: recode to/from UTF-8 around the stemmer call when the
+    /// matched UTF-8 stemmer's encoding differs from the server encoding.
+    pub needrecode: bool,
+}

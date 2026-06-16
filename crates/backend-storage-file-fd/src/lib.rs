@@ -94,6 +94,8 @@ pub fn init_seams() {
     fd_seams::transient_write::set(seams::transient_write);
     fd_seams::pg_pread::set(seams::pg_pread);
     fd_seams::pg_pwrite::set(seams::pg_pwrite);
+    fd_seams::pg_pwrite_transient::set(seams::pg_pwrite_transient);
+    fd_seams::pg_ftruncate_transient::set(seams::pg_ftruncate_transient);
     fd_seams::close_fd::set(seams::close_fd);
     fd_seams::pg_pwrite_zeros::set(seams::pg_pwrite_zeros);
 
