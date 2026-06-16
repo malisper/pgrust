@@ -946,4 +946,23 @@ pub fn init_seams() {
             Ok((op, strat))
         },
     );
+
+    // DefineIndex(tableId, stmt, ...) — used by the bootstrap (BKI) grammar's
+    // DECLARE [UNIQUE] INDEX actions (with skip_build = true).
+    backend_commands_indexcmds_seams::define_index::set(|mcx, args| {
+        DefineIndex(
+            mcx,
+            args.table_id,
+            &args.stmt,
+            args.index_relation_id,
+            args.parent_index_id,
+            args.parent_constraint_id,
+            args.total_parts,
+            args.is_alter_table,
+            args.check_rights,
+            args.check_not_in_use,
+            args.skip_build,
+            args.quiet,
+        )
+    });
 }

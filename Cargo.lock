@@ -4570,6 +4570,7 @@ dependencies = [
 name = "backend-catalog-objectaddress"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog-seams",
