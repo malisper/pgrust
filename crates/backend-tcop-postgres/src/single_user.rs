@@ -108,8 +108,15 @@ fn run(argv: &[&str], username: &str) -> PgResult<()> {
     s::local_process_control_file::call(false)?;
 
     // Give preloaded libraries a chance to request additional shared memory.
-    // Owned by the unported miscinit shared-library loader — seam-and-panics.
-    s::process_shared_preload_libraries::call()?;
+    // `process_shared_preload_libraries` is miscinit.c's own (ported) body; it
+    // is called directly here (the established single-user pattern, like
+    // `SetProcessingMode` above) rather than through the boot-driver seam. The
+    // C runs it in `TopMemoryContext`; a transient context supplies the `Mcx`
+    // its `SplitDirectoriesString` parse needs.
+    {
+        let spl_cx = mcx::MemoryContext::new("process_shared_preload_libraries");
+        backend_utils_init_miscinit::process_shared_preload_libraries(spl_cx.mcx())?;
+    }
 
     // Initialize MaxBackends, the postmaster child-slot table, and the
     // fast-path lock cache (sized from the GUCs).

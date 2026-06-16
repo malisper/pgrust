@@ -55,7 +55,8 @@ fn pending_block_is_type_erased() {
 fn local_and_pending_state_construct() {
     let local = PgStat_LocalState::new();
     assert!(local.shmem.is_none());
-    assert!(!local.dsa_attached);
+    assert!(local.dsa.is_null());
+    assert!(local.shared_hash.is_null());
 
     let pend = PgStat_PendingState::new();
     assert!(pend.entry_ref_hash.is_empty());
