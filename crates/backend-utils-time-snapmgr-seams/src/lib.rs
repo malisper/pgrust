@@ -206,3 +206,16 @@ seam_core::seam!(
     /// Can `ereport(ERROR)`, carried on `Err`.
     pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
 );
+
+seam_core::seam!(
+    /// `PushActiveSnapshotWithLevel(snapshot, snap_level)` (snapmgr.c:693):
+    /// push `snapshot` onto the active-snapshot stack, recording it as
+    /// belonging to transaction nesting level `snap_level` so it is popped at
+    /// the right subxact boundary. `PortalRunUtility` / `PortalRunMulti` /
+    /// `EnsurePortalSnapshotExists` use this to tie a portal's snapshot to its
+    /// `createLevel`. The snapshot copy can `ereport(ERROR)`.
+    pub fn push_active_snapshot_with_level(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+        snap_level: i32,
+    ) -> PgResult<()>
+);

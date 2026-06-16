@@ -52,3 +52,11 @@ seam_core::seam!(
     /// is finished. `Err` carries whatever the receiver's shutdown raises.
     pub fn dest_rshutdown(dest: DestReceiverHandle) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `dest->mydest` (tcop/dest.h): the [`CommandDest`] discriminant the
+    /// receiver was created for. `PortalRunMulti` tests it against
+    /// `DestRemoteExecute` (to swap in `None_Receiver`); `DoPortalRunFetch`
+    /// tests it against `DestNone`. A plain field read; infallible.
+    pub fn dest_get_mydest(dest: DestReceiverHandle) -> CommandDest
+);

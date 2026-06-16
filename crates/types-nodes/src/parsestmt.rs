@@ -112,6 +112,27 @@ impl QueryCompletionHandle {
 /// layers, which do not depend on `types-nodes`).
 pub use types_core::cmdtag::CommandTag;
 
+/// `ProcessUtilityContext` (`tcop/utility.h`) — identifies the nesting /
+/// atomicity context a utility statement is executed in. Discriminants follow
+/// PostgreSQL 18.3's enumeration order exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ProcessUtilityContext {
+    /// toplevel interactive command
+    #[default]
+    PROCESS_UTILITY_TOPLEVEL = 0,
+    /// a complete query, but not toplevel
+    PROCESS_UTILITY_QUERY,
+    /// a complete query, nonatomic execution context
+    PROCESS_UTILITY_QUERY_NONATOMIC,
+    /// a portion of a query
+    PROCESS_UTILITY_SUBCOMMAND,
+}
+pub use ProcessUtilityContext::{
+    PROCESS_UTILITY_QUERY, PROCESS_UTILITY_QUERY_NONATOMIC, PROCESS_UTILITY_SUBCOMMAND,
+    PROCESS_UTILITY_TOPLEVEL,
+};
+
 /// `ParseExprKind` (`parser/parse_node.h`) — the kind of expression currently
 /// being parsed. `EXPR_KIND_NONE` when not in an expression. Discriminants
 /// follow PostgreSQL 18.3's enumeration order exactly.

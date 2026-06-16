@@ -482,6 +482,103 @@ pub fn PortalCreateHoldStore(portal: &Portal) -> PgResult<()> {
 // on the live Portal handle.
 // ===========================================================================
 
+/// `portal->tupDesc = CreateTupleDescCopy(tupdesc)` — store a deep copy of the
+/// result tuple descriptor in the portal's `portalContext`. `PortalStart` sets
+/// it from `ExecutorStart`'s computed descriptor / `ExecCleanTypeFromTL` /
+/// `UtilityTupleDescriptor`. `None` clears it (the `PORTAL_MULTI_QUERY` leg).
+///
+/// The portal field is `'static` because the copy lives in `portalContext`,
+/// which is owned by this `PortalData` and dropped with it (in `PortalDrop`);
+/// the copy never outlives the context, so extending the clone's lifetime to
+/// the field's `'static` is sound (the C `TupleDesc` in `portalContext` has the
+/// same lifetime relationship).
+pub fn portal_set_tup_desc(
+    portal: &Portal,
+    tupdesc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
+) -> PgResult<()> {
+    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = match tupdesc {
+        None => None,
+        Some(td) => {
+            let p = portal.borrow();
+            let ctx = p.portalContext.as_ref().ok_or_else(|| {
+                ereport(ERROR)
+                    .errmsg_internal("portal_set_tup_desc: portal has no portalContext")
+                    .into_error()
+            })?;
+            let copied = td.clone_in(ctx.mcx())?;
+            // SAFETY: `copied` is allocated in `portalContext`, which this
+            // `PortalData` owns and drops together with the `tupDesc` field
+            // (PortalDrop drops both); the descriptor therefore never outlives
+            // its arena. The `'static` on the field is portalmem's marker for
+            // "portal-context-lived", mirroring `stmts`/`holdStore`.
+            Some(unsafe {
+                core::mem::transmute::<
+                    types_tuple::heaptuple::TupleDescData<'_>,
+                    types_tuple::heaptuple::TupleDescData<'static>,
+                >(copied)
+            })
+        }
+    };
+    portal.borrow_mut().tupDesc = copy;
+    Ok(())
+}
+
+/// Build the portal's result tuple descriptor in its own `portalContext` and
+/// store it, under a single portal borrow. `build` is the caller's
+/// `ExecCleanTypeFromTL(pstmt->planTree->targetlist)` /
+/// `UtilityTupleDescriptor(pstmt->utilityStmt)` leg: given the portalContext's
+/// [`Mcx`](mcx::Mcx) and the portal's primary statement list, it produces the
+/// descriptor allocated in that context.
+///
+/// This exists because the descriptor a `PortalStart` leg builds is bound to
+/// `portalContext`'s lifetime — it cannot escape the portal borrow to be
+/// handed to [`portal_set_tup_desc`]. portalmem owns the `portalContext` arena
+/// and the `'static`-marked `tupDesc` field, so the unsafe arena-lifetime
+/// marshaling lives here (mirroring [`portal_set_tup_desc`]), never in the
+/// driver.
+pub fn set_result_tup_desc_with(
+    portal: &Portal,
+    build: &mut dyn for<'m> FnMut(
+        mcx::Mcx<'m>,
+        &[types_nodes::nodeindexscan::PlannedStmt<'m>],
+    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'m>>,
+) -> PgResult<()> {
+    let mut p = portal.borrow_mut();
+    let ctx = p.portalContext.as_ref().ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal("set_result_tup_desc_with: portal has no portalContext")
+            .into_error()
+    })?;
+    // SAFETY of the lifetime juggling below: `stmts` is `Vec<PlannedStmt<'static>>`
+    // (the portal-context-lived marker) and `ctx.mcx()` borrows `ctx`; both live
+    // for the duration of this borrow. The descriptor `build` returns is
+    // allocated in `ctx` (the portalContext), which this `PortalData` owns and
+    // drops with the `tupDesc` field — so extending the result to the field's
+    // `'static` marker is sound, exactly as `portal_set_tup_desc` argues.
+    let ctx_ptr: *const mcx::MemoryContext = ctx;
+    let mcx = unsafe { (*ctx_ptr).mcx() };
+    let stmts: &[types_nodes::nodeindexscan::PlannedStmt<'static>] =
+        p.stmts.as_deref().unwrap_or(&[]);
+    let built = build(mcx, stmts)?;
+    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = match built {
+        None => None,
+        Some(b) => {
+            // The built descriptor already lives in `ctx` (the portalContext);
+            // move its value out by cloning the deref into the same context,
+            // then extend to the field's `'static` marker (sound — same arena).
+            let owned = (*b).clone_in(mcx)?;
+            Some(unsafe {
+                core::mem::transmute::<
+                    types_tuple::heaptuple::TupleDescData<'_>,
+                    types_tuple::heaptuple::TupleDescData<'static>,
+                >(owned)
+            })
+        }
+    };
+    p.tupDesc = copy;
+    Ok(())
+}
+
 pub fn portal_get_strategy(portal: &Portal) -> PortalStrategy {
     portal.borrow().strategy
 }
@@ -1253,6 +1350,16 @@ fn with_portal_globals(
     ACTIVE_PORTAL.with(|c| *c.borrow_mut() = saved_active);
     PORTAL_CONTEXT_OWNER.with(|c| *c.borrow_mut() = saved_ctx);
     result
+}
+
+/// Read the per-backend `ActivePortal` global (C `Portal ActivePortal`): run
+/// `f` with the currently-active portal (`None` is the C `NULL`), returning its
+/// result. A scoped reader (not an ambient `&'static` getter): the portal is
+/// cloned out of the thread-local so the closure never holds its borrow.
+/// `EnsurePortalSnapshotExists` reads `ActivePortal` through this.
+pub fn with_active_portal<R>(f: impl FnOnce(Option<&Portal>) -> R) -> R {
+    let active = ACTIVE_PORTAL.with(|c| c.borrow().clone());
+    f(active.as_ref())
 }
 
 /// `ErrorLocation` for an `ereport(...).finish(...)` site

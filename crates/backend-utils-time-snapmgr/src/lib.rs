@@ -1559,6 +1559,10 @@ pub fn init_seams() {
         PushActiveSnapshot(&new_handle((*snapshot).clone()));
         Ok(())
     });
+    seams::push_active_snapshot_with_level::set(|snapshot, snap_level| {
+        PushActiveSnapshotWithLevel(&new_handle((*snapshot).clone()), snap_level);
+        Ok(())
+    });
     seams::pop_active_snapshot::set(PopActiveSnapshot);
     seams::historic_snapshot_active::set(HistoricSnapshotActive);
     seams::have_registered_or_active_snapshot::set(HaveRegisteredOrActiveSnapshot);

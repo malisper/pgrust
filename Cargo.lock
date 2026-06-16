@@ -11997,6 +11997,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-pquery"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-executor-execMain",
+ "backend-executor-execTuples-seams",
+ "backend-executor-tstorereceiver-seams",
+ "backend-tcop-cmdtag",
+ "backend-tcop-dest",
+ "backend-tcop-dest-seams",
+ "backend-tcop-postgres-seams",
+ "backend-tcop-pquery-pre-seams",
+ "backend-tcop-pquery-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-mmgr-portalmem",
+ "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-sort-storage-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+ "types-scan",
+ "types-slot",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-pquery-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -12050,10 +12082,13 @@ dependencies = [
 name = "backend-tcop-utility-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-portal",
+ "types-tuple",
 ]
 
 [[package]]
@@ -15687,6 +15722,7 @@ dependencies = [
  "backend-tcop-backend-startup",
  "backend-tcop-dest",
  "backend-tcop-fastpath",
+ "backend-tcop-pquery",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",
