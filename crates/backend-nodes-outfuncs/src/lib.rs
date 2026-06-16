@@ -34,11 +34,11 @@
 //!
 //! Families still pending a faithful per-node writer panic loudly
 //! (`mirror-pg-and-panic`) rather than emit a partial / empty `{}` dump (C's
-//! `outNode` `default:` `elog(WARNING)` + empty `{}`). Notably `Const` is
-//! deliberately seam-panicked: the repo's [`types_nodes::primnodes::Const`]
-//! trims `constlen`/`constbyval`, which C's `outDatum` needs to serialize
-//! `constvalue`, so a faithful `_outConst` is not yet possible (that is the
-//! exact "still-unported sub-field" boundary).
+//! `outNode` `default:` `elog(WARNING)` + empty `{}`). `_outConst` serializes
+//! `consttype`/`consttypmod`/`constcollid`/`constlen`/`constbyval`/
+//! `constisnull`/`location` then `outDatum(constvalue, constlen, constbyval)`
+//! over the now-carried `constlen`/`constbyval` fields (the by-value word's
+//! native bytes, or a by-reference value's flat [`Datum::ByRef`] image).
 //!
 //! This crate also installs the `node_to_string_with_locations` inward seam
 //! (declared on the `backend-nodes-core` owner's seam crate, where it was
@@ -61,8 +61,9 @@ use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
-    BoolExpr, BoolExprType, Expr, FuncExpr, OpExpr, Param, TargetEntry, Var,
+    BoolExpr, BoolExprType, Const, Expr, FuncExpr, OpExpr, Param, TargetEntry, Var,
 };
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `outToken(str, s)` (outfuncs.c:154-189). Append a non-NULL string token to
 /// `buf`, inserting the protective backslashes `read.c`'s `pg_strtok` needs.
@@ -272,6 +273,76 @@ fn out_param(buf: &mut String, node: &Param, write_loc: bool) {
     write_location_field(buf, "location", node.location, write_loc);
 }
 
+/// `outDatum(str, value, typlen, typbyval)` (outfuncs.c) — serialize a `Datum`
+/// as `LENGTH [ b0 b1 ... ]`, the signed-decimal bytes of the value.
+///
+/// For a by-value datum the C reads `sizeof(Datum)` (8) bytes out of the word
+/// itself in native byte order and prints the type's `typlen` as the length;
+/// `readDatum` symmetrically re-reads all 8 word bytes. We mirror that exactly
+/// over the [`Datum::ByVal`] word via `to_ne_bytes`. For a by-reference datum
+/// the C prints `datumGetSize` bytes from the pointed-to image; we print the
+/// [`Datum::ByRef`] byte image verbatim (its `len()` is that size). The
+/// remaining `Datum` arms (`Cstring`/`Composite`/`Expanded`/`Internal`) cannot
+/// reach a `Const.constvalue` — `make_const` rejects them — so they are an
+/// unreachable carrier shape here.
+fn out_datum(buf: &mut String, value: &Datum<'_>, typlen: i32, typbyval: bool) {
+    if typbyval {
+        // s = (char *) (&value); print typlen as the length, then the 8 native
+        // bytes of the Datum word.
+        let word = match value {
+            Datum::ByVal(w) => *w,
+            other => panic!(
+                "outDatum: by-value Const but constvalue is {:?} (only Datum::ByVal \
+                 can carry a by-value Const; make_const rejects the rest)",
+                core::mem::discriminant(other)
+            ),
+        };
+        let _ = write!(buf, "{} [ ", typlen as u32);
+        for b in word.to_ne_bytes() {
+            // appendStringInfo(str, "%d ", (int) (s[i])) — signed char.
+            let _ = write!(buf, "{} ", b as i8 as i32);
+        }
+        buf.push(']');
+    } else {
+        // s = (char *) DatumGetPointer(value);
+        match value {
+            Datum::ByRef(bytes) => {
+                let _ = write!(buf, "{} [ ", bytes.len() as u32);
+                for &b in bytes.iter() {
+                    let _ = write!(buf, "{} ", b as i8 as i32);
+                }
+                buf.push(']');
+            }
+            // PointerIsValid(NULL) is false → "0 [ ]".
+            other => panic!(
+                "outDatum: by-reference Const but constvalue is {:?} (a by-reference \
+                 Const carries its flat image in Datum::ByRef; make_const rejects \
+                 Cstring/Composite/Expanded/Internal)",
+                core::mem::discriminant(other)
+            ),
+        }
+    }
+}
+
+/// `_outConst` (outfuncs.c:388).
+fn out_const(buf: &mut String, node: &Const, write_loc: bool) {
+    buf.push_str("CONST");
+    write_oid_field(buf, "consttype", node.consttype);
+    write_int_field(buf, "consttypmod", node.consttypmod);
+    write_oid_field(buf, "constcollid", node.constcollid);
+    write_int_field(buf, "constlen", node.constlen);
+    write_bool_field(buf, "constbyval", node.constbyval);
+    write_bool_field(buf, "constisnull", node.constisnull);
+    write_location_field(buf, "location", node.location, write_loc);
+
+    buf.push_str(" :constvalue ");
+    if node.constisnull {
+        buf.push_str("<>");
+    } else {
+        out_datum(buf, &node.constvalue, node.constlen, node.constbyval);
+    }
+}
+
 /// `_outOpExpr` (outfuncs.funcs.c). `label` distinguishes the
 /// `OPEXPR`/`DISTINCTEXPR`/`NULLIFEXPR` aliases (C: `typedef OpExpr` for the
 /// latter two — same fields, different node type label).
@@ -344,6 +415,7 @@ fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
     buf.push('{');
     match e {
         Expr::Var(v) => out_var(buf, v, write_loc),
+        Expr::Const(c) => out_const(buf, c, write_loc),
         Expr::Param(p) => out_param(buf, p, write_loc),
         Expr::OpExpr(o) => out_opexpr(buf, "OPEXPR", o, write_loc),
         Expr::DistinctExpr(o) => out_opexpr(buf, "DISTINCTEXPR", o, write_loc),
@@ -352,8 +424,7 @@ fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
         Expr::BoolExpr(b) => out_boolexpr(buf, b, write_loc),
         other => panic!(
             "outNode: no _out<Type> writer ported for Expr variant {:?} \
-             (common primitive-expression families Var/Param/Op/Func/Bool serialize so far; \
-             Const is seam-panicked on its trimmed constvalue Datum)",
+             (common primitive-expression families Var/Const/Param/Op/Func/Bool serialize so far)",
             core::mem::discriminant(other)
         ),
     }

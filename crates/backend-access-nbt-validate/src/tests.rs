@@ -176,9 +176,11 @@ fn install_test_seams() {
 fn func_member(number: i16, lefttype: Oid, righttype: Oid) -> OpFamilyMember {
     OpFamilyMember {
         is_func: true,
-        number,
+        object: 0,
+        number: number as i32,
         lefttype,
         righttype,
+        sortfamily: 0,
         ref_is_hard: false,
         ref_is_family: false,
         refobjid: 0,
@@ -188,9 +190,11 @@ fn func_member(number: i16, lefttype: Oid, righttype: Oid) -> OpFamilyMember {
 fn op_member(lefttype: Oid, righttype: Oid) -> OpFamilyMember {
     OpFamilyMember {
         is_func: false,
-        number: BTEqualStrategyNumber as i16,
+        object: 0,
+        number: BTEqualStrategyNumber as i32,
         lefttype,
         righttype,
+        sortfamily: 0,
         ref_is_hard: false,
         ref_is_family: false,
         refobjid: 0,

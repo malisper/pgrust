@@ -333,6 +333,111 @@ pub fn ClosePipeStream(index: i32) -> PgResult<i32> {
     Ok(-1)
 }
 
+/// `OpenPipeStream(const char *command, const char *mode)` (fd.c:2747),
+/// faithful to C's contract that a `popen` failure returns `NULL` with `errno`
+/// set rather than `ereport`ing. The `reserveAllocatedDesc` exhaustion still
+/// `ereport(ERROR)`s; the `EMFILE`/`ENFILE` retry reports at `LOG`. Used by
+/// `run_ssl_passphrase_command`, which reports a `NULL` at its own loglevel.
+pub fn OpenPipeStreamOrNull(command: &str, mode: &str) -> PgResult<Option<i32>> {
+    // Can we allocate another non-virtual FD?
+    if !reserveAllocatedDesc()? {
+        let max = with_fd(|fd| fd.allocated_descs.capacity() as i32);
+        return Err(ereport_error(
+            ERRCODE_INSUFFICIENT_RESOURCES,
+            format!(
+                "exceeded maxAllocatedDescs ({}) while trying to execute command \"{}\"",
+                max, command
+            ),
+            2759,
+            "OpenPipeStream",
+        ));
+    }
+
+    // Close excess kernel FDs.
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
+
+    loop {
+        match popen(command, mode) {
+            Ok(pipe) => {
+                let create_subid = get_current_sub_transaction_id();
+                return with_fd(|fd| {
+                    fd.allocated_descs.push(AllocateDesc {
+                        create_subid,
+                        desc: AllocatedHandle::Pipe(pipe),
+                    });
+                    Ok(Some((fd.allocated_descs.len() - 1) as i32))
+                });
+            }
+            Err(errno) => {
+                if errno == libc::EMFILE || errno == libc::ENFILE {
+                    ereport_log_out_of_fds()?;
+                    if vfd_core::with_fd(vfd_core::ReleaseLruFile) {
+                        continue;
+                    }
+                }
+                // C: `return NULL;` with `errno` left set.
+                vfd_core::set_errno_pub(errno);
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// `fgets(buf, size, fh)` + `ferror(fh)` against the pipe stream at table
+/// `index` (the read side of `OpenPipeStream(command, "r")`). Reads at most
+/// `size - 1` bytes up to and including the first newline. Returns the bytes
+/// read, EOF, or the read error's errno.
+pub(crate) fn pipe_read_line(index: i32, size: i32) -> PipeReadLineOutcome {
+    use std::io::Read;
+    if size <= 0 {
+        return PipeReadLineOutcome::Eof;
+    }
+    let max = (size - 1) as usize; // fgets reads at most size-1 bytes + NUL.
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return PipeReadLineOutcome::Error(libc::EBADF);
+        }
+        let stdout = match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::Pipe(pipe) => match pipe.stdout.as_mut() {
+                Some(s) => s,
+                None => return PipeReadLineOutcome::Error(libc::EBADF),
+            },
+            _ => return PipeReadLineOutcome::Error(libc::EBADF),
+        };
+        // fgets: read byte-by-byte, stopping at a newline (kept) or `size-1`.
+        let mut out: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        while out.len() < max {
+            match stdout.read(&mut byte) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    out.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(e) => return PipeReadLineOutcome::Error(e.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        }
+        if out.is_empty() {
+            // fgets returned NULL; ferror is false here (a hard error returned
+            // above), so this is EOF.
+            PipeReadLineOutcome::Eof
+        } else {
+            PipeReadLineOutcome::Line(out)
+        }
+    })
+}
+
+/// In-crate mirror of the [`crate::seams`] pipe-read outcome (kept private to
+/// avoid an `allocated_desc` -> seam-crate type dependency).
+pub(crate) enum PipeReadLineOutcome {
+    Line(Vec<u8>),
+    Eof,
+    Error(i32),
+}
+
 /// `AllocateDir(const char *dirname)` (fd.c:2907) — `opendir` a tracked
 /// directory. `Ok(None)` mirrors C returning NULL (caller checks errno via the
 /// following `ReadDir`).

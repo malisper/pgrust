@@ -109,6 +109,7 @@ backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-proc = { path = "../backend-catalog-pg-proc" }
 backend-catalog-pg-publication = { path = "../backend-catalog-pg-publication" }
+backend-catalog-pg-subscription = { path = "../backend-catalog-pg-subscription" }
 backend-commands-publicationcmds = { path = "../backend-commands-publicationcmds" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
@@ -202,6 +203,7 @@ backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }
 backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
+backend-libpq-be-secure-common = { path = "../backend-libpq-be-secure-common" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }

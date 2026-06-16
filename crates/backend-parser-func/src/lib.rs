@@ -1332,8 +1332,10 @@ fn dummy_const() -> types_nodes::primnodes::Const {
         consttype: InvalidOid,
         consttypmod: -1,
         constcollid: InvalidOid,
+        constlen: 0,
         constvalue: types_tuple::Datum::null(),
         constisnull: true,
+        constbyval: false,
         location: -1,
     }
 }

@@ -28,3 +28,7 @@ pub const PUBLICATIONRELMAP: SysCacheIdentifier = 53;
 pub const RELOID: SysCacheIdentifier = 57;
 /// `RULERELNAME`
 pub const RULERELNAME: SysCacheIdentifier = 60;
+/// `SUBSCRIPTIONOID`
+pub const SUBSCRIPTIONOID: SysCacheIdentifier = 67;
+/// `SUBSCRIPTIONRELMAP`
+pub const SUBSCRIPTIONRELMAP: SysCacheIdentifier = 68;

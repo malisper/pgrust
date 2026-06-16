@@ -15,7 +15,7 @@ use std::path::Path;
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 
 use backend_storage_file_fd_seams::{
-    CreateEmptyFileOutcome, PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
+    CreateEmptyFileOutcome, PgFileStream, PipeReadLine, RelmapReadOutcome, RelmapWriteOutcome,
 };
 
 use crate::{allocated_desc, sync_cleanup, vfd_core, vfd_io};
@@ -502,6 +502,31 @@ pub fn close_pipe_to_program(stream: PgFileStream, filename: &str) -> PgResult<(
         .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, "")));
     }
     Ok(())
+}
+
+/// `open_pipe_stream_read` — `OpenPipeStream(command, PG_BINARY_R)`: popen the
+/// command for reading. Faithful to C's NULL-on-failure contract (errno set):
+/// `Ok(None)` mirrors the NULL return, `Err` only the resource-exhaustion
+/// `ereport(ERROR)`.
+pub fn open_pipe_stream_read(command: &str) -> PgResult<Option<PgFileStream>> {
+    Ok(allocated_desc::OpenPipeStreamOrNull(command, "r")?
+        .map(|index| PgFileStream(index as u64)))
+}
+
+/// `pipe_read_line` — `fgets(buf, size, fh)` + `ferror(fh)` against the pipe
+/// stream opened with [`open_pipe_stream_read`].
+pub fn pipe_read_line(stream: PgFileStream, size: i32) -> PgResult<PipeReadLine> {
+    Ok(match allocated_desc::pipe_read_line(stream.0 as i32, size) {
+        allocated_desc::PipeReadLineOutcome::Line(bytes) => PipeReadLine::Line(bytes),
+        allocated_desc::PipeReadLineOutcome::Eof => PipeReadLine::Eof,
+        allocated_desc::PipeReadLineOutcome::Error(errno) => PipeReadLine::Error(errno),
+    })
+}
+
+/// `close_pipe_stream` — `ClosePipeStream(fh)` (`pclose`), returning the raw
+/// wait status for the caller's own loglevel-dependent reporting.
+pub fn close_pipe_stream(stream: PgFileStream) -> PgResult<i32> {
+    allocated_desc::ClosePipeStream(stream.0 as i32)
 }
 
 /// `stdout_stream` — the C stdio `stdout` global as a registered stream token.

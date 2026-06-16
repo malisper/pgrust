@@ -192,8 +192,10 @@ fn recognizes_ctid_equal_const() {
         consttype: TIDOID,
         consttypmod: -1,
         constcollid: 0,
+        constlen: 6,
         constvalue: types_tuple_datum_null(),
         constisnull: false,
+        constbyval: false,
         location: -1,
     });
     let op = Expr::OpExpr(OpExpr {
@@ -280,8 +282,10 @@ fn mk_opclause(root: &mut PlannerInfo, opno: Oid, relid: i32) -> NodeId {
         consttype: 23,
         consttypmod: -1,
         constcollid: 0,
+        constlen: 4,
         constvalue: types_tuple_datum_null(),
         constisnull: false,
+        constbyval: true,
         location: -1,
     });
     let op = Expr::OpExpr(OpExpr {
