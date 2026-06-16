@@ -450,6 +450,7 @@ backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
 backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+backend-utils-sort-small = { path = "../backend-utils-sort-small" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }

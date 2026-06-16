@@ -446,6 +446,7 @@ pub fn init_all() {
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
+    backend_utils_sort_small::init_seams();
     backend_utils_sort_sortsupport::init_seams();
     backend_utils_sort_storage::init_seams();
     backend_utils_sort_tuplesort::init_seams();

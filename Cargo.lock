@@ -18450,6 +18450,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-small"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-sort-sortsupport"
 version = "0.0.0"
 dependencies = [
@@ -19677,6 +19686,7 @@ dependencies = [
  "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
+ "backend-utils-sort-small",
  "backend-utils-sort-sortsupport",
  "backend-utils-sort-storage",
  "backend-utils-sort-tuplesort",
