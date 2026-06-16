@@ -83,23 +83,9 @@ const OIDOID: Oid = 26;
 const INTERNALOID: Oid = 2281;
 
 /// `OpFamilyMember` (`amapi.h`), mutated in place by [`btadjustmembers`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OpFamilyMember {
-    /// is this an operator, or support func?
-    pub is_func: bool,
-    /// strategy or support func number
-    pub number: i16,
-    /// lefttype
-    pub lefttype: Oid,
-    /// righttype
-    pub righttype: Oid,
-    /// OID of opclass or opfamily the dependency refers to
-    pub refobjid: Oid,
-    /// hard or soft dependency?
-    pub ref_is_hard: bool,
-    /// is dependency on opclass or opfamily?
-    pub ref_is_family: bool,
-}
+/// Canonical definition lives in `types_opclass`; re-exported here so this
+/// crate names the same type (no duplicate definition).
+pub use types_opclass::OpFamilyMember;
 
 /// `list_append_unique_oid(list, oid)` — append `oid` if not already present.
 /// Fallible: C's `lappend_oid` pallocs in the list's context.
@@ -433,7 +419,7 @@ pub fn btadjustmembers(
     // We handle operators and support functions almost identically, so rather
     // than duplicate this code block, just join the lists.
     for op in operators.iter_mut().chain(functions.iter_mut()) {
-        if op.is_func && op.number != BTORDER_PROC {
+        if op.is_func && op.number != BTORDER_PROC as i32 {
             // Optional support proc, so always a soft family dependency.
             op.ref_is_hard = false;
             op.ref_is_family = true;

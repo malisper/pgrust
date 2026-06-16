@@ -263,10 +263,26 @@ pub struct TransamVariablesData {
 
 /// `VirtualTransactionId` (`storage/lock.h`) — `{ ProcNumber procNumber;
 /// LocalTransactionId localTransactionId; }`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct VirtualTransactionId {
-    pub proc_number: crate::primitive::ProcNumber,
-    pub local_transaction_id: LocalTransactionId,
+    pub procNumber: crate::primitive::ProcNumber,
+    pub localTransactionId: LocalTransactionId,
+}
+
+impl VirtualTransactionId {
+    /// `SetInvalidVirtualTransactionId(vxid)`.
+    pub const fn invalid() -> Self {
+        Self {
+            procNumber: crate::primitive::INVALID_PROC_NUMBER,
+            localTransactionId: 0,
+        }
+    }
+
+    /// `VirtualTransactionIdIsValid(vxid)` —
+    /// `LocalTransactionIdIsValid((vxid).localTransactionId)`.
+    pub const fn is_valid(self) -> bool {
+        self.localTransactionId != 0
+    }
 }
 
 /// `SavedTransactionCharacteristics` (`access/xact.h`).

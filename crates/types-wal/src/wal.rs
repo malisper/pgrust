@@ -2,8 +2,8 @@
 
 use mcx::PgVec;
 use types_core::{
-    pg_crc32c, pg_time_t, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid,
-    RelFileNumber, RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, MAXPGPATH,
+    pg_crc32c, pg_time_t, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber,
+    RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, MAXPGPATH,
 };
 
 // `WAL_LEVEL_MINIMAL`/`WAL_LEVEL_REPLICA`/`WAL_LEVEL_LOGICAL` are the canonical
@@ -155,51 +155,10 @@ pub const WAL_COMPRESSION_LZ4: i32 = 2;
 pub const WAL_COMPRESSION_ZSTD: i32 = 3;
 
 /// `RelFileLocator` (storage/relfilelocator.h) — the physical identity of a
-/// relation: tablespace, database, relfilenumber.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RelFileLocator {
-    spcOid: Oid,
-    dbOid: Oid,
-    relNumber: RelFileNumber,
-}
-
-impl RelFileLocator {
-    pub const fn new(spcOid: Oid, dbOid: Oid, relNumber: RelFileNumber) -> Self {
-        Self {
-            spcOid,
-            dbOid,
-            relNumber,
-        }
-    }
-
-    /// Bounds-checked read at the C `#[repr(C)]` offsets (three `Oid`s, no
-    /// padding — the header requires that for hashtable keys): spcOid@0,
-    /// dbOid@4, relNumber@8. `None` when fewer than 12 bytes are present.
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        let word = |off: usize| -> Option<uint32> {
-            Some(uint32::from_ne_bytes(
-                data.get(off..off + 4)?.try_into().ok()?,
-            ))
-        };
-        Some(Self {
-            spcOid: word(0)?,
-            dbOid: word(4)?,
-            relNumber: word(8)?,
-        })
-    }
-
-    pub const fn spc_oid(&self) -> Oid {
-        self.spcOid
-    }
-
-    pub const fn db_oid(&self) -> Oid {
-        self.dbOid
-    }
-
-    pub const fn rel_number(&self) -> RelFileNumber {
-        self.relNumber
-    }
-}
+/// relation: tablespace, database, relfilenumber. Canonical definition lives
+/// in `types_storage`; re-exported here so `types_wal`'s `RelFileLocator`
+/// names the same type (no duplicate definition).
+pub use types_storage::RelFileLocator;
 
 /// The fixed-size WAL record header (`XLogRecord`, access/xlogrecord.h).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
