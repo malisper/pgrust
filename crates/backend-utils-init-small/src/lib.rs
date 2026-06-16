@@ -47,8 +47,11 @@ pub fn init_seams() {
     backend_utils_init_small_seams::set_interrupt_pending::set(globals::SetInterruptPending);
     backend_utils_init_small_seams::interrupt_pending::set(globals::InterruptPending);
     backend_utils_init_small_seams::set_proc_die_pending::set(globals::SetProcDiePending);
+    backend_utils_init_small_seams::proc_die_pending::set(globals::ProcDiePending);
     backend_utils_init_small_seams::set_query_cancel_pending::set(globals::SetQueryCancelPending);
+    backend_utils_init_small_seams::query_cancel_pending::set(globals::QueryCancelPending);
     backend_utils_init_small_seams::set_interrupt_holdoff_count::set(globals::SetInterruptHoldoffCount);
+    backend_utils_init_small_seams::interrupt_holdoff_count::set(globals::InterruptHoldoffCount);
     backend_utils_init_small_seams::hold_interrupts::set(globals::HoldInterrupts);
     backend_utils_init_small_seams::resume_interrupts::set(globals::ResumeInterrupts);
     backend_utils_init_small_seams::set_my_backend_type::set(globals::SetMyBackendType);

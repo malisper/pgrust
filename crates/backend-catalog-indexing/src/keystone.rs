@@ -13,7 +13,7 @@
 //! NO GENERIC INWARD SEAM. The `backend-catalog-indexing-seams` crate declares
 //! only the per-catalog *typed* seams (a `FormData_*` row crosses, the owner
 //! forms the tuple) plus the cluster-family `catalog_open_indexes` /
-//! `catalog_close_indexes` over the opaque `CatalogIndexStateToken`. There is
+//! `catalog_close_indexes` over the real owned [`CatalogIndexState`]. There is
 //! no generic `catalog_tuple_insert(rel, FormedTuple)` inward seam, so the
 //! generic engine is exposed as `pub` functions, not installed seams; the F1
 //! family fills will call these directly (or through their typed seam wrapper).
@@ -51,37 +51,12 @@ use backend_executor_execTuples::slot_store_fetch::ExecStoreHeapTuple;
 
 /// `CatalogIndexState` (the on-disk C type is `struct ResultRelInfo *`).
 ///
-/// The cut-down owned representation of a catalog's open indexes plus the heap
-/// relation — exactly the three `ResultRelInfo` fields `CatalogIndexInsert`
-/// reads:
-///   * `ri_RelationDesc`     → [`Self::heap_relation`]
-///   * `ri_NumIndices`       → `index_descs.len()`
-///   * `ri_IndexRelationDescs` / `ri_IndexRelationInfo` → the parallel
-///     [`Self::index_descs`] / [`Self::index_infos`] vectors.
-///
-/// `CatalogOpenIndexes` shares `execUtils.c`'s `ResultRelInfo` only as an
-/// allocation convenience; it deliberately builds **no** `EState` (so partial /
-/// expressional / exclusion indexes on catalogs are unsupported). The port
-/// therefore models the cut-down state directly rather than routing through
-/// `execIndexing.c`.
-///
-/// Built by [`CatalogOpenIndexes`] (≈ `ExecOpenIndices` minus the `EState`),
-/// torn down by [`CatalogCloseIndexes`].
-pub struct CatalogIndexState<'mcx> {
-    /// `indstate->ri_RelationDesc` — the open catalog (heap) relation. A
-    /// borrow-free alias of the caller's open relation (no release authority),
-    /// as in `CatalogOpenIndexes` where `ri_RelationDesc = heapRel` merely
-    /// points at the caller's open relation.
-    pub heap_relation: Relation<'mcx>,
-    /// `indstate->ri_IndexRelationDescs` — the open index relations, in the
-    /// relcache `RelationGetIndexList` order `ExecOpenIndices` uses. Each
-    /// carries its own `RowExclusiveLock` release authority taken by
-    /// `index_open`, released by [`CatalogCloseIndexes`].
-    pub index_descs: Vec<Relation<'mcx>>,
-    /// `indstate->ri_IndexRelationInfo` — the per-index `IndexInfo`, parallel
-    /// to [`Self::index_descs`].
-    pub index_infos: Vec<IndexInfo<'mcx>>,
-}
+/// The owned carrier now lives in [`types_cluster::CatalogIndexState`] so the
+/// `backend-catalog-indexing-seams` declarations and the cross-crate consumers
+/// (cluster, large-object) can name the real value — there is no opaque
+/// `CatalogIndexStateToken` handle anymore. This crate re-exports it for the
+/// engine functions below.
+pub use types_cluster::CatalogIndexState;
 
 /// `CatalogOpenIndexes(heapRel)` (indexing.c): prepare to update the catalog's
 /// indexes for an insert/update.

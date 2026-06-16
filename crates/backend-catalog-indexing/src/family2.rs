@@ -56,8 +56,8 @@ use backend_access_index_genam_seams as genam;
 use backend_access_table_table::table_open;
 
 use crate::keystone::{
-    CatalogOpenIndexes, CatalogTupleDelete, CatalogTupleInsert, CatalogTupleInsertWithInfo,
-    CatalogTupleUpdate, CatalogTupleUpdateWithInfo,
+    CatalogIndexState, CatalogOpenIndexes, CatalogTupleDelete, CatalogTupleInsert,
+    CatalogTupleInsertWithInfo, CatalogTupleUpdate, CatalogTupleUpdateWithInfo,
 };
 
 /* ======================================================================== *
@@ -398,36 +398,24 @@ fn catalog_tuple_delete(rel: &RelationData<'_>, tid: ItemPointerData) -> PgResul
 
 /// `CatalogOpenIndexes(rel)` (indexing.c).
 ///
-/// The cluster / large-object families thread the resulting
-/// `CatalogIndexStateToken` through `catalog_tuple_*_with_info_*` and close it
-/// with `catalog_close_indexes`. The live `CatalogIndexState<'mcx>` embeds open
-/// `Relation<'mcx>`s whose lifetime is the opener's `mcx`, which is gone by the
-/// time the next (separately-`mcx`-d) `*_with_info_*` / `close` seam fires — so
-/// it cannot be stashed across seam calls. Instead, the token carries the heap
-/// relation's OID, and each `*_with_info_*` body re-opens the indexes under its
-/// own `mcx` (`CatalogOpenIndexes` is the cheap, idempotent relcache lookup; the
-/// RowExclusiveLock is already held). This makes the index-state lifecycle
-/// per-`*_with_info_*`-call rather than spanning the open/close pair — exactly
-/// the "index-state lifecycle is per-batch here, which is logic-invisible"
-/// reconciliation the seam contract documents (the same index entries are
-/// inserted either way). [`catalog_open_indexes`] therefore validates the
-/// relation is openable and returns the OID-keyed token; [`catalog_close_indexes`]
-/// is the matching no-op.
+/// Returns the real owned [`CatalogIndexState`] tied to the caller's `mcx`. The
+/// cluster / large-object consumers open the catalog under one `mcx`, hold the
+/// returned value live across their `*_with_info_*` calls (which borrow it
+/// `&mut`), and close it with [`catalog_close_indexes`] — exactly C's
+/// `CatalogOpenIndexes` → `CatalogTupleUpdateWithInfo`* → `CatalogCloseIndexes`
+/// lifecycle. The seam passes the caller's `mcx` and an `'mcx`-tied relation, so
+/// the embedded open `Relation<'mcx>`s live as long as the caller's context.
 fn catalog_open_indexes<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'_>,
-) -> PgResult<types_cluster::CatalogIndexStateToken> {
-    // Validate the relation opens (the C CatalogOpenIndexes would fail here on a
-    // bad relation); the actual open index state is rebuilt per *_with_info_*.
-    let _r = table_open(mcx, rel.rd_id, RowExclusiveLock)?;
-    Ok(types_cluster::CatalogIndexStateToken(rel.rd_id as u64))
+    rel: &Relation<'mcx>,
+) -> PgResult<CatalogIndexState<'mcx>> {
+    CatalogOpenIndexes(mcx, rel)
 }
 
-/// `CatalogCloseIndexes(indstate)` (indexing.c). The per-call index state is
-/// opened and closed inside each `*_with_info_*` body; this is the matching
-/// no-op for the threaded token (see [`catalog_open_indexes`]).
-fn catalog_close_indexes(_token: types_cluster::CatalogIndexStateToken) -> PgResult<()> {
-    Ok(())
+/// `CatalogCloseIndexes(indstate)` (indexing.c): close the open index relations
+/// (the locks are held until end-of-transaction) and drop the owned state.
+fn catalog_close_indexes<'mcx>(indstate: CatalogIndexState<'mcx>) -> PgResult<()> {
+    crate::keystone::CatalogCloseIndexes(indstate)
 }
 
 /// `CatalogTupleUpdate(pg_class_rel, &tup->t_self, tup)` after reforming the
@@ -444,16 +432,19 @@ fn catalog_tuple_update_pg_class<'mcx>(
     update_pg_class_from_form(mcx, &r, tid, form, None)
 }
 
-/// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`.
+/// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`. `rel` and
+/// `indstate` are the caller's open pg_class relation and its open index state,
+/// both tied to the caller's `mcx` (so the index state is opened once by the
+/// caller and reused across both swap rows, exactly as C amortizes
+/// `CatalogOpenIndexes`).
 fn catalog_tuple_update_with_info_pg_class<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'_>,
+    rel: &Relation<'mcx>,
     tid: ItemPointerData,
     form: &types_cluster::PgClassForm,
-    token: &types_cluster::CatalogIndexStateToken,
+    indstate: &mut CatalogIndexState<'mcx>,
 ) -> PgResult<()> {
-    let r = table_open(mcx, rel.rd_id, RowExclusiveLock)?;
-    update_pg_class_from_form(mcx, &r, tid, form, Some(*token))
+    update_pg_class_from_form(mcx, rel, tid, form, Some(indstate))
 }
 
 /// Shared pg_class swap-row writer: read the on-disk tuple at `tid`, overwrite
@@ -466,7 +457,7 @@ fn update_pg_class_from_form<'mcx>(
     rel: &Relation<'mcx>,
     tid: ItemPointerData,
     form: &types_cluster::PgClassForm,
-    token: Option<types_cluster::CatalogIndexStateToken>,
+    indstate: Option<&mut CatalogIndexState<'mcx>>,
 ) -> PgResult<()> {
     // Fetch the existing tuple at tid via an OID-keyed scan? The cluster swap
     // addresses by tid; re-read the full tuple by scanning for it. The OID is
@@ -507,14 +498,9 @@ fn update_pg_class_from_form<'mcx>(
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
     let mut tup = heap_modify_tuple(mcx, &oldtup, &tupdesc, &values, &nulls, &replaces)?;
-    match token {
-        // *_with_info: open the catalog's indexes locally (see
-        // `catalog_open_indexes`'s reconciliation note) and update with them.
-        Some(_t) => {
-            let mut indstate = CatalogOpenIndexes(mcx, rel)?;
-            CatalogTupleUpdateWithInfo(mcx, rel, tid, &mut tup, &mut indstate)?;
-            crate::keystone::CatalogCloseIndexes(indstate)
-        }
+    match indstate {
+        // *_with_info: update using the caller's already-open index state.
+        Some(indstate) => CatalogTupleUpdateWithInfo(mcx, rel, tid, &mut tup, indstate),
         None => CatalogTupleUpdate(mcx, rel, tid, &mut tup),
     }
 }
@@ -1722,59 +1708,61 @@ fn bytea_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Datum<'mcx>> {
 }
 
 /// `catalog_tuple_insert_with_info_pg_largeobject`: form a new pg_largeobject
-/// page row (loid, pageno, data bytea) and `CatalogTupleInsertWithInfo`.
-fn catalog_tuple_insert_with_info_pg_largeobject(
-    rel: &RelationData<'_>,
+/// page row (loid, pageno, data bytea) and `CatalogTupleInsertWithInfo`. `rel`
+/// and `indstate` are the caller's open `lo_heap_r` and its open index state
+/// (`CatalogOpenIndexes` done once in `inv_write`/`inv_truncate`), reused across
+/// every page write — exactly C's amortized-`CatalogOpenIndexes` lifecycle.
+fn catalog_tuple_insert_with_info_pg_largeobject<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &RelationData<'mcx>,
     loid: Oid,
     pageno: i32,
     data: &[u8],
-    token: &types_cluster::CatalogIndexStateToken,
+    indstate: &mut CatalogIndexState<'mcx>,
 ) -> PgResult<()> {
     use cat::catalog::{
         ANUM_PG_LARGEOBJECT_DATA, ANUM_PG_LARGEOBJECT_LOID, ANUM_PG_LARGEOBJECT_PAGENO,
     };
-    let ctx = MemoryContext::new("catalog_tuple_insert_with_info_pg_largeobject");
-    let mcx = ctx.mcx();
-    let r = reopen(mcx, rel)?;
 
+    let _ = rel;
     let mut values: [Datum<'_>; 3] = core::array::from_fn(|_| Datum::null());
     values[(ANUM_PG_LARGEOBJECT_LOID - 1) as usize] = Datum::from_oid(loid);
     values[(ANUM_PG_LARGEOBJECT_PAGENO - 1) as usize] = Datum::from_i32(pageno);
     values[(ANUM_PG_LARGEOBJECT_DATA - 1) as usize] = bytea_datum(mcx, data)?;
     let nulls = [false; 3];
 
-    let _ = token;
-    let tupdesc = r.rd_att_clone_in(mcx)?;
+    // indstate->ri_RelationDesc is the open lo_heap_r the caller passed to
+    // CatalogOpenIndexes; use it (an alias) for the heap mutation.
+    let heap_rel = indstate.heap_relation.alias();
+    let tupdesc = heap_rel.rd_att_clone_in(mcx)?;
     let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
-    let mut indstate = CatalogOpenIndexes(mcx, &r)?;
-    CatalogTupleInsertWithInfo(mcx, &r, &mut tup, &mut indstate)?;
-    crate::keystone::CatalogCloseIndexes(indstate)
+    CatalogTupleInsertWithInfo(mcx, &heap_rel, &mut tup, indstate)
 }
 
 /// `catalog_tuple_update_with_info_pg_largeobject`: re-read the old page tuple
-/// at `tid`, replace only the `data` column, `CatalogTupleUpdateWithInfo`.
-fn catalog_tuple_update_with_info_pg_largeobject(
-    rel: &RelationData<'_>,
+/// at `tid`, replace only the `data` column, `CatalogTupleUpdateWithInfo`. `rel`
+/// and `indstate` are the caller's open relation and index state.
+fn catalog_tuple_update_with_info_pg_largeobject<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &RelationData<'mcx>,
     tid: ItemPointerData,
     data: &[u8],
-    token: &types_cluster::CatalogIndexStateToken,
+    indstate: &mut CatalogIndexState<'mcx>,
 ) -> PgResult<()> {
     use cat::catalog::ANUM_PG_LARGEOBJECT_DATA;
-    let ctx = MemoryContext::new("catalog_tuple_update_with_info_pg_largeobject");
-    let mcx = ctx.mcx();
-    let r = reopen(mcx, rel)?;
-    let oldtup = fetch_by_tid(mcx, &r, tid)?
+    let _ = rel;
+    // indstate->ri_RelationDesc is the open lo_heap_r the caller passed to
+    // CatalogOpenIndexes; use it (an alias) for the heap read/modify/update.
+    let heap_rel = indstate.heap_relation.alias();
+    let oldtup = fetch_by_tid(mcx, &heap_rel, tid)?
         .ok_or_else(|| PgError::error("could not re-read pg_largeobject page tuple"))?;
-    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let (mut values, mut nulls) = deform(mcx, &heap_rel, &oldtup)?;
     let mut replaces = vec![false; values.len()];
     set_col(&mut values, &mut nulls, &mut replaces, ANUM_PG_LARGEOBJECT_DATA, bytea_datum(mcx, data)?);
 
-    let _ = token;
-    let tupdesc = r.rd_att_clone_in(mcx)?;
+    let tupdesc = heap_rel.rd_att_clone_in(mcx)?;
     let mut tup = heap_modify_tuple(mcx, &oldtup, &tupdesc, &values, &nulls, &replaces)?;
-    let mut indstate = CatalogOpenIndexes(mcx, &r)?;
-    CatalogTupleUpdateWithInfo(mcx, &r, tid, &mut tup, &mut indstate)?;
-    crate::keystone::CatalogCloseIndexes(indstate)
+    CatalogTupleUpdateWithInfo(mcx, &heap_rel, tid, &mut tup, indstate)
 }
 
 /* ======================================================================== *

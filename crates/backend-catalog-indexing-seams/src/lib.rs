@@ -218,25 +218,30 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 seam_core::seam!(
-    /// `CatalogOpenIndexes(rel)` (indexing.c).
+    /// `CatalogOpenIndexes(rel)` (indexing.c). Returns the real owned
+    /// [`types_cluster::CatalogIndexState`] tied to the caller's `mcx`; the
+    /// cluster / large-object consumers hold it live across their
+    /// `*_with_info_*` calls and pass it to [`catalog_close_indexes`].
     pub fn catalog_open_indexes<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &types_rel::Relation<'_>,
-    ) -> PgResult<types_cluster::CatalogIndexStateToken>
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<types_cluster::CatalogIndexState<'mcx>>
 );
 seam_core::seam!(
     /// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`.
     pub fn catalog_tuple_update_with_info_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &types_rel::Relation<'_>,
+        rel: &types_rel::Relation<'mcx>,
         tid: ItemPointerData,
         form: &types_cluster::PgClassForm,
-        indstate: &types_cluster::CatalogIndexStateToken,
+        indstate: &mut types_cluster::CatalogIndexState<'mcx>,
     ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `CatalogCloseIndexes(indstate)` (indexing.c).
-    pub fn catalog_close_indexes(indstate: types_cluster::CatalogIndexStateToken) -> PgResult<()>
+    pub fn catalog_close_indexes<'mcx>(
+        indstate: types_cluster::CatalogIndexState<'mcx>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -417,12 +422,13 @@ seam_core::seam!(
     /// `heap_freetuple`. The page payload crosses as the owned `data` slice (the
     /// `workbuf` scratch page, already trimmed to the valid length). `Err`
     /// carries the heap/index-mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_with_info_pg_largeobject(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_with_info_pg_largeobject<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &RelationData<'mcx>,
         loid: Oid,
         pageno: i32,
         data: &[u8],
-        indstate: &types_cluster::CatalogIndexStateToken,
+        indstate: &mut types_cluster::CatalogIndexState<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -435,11 +441,12 @@ seam_core::seam!(
     /// re-reads the old tuple at `tid` to supply `heap_modify_tuple`'s base
     /// (the caller already holds the row from the scan; only the page payload
     /// changes). `Err` carries the heap/index-mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_update_with_info_pg_largeobject(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_update_with_info_pg_largeobject<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &RelationData<'mcx>,
         tid: ItemPointerData,
         data: &[u8],
-        indstate: &types_cluster::CatalogIndexStateToken,
+        indstate: &mut types_cluster::CatalogIndexState<'mcx>,
     ) -> PgResult<()>
 );
 

@@ -202,6 +202,11 @@ pub struct LogicalDecodingContext {
     pub write_xid: TransactionId,
     /// `bool end_xact`.
     pub end_xact: bool,
+    /// `void *output_plugin_private` — opaque per-plugin state the loaded output
+    /// plugin stows in its `startup_cb` (e.g. pgoutput's `PGOutputData`) and
+    /// recovers in every later callback. The owned, value-typed replacement for
+    /// the C `void *`: any plugin's private struct, type-erased.
+    pub output_plugin_private: Option<Box<dyn core::any::Any>>,
     /// `bool processing_required`.
     pub processing_required: bool,
 }
@@ -342,6 +347,7 @@ fn StartupDecodingContext(
         write_location: 0,
         write_xid: 0,
         end_xact: false,
+        output_plugin_private: None,
         processing_required: false,
     });
 

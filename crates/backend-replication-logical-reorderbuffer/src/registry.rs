@@ -289,6 +289,115 @@ fn seam_commit(
 }
 
 // ---------------------------------------------------------------------------
+// Further change-replay / commit-time entry points (consumed by decode.c).
+//
+// The owning families (change replay, spill-to-disk, streaming, cleanup /
+// commit-time) are not yet landed in this crate (see the crate header). Their
+// seams are installed here with loud panics (mirror-PG-and-panic) so decode.c
+// can be ported against the complete seam surface and any actual decode of a
+// data-bearing record fails loudly rather than silently dropping changes.
+// ---------------------------------------------------------------------------
+
+fn seam_process_xid(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
+    panic!("ReorderBufferProcessXid: change-replay family not yet ported");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seam_queue_change(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _kind: backend_replication_logical_reorderbuffer_seams::DecodedChangeKind,
+    _rlocator: RelFileLocator,
+    _oldtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+    _newtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+    _toast_insert: bool,
+) {
+    panic!("ReorderBufferQueueChange: change-replay family not yet ported");
+}
+
+fn seam_queue_message(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _transactional: bool,
+    _prefix: alloc::vec::Vec<u8>,
+    _message: alloc::vec::Vec<u8>,
+) {
+    panic!("ReorderBufferQueueMessage: change-replay family not yet ported");
+}
+
+fn seam_forget(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
+    panic!("ReorderBufferForget: change-replay family not yet ported");
+}
+
+fn seam_abort(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _abort_time: types_core::primitive::TimestampTz,
+) {
+    panic!("ReorderBufferAbort: change-replay family not yet ported");
+}
+
+fn seam_abort_old(_rb: ReorderBufferHandle, _oldest_running_xid: TransactionId) {
+    panic!("ReorderBufferAbortOld: change-replay family not yet ported");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seam_finish_prepared(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _commit_lsn: XLogRecPtr,
+    _end_lsn: XLogRecPtr,
+    _two_phase_at: XLogRecPtr,
+    _commit_time: types_core::primitive::TimestampTz,
+    _origin_id: types_core::primitive::RepOriginId,
+    _origin_lsn: XLogRecPtr,
+    _gid: alloc::vec::Vec<u8>,
+    _is_commit: bool,
+) {
+    panic!("ReorderBufferFinishPrepared: change-replay family not yet ported");
+}
+
+fn seam_prepare(_rb: ReorderBufferHandle, _xid: TransactionId, _gid: alloc::vec::Vec<u8>) {
+    panic!("ReorderBufferPrepare: change-replay family not yet ported");
+}
+
+fn seam_skip_prepare(_rb: ReorderBufferHandle, _xid: TransactionId) {
+    panic!("ReorderBufferSkipPrepare: change-replay family not yet ported");
+}
+
+fn seam_immediate_invalidation(
+    _rb: ReorderBufferHandle,
+    _invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
+) {
+    panic!("ReorderBufferImmediateInvalidation: change-replay family not yet ported");
+}
+
+fn seam_add_invalidations(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
+) {
+    panic!("ReorderBufferAddInvalidations: change-replay family not yet ported");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seam_remember_prepare_info(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _prepare_lsn: XLogRecPtr,
+    _end_lsn: XLogRecPtr,
+    _prepare_time: types_core::primitive::TimestampTz,
+    _origin_id: types_core::primitive::RepOriginId,
+    _origin_lsn: XLogRecPtr,
+) -> bool {
+    panic!("ReorderBufferRememberPrepareInfo: change-replay family not yet ported");
+}
+
+// ---------------------------------------------------------------------------
 // Active tuplecid hash (the `static HTAB *tuplecid_data` that
 // SetupHistoricSnapshot points at, owned here because reorderbuffer builds and
 // owns the per-txn `tuplecid_hash`). ReorderBufferProcessTXN (change-replay
@@ -436,4 +545,19 @@ pub fn init_seams() {
     s::ReorderBufferAssignChild::set(seam_assign_child);
     s::ReorderBufferCommitChild::set(seam_commit_child);
     s::ReorderBufferCommit::set(seam_commit);
+
+    // Further change-replay / commit-time entry points (panic until their
+    // families land; see above).
+    s::ReorderBufferProcessXid::set(seam_process_xid);
+    s::ReorderBufferQueueChange::set(seam_queue_change);
+    s::ReorderBufferQueueMessage::set(seam_queue_message);
+    s::ReorderBufferForget::set(seam_forget);
+    s::ReorderBufferAbort::set(seam_abort);
+    s::ReorderBufferAbortOld::set(seam_abort_old);
+    s::ReorderBufferFinishPrepared::set(seam_finish_prepared);
+    s::ReorderBufferPrepare::set(seam_prepare);
+    s::ReorderBufferSkipPrepare::set(seam_skip_prepare);
+    s::ReorderBufferImmediateInvalidation::set(seam_immediate_invalidation);
+    s::ReorderBufferAddInvalidations::set(seam_add_invalidations);
+    s::ReorderBufferRememberPrepareInfo::set(seam_remember_prepare_info);
 }
