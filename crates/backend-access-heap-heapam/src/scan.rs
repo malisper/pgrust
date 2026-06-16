@@ -298,7 +298,7 @@ fn initscan(
 
     // Currently, we only have a stats counter for sequential heap scans.
     if (sscan.rs_flags & SO_TYPE_SEQSCAN) != 0 {
-        pgstat_seam::pgstat_count_heap_scan::call(relid);
+        pgstat_seam::pgstat_count_heap_scan::call(relid, sscan.rs_rd.pgstat_enabled);
     }
     let _ = mcx;
     Ok(())
@@ -1259,7 +1259,7 @@ pub fn heap_getnext<'a, 'mcx>(
         return Ok(None);
     }
 
-    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id);
+    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id, sscan.rs_rd.pgstat_enabled);
     Ok(heap_scan(sscan).rs_ctup.as_ref())
 }
 
@@ -1282,7 +1282,7 @@ pub fn heap_getnextslot<'mcx>(
         return Ok(false);
     }
 
-    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id);
+    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id, sscan.rs_rd.pgstat_enabled);
     let cbuf = heap_scan(sscan).rs_cbuf;
     let tuple = heap_scan(sscan)
         .rs_ctup
@@ -1408,7 +1408,7 @@ pub fn heap_getnextslot_tidrange<'mcx>(
         break;
     }
 
-    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id);
+    pgstat_seam::pgstat_count_heap_getnext::call(sscan.rs_rd.rd_id, sscan.rs_rd.pgstat_enabled);
     let cbuf = heap_scan(sscan).rs_cbuf;
     let tuple = heap_scan(sscan)
         .rs_ctup

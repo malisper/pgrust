@@ -85,6 +85,7 @@ pub fn init_all() {
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
