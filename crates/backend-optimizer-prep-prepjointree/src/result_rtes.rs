@@ -904,6 +904,90 @@ fn get_relids_in_fromexpr<'mcx>(
 }
 
 // ===========================================================================
+// find_jointree_node_for_rel / get_relids_for_join (prepjointree.c:4160-4197)
+// ===========================================================================
+
+/// `find_jointree_node_for_rel(jtnode, relid)` (prepjointree.c:4160): locate the
+/// jointree node (`RangeTblRef`, or a `JoinExpr` for a join RTE) whose RT index
+/// is `relid`. Returns `None` if not present.
+fn find_jointree_node_for_rel<'a, 'mcx>(
+    jtnode: Option<&'a Node<'mcx>>,
+    relid: i32,
+) -> PgResult<Option<&'a Node<'mcx>>> {
+    let jtnode = match jtnode {
+        None => return Ok(None),
+        Some(n) => n,
+    };
+    match jtnode {
+        Node::RangeTblRef(r) => {
+            if relid == r.rtindex {
+                Ok(Some(jtnode))
+            } else {
+                Ok(None)
+            }
+        }
+        Node::FromExpr(f) => {
+            for l in f.fromlist.iter() {
+                if let Some(found) = find_jointree_node_for_rel(Some(l), relid)? {
+                    return Ok(Some(found));
+                }
+            }
+            Ok(None)
+        }
+        Node::JoinExpr(j) => {
+            if relid == j.rtindex {
+                return Ok(Some(jtnode));
+            }
+            if let Some(found) = find_jointree_node_for_rel(j.larg.as_deref(), relid)? {
+                return Ok(Some(found));
+            }
+            if let Some(found) = find_jointree_node_for_rel(j.rarg.as_deref(), relid)? {
+                return Ok(Some(found));
+            }
+            Ok(None)
+        }
+        _ => Err(types_error::PgError::error("unrecognized node type")),
+    }
+}
+
+/// `get_relids_for_join(query, joinrelid)` (prepjointree.c:4191): find the
+/// jointree node for join RTE `joinrelid` and return the base+OJ relids present
+/// underneath it. Returned as the lifetime-free [`ExprRelids`] so the var.c owner
+/// can assign it directly into a `PlaceHolderVar.phrels`.
+pub(crate) fn get_relids_for_join<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+    joinrelid: i32,
+) -> PgResult<ExprRelids> {
+    // The C passes `(Node *) query->jointree` (a FromExpr) directly. Here the top
+    // jointree is a typed `FromExpr`; search its fromlist (the FromExpr's own
+    // rtindex would never be a join RTE).
+    let jtnode = match query.jointree.as_deref() {
+        None => None,
+        Some(f) => {
+            let mut found = None;
+            for l in f.fromlist.iter() {
+                if let Some(n) = find_jointree_node_for_rel(Some(l), joinrelid)? {
+                    found = Some(n);
+                    break;
+                }
+            }
+            found
+        }
+    };
+    let jtnode = match jtnode {
+        None => {
+            return Err(types_error::PgError::error(alloc::format!(
+                "could not find join node {joinrelid}"
+            )))
+        }
+        Some(n) => n,
+    };
+    let relids = get_relids_in_jointree(mcx, jtnode, true, false)?;
+    Ok(relids_to_expr_relids(relids.as_deref()))
+}
+
+// ===========================================================================
 // get_nullingrels (prepjointree.c:4361)
 // ===========================================================================
 

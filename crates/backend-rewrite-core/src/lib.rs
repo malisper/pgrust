@@ -61,7 +61,8 @@
 //! (`parse_agg`/`parse_clause`): `contain_windowfuncs`, `locate_windowfunc`,
 //! `locate_agg_of_level`. The fourth declared seam, `flatten_join_alias_vars`,
 //! lives in `optimizer/util/var.c` (NOT rewriteManip.c) and is owned/installed
-//! by `backend-optimizer-util-vars`; it is intentionally not installed here.
+//! by `backend-optimizer-util-vars` (now ported there); it is intentionally not
+//! installed here.
 
 #![allow(non_snake_case)]
 #![no_std]
