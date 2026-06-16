@@ -61,12 +61,15 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgError, PgResult};
-use types_nodes::nodeindexscan::Plan;
+use types_nodes::nodeindexscan::{Plan, Scan};
+use types_nodes::noderesult::Result as ResultNode;
 use types_nodes::nodes::{Node, NodeTag};
+use types_nodes::nodeseqscan::SeqScan;
+use types_nodes::nodevaluesscan::ValuesScan;
 use types_nodes::primnodes::{Expr, TargetEntry};
-use types_pathnodes::planner_run::PlannerRun;
+use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
     NodeId, Path, PathId, PathNode, PathTarget, PlannerInfo, RinfoId, RELOPT_BASEREL, RTE_RELATION,
 };
@@ -324,7 +327,7 @@ pub fn replace_nestloop_params(
 /// — exactly as `clauses/grounded.rs::convert_saop_to_hashed_saop_walker` does —
 /// the fallible seam errors are stashed in `err` and surfaced by the caller; on
 /// a pending error the walk short-circuits, returning nodes unchanged.
-fn replace_nestloop_params_mutator(
+pub(crate) fn replace_nestloop_params_mutator(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     node: Expr,
@@ -1016,15 +1019,334 @@ pub fn create_plan_recurse<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
+// Scan-converter shared helpers (F2c).
+// ---------------------------------------------------------------------------
+
+/// Move an owned `Vec<TargetEntry<'mcx>>` (the C `qptlist` / `tlist`) into a
+/// `Plan.targetlist` slot. An empty list is the C `NIL`, stored as `None`.
+fn tlist_to_plan_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Vec<TargetEntry<'mcx>>,
+) -> PgResult<Option<PgVec<'mcx, TargetEntry<'mcx>>>> {
+    if tlist.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+    for tle in tlist {
+        out.push(tle);
+    }
+    Ok(Some(out))
+}
+
+/// Convert a list of bare clause expression arena handles (the
+/// `extract_actual_clauses` output) into an owned qual list, optionally
+/// replacing nestloop-supplied `Var`s / `PlaceHolderVar`s with `Param`s when
+/// the path is parameterized (the C `replace_nestloop_params(root, (Node *)
+/// scan_clauses)`). An empty list is the C `NIL`, stored as `None`.
+fn build_scan_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    clauses: &[NodeId],
+    has_param_info: bool,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    if clauses.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, clauses.len())?;
+    for &cid in clauses {
+        let expr: Expr = if has_param_info {
+            let replaced = replace_nestloop_params(mcx, root, cid)?;
+            root.node(replaced).clone()
+        } else {
+            root.node(cid).clone()
+        };
+        out.push(expr);
+    }
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------------------
+// make_seqscan (createplan.c ~5643) / make_valuesscan (~5878) /
+// make_result (~7129).
+// ---------------------------------------------------------------------------
+
+/// `make_seqscan(qptlist, qpqual, scanrelid)` — build a `SeqScan` plan node.
+fn make_seqscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+) -> SeqScan<'mcx> {
+    let mut node = SeqScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// `make_valuesscan(qptlist, qpqual, scanrelid, values_lists)` — build a
+/// `ValuesScan` plan node.
+fn make_valuesscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    values_lists: PgVec<'mcx, PgVec<'mcx, Expr>>,
+) -> ValuesScan<'mcx> {
+    let mut node = ValuesScan {
+        scan: Scan::default(),
+        values_lists,
+    };
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// `make_result(tlist, resconstantqual, subplan)` — build a `Result` plan node.
+/// `subplan` is the optional input plan (the C `lefttree`).
+fn make_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    resconstantqual: Option<PgVec<'mcx, Expr>>,
+    subplan: Option<Node<'mcx>>,
+) -> PgResult<ResultNode<'mcx>> {
+    let mut node = ResultNode::default();
+    let plan: &mut Plan = &mut node.plan;
+    plan.targetlist = tlist;
+    // plan->qual = NIL;
+    plan.qual = None;
+    plan.lefttree = match subplan {
+        Some(child) => Some(mcx::alloc_in(mcx, child)?),
+        None => None,
+    };
+    plan.righttree = None;
+    node.resconstantqual = resconstantqual;
+    Ok(node)
+}
+
+// ---------------------------------------------------------------------------
+// create_seqscan_plan (createplan.c ~2910)
+// ---------------------------------------------------------------------------
+
+/// `create_seqscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// seqscan plan for the base relation scanned by `best_path` with restriction
+/// clauses `scan_clauses` and targetlist `tlist`.
+fn create_seqscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let scan_relid = root.path(best_path).base().parent;
+    let scan_relid = root.rel(scan_relid).relid;
+
+    // it should be a base rel...
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, scan_relid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params (handled in
+    // build_scan_qual when the path is parameterized).
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_seqscan(tlist, qpqual, scan_relid);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::SeqScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_valuesscan_plan (createplan.c ~3840)
+// ---------------------------------------------------------------------------
+
+/// `create_valuesscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// valuesscan plan for the base relation scanned by `best_path` with
+/// restriction clauses `scan_clauses` and targetlist `tlist`.
+fn create_valuesscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let scan_relid = root.path(best_path).base().parent;
+    let scan_relid = root.rel(scan_relid).relid;
+
+    // it should be a values base rel...
+    debug_assert!(scan_relid > 0);
+
+    // rte = planner_rt_fetch(scan_relid, root); values_lists = rte->values_lists.
+    // The RTE's values_lists is a List<List<Node>>; resolve each row's column
+    // expressions into the owned ValuesScan `PgVec<PgVec<Expr>>` carrier.
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_VALUES);
+    let mut values_lists: PgVec<'mcx, PgVec<'mcx, Expr>> =
+        vec_with_capacity_in(mcx, rte.values_lists.len())?;
+    for row_node in rte.values_lists.iter() {
+        // Each element of values_lists is a List node of column expressions.
+        let cols = match &**row_node {
+            Node::List(list) => list,
+            _ => {
+                return Err(PgError::error(
+                    "create_valuesscan_plan: RTE values_lists element is not a List",
+                ))
+            }
+        };
+        let mut row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, cols.len())?;
+        for col in cols.iter() {
+            match &**col {
+                Node::Expr(e) => row.push(e.clone()),
+                _ => {
+                    return Err(PgError::error(
+                        "create_valuesscan_plan: VALUES column is not an expression",
+                    ))
+                }
+            }
+        }
+        values_lists.push(row);
+    }
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // The values lists could contain nestloop params, too.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        let mut replaced: PgVec<'mcx, PgVec<'mcx, Expr>> =
+            vec_with_capacity_in(mcx, values_lists.len())?;
+        for row in values_lists.into_iter() {
+            let mut new_row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, row.len())?;
+            for expr in row.into_iter() {
+                let out = replace_nestloop_params_mutator(mcx, root, expr, &mut err);
+                new_row.push(out);
+            }
+            replaced.push(new_row);
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+        values_lists = replaced;
+    }
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_valuesscan(tlist, qpqual, scan_relid, values_lists);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::ValuesScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_resultscan_plan (createplan.c ~4019)
+// ---------------------------------------------------------------------------
+
+/// `create_resultscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// `Result` plan for the `RTE_RESULT` base relation scanned by `best_path`
+/// with restriction clauses `scan_clauses` and targetlist `tlist`.
+fn create_resultscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let scan_relid = root.path(best_path).base().parent;
+    let scan_relid = root.rel(scan_relid).relid;
+
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, scan_relid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RESULT
+    );
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params. The bare
+    // clause list becomes the Result's resconstantqual (the C `make_result(tlist,
+    // (Node *) scan_clauses, NULL)`).
+    let resconstantqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_result(mcx, tlist, resconstantqual, None)?;
+
+    copy_generic_path_info(&mut scan_plan.plan, root.path(best_path).base());
+
+    Ok(Node::Result(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// order_qual_clauses over a RestrictInfo list (the create_*scan_plan callers
+// pass the resolved `scan_clauses` as `Vec<RinfoId>`; C up-casts each
+// `RestrictInfo *` to `Node *` for order_qual_clauses, which preserves the
+// RestrictInfo identity). Intern each RinfoId as a transient
+// `Expr::RestrictInfo`, order, resolve back to RinfoId — the same round-trip
+// `get_gating_quals` uses.
+// ---------------------------------------------------------------------------
+
+fn order_qual_clauses_rinfo(root: &mut PlannerInfo, quals: &[RinfoId]) -> Vec<RinfoId> {
+    if quals.len() <= 1 {
+        return quals.to_vec();
+    }
+    let nodes: Vec<NodeId> = quals
+        .iter()
+        .map(|&rid| root.alloc_node(Expr::RestrictInfo(rid.as_expr_ref())))
+        .collect();
+    let ordered = order_qual_clauses(root, &nodes);
+    ordered
+        .iter()
+        .map(|&nid| match root.node(nid) {
+            Expr::RestrictInfo(r) => RinfoId::from(*r),
+            _ => unreachable!("order_qual_clauses_rinfo: ordered node is not a RestrictInfo"),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Seam installation (this crate OWNS create_scan_plan).
 // ---------------------------------------------------------------------------
 
 /// Install the createplan-owned seams. F2b owns `create_scan_plan` (the scan
-/// dispatch + tlist selection + gating wiring); the per-scan-type converters
-/// (`create_seqscan_plan`, …), `create_gating_plan`, and the non-scan converter
-/// arms are installed by the later scan / join / append / upper F-families.
+/// dispatch + tlist selection + gating wiring); F2c adds the three simple scan
+/// converters (`create_seqscan_plan` / `create_valuesscan_plan` /
+/// `create_resultscan_plan`). The remaining per-scan-type converters
+/// (index/bitmap/tid/subquery/function/cte/foreign/…), `create_gating_plan`,
+/// and the non-scan converter arms are installed by the later scan / join /
+/// append / upper F-families.
 pub fn init_seams() {
     cp_seam::create_scan_plan::set(create_scan_plan);
+    // F2c simple scan converters.
+    cp_seam::create_seqscan_plan::set(create_seqscan_plan);
+    cp_seam::create_valuesscan_plan::set(create_valuesscan_plan);
+    cp_seam::create_resultscan_plan::set(create_resultscan_plan);
 }
 
 #[cfg(test)]
