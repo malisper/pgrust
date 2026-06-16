@@ -18,6 +18,45 @@ pub use types_relcache_entry::{
     OwnedTupleConstr, OwnedTupleDesc, RelationData,
 };
 
+/// `RewriteRule` (`rewrite/prs2lock.h`), re-projected into a per-query `'mcx`
+/// arena — the mcx-bound mirror of the relcache entry's `'static`
+/// [`types_relcache_entry::RewriteRule`].
+///
+/// The cached entry holds its rule trees in the process-lifetime
+/// CacheMemoryContext (`Query<'static>`/`Node<'static>`), reachable only
+/// in-crate to the relcache owner. `rewriteHandler.c` runs on a per-query
+/// `'mcx` arena and may NOT borrow `'static` cache memory across a seam (the
+/// cache entry can be invalidated/rebuilt mid-query). So the
+/// [`relation_rules`] reader deep-copies (`Query::clone_in`/`Node::clone_in`,
+/// the C `copyObject`) each rule into the caller's `mcx`, exactly as the C
+/// rewriter copies the rule action list before mutating it. This is the
+/// faithful per-query rendering of the cached `RewriteRule`, not an invented
+/// handle — field-for-field with the carrier, only the lifetime differs.
+pub struct RewriteRuleImage<'mcx> {
+    /// `Oid ruleId` — the `pg_rewrite` OID.
+    pub ruleId: types_core::primitive::Oid,
+    /// `CmdType event` — the command the rule fires on.
+    pub event: types_nodes::nodes::CmdType,
+    /// `char ev_enabled` — `'O'`/`'D'`/`'R'`/`'A'` (the raw stored char).
+    pub enabled: u8,
+    /// `bool isInstead` — is this an INSTEAD rule?
+    pub isInstead: bool,
+    /// `Node *qual` — the rule qualification, re-homed into `mcx`, or `None`
+    /// for an unconditional rule.
+    pub qual: Option<mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>,
+    /// `List *actions` — the rule's action `Query` trees, re-homed into `mcx`.
+    pub actions: mcx::PgVec<'mcx, types_nodes::copy_query::Query<'mcx>>,
+}
+
+/// `RuleLock` (`rewrite/prs2lock.h`), re-projected into a per-query `'mcx`
+/// arena — the mcx-bound mirror of the relcache entry's `'static`
+/// [`types_relcache_entry::RuleLock`], returned by [`relation_rules`]. As with
+/// the carrier, `numLocks` is implicit in `rules.len()`.
+pub struct RuleLockImage<'mcx> {
+    /// `RewriteRule **rules` — the rules in `RelationBuildRuleLock` read order.
+    pub rules: mcx::PgVec<'mcx, RewriteRuleImage<'mcx>>,
+}
+
 /// The dual-carry shared relcache cell type: `Rc<RefCell<RelationData>>` — a
 /// CLONE of C's live `RelationData *` into the cache. `types_rel::Relation`
 /// carries this (type-erased to `Rc<dyn Any>` to dodge the crate cycle); these
@@ -852,4 +891,26 @@ seam_core::seam!(
         relkind: i8,
         relfilenumber: types_core::primitive::RelFileNumber,
     ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// The per-query rewrite-rule reader for `rewriteHandler.c`. C reads the
+    /// rule list directly off the open relation (`relation->rd_rules->rules[i]`),
+    /// but the rule trees live in the relcache entry's process-lifetime
+    /// CacheMemoryContext (`Query<'static>`), reachable only in-crate to the
+    /// relcache owner — the trimmed cross-unit `types_rel::Relation<'mcx>` handle
+    /// the rewriter holds is node-vocabulary-free and carries no `rd_rules`. This
+    /// seam fetches the relcache entry by `reloid` (the C
+    /// `RelationIdGetRelation`/`with_relation` target), and if `rd_rules` is set
+    /// re-projects the whole `RuleLock` into the caller's `mcx` arena via
+    /// `Query::clone_in`/`Node::clone_in` (the C `copyObject` the rewriter
+    /// performs before mutating a rule's action list). `Ok(None)` is the C
+    /// `rd_rules == NULL` (the relation has no rules). The owner is the relcache
+    /// crate (it owns the entry store and already deps `types-nodes`), so this is
+    /// installed from relcache's `init_seams()`. Can `ereport(ERROR)`
+    /// (relation not open, OOM during the deep copy), carried on `Err`.
+    pub fn relation_rules<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        reloid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<RuleLockImage<'mcx>>>
 );

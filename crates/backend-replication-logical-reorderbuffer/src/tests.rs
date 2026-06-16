@@ -291,6 +291,123 @@ fn cleanup_txn_removes_txn_and_subtxns() {
     assert_eq!(rb.toplevel_txns(), Vec::<TransactionId>::new());
 }
 
+#[test]
+fn queue_decoded_change_appends_tp_change_and_marks_streamable() {
+    use backend_replication_logical_reorderbuffer_seams::{DecodedChangeKind, DecodedTuple};
+    let mut rb = ReorderBuffer::allocate();
+    let newt = DecodedTuple {
+        t_len: 4,
+        t_self: ItemPointerData::new(1, 2),
+        t_table_oid: 42,
+        data: vec![0xde, 0xad, 0xbe, 0xef],
+    };
+    rb.queue_decoded_change(
+        700,
+        0x100,
+        DecodedChangeKind::Insert,
+        RelFileLocator::default(),
+        None,
+        Some(newt),
+        false,
+    );
+    // change is queued on the txn, counters bumped, streamable flag set.
+    assert_eq!(rb.with_txn_for_test(700, |t| t.changes.len()), 1);
+    assert_eq!(rb.with_txn_for_test(700, |t| t.nentries), 1);
+    assert!(rb.with_txn_for_test(700, |t| t.txn_flags & RBTXN_HAS_STREAMABLE_CHANGE != 0));
+    let ok = rb.with_txn_for_test(700, |t| match &t.changes[0].data {
+        ReorderBufferChangeData::Tp { newtuple, oldtuple, .. } => {
+            oldtuple.is_none()
+                && newtuple.as_ref().map(|b| (b.t_len, b.data.clone()))
+                    == Some((4, vec![0xde, 0xad, 0xbe, 0xef]))
+        }
+        _ => false,
+    });
+    assert!(ok);
+    assert_eq!(rb.with_txn_for_test(700, |t| t.changes[0].action), ReorderBufferChangeType::Insert);
+}
+
+#[test]
+fn queue_truncate_appends_truncate_change() {
+    let mut rb = ReorderBuffer::allocate();
+    rb.queue_truncate(710, 0x100, true, false, vec![9, 10]);
+    assert_eq!(rb.with_txn_for_test(710, |t| t.changes.len()), 1);
+    let ok = rb.with_txn_for_test(710, |t| match &t.changes[0].data {
+        ReorderBufferChangeData::Truncate { cascade, restart_seqs, relids } => {
+            *cascade && !*restart_seqs && relids == &[9, 10]
+        }
+        _ => false,
+    });
+    assert!(ok);
+}
+
+#[test]
+fn queue_message_transactional_appends_message() {
+    let mut rb = ReorderBuffer::allocate();
+    rb.queue_message(720, 0x100, true, b"pre".to_vec(), b"body".to_vec());
+    let ok = rb.with_txn_for_test(720, |t| match &t.changes[0].data {
+        ReorderBufferChangeData::Msg { prefix, message } => prefix == b"pre" && message == b"body",
+        _ => false,
+    });
+    assert!(ok);
+}
+
+#[test]
+fn add_invalidations_accumulates_under_toptxn_and_queues() {
+    let mut rb = ReorderBuffer::allocate();
+    rb.process_xid(730, 0x10);
+    rb.process_xid(735, 0x20);
+    rb.assign_child(730, 735, 0x30);
+    // invalidations recorded against a subxact collect under the toplevel txn.
+    rb.add_invalidations(735, 0x40, vec![mk_inval(), mk_inval()]);
+    assert_eq!(rb.with_txn_for_test(730, |t| t.invalidations.len()), 2);
+    // and an Invalidation change is queued.
+    let queued = rb.with_txn_for_test(735, |t| {
+        t.changes.iter().any(|c| matches!(c.data, ReorderBufferChangeData::Inval(_)))
+    });
+    assert!(queued);
+}
+
+#[test]
+fn remember_prepare_info_then_skip_prepare_sets_flags() {
+    let mut rb = ReorderBuffer::allocate();
+    // unknown txn -> false, no creation.
+    assert!(!rb.remember_prepare_info(740, 0x10, 0x11, 0, 0, 0));
+
+    rb.process_xid(740, 0x10);
+    assert!(rb.remember_prepare_info(740, 0x100, 0x101, 123, 5, 0x99));
+    assert_eq!(rb.with_txn_for_test(740, |t| t.final_lsn), 0x100);
+    assert_eq!(rb.with_txn_for_test(740, |t| t.end_lsn), 0x101);
+    assert_eq!(rb.with_txn_for_test(740, |t| t.origin_id), 5);
+    assert!(rb.with_txn_for_test(740, |t| t.is_prepared()));
+
+    rb.skip_prepare(740);
+    assert!(rb.with_txn_for_test(740, |t| t.txn_flags & RBTXN_SKIPPED_PREPARE != 0));
+}
+
+#[test]
+fn abort_unknown_txn_is_noop() {
+    let mut rb = ReorderBuffer::allocate();
+    // No txn -> nothing to remove, no panic.
+    rb.abort(999, 0x10, 0);
+    rb.forget(999, 0x10);
+    rb.invalidate(999, 0x10);
+}
+
+#[test]
+fn abort_removes_non_streamed_txn_without_invalidations() {
+    let mut rb = ReorderBuffer::allocate();
+    rb.process_xid(750, 0x10);
+    rb.with_txn_for_test(750, |t| {
+        t.changes = vec![mk_change(0x20)];
+        t.nentries = 1;
+        t.nentries_mem = 1;
+    });
+    rb.abort(750, 0x30, 555);
+    // cleanup removed the txn.
+    assert!(rb.by_txn_get(750).is_none());
+    assert_eq!(rb.toplevel_txns(), Vec::<TransactionId>::new());
+}
+
 impl ReorderBuffer {
     /// Test-only accessor mirroring `with_txn`.
     fn with_txn_for_test<R>(

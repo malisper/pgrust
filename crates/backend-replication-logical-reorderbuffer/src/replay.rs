@@ -366,18 +366,24 @@ impl ReorderBuffer {
         command_id: CommandId,
         streaming: bool,
     ) {
+        // `snapshot_now` and `command_id` are the locals the C threads through
+        // the change loop: the INTERNAL_SNAPSHOT / INTERNAL_COMMAND_ID branches
+        // reassign them (ReorderBufferFreeSnap / ReorderBufferCopySnap), so they
+        // are mutable here.
+        let mut snapshot_now = snapshot_now;
+        let mut command_id = command_id;
+
         // build data to be able to lookup the CommandIds of catalog tuples.
         self.build_tuple_cid_hash(txn_xid);
 
         // setup the initial snapshot: hand the decoded snapshot and the built
         // tuplecid hash to snapmgr's SetupHistoricSnapshot so the historic-MVCC
         // resolver can see them (snapmgr owns the active `tuplecid_data`).
-        let _ = (command_id, commit_lsn, streaming);
+        let _ = commit_lsn;
         self.setup_historic_snapshot(&snapshot_now, txn_xid);
 
-        // The transaction machinery (BeginInternalSubTransaction /
-        // StartTransactionCommand), the begin/begin_prepare output callback,
-        // and the per-change apply callbacks are all unported. Drive the merge
+        // The begin/begin_prepare output callback and the per-change apply
+        // callbacks reach the unported output-plugin dispatch; drive the merge
         // so the spine is exercised, then panic at the first boundary the body
         // actually reaches.
         let mut iterstate = self.iter_txn_init(txn_xid);
@@ -420,13 +426,44 @@ impl ReorderBuffer {
                 }
                 ReorderBufferChangeType::InternalSnapshot => {
                     // get rid of the old, switch to the change's snapshot.
-                    // The historic-snapshot teardown/setup ABI is unported.
-                    self.handle_internal_snapshot(txn_xid, &change, command_id);
+                    let new_snap = match &change.data {
+                        ReorderBufferChangeData::Snapshot(s) => s.clone(),
+                        _ => unreachable!("INTERNAL_SNAPSHOT change carries a snapshot"),
+                    };
+                    backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
+
+                    if snapshot_now.copied {
+                        self.free_snap(snapshot_now);
+                        snapshot_now = self.copy_snap(&new_snap, txn_xid, command_id);
+                    } else if new_snap.copied {
+                        // Restored from disk: copy to avoid double-free.
+                        snapshot_now = self.copy_snap(&new_snap, txn_xid, command_id);
+                    } else {
+                        snapshot_now = new_snap;
+                    }
+
+                    // and continue with the new one.
+                    self.setup_historic_snapshot(&snapshot_now, txn_xid);
                 }
                 ReorderBufferChangeType::InternalCommandId => {
-                    if let ReorderBufferChangeData::CommandId(cid) = &change.data {
-                        debug_assert!(*cid != types_core::xact::InvalidCommandId);
-                        self.handle_internal_command_id(txn_xid, *cid, command_id);
+                    let cid = match &change.data {
+                        ReorderBufferChangeData::CommandId(c) => *c,
+                        _ => unreachable!("INTERNAL_COMMAND_ID change carries a command id"),
+                    };
+                    debug_assert!(cid != types_core::xact::InvalidCommandId);
+
+                    if command_id < cid {
+                        command_id = cid;
+
+                        if !snapshot_now.copied {
+                            // we don't use the global one anymore.
+                            snapshot_now = self.copy_snap(&snapshot_now, txn_xid, command_id);
+                        }
+
+                        snapshot_now.curcid = command_id;
+
+                        backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
+                        self.setup_historic_snapshot(&snapshot_now, txn_xid);
                     }
                 }
                 ReorderBufferChangeType::InternalTupleCid => {

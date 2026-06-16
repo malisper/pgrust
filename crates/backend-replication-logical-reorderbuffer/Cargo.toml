@@ -28,6 +28,10 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 # ReorderBufferExecuteInvalidations applies decoded invalidations through.
 backend-lib-binaryheap = { path = "../backend-lib-binaryheap" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+# ReorderBufferImmediateInvalidation forces invalidations to apply outside a
+# valid (sub)transaction: IsTransactionOrTransactionBlock / BeginInternalSubTransaction
+# / AbortCurrentTransaction / RollbackAndReleaseCurrentSubTransaction.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }

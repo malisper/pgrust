@@ -296,61 +296,63 @@ fn seam_commit(
 // data-bearing record fails loudly rather than silently dropping changes.
 // ---------------------------------------------------------------------------
 
-fn seam_process_xid(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
-    panic!("ReorderBufferProcessXid: change-replay family not yet ported");
+fn seam_process_xid(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr) {
+    with_buffer(rb, |b| b.process_xid(xid, lsn));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn seam_queue_change(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _lsn: XLogRecPtr,
-    _kind: backend_replication_logical_reorderbuffer_seams::DecodedChangeKind,
-    _rlocator: RelFileLocator,
-    _oldtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
-    _newtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
-    _toast_insert: bool,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    kind: backend_replication_logical_reorderbuffer_seams::DecodedChangeKind,
+    rlocator: RelFileLocator,
+    oldtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+    newtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+    toast_insert: bool,
 ) {
-    panic!("ReorderBufferQueueChange: change-replay family not yet ported");
+    with_buffer(rb, |b| {
+        b.queue_decoded_change(xid, lsn, kind, rlocator, oldtuple, newtuple, toast_insert)
+    });
 }
 
 fn seam_queue_truncate(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _lsn: XLogRecPtr,
-    _cascade: bool,
-    _restart_seqs: bool,
-    _relids: alloc::vec::Vec<types_core::Oid>,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    cascade: bool,
+    restart_seqs: bool,
+    relids: alloc::vec::Vec<types_core::Oid>,
 ) {
-    panic!("ReorderBufferQueueTruncate: change-replay family not yet ported");
+    with_buffer(rb, |b| b.queue_truncate(xid, lsn, cascade, restart_seqs, relids));
 }
 
 fn seam_queue_message(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _lsn: XLogRecPtr,
-    _transactional: bool,
-    _prefix: alloc::vec::Vec<u8>,
-    _message: alloc::vec::Vec<u8>,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    transactional: bool,
+    prefix: alloc::vec::Vec<u8>,
+    message: alloc::vec::Vec<u8>,
 ) {
-    panic!("ReorderBufferQueueMessage: change-replay family not yet ported");
+    with_buffer(rb, |b| b.queue_message(xid, lsn, transactional, prefix, message));
 }
 
-fn seam_forget(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
-    panic!("ReorderBufferForget: change-replay family not yet ported");
+fn seam_forget(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr) {
+    with_buffer(rb, |b| b.forget(xid, lsn));
 }
 
 fn seam_abort(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _lsn: XLogRecPtr,
-    _abort_time: types_core::primitive::TimestampTz,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    abort_time: types_core::primitive::TimestampTz,
 ) {
-    panic!("ReorderBufferAbort: change-replay family not yet ported");
+    with_buffer(rb, |b| b.abort(xid, lsn, abort_time));
 }
 
-fn seam_abort_old(_rb: ReorderBufferHandle, _oldest_running_xid: TransactionId) {
-    panic!("ReorderBufferAbortOld: change-replay family not yet ported");
+fn seam_abort_old(rb: ReorderBufferHandle, oldest_running_xid: TransactionId) {
+    with_buffer(rb, |b| b.abort_old(oldest_running_xid));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -366,48 +368,61 @@ fn seam_finish_prepared(
     _gid: alloc::vec::Vec<u8>,
     _is_commit: bool,
 ) {
-    panic!("ReorderBufferFinishPrepared: change-replay family not yet ported");
+    // FinishPrepared replays the prepared txn's commit/abort through the
+    // output-plugin commit_prepared/rollback_prepared callbacks (ProcessTXN
+    // commit tail). Blocked on the logical.c output-plugin dispatch keystone.
+    panic!(
+        "ReorderBufferFinishPrepared: output-plugin commit_prepared/rollback_prepared \
+         dispatch (logical.c handle facade) not yet modeled"
+    );
 }
 
 fn seam_prepare(_rb: ReorderBufferHandle, _xid: TransactionId, _gid: alloc::vec::Vec<u8>) {
-    panic!("ReorderBufferPrepare: change-replay family not yet ported");
+    // Prepare drives ReorderBufferReplay then rb->prepare(); the replay tail
+    // and the prepare callback both go through the output-plugin dispatch.
+    panic!(
+        "ReorderBufferPrepare: ReorderBufferReplay output-plugin dispatch + rb->prepare \
+         callback (logical.c handle facade) not yet modeled"
+    );
 }
 
-fn seam_skip_prepare(_rb: ReorderBufferHandle, _xid: TransactionId) {
-    panic!("ReorderBufferSkipPrepare: change-replay family not yet ported");
+fn seam_skip_prepare(rb: ReorderBufferHandle, xid: TransactionId) {
+    with_buffer(rb, |b| b.skip_prepare(xid));
 }
 
 fn seam_immediate_invalidation(
-    _rb: ReorderBufferHandle,
-    _invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
+    rb: ReorderBufferHandle,
+    invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
 ) {
-    panic!("ReorderBufferImmediateInvalidation: change-replay family not yet ported");
+    with_buffer(rb, |b| b.immediate_invalidation(&invalidations));
 }
 
 fn seam_add_invalidations(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _lsn: XLogRecPtr,
-    _invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    invalidations: alloc::vec::Vec<SharedInvalidationMessage>,
 ) {
-    panic!("ReorderBufferAddInvalidations: change-replay family not yet ported");
+    with_buffer(rb, |b| b.add_invalidations(xid, lsn, invalidations));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn seam_remember_prepare_info(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _prepare_lsn: XLogRecPtr,
-    _end_lsn: XLogRecPtr,
-    _prepare_time: types_core::primitive::TimestampTz,
-    _origin_id: types_core::primitive::RepOriginId,
-    _origin_lsn: XLogRecPtr,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    prepare_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    prepare_time: types_core::primitive::TimestampTz,
+    origin_id: types_core::primitive::RepOriginId,
+    origin_lsn: XLogRecPtr,
 ) -> bool {
-    panic!("ReorderBufferRememberPrepareInfo: change-replay family not yet ported");
+    with_buffer(rb, |b| {
+        b.remember_prepare_info(xid, prepare_lsn, end_lsn, prepare_time, origin_id, origin_lsn)
+    })
 }
 
-fn seam_invalidate(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
-    panic!("ReorderBufferInvalidate: change-replay family not yet ported");
+fn seam_invalidate(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr) {
+    with_buffer(rb, |b| b.invalidate(xid, lsn));
 }
 
 // ---------------------------------------------------------------------------

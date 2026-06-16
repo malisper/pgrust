@@ -115,6 +115,155 @@ pub fn init_seams() {
     sx::rd_indcollation::set(rd_indcollation);
     sx::index_getprocid::set(index_getprocid);
     sx::relation_set_new_relfilenumber::set(crate::initfile::RelationSetNewRelfilenumber);
+
+    // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
+    sx::relation_rules::set(relation_rules);
+}
+
+/// `relation_rules(mcx, reloid)` — the per-query rewrite-rule reader for
+/// `rewriteHandler.c`. Fetch the relcache entry (the C `RelationIdGetRelation`),
+/// and if its `rd_rules` is set re-project the whole `RuleLock` into the
+/// caller's `mcx` arena by deep-copying each rule's `qual`/`actions`
+/// (`Node::clone_in`/`Query::clone_in`, the C `copyObject`). The cached trees
+/// live in the process-lifetime CacheMemoryContext (`'static`); copying them
+/// into the per-query arena is exactly what the C rewriter does before mutating
+/// a rule action list, and decouples the returned image from a possible
+/// mid-query cache invalidation/rebuild. `Ok(None)` is the C `rd_rules == NULL`.
+fn relation_rules(
+    mcx: Mcx<'_>,
+    reloid: Oid,
+) -> PgResult<Option<sx::RuleLockImage<'_>>> {
+    // `with_relation` is the `Oid`-keyed scoped immutable borrow; it errors
+    // (loud) if `reloid` names no live relcache entry — the same caller contract
+    // as C, where the relation must already be open/pinned before the rewriter
+    // reads its rules. The closure builds the re-projected image while the entry
+    // is borrowed; `?`-flatten the inner deep-copy `PgResult`.
+    crate::core_entry_store::with_relation(reloid, |rd| {
+        let rule_lock = match &rd.rd_rules {
+            // C `rd_rules == NULL`: relation has no rewrite rules.
+            None => return Ok(None),
+            Some(rl) => rl,
+        };
+        let mut rules: PgVec<sx::RewriteRuleImage<'_>> =
+            mcx::vec_with_capacity_in(mcx, rule_lock.rules.len())?;
+        for r in rule_lock.rules.iter() {
+            // `qual = copyObject(rule->qual)` — re-home the qualification Node.
+            let qual = match &r.qual {
+                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                None => None,
+            };
+            // `actions = copyObject(rule->actions)` — re-home each action Query.
+            let mut actions: PgVec<types_nodes::copy_query::Query<'_>> =
+                mcx::vec_with_capacity_in(mcx, r.actions.len())?;
+            for a in r.actions.iter() {
+                actions.push(a.clone_in(mcx)?);
+            }
+            rules.push(sx::RewriteRuleImage {
+                ruleId: r.ruleId,
+                event: r.event,
+                enabled: r.enabled,
+                isInstead: r.isInstead,
+                qual,
+                actions,
+            });
+        }
+        Ok(Some(sx::RuleLockImage { rules }))
+    })?
+}
+
+#[cfg(test)]
+mod relation_rules_tests {
+    //! The `relation_rules` reader keystone: prove that a relcache entry holding
+    //! `rd_rules` whose `RewriteRule.actions` are whole `Query<'static>` trees in
+    //! the process-lifetime CacheMemoryContext re-projects those trees into a
+    //! fresh per-query `'mcx` arena (the C `copyObject`), unblocking
+    //! `rewriteHandler.c`'s rule reads off the trimmed per-query handle.
+
+    use crate::core_entry_store;
+    use crate::core_entry_store::entry::{RelationData, RewriteRule, RuleLock};
+    use mcx::MemoryContext;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use types_core::primitive::Oid;
+    use types_nodes::copy_query::Query;
+    use types_nodes::nodes::CmdType;
+
+    /// Install a relcache entry (OID `reloid`) whose `rd_rules` holds one rule
+    /// with one action `Query` of `command`, allocated in the cache arena — the
+    /// shape `RelationBuildRuleLock` produces. Then call the `relation_rules`
+    /// reader with a SEPARATE per-query context and assert the rule re-projects.
+    #[test]
+    fn relation_with_rules_reprojects_query_trees_into_fresh_mcx() {
+        const RELOID: Oid = 99001;
+
+        // Build the cached rule tree in the process-lifetime cache arena.
+        let cache_mcx = crate::derived::cache_memory_context();
+        let mut q = Query::new(cache_mcx);
+        q.commandType = CmdType::CMD_SELECT;
+        let mut actions = mcx::PgVec::new_in(cache_mcx);
+        actions.push(q);
+        let mut rules = mcx::PgVec::new_in(cache_mcx);
+        rules.push(RewriteRule {
+            ruleId: 42,
+            event: CmdType::CMD_SELECT,
+            enabled: b'O',
+            isInstead: true,
+            qual: None,
+            actions,
+        });
+        let lock: mcx::PgBox<'static, RuleLock> =
+            mcx::alloc_in(cache_mcx, RuleLock { rules }).expect("alloc RuleLock");
+
+        // Place the entry in the id_cache, exactly as a relcache build would.
+        let mut entry = RelationData::default();
+        entry.rd_id = RELOID;
+        entry.rd_rules = Some(lock);
+        core_entry_store::with_state(|st| {
+            st.id_cache.insert(RELOID, Rc::new(RefCell::new(entry)));
+        });
+
+        // Read through the seam adapter with a DISTINCT per-query context.
+        let query_ctx = MemoryContext::new("relation_rules_test_mcx");
+        let image = super::relation_rules(query_ctx.mcx(), RELOID)
+            .expect("relation_rules ok")
+            .expect("rd_rules present -> Some image");
+
+        assert_eq!(image.rules.len(), 1);
+        let r = &image.rules[0];
+        assert_eq!(r.ruleId, 42);
+        assert_eq!(r.event, CmdType::CMD_SELECT);
+        assert_eq!(r.enabled, b'O');
+        assert!(r.isInstead);
+        assert!(r.qual.is_none());
+        assert_eq!(r.actions.len(), 1);
+        // The re-projected action carries the original command type — the deep
+        // copy preserved the tree, now living in the per-query arena.
+        assert_eq!(r.actions[0].commandType, CmdType::CMD_SELECT);
+
+        core_entry_store::with_state(|st| {
+            st.id_cache.remove(&RELOID);
+        });
+    }
+
+    /// A relation with no rewrite rules (`rd_rules == NULL`) yields `Ok(None)`.
+    #[test]
+    fn relation_without_rules_yields_none() {
+        const RELOID: Oid = 99002;
+        let mut entry = RelationData::default();
+        entry.rd_id = RELOID;
+        // rd_rules left None (the C NULL).
+        core_entry_store::with_state(|st| {
+            st.id_cache.insert(RELOID, Rc::new(RefCell::new(entry)));
+        });
+
+        let query_ctx = MemoryContext::new("relation_rules_none_test_mcx");
+        let image = super::relation_rules(query_ctx.mcx(), RELOID).expect("relation_rules ok");
+        assert!(image.is_none());
+
+        core_entry_store::with_state(|st| {
+            st.id_cache.remove(&RELOID);
+        });
+    }
 }
 
 /// `criticalRelcachesBuilt` (relcache.c) — the owned per-backend flag set once
