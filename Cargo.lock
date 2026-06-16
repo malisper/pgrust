@@ -9278,6 +9278,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-tstoreReceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-tstorereceiver-seams",
+ "backend-tcop-dest",
+ "backend-tcop-dest-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-tstorereceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -19053,6 +19073,7 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-spi",
  "backend-executor-tqueue",
+ "backend-executor-tstoreReceiver",
  "backend-foreign-foreign",
  "backend-geqo-all",
  "backend-jit-jit",
