@@ -52,10 +52,14 @@ use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
 use types_catalog::pg_type::{
-    type_create_fields, PgTypeInsertRow, TypeCreateParams, TypeFormFields, TypeRelationId,
+    type_create_fields, Anum_pg_type_oid, PgTypeInsertRow, TypeCreateParams, TypeFormFields,
+    TypeOidIndexId, TypeRelationId,
     TYPTYPE_MULTIRANGE,
 };
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use types_core::fmgr::F_OIDEQ;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_tuple::backend_access_common_heaptuple::Datum as HeapDatum;
 use backend_utils_error::ereport;
 use types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
@@ -65,6 +69,8 @@ use types_tuple::heaptuple::{
     TYPSTORAGE_PLAIN,
 };
 
+use backend_access_common_scankey::ScanKeyInit;
+use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table::table_open;
 use backend_catalog_dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
@@ -793,8 +799,79 @@ fn form_to_fields(f: &types_tuple::pg_type::FormData_pg_type) -> TypeFormFields 
 
 /// Install this unit's inward seams ([`backend_catalog_pg_type_seams`]) and the
 /// cross-crate `type_shell_make` decl that `functioncmds.c` consumes.
+/// `get_new_type_oid()` — the non-binary-upgrade OID source shared by
+/// `typecmds.c`'s `AssignType{Array,Multirange,MultirangeArray}Oid`:
+/// `table_open(TypeRelationId, AccessShareLock)` +
+/// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)` +
+/// `table_close(...)`.
+fn get_new_type_oid() -> PgResult<Oid> {
+    let ctx = MemoryContext::new("AssignTypeOid");
+    /* The C opens AccessShareLock; GetNewOidWithIndex only reads the index. */
+    let pg_type_desc = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+    let oid = indexing_seams::get_new_oid_with_index_pg_type::call(&pg_type_desc)?;
+    pg_type_desc.close(RowExclusiveLock)?;
+    Ok(oid)
+}
+
+/// Guts of `RemoveTypeById` (typecmds.c:656) on the pg_type side:
+/// `table_open(TypeRelationId, RowExclusiveLock)` + `SearchSysCache1(TYPEOID)` +
+/// `CatalogTupleDelete(&tup->t_self)` + `table_close`. Returns the deleted
+/// row's `typtype` so the caller can do the by-hand enum/range cleanup.
+///
+/// The cached form (for `typtype`) is read via the `pg_type_form` projection
+/// before the row is removed; the tuple itself is located by a `systable` scan
+/// on `TypeOidIndexId` to obtain its `t_self` for the catalog delete (the
+/// repo's value-typed equivalent of `SearchSysCache1` + `&tup->t_self`).
+fn remove_type_catalog_row(typeOid: Oid) -> PgResult<i8> {
+    /* Read typtype from the cached form before deleting (elog on miss). */
+    let typtype = match pg_type_form::call(typeOid)? {
+        Some(form) => form.typtype,
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("cache lookup failed for type {typeOid}"))
+                .into_error());
+        }
+    };
+
+    let ctx = MemoryContext::new("RemoveTypeById");
+    let relation = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
+
+    let key = [{
+        let mut k = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut k,
+            Anum_pg_type_oid,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            HeapDatum::from_oid(typeOid),
+        )?;
+        k
+    }];
+
+    let mut scan =
+        genam_seams::systable_beginscan::call(&relation, TypeOidIndexId, true, None, &key)?;
+    let scratch = MemoryContext::new("RemoveTypeById scan row");
+    if let Some(tup) = genam_seams::systable_getnext::call(scratch.mcx(), scan.desc_mut())? {
+        /* CatalogTupleDelete(relation, &tup->t_self); */
+        indexing_seams::catalog_tuple_delete::call(&relation, tup.tuple.t_self)?;
+    } else {
+        scan.end()?;
+        relation.close(RowExclusiveLock)?;
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!("cache lookup failed for type {typeOid}"))
+            .into_error());
+    }
+    scan.end()?;
+
+    relation.close(RowExclusiveLock)?;
+
+    Ok(typtype)
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_type_seams as s;
+    s::get_new_type_oid::set(get_new_type_oid);
+    s::remove_type_catalog_row::set(remove_type_catalog_row);
     s::type_create::set(TypeCreate);
     s::rename_type_internal::set(|type_oid, new_name, nsp| {
         RenameTypeInternal(type_oid, &new_name, nsp)

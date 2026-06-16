@@ -613,6 +613,16 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// `FlushRelationBuffers(rel)` (bufmgr.c) — write every dirty buffer of the
+    /// one relation out to the kernel (but do not fsync). `fill_seq_with_data`
+    /// calls it for an unlogged sequence's freshly-written INIT fork.
+    /// `void` in C; `Err` carries the write `ereport(ERROR)`s.
+    pub fn flush_relation_buffers<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
 // ---------------------------------------------------------------------------
 // ResourceOwner buffer-pin bookkeeping (bufmgr.c:244).
 //
