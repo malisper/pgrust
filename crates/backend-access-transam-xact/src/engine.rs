@@ -381,14 +381,11 @@ fn StartTransaction() -> PgResult<()> {
     // Assign a new LocalTransactionId, combine with the proc number to form
     // a virtual transaction id, lock it, and advertise it in the proc array.
     let vxid = VirtualTransactionId {
-        proc_number: globals_seams::my_proc_number::call(),
-        local_transaction_id: sinval_seams::get_next_local_transaction_id::call(),
+        procNumber: globals_seams::my_proc_number::call(),
+        localTransactionId: sinval_seams::get_next_local_transaction_id::call(),
     };
-    lock_seams::virtual_xact_lock_table_insert::call(types_storage::VirtualTransactionId {
-        procNumber: vxid.proc_number,
-        localTransactionId: vxid.local_transaction_id,
-    })?;
-    proc_seams::set_my_proc_lxid::call(vxid.local_transaction_id);
+    lock_seams::virtual_xact_lock_table_insert::call(vxid)?;
+    proc_seams::set_my_proc_lxid::call(vxid.localTransactionId);
 
     // set transaction_timestamp() (a/k/a now()): normally the same as the
     // first command's statement_timestamp(); advance it for transactions

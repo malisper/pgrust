@@ -330,6 +330,16 @@ pub fn hashtidextended(key: Datum<'_>, seed: u64) -> PgResult<u64> {
 /// byte image the C hashes: `BlockIdData{bi_hi, bi_lo}` (two `uint16`, native
 /// layout) followed by the `uint16` offset — 6 bytes total, no trailing pad.
 fn itempointer_hash_image(ptr: &ItemPointer) -> [u8; 6] {
+    itempointer_image(ptr)
+}
+
+/// The canonical 6-byte on-disk/in-memory image of an `ItemPointerData`:
+/// `BlockIdData{bi_hi = high16, bi_lo = low16}` (two `uint16`, native layout)
+/// followed by the `uint16` offset — exactly `sizeof(ItemPointerData)` with no
+/// trailing pad. This is both the image the C struct occupies in memory (what a
+/// pass-by-reference TID `Datum` points at) and the `sizeof(BlockIdData) +
+/// sizeof(OffsetNumber)` window `hash_any` digests.
+fn itempointer_image(ptr: &ItemPointer) -> [u8; 6] {
     // BlockIdData stores the block number as { bi_hi = high16, bi_lo = low16 }.
     let bn = ptr.block_number_no_check();
     let bi_hi = (bn >> 16) as u16;
@@ -853,33 +863,45 @@ mod unported {
     #[derive(Clone, Copy)]
     pub struct WindowObject(());
 
-    /// `PG_GETARG_ITEMPOINTER(n)` — the arg datum points at a `palloc`'d
-    /// `ItemPointerData`. Detoasting/pointer-deref of pass-by-reference args is
-    /// fmgr/varlena plumbing not modeled by the bare `Datum` word.
-    pub fn getarg_itempointer(_datum: &Datum<'_>) -> ItemPointer {
-        panic!(
-            "unported owner: tid PG_GETARG_ITEMPOINTER (fmgr pass-by-reference \
-             arg deref of palloc'd ItemPointerData)"
-        )
+    /// `PG_GETARG_ITEMPOINTER(n)` — the arg datum is a pass-by-reference
+    /// `ItemPointerData`. The by-reference `Datum::ByRef` arm carries the verbatim
+    /// 6-byte struct image (`BlockIdData{bi_hi, bi_lo}` + `ip_posid`, native
+    /// layout, no trailing pad — exactly the image `return_itempointer` writes and
+    /// `itempointer_hash_image` produces). Decode it back into the `(block,
+    /// offset)` pair, mirroring a C deref of the `palloc`'d `ItemPointerData`.
+    pub fn getarg_itempointer(datum: &Datum<'_>) -> ItemPointer {
+        let image = datum.as_ref_bytes();
+        // BlockIdData{bi_hi = high16, bi_lo = low16} then uint16 ip_posid.
+        let bi_hi = u16::from_ne_bytes([image[0], image[1]]);
+        let bi_lo = u16::from_ne_bytes([image[2], image[3]]);
+        let off = u16::from_ne_bytes([image[4], image[5]]);
+        let block_number = ((bi_hi as u32) << 16) | bi_lo as u32;
+        ItemPointer::set(block_number, off)
     }
 
-    /// `PG_RETURN_ITEMPOINTER(result)` — palloc the `ItemPointerData` and return
-    /// its pointer as a Datum (mmgr + fmgr).
-    pub fn return_itempointer<'mcx>(_mcx: Mcx<'mcx>, _ptr: ItemPointer) -> PgResult<Datum<'mcx>> {
-        panic!(
-            "unported owner: tid PG_RETURN_ITEMPOINTER (palloc + pass-by-reference \
-             Datum construction)"
-        )
+    /// `PG_RETURN_ITEMPOINTER(result)` — the `ItemPointerData` crosses by
+    /// reference. Build the canonical 6-byte struct image (the same native layout
+    /// the C struct occupies in memory) and carry it through the `Datum::ByRef`
+    /// arm; `slice_in` copies it into the caller's context (C: the `palloc`'d
+    /// pointer lives in the current memory context).
+    pub fn return_itempointer<'mcx>(mcx: Mcx<'mcx>, ptr: ItemPointer) -> PgResult<Datum<'mcx>> {
+        let image = super::itempointer_image(&ptr);
+        Ok(Datum::ByRef(mcx::slice_in(mcx, &image)?))
     }
 
-    /// `PG_RETURN_CSTRING(pstrdup(buf))` — palloc the result cstring.
-    pub fn return_cstring<'mcx>(_mcx: Mcx<'mcx>, _buf: alloc::string::String) -> PgResult<Datum<'mcx>> {
-        panic!("unported owner: tidout PG_RETURN_CSTRING (pstrdup + cstring Datum)")
+    /// `PG_RETURN_CSTRING(pstrdup(buf))` — the C `cstring` result. The
+    /// `Datum::Cstring` arm owns the text (no varlena header, no terminating NUL
+    /// stored), mirroring the `pstrdup`'d C string.
+    pub fn return_cstring<'mcx>(_mcx: Mcx<'mcx>, buf: alloc::string::String) -> PgResult<Datum<'mcx>> {
+        Ok(Datum::Cstring(buf))
     }
 
-    /// `PG_RETURN_BYTEA_P(...)` — palloc the bytea result.
-    pub fn return_bytea<'mcx>(_mcx: Mcx<'mcx>, _bytes: alloc::vec::Vec<u8>) -> PgResult<Datum<'mcx>> {
-        panic!("unported owner: tidsend PG_RETURN_BYTEA_P (bytea Datum construction)")
+    /// `PG_RETURN_BYTEA_P(...)` — the bytea result. `pq_endtypsend` has already
+    /// stamped the varlena header onto the byte image; the by-reference
+    /// `Datum::ByRef` arm carries that verbatim varlena image, copied into the
+    /// caller's context.
+    pub fn return_bytea<'mcx>(mcx: Mcx<'mcx>, bytes: alloc::vec::Vec<u8>) -> PgResult<Datum<'mcx>> {
+        Ok(Datum::ByRef(mcx::slice_in(mcx, &bytes)?))
     }
 
     /// `common/hashfn.c` `hash_any(k, keylen)` — the Bob Jenkins hash, mapped to
