@@ -24,27 +24,33 @@
 //! classifiers consult cross [`backend_tcop_utility_out_seams`], defaulting to a
 //! loud panic until the owning subsystem installs them.
 //!
-//! ## Dispatch (`ProcessUtility` / `standard_ProcessUtility` /
-//! `ProcessUtilitySlow`) — keystone-blocked, not yet ported here
+//! ## Dispatch (`ProcessUtility` / `standard_ProcessUtility` / `ExecDropStmt` /
+//! `ProcessUtilityForAlterTable`) — ported in [`crate::dispatch`]
 //!
-//! The giant `nodeTag` dispatch is **not** in this crate. The installed inward
-//! `backend_tcop_utility_seams::process_utility` seam — already consumed by
-//! `backend-tcop-pquery`'s `portal_run_utility` — has the C parameter set
-//! *minus an `mcx`* (`&PlannedStmt`, `query_string`, `read_only_tree`, `context`,
-//! `params`, `dest`, `&mut QueryCompletion`). But `standard_ProcessUtility` must
-//! `make_parsestate(NULL)` (allocates a `ParseState<'mcx>`), `copyObject(pstmt)`
-//! when `readOnlyTree`, and run the `parse_utilcmd.c` transforms in
-//! `ProcessUtilitySlow` — every one of which needs an `Mcx<'mcx>`. There is no
-//! ambient memory context in this workspace (by design), and `portal_run_utility`
-//! holds none to thread through. Re-signing the inward seam to carry an `mcx`
-//! and supplying one from pquery is a prerequisite keystone (thread the
-//! per-query `Mcx` into `portal_run_utility` → the `process_utility` seam). Until
-//! then the dispatch cannot be installed faithfully, so it is deferred; the
-//! `process_utility` seam stays on its panic-until-installed default. The four
-//! classifier inward seams (`create_command_tag`, `utility_returns_tuples`,
-//! `utility_tuple_descriptor` — pquery already passes it an `mcx` — and
-//! `prevent_command_during_recovery`) are fully installable now and are wired in
-//! [`init_seams`].
+//! The giant `nodeTag` dispatch switch is in [`crate::dispatch`], ported 1:1
+//! over the owned [`types_nodes::nodes::Node`] tree (the `readOnlyTree`
+//! deep-copy, the recursion / read-only / parallel / recovery guards, the full
+//! command switch, and the trailing `CommandCounterIncrement`). The inward
+//! `backend_tcop_utility_seams::process_utility` seam now carries the per-utility
+//! `mcx: Mcx<'mcx>` working context (the owned analogue of C's per-message
+//! `CurrentMemoryContext`): `standard_ProcessUtility` allocates the
+//! `copyObject(pstmt)` deep-copy and the `make_parsestate(NULL)` parse state in
+//! it, and the caller (pquery `PortalRunUtility`) supplies a per-utility scratch
+//! context it drops on return. The seam is installed in [`init_seams`].
+//!
+//! Every command body the switch routes to lives in another subsystem and is
+//! reached through a forwarding seam in [`backend_tcop_utility_out_seams`]
+//! (xact-control, portal verbs, every `commands` handler, the event-trigger
+//! machinery / `process_utility_slow`, the checkpointer, …). Each defaults to a
+//! loud panic until its owning subsystem installs the real handler — so e.g.
+//! VACUUM/CLUSTER/CREATE DATABASE/PREPARE/DECLARE CURSOR route to their already-
+//! landed owners once those owners install their arm, while DROP/COPY/EXPLAIN/
+//! GRANT and the whole `process_utility_slow` DDL fan-out (CREATE/ALTER TABLE,
+//! CREATE INDEX, …) seam-and-panic until their owners (or the dedicated
+//! `process_utility_slow` wiring point) land. `ProcessUtilitySlow` itself is an
+//! outward seam, not an in-crate body: its ~400-line body fans out to ~40 DDL
+//! owners plus the `parse_utilcmd.c` transforms and is owned by a dedicated
+//! wiring point, exactly as in the established seam architecture.
 
 #![allow(non_snake_case)]
 // The classifiers carry the large shared `PgError` enum by value in `PgResult`,
@@ -54,6 +60,7 @@
 pub mod classify;
 pub mod commandtag;
 pub mod consts;
+pub mod dispatch;
 pub mod loglevel;
 pub mod returns;
 
@@ -62,6 +69,9 @@ pub use classify::{
     PreventCommandDuringRecovery, PreventCommandIfParallelMode, PreventCommandIfReadOnly,
 };
 pub use commandtag::{AlterObjectTypeCommandTag, CreateCommandTag};
+pub use dispatch::{
+    ExecDropStmt, ProcessUtility, ProcessUtilityForAlterTable, standard_ProcessUtility,
+};
 pub use consts::{
     LogStmtLevel, COMMAND_IS_NOT_READ_ONLY, COMMAND_IS_STRICTLY_READ_ONLY,
     COMMAND_OK_IN_PARALLEL_MODE, COMMAND_OK_IN_READ_ONLY_TXN, COMMAND_OK_IN_RECOVERY, LOGSTMT_ALL,
@@ -83,4 +93,5 @@ pub fn init_seams() {
     backend_tcop_utility_seams::utility_returns_tuples::set(UtilityReturnsTuples);
     backend_tcop_utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
     backend_tcop_utility_seams::prevent_command_during_recovery::set(PreventCommandDuringRecovery);
+    backend_tcop_utility_seams::process_utility::set(ProcessUtility);
 }

@@ -16123,6 +16123,8 @@ dependencies = [
 name = "backend-tcop-utility"
 version = "0.0.0"
 dependencies = [
+ "backend-parser-analyze-seams",
+ "backend-tcop-cmdtag",
  "backend-tcop-utility-out-seams",
  "backend-tcop-utility-seams",
  "backend-utils-error",
@@ -16130,7 +16132,9 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-tuple",
+ "types-wal",
 ]
 
 [[package]]
@@ -16149,7 +16153,10 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-error",
  "types-nodes",
+ "types-portal",
  "types-tuple",
 ]
 
