@@ -1,0 +1,33 @@
+[package]
+name = "backend-parser-parse-utilcmd"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_parser_parse_utilcmd"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+
+# Inward seam contract owned by this crate.
+backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }
+
+# Outward dependency seams (catalog/relcache/partcache-bound leaves).
+backend-parser-parse-utilcmd-outward-seams = { path = "../backend-parser-parse-utilcmd-outward-seams" }
+
+# Merged sibling owner called directly (cycle-free): node equality for the
+# index-redundancy dedup (equal()).
+backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
+
+# ParseState setup (make_parsestate) — reachable owner.
+backend-parser-small1 = { path = "../backend-parser-small1" }
+
+[dev-dependencies]

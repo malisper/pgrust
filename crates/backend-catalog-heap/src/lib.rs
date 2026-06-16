@@ -30,36 +30,48 @@
 //!     registration;
 //!   * the catalog-row **delete** family `DeleteRelationTuple` /
 //!     `DeleteAttributeTuples` / `DeleteSystemAttributeTuples`;
-//!   * [`RemoveAttributeById`] — the ALTER TABLE DROP COLUMN guts.
+//!   * the **drop** family [`heap_drop_with_catalog`] (the full relation-drop
+//!     orchestration — wired as the inward seam dependency.c reaches), plus its
+//!     [`RemovePartitionKeyByRelId`] and [`RemoveStatistics`] collaborators.
 //!
 //! This builds on the K1/K2/K3 catalog-write carrier keystone: the full-row
 //! INSERT carriers (`PgClassInsertRow`, `PgAttributeInsertRow`) and their
 //! producers in `backend-catalog-indexing` form the heap tuples; the trimmed
 //! relcache `rd_rel` carries the read-side fields.
 //!
-//! ## STOP — the constraint-cooker / partition / truncate-FK / full-drop
-//! families are deeper-keystone-blocked (not landed here)
+//! ## STOP — the constraint-cooker / partition-store / truncate / attribute-
+//! mutate families are carrier-blocked (not landed here)
 //!
 //! `StoreConstraints` is mirrored faithfully for its only live call surface
 //! (NIL `cooked_constraints` ⇒ no-op; the `heap_create_with_catalog` inward
-//! seam carries no cooked-constraint list). But the constraint *writers*
-//! themselves — `StoreAttrDefault` / `StoreRelCheck` / `AddRelationNewConstraints`
-//! / `AddRelationNotNullConstraints` / `cookDefault` / `SetRelationNumChecks`,
-//! plus `RelationClearMissing` / `StoreAttrMissingVal` / `SetAttrMissing` — need
-//! the cooked-constraint node model (`CookedConstraint` / `RawColumnDefault`),
-//! the parser default-cooker (`cookDefault`/`transformExpr`/`coerce_to_target_type`/
-//! `assign_expr_collations`), `nodeToString`, and `construct_array`-of-missingval,
-//! which the repo has not assembled into a callable cooker. The `StorePartitionKey`
-//! / `RemovePartitionKeyByRelId` / `StorePartitionBound` partition family needs
-//! the partition-key node + partcache owner. `heap_truncate` /
-//! `heap_truncate_one_rel` / `RelationTruncateIndexes` / `heap_truncate_check_FKs`
-//! / `heap_truncate_find_FKs` need the table-AM truncate + the FK-scan engine.
-//! `heap_drop_with_catalog` needs a cluster of collaborators with no owner crate
-//! yet (`get_partition_parent`/`get_default_partition_oid`, `RemoveSubscriptionRel`,
-//! `RelationDropStorage`-by-handle, `CheckTableForSerializableConflictIn`,
-//! `RemoveStatistics`-by-relid). Each is seam-and-panicked into its correct
-//! owner where a seam crate exists; the inward `heap_drop_with_catalog` /
-//! `RemoveAttributeById`'s `RemoveStatistics` call point into those owners.
+//! seam carries no cooked-constraint list). The constraint *writers* themselves
+//! — `StoreRelCheck` / `StoreRelNotNull` / `StoreConstraints` (real) /
+//! `AddRelationNewConstraints` / `AddRelationNotNullConstraints` /
+//! `SetRelationNumChecks` / `MergeWithExistingConstraint` / `cookDefault` /
+//! `cookConstraint` — are blocked: `AddRelationNewConstraints` iterates a
+//! `RawColumnDefault` node type that does not yet exist in `types-nodes`, and
+//! `MergeWithExistingConstraint` needs a `pg_constraint` full-row UPDATE carrier
+//! the typed catalog-write model has not assembled. (`CreateConstraintEntry`,
+//! `transformExpr`, `coerce_to_*`, `assign_expr_collations`, `make_parsestate`,
+//! `addRangeTableEntryForRelation`, `pull_var_clause`, `nodeToString` are all
+//! reachable now — only the `RawColumnDefault` node + pg_constraint UPDATE
+//! carrier are missing.)
+//!
+//! `RemoveAttributeById` / `RelationClearMissing` / `StoreAttrMissingVal` /
+//! `SetAttrMissing` need a writable full-row `ATTNUM` syscache copy plus a
+//! `pg_attribute` `catalog_tuple_update` carrier (and `construct_array`-of-
+//! missingval), none of which the typed catalog-write model exposes yet.
+//!
+//! `StorePartitionKey` / `StorePartitionBound` need `buildint2vector` /
+//! `buildoidvector` (private to `backend-catalog-indexing`) plus a
+//! `pg_partitioned_table` INSERT carrier and a `pg_class.relpartbound` UPDATE
+//! carrier. `heap_truncate` / `heap_truncate_one_rel` / `RelationTruncateIndexes`
+//! need `table_relation_nontransactional_truncate` (no tableam seam) +
+//! `BuildDummyIndexInfo` (only `BuildIndexInfo` exists).
+//! `heap_truncate_check_FKs` / `heap_truncate_find_FKs` need a `pg_constraint`
+//! seqscan deform helper. `CopyStatistics` needs a `pg_statistic` INSERT carrier.
+//! Each remains unported (no stub); where an inward seam is declared, it stays
+//! uninstalled (a loud panic = the mirror-and-panic posture).
 
 extern crate alloc;
 
@@ -817,6 +829,9 @@ pub fn heap_create<'mcx>(
 
 mod create;
 mod delete;
+mod drop;
+mod partition;
+mod statistics;
 
 pub use create::{
     heap_create_with_catalog, AddNewAttributeTuples, AddNewRelationTuple, AddNewRelationType,
@@ -826,3 +841,6 @@ pub use delete::{
     DeleteAttributeTuples, DeleteRelationTuple, DeleteSystemAttributeTuples,
     RelationRemoveInheritance,
 };
+pub use drop::heap_drop_with_catalog;
+pub use partition::RemovePartitionKeyByRelId;
+pub use statistics::RemoveStatistics;
