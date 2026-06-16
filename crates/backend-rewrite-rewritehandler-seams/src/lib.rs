@@ -28,3 +28,35 @@ seam_core::seam!(
         attrno: i32,
     ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr>>>
 );
+
+seam_core::seam!(
+    /// `get_view_query(view)` (rewriteHandler.c): return the `Query` from a
+    /// view's `_RETURN` rule (the `ON SELECT` rewrite action). The C returns a
+    /// read-only pointer into the relcache's `rd_rules`; this seam returns the
+    /// canonical owned [`types_nodes::copy_query::Query`] image, allocated in
+    /// `mcx`. The caller must have verified the relation is a view. C
+    /// `elog(ERROR)`s on a missing/malformed `_RETURN` rule, carried on `Err`.
+    ///
+    /// rewriteHandler.c's `get_view_query` reads `view->rd_rules`, the relcache
+    /// rewrite-rule array, which the ported `RelationData` does not yet model —
+    /// so this stays a seam-and-panic until rewriteHandler's view-rule access
+    /// lands. (Owner dir `backend-rewrite-rewritehandler` does not resolve to a
+    /// crate, so the seam-install guard does not require it to be installed.)
+    pub fn get_view_query<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        view: &types_rel::Relation<'mcx>,
+    ) -> PgResult<types_nodes::copy_query::Query<'mcx>>
+);
+
+seam_core::seam!(
+    /// `RelationHasSecurityInvoker(relation)` (`utils/rel.h`): whether the
+    /// view's parsed reloptions have the `security_invoker` flag set (default
+    /// `false` when no reloptions). The repo's `RelationData::rd_options` carries
+    /// the *heap* `StdRdOptions`, which does not model the *view* `StdRdOptions`
+    /// where `security_invoker` lives, so this stays a seam-and-panic until view
+    /// reloptions are carried on the relcache entry. Homed alongside
+    /// `get_view_query` (lockcmds reads both off the same opened view relcache
+    /// handle); the owner dir `backend-rewrite-rewritehandler` does not resolve
+    /// to a crate, so the seam-install guard does not require an installer.
+    pub fn relation_has_security_invoker(relation: &types_rel::Relation<'_>) -> bool
+);

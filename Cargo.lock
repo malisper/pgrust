@@ -5196,6 +5196,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-lockcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-class",
+ "backend-catalog-pg-inherits-seams",
+ "backend-commands-lockcmds-seams",
+ "backend-nodes-core",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-lockcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-commands-matview"
 version = "0.0.0"
 dependencies = [
@@ -15920,6 +15959,7 @@ dependencies = [
  "backend-commands-explain",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
+ "backend-commands-lockcmds",
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
