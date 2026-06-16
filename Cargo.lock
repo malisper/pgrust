@@ -16304,6 +16304,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-tupdesc",
  "backend-parser-coerce-seams",
@@ -16341,6 +16342,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -17075,6 +17077,21 @@ name = "backend-utils-adt-ri-triggers-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-ruleutils"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -20155,6 +20172,7 @@ dependencies = [
  "backend-utils-adt-rangetypes-typanalyze",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
+ "backend-utils-adt-ruleutils",
  "backend-utils-adt-scalar-datum-core",
  "backend-utils-adt-selfuncs",
  "backend-utils-adt-tsvector-core",

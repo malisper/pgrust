@@ -156,6 +156,13 @@ pub fn proc_last_rec_ptr() -> XLogRecPtr {
     PROC_LAST_REC_PTR.with(Cell::get)
 }
 
+/// `static bool doPageWrites` reader (xlog.c) — the backend-local
+/// full-page-writes decision cached at the last insertion-lock acquisition,
+/// consulted by `GetFullPageWriteInfo`.
+pub fn do_page_writes() -> bool {
+    DO_PAGE_WRITES.with(Cell::get)
+}
+
 /// `XactLastRecEnd` reader (seam `xact_last_rec_end`).
 pub fn xact_last_rec_end() -> XLogRecPtr {
     XACT_LAST_REC_END.with(Cell::get)

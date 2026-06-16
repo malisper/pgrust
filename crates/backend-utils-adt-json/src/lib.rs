@@ -180,6 +180,7 @@ pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> 
 /// Appends the JSON text for `val` onto `result`. Array/composite rendering and
 /// the fmgr output/cast functions are reached through the seams.
 pub fn datum_to_json_internal<'mcx>(
+    mcx: Mcx<'mcx>,
     val: &Datum<'mcx>,
     is_null: bool,
     result: &mut PgVec<'_, u8>,
@@ -215,10 +216,10 @@ pub fn datum_to_json_internal<'mcx>(
 
     match tcategory {
         JSONTYPE_ARRAY => {
-            array_to_json_internal(val, result, false)?;
+            array_to_json_internal(mcx, val, result, false)?;
         }
         JSONTYPE_COMPOSITE => {
-            composite_to_json(val, result, false)?;
+            composite_to_json(mcx, val, result, false)?;
         }
         JSONTYPE_BOOL => {
             if key_scalar {
@@ -234,7 +235,7 @@ pub fn datum_to_json_internal<'mcx>(
             }
         }
         JSONTYPE_NUMERIC => {
-            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+            let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
 
             // Don't quote a non-key if it's a valid JSON number (i.e., not
             // "Infinity", "-Infinity", or "NaN"). We open-code the validation:
@@ -272,12 +273,12 @@ pub fn datum_to_json_internal<'mcx>(
         }
         JSONTYPE_JSON => {
             // JSON and JSONB output will already be escaped.
-            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+            let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
             buf_extend(result, &outputstr)?;
         }
         JSONTYPE_CAST => {
             // outfuncoid refers to a cast function, not an output function.
-            let jsontext = catalog_fmgr::cast_function_call::call(outfuncoid, val)?;
+            let jsontext = catalog_fmgr::cast_function_call::call(mcx, outfuncoid, val)?;
             buf_extend(result, &jsontext)?;
         }
         // C's `switch` has explicit cases above and a `default:` covering
@@ -287,10 +288,10 @@ pub fn datum_to_json_internal<'mcx>(
         JSONTYPE_NULL | JSONTYPE_JSONB | JSONTYPE_OTHER => {
             // special-case text types to save useless palloc/memcpy cycles
             if catalog_fmgr::is_text_output_func::call(outfuncoid) {
-                let txt = catalog_fmgr::text_datum_bytes::call(val)?;
+                let txt = catalog_fmgr::text_datum_bytes::call(mcx, val)?;
                 escape_json_with_len(result, &txt)?;
             } else {
-                let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+                let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
                 escape_json(result, &outputstr)?;
             }
         }
@@ -324,6 +325,7 @@ pub fn JsonEncodeDateTime<'mcx>(
 /// Process a single dimension of an array, recursing into inner dimensions.
 /// `valcount` is advanced as innermost values are consumed.
 pub fn array_dim_to_json<'mcx>(
+    mcx: Mcx<'mcx>,
     result: &mut PgVec<'_, u8>,
     dim: usize,
     ndims: usize,
@@ -349,6 +351,7 @@ pub fn array_dim_to_json<'mcx>(
 
         if dim + 1 == ndims {
             datum_to_json_internal(
+                mcx,
                 &vals[*valcount],
                 nulls[*valcount],
                 result,
@@ -361,6 +364,7 @@ pub fn array_dim_to_json<'mcx>(
             // Do we want line feeds on inner dimensions of arrays? For now we'll
             // say no.
             array_dim_to_json(
+                mcx,
                 result,
                 dim + 1,
                 ndims,
@@ -384,11 +388,12 @@ pub fn array_dim_to_json<'mcx>(
 /// C: `array_to_json_internal(Datum array, StringInfo result, bool
 /// use_line_feeds)` (json.c:473). Turn an array into JSON.
 pub fn array_to_json_internal<'mcx>(
+    mcx: Mcx<'mcx>,
     array: &Datum<'mcx>,
     result: &mut PgVec<'_, u8>,
     use_line_feeds: bool,
 ) -> PgResult<()> {
-    let arr = catalog_fmgr::deconstruct_array::call(array)?;
+    let arr = catalog_fmgr::deconstruct_array::call(mcx, array)?;
     // `deconstruct_array` yields the canonical `Datum<'mcx>` element model
     // (`ArrayForJson.elements`); `array_dim_to_json` / `datum_to_json_internal`
     // drive the per-element `OutputFunctionCall` directly off the canonical
@@ -416,6 +421,7 @@ pub fn array_to_json_internal<'mcx>(
 
     let mut count = 0usize;
     array_dim_to_json(
+        mcx,
         result,
         0,
         arr.ndim as usize,
@@ -432,6 +438,7 @@ pub fn array_to_json_internal<'mcx>(
 /// C: `composite_to_json(Datum composite, StringInfo result, bool
 /// use_line_feeds)` (json.c:520). Turn a composite / record into JSON.
 pub fn composite_to_json<'mcx>(
+    mcx: Mcx<'mcx>,
     composite: &Datum<'mcx>,
     result: &mut PgVec<'_, u8>,
     use_line_feeds: bool,
@@ -440,7 +447,7 @@ pub fn composite_to_json<'mcx>(
     // precalculate the separator (avoids strlen in C).
     let sep: &[u8] = if use_line_feeds { b",\n " } else { b"," };
 
-    let fields = catalog_fmgr::walk_composite::call(composite)?;
+    let fields = catalog_fmgr::walk_composite::call(mcx, composite)?;
 
     buf_push(result, b'{')?;
 
@@ -455,6 +462,7 @@ pub fn composite_to_json<'mcx>(
         buf_push(result, b':')?;
 
         datum_to_json_internal(
+            mcx,
             // `walk_composite` yields the canonical `Datum<'mcx>` per attribute
             // (`CompositeFieldForJson.val`); forward it directly.
             &field.val,
@@ -474,6 +482,7 @@ pub fn composite_to_json<'mcx>(
 /// key_scalar)` (json.c:601). Thin wrapper around `datum_to_json` that
 /// classifies `val_type` first.
 pub fn add_json<'mcx>(
+    mcx: Mcx<'mcx>,
     val: &Datum<'mcx>,
     is_null: bool,
     result: &mut PgVec<'_, u8>,
@@ -491,7 +500,7 @@ pub fn add_json<'mcx>(
         catalog_fmgr::categorize_type::call(val_type)?
     };
 
-    datum_to_json_internal(val, is_null, result, tcategory, outfuncoid, key_scalar)
+    datum_to_json_internal(mcx, val, is_null, result, tcategory, outfuncoid, key_scalar)
 }
 
 /// C: `to_json_is_immutable(Oid typoid)` (json.c:699).
@@ -524,7 +533,7 @@ pub fn datum_to_json<'mcx>(
     outfuncoid: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     build(mcx, |buf| {
-        datum_to_json_internal(val, false, buf, tcategory, outfuncoid, false)
+        datum_to_json_internal(mcx, val, false, buf, tcategory, outfuncoid, false)
     })
 }
 
@@ -538,7 +547,7 @@ pub fn datum_to_json<'mcx>(
 
 /// C: `array_to_json(PG_FUNCTION_ARGS)` (json.c:629).
 pub fn array_to_json<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
-    build(mcx, |buf| array_to_json_internal(array, buf, false))
+    build(mcx, |buf| array_to_json_internal(mcx, array, buf, false))
 }
 
 /// C: `array_to_json_pretty(PG_FUNCTION_ARGS)` (json.c:645).
@@ -547,12 +556,12 @@ pub fn array_to_json_pretty<'mcx>(
     array: &Datum<'mcx>,
     use_line_feeds: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    build(mcx, |buf| array_to_json_internal(array, buf, use_line_feeds))
+    build(mcx, |buf| array_to_json_internal(mcx, array, buf, use_line_feeds))
 }
 
 /// C: `row_to_json(PG_FUNCTION_ARGS)` (json.c:662).
 pub fn row_to_json<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
-    build(mcx, |buf| composite_to_json(array, buf, false))
+    build(mcx, |buf| composite_to_json(mcx, array, buf, false))
 }
 
 /// C: `row_to_json_pretty(PG_FUNCTION_ARGS)` (json.c:678).
@@ -561,7 +570,7 @@ pub fn row_to_json_pretty<'mcx>(
     array: &Datum<'mcx>,
     use_line_feeds: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    build(mcx, |buf| composite_to_json(array, buf, use_line_feeds))
+    build(mcx, |buf| composite_to_json(mcx, array, buf, use_line_feeds))
 }
 
 /// C: `to_json(PG_FUNCTION_ARGS)` (json.c:738).
@@ -867,6 +876,7 @@ pub fn json_agg_transfn_worker<'mcx>(
     // fast path for NULLs
     if val_is_null {
         datum_to_json_internal(
+            mcx,
             &Datum::null(),
             true,
             &mut state.str,
@@ -890,7 +900,7 @@ pub fn json_agg_transfn_worker<'mcx>(
         PgError::error("json_agg_transfn_worker: val_category is not set on a non-first call")
     })?;
     let val_output_func = state.val_output_func;
-    datum_to_json_internal(val, false, &mut state.str, val_category, val_output_func, false)?;
+    datum_to_json_internal(mcx, val, false, &mut state.str, val_category, val_output_func, false)?;
 
     Ok(state)
 }
@@ -994,7 +1004,7 @@ pub fn json_object_agg_transfn_worker<'mcx>(
         }
 
         let mut out = PgVec::new_in(mcx);
-        datum_to_json_internal(key, false, &mut out, key_category, key_output_func, true)?;
+        datum_to_json_internal(mcx, key, false, &mut out, key_category, key_output_func, true)?;
         key_bytes = out.as_slice().to_vec();
     } else {
         // Append comma delimiter only if we have output some fields after "{ ".
@@ -1002,7 +1012,7 @@ pub fn json_object_agg_transfn_worker<'mcx>(
             buf_extend(&mut state.str, b", ")?;
         }
         let key_offset = state.str.len();
-        datum_to_json_internal(key, false, &mut state.str, key_category, key_output_func, true)?;
+        datum_to_json_internal(mcx, key, false, &mut state.str, key_category, key_output_func, true)?;
         key_bytes = state.str[key_offset..].to_vec();
     }
 
@@ -1027,7 +1037,7 @@ pub fn json_object_agg_transfn_worker<'mcx>(
     let arg = if val_is_null { &null_arg } else { val };
     let val_category = state.val_category.expect("val_category set on first call");
     let val_output_func = state.val_output_func;
-    datum_to_json_internal(arg, val_is_null, &mut state.str, val_category, val_output_func, false)?;
+    datum_to_json_internal(mcx, arg, val_is_null, &mut state.str, val_category, val_output_func, false)?;
 
     Ok(state)
 }
@@ -1179,13 +1189,13 @@ pub fn json_build_object_worker<'mcx>(
                 // C uses a throwaway StringInfo to hold the key bytes just long
                 // enough to copy them for the uniqueness check.
                 let mut out = PgVec::new_in(mcx);
-                add_json(&args[i], false, &mut out, types[i], true)?;
+                add_json(mcx, &args[i], false, &mut out, types[i], true)?;
                 key_bytes = out.as_slice().to_vec();
             } else {
                 buf_extend(result, sep)?;
                 sep = b", ";
                 let key_offset = result.len();
-                add_json(&args[i], false, result, types[i], true)?;
+                add_json(mcx, &args[i], false, result, types[i], true)?;
                 key_bytes = result[key_offset..].to_vec();
             }
 
@@ -1208,7 +1218,7 @@ pub fn json_build_object_worker<'mcx>(
             buf_extend(result, b" : ")?;
 
             // process value
-            add_json(&args[i + 1], nulls[i + 1], result, types[i + 1], false)?;
+            add_json(mcx, &args[i + 1], nulls[i + 1], result, types[i + 1], false)?;
 
             i += 2;
         }
@@ -1261,7 +1271,7 @@ pub fn json_build_array_worker<'mcx>(
 
             buf_extend(result, sep)?;
             sep = b", ";
-            add_json(&args[i], nulls[i], result, types[i], false)?;
+            add_json(mcx, &args[i], nulls[i], result, types[i], false)?;
         }
 
         buf_push(result, b']')
