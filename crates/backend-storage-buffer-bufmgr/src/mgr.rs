@@ -15,8 +15,9 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering;
 
-use backend_storage_buffer_support::{BufTable, BufferStrategyControl};
+use backend_storage_buffer_support::{BufTable, BufferStrategyControl, StrategyShmemSize};
 use types_condvar::ConditionVariable;
+use types_core::Size;
 use types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
 use types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
 use types_storage::storage::{
@@ -490,6 +491,128 @@ impl BufferManager {
             my,
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared-memory sizing + placement (buf_init.c BufferManagerShmemSize /
+// BufferManagerShmemInit). These are the `CalculateShmemSize` accumulator +
+// `CreateOrAttachShmemStructs` entry points called from ipci.c.
+// ---------------------------------------------------------------------------
+
+/// `sizeof(BufferDescPadded)` (buf_internals.h) — `BUFFERDESC_PAD_TO_SIZE` is
+/// 64 on the 64-bit (`SIZEOF_VOID_P == 8`) migration profile.
+const SIZEOF_BUFFER_DESC_PADDED: Size = 64;
+/// `sizeof(ConditionVariableMinimallyPadded)` (condition_variable.h):
+/// `CV_MINIMAL_SIZE = (sizeof(ConditionVariable) <= 16 ? 16 : 32)`. The C
+/// `ConditionVariable` is `slock_t mutex` (4) + `proclist_head wakeup` (two
+/// `int32`, 8) = 12 bytes <= 16, so the padded size is 16.
+const SIZEOF_CV_MINIMALLY_PADDED: Size = 16;
+/// `sizeof(CkptSortItem)` (buf_internals.h) — `Oid tsId` (4) +
+/// `RelFileNumber relNumber` (4) + `ForkNumber forkNum` (4) +
+/// `BlockNumber blockNum` (4) + `int buf_id` (4) = 20 (alignment 4, no padding).
+const SIZEOF_CKPT_SORT_ITEM: Size = 20;
+/// `PG_CACHE_LINE_SIZE` (pg_config_manual.h).
+const PG_CACHE_LINE_SIZE: Size = 128;
+/// `PG_IO_ALIGN_SIZE` (c.h).
+const PG_IO_ALIGN_SIZE: Size = types_storage::bufpage::PG_IO_ALIGN_SIZE;
+
+/// `BufferManagerShmemSize(void)` (buf_init.c) — shared-memory bytes the buffer
+/// pool needs: descriptors, data pages (+ I/O alignment padding), the freelist
+/// strategy control + buffer lookup hash, the I/O condition variables, and the
+/// checkpoint sort array. Mirrors the C `add_size`/`mul_size` overflow-checked
+/// accumulation (carried on `Err`). `NBuffers` is the GUC global the C reads.
+pub fn BufferManagerShmemSize() -> types_error::PgResult<Size> {
+    use backend_storage_ipc_shmem_seams as shmem;
+
+    let nbuffers = backend_utils_misc_guc_tables::vars::NBuffers.read() as Size;
+    let nbuffers_i32 = backend_utils_misc_guc_tables::vars::NBuffers.read();
+
+    let mut size: Size = 0;
+
+    // size of buffer descriptors + cacheline alignment slack.
+    size = shmem::add_size::call(size, shmem::mul_size::call(nbuffers, SIZEOF_BUFFER_DESC_PADDED)?)?;
+    size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;
+
+    // size of data pages, plus I/O alignment padding.
+    size = shmem::add_size::call(size, PG_IO_ALIGN_SIZE)?;
+    size = shmem::add_size::call(size, shmem::mul_size::call(nbuffers, BLCKSZ as Size)?)?;
+
+    // size of stuff controlled by freelist.c (buf lookup hash + control block).
+    size = shmem::add_size::call(size, StrategyShmemSize(nbuffers_i32))?;
+
+    // size of I/O condition variables + cacheline alignment slack.
+    size = shmem::add_size::call(
+        size,
+        shmem::mul_size::call(nbuffers, SIZEOF_CV_MINIMALLY_PADDED)?,
+    )?;
+    size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;
+
+    // size of checkpoint sort array in bufmgr.c.
+    size = shmem::add_size::call(size, shmem::mul_size::call(nbuffers, SIZEOF_CKPT_SORT_ITEM)?)?;
+
+    Ok(size)
+}
+
+/// `BufferManagerShmemInit(void)` (buf_init.c) — allocate-or-attach the buffer
+/// pool's shared structures and stand up the process-local manager view.
+///
+/// The C carves four named regions (`Buffer Descriptors`, `Buffer Blocks`,
+/// `Buffer IO Condition Variables`, `Checkpoint BufferIds`) from the shared
+/// segment via `ShmemInitStruct`, then initialises the descriptor headers in
+/// the first-creator backend. This engine models the genuinely-shared payload
+/// (descriptors, page bytes, content locks, I/O condvars, buf table, strategy
+/// control) as the owned [`BufferManager`] published process-locally through
+/// [`BufferManager::register_global`] — the same posture procarray uses for the
+/// ProcArray header. We still call `ShmemInitStruct` for each named region so
+/// the cross-backend allocate-or-attach + `found` bookkeeping (the shmem index
+/// entries surfaced by `pg_get_shmem_allocations`) is honoured exactly as C
+/// does, and so the `found`/not-found "first creator initialises" decision is
+/// driven by the real shmem index.
+pub fn BufferManagerShmemInit() -> types_error::PgResult<()> {
+    use backend_storage_ipc_shmem_seams as shmem;
+
+    let nbuffers = backend_utils_misc_guc_tables::vars::NBuffers.read() as u32;
+    let n = nbuffers as Size;
+
+    // Align descriptors to a cacheline boundary.
+    let (_descs, found_descs) = shmem::shmem_init_struct::call(
+        "Buffer Descriptors",
+        shmem::mul_size::call(n, SIZEOF_BUFFER_DESC_PADDED)?,
+    )?;
+
+    // Align buffer pool on the I/O page-size boundary.
+    let (_blocks, found_bufs) = shmem::shmem_init_struct::call(
+        "Buffer Blocks",
+        shmem::add_size::call(shmem::mul_size::call(n, BLCKSZ as Size)?, PG_IO_ALIGN_SIZE)?,
+    )?;
+
+    // Align condition variables to a cacheline boundary.
+    let (_iocv, found_iocv) = shmem::shmem_init_struct::call(
+        "Buffer IO Condition Variables",
+        shmem::mul_size::call(n, SIZEOF_CV_MINIMALLY_PADDED)?,
+    )?;
+
+    // Checkpoint sort array (allocated in shmem to avoid runtime allocation
+    // during a checkpoint).
+    let (_ckpt, found_ckpt) = shmem::shmem_init_struct::call(
+        "Checkpoint BufferIds",
+        shmem::mul_size::call(n, SIZEOF_CKPT_SORT_ITEM)?,
+    )?;
+
+    if found_descs || found_bufs || found_iocv || found_ckpt {
+        // Should find all of these, or none of them (EXEC_BACKEND only). When
+        // attaching, the genuinely-shared payload is already initialised by the
+        // first creator; this backend just re-publishes its process-local view.
+        debug_assert!(found_descs && found_bufs && found_iocv && found_ckpt);
+    }
+
+    // Stand up (or re-publish) this backend's view of the pool. The descriptor
+    // headers, freelist links, content locks, and I/O condvars are initialised
+    // inside `BufferManagerShmemInit(nbuffers)` exactly as the C first-creator
+    // init loop does (`StrategyInitialize` is invoked there too).
+    BufferManager::BufferManagerShmemInit(nbuffers).register_global();
+
+    Ok(())
 }
 
 #[cfg(test)]

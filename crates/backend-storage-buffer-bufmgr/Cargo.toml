@@ -68,8 +68,10 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 # InitBufferManagerAccess registers the AtProcExit_Buffers cleanup via
 # on_shmem_exit (ipc.c), reached through the ipc seam crate.
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
-
-[dev-dependencies]
-# Test-only: stub ShmemInitStruct so BufferManagerShmemInit can stand up the
-# buffer-support BufTable + StrategyControl (F2a) without a real shmem segment.
+# `BufferManagerShmemInit`/`Size` (buf_init.c) carve the four named buffer-pool
+# regions via `ShmemInitStruct` + the `add_size`/`mul_size` overflow-checked
+# size arithmetic.
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+# `BufferManagerShmemSize`/`Init` read the `NBuffers` GUC global (the C
+# bufmgr.c global).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

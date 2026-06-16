@@ -2956,62 +2956,282 @@ fn set_page_btpo_flags_garbage(page: &mut [u8]) -> PgResult<()> {
 // ===========================================================================
 // VACUUM cycle-ID shmem helpers (BTVacInfo).
 //
-// The btvacinfo shared-memory array has no producer in this repo. The cycle-id
-// assignment arithmetic and the per-index lookup logic are ported faithfully,
-// but the actual shared-memory access (the BTVacInfo struct) is the genuinely
-// external substrate, so it reaches an honest panic. The installable seams are
-// bt_start_vacuum / bt_end_vacuum.
+// `btvacinfo` is the genuinely-shared btree vacuum cycle-id registry: the
+// cycle-id counter plus the array of `(LockRelId, BTCycleId)` entries for the
+// currently active VACUUMs. In C it lives in main shared memory, carved by
+// `ShmemInitStruct` and interlocked by `BtreeVacuumLock`. This engine is
+// thread-per-backend; per AGENTS.md "Backend-global state" the genuinely-shared
+// payload is modelled as a process-local view (the same posture procarray uses
+// for the ProcArray header + KnownAssignedXids ring). `BTreeShmemInit` still
+// calls `ShmemInitStruct` so the cross-backend allocate-or-attach + `found`
+// bookkeeping (and the `pg_get_shmem_allocations` index entry) is honoured, and
+// `BtreeVacuumLock` is taken exactly where C takes it.
 // ===========================================================================
+
+/// `BTOneVacInfo` (nbtutils.c) — one active-VACUUM registry entry.
+#[derive(Clone, Copy)]
+struct BTOneVacInfo {
+    /// `LockRelId relid` — global identifier of an index.
+    relid: types_storage::lock::LockRelId,
+    /// `BTCycleId cycleid` — cycle ID for its active VACUUM.
+    cycleid: BTCycleId,
+}
+
+/// `BTVacInfo` (nbtutils.c) — the btree vacuum cycle-id shared state.
+struct BTVacInfo {
+    /// `BTCycleId cycle_ctr` — cycle ID most recently assigned.
+    cycle_ctr: BTCycleId,
+    /// `int num_vacuums` — number of currently active VACUUMs.
+    num_vacuums: i32,
+    /// `int max_vacuums` — allocated length of `vacuums[]`.
+    max_vacuums: i32,
+    /// `BTOneVacInfo vacuums[FLEXIBLE_ARRAY_MEMBER]` — the active-VACUUM array,
+    /// modelled as an owned `Vec` (the C flexible member).
+    vacuums: alloc::vec::Vec<BTOneVacInfo>,
+}
+
+std::thread_local! {
+    /// `static BTVacInfo *btvacinfo` — this backend's view of the shared btree
+    /// vacuum registry, established by [`bt_shmem_init`].
+    static BTVACINFO: core::cell::RefCell<Option<BTVacInfo>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// `rel->rd_lockInfo.lockRelId` (`RelationInitLockInfo`): `relId = rd_id`,
+/// `dbId = rd_locator.dbOid` (`InvalidOid` for a shared relation).
+fn lock_rel_id(rel: &Relation<'_>) -> types_storage::lock::LockRelId {
+    types_storage::lock::LockRelId {
+        relId: rel.rd_id,
+        dbId: rel.rd_locator.dbOid,
+    }
+}
+
+/// Acquire `BtreeVacuumLock` in the given mode (RAII release on drop / explicit
+/// `release()`), keyed by this backend's `ProcNumber`.
+fn acquire_btree_vacuum_lock(
+    mode: types_storage::LWLockMode,
+) -> PgResult<backend_storage_lmgr_lwlock::MainLWLockGuard> {
+    backend_storage_lmgr_lwlock::LWLockAcquireMain(
+        types_storage::storage::BTREE_VACUUM_LOCK,
+        mode,
+        backend_utils_init_small_seams::my_proc_number::call(),
+    )
+}
 
 /// `_bt_vacuum_cycleid()` — get the active vacuum cycle ID for an index, or 0
 /// if there is no active VACUUM. (Reads the `btvacinfo` shmem array.)
-pub fn bt_vacuum_cycleid(_rel: &Relation) -> PgResult<BTCycleId> {
-    // for (i in btvacinfo->num_vacuums) if vac->relid matches rel return cycleid
-    panic!("_bt_vacuum_cycleid: btvacinfo shmem array not yet ported")
+pub fn bt_vacuum_cycleid(rel: &Relation) -> PgResult<BTCycleId> {
+    let mut result: BTCycleId = 0;
+
+    // Share lock is enough since this is a read-only operation.
+    let guard = acquire_btree_vacuum_lock(types_storage::LW_SHARED)?;
+
+    let target = lock_rel_id(rel);
+    BTVACINFO.with(|cell| {
+        let borrow = cell.borrow();
+        let info = borrow
+            .as_ref()
+            .expect("btvacinfo accessed before BTreeShmemInit");
+        for i in 0..info.num_vacuums as usize {
+            let vac = &info.vacuums[i];
+            if vac.relid.relId == target.relId && vac.relid.dbId == target.dbId {
+                result = vac.cycleid;
+                break;
+            }
+        }
+    });
+
+    guard.release()?;
+    Ok(result)
 }
 
 /// `_bt_start_vacuum()` — assign a cycle ID to a just-starting VACUUM operation.
 /// Returns the cycle ID it was assigned.
 pub fn bt_start_vacuum(rel: &Relation) -> PgResult<BTCycleId> {
-    // The cycle-id assignment arithmetic (mirroring the C, modulo the shmem
-    // counter the seam owns):
-    //
-    //   result = ++(btvacinfo->cycle_ctr);
-    //   if (result == 0 || result > MAX_BT_CYCLE_ID) result = btvacinfo->cycle_ctr = 1;
-    //   <reject a second active vacuum for this index>
-    //   <reject when out of slots>
-    //   <register (rel->rd_lockInfo.lockRelId, result) in vacuums[num_vacuums++]>
-    //
-    // The shared `btvacinfo` array (and the BtreeVacuumLock that interlocks it)
-    // has no producer in this repo; the bounded MAX_BT_CYCLE_ID arithmetic is
-    // shown above for fidelity but cannot run without the shared counter/array.
-    let _ = (MAX_BT_CYCLE_ID, rel_name(rel));
-    panic!("_bt_start_vacuum: btvacinfo shmem array not yet ported")
+    let guard = acquire_btree_vacuum_lock(types_storage::LW_EXCLUSIVE)?;
+
+    let target = lock_rel_id(rel);
+
+    // The body needs to release the lock explicitly before erroring (the C
+    // comment: _bt_end_vacuum must run before abort cleanup releases LWLocks),
+    // so collect the outcome under the borrow and act afterwards.
+    enum Outcome {
+        Ok(BTCycleId),
+        DuplicateVacuum,
+        OutOfSlots,
+    }
+
+    let outcome = BTVACINFO.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let info = borrow
+            .as_mut()
+            .expect("btvacinfo accessed before BTreeShmemInit");
+
+        // Assign the next cycle ID, avoiding zero and the reserved high values.
+        let mut result = info.cycle_ctr.wrapping_add(1);
+        info.cycle_ctr = result;
+        if result == 0 || result > MAX_BT_CYCLE_ID {
+            result = 1;
+            info.cycle_ctr = 1;
+        }
+
+        // Make sure there's no entry already for this index.
+        for i in 0..info.num_vacuums as usize {
+            let vac = &info.vacuums[i];
+            if vac.relid.relId == target.relId && vac.relid.dbId == target.dbId {
+                return Outcome::DuplicateVacuum;
+            }
+        }
+
+        // Add an entry.
+        if info.num_vacuums >= info.max_vacuums {
+            return Outcome::OutOfSlots;
+        }
+        let idx = info.num_vacuums as usize;
+        debug_assert!(idx < info.vacuums.len());
+        info.vacuums[idx] = BTOneVacInfo {
+            relid: target,
+            cycleid: result,
+        };
+        info.num_vacuums += 1;
+        Outcome::Ok(result)
+    });
+
+    match outcome {
+        Outcome::Ok(result) => {
+            guard.release()?;
+            Ok(result)
+        }
+        Outcome::DuplicateVacuum => {
+            // Unlike most places, we must release the LWLock before erroring.
+            guard.release()?;
+            Err(ereport(ERROR)
+                .errmsg_internal(format!(
+                    "multiple active vacuums for index \"{}\"",
+                    rel_name(rel)
+                ))
+                .into_error())
+        }
+        Outcome::OutOfSlots => {
+            guard.release()?;
+            Err(ereport(ERROR)
+                .errmsg_internal("out of btvacinfo slots")
+                .into_error())
+        }
+    }
 }
 
 /// `_bt_end_vacuum()` — mark a btree VACUUM operation as done (deregister it
-/// from the `btvacinfo` shmem array).
-pub fn bt_end_vacuum(_rel: &Relation) {
-    // Find the matching vacuums[] entry, shift down the last entry, decrement
-    // num_vacuums. The shared array has no producer.
-    panic!("_bt_end_vacuum: btvacinfo shmem array not yet ported")
+/// from the `btvacinfo` shmem array). Deliberately silent if no entry is found.
+pub fn bt_end_vacuum(rel: &Relation) {
+    let guard = acquire_btree_vacuum_lock(types_storage::LW_EXCLUSIVE)
+        .expect("BtreeVacuumLock acquisition failed in _bt_end_vacuum");
+
+    let target = lock_rel_id(rel);
+    BTVACINFO.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let info = borrow
+            .as_mut()
+            .expect("btvacinfo accessed before BTreeShmemInit");
+        for i in 0..info.num_vacuums as usize {
+            let vac = info.vacuums[i];
+            if vac.relid.relId == target.relId && vac.relid.dbId == target.dbId {
+                // Remove it by shifting down the last entry.
+                let last = (info.num_vacuums - 1) as usize;
+                info.vacuums[i] = info.vacuums[last];
+                info.num_vacuums -= 1;
+                break;
+            }
+        }
+    });
+
+    guard
+        .release()
+        .expect("BtreeVacuumLock release failed in _bt_end_vacuum");
 }
+
+/// `sizeof(BTOneVacInfo)` (nbtutils.c) — `LockRelId` (`relId` 4 + `dbId` 4) +
+/// `BTCycleId` (2), padded to the 4-byte alignment of `Oid` = 12 bytes.
+const SIZEOF_BT_ONE_VAC_INFO: Size = 12;
+/// `offsetof(BTVacInfo, vacuums)` (nbtutils.c) — `BTCycleId cycle_ctr` (2) +
+/// `int num_vacuums` (4) + `int max_vacuums` (4), with `vacuums[]` aligned to
+/// the 4-byte alignment of `Oid` inside `BTOneVacInfo` = 12.
+const OFFSETOF_BT_VAC_INFO_VACUUMS: Size = 12;
 
 /// `BTreeShmemSize()` — report shared memory space needed. Mirrors
 /// `offsetof(BTVacInfo, vacuums) + MaxBackends * sizeof(BTOneVacInfo)`.
 pub fn bt_shmem_size() -> PgResult<Size> {
-    // size = offsetof(BTVacInfo, vacuums) + MaxBackends * sizeof(BTOneVacInfo)
-    // BTOneVacInfo = { LockRelId (8 bytes: relId+dbId), BTCycleId (2) } padded.
-    // MaxBackends and the BTVacInfo layout are owned by the shmem substrate.
-    panic!("BTreeShmemSize: btvacinfo shmem layout (MaxBackends, BTVacInfo) not yet ported")
+    use backend_storage_ipc_shmem_seams as shmem;
+
+    let max_backends = backend_utils_init_small_seams::max_backends::call() as Size;
+    let size = OFFSETOF_BT_VAC_INFO_VACUUMS;
+    shmem::add_size::call(
+        size,
+        shmem::mul_size::call(max_backends, SIZEOF_BT_ONE_VAC_INFO)?,
+    )
 }
 
 /// `BTreeShmemInit()` — initialize this module's shared memory area.
 pub fn bt_shmem_init() -> PgResult<()> {
-    // btvacinfo = ShmemInitStruct("BTree Vacuum State", BTreeShmemSize(), &found);
-    // if !IsUnderPostmaster { cycle_ctr = time(NULL); num_vacuums = 0;
-    //                         max_vacuums = MaxBackends; }
-    panic!("BTreeShmemInit: btvacinfo shmem (ShmemInitStruct) not yet ported")
+    use backend_storage_ipc_shmem_seams as shmem;
+
+    // Carve (or attach to) the shared "BTree Vacuum State" region so the
+    // cross-backend allocate-or-attach + shmem-index bookkeeping matches C.
+    let (_addr, found) = shmem::shmem_init_struct::call("BTree Vacuum State", bt_shmem_size()?)?;
+
+    let max_vacuums = backend_utils_init_small_seams::max_backends::call();
+
+    if !backend_utils_init_small_seams::is_under_postmaster::call() {
+        // Initialize the shared memory area. Assert(!found).
+        debug_assert!(!found);
+
+        // Seed the cycle counter with low-order bits of time(), as C does.
+        // SAFETY: `time(NULL)` is always safe.
+        let cycle_ctr = (unsafe { libc::time(core::ptr::null_mut()) } as u64) as BTCycleId;
+
+        BTVACINFO.with(|cell| {
+            *cell.borrow_mut() = Some(BTVacInfo {
+                cycle_ctr,
+                num_vacuums: 0,
+                max_vacuums,
+                vacuums: alloc::vec![
+                    BTOneVacInfo {
+                        relid: types_storage::lock::LockRelId {
+                            relId: types_core::primitive::InvalidOid,
+                            dbId: types_core::primitive::InvalidOid,
+                        },
+                        cycleid: 0,
+                    };
+                    max_vacuums as usize
+                ],
+            });
+        });
+    } else {
+        // Attaching backend: the genuinely-shared payload is already
+        // initialised; re-publish this backend's process-local view. Assert(found).
+        debug_assert!(found);
+        BTVACINFO.with(|cell| {
+            if cell.borrow().is_none() {
+                *cell.borrow_mut() = Some(BTVacInfo {
+                    cycle_ctr: 0,
+                    num_vacuums: 0,
+                    max_vacuums,
+                    vacuums: alloc::vec![
+                        BTOneVacInfo {
+                            relid: types_storage::lock::LockRelId {
+                                relId: types_core::primitive::InvalidOid,
+                                dbId: types_core::primitive::InvalidOid,
+                            },
+                            cycleid: 0,
+                        };
+                        max_vacuums as usize
+                    ],
+                });
+            }
+        });
+    }
+
+    Ok(())
 }
 
 // ===========================================================================

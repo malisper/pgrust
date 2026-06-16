@@ -1288,18 +1288,9 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
-        // DESIGN_DEBT (TD-BUFMGR-SHMEM-AIO): four bufmgr-seams `::call`ed in live
-        // consumers (ipc shmem startup; backend-storage-aio-read-stream) whose real
-        // bodies are not in the merged bufmgr slice:
-        //   * buffer_manager_shmem_size — bufmgr.c `BufferManagerShmemSize`: the
-        //     add_size accumulator over BufferDescriptors/BufferBlocks/lookup table.
-        //     The owner has no ShmemSize accumulator (in-process buffer arrays, not
-        //     the shmem-resident layout) — needs the shmem allocator keystone.
-        //   * buffer_manager_shmem_init — bufmgr.c `BufferManagerShmemInit`: the
-        //     ShmemInitStruct allocate-or-attach over those shmem arrays. The
-        //     owner's `BufferManager::BufferManagerShmemInit(nbuffers)->Self`
-        //     diverges (wrong args, returns Self not PgResult<()>, in-process not
-        //     shmem). Contract-divergent; needs the shmem allocator keystone.
+        // DESIGN_DEBT (TD-BUFMGR-AIO-GUC): three bufmgr-seams `::call`ed in live
+        // consumers (backend-storage-aio-read-stream; the bgwriter loop) whose
+        // values come from the unported aio.c / GUC machinery, not this owner:
         //   * maintenance_io_concurrency — the `maintenance_io_concurrency` GUC
         //     value; no backing GUC variable exists in the owner (only a doc note).
         //   * io_method_sync — the `io_method == IOMETHOD_SYNC` test; the `io_method`
@@ -1314,9 +1305,12 @@ mod recurrence_guard {
         //     escapes the guard only because it is `::call`ed inside this owner
         //     crate — the OUTWARD-seam exclusion — whereas bgwriter_flush_after is
         //     called from the bgwriter consumer.)
-        // DELETE each entry as the shmem allocator + aio GUC source land.
-        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_init"),
-        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
+        // (buffer_manager_shmem_size / buffer_manager_shmem_init RETIRED: the owner
+        // now installs both — BufferManagerShmemSize is the faithful add_size/
+        // mul_size accumulator and BufferManagerShmemInit allocate-or-attaches the
+        // four named buffer-pool regions via ShmemInitStruct, then publishes the
+        // process-local pool view, mirroring procarray's ProcArrayShmemInit.)
+        // DELETE each entry as the aio GUC source lands.
         ("backend_storage_buffer_bufmgr", "io_method_sync"),
         ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
         ("backend_storage_buffer_bufmgr", "bgwriter_flush_after"),
