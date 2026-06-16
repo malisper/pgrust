@@ -25,3 +25,9 @@ backend-optimizer-util-paramassign-seams = { path = "../backend-optimizer-util-p
 backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-placeholder-seams" }
 # relids_is_member / relids_is_subset over Relids (relnode.c).
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+# make_tlist_from_pathtarget / apply_pathtarget_labeling_to_tlist (tlist.c).
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+# extract_actual_clauses (restrictinfo.c).
+backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
+# build_physical_tlist (plancat.c).
+backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }

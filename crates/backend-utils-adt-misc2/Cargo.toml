@@ -27,6 +27,10 @@ mcx = { path = "../mcx" }
 # datum, pqformat message helpers). The `domains` family reaches the typcache
 # domain-constraint engine and the base type's fmgr I/O via those same seams.
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# detoast / heaptoast owners reached by expandedrecord's flatten path (real
+# seams, signature-identical).
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 # hashtid/hashtidextended hash the ItemPointer byte image via the merged
 # common/hashfn owner (pure, no-alloc; no seam install needed).

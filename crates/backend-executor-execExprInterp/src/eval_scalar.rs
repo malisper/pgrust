@@ -729,6 +729,139 @@ pub fn ExecEvalParamSet<'mcx>(
     Ok(())
 }
 
+/// Read an `IoCoerce` step payload's `(out_oid, out_coll, in_oid, in_coll,
+/// in_strict, in_args)`: the resolved output/input function OIDs + collations,
+/// the input function's strictness, and the input function's preloaded constant
+/// arg frame (`args[1] = typioparam`, `args[2] = -1`, with `args[0]` a
+/// placeholder the eval fills).
+fn iocoerce_step_inputs<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> (
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    bool,
+    Vec<types_datum::NullableDatum>,
+) {
+    match step_data(state, op) {
+        ExprEvalStepData::IoCoerce {
+            finfo_out,
+            fcinfo_data_out,
+            finfo_in,
+            fcinfo_data_in,
+        } => {
+            let finfo_out = finfo_out
+                .as_ref()
+                .expect("EEOP_IOCOERCE: op->d.iocoerce.finfo_out not resolved");
+            let fcinfo_out = fcinfo_data_out
+                .as_ref()
+                .expect("EEOP_IOCOERCE: op->d.iocoerce.fcinfo_data_out missing");
+            let finfo_in = finfo_in
+                .as_ref()
+                .expect("EEOP_IOCOERCE: op->d.iocoerce.finfo_in not resolved");
+            let fcinfo_in = fcinfo_data_in
+                .as_ref()
+                .expect("EEOP_IOCOERCE: op->d.iocoerce.fcinfo_data_in missing");
+            (
+                finfo_out.fn_oid,
+                fcinfo_out.fncollation,
+                finfo_in.fn_oid,
+                fcinfo_in.fncollation,
+                finfo_in.fn_strict,
+                fcinfo_in.args.clone(),
+            )
+        }
+        other => unreachable!("EEOP_IOCOERCE step carries the wrong payload: {other:?}"),
+    }
+}
+
+/// Shared body of `EEOP_IOCOERCE` (inline) and `EEOP_IOCOERCE_SAFE`
+/// (`ExecEvalCoerceViaIOSafe`): run the source type's output function on the
+/// result cell, then the result type's input function on the resulting cstring.
+/// The C frames preload `args[1]`/`args[2]` (typioparam, -1) at compile; the
+/// resolved `FmgrInfo` cannot cross the seam, so each call dispatches by OID
+/// through `function_call_invoke` (#296). `str == NULL` is the zero `Datum`
+/// word (a NULL cstring pointer), exactly as C tests `str != NULL`.
+fn iocoerce_core<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    safe: bool,
+) -> PgResult<()> {
+    let (out_oid, out_coll, in_oid, in_coll, in_strict, in_args) =
+        iocoerce_step_inputs(state, op);
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+    let cur = state.result_cells.get(resvalue_id);
+
+    // /* call output function (similar to OutputFunctionCall) */
+    // if (*op->resnull) str = NULL; else { args[0]=*resvalue; str = invoke(out); }
+    let str_word: Datum = if cur.isnull {
+        Datum::from_usize(0) // NULL cstring
+    } else {
+        let out_call_args = [types_datum::NullableDatum {
+            value: word_of(&cur.value),
+            isnull: false,
+        }];
+        let (word, _isnull) = function_call_invoke::call(out_oid, out_coll, &out_call_args)?;
+        // Assert(!fcinfo_out->isnull) — output functions never return NULL.
+        word
+    };
+
+    // /* call input function (similar to InputFunctionCall[Safe]) */
+    // if (!finfo_in->fn_strict || str != NULL) { args[0]={str, *resnull}; ... }
+    let str_is_null = str_word.as_usize() == 0;
+    if !in_strict || !str_is_null {
+        // fcinfo_in->args[0].value = PointerGetDatum(str);
+        // fcinfo_in->args[0].isnull = *op->resnull;
+        // (args[1] = typioparam, args[2] = -1 are already preloaded.)
+        let mut in_call_args = in_args;
+        in_call_args[0] = types_datum::NullableDatum {
+            value: str_word,
+            isnull: cur.isnull,
+        };
+
+        if safe {
+            // EEOP_IOCOERCE_SAFE reads SOFT_ERROR_OCCURRED(fcinfo_in->context)
+            // after the call to detect a caught conversion error. The
+            // soft-error sink (ErrorSaveContext on fcinfo->context) is owned by
+            // the not-yet-ported elog/ErrorSaveContext layer (the IoCoerce
+            // frame's context stays None until that lands), so this safe variant
+            // cannot observe the soft error.
+            let _ = (in_oid, in_coll, in_call_args);
+            panic!(
+                "ExecEvalCoerceViaIOSafe: the input function runs under a soft-error \
+                 ErrorSaveContext (fcinfo_in->context) and the arm reads \
+                 SOFT_ERROR_OCCURRED(context) to convert a caught error into a NULL \
+                 result; the soft-error sink is owned by the unported \
+                 elog/ErrorSaveContext layer (IoCoerce frame context is None); \
+                 blocked until that lands"
+            );
+        }
+
+        let (word, isnull) = function_call_invoke::call(in_oid, in_coll, &in_call_args)?;
+        // *op->resvalue = d;  (resnull is unchanged: null iff str was NULL).
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell {
+                value: DatumV::from_usize(word.as_usize()),
+                isnull,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// `EEOP_IOCOERCE` (execExprInterp.c inline case) — the non-soft-error
+/// output-then-input I/O coercion.
+pub fn ExecEvalCoerceViaIO<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    _estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    iocoerce_core(state, op, false)
+}
+
 /// `ExecEvalCoerceViaIOSafe(ExprState *state, ExprEvalStep *op)` — output-then-
 /// input I/O coercion with soft-error handling.
 pub fn ExecEvalCoerceViaIOSafe<'mcx>(
@@ -736,47 +869,8 @@ pub fn ExecEvalCoerceViaIOSafe<'mcx>(
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // char *str;
-    // /* call output function (similar to OutputFunctionCall) */
-    // if (*op->resnull) { str = NULL; }
-    // else {
-    //     fcinfo_out = op->d.iocoerce.fcinfo_data_out;
-    //     fcinfo_out->args[0].value = *op->resvalue;
-    //     fcinfo_out->args[0].isnull = false;
-    //     fcinfo_out->isnull = false;
-    //     str = DatumGetCString(FunctionCallInvoke(fcinfo_out));
-    //     Assert(!fcinfo_out->isnull);
-    // }
-    // /* call input function (similar to InputFunctionCallSafe) */
-    // if (!op->d.iocoerce.finfo_in->fn_strict || str != NULL) {
-    //     fcinfo_in = op->d.iocoerce.fcinfo_data_in;
-    //     fcinfo_in->args[0].value = PointerGetDatum(str);
-    //     fcinfo_in->args[0].isnull = *op->resnull;
-    //     /* second and third arguments are already set up */
-    //     Assert(IsA(fcinfo_in->context, ErrorSaveContext));
-    //     fcinfo_in->isnull = false;
-    //     *op->resvalue = FunctionCallInvoke(fcinfo_in);
-    //     if (SOFT_ERROR_OCCURRED(fcinfo_in->context)) {
-    //         *op->resnull = true; *op->resvalue = (Datum) 0; return;
-    //     }
-    //     /* Should get null result iff str is NULL */
-    // }
-    //
-    // The step payload (d.iocoerce.finfo_in.fn_strict, fcinfo_data_out/in) is
-    // modeled. The genuine blockers are the two call-frame invocations:
-    // writing fcinfo_out->args[0] and FunctionCallInvoke(fcinfo_out), then
-    // fcinfo_in->args[0] and FunctionCallInvoke(fcinfo_in), plus reading the
-    // soft-error sink on fcinfo_in->context. The FunctionCallInfoBaseData is
-    // trimmed (no args[]/isnull/context until fmgr widens it; see crate::justs)
-    // and there is no FunctionCallInvoke seam. Faithful once fmgr lands.
-    let _ = (state, op, estate);
-    panic!(
-        "ExecEvalCoerceViaIOSafe: the output/input FunctionCallInvoke pair \
-         (write fcinfo_out/in->args[0], dispatch, read back, test the soft-error \
-         sink on fcinfo_in->context) needs the fmgr-widened \
-         FunctionCallInfoBaseData (trimmed model has no args[]/isnull/context); \
-         blocked until fmgr lands"
-    )
+    let _ = estate;
+    iocoerce_core(state, op, true)
 }
 
 /// `ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)` — evaluate
@@ -1052,27 +1146,111 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
     //   combine per OR/AND; ...
     // *op->resvalue = result; *op->resnull = resultnull;
     //
-    // The step payload (d.scalararrayop.useOr / finfo.fn_strict / element_type /
-    // typlen/typbyval/typalign / scalar_cell / array_cell / fn_addr) is modeled,
-    // and the *op->resnull NULL-array guard + empty-array fast path are
-    // expressible. But the body's core needs (a) the fcinfo call frame — reading
-    // fcinfo->args[0].isnull, loading each element into fcinfo->args[1], and
-    // dispatching op->d.scalararrayop.fn_addr(fcinfo) — which the trimmed
-    // FunctionCallInfoBaseData cannot hold (fmgr widens it; see crate::justs),
-    // and (b) detoasting + deconstructing the ArrayType (DatumGetArrayTypeP /
-    // ArrayGetNItems / fetch_att over ARR_DATA_PTR + the null bitmap), owned by
-    // the (unported here) arrayfuncs unit, plus get_typlenbyvalalign from the
-    // lsyscache/typcache owner. Faithful once fmgr + arrayfuncs land.
-    let _ = (state, op, estate);
-    panic!(
-        "ExecEvalScalarArrayOp: the per-element comparison loads fcinfo->args[1] \
-         and dispatches op.d.scalararrayop.fn_addr(fcinfo) — needs the \
-         fmgr-widened FunctionCallInfoBaseData (trimmed model has no \
-         args[]/isnull) — and the array detoast/deconstruct \
-         (DatumGetArrayTypeP / ArrayGetNItems / fetch_att + null bitmap) plus \
-         get_typlenbyvalalign belong to the unported arrayfuncs / typcache \
-         owners; blocked until fmgr + arrayfuncs land"
-    )
+    // Read the step payload: comparison fn OID + collation, useOr, strictfunc.
+    let (use_or, strictfunc, fn_oid, collation, scalar_cell) = match step_data(state, op) {
+        ExprEvalStepData::ScalarArrayOp {
+            use_or,
+            finfo,
+            fcinfo_data,
+            scalar_cell,
+            ..
+        } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_SCALARARRAYOP: op->d.scalararrayop.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("EEOP_SCALARARRAYOP: op->d.scalararrayop.fcinfo_data missing");
+            (*use_or, finfo.fn_strict, finfo.fn_oid, fcinfo.fncollation, *scalar_cell)
+        }
+        other => unreachable!("EEOP_SCALARARRAYOP step carries the wrong payload: {other:?}"),
+    };
+
+    let (resvalue_id, resnull_id) = res_cells(state, op);
+
+    // if (*op->resnull) return;  /* NULL array => NULL result */
+    let arr_cell = state.result_cells.get(resvalue_id);
+    if arr_cell.isnull {
+        return Ok(());
+    }
+
+    // arr = DatumGetArrayTypeP(*op->resvalue); detoast + deconstruct.
+    let arraydatum = word_of(&arr_cell.value);
+    let mcx = estate.es_query_cxt;
+    let elemtype = backend_utils_adt_arrayfuncs_seams::array_get_elemtype::call(mcx, arraydatum)?;
+    let tlba = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
+    // deconstruct_array subsumes ArrayGetNItems + the ARR_DATA_PTR / null-bitmap
+    // fetch_att walk: it yields the per-element (Datum, isnull) pairs.
+    let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array::call(
+        mcx,
+        arraydatum,
+        elemtype,
+        tlba.typlen,
+        tlba.typbyval,
+        tlba.typalign as core::ffi::c_char,
+    )?;
+    let nitems = elements.len();
+
+    // if (nitems <= 0) { *op->resvalue = BoolGetDatum(!useOr); *op->resnull = false; return; }
+    if nitems == 0 {
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell { value: DatumV::from_bool(!use_or), isnull: false },
+        );
+        return Ok(());
+    }
+
+    // if (fcinfo->args[0].isnull && strictfunc) { *op->resnull = true; return; }
+    let scalar = state.result_cells.get(scalar_cell);
+    let scalar_isnull = scalar.isnull;
+    let scalar_word = word_of(&scalar.value);
+    if scalar_isnull && strictfunc {
+        state
+            .result_cells
+            .set(resnull_id, ResultCell { value: arr_cell.value, isnull: true });
+        return Ok(());
+    }
+
+    // result = BoolGetDatum(!useOr); resultnull = false;
+    let mut result = !use_or;
+    let mut resultnull = false;
+
+    // Loop over the array elements.
+    for (elt, elt_isnull) in elements.into_iter() {
+        // Call comparison function (strict-null short-circuit on the element).
+        let (this_isnull, thisresult) = if elt_isnull && strictfunc {
+            (true, false)
+        } else {
+            let args = [
+                types_datum::NullableDatum { value: scalar_word, isnull: scalar_isnull },
+                types_datum::NullableDatum { value: elt, isnull: elt_isnull },
+            ];
+            let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            (isnull, Datum::from_usize(word.as_usize()).as_bool())
+        };
+
+        // Combine results per OR or AND semantics.
+        if this_isnull {
+            resultnull = true;
+        } else if use_or {
+            if thisresult {
+                result = true;
+                resultnull = false;
+                break; // needn't look at any more elements
+            }
+        } else if !thisresult {
+            result = false;
+            resultnull = false;
+            break; // needn't look at any more elements
+        }
+    }
+
+    // *op->resvalue = result; *op->resnull = resultnull;
+    state.result_cells.set(
+        resvalue_id,
+        ResultCell { value: DatumV::from_bool(result), isnull: resultnull },
+    );
+    Ok(())
 }
 
 /// `saop_element_hash(struct saophash_hash *tb, Datum key)` — the `SH_HASH_KEY`
@@ -1323,19 +1501,27 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
             //   resultnull = fcinfo->isnull;
             //   if (!inclause) result = !result;
             //
-            // This is the one sub-path that needs the fmgr-widened nullable-arg
-            // call frame (pass args[1].isnull = true, read back fcinfo->isnull):
-            // the function_call2_coll seam (FunctionCall2Coll) only models
-            // non-null args + a non-null result. Mirror-PG-and-panic on the
-            // unported owner.
-            let _ = (scalar_value, scalar_isnull, matchfuncid, collation);
-            panic!(
-                "ExecEvalHashedScalarArrayOp: non-strict no-match-with-nulls branch \
-                 dispatches the equality function with a NULL rhs (args[1].isnull = \
-                 true) and reads back fcinfo->isnull — the function_call2_coll seam \
-                 (FunctionCall2Coll) models only non-null args and a non-null \
-                 result; blocked until the fmgr-widened nullable-arg call frame lands"
-            );
+            // The resolved FmgrInfo cannot cross the seam, so dispatch by
+            // fn_oid through function_call_invoke (#296: the call frame carries
+            // nullable args + collation + isnull). args[1] is the NULL rhs.
+            let args = [
+                types_datum::NullableDatum {
+                    value: word_of(&scalar_value),
+                    isnull: scalar_isnull,
+                },
+                types_datum::NullableDatum {
+                    value: Datum::from_usize(0),
+                    isnull: true,
+                },
+            ];
+            let (word, isnull) = function_call_invoke::call(matchfuncid, collation, &args)?;
+            // result = DatumGetBool(...); resultnull = fcinfo->isnull;
+            result = Datum::from_usize(word.as_usize()).as_bool();
+            resultnull = isnull;
+            // Reverse the result for NOT IN clauses (the function is equality).
+            if !inclause {
+                result = !result;
+            }
         }
     }
 

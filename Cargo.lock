@@ -1968,9 +1968,12 @@ version = "0.0.0"
 dependencies = [
  "backend-access-nbtree-build-seams",
  "backend-access-nbtree-core-seams",
+ "backend-access-table-tableam-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-page",
  "backend-storage-smgr-bulkwrite-seams",
  "backend-utils-activity-small",
+ "backend-utils-misc-guc-seams",
  "backend-utils-sort-tuplesort-seams",
  "mcx",
  "types-core",
@@ -1980,6 +1983,7 @@ dependencies = [
  "types-rel",
  "types-scan",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -7122,6 +7126,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -8112,15 +8117,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-analyzejoins"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-indxpath",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-relnode",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-createplan"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-optimizer-plan-createplan-seams",
+ "backend-optimizer-util-joininfo",
  "backend-optimizer-util-paramassign-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-placeholder-seams",
+ "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
  "mcx",
  "types-error",
  "types-nodes",
@@ -12647,7 +12676,9 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-access-heap-heaptoast-seams",
  "backend-catalog-binary-upgrade-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-partition-seams",

@@ -593,16 +593,11 @@ pub fn ExecInterpExpr<'mcx>(
 
             EEOP_IOCOERCE => {
                 // C: output function then input function over fcinfo->args[0],
-                //    dispatched via FunctionCallInvoke(fcinfo_out/in). Needs the
-                //    fmgr-widened call frame (args[]/isnull); same blocker as
-                //    EEOP_FUNCEXPR.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_IOCOERCE: writes fcinfo_out/in->args[0] and dispatches \
-                     FunctionCallInvoke on the I/O functions, needing the \
-                     fmgr-widened FunctionCallInfoBaseData (trimmed model has no \
-                     args[]/isnull); blocked until fmgr widens the call frame"
-                );
+                //    dispatched via FunctionCallInvoke(fcinfo_out/in). #296: the
+                //    call frame carries args/collation/isnull, so each I/O
+                //    function dispatches by OID through function_call_invoke.
+                eval_scalar::ExecEvalCoerceViaIO(state, op, estate)?;
+                op += 1;
             }
 
             EEOP_IOCOERCE_SAFE => {
