@@ -87,6 +87,7 @@ pub fn init_all() {
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
     backend_catalog_pg_collation::init_seams();
+    backend_catalog_pg_parameter_acl::init_seams();
     backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
@@ -1494,6 +1495,134 @@ mod recurrence_guard {
         // landed alter dispatch can call it; loud-panics until indexing's
         // generic aclitem[] write lands. DELETE when indexing installs it.
         ("backend_catalog_indexing", "update_object_owner_tuple"),
+        // ===================================================================
+        // AUDIT-FIX #345 — blind-spot revealed by the col-4-fallback guard fix.
+        // The 24 merged/audited rows with an EMPTY `crate` column (and the
+        // 3-column rows with no `crate` column at all) were silently exempted
+        // from the install guard. With the fallback in `complete_crate_dirs`
+        // they are now scoped, surfacing these declared-but-uninstalled,
+        // actually-`::call`ed seams on complete owners. Each below is EITHER a
+        // genuinely-unported owner leg OR a handle/contract divergence — NOT a
+        // pure-wiring miss. The owners' wireable legs were installed instead.
+        // ===================================================================
+        //
+        // -- backend-nodes-copyfuncs (K1 plancache-handle de-handle keystone) --
+        // DESIGN_DEBT (TD-COPYFUNCS-PLANCACHE-HANDLES): these 10 are the
+        // `-pc-seams` slice of copyfuncs.c / list.c / setrefs.c::
+        // extract_query_dependencies / clauses.c::expression_planner_with_deps.
+        // They take/return the OPAQUE plancache token newtypes
+        // (`QueryListHandle`/`PlannedStmtListHandle`/`RawStmtHandle`/
+        // `AnalyzedQueryHandle`/`ExprHandle`/`QueryHandle` in types-plancache),
+        // whose storage is owned by the unported parser/planner/plancache
+        // subsystems. copyfuncs's real ported body (`copy_object`) operates on
+        // value-typed `Node`s, NOT these tokens; there is no token->value
+        // registry (forbidden — opacity-inherited-never-introduced). All 10 are
+        // consumed only by the keystone-blocked plancache unit (#159 de-handle).
+        // Install + DELETE when plancache is de-handled onto owned node values.
+        ("backend_nodes_copyfuncs", "copy_query_list"),
+        ("backend_nodes_copyfuncs", "copy_plan_list"),
+        ("backend_nodes_copyfuncs", "copy_raw_stmt"),
+        ("backend_nodes_copyfuncs", "copy_analyzed_query"),
+        ("backend_nodes_copyfuncs", "copy_expr"),
+        ("backend_nodes_copyfuncs", "query_list_elements"),
+        ("backend_nodes_copyfuncs", "plan_list_elements"),
+        ("backend_nodes_copyfuncs", "list_member_oid"),
+        ("backend_nodes_copyfuncs", "extract_query_dependencies"),
+        ("backend_nodes_copyfuncs", "expression_planner_with_deps"),
+        //
+        // -- backend-commands-trigger (F1 firing/DDL leg still todo) --
+        // DESIGN_DEBT (TD-TRIGGER-F1): trigger.c is CATALOG `merged` only for
+        // its F0 value-type keystone (the trigger value structs landed); F1 —
+        // the trigger firing logic + DDL (RemoveTriggerById / renametrig) — is
+        // still todo. The 23 accessor seams are keyed by the OPAQUE foreign
+        // handles `types_ri_triggers::{TriggerDataRef, TriggerRef,
+        // TupleTableSlotRef}` (u64 newtypes), which ri_triggers.c treats as
+        // never-deref'd foreign tokens (sanctioned semantic-opacity per the F0
+        // keystone note); the trigger manager's real value-typed TriggerData /
+        // Trigger / TupleTableSlot do not back these tokens, and inventing a
+        // token->value registry is forbidden. `RemoveTriggerById` / `renametrig`
+        // are the unported DDL legs (no body in the owner). `slot_getattr` here
+        // is the trigger-manager (handle) flavor ri_triggers.c calls — a
+        // distinct seam crate from execTuples::slot_getattr; it stays uninstalled
+        // until trigger F1 lands. Install + DELETE each as trigger F1 lands.
+        ("backend_commands_trigger", "called_as_trigger"),
+        ("backend_commands_trigger", "tg_event"),
+        ("backend_commands_trigger", "tg_relation_oid"),
+        ("backend_commands_trigger", "tg_relation_name"),
+        ("backend_commands_trigger", "tg_relation_namespace"),
+        ("backend_commands_trigger", "tg_relation_owner"),
+        ("backend_commands_trigger", "tg_relation_is_partitioned"),
+        ("backend_commands_trigger", "tg_relation_att_name"),
+        ("backend_commands_trigger", "tg_relation_att_type"),
+        ("backend_commands_trigger", "tg_relation_att_collation"),
+        ("backend_commands_trigger", "tg_relation_tuple_satisfies_snapshot_self"),
+        ("backend_commands_trigger", "tg_trigger"),
+        ("backend_commands_trigger", "tg_trigslot"),
+        ("backend_commands_trigger", "tg_newslot"),
+        ("backend_commands_trigger", "tg_trigtuple"),
+        ("backend_commands_trigger", "tg_newtuple"),
+        ("backend_commands_trigger", "trigger_constraint"),
+        ("backend_commands_trigger", "trigger_constrrelid"),
+        ("backend_commands_trigger", "trigger_name"),
+        ("backend_commands_trigger", "slot_attisnull"),
+        ("backend_commands_trigger", "slot_is_current_xact_tuple"),
+        ("backend_commands_trigger", "slot_getattr"),
+        ("backend_commands_trigger", "pk_datum_image_eq"),
+        ("backend_commands_trigger", "RemoveTriggerById"),
+        ("backend_commands_trigger", "renametrig"),
+        //
+        // -- backend-access-index-genam (relcache-build scan helpers unported) --
+        // DESIGN_DEBT (TD-GENAM-RELCACHE-SCANS): the genam unit ported genam.c's
+        // systable_* primitive engine (begin/getnext/endscan, installed) but NOT
+        // these higher-level helpers. The 6 `relcache_*`/`scan_pg_*` seams are
+        // relcache.c's own systable scans (RelationGetIndexList /
+        // GetStatExtList / GetFKeyList / GetExclusionInfo / AttrDefaultFetch /
+        // CheckNNConstraintFetch) — relcache calls them OUTWARD, but the scan
+        // bodies (systable_beginscan over pg_index/pg_statistic_ext/pg_constraint/
+        // pg_attrdef + per-row deform + DeconstructFkConstraintRow / get_opcode /
+        // detoast) are not yet written in the genam owner (only the DTO structs
+        // exist). `systable_inplace_update` (the buffer-locking retry +
+        // heap_inplace_update_and_unlock loop) and `build_index_value_description`
+        // (the per-key out-function + ACL-visibility render) are genam.c
+        // functions not yet bodied. Install + DELETE each as the genam unit
+        // ports the corresponding scan/update/render body.
+        ("backend_access_index_genam", "relcache_scan_pg_index"),
+        ("backend_access_index_genam", "relcache_scan_pg_statistic_ext"),
+        ("backend_access_index_genam", "relcache_scan_pg_constraint_fkeys"),
+        ("backend_access_index_genam", "relcache_exclusion_info"),
+        ("backend_access_index_genam", "scan_pg_attrdef"),
+        ("backend_access_index_genam", "scan_pg_constraint_nncheck"),
+        ("backend_access_index_genam", "systable_inplace_update"),
+        ("backend_access_index_genam", "build_index_value_description"),
+        //
+        // -- backend-utils-cache-relcache (FDW-routine cache slot not modeled) --
+        // DESIGN_DEBT (TD-RELCACHE-FDWROUTINE): `relation_fdwroutine` /
+        // `set_relation_fdwroutine` read/write the relcache entry's
+        // `rd_fdwroutine` cache slot (foreign.c `GetFdwRoutineForRelation`
+        // memoizes the resolved `FdwRoutine` there). `types_rel::RelationData`
+        // does NOT model an `rd_fdwroutine` field yet, so the relcache owner has
+        // no slot to read/cache into. The other 6 newly-surfaced relcache seams
+        // (critical_relcaches_built / critical_shared_relcaches_built /
+        // assert_could_get_relation / rd_indcollation / index_getprocid /
+        // relation_set_new_relfilenumber) WERE installed in this lane — they back
+        // onto existing owned state. Install + DELETE these two when the relcache
+        // entry gains the `rd_fdwroutine` cache slot.
+        ("backend_utils_cache_relcache", "relation_fdwroutine"),
+        ("backend_utils_cache_relcache", "set_relation_fdwroutine"),
+        //
+        // -- backend-utils-cache-inval (OID-refetch wrapper unported) --
+        // DESIGN_DEBT (TD-INVAL-OID-REFETCH): `cache_invalidate_heap_tuple`
+        // (class_id, object_id) is the `CacheInvalidateHeapTuple(rel, tuple,
+        // NULL)` reduction the typecmds ALTER DOMAIN paths need — re-fetch the
+        // catalog row by OID (table_open(class_id) + syscache fetch by
+        // object_id), then run the shared invalidation logic. The inval owner
+        // HAS the shared engine (`cache_invalidate_heap_tuple_common(relation,
+        // tuple, ...)`) but NOT the (classId, objectId) re-fetch wrapper around
+        // it (it has no catalog open + OID syscache fetch by dynamic class). The
+        // signature diverges (OID pair vs &RelationData + &HeapTupleData), so no
+        // bare `::set` of the common body fits. Install + DELETE when the inval
+        // owner adds the OID-keyed re-fetch wrapper.
+        ("backend_utils_cache_inval", "cache_invalidate_heap_tuple"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
@@ -1518,18 +1647,37 @@ mod recurrence_guard {
                 continue; // header
             }
             let cols: Vec<&str> = line.split('\t').collect();
-            if cols.len() < 4 {
+            // A row may have only 3 columns (no trailing `crate`/`notes` tabs at
+            // all). Earlier this `< 4` skip silently EXEMPTED such complete
+            // owners (e.g. backend-utils-cache-inval) — same blind spot as the
+            // empty col-4 below. Only the unit (col-1) + status (col-3) are
+            // required; treat a missing `crate` column as empty.
+            if cols.len() < 3 {
                 continue;
             }
             let status = cols[2].trim();
-            let crate_col = cols[3];
+            let crate_col = cols.get(3).copied().unwrap_or("");
             if !is_complete_status(status) {
                 continue;
             }
+            // BLIND-SPOT FIX (empty `crate` column): many merged/audited rows
+            // leave col-4 (`crate`) blank because the crate dir name equals the
+            // unit name (col-1). Skipping those rows silently EXEMPTED their
+            // owners from the install guard — a complete owner's declared-but-
+            // unset, actually-called seams would panic at runtime undetected.
+            // Fall back to the unit name (col-1) so the owner enters `complete`.
+            let mut any = false;
             for c in crate_col.split(|ch| ch == '+' || ch == ',') {
                 let c = c.trim();
                 if !c.is_empty() {
                     complete.insert(c.to_string());
+                    any = true;
+                }
+            }
+            if !any {
+                let unit = cols[0].trim();
+                if !unit.is_empty() {
+                    complete.insert(unit.to_string());
                 }
             }
         }
