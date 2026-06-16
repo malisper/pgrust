@@ -13111,6 +13111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-ascii"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
+ "types-error",
+ "types-fmgr",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-adt-cash"
 version = "0.0.0"
 dependencies = [
