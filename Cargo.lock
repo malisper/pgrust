@@ -8791,6 +8791,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-auth"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqformat",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small-seams",
+ "common-ip",
+ "libc",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "types-authid",
+ "types-core",
+ "types-error",
+ "types-net",
+ "types-network",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-libpq-auth-seams"
 version = "0.0.0"
 dependencies = [
@@ -17876,6 +17902,7 @@ dependencies = [
  "backend-jit-jit",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-libpq-auth",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
