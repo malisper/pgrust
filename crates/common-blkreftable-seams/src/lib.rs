@@ -94,26 +94,10 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 // Reader side: incremental on-disk reading of a block-reference table.
 // `pg_wal_summary_contents` drives these over a `BlockRefTableReaderHandle`
-// produced by the walsummary owner's `wal_summary_create_reader` seam.
+// produced by the walsummary owner's `wal_summary_create_reader` seam (which
+// itself calls `common_blkreftable::create_block_ref_table_reader` directly — a
+// plain pub fn, not a seam — to mint the handle).
 // ---------------------------------------------------------------------------
-
-seam_core::seam!(
-    /// `CreateBlockRefTableReader(read_callback, read_callback_arg,
-    /// error_filename, error_callback, error_callback_arg)` (blkreftable.c) —
-    /// initialize an on-disk block-reference-table reader and verify the magic
-    /// number. The `reader` handle has already been minted by the
-    /// walsummary owner (which owns the open `File` cursor and the
-    /// `ReadWalSummary` / `ReportWalSummaryError` callbacks behind that handle:
-    /// blkreftable's `io_callback` / `error_callback` reach them through the
-    /// walsummary read/report seams keyed by this handle). `error_filename`
-    /// supplies the `%s` of the magic-mismatch message. `Err` carries the
-    /// initial magic-number read / wrong-magic `ereport(ERROR)`.
-    pub fn create_block_ref_table_reader<'mcx>(
-        mcx: Mcx<'mcx>,
-        reader: BlockRefTableReaderHandle,
-        error_filename: &str,
-    ) -> PgResult<()>
-);
 
 seam_core::seam!(
     /// `BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
