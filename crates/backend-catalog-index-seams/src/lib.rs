@@ -7,9 +7,13 @@
 /// supply. The C `IndexInfo *indexInfo` crosses by value; the index column
 /// names cross as an owned `Vec<String>` (the C `const List *indexColNames`);
 /// the C `const Oid *collationIds` / `const Oid *opclassIds` /
-/// `const int16 *coloptions` arrays cross as owned `Vec`s. `opclassOptions`,
-/// `stattargets`, and the `Oid *constraintId` out-parameter are NULL/ignored
-/// at the current call sites and are not carried.
+/// `const int16 *coloptions` arrays cross as owned `Vec`s. The C
+/// `const Datum *opclassOptions` (per-column attoptions, one `Datum` per index
+/// attribute) crosses as [`IndexCreateArgs::opclass_options`]: `None` is the C
+/// NULL `opclassOptions` (no per-column opclass options — the common case);
+/// `Some(vec)` carries one canonical `Datum` per index attribute (`Datum::null()`
+/// for a column with no options). `stattargets` remains NULL/ignored at the
+/// current call sites and is not carried.
 #[derive(Debug)]
 pub struct IndexCreateArgs<'mcx> {
     /// `const char *indexRelationName`.
@@ -38,6 +42,11 @@ pub struct IndexCreateArgs<'mcx> {
     pub coloptions: std::vec::Vec<i16>,
     /// `Datum reloptions`.
     pub reloptions: types_tuple::Datum<'mcx>,
+    /// `const Datum *opclassOptions` — per-column attoptions (one canonical
+    /// `Datum` per index attribute; `Datum::null()` for a column with no
+    /// options). `None` ⇒ the C NULL `opclassOptions` (no per-column opclass
+    /// options at all).
+    pub opclass_options: std::option::Option<std::vec::Vec<types_tuple::Datum<'mcx>>>,
     /// `bits16 flags`.
     pub flags: u16,
     /// `bits16 constr_flags`.
@@ -50,14 +59,18 @@ pub struct IndexCreateArgs<'mcx> {
 
 seam_core::seam!(
     /// `index_create(heapRelation, ...)` (catalog/index.c): create the
-    /// catalog entries for a new index and build it. Returns the new index
-    /// relation's OID. `Err` carries the catalog-mutation / validation
-    /// `ereport(ERROR)`s and OOM. The open `heapRelation` crosses by
+    /// catalog entries for a new index and build it. Returns
+    /// `(indexRelationId, createdConstraintId)` — the new index relation's OID
+    /// and the OID of the constraint created for it (the C `Oid *constraintId`
+    /// out-parameter; `InvalidOid` when no constraint was created, mirroring the
+    /// C contract where `*constraintId` is only written on the
+    /// `INDEX_CREATE_ADD_CONSTRAINT` path). `Err` carries the catalog-mutation /
+    /// validation `ereport(ERROR)`s and OOM. The open `heapRelation` crosses by
     /// reference; the caller retains ownership and closes it afterward.
     pub fn index_create<'mcx>(
         heap_relation: &types_rel::Relation<'mcx>,
         args: IndexCreateArgs<'mcx>,
-    ) -> types_error::PgResult<types_core::primitive::Oid>
+    ) -> types_error::PgResult<(types_core::primitive::Oid, types_core::primitive::Oid)>
 );
 
 /// `IndexStateFlagsAction` (`catalog/index.h`) — the state transition
@@ -259,6 +272,30 @@ seam_core::seam!(
         params: types_cluster::ReindexParams,
     ) -> types_error::PgResult<()>
 );
+seam_core::seam!(
+    /// `reindex_index(stmt, indexId, skip_constraint_checks, persistence,
+    /// params)` (catalog/index.c, file-static): rebuild one existing index in
+    /// place — re-acquire locks, reset its relfilenumber, re-run `index_build`,
+    /// reset `pg_index` validity, and fire the post-reindex hook. Reached from
+    /// the non-concurrent `ReindexIndex` command driver (indexcmds.c).
+    ///
+    /// Owned by this unit (catalog/index.c). Its substrate
+    /// (`SetReindexProcessing`/`ResetReindexProcessing`,
+    /// `RelationSetNewRelfilenumber`, `reindex_index`'s catalog-validity reset,
+    /// `try_index_open`/`try_table_open`) is not yet ported, so the owner does
+    /// not install this from `init_seams()` and a call panics loudly
+    /// (`mirror-pg-and-panic`) until that lands. `Err` carries the
+    /// build/catalog `ereport(ERROR)` surface.
+    pub fn reindex_index<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_nodes::ddlnodes::ReindexStmt<'mcx>,
+        index_id: types_core::Oid,
+        skip_constraint_checks: bool,
+        persistence: i8,
+        params: types_cluster::ReindexParams,
+    ) -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `IndexGetRelation(indexId, missing_ok)` (index.c).
     pub fn index_get_relation(index_id: types_core::Oid, missing_ok: bool) -> types_error::PgResult<types_core::Oid>

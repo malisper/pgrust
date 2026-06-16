@@ -351,6 +351,7 @@ fn create_toast_table<'mcx>(
             opclass_ids: opclassIds.to_vec(),
             coloptions: coloptions.to_vec(),
             reloptions: Datum::null(), // (Datum) 0
+            opclass_options: None, // C: opclassOptions == NULL
             flags: INDEX_CREATE_IS_PRIMARY,
             constr_flags: 0,
             allow_system_table_mods: true,

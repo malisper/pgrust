@@ -60,6 +60,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_opclass_options(indrel, attnum, attoptions, validate)` (indexam.c):
+    /// parse (and optionally validate) the opclass-specific per-column options
+    /// for an index column, returning the packed `local_relopts` bytea image
+    /// (`None` when the column has no options and the opclass defines no options
+    /// support procedure). `attoptions` is the canonical attoptions `Datum`
+    /// (`Datum::null()` ⇒ no options). Reached from `index_create` to validate a
+    /// CREATE INDEX's per-column opclass options. The owner
+    /// (`backend-access-index-indexam`) installs it from `init_seams()`; until
+    /// then a call panics loudly. `Err` carries the opclass-options
+    /// `ereport(ERROR)` surface (including the "operator class %s has no options"
+    /// error).
+    pub fn index_opclass_options<'mcx>(
+        indrel: &types_rel::Relation<'mcx>,
+        attnum: types_core::primitive::AttrNumber,
+        attoptions: types_tuple::Datum<'mcx>,
+        validate: bool,
+    ) -> types_error::PgResult<std::option::Option<std::vec::Vec<u8>>>
+);
+
+seam_core::seam!(
     /// `index_beginscan_parallel(heaprel, indexrel, instrument, nkeys,
     /// norderbys, pscan)` (indexam.c): begin a parallel index scan attached to
     /// the shared `ParallelIndexScanDesc`. Fallible on OOM / `ereport(ERROR)`.

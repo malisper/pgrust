@@ -4327,6 +4327,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-table-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
