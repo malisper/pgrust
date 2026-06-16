@@ -292,6 +292,7 @@ backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

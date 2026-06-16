@@ -3693,6 +3693,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-indexing"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-index-indexam",
+ "backend-catalog-index-seams",
+ "backend-catalog-indexing-seams",
+ "backend-executor-execTuples",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-indexing-seams"
 version = "0.0.0"
 dependencies = [
@@ -12640,7 +12661,9 @@ name = "backend-utils-adt-datetime-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-datetime",
  "types-misc-more2",
+ "types-pgtime",
 ]
 
 [[package]]
@@ -12722,6 +12745,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-formatting"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-adt-isoweek-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-fmgr-core",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-cash",
+ "types-core",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-locale",
+ "types-numeric",
+ "types-pgtime",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-adt-formatting-seams"
 version = "0.0.0"
 dependencies = [
@@ -12757,6 +12806,14 @@ dependencies = [
  "backend-utils-adt-geo-ops-seams",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-isoweek-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-datetime",
 ]
 
 [[package]]
@@ -13238,7 +13295,9 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datetime",
  "types-error",
+ "types-pgtime",
  "types-tuple",
 ]
 
@@ -15862,6 +15921,7 @@ dependencies = [
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
  "backend-utils-adt-misc2",
@@ -16108,6 +16168,14 @@ name = "types-crypto"
 version = "0.0.0"
 
 [[package]]
+name = "types-datetime"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-pgtime",
+]
+
+[[package]]
 name = "types-datum"
 version = "0.0.0"
 dependencies = [
@@ -16247,6 +16315,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-nodes",
  "types-scan",
  "types-storage",
  "types-tableam",
