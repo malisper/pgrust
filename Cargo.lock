@@ -4131,6 +4131,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-inherits"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-inherits-seams",
+ "backend-parser-parse-type",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-inherits-seams"
 version = "0.0.0"
 dependencies = [
@@ -15527,6 +15552,7 @@ dependencies = [
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-enum",
+ "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-range",
