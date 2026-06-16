@@ -14,6 +14,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_strong_random_init(void)` (port/pg_strong_random.c): per-process
+    /// initialization of the strong-random generator, called once before any
+    /// `pg_strong_random` in a process (notably on the child side of
+    /// `fork_process`). A documented no-op for every supported randomness
+    /// source (OpenSSL `RAND_*`, Win32 `CryptGenRandom`, `/dev/urandom`),
+    /// retained only for backwards compatibility with extensions. Lives in the
+    /// same unported owner (`port-pg-strong-random`) as `pg_strong_random`, so
+    /// a call panics loudly until that owner lands.
+    pub fn pg_strong_random_init()
+);
+
+seam_core::seam!(
     /// The current real timestamp in nanoseconds since the UNIX epoch
     /// (`clock_gettime(CLOCK_REALTIME)` combined as `tv_sec * 1e9 + tv_nsec`, or
     /// `gettimeofday` as `tv_sec * 1e9 + tv_usec * 1e3` on platforms without
