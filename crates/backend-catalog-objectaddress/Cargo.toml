@@ -17,6 +17,7 @@ types-catalog = { path = "../types-catalog" }
 types-snapshot = { path = "../types-snapshot" }
 types-acl = { path = "../types-acl" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
