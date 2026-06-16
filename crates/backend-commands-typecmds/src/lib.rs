@@ -53,9 +53,9 @@ use backend_catalog_pg_type::{
     makeArrayTypeName, makeMultirangeTypeName, moveArrayTypeName, TypeCreate, TypeShellMake,
 };
 use backend_utils_error::ereport;
-use mcx::Mcx;
+use mcx::{Mcx, MemoryContext};
 
-use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
+use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
 use types_catalog::catalog::TYPE_RELATION_ID;
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 use types_catalog::pg_type::{
@@ -66,9 +66,10 @@ use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::pg_error::ErrorLocation;
 use types_error::{
     PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use types_nodes::parsenodes::OBJECT_FUNCTION;
 use types_parsenodes::{
@@ -97,7 +98,8 @@ use backend_commands_functioncmds_seams::{
 };
 use backend_commands_opclasscmds_seams::get_opclass_oid;
 use backend_utils_cache_lsyscache_seams::{
-    func_volatile, get_func_rettype, get_namespace_name, get_opclass_input_type, get_typcollation,
+    func_volatile, get_func_rettype, get_multirange_range, get_namespace_name,
+    get_opclass_input_type, get_range_multirange, get_rel_relkind, get_typcollation,
     get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype, type_is_collatable,
 };
 use backend_utils_cache_syscache_seams::get_type_oid;
@@ -2152,8 +2154,1628 @@ pub fn DefineCompositeType<'mcx>(
 }
 
 // ===========================================================================
+// F3 (DOMAIN) + F4 (ALTER TYPE / RENAME / namespace / owner)
+//
+// The catalog WRITES go through pg_type owner seams (set_type_owner /
+// set_type_namespace / set_type_not_null / set_domain_default /
+// alter_type_recurse_update) and the ported pg_constraint / namespace /
+// dependency / pg_shdepend / pg_depend / objectaccess owners. The
+// executor-VALIDATE scans and the parser DEFAULT/CHECK expression cook
+// (cookDefault/transformExpr/deparse_expression/nodeToString) are unported and
+// seam-and-panic through this unit's own outward seams (validate_domain_*,
+// cook_default, deparse_expression, node_to_string, domain_add_check_constraint,
+// domain_add_not_null_constraint). The composite-rel ALTER paths
+// (RenameRelationInternal / ATExecChangeOwner / AlterRelationNamespaceInternal)
+// cross tablecmds-seams (no tablecmds owner yet → panic).
+// ===========================================================================
+
+use types_catalog::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
+use types_catalog::pg_type::{
+    TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN as PGT_TYPTYPE_DOMAIN,
+};
+use types_nodes::ddlnodes::{ConstrType, CONSTR_CHECK, CONSTR_DEFAULT, CONSTR_NOTNULL, CONSTR_NULL};
+use types_nodes::nodes::Node as RichNode;
+use types_nodes::parsenodes::{DropBehavior, ObjectType, DROP_RESTRICT, OBJECT_DOMAIN, OBJECT_SCHEMA};
+use types_nodes::primnodes::Expr;
+
+/// `F_DOMAIN_IN` (fmgroids.h) — `domain_in`.
+const F_DOMAIN_IN: Oid = 4150;
+/// `F_DOMAIN_RECV` (fmgroids.h) — `domain_recv`.
+const F_DOMAIN_RECV: Oid = 4151;
+
+/// `RELKIND_COMPOSITE_TYPE` ('c'), as `u8` (matches `get_rel_relkind`).
+const RELKIND_COMPOSITE_TYPE: u8 = b'c';
+/// `ConstraintRelationId` — pg_constraint's OID (catalog).
+const ConstraintRelationId: Oid = types_catalog::catalog::CONSTRAINT_RELATION_ID;
+/// `NamespaceRelationId` — pg_namespace's OID.
+const NamespaceRelationId: Oid = NAMESPACE_RELATION_ID;
+/// `RelationRelationId` — pg_class's OID.
+const RelationRelationId: Oid = RELATION_RELATION_ID;
+/// `AccessExclusiveLock` (lockdefs.h).
+const AccessExclusiveLock: i32 = 8;
+
+/// `makeTypeNameFromNameList(names)` — wrap a bare name list as the resolver
+/// `TypeName` consumed by the parse_type.c seams.
+fn type_name_from_namelist(names: &[String]) -> types_opclass::TypeName {
+    types_opclass::TypeName {
+        names: names.to_vec(),
+        typeOid: InvalidOid,
+        setof: false,
+        pct_type: false,
+        typemod: -1,
+        location: -1,
+    }
+}
+
+/// `typenameTypeId(NULL, makeTypeNameFromNameList(names))`.
+fn typename_type_id_from_names(names: &[String]) -> PgResult<Oid> {
+    backend_parser_parse_type_seams::typename_type_id::call(&type_name_from_namelist(names))
+}
+
+/// `SearchSysCacheCopy1(TYPEOID, oid)` + `GETSTRUCT(Form_pg_type)` projected to
+/// the fixed-part [`FormData_pg_type`]; `elog(ERROR, "cache lookup failed for
+/// type %u")` on a missing row (mirrors the C `!HeapTupleIsValid`).
+fn read_type_form(type_oid: Oid) -> PgResult<types_tuple::pg_type::FormData_pg_type> {
+    match backend_utils_cache_syscache_seams::pg_type_form::call(type_oid)? {
+        Some(f) => Ok(f),
+        None => ereport(ERROR)
+            .errmsg_internal(format!("cache lookup failed for type {type_oid}"))
+            .finish(errloc(0, "typecmds"))
+            .map(|()| unreachable!()),
+    }
+}
+
+/// `IsTrueArrayType(typTup)` (typecmds.c:120) — a true array type has a nonzero
+/// `typelem` and uses `array_subscript_handler` as its `typsubscript`.
+fn is_true_array_type(typ: &types_tuple::pg_type::FormData_pg_type) -> bool {
+    OidIsValid(typ.typelem) && typ.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
+}
+
+/// `format_type_be(oid)` text.
+fn format_type_be(oid: Oid) -> PgResult<String> {
+    format_type_be_owned::call(oid)
+}
+
+/// `NameStr(typTup->typname)`.
+fn type_name_str(typ: &types_tuple::pg_type::FormData_pg_type) -> String {
+    String::from_utf8_lossy(typ.typname.name_str()).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// checkDomainOwner   (typecmds.c:3484)
+// ---------------------------------------------------------------------------
+
+/// `checkDomainOwner(tup)` (typecmds.c:3484) — verify the type is a domain and
+/// the current user owns it.
+pub fn checkDomainOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
+    /* Check that this is actually a domain */
+    if typ.typtype != PGT_TYPTYPE_DOMAIN {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a domain", format_type_be(typ.oid)?))
+            .finish(errloc(3490, "checkDomainOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* Permission check: must own type */
+    if !backend_catalog_aclchk_seams::object_ownercheck::call(
+        TypeRelationId,
+        typ.oid,
+        get_user_id::call(),
+    )? {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(
+            types_acl::acl::ACLCHECK_NOT_OWNER,
+            typ.oid,
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AlterDomainDefault   (typecmds.c:2613)
+// ---------------------------------------------------------------------------
+
+/// `AlterDomainDefault(names, defaultRaw)` (typecmds.c:2613) — ALTER DOMAIN
+/// SET/DROP DEFAULT.
+pub fn AlterDomainDefault<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    default_raw: Option<&RichNode>,
+) -> PgResult<ObjectAddress> {
+    let domainoid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(domainoid)?;
+
+    /* Check it's a domain and check user has permission for ALTER DOMAIN */
+    checkDomainOwner(&typ)?;
+
+    let mut default_value: Option<String> = None;
+    let mut default_bin: Option<String> = None;
+
+    if let Some(raw) = default_raw {
+        /* Cook the colDef->raw_expr into an expression. */
+        let default_expr = me::cook_default::call(
+            raw.clone_in(mcx)?,
+            typ.typbasetype,
+            typ.typtypmod,
+            type_name_str(&typ),
+        )?;
+
+        /*
+         * If the expression is just a NULL constant, we treat the command like
+         * ALTER ... DROP DEFAULT.
+         */
+        let is_null_const = match default_expr.as_ref() {
+            None => true,
+            Some(RichNode::Expr(Expr::Const(c))) => c.constisnull,
+            Some(_) => false,
+        };
+        if is_null_const {
+            /* Default is NULL, drop it */
+            default_value = None;
+            default_bin = None;
+        } else {
+            let expr = default_expr.unwrap();
+            /* require a valid textual representation (deparse) */
+            default_value = Some(me::deparse_expression::call(expr.clone_in(mcx)?)?);
+            default_bin = Some(me::node_to_string::call(expr)?);
+        }
+    }
+    /* else: ALTER ... DROP DEFAULT — both None */
+
+    /* pg_type write + GenerateTypeDependencies + hook (pg_type owner). */
+    backend_catalog_pg_type_seams::set_domain_default::call(domainoid, default_value, default_bin)?;
+
+    let _ = mcx;
+    Ok(object_address_set_type(domainoid))
+}
+
+// ---------------------------------------------------------------------------
+// AlterDomainNotNull   (typecmds.c:2742)
+// ---------------------------------------------------------------------------
+
+/// `AlterDomainNotNull(names, notNull)` (typecmds.c:2742) — ALTER DOMAIN
+/// SET/DROP NOT NULL.
+pub fn AlterDomainNotNull<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    not_null: bool,
+) -> PgResult<ObjectAddress> {
+    let domainoid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(domainoid)?;
+
+    checkDomainOwner(&typ)?;
+
+    /* Is the domain already set to the desired constraint? */
+    if typ.typnotnull == not_null {
+        return Ok(InvalidObjectAddress());
+    }
+
+    if not_null {
+        let constr = make_constraint(mcx, CONSTR_NOTNULL);
+        me::domain_add_not_null_constraint::call(
+            domainoid,
+            typ.typnamespace,
+            typ.typbasetype,
+            typ.typtypmod,
+            constr,
+            type_name_str(&typ),
+            false,
+        )?;
+        me::validate_domain_not_null_constraint::call(domainoid)?;
+    } else {
+        let conoid = backend_catalog_pg_constraint_seams::find_domain_not_null_constraint_oid::call(
+            mcx, domainoid,
+        )?;
+        if !OidIsValid(conoid) {
+            return ereport(ERROR)
+                .errmsg_internal(format!(
+                    "could not find not-null constraint on domain \"{}\"",
+                    type_name_str(&typ)
+                ))
+                .finish(errloc(2796, "AlterDomainNotNull"))
+                .map(|()| unreachable!());
+        }
+        backend_catalog_dependency_seams::perform_deletion::call(
+            ConstraintRelationId,
+            conoid,
+            0,
+            DROP_RESTRICT,
+            0,
+        )?;
+    }
+
+    /* Okay to update pg_type row. */
+    backend_catalog_pg_type_seams::set_type_not_null::call(domainoid, not_null)?;
+
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        TypeRelationId,
+        domainoid,
+        0,
+    )?;
+
+    Ok(object_address_set_type(domainoid))
+}
+
+// ---------------------------------------------------------------------------
+// AlterDomainDropConstraint   (typecmds.c:2828)
+// ---------------------------------------------------------------------------
+
+/// `AlterDomainDropConstraint(names, constrName, behavior, missing_ok)`
+/// (typecmds.c:2828).
+pub fn AlterDomainDropConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    constr_name: &str,
+    behavior: DropBehavior,
+    missing_ok: bool,
+) -> PgResult<ObjectAddress> {
+    let domainoid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(domainoid)?;
+
+    checkDomainOwner(&typ)?;
+
+    /*
+     * Find and remove the target constraint (pg_constraint scan + the
+     * CONSTRAINT_NOTNULL => typnotnull=false side-effect + performDeletion).
+     */
+    let (found, was_notnull) = backend_catalog_pg_constraint_seams::drop_domain_constraint::call(
+        mcx,
+        domainoid,
+        constr_name.to_string(),
+        behavior,
+    )?;
+
+    if was_notnull {
+        backend_catalog_pg_type_seams::set_type_not_null::call(domainoid, false)?;
+    }
+
+    if !found {
+        if !missing_ok {
+            return ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!(
+                    "constraint \"{constr_name}\" of domain \"{}\" does not exist",
+                    type_name_str(&typ)
+                ))
+                .finish(errloc(2906, "AlterDomainDropConstraint"))
+                .map(|()| unreachable!());
+        } else {
+            ereport(WARNING)
+                .errmsg(format!(
+                    "constraint \"{constr_name}\" of domain \"{}\" does not exist, skipping",
+                    type_name_str(&typ)
+                ))
+                .finish(errloc(2910, "AlterDomainDropConstraint"))?;
+        }
+    }
+
+    /*
+     * Send out an sinval message for the domain (CacheInvalidateHeapTuple), so
+     * dependent plans get rebuilt; this command doesn't change the pg_type row.
+     */
+    backend_utils_cache_inval_seams::cache_invalidate_heap_tuple::call(TypeRelationId, domainoid)?;
+
+    Ok(object_address_set_type(domainoid))
+}
+
+// ---------------------------------------------------------------------------
+// AlterDomainAddConstraint   (typecmds.c:2934)
+// ---------------------------------------------------------------------------
+
+/// `AlterDomainAddConstraint(names, newConstraint, constrAddr)` (typecmds.c:2934).
+pub fn AlterDomainAddConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    new_constraint: &RichNode,
+    want_constr_addr: bool,
+) -> PgResult<(ObjectAddress, Option<ObjectAddress>)> {
+    let domainoid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(domainoid)?;
+
+    checkDomainOwner(&typ)?;
+
+    let constr = match new_constraint {
+        RichNode::Constraint(c) => c,
+        _ => {
+            return ereport(ERROR)
+                .errmsg_internal(format!(
+                    "unrecognized node type: {}",
+                    "AlterDomainAddConstraint: not a Constraint"
+                ))
+                .finish(errloc(2963, "AlterDomainAddConstraint"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    /* enforced by parser */
+    debug_assert!(constr.contype == CONSTR_CHECK || constr.contype == CONSTR_NOTNULL);
+
+    let mut constr_addr: Option<ObjectAddress> = None;
+
+    if constr.contype == CONSTR_CHECK {
+        let (ccbin, addr) = me::domain_add_check_constraint::call(
+            domainoid,
+            typ.typnamespace,
+            typ.typbasetype,
+            typ.typtypmod,
+            new_constraint.clone_in(mcx)?,
+            type_name_str(&typ),
+            want_constr_addr,
+        )?;
+        constr_addr = addr;
+
+        if !constr.skip_validation {
+            me::validate_domain_check_constraint::call(domainoid, ccbin)?;
+        }
+
+        backend_utils_cache_inval_seams::cache_invalidate_heap_tuple::call(
+            TypeRelationId,
+            domainoid,
+        )?;
+    } else if constr.contype == CONSTR_NOTNULL {
+        /* Is the domain already set NOT NULL? */
+        if typ.typnotnull {
+            return Ok((InvalidObjectAddress(), None));
+        }
+        constr_addr = me::domain_add_not_null_constraint::call(
+            domainoid,
+            typ.typnamespace,
+            typ.typbasetype,
+            typ.typtypmod,
+            new_constraint.clone_in(mcx)?,
+            type_name_str(&typ),
+            want_constr_addr,
+        )?;
+
+        if !constr.skip_validation {
+            me::validate_domain_not_null_constraint::call(domainoid)?;
+        }
+
+        backend_catalog_pg_type_seams::set_type_not_null::call(domainoid, true)?;
+    }
+
+    let _ = mcx;
+    Ok((object_address_set_type(domainoid), constr_addr))
+}
+
+// ---------------------------------------------------------------------------
+// AlterDomainValidateConstraint   (typecmds.c:3031)
+// ---------------------------------------------------------------------------
+
+/// `AlterDomainValidateConstraint(names, constrName)` (typecmds.c:3031).
+pub fn AlterDomainValidateConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    constr_name: &str,
+) -> PgResult<ObjectAddress> {
+    let domainoid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(domainoid)?;
+
+    checkDomainOwner(&typ)?;
+
+    /* Find and check the target CHECK constraint; get its cooked conbin + oid. */
+    let (conoid, conbin) = backend_catalog_pg_constraint_seams::find_domain_check_constraint::call(
+        mcx,
+        domainoid,
+        constr_name.to_string(),
+    )?;
+
+    me::validate_domain_check_constraint::call(domainoid, conbin)?;
+
+    /* Now update the catalog (convalidated = true). */
+    backend_catalog_pg_constraint_seams::set_constraint_validated::call(mcx, conoid)?;
+
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        ConstraintRelationId,
+        conoid,
+        0,
+    )?;
+
+    Ok(object_address_set_type(domainoid))
+}
+
+// ---------------------------------------------------------------------------
+// DefineDomain   (typecmds.c:697)
+// ---------------------------------------------------------------------------
+
+/// `DefineDomain(pstate, stmt)` (typecmds.c:697) — CREATE DOMAIN.
+///
+/// `domainname` is the qualified domain name; `type_name` is the base
+/// `TypeName`; `coll_clause` the optional COLLATE clause name list; `constraints`
+/// the list of `Constraint` nodes.
+pub fn DefineDomain<'mcx>(
+    mcx: Mcx<'mcx>,
+    domainname: &[String],
+    type_name: &TypeName,
+    coll_clause: Option<&[String]>,
+    constraints: &[RichNode],
+) -> PgResult<ObjectAddress> {
+    /* Convert list of names to a name and namespace */
+    let names_nl = as_namelist(domainname);
+    let (domainNamespace, domain_name_owned) = QualifiedNameGetCreationNamespace(mcx, &names_nl)?;
+    let domainName = domain_name_owned.to_string();
+
+    /* Check we have creation rights in target namespace */
+    let aclresult = object_aclcheck::call(
+        NamespaceRelationId,
+        domainNamespace,
+        get_user_id::call(),
+        ACL_CREATE as AclMode,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        aclcheck_error::call(
+            aclresult,
+            OBJECT_SCHEMA,
+            get_namespace_name_seam(mcx, domainNamespace)?,
+        )?;
+    }
+
+    /*
+     * Check for collision with an existing type name (autogenerated array can
+     * be renamed out of the way).
+     */
+    let old_type_oid = get_type_oid::call(&domainName, domainNamespace)?;
+    if OidIsValid(old_type_oid) && !moveArrayTypeName(old_type_oid, &domainName, domainNamespace)? {
+        return ereport(ERROR)
+            .errcode(ERRCODE_DUPLICATE_OBJECT)
+            .errmsg(format!("type \"{domainName}\" already exists"))
+            .finish(errloc(757, "DefineDomain"))
+            .map(|()| unreachable!());
+    }
+
+    /* Look up the base type. */
+    let basetypeoid = typenameTypeId(type_name)?;
+    let baseType = read_type_form(basetypeoid)?;
+    let basetypeMod = baseType.typtypmod;
+
+    /*
+     * Base type must be a plain base type, a composite type, another domain, an
+     * enum or a range type.
+     */
+    let typtype = baseType.typtype;
+    if typtype != TYPTYPE_BASE
+        && typtype != TYPTYPE_COMPOSITE
+        && typtype != PGT_TYPTYPE_DOMAIN
+        && typtype != TYPTYPE_ENUM
+        && typtype != TYPTYPE_RANGE
+        && typtype != TYPTYPE_MULTIRANGE
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "\"{}\" is not a valid base type for a domain",
+                TypeNameToString(mcx, type_name)?
+            ))
+            .finish(errloc(783, "DefineDomain"))
+            .map(|()| unreachable!());
+    }
+
+    let aclresult = object_aclcheck::call(
+        TypeRelationId,
+        basetypeoid,
+        get_user_id::call(),
+        ACL_USAGE as AclMode,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, basetypeoid)?;
+    }
+
+    /* Identify the collation if any */
+    let baseColl = baseType.typcollation;
+    let domaincoll = if let Some(coll) = coll_clause {
+        backend_catalog_namespace::get_collation_oid(mcx, &as_namelist(coll), false)?
+    } else {
+        baseColl
+    };
+
+    /* Complain if COLLATE is applied to an uncollatable type */
+    if OidIsValid(domaincoll) && !OidIsValid(baseColl) {
+        return ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "collations are not supported by type {}",
+                format_type_be(basetypeoid)?
+            ))
+            .finish(errloc(810, "DefineDomain"))
+            .map(|()| unreachable!());
+    }
+
+    /* Inherited properties from base type. */
+    let byValue = baseType.typbyval;
+    let mut alignment = baseType.typalign;
+    let storage = baseType.typstorage;
+    let internalLength = baseType.typlen;
+    let category = baseType.typcategory;
+    let delimiter = baseType.typdelim;
+
+    /* I/O Functions */
+    let inputProcedure: Oid = F_DOMAIN_IN;
+    let outputProcedure: Oid = baseType.typoutput;
+    let receiveProcedure: Oid = F_DOMAIN_RECV;
+    let sendProcedure: Oid = baseType.typsend;
+    let analyzeProcedure: Oid = baseType.typanalyze;
+
+    /* Inherited default value / binary value (via pg_type_default projection). */
+    let base_default = backend_utils_cache_syscache_seams::pg_type_default::call(mcx, basetypeoid)?;
+    let mut defaultValue: Option<String> =
+        base_default.as_ref().and_then(|d| d.typdefault.clone());
+    let mut defaultValueBin: Option<String> =
+        base_default.as_ref().and_then(|d| d.typdefaultbin.clone());
+
+    /* Run through constraints manually (the validation/typNotNull loop). */
+    let mut saw_default = false;
+    let mut typNotNull = false;
+    let mut nullDefined = false;
+    let typNDims = type_name.arrayBounds.len() as i32;
+
+    for node in constraints {
+        let constr = match node {
+            RichNode::Constraint(c) => c,
+            _ => {
+                return ereport(ERROR)
+                    .errmsg_internal("unrecognized node type in CREATE DOMAIN constraints")
+                    .finish(errloc(872, "DefineDomain"))
+                    .map(|()| unreachable!());
+            }
+        };
+        match constr.contype {
+            CONSTR_DEFAULT => {
+                if saw_default {
+                    return ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg("multiple default expressions")
+                        .finish(errloc(885, "DefineDomain"))
+                        .map(|()| unreachable!());
+                }
+                saw_default = true;
+
+                if let Some(raw) = constr.raw_expr.as_deref() {
+                    /* Cook the constr->raw_expr into an expression. */
+                    let default_expr = me::cook_default::call(
+                        raw.clone_in(mcx)?,
+                        basetypeoid,
+                        basetypeMod,
+                        domainName.clone(),
+                    )?;
+                    let is_null_const = match default_expr.as_ref() {
+                        None => true,
+                        Some(RichNode::Expr(Expr::Const(c))) => c.constisnull,
+                        Some(_) => false,
+                    };
+                    if is_null_const {
+                        defaultValue = None;
+                        defaultValueBin = None;
+                    } else {
+                        let expr = default_expr.unwrap();
+                        defaultValue = Some(me::deparse_expression::call(expr.clone_in(mcx)?)?);
+                        defaultValueBin = Some(me::node_to_string::call(expr)?);
+                    }
+                } else {
+                    defaultValue = None;
+                    defaultValueBin = None;
+                }
+            }
+            CONSTR_NOTNULL => {
+                if nullDefined {
+                    if !typNotNull {
+                        return ereport(ERROR)
+                            .errcode(ERRCODE_SYNTAX_ERROR)
+                            .errmsg("conflicting NULL/NOT NULL constraints")
+                            .finish(errloc(948, "DefineDomain"))
+                            .map(|()| unreachable!());
+                    }
+                    return ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .errmsg("redundant NOT NULL constraint definition")
+                        .finish(errloc(953, "DefineDomain"))
+                        .map(|()| unreachable!());
+                }
+                if constr.is_no_inherit {
+                    return ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .errmsg("not-null constraints for domains cannot be marked NO INHERIT")
+                        .finish(errloc(959, "DefineDomain"))
+                        .map(|()| unreachable!());
+                }
+                typNotNull = true;
+                nullDefined = true;
+            }
+            CONSTR_NULL => {
+                if nullDefined && typNotNull {
+                    return ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg("conflicting NULL/NOT NULL constraints")
+                        .finish(errloc(969, "DefineDomain"))
+                        .map(|()| unreachable!());
+                }
+                typNotNull = false;
+                nullDefined = true;
+            }
+            CONSTR_CHECK => {
+                /* Handled after domain creation; here only reject NO INHERIT. */
+                if constr.is_no_inherit {
+                    return ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .errmsg("check constraints for domains cannot be marked NO INHERIT")
+                        .finish(errloc(986, "DefineDomain"))
+                        .map(|()| unreachable!());
+                }
+            }
+            other => {
+                /* All other constraint types are errors for domains. */
+                return Err(domain_constraint_kind_error(other));
+            }
+        }
+    }
+
+    /* Allocate OID for array type */
+    let domainArrayOid = AssignTypeArrayOid()?;
+    let owner = get_user_id::call();
+
+    /* Have TypeCreate do all the real work. */
+    let address = TypeCreate(TypeCreateParams {
+        new_type_oid: InvalidOid,
+        type_name: domainName.clone(),
+        type_namespace: domainNamespace,
+        relation_oid: InvalidOid,
+        relation_kind: 0,
+        owner_id: owner,
+        internal_size: internalLength,
+        type_type: PGT_TYPTYPE_DOMAIN,
+        type_category: category,
+        type_preferred: false,
+        type_delim: delimiter,
+        input_procedure: inputProcedure,
+        output_procedure: outputProcedure,
+        receive_procedure: receiveProcedure,
+        send_procedure: sendProcedure,
+        typmodin_procedure: InvalidOid,
+        typmodout_procedure: InvalidOid,
+        analyze_procedure: analyzeProcedure,
+        subscript_procedure: InvalidOid,
+        element_type: InvalidOid,
+        is_implicit_array: false,
+        array_type: domainArrayOid,
+        base_type: basetypeoid,
+        default_type_value: defaultValue,
+        default_type_bin: defaultValueBin,
+        passed_by_value: byValue,
+        alignment,
+        storage,
+        type_mod: basetypeMod,
+        typ_ndims: typNDims,
+        type_not_null: typNotNull,
+        type_collation: domaincoll,
+    })?;
+
+    /* Create the array type that goes with it. */
+    let domainArrayName = makeArrayTypeName(&domainName, domainNamespace)?;
+    alignment = if alignment == TYPALIGN_DOUBLE {
+        TYPALIGN_DOUBLE
+    } else {
+        TYPALIGN_INT
+    };
+
+    TypeCreate(TypeCreateParams {
+        new_type_oid: domainArrayOid,
+        type_name: domainArrayName,
+        type_namespace: domainNamespace,
+        relation_oid: InvalidOid,
+        relation_kind: 0,
+        owner_id: owner,
+        internal_size: -1,
+        type_type: TYPTYPE_BASE,
+        type_category: TYPCATEGORY_ARRAY,
+        type_preferred: false,
+        type_delim: delimiter,
+        input_procedure: F_ARRAY_IN,
+        output_procedure: F_ARRAY_OUT,
+        receive_procedure: F_ARRAY_RECV,
+        send_procedure: F_ARRAY_SEND,
+        typmodin_procedure: InvalidOid,
+        typmodout_procedure: InvalidOid,
+        analyze_procedure: F_ARRAY_TYPANALYZE,
+        subscript_procedure: F_ARRAY_SUBSCRIPT_HANDLER,
+        element_type: address.objectId,
+        is_implicit_array: true,
+        array_type: InvalidOid,
+        base_type: InvalidOid,
+        default_type_value: None,
+        default_type_bin: None,
+        passed_by_value: false,
+        alignment,
+        storage: TYPSTORAGE_EXTENDED,
+        type_mod: -1,
+        typ_ndims: 0,
+        type_not_null: false,
+        type_collation: domaincoll,
+    })?;
+
+    /* Process constraints which refer to the domain ID returned by TypeCreate. */
+    for node in constraints {
+        let constr = match node {
+            RichNode::Constraint(c) => c,
+            _ => unreachable!("checked above"),
+        };
+        match constr.contype {
+            CONSTR_CHECK => {
+                me::domain_add_check_constraint::call(
+                    address.objectId,
+                    domainNamespace,
+                    basetypeoid,
+                    basetypeMod,
+                    node.clone_in(mcx)?,
+                    domainName.clone(),
+                    false,
+                )?;
+            }
+            CONSTR_NOTNULL => {
+                me::domain_add_not_null_constraint::call(
+                    address.objectId,
+                    domainNamespace,
+                    basetypeoid,
+                    basetypeMod,
+                    node.clone_in(mcx)?,
+                    domainName.clone(),
+                    false,
+                )?;
+            }
+            _ => {}
+        }
+        /* CCI so we can detect duplicate constraint names */
+        backend_access_transam_xact_seams::command_counter_increment::call()?;
+    }
+
+    Ok(address)
+}
+
+/// The `default:` error arms of the `DefineDomain` constraint switch
+/// (typecmds.c:993-1045) — the unsupported constraint kinds for a domain.
+fn domain_constraint_kind_error(contype: ConstrType) -> PgError {
+    use types_nodes::ddlnodes::{
+        CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,
+        CONSTR_ATTR_NOT_DEFERRABLE, CONSTR_ATTR_NOT_ENFORCED, CONSTR_EXCLUSION, CONSTR_FOREIGN,
+        CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_PRIMARY, CONSTR_UNIQUE,
+    };
+    let (code, msg) = if contype == CONSTR_UNIQUE {
+        (ERRCODE_SYNTAX_ERROR, "unique constraints not possible for domains")
+    } else if contype == CONSTR_PRIMARY {
+        (ERRCODE_SYNTAX_ERROR, "primary key constraints not possible for domains")
+    } else if contype == CONSTR_EXCLUSION {
+        (ERRCODE_SYNTAX_ERROR, "exclusion constraints not possible for domains")
+    } else if contype == CONSTR_FOREIGN {
+        (ERRCODE_SYNTAX_ERROR, "foreign key constraints not possible for domains")
+    } else if contype == CONSTR_ATTR_DEFERRABLE
+        || contype == CONSTR_ATTR_NOT_DEFERRABLE
+        || contype == CONSTR_ATTR_DEFERRED
+        || contype == CONSTR_ATTR_IMMEDIATE
+    {
+        (
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "specifying constraint deferrability not supported for domains",
+        )
+    } else if contype == CONSTR_GENERATED || contype == CONSTR_IDENTITY {
+        (ERRCODE_FEATURE_NOT_SUPPORTED, "specifying GENERATED not supported for domains")
+    } else if contype == CONSTR_ATTR_ENFORCED || contype == CONSTR_ATTR_NOT_ENFORCED {
+        (
+            ERRCODE_INVALID_OBJECT_DEFINITION,
+            "specifying constraint enforceability not supported for domains",
+        )
+    } else {
+        (ERRCODE_SYNTAX_ERROR, "unsupported constraint for domain")
+    };
+    ereport(ERROR)
+        .errcode(code)
+        .errmsg(msg)
+        .finish(errloc(0, "DefineDomain"))
+        .expect_err("ereport(ERROR) always yields an Err")
+}
+
+/// `makeNode(Constraint); constr->contype = ...; constr->initially_valid =
+/// true; constr->location = -1;` — the bare Constraint node `AlterDomainNotNull`
+/// builds for the SET NOT NULL path (typecmds.c:2778).
+fn make_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> RichNode<'mcx> {
+    RichNode::Constraint(types_nodes::ddlnodes::Constraint {
+        contype,
+        conname: None,
+        deferrable: false,
+        initdeferred: false,
+        is_enforced: true,
+        skip_validation: false,
+        initially_valid: true,
+        is_no_inherit: false,
+        raw_expr: None,
+        cooked_expr: None,
+        generated_when: 0,
+        generated_kind: 0,
+        nulls_not_distinct: false,
+        keys: mcx::PgVec::new_in(mcx),
+        without_overlaps: false,
+        including: mcx::PgVec::new_in(mcx),
+        exclusions: mcx::PgVec::new_in(mcx),
+        options: mcx::PgVec::new_in(mcx),
+        indexname: None,
+        indexspace: None,
+        reset_default_tblspc: false,
+        access_method: None,
+        where_clause: None,
+        pktable: None,
+        fk_attrs: mcx::PgVec::new_in(mcx),
+        pk_attrs: mcx::PgVec::new_in(mcx),
+        fk_with_period: false,
+        pk_with_period: false,
+        fk_matchtype: 0,
+        fk_upd_action: 0,
+        fk_del_action: 0,
+        fk_del_set_cols: mcx::PgVec::new_in(mcx),
+        old_conpfeqop: mcx::PgVec::new_in(mcx),
+        old_pktable_oid: InvalidOid,
+        location: -1,
+    })
+}
+
+// ===========================================================================
+// F4 — RenameType / AlterTypeOwner / AlterTypeNamespace / AlterType
+// ===========================================================================
+
+/// `RenameType(stmt)` (typecmds.c:3739).
+pub fn RenameType<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    new_type_name: &str,
+    rename_type: ObjectType,
+) -> PgResult<ObjectAddress> {
+    let typeOid = typename_type_id_from_names(names)?;
+    let typ = read_type_form(typeOid)?;
+
+    /* check permissions on type */
+    if !backend_catalog_aclchk_seams::object_ownercheck::call(
+        TypeRelationId,
+        typeOid,
+        get_user_id::call(),
+    )? {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(
+            types_acl::acl::ACLCHECK_NOT_OWNER,
+            typeOid,
+        )?;
+    }
+
+    /* ALTER DOMAIN used on a non-domain? */
+    if rename_type == OBJECT_DOMAIN && typ.typtype != PGT_TYPTYPE_DOMAIN {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a domain", format_type_be(typeOid)?))
+            .finish(errloc(3771, "RenameType"))
+            .map(|()| unreachable!());
+    }
+
+    /* free-standing composite type, not a table's rowtype */
+    if typ.typtype == TYPTYPE_COMPOSITE
+        && get_rel_relkind::call(typ.typrelid)? != RELKIND_COMPOSITE_TYPE
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is a table's row type", format_type_be(typeOid)?))
+            .errhint("Use ALTER TABLE instead.")
+            .finish(errloc(3783, "RenameType"))
+            .map(|()| unreachable!());
+    }
+
+    /* don't allow direct alteration of array types */
+    if is_true_array_type(&typ) {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("cannot alter array type {}", format_type_be(typeOid)?))
+            .errhint(format!(
+                "You can alter type {}, which will alter the array type as well.",
+                format_type_be(typ.typelem)?
+            ))
+            .finish(errloc(3793, "RenameType"))
+            .map(|()| unreachable!());
+    }
+
+    /*
+     * If type is composite, rename associated pg_class entry too
+     * (RenameRelationInternal calls RenameTypeInternal automatically); else
+     * RenameTypeInternal directly.
+     */
+    if typ.typtype == TYPTYPE_COMPOSITE {
+        backend_commands_tablecmds_seams::rename_relation_internal::call(
+            mcx,
+            typ.typrelid,
+            new_type_name,
+            false,
+            false,
+        )?;
+    } else {
+        backend_catalog_pg_type::RenameTypeInternal(typeOid, new_type_name, typ.typnamespace)?;
+    }
+
+    Ok(object_address_set_type(typeOid))
+}
+
+/// `AlterTypeOwner(names, newOwnerId, objecttype)` (typecmds.c:3820).
+pub fn AlterTypeOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    new_owner_id: Oid,
+    objecttype: ObjectType,
+) -> PgResult<ObjectAddress> {
+    /*
+     * Use LookupTypeName here so that shell types can be processed
+     * (`lookup_type_name_oid_from_names` is the shell-allowing OID resolver,
+     * unlike `typenameTypeId` which rejects a shell type).
+     */
+    let typeOid = backend_parser_parse_type_seams::lookup_type_name_oid_from_names::call(
+        &type_name_from_namelist(names),
+    )?;
+    let typ = read_type_form(typeOid)?;
+
+    /* Don't allow ALTER DOMAIN on a type */
+    if objecttype == OBJECT_DOMAIN && typ.typtype != PGT_TYPTYPE_DOMAIN {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a domain", format_type_be(typeOid)?))
+            .finish(errloc(3856, "AlterTypeOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* free-standing composite type, not a table's rowtype */
+    if typ.typtype == TYPTYPE_COMPOSITE
+        && get_rel_relkind::call(typ.typrelid)? != RELKIND_COMPOSITE_TYPE
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is a table's row type", format_type_be(typeOid)?))
+            .errhint("Use ALTER TABLE instead.")
+            .finish(errloc(3868, "AlterTypeOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* don't allow direct alteration of array types */
+    if is_true_array_type(&typ) {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("cannot alter array type {}", format_type_be(typeOid)?))
+            .errhint(format!(
+                "You can alter type {}, which will alter the array type as well.",
+                format_type_be(typ.typelem)?
+            ))
+            .finish(errloc(3878, "AlterTypeOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* don't allow direct alteration of multirange types */
+    if typ.typtype == TYPTYPE_MULTIRANGE {
+        let rangetype = get_multirange_range::call(typeOid)?;
+        let mut b = ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("cannot alter multirange type {}", format_type_be(typeOid)?));
+        if OidIsValid(rangetype) {
+            b = b.errhint(format!(
+                "You can alter type {}, which will alter the multirange type as well.",
+                format_type_be(rangetype)?
+            ));
+        }
+        return b
+            .finish(errloc(3889, "AlterTypeOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* If the new owner is the same as the existing owner, succeed (dump). */
+    if typ.typowner != new_owner_id {
+        /* Superusers can always do it */
+        if !superuser::call(mcx)? {
+            /* Otherwise, must be owner of the existing object */
+            if !backend_catalog_aclchk_seams::object_ownercheck::call(
+                TypeRelationId,
+                typ.oid,
+                get_user_id::call(),
+            )? {
+                backend_catalog_aclchk_seams::aclcheck_error_type::call(
+                    types_acl::acl::ACLCHECK_NOT_OWNER,
+                    typ.oid,
+                )?;
+            }
+
+            /* Must be able to become new owner */
+            backend_utils_adt_acl_seams::check_can_set_role::call(get_user_id::call(), new_owner_id)?;
+
+            /* New owner must have CREATE privilege on namespace */
+            let aclresult = object_aclcheck::call(
+                NamespaceRelationId,
+                typ.typnamespace,
+                new_owner_id,
+                ACL_CREATE as AclMode,
+            )?;
+            if aclresult != ACLCHECK_OK {
+                aclcheck_error::call(
+                    aclresult,
+                    OBJECT_SCHEMA,
+                    get_namespace_name_seam(mcx, typ.typnamespace)?,
+                )?;
+            }
+        }
+
+        AlterTypeOwner_oid(typeOid, new_owner_id, true)?;
+    }
+
+    Ok(object_address_set_type(typeOid))
+}
+
+/// `AlterTypeOwner_oid(typeOid, newOwnerId, hasDependEntry)` (typecmds.c:3945) —
+/// the inward seam body (installed in `init_seams`).
+pub fn AlterTypeOwner_oid(
+    type_oid: Oid,
+    new_owner_id: Oid,
+    has_depend_entry: bool,
+) -> PgResult<()> {
+    let typ = read_type_form(type_oid)?;
+
+    /*
+     * If composite, ATExecChangeOwner fixes the pg_class entry and calls back to
+     * AlterTypeOwnerInternal; else AlterTypeOwnerInternal directly.
+     */
+    if typ.typtype == TYPTYPE_COMPOSITE {
+        backend_commands_tablecmds_seams::at_exec_change_owner::call(
+            typ.typrelid,
+            new_owner_id,
+            true,
+            AccessExclusiveLock,
+        )?;
+    } else {
+        AlterTypeOwnerInternal(type_oid, new_owner_id)?;
+    }
+
+    /* Update owner dependency reference */
+    if has_depend_entry {
+        backend_catalog_pg_shdepend_seams::changeDependencyOnOwner::call(
+            TypeRelationId,
+            type_oid,
+            new_owner_id,
+        )?;
+    }
+
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        TypeRelationId,
+        type_oid,
+        0,
+    )?;
+
+    Ok(())
+}
+
+/// `AlterTypeOwnerInternal(typeOid, newOwnerId)` (typecmds.c:3985) — bare owner
+/// change; recurses to array + (range) multirange types. The single-row
+/// typowner/typacl write is the pg_type owner seam `set_type_owner`.
+pub fn AlterTypeOwnerInternal(type_oid: Oid, new_owner_id: Oid) -> PgResult<()> {
+    /* Owner-side write: typowner + (if typacl non-null) aclnewowner. */
+    backend_catalog_pg_type_seams::set_type_owner::call(type_oid, new_owner_id)?;
+
+    let typ = read_type_form(type_oid)?;
+
+    /* If it has an array type, update that too */
+    if OidIsValid(typ.typarray) {
+        AlterTypeOwnerInternal(typ.typarray, new_owner_id)?;
+    }
+
+    /* If it is a range type, update the associated multirange too */
+    if typ.typtype == TYPTYPE_RANGE {
+        let multirange_typeid = get_range_multirange::call(type_oid)?;
+        if !OidIsValid(multirange_typeid) {
+            return ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!(
+                    "could not find multirange type for data type {}",
+                    format_type_be(type_oid)?
+                ))
+                .finish(errloc(4041, "AlterTypeOwnerInternal"))
+                .map(|()| unreachable!());
+        }
+        AlterTypeOwnerInternal(multirange_typeid, new_owner_id)?;
+    }
+
+    Ok(())
+}
+
+/// `AlterTypeNamespace(names, newschema, objecttype, oldschema)`
+/// (typecmds.c:4053).
+pub fn AlterTypeNamespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    newschema: &str,
+    objecttype: ObjectType,
+    oldschema: Option<&mut Oid>,
+) -> PgResult<ObjectAddress> {
+    let typeOid = typename_type_id_from_names(names)?;
+
+    /* Don't allow ALTER DOMAIN on a non-domain type */
+    if objecttype == OBJECT_DOMAIN && get_typtype::call(typeOid)? as i8 != PGT_TYPTYPE_DOMAIN {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a domain", format_type_be(typeOid)?))
+            .finish(errloc(4072, "AlterTypeNamespace"))
+            .map(|()| unreachable!());
+    }
+
+    /* get schema OID and check its permissions */
+    let nspOid = backend_catalog_namespace_seams::lookup_creation_namespace::call(newschema)?;
+
+    let mut objsMoved = backend_catalog_dependency_seams::new_object_addresses::call()?;
+    let oldNspOid = AlterTypeNamespace_oid(typeOid, nspOid, false, &mut objsMoved)?;
+    backend_catalog_dependency_seams::free_object_addresses::call(objsMoved)?;
+
+    if let Some(slot) = oldschema {
+        *slot = oldNspOid;
+    }
+
+    let _ = mcx;
+    Ok(object_address_set_type(typeOid))
+}
+
+/// `AlterTypeNamespace_oid(typeOid, nspOid, ignoreDependent, objsMoved)`
+/// (typecmds.c:4102).
+pub fn AlterTypeNamespace_oid(
+    type_oid: Oid,
+    nsp_oid: Oid,
+    ignore_dependent: bool,
+    objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+) -> PgResult<Oid> {
+    /* check permissions on type */
+    if !backend_catalog_aclchk_seams::object_ownercheck::call(
+        TypeRelationId,
+        type_oid,
+        get_user_id::call(),
+    )? {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(
+            types_acl::acl::ACLCHECK_NOT_OWNER,
+            type_oid,
+        )?;
+    }
+
+    /* don't allow direct alteration of array types */
+    let elemOid = get_element_type_seam(type_oid)?;
+    if OidIsValid(elemOid) && get_array_type_seam(elemOid)? == type_oid {
+        if ignore_dependent {
+            return Ok(InvalidOid);
+        }
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("cannot alter array type {}", format_type_be(type_oid)?))
+            .errhint(format!(
+                "You can alter type {}, which will alter the array type as well.",
+                format_type_be(elemOid)?
+            ))
+            .finish(errloc(4123, "AlterTypeNamespace_oid"))
+            .map(|()| unreachable!());
+    }
+
+    AlterTypeNamespaceInternal(type_oid, nsp_oid, false, ignore_dependent, true, objs_moved)
+}
+
+/// `AlterTypeNamespaceInternal(typeOid, nspOid, isImplicitArray,
+/// ignoreDependent, errorOnTableType, objsMoved)` (typecmds.c:4154).
+pub fn AlterTypeNamespaceInternal(
+    type_oid: Oid,
+    nsp_oid: Oid,
+    is_implicit_array: bool,
+    ignore_dependent: bool,
+    error_on_table_type: bool,
+    objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+) -> PgResult<Oid> {
+    let thisobj = object_address_set_type(type_oid);
+
+    /* Make sure we haven't moved this object previously. */
+    if backend_catalog_dependency_seams::object_address_present::call(thisobj, &*objs_moved)? {
+        return Ok(InvalidOid);
+    }
+
+    let typform = read_type_form(type_oid)?;
+    let oldNspOid = typform.typnamespace;
+    let arrayOid = typform.typarray;
+
+    /* If the type is already there, skip these next few checks. */
+    if oldNspOid != nsp_oid {
+        /* common checks on switching namespaces */
+        backend_catalog_namespace_seams::check_set_namespace::call(oldNspOid, nsp_oid)?;
+
+        /* check for duplicate name */
+        if backend_utils_cache_syscache_seams::type_exists::call(
+            &type_name_str(&typform),
+            nsp_oid,
+        )? {
+            return ereport(ERROR)
+                .errcode(ERRCODE_DUPLICATE_OBJECT)
+                .errmsg(format!(
+                    "type \"{}\" already exists in schema \"{}\"",
+                    type_name_str(&typform),
+                    get_namespace_name_str(nsp_oid)?
+                ))
+                .finish(errloc(4201, "AlterTypeNamespaceInternal"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    /* Detect composite type (but not a table rowtype). */
+    let isCompositeType = typform.typtype == TYPTYPE_COMPOSITE
+        && get_rel_relkind::call(typform.typrelid)? == RELKIND_COMPOSITE_TYPE;
+
+    /* Enforce not-table-type if requested. */
+    if typform.typtype == TYPTYPE_COMPOSITE && !isCompositeType {
+        if ignore_dependent {
+            return Ok(InvalidOid);
+        }
+        if error_on_table_type {
+            return ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("{} is a table's row type", format_type_be(type_oid)?))
+                .errhint("Use ALTER TABLE instead.")
+                .finish(errloc(4225, "AlterTypeNamespaceInternal"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    if oldNspOid != nsp_oid {
+        /* OK, modify the pg_type row (typnamespace). */
+        backend_catalog_pg_type_seams::set_type_namespace::call(type_oid, nsp_oid)?;
+    }
+
+    /*
+     * Composite types have pg_class entries; modify the pg_class tuple too +
+     * move associated constraints.
+     */
+    if isCompositeType {
+        backend_commands_tablecmds_seams::alter_relation_namespace_internal::call(
+            typform.typrelid,
+            oldNspOid,
+            nsp_oid,
+            false,
+            objs_moved,
+        )?;
+        backend_catalog_pg_constraint_seams::alter_constraint_namespaces::call(
+            type_relation_mcx(),
+            typform.typrelid,
+            oldNspOid,
+            nsp_oid,
+            false,
+            objs_moved,
+        )?;
+    } else if typform.typtype == PGT_TYPTYPE_DOMAIN {
+        /* If it's a domain, it might have constraints. */
+        backend_catalog_pg_constraint_seams::alter_constraint_namespaces::call(
+            type_relation_mcx(),
+            type_oid,
+            oldNspOid,
+            nsp_oid,
+            true,
+            objs_moved,
+        )?;
+    }
+
+    /*
+     * Update dependency on schema, if any --- a table rowtype has not got one,
+     * and neither does an implicit array.
+     */
+    if oldNspOid != nsp_oid
+        && (isCompositeType || typform.typtype != TYPTYPE_COMPOSITE)
+        && !is_implicit_array
+    {
+        let scratch = MemoryContext::new("changeDependencyFor");
+        if backend_catalog_pg_depend_seams::changeDependencyFor::call(
+            scratch.mcx(),
+            TypeRelationId,
+            type_oid,
+            NamespaceRelationId,
+            oldNspOid,
+            nsp_oid,
+        )? != 1
+        {
+            return ereport(ERROR)
+                .errmsg_internal(format!(
+                    "could not change schema dependency for type \"{}\"",
+                    format_type_be(type_oid)?
+                ))
+                .finish(errloc(4280, "AlterTypeNamespaceInternal"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        TypeRelationId,
+        type_oid,
+        0,
+    )?;
+
+    backend_catalog_dependency_seams::add_exact_object_address::call(thisobj, objs_moved)?;
+
+    /* Recursively alter the associated array type, if any */
+    if OidIsValid(arrayOid) {
+        AlterTypeNamespaceInternal(arrayOid, nsp_oid, true, false, true, objs_moved)?;
+    }
+
+    Ok(oldNspOid)
+}
+
+/// A fresh scratch `Mcx` for the constraint-namespace seam (it takes a `Mcx`
+/// arg the owner ignores in favour of its own context).
+fn type_relation_mcx<'a>() -> Mcx<'a> {
+    // SAFETY-free: the owner's installed body opens its own MemoryContext and
+    // does not retain this Mcx; we forge a leaked scratch context's mcx.
+    let ctx = Box::leak(Box::new(MemoryContext::new("alter_constraint_namespaces")));
+    ctx.mcx()
+}
+
+/// `RELATION_RELATION_ID` keepalive (the C composite path opens pg_class).
+const _: Oid = RelationRelationId;
+
+// ---------------------------------------------------------------------------
+// AlterType / AlterTypeRecurse   (typecmds.c:4310 / 4561)
+// ---------------------------------------------------------------------------
+
+/// `AlterType(stmt)` (typecmds.c:4310) — ALTER TYPE <type> SET (option = ...).
+///
+/// `type_name` is the qualified type name; `options` the `DefElem` option list.
+pub fn AlterType<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_name: &[String],
+    options: &[Node],
+) -> PgResult<ObjectAddress> {
+    let typeOid = typename_type_id_from_names(type_name)?;
+    let typForm = read_type_form(typeOid)?;
+
+    let mut atparams = types_catalog::pg_type::TypeAttrUpdate::default();
+    let mut requireSuper = false;
+
+    for node in options {
+        let defel = expect_defelem(node, "AlterType")?;
+        let defname = def_name(defel);
+
+        if defname == "storage" {
+            let a = defGetString(mcx, defel)?;
+            atparams.storage = if pg_strcaseeq(&a, "plain") {
+                TYPSTORAGE_PLAIN
+            } else if pg_strcaseeq(&a, "external") {
+                TYPSTORAGE_EXTERNAL
+            } else if pg_strcaseeq(&a, "extended") {
+                TYPSTORAGE_EXTENDED
+            } else if pg_strcaseeq(&a, "main") {
+                TYPSTORAGE_MAIN
+            } else {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!("storage \"{a}\" not recognized"))
+                    .finish(errloc(4353, "AlterType"))
+                    .map(|()| unreachable!());
+            };
+
+            /* If the type isn't varlena, it can't support non-PLAIN storage. */
+            if atparams.storage != TYPSTORAGE_PLAIN && typForm.typlen != -1 {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("fixed-size types must have storage PLAIN")
+                    .finish(errloc(4362, "AlterType"))
+                    .map(|()| unreachable!());
+            }
+
+            if atparams.storage != TYPSTORAGE_PLAIN && typForm.typstorage == TYPSTORAGE_PLAIN {
+                requireSuper = true;
+            } else if atparams.storage == TYPSTORAGE_PLAIN && typForm.typstorage != TYPSTORAGE_PLAIN
+            {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("cannot change type's storage to PLAIN")
+                    .finish(errloc(4381, "AlterType"))
+                    .map(|()| unreachable!());
+            }
+            atparams.update_storage = true;
+        } else if defname == "receive" {
+            atparams.receive_oid = if defel.arg.is_some() {
+                findTypeReceiveFunction(mcx, &defGetQualifiedName(defel)?, typeOid)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_receive = true;
+            requireSuper = true;
+        } else if defname == "send" {
+            atparams.send_oid = if defel.arg.is_some() {
+                findTypeSendFunction(mcx, &defGetQualifiedName(defel)?, typeOid)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_send = true;
+            requireSuper = true;
+        } else if defname == "typmod_in" {
+            atparams.typmodin_oid = if defel.arg.is_some() {
+                findTypeTypmodinFunction(mcx, &defGetQualifiedName(defel)?)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_typmodin = true;
+            requireSuper = true;
+        } else if defname == "typmod_out" {
+            atparams.typmodout_oid = if defel.arg.is_some() {
+                findTypeTypmodoutFunction(mcx, &defGetQualifiedName(defel)?)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_typmodout = true;
+            requireSuper = true;
+        } else if defname == "analyze" {
+            atparams.analyze_oid = if defel.arg.is_some() {
+                findTypeAnalyzeFunction(mcx, &defGetQualifiedName(defel)?, typeOid)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_analyze = true;
+            requireSuper = true;
+        } else if defname == "subscript" {
+            atparams.subscript_oid = if defel.arg.is_some() {
+                findTypeSubscriptingFunction(mcx, &defGetQualifiedName(defel)?, typeOid)?
+            } else {
+                InvalidOid
+            };
+            atparams.update_subscript = true;
+            requireSuper = true;
+        } else if matches!(
+            defname,
+            "input"
+                | "output"
+                | "internallength"
+                | "passedbyvalue"
+                | "alignment"
+                | "like"
+                | "category"
+                | "preferred"
+                | "default"
+                | "element"
+                | "delimiter"
+                | "collatable"
+        ) {
+            return ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("type attribute \"{defname}\" cannot be changed"))
+                .finish(errloc(4474, "AlterType"))
+                .map(|()| unreachable!());
+        } else {
+            return ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("type attribute \"{defname}\" not recognized"))
+                .finish(errloc(4479, "AlterType"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    /* Permissions check. */
+    if requireSuper {
+        if !superuser::call(mcx)? {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg("must be superuser to alter a type")
+                .finish(errloc(4492, "AlterType"))
+                .map(|()| unreachable!());
+        }
+    } else if !backend_catalog_aclchk_seams::object_ownercheck::call(
+        TypeRelationId,
+        typeOid,
+        get_user_id::call(),
+    )? {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(
+            types_acl::acl::ACLCHECK_NOT_OWNER,
+            typeOid,
+        )?;
+    }
+
+    /* Disallow ALTER TYPE SET on non-base types. */
+    if typForm.typtype != TYPTYPE_BASE {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a base type", format_type_be(typeOid)?))
+            .finish(errloc(4513, "AlterType"))
+            .map(|()| unreachable!());
+    }
+    if is_true_array_type(&typForm) {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not a base type", format_type_be(typeOid)?))
+            .finish(errloc(4522, "AlterType"))
+            .map(|()| unreachable!());
+    }
+
+    /* Recursively update this type and any arrays/domains over it. */
+    AlterTypeRecurse(typeOid, false, atparams)?;
+
+    Ok(object_address_set_type(typeOid))
+}
+
+/// `AlterTypeRecurse(typeOid, isImplicitArray, tup, catalog, atparams)`
+/// (typecmds.c:4561) — one recursion step. The per-row write + the
+/// GenerateTypeDependencies/hook run in the pg_type owner seam
+/// `alter_type_recurse_update` (returns the row's `typarray`); the catalog
+/// `Relation` arg is implicit (the owner opens pg_type). The domain scan is the
+/// pg_type owner seam `scan_domains_over_basetype`.
+pub fn AlterTypeRecurse(
+    type_oid: Oid,
+    is_implicit_array: bool,
+    mut atparams: types_catalog::pg_type::TypeAttrUpdate,
+) -> PgResult<()> {
+    /* Update the current type's tuple + rebuild deps + hook (owner seam). */
+    let arrtypoid = backend_catalog_pg_type_seams::alter_type_recurse_update::call(
+        type_oid,
+        is_implicit_array,
+        atparams,
+    )?;
+
+    /*
+     * Arrays inherit their base type's typmodin/typmodout, but none of the
+     * other properties. Recurse to the array type if needed.
+     */
+    if !is_implicit_array && (atparams.update_typmodin || atparams.update_typmodout) {
+        if OidIsValid(arrtypoid) {
+            let arrparams = types_catalog::pg_type::TypeAttrUpdate {
+                update_typmodin: atparams.update_typmodin,
+                update_typmodout: atparams.update_typmodout,
+                typmodin_oid: atparams.typmodin_oid,
+                typmodout_oid: atparams.typmodout_oid,
+                ..Default::default()
+            };
+            AlterTypeRecurse(arrtypoid, true, arrparams)?;
+        }
+    }
+
+    /*
+     * Recurse to domains; some properties are not inherited by domains, so
+     * clear those update flags.
+     */
+    atparams.update_receive = false;
+    atparams.update_typmodin = false;
+    atparams.update_typmodout = false;
+    atparams.update_subscript = false;
+
+    /* Skip the scan if nothing remains to be done. */
+    if !(atparams.update_storage || atparams.update_send || atparams.update_analyze) {
+        return Ok(());
+    }
+
+    /* Search pg_type for domains over this type, and recurse to each. */
+    let domains = backend_catalog_pg_type_seams::scan_domains_over_basetype::call(type_oid)?;
+    for domain_oid in domains {
+        AlterTypeRecurse(domain_oid, false, atparams)?;
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
 // helpers
 // ===========================================================================
+
+/// `InvalidObjectAddress` (objectaddress.h) — `{InvalidOid, InvalidOid, 0}`.
+fn InvalidObjectAddress() -> ObjectAddress {
+    ObjectAddress {
+        classId: InvalidOid,
+        objectId: InvalidOid,
+        objectSubId: 0,
+    }
+}
+
+/// `get_element_type(typid)` (lsyscache) → `InvalidOid` when none.
+fn get_element_type_seam(typid: Oid) -> PgResult<Oid> {
+    Ok(backend_utils_cache_lsyscache_seams::get_element_type::call(typid)?.unwrap_or(InvalidOid))
+}
+
+/// `get_array_type(typid)` (lsyscache) → `InvalidOid` when none.
+fn get_array_type_seam(typid: Oid) -> PgResult<Oid> {
+    Ok(backend_utils_cache_lsyscache_seams::get_array_type::call(typid)?.unwrap_or(InvalidOid))
+}
+
+/// `get_namespace_name(nspid)` text (panics-safe `String`).
+fn get_namespace_name_str(nspid: Oid) -> PgResult<String> {
+    let scratch = MemoryContext::new("get_namespace_name");
+    let name = get_namespace_name::call(scratch.mcx(), nspid)?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    Ok(name)
+}
 
 /// `lfirst_node(DefElem, ...)` — a parameter-list cell must be a `DefElem`.
 fn expect_defelem<'a>(node: &'a Node, fname: &'static str) -> PgResult<&'a DefElem> {
@@ -2184,16 +3806,91 @@ fn get_namespace_name_seam(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>>
 
 /// `pub fn init_seams()` — install typecmds' two INWARD seams:
 ///   * `RemoveTypeById` — the real `OCLASS_TYPE` drop body (above);
-///   * `alter_type_owner_oid` — F4 (`AlterTypeOwner_oid`), out of F2 scope, so a
-///     loud panic until F4 lands.
+///   * `alter_type_owner_oid` — F4 (`AlterTypeOwner_oid`), the real body.
 ///
 /// The OUTWARD seams declared in this unit's `-seams` crate
 /// (`make_range_constructors`, `make_multirange_constructors`,
 /// `define_relation_composite`) are installed by their real owners
 /// (`ProcedureCreate`/`DefineRelation`), not here.
+/// `castNode(List, stmt->object)` + `strVal` over each `String` child — the
+/// qualified type name as a `Vec<String>` (the `makeTypeNameFromNameList` input
+/// the F4 entry points consume). The generic ALTER dispatch (`commands/alter.c`)
+/// hands `stmt->object` as a `List *` `Node`; the F4 bodies want the namelist.
+fn names_from_list_node(object: &Node) -> PgResult<Vec<String>> {
+    let items = object.as_list().ok_or_else(|| {
+        PgError::error("typecmds: ALTER TYPE/DOMAIN object must be a List of String nodes")
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let s = it
+            .as_string()
+            .ok_or_else(|| PgError::error("strVal: String node expected"))?;
+        out.push(s.sval.as_deref().unwrap_or("").to_string());
+    }
+    Ok(out)
+}
+
+/// Inward-seam adapter for `RenameType(RenameStmt *stmt)` (the
+/// `commands/alter.c` `ExecRenameStmt` dispatch target): decode `stmt->object`
+/// (qualified name `List`) + `stmt->newname` + `stmt->renameType`, then run the
+/// ported `RenameType` body.
+fn rename_type_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_parsenodes::RenameStmt,
+) -> PgResult<ObjectAddress> {
+    let object = stmt.object.as_deref().ok_or_else(|| {
+        PgError::error("ExecRenameStmt: RENAME object must be set for DOMAIN/TYPE")
+    })?;
+    let names = names_from_list_node(object)?;
+    let new_type_name = stmt.newname.as_deref().unwrap_or("");
+    RenameType(mcx, &names, new_type_name, stmt.renameType)
+}
+
+/// Inward-seam adapter for `AlterTypeNamespace(names, newschema, objecttype,
+/// *oldschema)` — decode the `List` namelist and surface the old-schema OID on
+/// the tuple's second slot (the C `*oldschema` out-parameter).
+fn alter_type_namespace_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &Node,
+    newschema: &str,
+    objecttype: ObjectType,
+    want_oldschema: bool,
+) -> PgResult<(ObjectAddress, Oid)> {
+    let names = names_from_list_node(names)?;
+    let mut oldschema = InvalidOid;
+    let addr = AlterTypeNamespace(
+        mcx,
+        &names,
+        newschema,
+        objecttype,
+        if want_oldschema {
+            Some(&mut oldschema)
+        } else {
+            None
+        },
+    )?;
+    Ok((addr, oldschema))
+}
+
+/// Inward-seam adapter for `AlterTypeOwner(names, newOwnerId, objecttype)` —
+/// decode the `List` namelist and run the ported body.
+fn alter_type_owner_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &Node,
+    new_owner_id: Oid,
+    objecttype: ObjectType,
+) -> PgResult<ObjectAddress> {
+    let names = names_from_list_node(names)?;
+    AlterTypeOwner(mcx, &names, new_owner_id, objecttype)
+}
+
 pub fn init_seams() {
     me::RemoveTypeById::set(RemoveTypeById);
-    me::alter_type_owner_oid::set(|_type_oid, _new_owner_id, _has_depend_entry| {
-        panic!("alter_type_owner_oid: AlterTypeOwner_oid not yet ported (typecmds.c F4)")
-    });
+    me::alter_type_owner_oid::set(AlterTypeOwner_oid);
+    // Generic ALTER dispatch targets (commands/alter.c) — adapt the `List`
+    // namelist / `RenameStmt` the dispatcher passes onto the ported F4 bodies.
+    me::RenameType::set(rename_type_seam);
+    me::AlterTypeNamespace::set(alter_type_namespace_seam);
+    me::AlterTypeNamespace_oid::set(AlterTypeNamespace_oid);
+    me::AlterTypeOwner::set(alter_type_owner_seam);
 }

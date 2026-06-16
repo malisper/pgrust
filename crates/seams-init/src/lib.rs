@@ -1431,11 +1431,17 @@ mod recurrence_guard {
         ("backend_catalog_indexing", "catalog_close_indexes"),
         ("backend_catalog_indexing", "catalog_tuple_delete"),
         ("backend_catalog_indexing", "get_catalog_object_by_oid"),
-        // -- pg_type (pg_type.c TypeCreate/TypeShellMake/RenameTypeInternal) --
+        // -- pg_type (pg_type.c TypeCreate/TypeShellMake/RenameTypeInternal +
+        //    typecmds.c F3/F4 narrow single-column mutators) --
         ("backend_catalog_indexing", "get_new_oid_with_index_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_insert_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typname_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typowner_typacl_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typnamespace_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typnotnull_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typdefault_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_attrs_pg_type"),
         // -- pg_constraint (heap.c/index.c CreateConstraintEntry + rename) --
         ("backend_catalog_indexing", "catalog_tuple_insert_pg_constraint"),
         ("backend_catalog_indexing", "catalog_tuple_update_pg_constraint"),

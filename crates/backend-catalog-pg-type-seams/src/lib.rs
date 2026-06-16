@@ -113,3 +113,77 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn get_new_type_oid() -> PgResult<Oid>
 );
+
+// ---------------------------------------------------------------------------
+// F3/F4 single-row mutators (commands/typecmds.c ALTER TYPE / ALTER DOMAIN).
+//
+// Each owns the pg_type catalog WRITE for one ALTER path: the owner opens
+// pg_type (RowExclusiveLock), reads the row form for the values it needs, calls
+// the narrow `catalog_tuple_update_*_pg_type` indexing seam (which does the
+// heap_modify_tuple over only the targeted columns), then performs the
+// `GenerateTypeDependencies` + `InvokeObjectPostAlterHook` calls where C does.
+// typecmds does NO datum writes and NO GenerateTypeDependencies of its own.
+// ---------------------------------------------------------------------------
+
+use types_catalog::pg_type::TypeAttrUpdate;
+
+seam_core::seam!(
+    /// `AlterTypeOwnerInternal`'s SINGLE-ROW write (typecmds.c:3985): set
+    /// `typowner = new_owner_id` and (when typacl non-NULL)
+    /// `typacl = aclnewowner(old_acl, old_owner, new_owner)`, then
+    /// `CatalogTupleUpdate`. No recursion to array/multirange (typecmds does
+    /// that). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn set_type_owner(type_oid: Oid, new_owner_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterTypeNamespaceInternal`'s single-row `typnamespace` write
+    /// (typecmds.c:4233) + `CatalogTupleUpdate`. Can `ereport(ERROR)`.
+    pub fn set_type_namespace(type_oid: Oid, nsp_oid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// AlterDomain* single-row `typnotnull` write + `CatalogTupleUpdate`. Can
+    /// `ereport(ERROR)`.
+    pub fn set_type_not_null(type_oid: Oid, not_null: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterDomainDefault`'s pg_type write (typecmds.c:2614): replace
+    /// `typdefault`/`typdefaultbin` (`None` = SQL NULL), `CatalogTupleUpdate`,
+    /// then `GenerateTypeDependencies(newtuple, defaultExpr=string_to_node(
+    /// default_bin) when Some, typacl=None, relationKind=0, isImplicitArray=
+    /// false, isDependentType=false, makeExtensionDep=false, rebuild=true)` +
+    /// `InvokeObjectPostAlterHook(TypeRelationId, type_oid, 0)`. Can
+    /// `ereport(ERROR)`.
+    pub fn set_domain_default(
+        type_oid: Oid,
+        default_value: Option<String>,
+        default_bin: Option<String>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterTypeRecurse`'s per-row update (typecmds.c:4561): build values/nulls/
+    /// replaces from the [`TypeAttrUpdate`] gates, `heap_modify_tuple`,
+    /// `CatalogTupleUpdate`, `GenerateTypeDependencies(newtup, NULL, NULL, 0,
+    /// is_implicit_array, is_implicit_array, false, true)`,
+    /// `InvokeObjectPostAlterHook(TypeRelationId, type_oid, 0)`. Returns the
+    /// row's `typarray` OID (so typecmds can recurse to the array type). Can
+    /// `ereport(ERROR)`.
+    pub fn alter_type_recurse_update(
+        type_oid: Oid,
+        is_implicit_array: bool,
+        attr: TypeAttrUpdate,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AlterTypeRecurse`'s domain scan (typecmds.c:4682): `systable_beginscan(
+    /// pg_type, InvalidOid, false, NULL, 1, key[typbasetype = base_type_oid])`
+    /// returning the OIDs of rows with `typbasetype = base_type_oid` AND
+    /// `typtype == TYPTYPE_DOMAIN` (the C `domainForm->typtype != TYPTYPE_DOMAIN`
+    /// continue). typecmds then re-fires `AlterTypeRecurse` over each. Keeps the
+    /// table scan in the pg_type owner. Can `ereport(ERROR)`.
+    pub fn scan_domains_over_basetype(base_type_oid: Oid) -> PgResult<Vec<Oid>>
+);
