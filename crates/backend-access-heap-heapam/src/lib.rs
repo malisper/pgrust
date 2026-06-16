@@ -521,6 +521,20 @@ pub fn init_seams() {
     // uninstalled here: it carries canonical `Datum<'mcx>` (so by-ref column
     // images survive), but forming + `simple_heap_insert`ing the tuple is the
     // heap-INSERT family's job, out of this slice's scope.
+
+    // Inplace-update lock/apply/unlock trio (heapam.c, ported in `inplace.rs`),
+    // the primitives `systable_inplace_update_{begin,finish,cancel}` drive.
+    heapam_seam::heap_inplace_lock::set(|mcx, relation, oldtup, buffer, cb| {
+        inplace::heap_inplace_lock(mcx, relation, oldtup, buffer, cb)
+    });
+    heapam_seam::heap_inplace_update_and_unlock::set(
+        |mcx, relation, oldtup, tuple, new_data, buffer| {
+            inplace::heap_inplace_update_and_unlock(mcx, relation, oldtup, tuple, new_data, buffer)
+        },
+    );
+    heapam_seam::heap_inplace_unlock::set(|relation, oldtup, buffer| {
+        inplace::heap_inplace_unlock(relation, oldtup, buffer)
+    });
 }
 
 /// Materialize an on-page `HeapTupleHeader` at `(buffer, offnum)` into `mcx`

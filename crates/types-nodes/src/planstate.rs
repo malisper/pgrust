@@ -470,3 +470,87 @@ impl<'mcx> PlanStateNode<'mcx> {
         out
     }
 }
+
+/// `PlanState *` back-link — the non-owning parent back-pointer stored in
+/// `ExprState.parent`.
+///
+/// In C, `ExprState.parent` is a bare `PlanState *`: a NON-owning uplink from a
+/// compiled expression to the plan-state node that owns it (the node's quals,
+/// projections, etc.). An aggregate's `ExprState`s point back at the very
+/// `AggState` that owns them; a MERGE action's `ExprState`s point back at the
+/// owning `ModifyTableState`. Because the `PlanState` OWNS its `ExprState`s, an
+/// *owning* `PgBox<PlanStateNode>` field here would be an ownership cycle (the
+/// node cannot be owned by the plan tree AND by its own expressions), which is
+/// exactly what blocked an in-flight `AggState` from being its own expressions'
+/// parent.
+///
+/// Modelled as a **lifetime-free raw back-pointer** to the owning
+/// `PlanStateNode`, identical to the established [`EStateLink`] uplink
+/// (`PlanState.state`) and the `mcx` child→parent / `RelAlias` raw back-pointer
+/// idioms: no lifetime to infect `ExprState`/`PlanStateNode`, `Copy` (so the C
+/// `elemstate->parent = state->parent` raw-pointer copy is faithful), and the
+/// `&` is re-derived per access. Validity is underwritten by the invariant that
+/// the owning `PlanStateNode` OUTLIVES — and, because it OWNS the `ExprState`
+/// carrying this link, never moves while linked — that `ExprState`.
+///
+/// [`EStateLink`]: crate::execnodes::EStateLink
+#[derive(Clone, Copy, Debug)]
+pub struct PlanStateLink(core::ptr::NonNull<PlanStateNode<'static>>);
+
+impl PlanStateLink {
+    /// Wrap the stable address of the owning `PlanStateNode` as a back-link. The
+    /// caller must guarantee the node outlives every `ExprState` carrying the
+    /// link (it does: the node owns those `ExprState`s); see the type docs. The
+    /// `'mcx` is erased into the raw address.
+    #[inline]
+    pub fn from_ref<'mcx>(parent: &PlanStateNode<'mcx>) -> Self {
+        PlanStateLink(core::ptr::NonNull::from(parent).cast())
+    }
+
+    /// Wrap a non-null pointer to the owning `PlanStateNode`. The caller takes on
+    /// the same liveness obligation [`Self::from_ref`] discharges.
+    #[inline]
+    pub fn new(p: core::ptr::NonNull<PlanStateNode<'static>>) -> Self {
+        PlanStateLink(p)
+    }
+
+    /// Momentary shared read of the owning `PlanStateNode` through the back-link —
+    /// the single audited deref of the raw uplink (mirrors [`EStateLink::get`]
+    /// and `RelAlias::get`). Re-derives the `&` per access at the caller-chosen
+    /// lifetime; never stores a stale reference. This is the owned-model
+    /// rendering of C's `state->parent` dereference (`castNode(..., parent)`).
+    ///
+    /// [`EStateLink::get`]: crate::execnodes::EStateLink::get
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get<'a>(&self) -> &'a PlanStateNode<'a> {
+        // Re-derive a fresh, untagged `NonNull` from the raw address so this
+        // deref's provenance is current (a once-captured `&`-tag would be
+        // revoked by an intervening `&mut` to the owning node); never deref the
+        // stored `self.0` directly. Mirrors `EStateLink::get` exactly.
+        // SAFETY: `self.0` is non-null (newtype invariant).
+        let fresh =
+            unsafe { core::ptr::NonNull::new_unchecked(self.0.as_ptr() as *mut PlanStateNode<'a>) };
+        debug_assert_eq!(
+            fresh.as_ptr() as *mut (),
+            self.0.as_ptr() as *mut (),
+            "owning PlanStateNode moved under PlanStateLink"
+        );
+        // SAFETY: the uplink is set only to the `PlanStateNode` that OWNS — and
+        // therefore outlives + never moves while linked — the `ExprState`
+        // carrying this link. The cross-struct reference points from the
+        // shorter-lived `ExprState` to the longer-lived owning node, exactly the
+        // verified parent-outlives-child invariant of `EStateLink` / the `mcx`
+        // parent uplink. `fresh` is re-derived this call from the raw address
+        // (not a stored stale-tag pointer), so the deref is momentary.
+        unsafe { fresh.as_ref() }
+    }
+
+    /// Raw escape hatch (the bare `PlanState *` the C executor holds), for the
+    /// rare spot where tying the borrow to `&self` is too restrictive. The
+    /// caller takes on the liveness obligation [`Self::get`] discharges.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut PlanStateNode<'static> {
+        self.0.as_ptr()
+    }
+}
