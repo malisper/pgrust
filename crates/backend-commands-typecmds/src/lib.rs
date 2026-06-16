@@ -43,7 +43,7 @@
 //! unported owners land.
 
 use backend_catalog_namespace::{
-    NameListToString, QualifiedNameGetCreationNamespace, RangeVarAdjustRelationPersistence,
+    QualifiedNameGetCreationNamespace, RangeVarAdjustRelationPersistence,
     RangeVarGetAndCheckCreationNamespace,
 };
 use backend_catalog_pg_cast::CastCreate;
@@ -56,7 +56,7 @@ use backend_utils_error::ereport;
 use mcx::Mcx;
 
 use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
-use types_catalog::catalog::{NAMESPACE_RELATION_ID, TYPE_RELATION_ID};
+use types_catalog::catalog::TYPE_RELATION_ID;
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 use types_catalog::pg_type::{
     TypeCreateParams, TYPTYPE_BASE, TYPTYPE_ENUM, TYPTYPE_MULTIRANGE, TYPTYPE_PSEUDO, TYPTYPE_RANGE,
@@ -87,8 +87,9 @@ use backend_catalog_aclchk_seams::{aclcheck_error, object_aclcheck};
 use backend_commands_define_seams::DefElemArg;
 use backend_parser_coerce_seams::is_binary_coercible;
 use backend_utils_adt_format_type_seams::format_type_be_owned;
-use backend_utils_init_miscinit_seams::{get_user_id, is_binary_upgrade, superuser};
+use backend_utils_init_miscinit_seams::{get_user_id, superuser};
 
+use backend_catalog_binary_upgrade_seams::{consume_next_pg_type_oid, is_binary_upgrade};
 use backend_catalog_pg_opclass_seams::get_default_opclass;
 use backend_commands_functioncmds_seams::{
     aclcheck_error_schema, func_signature_string, get_func_name, lookup_func_name,
@@ -96,8 +97,8 @@ use backend_commands_functioncmds_seams::{
 };
 use backend_commands_opclasscmds_seams::get_opclass_oid;
 use backend_utils_cache_lsyscache_seams::{
-    func_volatile, get_func_rettype, get_opclass_input_type, get_typcollation, get_typisdefined,
-    get_typlen, get_typlenbyvalalign, get_typtype, type_is_collatable,
+    func_volatile, get_func_rettype, get_namespace_name, get_opclass_input_type, get_typcollation,
+    get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype, type_is_collatable,
 };
 use backend_utils_cache_syscache_seams::get_type_oid;
 
@@ -146,14 +147,10 @@ const TYPCATEGORY_USER: i8 = b'U' as i8;
 /// `NoLock` (lockdefs.h) — used by RangeVarGetAndCheckCreationNamespace.
 const NoLock: i32 = 0;
 
-/// `RELKIND_COMPOSITE_TYPE` (catalog/pg_class.h).
-const RELKIND_COMPOSITE_TYPE: i8 = b'c' as i8;
-
-/// `ProcedureRelationId` — pg_proc's OID, used as the aclcheck classid.
+/// `ProcedureRelationId` — pg_proc's OID, used as the `object_aclcheck` classid
+/// in the range support-function permission checks.
 const ProcedureRelationId: Oid = PROCEDURE_RELATION_ID;
-/// `NamespaceRelationId` — pg_namespace's OID.
-const NamespaceRelationId: Oid = NAMESPACE_RELATION_ID;
-/// `TypeRelationId` — pg_type's OID.
+/// `TypeRelationId` — pg_type's OID, used for the `ObjectAddress` class id.
 const TypeRelationId: Oid = TYPE_RELATION_ID;
 
 // ---------------------------------------------------------------------------
@@ -181,7 +178,10 @@ fn as_namelist(names: &[String]) -> Vec<Option<String>> {
     names.iter().map(|s| Some(s.clone())).collect()
 }
 
-/// `ObjectAddressSet(addr, TypeRelationId, oid)`.
+/// `ObjectAddressSet(addr, TypeRelationId, oid)` — mirrors the C helper; F2
+/// returns the `TypeCreate`/`enum`-address directly, so this is unused here but
+/// kept for parity (and keeps `TypeRelationId` live for the class id).
+#[allow(dead_code)]
 fn object_address_set_type(type_oid: Oid) -> ObjectAddress {
     ObjectAddress {
         classId: TypeRelationId,
@@ -964,7 +964,7 @@ pub fn DefineEnum<'mcx>(
     /* Check we have creation rights in target namespace */
     let aclresult = namespace_aclcheck::call(enumNamespace, get_user_id::call(), ACL_CREATE)?;
     if aclresult != ACLCHECK_OK {
-        aclcheck_error_schema::call(aclresult, get_namespace_name_seam(enumNamespace)?)?;
+        aclcheck_error_schema::call(aclresult, get_namespace_name_seam(mcx, enumNamespace)?)?;
     }
 
     /*
@@ -1108,7 +1108,7 @@ pub fn DefineRange<'mcx>(
     /* Check we have creation rights in target namespace */
     let aclresult = namespace_aclcheck::call(typeNamespace, get_user_id::call(), ACL_CREATE)?;
     if aclresult != ACLCHECK_OK {
-        aclcheck_error_schema::call(aclresult, get_namespace_name_seam(typeNamespace)?)?;
+        aclcheck_error_schema::call(aclresult, get_namespace_name_seam(mcx, typeNamespace)?)?;
     }
 
     /*
@@ -1913,7 +1913,7 @@ fn findRangeSubOpclass(mcx: Mcx<'_>, opcname: Option<&[String]>, subtype: Oid) -
 }
 
 /// `findRangeCanonicalFunction(procname, typeOid)` (typecmds.c:2358).
-fn findRangeCanonicalFunction(mcx: Mcx<'_>, procname: &[String], typeOid: Oid) -> PgResult<Oid> {
+fn findRangeCanonicalFunction(_mcx: Mcx<'_>, procname: &[String], typeOid: Oid) -> PgResult<Oid> {
     /*
      * Range canonical functions must take and return the range type, and must
      * be immutable.
@@ -1970,7 +1970,7 @@ fn findRangeCanonicalFunction(mcx: Mcx<'_>, procname: &[String], typeOid: Oid) -
 }
 
 /// `findRangeSubtypeDiffFunction(procname, subtype)` (typecmds.c:2399).
-fn findRangeSubtypeDiffFunction(mcx: Mcx<'_>, procname: &[String], subtype: Oid) -> PgResult<Oid> {
+fn findRangeSubtypeDiffFunction(_mcx: Mcx<'_>, procname: &[String], subtype: Oid) -> PgResult<Oid> {
     /*
      * Range subtype diff functions must take two arguments of the subtype, must
      * return float8, and must be immutable.
@@ -2033,10 +2033,16 @@ fn findRangeSubtypeDiffFunction(mcx: Mcx<'_>, procname: &[String], subtype: Oid)
 
 /// `AssignTypeArrayOid(void)` (typecmds.c:2447) — pre-assign the type's array
 /// OID for use in `pg_type.typarray`.
+///
+/// Binary-upgrade override: the C reads the dedicated
+/// `binary_upgrade_next_array_pg_type_oid` global; the repo's binary-upgrade
+/// model exposes a single `pg_type` OID slot (`consume_next_pg_type_oid`, also
+/// used by `TypeCreate`), so all three `AssignType*Oid` consume that one slot in
+/// the order they are called — preserving the per-OID validation and clearing.
 pub fn AssignTypeArrayOid() -> PgResult<Oid> {
     /* Use binary-upgrade override for pg_type.typarray? */
     if is_binary_upgrade::call() {
-        let next = backend_catalog_pg_type_seams::take_binary_upgrade_next_array_pg_type_oid::call()?;
+        let next = consume_next_pg_type_oid::call();
         if !OidIsValid(next) {
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -2056,7 +2062,7 @@ pub fn AssignTypeArrayOid() -> PgResult<Oid> {
 pub fn AssignTypeMultirangeOid() -> PgResult<Oid> {
     /* Use binary-upgrade override for pg_type.oid? */
     if is_binary_upgrade::call() {
-        let next = backend_catalog_pg_type_seams::take_binary_upgrade_next_mrng_pg_type_oid::call()?;
+        let next = consume_next_pg_type_oid::call();
         if !OidIsValid(next) {
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -2075,8 +2081,7 @@ pub fn AssignTypeMultirangeOid() -> PgResult<Oid> {
 pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
     /* Use binary-upgrade override for pg_type.oid? */
     if is_binary_upgrade::call() {
-        let next =
-            backend_catalog_pg_type_seams::take_binary_upgrade_next_mrng_array_pg_type_oid::call()?;
+        let next = consume_next_pg_type_oid::call();
         if !OidIsValid(next) {
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -2102,7 +2107,7 @@ pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
 /// `ColumnDef` nodes (the `(...)` after AS).
 pub fn DefineCompositeType<'mcx>(
     mcx: Mcx<'mcx>,
-    typevar: &mut types_nodes::rawnodes::RangeVar<'mcx>,
+    typevar: &mut types_tuple::access::RangeVar,
     coldeflist: &[Node],
 ) -> PgResult<ObjectAddress> {
     /*
@@ -2113,11 +2118,7 @@ pub fn DefineCompositeType<'mcx>(
      */
     let typeNamespace = RangeVarGetAndCheckCreationNamespace(mcx, typevar, NoLock, None)?;
     RangeVarAdjustRelationPersistence(mcx, typevar, typeNamespace)?;
-    let relname: String = typevar
-        .relname
-        .as_ref()
-        .map(|s| s.as_str().to_string())
-        .unwrap_or_default();
+    let relname: String = typevar.relname.clone();
     let old_type_oid = get_type_oid::call(&relname, typeNamespace)?;
     if OidIsValid(old_type_oid) {
         if !moveArrayTypeName(old_type_oid, &relname, typeNamespace)? {
@@ -2138,11 +2139,11 @@ pub fn DefineCompositeType<'mcx>(
      * NIL/NIL/NIL/ONCOMMIT_NOOP/NULL/false. Seam panics until tablecmds lands.
      */
     let carrier = TypeCmdsRangeVar {
-        catalogname: typevar.catalogname.as_ref().map(|s| s.as_str().to_string()),
-        schemaname: typevar.schemaname.as_ref().map(|s| s.as_str().to_string()),
-        relname: typevar.relname.as_ref().map(|s| s.as_str().to_string()),
+        catalogname: typevar.catalogname.clone(),
+        schemaname: typevar.schemaname.clone(),
+        relname: Some(typevar.relname.clone()),
         inh: typevar.inh,
-        relpersistence: typevar.relpersistence,
+        relpersistence: typevar.relpersistence as i8,
         location: typevar.location,
     };
     let address = me::define_relation_composite::call(carrier, coldeflist.to_vec())?;
@@ -2171,9 +2172,10 @@ fn NameListToString_seam(_mcx: Mcx<'_>, names: &[String]) -> PgResult<String> {
     name_list_to_string::call(names.to_vec())
 }
 
-/// `get_namespace_name(nspid)` projected for `aclcheck_error_schema`'s objname.
-fn get_namespace_name_seam(nspid: Oid) -> PgResult<Option<String>> {
-    backend_commands_functioncmds_seams::get_namespace_name::call(nspid)
+/// `get_namespace_name(nspid)` (lsyscache) projected for `aclcheck_error_schema`'s
+/// objname.
+fn get_namespace_name_seam(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
+    Ok(get_namespace_name::call(mcx, nspid)?.map(|s| s.as_str().to_string()))
 }
 
 // ---------------------------------------------------------------------------

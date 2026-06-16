@@ -4513,6 +4513,8 @@ dependencies = [
 name = "backend-catalog-pg-type"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
@@ -4539,6 +4541,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-scan",
  "types-storage",
  "types-tuple",
 ]
@@ -5721,6 +5724,7 @@ name = "backend-commands-typecmds"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
+ "backend-catalog-binary-upgrade-seams",
  "backend-catalog-namespace",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-enum",
@@ -16293,6 +16297,7 @@ dependencies = [
  "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-trigger",
+ "backend-commands-typecmds",
  "backend-commands-variable",
  "backend-common-relpath",
  "backend-executor-execAmi",

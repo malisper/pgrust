@@ -113,20 +113,3 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn get_new_type_oid() -> PgResult<Oid>
 );
-
-seam_core::seam!(
-    /// Read-and-clear of the `binary_upgrade_next_array_pg_type_oid` global
-    /// (catalog/binary_upgrade.h), set by the pg_upgrade_support functions:
-    /// returns the pending value and resets it to `InvalidOid`.
-    pub fn take_binary_upgrade_next_array_pg_type_oid() -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// Read-and-clear of the `binary_upgrade_next_mrng_pg_type_oid` global.
-    pub fn take_binary_upgrade_next_mrng_pg_type_oid() -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// Read-and-clear of the `binary_upgrade_next_mrng_array_pg_type_oid` global.
-    pub fn take_binary_upgrade_next_mrng_array_pg_type_oid() -> PgResult<Oid>
-);

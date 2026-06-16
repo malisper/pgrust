@@ -117,6 +117,7 @@ backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-typecmds = { path = "../backend-commands-typecmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }
 backend-executor-execExpr = { path = "../backend-executor-execExpr" }

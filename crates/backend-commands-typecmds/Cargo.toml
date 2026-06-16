@@ -26,6 +26,7 @@ backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-commands-opclasscmds-seams = { path = "../backend-commands-opclasscmds-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
 backend-catalog-pg-opclass-seams = { path = "../backend-catalog-pg-opclass-seams" }
 backend-catalog-pg-type-seams = { path = "../backend-catalog-pg-type-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
