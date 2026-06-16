@@ -424,8 +424,11 @@ dependencies = [
 name = "backend-access-common-printtup"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-printtup-seams",
  "backend-executor-execTuples-seams",
  "backend-libpq-pqformat",
+ "backend-tcop-dest",
+ "backend-tcop-dest-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
@@ -433,8 +436,18 @@ dependencies = [
  "types-dest",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-stringinfo",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-common-printtup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-dest",
+ "types-nodes",
 ]
 
 [[package]]
@@ -15795,6 +15808,7 @@ dependencies = [
 name = "backend-tcop-dest"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-printtup-seams",
  "backend-access-transam-xact-seams",
  "backend-commands-copyto-seams",
  "backend-libpq-pqcomm-seams",
@@ -20546,6 +20560,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
  "backend-access-common-next",
+ "backend-access-common-printtup",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tidstore",

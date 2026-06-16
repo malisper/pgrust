@@ -46,11 +46,13 @@ fn distinct_handles() {
 
 /// An un-routed receiver kind dispatches to the honest mirror-and-panic vtable:
 /// `rShutdown` panics naming the missing keystone, rather than silently
-/// succeeding.
+/// succeeding. `DestSPI`'s owner (spi.c) is not yet routed into this router
+/// (`DestRemote`/`DestRemoteExecute`/`DestDebug` now are — they delegate to
+/// printtup's `printtup_create_dr` seam — so they no longer hit this path).
 #[test]
 #[should_panic(expected = "not wired into the tcop-dest router")]
 fn unwired_kind_panics_on_dispatch() {
-    let h = CreateDestReceiver(CommandDest::Remote);
+    let h = CreateDestReceiver(CommandDest::Spi);
     let _ = with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h));
 }
 
