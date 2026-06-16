@@ -38,6 +38,9 @@ use types_error::{ErrorLocation, PgResult};
 use types_nodes::nodes::Node;
 
 use backend_nodes_core_seams as seams;
+use backend_utils_adt_ruleutils_seams as seams_ruleutils;
+use backend_utils_cache_lsyscache_seams as seams_lsyscache;
+use backend_utils_fmgr_fmgr_seams as seams_fmgr;
 
 /// `print(obj)` — print the contents of a `Node` to stdout.
 ///
@@ -261,29 +264,182 @@ fn finish(out: PgVec<'_, u8>) -> PgResult<PgString<'_>> {
     Ok(PgString::from_utf8(out).expect("node dump is valid UTF-8"))
 }
 
-/// `print_rt(rtable)` — print the contents of a range table.
-///
-/// Reads `rte->eref->aliasname`, `rte->inh`, and `rte->inFromCl`, none of which
-/// are modeled on `types_nodes::parsenodes::RangeTblEntry` (the carrier is
-/// trimmed by its owning crate, and `eref`/`Alias` is not modeled at all). The
-/// faithful printer is owned by the (unported) `outfuncs`/parsetree surface;
-/// seam-and-panic until that owner lands.
-pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>]) -> PgResult<()> {
-    seams::print_rt::call(rtable)
+// The special `Var.varno` magic values (primnodes.h): references into the
+// executor's INNER/OUTER/INDEX tuple slots rather than a real range-table entry.
+const INNER_VAR: i32 = -1;
+const OUTER_VAR: i32 = -2;
+const INDEX_VAR: i32 = -3;
+
+/// `print_rt(rtable)` — print the contents of a range table to stdout
+/// (`nodes/print.c`). Faithful field-for-field port: one row per RTE with its
+/// `rtekind`-specific second column, then the `inh`/`inFromCl` flags.
+pub fn print_rt(mcx: Mcx<'_>, rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>]) -> PgResult<()> {
+    use types_nodes::parsenodes::RTEKind;
+
+    let _ = mcx; // C uses no allocation here; kept for the seam signature.
+    print!("resno\trefname  \trelid\tinFromCl\n");
+    print!("-----\t---------\t-----\t--------\n");
+    for (idx, rte) in rtable.iter().enumerate() {
+        let i = idx + 1;
+        // C: rte->eref->aliasname — the eref Alias is always present on a built RTE.
+        let aliasname = rte
+            .eref
+            .as_ref()
+            .and_then(|a| a.aliasname.as_deref())
+            .unwrap_or("");
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                // relkind is a `char` in C, printed with %c.
+                print!("{}\t{}\t{}\t{}", i, aliasname, rte.relid, rte.relkind as u8 as char);
+            }
+            RTEKind::RTE_SUBQUERY => print!("{}\t{}\t[subquery]", i, aliasname),
+            RTEKind::RTE_JOIN => print!("{}\t{}\t[join]", i, aliasname),
+            RTEKind::RTE_FUNCTION => print!("{}\t{}\t[rangefunction]", i, aliasname),
+            RTEKind::RTE_TABLEFUNC => print!("{}\t{}\t[table function]", i, aliasname),
+            RTEKind::RTE_VALUES => print!("{}\t{}\t[values list]", i, aliasname),
+            RTEKind::RTE_CTE => print!("{}\t{}\t[cte]", i, aliasname),
+            RTEKind::RTE_NAMEDTUPLESTORE => print!("{}\t{}\t[tuplestore]", i, aliasname),
+            RTEKind::RTE_RESULT => print!("{}\t{}\t[result]", i, aliasname),
+            RTEKind::RTE_GROUP => print!("{}\t{}\t[group]", i, aliasname),
+        }
+        print!(
+            "\t{}\t{}\n",
+            if rte.inh { "inh" } else { "" },
+            if rte.inFromCl { "inFromCl" } else { "" }
+        );
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(())
 }
 
-/// `print_expr(expr, rtable)` — print an expression.
-///
-/// The Var/Const/OpExpr/FuncExpr field reads are all modeled, but the default
-/// `Var` arm needs `rt_fetch(varno, rtable)->eref->aliasname` and
-/// `get_rte_attribute_name(rte, varattno)` (parser `parsetree`), and the trimmed
-/// `RangeTblEntry` carrier has no `eref`. Owned by the (unported)
-/// parsetree/lsyscache surface; seam-and-panic until it lands.
+/// `print_expr(expr, rtable)` — print an expression to stdout (`nodes/print.c`).
+/// Handles the `<>`/Var/Const/OpExpr/FuncExpr cases, falling back to
+/// `"unknown expr"`. The `Var` default arm resolves the relation/attribute names
+/// through the parser/lsyscache owner seams; Const value text through the type's
+/// output function; operator/function names through lsyscache.
 pub fn print_expr(
+    mcx: Mcx<'_>,
     expr: Option<&Node<'_>>,
     rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
-    seams::print_expr::call(expr, rtable)
+    // C: `if (expr == NULL) { printf("<>"); return; }`.
+    let node = match expr {
+        None => {
+            print!("<>");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            return Ok(());
+        }
+        Some(n) => n,
+    };
+    // print_expr only inspects Expr-derived nodes (IsA(expr, Var/Const/...));
+    // anything else falls through to "unknown expr".
+    match node {
+        Node::Expr(e) => print_expr_inner(mcx, Some(e), rtable)?,
+        _ => print!("unknown expr"),
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(())
+}
+
+/// The `Expr`-level recursion behind [`print_expr`]. C passes `Expr *` children
+/// directly back into `print_expr((Node *) child, ...)`; this repo carries those
+/// children as borrowed [`Expr`] values, so the recursion stays at the `&Expr`
+/// level (no `Node` allocation/clone). `None` mirrors a NULL child (`"<>"`).
+fn print_expr_inner(
+    mcx: Mcx<'_>,
+    expr: Option<&types_nodes::primnodes::Expr>,
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+) -> PgResult<()> {
+    use types_nodes::primnodes::Expr;
+
+    let e = match expr {
+        None => {
+            print!("<>");
+            return Ok(());
+        }
+        Some(e) => e,
+    };
+
+    match e {
+        Expr::Var(var) => {
+            let (relname, attname): (String, String) = match var.varno {
+                INNER_VAR => ("INNER".to_string(), "?".to_string()),
+                OUTER_VAR => ("OUTER".to_string(), "?".to_string()),
+                INDEX_VAR => ("INDEX".to_string(), "?".to_string()),
+                _ => {
+                    // C: Assert(varno > 0 && varno <= list_length(rtable));
+                    //    rte = rt_fetch(varno, rtable);
+                    let rte = &rtable[(var.varno - 1) as usize];
+                    let relname = rte
+                        .eref
+                        .as_ref()
+                        .and_then(|a| a.aliasname.as_deref())
+                        .unwrap_or("")
+                        .to_string();
+                    // get_rte_attribute_name(rte, var->varattno) — parser parsetree.
+                    let attname =
+                        seams_ruleutils::get_rte_attribute_name::call(mcx, rte, var.varattno)?
+                            .as_str()
+                            .to_string();
+                    (relname, attname)
+                }
+            };
+            print!("{}.{}", relname, attname);
+        }
+        Expr::Const(c) => {
+            if c.constisnull {
+                print!("NULL");
+                return Ok(());
+            }
+            // getTypeOutputInfo(consttype, &typoutput, &typIsVarlena);
+            let (typoutput, _typ_is_varlena) =
+                seams_lsyscache::get_type_output_info::call(c.consttype)?;
+            // OidOutputFunctionCall(typoutput, constvalue) — varlena-aware output.
+            let outputstr =
+                seams_fmgr::oid_output_function_call::call(mcx, typoutput, &c.constvalue)?;
+            print!("{}", String::from_utf8_lossy(&outputstr));
+        }
+        // Only `IsA(expr, OpExpr)` is special-cased in C; `DistinctExpr` and
+        // `NullIfExpr` have distinct node tags and fall through to "unknown expr".
+        Expr::OpExpr(opexpr) => {
+            // get_opname(e->opno) — NULL when the operator is gone.
+            let opname = seams_lsyscache::get_opname::call(mcx, opexpr.opno)?;
+            let opname_str: &str = opname
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("(invalid operator)");
+            if opexpr.args.len() > 1 {
+                // print_expr(get_leftop); printf(" op "); print_expr(get_rightop).
+                print_expr_inner(mcx, opexpr.args.first(), rtable)?;
+                print!(" {} ", opname_str);
+                print_expr_inner(mcx, opexpr.args.get(1), rtable)?;
+            } else {
+                print!("{} ", opname_str);
+                print_expr_inner(mcx, opexpr.args.first(), rtable)?;
+            }
+        }
+        Expr::FuncExpr(funcexpr) => {
+            // get_func_name(e->funcid) — NULL when the function is gone.
+            let funcname = seams_lsyscache::get_func_name::call(mcx, funcexpr.funcid)?;
+            let funcname_str: &str = funcname
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("(invalid function)");
+            print!("{}(", funcname_str);
+            for (k, arg) in funcexpr.args.iter().enumerate() {
+                print_expr_inner(mcx, Some(arg), rtable)?;
+                if k + 1 < funcexpr.args.len() {
+                    print!(",");
+                }
+            }
+            print!(")");
+        }
+        _ => print!("unknown expr"),
+    }
+    Ok(())
 }
 
 /// `print_pathkeys(pathkeys, rtable)` — print a list of `PathKey`s.
@@ -301,17 +457,35 @@ pub fn print_pathkeys(
     seams::print_pathkeys::call(pathkeys, rtable)
 }
 
-/// `print_tl(tlist, rtable)` — print a targetlist in a more legible way.
-///
-/// Reads `tle->resno` and `tle->ressortgroupref`, neither modeled on
-/// `types_nodes::primnodes::TargetEntry` (trimmed by its owning crate), and
-/// delegates each entry to [`print_expr`]. Owned by the (unported)
-/// outfuncs/parsetree surface; seam-and-panic until it lands.
+/// `print_tl(tlist, rtable)` — print a targetlist in a more legible way
+/// (`nodes/print.c`). Each entry: `resno`, `resname` (or `<null>`), the
+/// `ressortgroupref` (when nonzero), then the entry's expression via
+/// [`print_expr`].
 pub fn print_tl(
+    mcx: Mcx<'_>,
     tlist: &[types_nodes::primnodes::TargetEntry<'_>],
     rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
-    seams::print_tl::call(tlist, rtable)
+    print!("(\n");
+    for tle in tlist {
+        print!(
+            "\t{} {}\t",
+            tle.resno,
+            tle.resname.as_deref().unwrap_or("<null>")
+        );
+        if tle.ressortgroupref != 0 {
+            print!("({}):\t", tle.ressortgroupref);
+        } else {
+            print!("    :\t");
+        }
+        // print_expr((Node *) tle->expr, rtable).
+        print_expr_inner(mcx, tle.expr.as_deref(), rtable)?;
+        print!("\n");
+    }
+    print!(")\n");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(())
 }
 
 /// `print_slot(slot)` — print out the tuple in the given `TupleTableSlot`.

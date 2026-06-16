@@ -261,16 +261,23 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `print_rt(rtable)` (`nodes/print.c`): print the range table to stdout.
-    /// Owned by the parsetree/parsenodes surface that carries the full
-    /// `RangeTblEntry` (with `eref`/`inh`/`inFromCl`).
-    pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>]) -> types_error::PgResult<()>
+    /// Owned and installed by `backend-nodes-core` (the `print` family). Takes an
+    /// `Mcx` for the transient strings the printer materializes (C uses the
+    /// ambient `CurrentMemoryContext`).
+    pub fn print_rt<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `print_expr(expr, rtable)` (`nodes/print.c`): print an expression to
-    /// stdout. Owned by the parsetree/lsyscache surface (needs
-    /// `rt_fetch->eref->aliasname` + `get_rte_attribute_name`).
-    pub fn print_expr(
+    /// stdout. Owned and installed by `backend-nodes-core`; reaches
+    /// `get_rte_attribute_name`/`get_type_output_info`/`oid_output_function_call`/
+    /// `get_opname`/`get_func_name` through their owner seams. Takes an `Mcx` for
+    /// the transient strings (C uses the ambient `CurrentMemoryContext`).
+    pub fn print_expr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         expr: Option<&types_nodes::nodes::Node<'_>>,
         rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
     ) -> types_error::PgResult<()>
@@ -291,6 +298,7 @@ seam_core::seam!(
     /// stdout. Owned by the outfuncs/parsetree surface that carries the full
     /// `TargetEntry` (with `resno`/`ressortgroupref`).
     pub fn print_tl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
         rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
     ) -> types_error::PgResult<()>

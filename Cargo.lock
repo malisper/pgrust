@@ -10542,6 +10542,7 @@ dependencies = [
  "backend-nodes-readfuncs-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",

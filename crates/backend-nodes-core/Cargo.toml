@@ -33,6 +33,7 @@ backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-s
 backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
