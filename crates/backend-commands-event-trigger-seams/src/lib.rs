@@ -114,3 +114,15 @@ seam_core::seam!(
         new_owner_id: Oid,
     ) -> PgResult<ObjectAddress>
 );
+
+seam_core::seam!(
+    /// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
+    /// (event_trigger.c) keyed by an owned `AlterPublicationStmt` — the
+    /// publication CREATE/ALTER command-collection path (publicationcmds.c
+    /// `PublicationAddTables` / `PublicationAddSchemas` / `AlterPublicationOptions`).
+    pub fn event_trigger_collect_simple_command_publication<'mcx>(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        stmt: types_nodes::ddlnodes::AlterPublicationStmt<'mcx>,
+    ) -> PgResult<()>
+);

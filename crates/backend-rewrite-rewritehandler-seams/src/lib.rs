@@ -76,3 +76,19 @@ seam_core::seam!(
         include_col: Option<i32>,
     ) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `expand_generated_columns_in_expr(node, rel, rt_index)`
+    /// (rewriteHandler.c:4494) — expression-level: replace references to STORED
+    /// generated columns of `rel` (range-table index `rt_index`) within the
+    /// expression with their generation expressions. Returns the (possibly
+    /// rewritten) expression. Reached by `publicationcmds.c`
+    /// `TransformPubWhereClauses`; the rewriteHandler.c owner installs it. `rel`
+    /// is passed by OID (the seam re-opens / consults the relation).
+    pub fn expand_generated_columns_in_expr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: Option<types_nodes::primnodes::Expr>,
+        rel_oid: types_core::Oid,
+        rt_index: i32,
+    ) -> PgResult<Option<types_nodes::primnodes::Expr>>
+);

@@ -795,3 +795,17 @@ seam_core::seam!(
         xid: TransactionId,
     ) -> Vec<TransactionId>
 );
+
+seam_core::seam!(
+    /// `ProcGlobal->checkpointerProc` (proc.c) — the proc number the
+    /// checkpointer advertises so backends can wake it (`RequestCheckpoint` /
+    /// `ForwardSyncRequest`). `INVALID_PROC_NUMBER` while not running. Plain
+    /// shmem read.
+    pub fn checkpointer_proc() -> ProcNumber
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->checkpointerProc = MyProcNumber` (proc.c) — the checkpointer
+    /// advertises its own proc number at startup. Plain shmem write.
+    pub fn set_checkpointer_proc_to_self() -> types_error::PgResult<()>
+);

@@ -64,3 +64,10 @@ seam_core::seam!(
     /// void; the port threads its callees' `ereport` surface as `PgResult`.
     pub fn register_postmaster_child_active() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_XLOG_IS_SHUTDOWN)` (pmsignal.c): tell the
+    /// postmaster the checkpointer has finished writing the shutdown checkpoint.
+    /// Async-signal-safe and infallible in C.
+    pub fn send_postmaster_signal_xlog_is_shutdown()
+);

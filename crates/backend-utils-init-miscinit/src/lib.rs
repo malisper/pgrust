@@ -885,6 +885,14 @@ pub fn init_seams() {
     s::am_wal_summarizer_process::set(|| GetMyBackendType() == BackendType::WalSummarizer);
     s::am_logical_slot_sync_worker_process::set(|| GetMyBackendType() == BackendType::SlotsyncWorker);
 
+    // Checkpointer backend-type set/test (MyBackendType lives in globals.c).
+    s::set_my_backend_type_checkpointer::set(|| SetMyBackendType(BackendType::Checkpointer));
+    s::am_checkpointer_process::set(|| GetMyBackendType() == BackendType::Checkpointer);
+
+    // `CritSectionCount > 0` (the START_CRIT_SECTION counter in globals.c) —
+    // CompactCheckpointerRequestQueue avoids allocating inside a crit section.
+    s::in_critical_section::set(|| backend_utils_init_small::globals::CritSectionCount() > 0);
+
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match the
     // declared seam signatures exactly; the remaining miscinit seams either
     // diverge (extra Mcx / Result wrapper) or are mis-homed (pg_usleep lives in
