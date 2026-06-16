@@ -637,6 +637,88 @@ pub fn pgstat_drop_entry(kind: PgStat_Kind, dboid: Oid, objid: u64) -> PgResult<
     }
 }
 
+/// `pgstat_drop_entry_internal(shent, hstat)` (`pgstat_shmem.c`) — mark the
+/// seq-scan-current shared entry dropped and, if we held the last reference,
+/// free its body and delete it from the table. The caller has already released
+/// its backend-local reference. Returns `true` if the entry was freed.
+///
+/// # Safety
+/// `shent` must be the live, exclusively-locked entry the scan currently sits
+/// on (`hstat.curitem`).
+unsafe fn pgstat_drop_entry_internal(
+    area: *mut DsaArea,
+    hstat: &mut dshash::DshashSeqStatus,
+    shent: *mut PgStatShared_HashEntry,
+) -> PgResult<bool> {
+    debug_assert!((*shent).body != INVALID_DSA_POINTER);
+
+    // Signal that the entry is dropped - this eventually causes other backends
+    // to release their references.
+    debug_assert!(!(*shent).dropped, "trying to drop stats entry already dropped");
+    (*shent).dropped = true;
+
+    // Release the refcount marking the entry as not dropped.
+    if (*shent).refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
+        // pgstat_free_entry: fetch the dsa pointer, delete the current scan
+        // entry, then free the body.
+        let pdsa = (*shent).body;
+        dshash::dshash_delete_current(hstat)?;
+        dsa::dsa_free_ptr::call(area, pdsa)?;
+        Ok(true)
+    } else {
+        // Other backends still hold references; the seq scan keeps its lock.
+        Ok(false)
+    }
+}
+
+/// `pgstat_drop_matching_entries(do_drop, match_data)` (`pgstat_shmem.c`) with
+/// `do_drop == NULL` — drop *every* variable-numbered shared stats entry. Used
+/// by [`pgstat_drop_all_entries`].
+///
+/// Walks the shared dshash under an exclusive seq scan, releasing each backend's
+/// local reference and then dropping the entry. Entries still referenced by
+/// other backends request a GC.
+pub fn pgstat_drop_all_entries() -> PgResult<()> {
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+    if dsh.is_null() {
+        // Shared stats not attached: nothing to drop.
+        return Ok(());
+    }
+
+    let mut not_freed_count: u64 = 0;
+
+    // Entries are removed, so take an exclusive lock.
+    let mut hstat = dshash::dshash_seq_init(dsh, true);
+    loop {
+        let entry = match dshash::dshash_seq_next(&mut hstat)? {
+            Some(e) => e,
+            None => break,
+        };
+        // SAFETY: dshash_seq_next returns a live, locked entry address.
+        let shent = unsafe { shared_entry(entry) };
+
+        if unsafe { (*shent).dropped } {
+            continue;
+        }
+
+        // do_drop == NULL: drop every entry.
+
+        // Delete the backend-local reference, if any.
+        let key = unsafe { (*shent).key };
+        pgstat_release_entry_ref_for_key(&key)?;
+
+        if !unsafe { pgstat_drop_entry_internal(area, &mut hstat, shent)? } {
+            not_freed_count += 1;
+        }
+    }
+    dshash::dshash_seq_term(&mut hstat)?;
+
+    if not_freed_count > 0 {
+        pgstat_request_entry_refs_gc()?;
+    }
+    Ok(())
+}
+
 /// `pgstat_request_entry_refs_gc()` (`pgstat_shmem.c`) — bump the shared
 /// gc-request counter so every backend garbage-collects its stale entry refs.
 pub fn pgstat_request_entry_refs_gc() -> PgResult<()> {

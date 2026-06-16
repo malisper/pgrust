@@ -22,3 +22,16 @@ seam_core::seam!(
         fork_end: types_core::TimestampTz,
     )
 );
+
+seam_core::seam!(
+    /// `conn_timing.auth_start = tstamp` (the `conn_timing` global owned by
+    /// `backend_startup.c`): record the authentication start timestamp.
+    /// Set by `postinit.c`'s `PerformAuthentication`.
+    pub fn set_conn_timing_auth_start(tstamp: types_core::TimestampTz)
+);
+
+seam_core::seam!(
+    /// `conn_timing.auth_end = tstamp` (the `conn_timing` global owned by
+    /// `backend_startup.c`). Set by `postinit.c`'s `PerformAuthentication`.
+    pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
+);

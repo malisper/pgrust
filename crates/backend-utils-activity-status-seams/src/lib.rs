@@ -104,17 +104,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `conn_timing.auth_start = tstamp` (backend_status.c): record the
-    /// authentication start timestamp for logging.
-    pub fn set_conn_timing_auth_start(tstamp: types_core::TimestampTz)
-);
-
-seam_core::seam!(
-    /// `conn_timing.auth_end = tstamp` (backend_status.c).
-    pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
-);
-
-seam_core::seam!(
     /// `BackendStatusShmemSize()` (backend_status.c) — shared-memory bytes for
     /// the per-backend status array (`PgBackendStatus` entries, activity
     /// buffers, app-name and client-host buffers); summed by ipci.c
