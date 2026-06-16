@@ -16309,6 +16309,9 @@ name = "backend-utils-sort-tuplesort"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-indextuple-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-nbtree-core-seams",
  "backend-storage-file-buffile-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-sortsupport-seams",
@@ -16322,6 +16325,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-slot",
  "types-sortsupport",
  "types-storage",

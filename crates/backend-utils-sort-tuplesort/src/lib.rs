@@ -73,6 +73,7 @@ use types_nodes::{
     TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType,
     TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
 };
+use types_rel::Relation;
 use types_sortsupport::SortSupportData;
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple};
 use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
@@ -262,8 +263,46 @@ pub enum SortVariantArg<'mcx> {
     Heap { tupDesc: TupleDescData<'mcx> },
     /// Datum: `TuplesortDatumArg { Oid datumType; int datumTypeLen; }`.
     Datum { datumType: Oid, datumTypeLen: i16 },
-    /// Index/cluster variants — F4 fills the concrete `arg` payloads.
+    /// Index btree/gist subcase: `TuplesortIndexBTreeArg { TuplesortIndexArg
+    /// index; bool enforceUnique; bool uniqueNullsNotDistinct; }`
+    /// (tuplesortvariants.c). GiST shares this struct with both flags `false`.
+    IndexBtree {
+        index: TuplesortIndexArg<'mcx>,
+        enforceUnique: bool,
+        uniqueNullsNotDistinct: bool,
+    },
+    /// Index hash subcase: `TuplesortIndexHashArg { TuplesortIndexArg index;
+    /// uint32 high_mask; uint32 low_mask; uint32 max_buckets; }`
+    /// (tuplesortvariants.c).
+    IndexHash {
+        index: TuplesortIndexArg<'mcx>,
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+    },
+    /// CLUSTER variant — F4 fills the concrete `arg` payload.
     Other,
+}
+
+/// `TuplesortIndexArg { Relation heapRel; Relation indexRel; }`
+/// (tuplesortvariants.c): the common index-sort `arg` base. The hot paths
+/// (`removeabbrev_index` / `comparetup_index_*` / `readtup_index`) only read
+/// `RelationGetDescr(indexRel)`; the index descriptor is deep-cloned into the
+/// engine's own context (`indexDesc`). The two `Relation` handles are also kept
+/// (their relcache cell `Rc` pins the underlying allocation against eviction,
+/// exactly as C's held `Relation` pointers do) for the cold uniqueness-violation
+/// error path (`comparetup_index_btree_tiebreak` →
+/// `BuildIndexValueDescription` / `RelationGetRelationName` / `errtableconstraint`).
+#[derive(Debug)]
+pub struct TuplesortIndexArg<'mcx> {
+    /// `Relation heapRel` — table the index is being built on.
+    pub heapRel: Relation<'mcx>,
+    /// `Relation indexRel` — index being built.
+    pub indexRel: Relation<'mcx>,
+    /// `RelationGetDescr(indexRel)` deep-cloned into the engine context. The C
+    /// re-reads this off `indexRel` on every access; we snapshot it once so the
+    /// hot paths never need the (lifetime-foreign) relation handle.
+    pub indexDesc: TupleDescData<'mcx>,
 }
 
 // ===========================================================================
@@ -678,9 +717,9 @@ fn comparetup<'mcx>(
     match state.variant {
         SortVariantKind::Heap => comparetup_heap(state, a, b),
         SortVariantKind::Datum => comparetup_datum(state, a, b),
-        SortVariantKind::Cluster
-        | SortVariantKind::IndexBtree
-        | SortVariantKind::IndexHash => panic!(
+        SortVariantKind::IndexBtree => comparetup_index_btree(state, a, b),
+        SortVariantKind::IndexHash => comparetup_index_hash(state, a, b),
+        SortVariantKind::Cluster => panic!(
             "tuplesort: comparetup for {:?} not yet ported (tuplesortvariants.c, F4)",
             state.variant
         ),
@@ -977,9 +1016,10 @@ fn writetup<'mcx>(
     match variant {
         SortVariantKind::Heap => writetup_heap(sortopt, tapeset, tape, stup),
         SortVariantKind::Datum => writetup_datum(sortopt, tapeset, tape, stup),
-        SortVariantKind::Cluster
-        | SortVariantKind::IndexBtree
-        | SortVariantKind::IndexHash => panic!(
+        SortVariantKind::IndexBtree | SortVariantKind::IndexHash => {
+            writetup_index(sortopt, tapeset, tape, stup)
+        }
+        SortVariantKind::Cluster => panic!(
             "tuplesort: writetup for {variant:?} not yet ported (tuplesortvariants.c, F4)"
         ),
     }
@@ -999,9 +1039,10 @@ fn readtup<'mcx>(
     match variant {
         SortVariantKind::Heap => readtup_heap(base, mcx, tapeset, tape, len),
         SortVariantKind::Datum => readtup_datum(base, mcx, tapeset, tape, len),
-        SortVariantKind::Cluster
-        | SortVariantKind::IndexBtree
-        | SortVariantKind::IndexHash => panic!(
+        SortVariantKind::IndexBtree | SortVariantKind::IndexHash => {
+            readtup_index(base, mcx, tapeset, tape, len)
+        }
+        SortVariantKind::Cluster => panic!(
             "tuplesort: readtup for {variant:?} not yet ported (tuplesortvariants.c, F4)"
         ),
     }
@@ -1339,9 +1380,8 @@ fn remove_abbrev_all<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()>
     match state.variant {
         SortVariantKind::Heap => removeabbrev_heap(state),
         SortVariantKind::Datum => removeabbrev_datum(state),
-        SortVariantKind::Cluster
-        | SortVariantKind::IndexBtree
-        | SortVariantKind::IndexHash => panic!(
+        SortVariantKind::IndexBtree | SortVariantKind::IndexHash => removeabbrev_index(state),
+        SortVariantKind::Cluster => panic!(
             "tuplesort: removeabbrev for {:?} not yet ported (tuplesortvariants.c, F4)",
             state.variant
         ),
@@ -1386,6 +1426,345 @@ fn removeabbrev_datum<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()
         state.memtuples[i].datum1 = datum;
     }
     Ok(())
+}
+
+// ===========================================================================
+// Index variant comparetup / removeabbrev / writetup / readtup
+// (tuplesortvariants.c). Shared by index_btree, index_gist and index_hash.
+// ===========================================================================
+
+/// Read the index `arg` (the C `(TuplesortIndexArg *) base->arg`) — common to
+/// btree/gist (`IndexBtree`) and hash (`IndexHash`).
+fn index_arg<'a, 'mcx>(arg: &'a SortVariantArg<'mcx>) -> PgResult<&'a TuplesortIndexArg<'mcx>> {
+    match arg {
+        SortVariantArg::IndexBtree { index, .. } => Ok(index),
+        SortVariantArg::IndexHash { index, .. } => Ok(index),
+        _ => Err(PgError::error(
+            "tuplesort: index variant op on a non-index arg",
+        )),
+    }
+}
+
+/// `index_getattr(tuple, attnum, tupleDescriptor, &isnull)` (access/itup.h) over
+/// the on-disk IndexTuple bytes. The C macro fast-paths a non-null leading attr;
+/// `nocache_index_getattr` yields the identical value for any attr, so we route
+/// through it (behaviour-preserving).
+fn index_getattr<'mcx>(
+    mcx: Mcx<'mcx>,
+    itup: &[u8],
+    attnum: i32,
+    itupdesc: &TupleDescData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    backend_access_common_indextuple_seams::nocache_index_getattr::call(mcx, itup, attnum, itupdesc)
+}
+
+/// The on-disk IndexTuple bytes of a [`SortTuple`]'s body.
+fn index_tuple_bytes<'a, 'mcx>(stup: &'a SortTuple<'mcx>) -> PgResult<&'a [u8]> {
+    match &stup.tuple {
+        Some(TupleBody::Index(b)) => Ok(b),
+        _ => Err(PgError::error("tuplesort: index op on a non-index tuple body")),
+    }
+}
+
+/// `ItemPointerGetBlockNumber(&itup->t_tid)` over the on-disk bytes: the
+/// `t_tid` is the leading `ItemPointerData` (`ip_blkid` 4 bytes + `ip_posid` 2),
+/// laid out exactly as the C struct (`bi_hi` then `bi_lo`).
+fn itup_block_number(itup: &[u8]) -> u32 {
+    let bi_hi = u16::from_ne_bytes([itup[0], itup[1]]);
+    let bi_lo = u16::from_ne_bytes([itup[2], itup[3]]);
+    ((bi_hi as u32) << 16) | (bi_lo as u32)
+}
+
+/// `ItemPointerGetOffsetNumber(&itup->t_tid)` over the on-disk bytes.
+fn itup_offset_number(itup: &[u8]) -> u16 {
+    u16::from_ne_bytes([itup[4], itup[5]])
+}
+
+/// `_hash_hashkey2bucket(hashkey, maxbucket, highmask, lowmask)` (hashutil.c):
+/// pure bit-mask arithmetic with no catalog/state, inlined here (no cross-unit
+/// seam needed for a self-contained scalar op).
+fn hash_hashkey2bucket(hashkey: u32, maxbucket: u32, highmask: u32, lowmask: u32) -> u32 {
+    let mut bucket = hashkey & highmask;
+    if bucket > maxbucket {
+        bucket &= lowmask;
+    }
+    bucket
+}
+
+/// `removeabbrev_index(state, stups, count)` (tuplesortvariants.c): re-extract
+/// each `datum1` from the leading index column.
+fn removeabbrev_index<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
+    let mcx = state.mcx();
+    let count = state.memtupcount as usize;
+    for i in 0..count {
+        let (datum1, isnull1) = {
+            let arg = index_arg(&state.base.arg)?;
+            let itup = index_tuple_bytes(&state.memtuples[i])?;
+            index_getattr(mcx, itup, 1, &arg.indexDesc)?
+        };
+        state.memtuples[i].datum1 = datum1;
+        state.memtuples[i].isnull1 = isnull1;
+    }
+    Ok(())
+}
+
+/// `comparetup_index_btree(a, b, state)` (tuplesortvariants.c): compare the
+/// leading sort key via `ApplySortComparator`, then the btree tiebreak.
+fn comparetup_index_btree<'mcx>(
+    state: &TuplesortStateImpl<'mcx>,
+    a: &SortTuple<'mcx>,
+    b: &SortTuple<'mcx>,
+) -> PgResult<i32> {
+    let sort_key = &state.base.sortKeys[0];
+
+    // Compare the leading sort key.
+    let compare = apply_sort_comparator(
+        a.datum1.clone_in(state.mcx())?,
+        a.isnull1,
+        b.datum1.clone_in(state.mcx())?,
+        b.isnull1,
+        sort_key,
+    )?;
+    if compare != 0 {
+        return Ok(compare);
+    }
+
+    // Compare additional sort keys.
+    comparetup_index_btree_tiebreak(state, a, b)
+}
+
+/// `comparetup_index_btree_tiebreak(a, b, state)` (tuplesortvariants.c): the
+/// full multi-key + abbreviated-key tiebreak, the unique-constraint enforcement,
+/// and the final heap-TID (ItemPointer) tiebreak.
+fn comparetup_index_btree_tiebreak<'mcx>(
+    state: &TuplesortStateImpl<'mcx>,
+    a: &SortTuple<'mcx>,
+    b: &SortTuple<'mcx>,
+) -> PgResult<i32> {
+    let mcx = state.mcx();
+    let (enforce_unique, unique_nulls_not_distinct) = match &state.base.arg {
+        SortVariantArg::IndexBtree {
+            enforceUnique,
+            uniqueNullsNotDistinct,
+            ..
+        } => (*enforceUnique, *uniqueNullsNotDistinct),
+        // GiST shares the btree arg with both flags false.
+        _ => (false, false),
+    };
+    let arg = index_arg(&state.base.arg)?;
+    let tuple1 = index_tuple_bytes(a)?;
+    let tuple2 = index_tuple_bytes(b)?;
+    let keysz = state.base.nKeys;
+    let tup_des = &arg.indexDesc;
+
+    let mut equal_hasnull = false;
+
+    // sortKey[0]: if abbreviated, run the authoritative full comparator.
+    if state.base.sortKeys[0].abbrev_converter.is_some() {
+        let (datum1, isnull1) = index_getattr(mcx, tuple1, 1, tup_des)?;
+        let (datum2, isnull2) = index_getattr(mcx, tuple2, 1, tup_des)?;
+        let compare = apply_sort_abbrev_full_comparator(
+            datum1,
+            isnull1,
+            datum2,
+            isnull2,
+            &state.base.sortKeys[0],
+        )?;
+        if compare != 0 {
+            return Ok(compare);
+        }
+    }
+
+    // they are equal, so we only need to examine one null flag.
+    if a.isnull1 {
+        equal_hasnull = true;
+    }
+
+    // Remaining sort keys (nkey = 2 .. keysz).
+    for nkey in 2..=keysz {
+        let sort_key = &state.base.sortKeys[(nkey - 1) as usize];
+        let (datum1, isnull1) = index_getattr(mcx, tuple1, nkey, tup_des)?;
+        let (datum2, isnull2) = index_getattr(mcx, tuple2, nkey, tup_des)?;
+
+        let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, sort_key)?;
+        if compare != 0 {
+            return Ok(compare); // done when we find unequal attributes.
+        }
+
+        // they are equal, so we only need to examine one null flag.
+        if isnull1 {
+            equal_hasnull = true;
+        }
+    }
+
+    // Uniqueness enforcement: complain if two equal tuples are detected (unless
+    // there was at least one NULL field and NULLS NOT DISTINCT was not set).
+    if enforce_unique && !(!unique_nulls_not_distinct && equal_hasnull) {
+        // The two compared tuples are never the same physical tuple.
+        debug_assert!(!core::ptr::eq(tuple1.as_ptr(), tuple2.as_ptr()));
+
+        // index_deform_tuple(tuple1, tupDes, values, isnull).
+        let cols =
+            backend_access_common_indextuple_seams::index_deform_tuple::call(mcx, tuple1, tup_des)?;
+        let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, cols.len())?;
+        let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, cols.len())?;
+        for (d, n) in cols.iter() {
+            values.push(d.clone_in(mcx)?);
+            isnull.push(*n);
+        }
+
+        let key_desc = backend_access_index_genam_seams::build_index_value_description::call(
+            mcx,
+            &arg.indexRel,
+            &values,
+            &isnull,
+        )?;
+
+        let index_name = arg.indexRel.name();
+        let detail = match &key_desc {
+            Some(kd) => format!("Key {} is duplicated.", kd.as_str()),
+            None => "Duplicate keys exist.".to_string(),
+        };
+        return Err(PgError::error(format!(
+            "could not create unique index \"{index_name}\": {detail}"
+        )));
+    }
+
+    // If key values are equal, we sort on ItemPointer (heap TID as the implicit
+    // last key attribute — required for btree physical uniqueness).
+    {
+        let blk1 = itup_block_number(tuple1);
+        let blk2 = itup_block_number(tuple2);
+        if blk1 != blk2 {
+            return Ok(if blk1 < blk2 { -1 } else { 1 });
+        }
+    }
+    {
+        let pos1 = itup_offset_number(tuple1);
+        let pos2 = itup_offset_number(tuple2);
+        if pos1 != pos2 {
+            return Ok(if pos1 < pos2 { -1 } else { 1 });
+        }
+    }
+
+    // ItemPointer values should never be equal.
+    debug_assert!(false, "tuplesort: duplicate ItemPointer in index sort");
+    Ok(0)
+}
+
+/// `comparetup_index_hash(a, b, state)` (tuplesortvariants.c): sort by bucket
+/// number, then hash value, then ItemPointer.
+fn comparetup_index_hash<'mcx>(
+    state: &TuplesortStateImpl<'mcx>,
+    a: &SortTuple<'mcx>,
+    b: &SortTuple<'mcx>,
+) -> PgResult<i32> {
+    let (high_mask, low_mask, max_buckets) = match &state.base.arg {
+        SortVariantArg::IndexHash {
+            high_mask,
+            low_mask,
+            max_buckets,
+            ..
+        } => (*high_mask, *low_mask, *max_buckets),
+        _ => {
+            return Err(PgError::error(
+                "tuplesort comparetup_index_hash: arg is not an index-hash arg",
+            ))
+        }
+    };
+
+    // Fetch hash keys and mask off bits we don't want to sort by, so the initial
+    // sort is just on the bucket number. The first column is the hash key.
+    debug_assert!(!a.isnull1);
+    let bucket1 = hash_hashkey2bucket(a.datum1.as_u32(), max_buckets, high_mask, low_mask);
+    debug_assert!(!b.isnull1);
+    let bucket2 = hash_hashkey2bucket(b.datum1.as_u32(), max_buckets, high_mask, low_mask);
+    if bucket1 > bucket2 {
+        return Ok(1);
+    } else if bucket1 < bucket2 {
+        return Ok(-1);
+    }
+
+    // If bucket values are equal, sort by hash values.
+    let hash1 = a.datum1.as_u32();
+    let hash2 = b.datum1.as_u32();
+    if hash1 > hash2 {
+        return Ok(1);
+    } else if hash1 < hash2 {
+        return Ok(-1);
+    }
+
+    // If hash values are equal, sort on ItemPointer (physical order).
+    let tuple1 = index_tuple_bytes(a)?;
+    let tuple2 = index_tuple_bytes(b)?;
+    {
+        let blk1 = itup_block_number(tuple1);
+        let blk2 = itup_block_number(tuple2);
+        if blk1 != blk2 {
+            return Ok(if blk1 < blk2 { -1 } else { 1 });
+        }
+    }
+    {
+        let pos1 = itup_offset_number(tuple1);
+        let pos2 = itup_offset_number(tuple2);
+        if pos1 != pos2 {
+            return Ok(if pos1 < pos2 { -1 } else { 1 });
+        }
+    }
+
+    // ItemPointer values should never be equal.
+    debug_assert!(false, "tuplesort: duplicate ItemPointer in hash index sort");
+    Ok(0)
+}
+
+/// `writetup_index(state, tape, stup)` (tuplesortvariants.c): write the
+/// IndexTuple bytes with the C `tuplen = IndexTupleSize(tuple) + sizeof(tuplen)`
+/// framing (`IndexTupleSize` == the on-disk byte length).
+fn writetup_index<'mcx>(
+    sortopt: i32,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    stup: &SortTuple<'mcx>,
+) -> PgResult<()> {
+    let tuple = index_tuple_bytes(stup)?;
+    // tuplen = IndexTupleSize(tuple) + sizeof(tuplen).
+    let tuplen = (tuple.len() + LEN_WORD_SIZE) as u32;
+    logtape::logical_tape_write(tapeset, tape, &tuplen.to_ne_bytes())?;
+    logtape::logical_tape_write(tapeset, tape, tuple)?;
+    if sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        logtape::logical_tape_write(tapeset, tape, &tuplen.to_ne_bytes())?;
+    }
+    Ok(())
+}
+
+/// `readtup_index(state, stup, tape, len)` (tuplesortvariants.c): read the
+/// IndexTuple bytes back and re-extract `datum1` from the leading column.
+fn readtup_index<'mcx>(
+    base: &TuplesortPublic<'mcx>,
+    mcx: Mcx<'mcx>,
+    tapeset: &mut LogicalTapeSet<'mcx>,
+    tape: usize,
+    len: u32,
+) -> PgResult<SortTuple<'mcx>> {
+    let tuplen = len as usize - LEN_WORD_SIZE;
+
+    let mut tuple: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, tuplen)?;
+    tuple.resize(tuplen, 0);
+    logical_tape_read_exact(tapeset, tape, &mut tuple)?;
+    if base.sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        let mut trail = [0u8; LEN_WORD_SIZE];
+        logical_tape_read_exact(tapeset, tape, &mut trail)?;
+    }
+
+    // set up first-column key value.
+    let arg = index_arg(&base.arg)?;
+    let (datum1, isnull1) = index_getattr(mcx, &tuple, 1, &arg.indexDesc)?;
+    Ok(SortTuple {
+        tuple: Some(TupleBody::Index(tuple)),
+        datum1,
+        isnull1,
+        srctape: 0,
+    })
 }
 
 // ===========================================================================
@@ -2928,6 +3307,330 @@ fn tuplesort_begin_datum_state(
     })
 }
 
+/// A lifetime-free snapshot of a [`SortSupportData`]. Every field except
+/// `ssup_cxt` is already lifetime-free (`Copy` registry tokens / scalars); the
+/// snapshot drops the context and the rebuild re-homes it to the engine arena.
+#[derive(Clone, Copy)]
+struct SortSupportSnapshot {
+    ssup_collation: Oid,
+    ssup_reverse: bool,
+    ssup_nulls_first: bool,
+    ssup_attno: AttrNumber,
+    abbreviate: bool,
+    comparator: Option<types_sortsupport::SortComparatorId>,
+    abbrev_converter: Option<types_sortsupport::AbbrevConverterId>,
+    abbrev_abort: Option<types_sortsupport::AbbrevAbortId>,
+    abbrev_full_comparator: Option<types_sortsupport::SortComparatorId>,
+}
+
+impl SortSupportSnapshot {
+    fn capture(s: &SortSupportData<'_>) -> Self {
+        SortSupportSnapshot {
+            ssup_collation: s.ssup_collation,
+            ssup_reverse: s.ssup_reverse,
+            ssup_nulls_first: s.ssup_nulls_first,
+            ssup_attno: s.ssup_attno,
+            abbreviate: s.abbreviate,
+            comparator: s.comparator,
+            abbrev_converter: s.abbrev_converter,
+            abbrev_abort: s.abbrev_abort,
+            abbrev_full_comparator: s.abbrev_full_comparator,
+        }
+    }
+
+    fn rebuild<'sx>(&self, sx: Mcx<'sx>) -> SortSupportData<'sx> {
+        SortSupportData {
+            ssup_cxt: sx,
+            ssup_collation: self.ssup_collation,
+            ssup_reverse: self.ssup_reverse,
+            ssup_nulls_first: self.ssup_nulls_first,
+            ssup_attno: self.ssup_attno,
+            abbreviate: self.abbreviate,
+            comparator: self.comparator,
+            abbrev_converter: self.abbrev_converter,
+            abbrev_abort: self.abbrev_abort,
+            abbrev_full_comparator: self.abbrev_full_comparator,
+        }
+    }
+}
+
+/// Carry a caller-`'mcx` [`Relation`] into the engine's self-owned arena.
+///
+/// The index sort engine is self-owning over its own context (`OwnedSort`), so a
+/// caller-lifetimed handle cannot be moved into the `for<'sx>` build closure.
+/// The relation's data outlives the sort (its relcache cell `Rc` pins the
+/// allocation against eviction for as long as the handle is held — exactly the C
+/// `Relation` pointer's lifetime), so extending the apparent lifetime is sound.
+/// This mirrors the established seam transmute pattern used by `seam_puttupleslot`
+/// / `seam_putdatum` in this crate.
+///
+/// SAFETY: the returned handle (and its clone of the cell `Rc`) keep the
+/// relation's backing allocation alive for the engine's whole life; nothing from
+/// the relation is mutated, and the handle is dropped when the engine bundle is.
+unsafe fn relation_into_engine<'sx>(rel: &Relation<'_>) -> Relation<'sx> {
+    // alias() bumps the cell refcount (a second live `Relation *`); re-tie its
+    // phantom lifetime to the engine arena.
+    core::mem::transmute::<Relation<'_>, Relation<'sx>>(rel.alias())
+}
+
+/// `tuplesort_begin_index_btree(heapRel, indexRel, enforceUnique,
+/// uniqueNullsNotDistinct, workMem, coordinate=NULL, sortopt)`
+/// (tuplesortvariants.c).
+fn tuplesort_begin_index_btree_state(
+    mcx: Mcx<'_>,
+    heap_rel: &Relation<'_>,
+    index_rel: &Relation<'_>,
+    enforce_unique: bool,
+    unique_nulls_not_distinct: bool,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<OwnedSort> {
+    // nKeys = IndexRelationGetNumberOfKeyAttributes(indexRel).
+    let nkeys = index_rel.indnkeyatts();
+
+    // Snapshot the index descriptor for the engine's hot paths.
+    let index_desc_snap = TupleDescSnapshot::capture(&index_rel.rd_att)?;
+
+    // indexScanKey = _bt_mkscankey(indexRel, NULL): one scankey per key column.
+    let index_scan_key = backend_access_nbtree_core_seams::bt_mkscankey::call(index_rel, None)?
+        .ok_or_else(|| PgError::error("tuplesort_begin_index_btree: _bt_mkscankey returned NULL"))?;
+
+    // Prepare SortSupport data for each column (against the live caller relation),
+    // then snapshot to lifetime-free for the universal build closure.
+    let mut sort_key_snaps: std::vec::Vec<SortSupportSnapshot> =
+        std::vec::Vec::with_capacity(nkeys as usize);
+    for i in 0..nkeys as usize {
+        let scan_key = &index_scan_key.scankeys[i];
+        let mut sort_key = SortSupportData::new(mcx);
+        sort_key.ssup_collation = scan_key.sk_collation;
+        sort_key.ssup_nulls_first =
+            (scan_key.sk_flags & types_scan::scankey::SK_BT_NULLS_FIRST) != 0;
+        sort_key.ssup_attno = scan_key.sk_attno;
+        // Convey if abbreviation optimization is applicable in principle.
+        sort_key.abbreviate = i == 0; // haveDatum1 is always true here.
+        debug_assert!(sort_key.ssup_attno != 0);
+
+        let reverse = (scan_key.sk_flags & types_scan::scankey::SK_BT_DESC) != 0;
+        backend_utils_sort_sortsupport_seams::prepare_sort_support_from_index_rel::call(
+            index_rel,
+            reverse,
+            &mut sort_key,
+        )?;
+        sort_key_snaps.push(SortSupportSnapshot::capture(&sort_key));
+    }
+
+    // SAFETY: extend the relation handles' lifetime into the engine arena (see
+    // `relation_into_engine`).
+    let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
+    let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
+
+    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+        let mut state =
+            tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexBtree)?;
+
+        state.base.nKeys = nkeys;
+        state.base.haveDatum1 = true;
+
+        let index_desc = index_desc_snap.rebuild(sx)?;
+        let mut sort_keys: PgVec<'_, SortSupportData<'_>> =
+            vec_with_capacity_in(sx, nkeys as usize)?;
+        for snap in &sort_key_snaps {
+            sort_keys.push(snap.rebuild(sx));
+        }
+
+        // SAFETY: re-tie the engine-bound relation aliases to this closure's `sx`.
+        let heap_rel: Relation<'_> = unsafe { core::mem::transmute(heap_rel_engine) };
+        let index_rel: Relation<'_> = unsafe { core::mem::transmute(index_rel_engine) };
+
+        state.base.arg = SortVariantArg::IndexBtree {
+            index: TuplesortIndexArg {
+                heapRel: heap_rel,
+                indexRel: index_rel,
+                indexDesc: index_desc,
+            },
+            enforceUnique: enforce_unique,
+            uniqueNullsNotDistinct: unique_nulls_not_distinct,
+        };
+        state.base.sortKeys = sort_keys;
+
+        Ok(state)
+    })
+}
+
+/// `tuplesort_begin_index_hash(heapRel, indexRel, high_mask, low_mask,
+/// max_buckets, workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c).
+fn tuplesort_begin_index_hash_state(
+    _mcx: Mcx<'_>,
+    heap_rel: &Relation<'_>,
+    index_rel: &Relation<'_>,
+    high_mask: u32,
+    low_mask: u32,
+    max_buckets: u32,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<OwnedSort> {
+    let index_desc_snap = TupleDescSnapshot::capture(&index_rel.rd_att)?;
+    let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
+    let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
+
+    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+        let mut state =
+            tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexHash)?;
+
+        state.base.nKeys = 1; // Only one sort column, the hash code.
+        state.base.haveDatum1 = true;
+        // index_hash builds no SortSupport array (comparetup uses the masks).
+
+        let index_desc = index_desc_snap.rebuild(sx)?;
+        // SAFETY: re-tie the engine-bound relation aliases to `sx`.
+        let heap_rel: Relation<'_> = unsafe { core::mem::transmute(heap_rel_engine) };
+        let index_rel: Relation<'_> = unsafe { core::mem::transmute(index_rel_engine) };
+
+        state.base.arg = SortVariantArg::IndexHash {
+            index: TuplesortIndexArg {
+                heapRel: heap_rel,
+                indexRel: index_rel,
+                indexDesc: index_desc,
+            },
+            high_mask,
+            low_mask,
+            max_buckets,
+        };
+
+        Ok(state)
+    })
+}
+
+/// `tuplesort_begin_index_gist(heapRel, indexRel, workMem, coordinate=NULL,
+/// sortopt)` (tuplesortvariants.c). Shares the btree arg with both uniqueness
+/// flags `false`; keys the sort by the opclass' sortsupport
+/// (`PrepareSortSupportFromGistIndexRel`), per-column collation from
+/// `rd_indcollation`.
+fn tuplesort_begin_index_gist_state(
+    mcx: Mcx<'_>,
+    heap_rel: &Relation<'_>,
+    index_rel: &Relation<'_>,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<OwnedSort> {
+    let nkeys = index_rel.indnkeyatts();
+    let index_desc_snap = TupleDescSnapshot::capture(&index_rel.rd_att)?;
+
+    // Prepare SortSupport per column against the live relation, then snapshot.
+    let mut sort_key_snaps: std::vec::Vec<SortSupportSnapshot> =
+        std::vec::Vec::with_capacity(nkeys as usize);
+    for i in 0..nkeys as usize {
+        let mut sort_key = SortSupportData::new(mcx);
+        sort_key.ssup_collation = index_rel.rd_indcollation[i];
+        sort_key.ssup_nulls_first = false;
+        sort_key.ssup_attno = (i + 1) as AttrNumber;
+        // Convey if abbreviation optimization is applicable in principle.
+        sort_key.abbreviate = i == 0; // haveDatum1 is always true here.
+        debug_assert!(sort_key.ssup_attno != 0);
+
+        // Look for a sort support function.
+        backend_utils_sort_sortsupport_seams::prepare_sort_support_from_gist_index_rel::call(
+            index_rel,
+            &mut sort_key,
+        )?;
+        sort_key_snaps.push(SortSupportSnapshot::capture(&sort_key));
+    }
+
+    let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
+    let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
+
+    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+        // GiST shares the index_btree subcase comparetup/writetup/readtup.
+        let mut state =
+            tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexBtree)?;
+
+        state.base.nKeys = nkeys;
+        state.base.haveDatum1 = true;
+
+        let index_desc = index_desc_snap.rebuild(sx)?;
+        let mut sort_keys: PgVec<'_, SortSupportData<'_>> =
+            vec_with_capacity_in(sx, nkeys as usize)?;
+        for snap in &sort_key_snaps {
+            sort_keys.push(snap.rebuild(sx));
+        }
+
+        // SAFETY: re-tie the engine-bound relation aliases to `sx`.
+        let heap_rel: Relation<'_> = unsafe { core::mem::transmute(heap_rel_engine) };
+        let index_rel: Relation<'_> = unsafe { core::mem::transmute(index_rel_engine) };
+
+        state.base.arg = SortVariantArg::IndexBtree {
+            index: TuplesortIndexArg {
+                heapRel: heap_rel,
+                indexRel: index_rel,
+                indexDesc: index_desc,
+            },
+            enforceUnique: false,
+            uniqueNullsNotDistinct: false,
+        };
+        state.base.sortKeys = sort_keys;
+
+        Ok(state)
+    })
+}
+
+/// `tuplesort_putindextuplevalues(state, rel, self, values, isnull)`
+/// (tuplesortvariants.c): form an index tuple from `values`/`isnull` with heap
+/// TID `self`, set up `datum1` from the leading index column, and feed it in.
+fn tuplesort_putindextuplevalues_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    rel: &Relation<'mcx>,
+    self_tid: types_tuple::heaptuple::ItemPointerData,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<()> {
+    let mcx = state.mcx();
+
+    // stup.tuple = index_form_tuple_context(RelationGetDescr(rel), values, isnull,
+    // base->tuplecontext); tuple->t_tid = *self. The seam forms the tuple and
+    // stamps the heap TID in one shot.
+    let tuple: PgVec<'mcx, u8> = backend_access_common_indextuple_seams::index_form_tuple::call(
+        mcx, rel, values, isnull, self_tid,
+    )?;
+
+    // set up first-column key value (index_getattr(tuple, 1,
+    // RelationGetDescr(arg->indexRel), &stup.isnull1)).
+    let (datum1, isnull1) = {
+        let arg = index_arg(&state.base.arg)?;
+        index_getattr(mcx, &tuple, 1, &arg.indexDesc)?
+    };
+
+    // tuplen = GetMemoryChunkSpace(tuple): the engine's mem accounting charges
+    // the stored byte size (the bump-context fast path uses the same value).
+    let tuplen = tuple.len() as i64;
+    let use_abbrev = !state.base.sortKeys.is_empty()
+        && state.base.sortKeys[0].abbrev_converter.is_some()
+        && !isnull1;
+
+    let stup = SortTuple {
+        tuple: Some(TupleBody::Index(tuple)),
+        datum1,
+        isnull1,
+        srctape: 0,
+    };
+    tuplesort_puttuple_common(state, stup, use_abbrev, tuplen)
+}
+
+/// `tuplesort_getindextuple(state, forward)` (tuplesortvariants.c): fetch the
+/// next sorted IndexTuple's on-disk bytes; `None` at end of sort.
+fn tuplesort_getindextuple_impl<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    forward: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let mcx = state.mcx();
+    match tuplesort_gettuple_common(state, forward)? {
+        Some(SortTuple {
+            tuple: Some(TupleBody::Index(bytes)),
+            ..
+        }) => Ok(Some(mcx::slice_in(mcx, &bytes)?)),
+        _ => Ok(None),
+    }
+}
+
 /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c): copy the slot's
 /// tuple into sort storage as a `MinimalTuple` and set up `datum1` from the
 /// leading sort column.
@@ -3121,14 +3824,14 @@ fn clear_slot(slot: &mut TupleTableSlot<'_>) {
 // init_seams() — install this unit's inward `tuplesort_*` access-method seams.
 //
 // Installed (F3a): the variant-agnostic engine seams + the heap/datum-reachable
-// begin entry points. The INDEX variants (begin_index_btree/hash/gist,
-// putindextuplevalues, getindextuple) are F3b: their variant comparetup/
-// writetup/readtup are still seam-panics inside the engine, and their begin
-// entry points are not installed here — they remain seam-panics (the
-// allowlisted CONTRACT_RECONCILE_PENDING entries) until F3b lands.
+// begin entry points. F3b adds the INDEX variants (begin_index_btree/hash/gist,
+// putindextuplevalues, getindextuple) — their variant comparetup/writetup/
+// readtup/removeabbrev now dispatch to real bodies, and their begin entry points
+// are installed here, retiring the 5 CONTRACT_RECONCILE_PENDING allowlist
+// entries. (CLUSTER is still F4.)
 // ===========================================================================
 
-/// Install every inward seam this unit owns and can serve (F3a surface).
+/// Install every inward seam this unit owns and can serve (F3a + F3b surface).
 pub fn init_seams() {
     use backend_utils_sort_tuplesort_seams as sx;
 
@@ -3145,6 +3848,100 @@ pub fn init_seams() {
     sx::tuplesort_rescan::set(seam_rescan);
     sx::tuplesort_markpos::set(seam_markpos);
     sx::tuplesort_restorepos::set(seam_restorepos);
+
+    // F3b: the index sort variants.
+    sx::tuplesort_begin_index_btree::set(seam_begin_index_btree);
+    sx::tuplesort_begin_index_hash::set(seam_begin_index_hash);
+    sx::tuplesort_begin_index_gist::set(seam_begin_index_gist);
+    sx::tuplesort_putindextuplevalues::set(seam_putindextuplevalues);
+    sx::tuplesort_getindextuple::set(seam_getindextuple);
+}
+
+fn seam_begin_index_btree<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    index_rel: &Relation<'mcx>,
+    enforce_unique: bool,
+    unique_nulls_not_distinct: bool,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<Tuplesortstate<'mcx>> {
+    let owned = tuplesort_begin_index_btree_state(
+        mcx,
+        heap_rel,
+        index_rel,
+        enforce_unique,
+        unique_nulls_not_distinct,
+        work_mem,
+        sortopt,
+    )?;
+    into_carrier(mcx, owned)
+}
+
+fn seam_begin_index_hash<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    index_rel: &Relation<'mcx>,
+    high_mask: u32,
+    low_mask: u32,
+    max_buckets: u32,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<Tuplesortstate<'mcx>> {
+    let owned = tuplesort_begin_index_hash_state(
+        mcx,
+        heap_rel,
+        index_rel,
+        high_mask,
+        low_mask,
+        max_buckets,
+        work_mem,
+        sortopt,
+    )?;
+    into_carrier(mcx, owned)
+}
+
+fn seam_begin_index_gist<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    index_rel: &Relation<'mcx>,
+    work_mem: i32,
+    sortopt: i32,
+) -> PgResult<Tuplesortstate<'mcx>> {
+    let owned = tuplesort_begin_index_gist_state(mcx, heap_rel, index_rel, work_mem, sortopt)?;
+    into_carrier(mcx, owned)
+}
+
+fn seam_putindextuplevalues<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    rel: &Relation<'mcx>,
+    self_tid: types_tuple::heaptuple::ItemPointerData,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<()> {
+    with_sort_mut(state, |s| {
+        // SAFETY: re-tie the relation / value slices to the engine's universal
+        // `'mcx`. They are only READ (the tuple bytes + datum1 are cloned into the
+        // engine arena), so no borrow escapes the call. Mirrors C `void *`
+        // aliasing, like `seam_puttupleslot`.
+        let rel: &Relation = unsafe { core::mem::transmute(rel) };
+        let values: &[Datum] = unsafe { core::mem::transmute(values) };
+        tuplesort_putindextuplevalues_impl(s, rel, self_tid, values, isnull)
+    })
+}
+
+fn seam_getindextuple<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    forward: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    with_sort_mut(state, |s| {
+        let out = tuplesort_getindextuple_impl(s, forward)?;
+        // SAFETY: re-tie the returned bytes' lifetime to the carrier's `'mcx`;
+        // they were allocated in the engine bundle's context, which the carrier
+        // keeps alive at least as long as the caller's `'mcx`.
+        let out: Option<PgVec<'mcx, u8>> = unsafe { core::mem::transmute(out) };
+        Ok(out)
+    })
 }
 
 fn seam_begin_heap<'mcx>(
