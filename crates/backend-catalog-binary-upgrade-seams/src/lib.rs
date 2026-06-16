@@ -77,6 +77,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read-and-reset `binary_upgrade_next_pg_type_oid`
+    /// (`catalog/binary_upgrade.h`) the way `TypeShellMake` / `TypeCreate`
+    /// (pg_type.c) consume it during a `pg_upgrade` restore: it returns the
+    /// global's current value and clears it to `InvalidOid`. Returns
+    /// `InvalidOid` when the global was not set (the caller raises "pg_type OID
+    /// value not set when in binary upgrade mode"). A plain global read/store —
+    /// infallible.
+    pub fn consume_next_pg_type_oid() -> Oid
+);
+
+seam_core::seam!(
     /// Read-and-reset `binary_upgrade_next_pg_enum_oid`
     /// (`catalog/binary_upgrade.h`) the way `AddEnumLabel` (pg_enum.c) consumes
     /// it during a `pg_upgrade` restore: it returns the global's current value

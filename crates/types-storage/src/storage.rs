@@ -368,6 +368,10 @@ pub const XACT_TRUNCATION_LOCK: usize = 44;
 pub const MULTI_XACT_GEN_LOCK: usize = 13;
 /// `MultiXactTruncationLock` (`lwlocklist.h`): `PG_LWLOCK(41, MultiXactTruncation)`.
 pub const MULTI_XACT_TRUNCATION_LOCK: usize = 41;
+/// `NotifyQueueLock` (`lwlocklist.h`): `PG_LWLOCK(27, NotifyQueue)`.
+pub const NOTIFY_QUEUE_LOCK: usize = 27;
+/// `NotifyQueueTailLock` (`lwlocklist.h`): `PG_LWLOCK(47, NotifyQueueTail)`.
+pub const NOTIFY_QUEUE_TAIL_LOCK: usize = 47;
 /// `ReplicationSlotAllocationLock` — `PG_LWLOCK(36, ReplicationSlotAllocation)`.
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
 /// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.

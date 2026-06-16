@@ -1,0 +1,48 @@
+[package]
+name = "backend-catalog-pg-database"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_catalog_pg_database"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-catalog = { path = "../types-catalog" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+
+# Own inward-seam declarations (installed by this crate's init_seams()).
+backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-seams" }
+
+# The catalog-mutation engine (F0, indexing.c) is consumed as `pub` functions,
+# exactly as the indexing F1 family does — no cycle (indexing does not depend on
+# this crate).
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
+
+# heap_form_tuple / heap_deform_tuple (forming + decoding the pg_database tuple)
+# — direct calls into the common heaptuple unit, as the indexing F1 family does.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+
+# SearchSysCache1(DATABASEOID, ...) for the syscache read seam — direct dep on
+# the syscache owner (no cycle; syscache does not depend on this crate).
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+types-syscache = { path = "../types-syscache" }
+types-cache = { path = "../types-cache" }
+types-datum = { path = "../types-datum" }
+
+# Outward callees crossed as seams.
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
