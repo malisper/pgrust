@@ -284,6 +284,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecPrepareQual(qual, estate)` (execExpr.c): prepare a standalone qual
+    /// (implicitly-ANDed `List` of `Expr`) for execution, with no parent
+    /// `PlanState`. C switches to `estate->es_query_cxt`, runs
+    /// `expression_planner((Expr *) qual)` (const-fold / SQL-function inline),
+    /// then `ExecInitQual(qual, NULL)`. An empty qual (the C `NIL`) compiles to
+    /// `None` (the C `NULL` ExprState, always-true) WITHOUT touching the
+    /// planner. A non-empty qual reaches `expression_planner` (optimizer/
+    /// planner.c, unported — no reachable owner seam) and loud-panics there,
+    /// mirror-PG-and-panic; the `ExecInitQual` compile that follows is this
+    /// crate's own logic. Used by the index-build path (`FormIndexDatum`
+    /// partial-index predicate). Allocated in `es_query_cxt`; fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn exec_prepare_qual<'mcx>(
+        qual: Option<&[types_nodes::primnodes::Expr]>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `ExecInitExprList(nodes, parent)` (execExpr.c): compile a list of
     /// expressions into a list of `ExprState`s (`lappend(ExecInitExpr(e))`).
     /// A `None` element (the C NULL `Expr *`) compiles to a `None` cell (the
