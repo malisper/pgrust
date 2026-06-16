@@ -395,6 +395,8 @@ pub fn init_all() {
     backend_utils_activity_pgstat_subscription::init_seams();
     backend_utils_activity_pgstat_slru::init_seams();
     backend_utils_activity_pgstat_backend::init_seams();
+    backend_utils_activity_pgstat_database::init_seams();
+    backend_utils_activity_pgstat_function::init_seams();
     backend_utils_activity_pgstat::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();

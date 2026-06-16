@@ -218,6 +218,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyStartTimestamp` (globals.c): the `TimestampTz` recorded by
+    /// `InitProcessGlobals()` at this backend's startup. Pure read of
+    /// process-identity state (same class as `my_database_id`).
+    pub fn my_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `DatabasePath` (globals.c): the path to the current database's data
     /// directory, set up at backend startup. Returns an owned copy of the
     /// backend-global string (the caller uses it transiently). `Err` carries

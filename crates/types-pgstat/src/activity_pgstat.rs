@@ -371,6 +371,11 @@ pub struct PgStat_FunctionCounts {
 pub struct PgStat_FunctionCallUsage {
     /// `fs != NULL`: are we tracking the current function call?
     pub tracking: bool,
+    /// the function OID `fs` points into: `pgstat_end_function_usage`
+    /// re-resolves the pending `PgStat_FunctionCounts` from `(MyDatabaseId,
+    /// proid)` because the owner-private pending block can't be carried as a raw
+    /// pointer here. Meaningful only while `tracking`.
+    pub proid: types_core::primitive::Oid,
     /// total time previously charged to function, as of function start
     pub save_f_total_time: instr_time,
     /// backend-wide total time as of function start
