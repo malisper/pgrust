@@ -1640,6 +1640,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-rewriteheap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-heaptoast",
+ "backend-access-heap-rewriteheap-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-replication-slot-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-smgr",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-heap-rewriteheap-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-smgr-bulkwrite-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
@@ -7218,10 +7266,30 @@ dependencies = [
  "seam-core",
  "types-cluster",
  "types-core",
+ "types-dsa",
  "types-error",
  "types-nodes",
  "types-rel",
  "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-commands-vacuumparallel"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-commands-vacuum-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dsa",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
  "types-vacuum",
 ]
 
@@ -16064,6 +16132,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-tupdesc",
+ "backend-parser-coerce-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-json",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-misc2",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-typcache",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "backend-utils-sort-storage",
+ "common-jsonapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-jsonfuncs",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -19503,6 +19608,7 @@ dependencies = [
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-pruneheap",
+ "backend-access-heap-rewriteheap",
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-amapi",
@@ -19626,6 +19732,7 @@ dependencies = [
  "backend-commands-tsearchcmds",
  "backend-commands-typecmds",
  "backend-commands-vacuum",
+ "backend-commands-vacuumparallel",
  "backend-commands-variable",
  "backend-commands-view",
  "backend-common-relpath",
@@ -19856,6 +19963,7 @@ dependencies = [
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
+ "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
@@ -20308,6 +20416,7 @@ name = "types-json"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -20316,6 +20425,19 @@ name = "types-jsonb"
 version = "0.0.0"
 dependencies = [
  "types-datum",
+]
+
+[[package]]
+name = "types-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-tuple",
 ]
 
 [[package]]

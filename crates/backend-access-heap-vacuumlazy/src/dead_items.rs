@@ -131,8 +131,9 @@ pub fn dead_items_cleanup(vacrel: &mut LVRelState) -> PgResult<()> {
         return Ok(());
     }
 
-    /* End parallel mode. */
-    vl::parallel_vacuum_end::call(vacrel.pvs, vacrel.indstats.clone())?;
+    /* End parallel mode. C copies the per-index stats into vacrel->indstats
+     * here; the seam returns them so we can store them. */
+    vacrel.indstats = vl::parallel_vacuum_end::call(vacrel.pvs)?;
     vacrel.pvs = types_vacuum::vacuumlazy::ParallelVacuumStateHandle::none();
     Ok(())
 }

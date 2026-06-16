@@ -561,7 +561,7 @@ fn deconstruct_builtin_meta(elmtype: Oid) -> PgResult<(i32, bool, u8)> {
 // ---------------------------------------------------------------------------
 
 /// `initArrayResult(element_type, rcontext, subcontext)` (arrayfuncs.c).
-fn init_array_result(element_type: Oid, subcontext: bool) -> PgResult<ArrayBuildState> {
+pub fn init_array_result(element_type: Oid, subcontext: bool) -> PgResult<ArrayBuildState> {
     // initArrayResultWithSize(element_type, rcontext, subcontext,
     //                         subcontext ? 64 : 8)
     init_array_result_with_size(element_type, subcontext, if subcontext { 64 } else { 8 })
@@ -590,7 +590,7 @@ fn init_array_result_with_size(
 
 /// `accumArrayResult(astate, dvalue, disnull, element_type, rcontext)`
 /// (arrayfuncs.c): accumulate one element.
-fn accum_array_result<'mcx>(
+pub fn accum_array_result<'mcx>(
     mcx: Mcx<'mcx>,
     astate: Option<ArrayBuildState>,
     mut dvalue: Datum,
@@ -656,7 +656,7 @@ fn make_array_result<'mcx>(mcx: Mcx<'mcx>, astate: &ArrayBuildState) -> PgResult
 /// `makeMdArrayResult(astate, ndims, dims, lbs, rcontext, release)`
 /// (arrayfuncs.c). `release` (context delete) is modeled by the caller dropping
 /// the state.
-fn make_md_array_result<'mcx>(
+pub fn make_md_array_result<'mcx>(
     mcx: Mcx<'mcx>,
     astate: &ArrayBuildState,
     ndims: i32,

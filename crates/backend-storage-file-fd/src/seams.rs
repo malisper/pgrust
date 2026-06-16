@@ -598,6 +598,56 @@ fn transient_write_raw(fd: i32, buf: &[u8]) -> isize {
     unsafe { libc::write(raw, buf.as_ptr() as *const libc::c_void, buf.len()) }
 }
 
+/// `pg_pwrite(fd, buf, offset)` against a *transient* fd (the
+/// `OpenTransientFile` return value, a descriptor-table index). Resolves the
+/// transient index to the kernel fd, then `pwrite(2)`s. Bytes written (`>= 0`)
+/// or `-errno`. Mirrors `rewriteheap.c`'s `heap_xlog_logical_rewrite`
+/// `pg_pwrite(fd, data, len, offset)` on its `OpenTransientFile` fd.
+pub fn pg_pwrite_transient(fd: i32, buf: &[u8], offset: i64) -> isize {
+    let raw = match allocated_desc::TransientFileRawFd(fd) {
+        Ok(raw) => raw,
+        Err(_) => return -1,
+    };
+    // SAFETY: `raw` is a live kernel fd owned by the descriptor table; pwrite(2)
+    // from the caller's buffer at `offset`.
+    let r = unsafe {
+        libc::pwrite(
+            raw,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            offset as libc::off_t,
+        )
+    };
+    if r < 0 {
+        -(errno_now() as isize)
+    } else {
+        r
+    }
+}
+
+/// `pg_ftruncate(fd, length)` against a *transient* fd. Resolves the transient
+/// index to the kernel fd, then `ftruncate(2)`s (with the `EINTR` retry).
+/// Returns 0 on success or `-errno`. Mirrors `rewriteheap.c`'s
+/// `heap_xlog_logical_rewrite` `ftruncate(fd, xlrec->offset)`.
+pub fn pg_ftruncate_transient(fd: i32, length: i64) -> i32 {
+    let raw = match allocated_desc::TransientFileRawFd(fd) {
+        Ok(raw) => raw,
+        Err(_) => return -1,
+    };
+    loop {
+        // SAFETY: `raw` is a live kernel fd owned by the descriptor table.
+        let ret = unsafe { libc::ftruncate(raw, length as libc::off_t) };
+        if ret == -1 {
+            let e = errno_now();
+            if e == libc::EINTR {
+                continue;
+            }
+            return -e;
+        }
+        return 0;
+    }
+}
+
 /// `transient_read` — `read(fd, buf, len)` against a transient fd. Bytes read
 /// (`>= 0`) or `-errno`.
 pub fn transient_read(fd: i32, buf: &mut [u8]) -> isize {

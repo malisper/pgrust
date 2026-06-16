@@ -34,6 +34,7 @@ backend-access-heap-heapam-handler-dml = { path = "../backend-access-heap-heapam
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
+backend-access-heap-rewriteheap = { path = "../backend-access-heap-rewriteheap" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
@@ -130,6 +131,7 @@ backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }
+backend-commands-vacuumparallel = { path = "../backend-commands-vacuumparallel" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
@@ -371,6 +373,7 @@ backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }
+backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

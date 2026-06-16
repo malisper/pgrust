@@ -18,4 +18,5 @@ types-rel = { path = "../types-rel" }
 types-cluster = { path = "../types-cluster" }
 types-vacuum = { path = "../types-vacuum" }
 types-nodes = { path = "../types-nodes" }
+types-dsa = { path = "../types-dsa" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
