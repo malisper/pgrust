@@ -72,6 +72,7 @@ pub fn init_all() {
     backend_access_transam_xlogrecovery::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_access_transam_xlogutils::init_seams();
+    backend_backup_basebackup_target::init_seams();
     backend_backup_server::init_seams();
     backend_backup_sink::init_seams();
     backend_bootstrap_bootstrap::init_seams();
@@ -104,6 +105,7 @@ pub fn init_all() {
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_proc::init_seams();
     backend_catalog_pg_publication::init_seams();
+    backend_catalog_pg_subscription::init_seams();
     backend_commands_publicationcmds::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
@@ -204,6 +206,7 @@ pub fn init_all() {
     backend_libpq_be_fsstubs::init_seams();
     backend_libpq_hba::init_seams();
     backend_libpq_be_gssapi_common::init_seams();
+    backend_libpq_be_secure_common::init_seams();
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();

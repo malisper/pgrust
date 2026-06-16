@@ -1,0 +1,21 @@
+[package]
+name = "backend-libpq-be-secure-common"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_libpq_be_secure_common"
+path = "src/lib.rs"
+
+[dependencies]
+backend-libpq-be-secure-common-seams = { path = "../backend-libpq-be-secure-common-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+common-percentrepl = { path = "../common-percentrepl" }
+common-string = { path = "../common-string" }
+common-wait-error-seams = { path = "../common-wait-error-seams" }
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+libc = "0.2"

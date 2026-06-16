@@ -3551,6 +3551,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-basebackup-target"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-server",
+ "backend-backup-sink",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-manifest"
 version = "0.0.0"
 dependencies = [
@@ -4956,11 +4967,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-subscription"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-indexing",
+ "backend-catalog-pg-subscription-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-subscription-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-replication-launcher",
@@ -9366,6 +9409,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure-common"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-common-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "common-percentrepl",
+ "common-string",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-common-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-seams"
 version = "0.0.0"
 dependencies = [
@@ -9765,6 +9833,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9806,6 +9875,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18562,6 +18632,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-archive-shell-archive",
+ "backend-backup-basebackup-target",
  "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
@@ -18594,6 +18665,7 @@ dependencies = [
  "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
+ "backend-catalog-pg-subscription",
  "backend-catalog-pg-type",
  "backend-catalog-storage",
  "backend-catalog-toasting",
@@ -18712,6 +18784,7 @@ dependencies = [
  "backend-libpq-auth-scram",
  "backend-libpq-be-fsstubs",
  "backend-libpq-be-gssapi-common",
+ "backend-libpq-be-secure-common",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",

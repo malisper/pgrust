@@ -939,6 +939,12 @@ fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+/// `pub(crate)` wrapper over [`set_errno`] for other modules (e.g. the
+/// NULL-returning `OpenPipeStreamOrNull` leaving `errno` set).
+pub(crate) fn set_errno_pub(value: i32) {
+    set_errno(value)
+}
+
 /// Set the calling thread's `errno` (mirrors C `errno = x`).
 fn set_errno(value: i32) {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
