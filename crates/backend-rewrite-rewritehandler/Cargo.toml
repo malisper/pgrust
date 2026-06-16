@@ -1,0 +1,38 @@
+[package]
+name = "backend-rewrite-rewritehandler"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_rewrite_rewritehandler"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-acl = { path = "../types-acl" }
+types-trigger = { path = "../types-trigger" }
+
+# Direct (acyclic) owners.
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+types-storage = { path = "../types-storage" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+
+# Inward seam crates this unit owns / installs into.
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-commands-view-seams = { path = "../backend-commands-view-seams" }
+
+# Cross-cycle externals consumed through owner -seams crates.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
