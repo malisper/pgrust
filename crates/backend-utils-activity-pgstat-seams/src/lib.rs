@@ -47,6 +47,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_drop_database(databaseid)` (pgstat_database.c): tell the
+    /// cumulative stats system to forget the database's stats immediately
+    /// (`pgstat_drop_entry(PGSTAT_KIND_DATABASE, databaseid, InvalidOid)`),
+    /// dropping the dropped database's entry as part of DROP DATABASE.
+    pub fn pgstat_drop_database(databaseid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `pgstat_create_relation(rel)` (pgstat_relation.c): create the pending
     /// per-relation stats entry transactionally (`pgstat_create_transactional(
     /// PGSTAT_KIND_RELATION, rel->rd_rel->relisshared ? InvalidOid :

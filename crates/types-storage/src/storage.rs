@@ -107,6 +107,12 @@ impl pg_atomic_uint64 {
         self.value.load(Ordering::SeqCst)
     }
 
+    /// `pg_atomic_fetch_add_u64(ptr, add_)` (`port/atomics.h`) — atomically add
+    /// `add_` and return the value `*ptr` held *before* the addition.
+    pub fn fetch_add(&self, add_: types_core::uint64) -> types_core::uint64 {
+        self.value.fetch_add(add_, Ordering::SeqCst)
+    }
+
     /// `pg_atomic_monotonic_advance_u64(ptr, target)` (`port/atomics.h`) —
     /// advance `*ptr` to `target` unless it is already at least `target`;
     /// returns the resulting value (always >= the prior value). Implemented
@@ -526,6 +532,16 @@ pub const PREDICATELOCK_MANAGER_LWLOCK_OFFSET: i32 =
     LOCK_MANAGER_LWLOCK_OFFSET + NUM_LOCK_PARTITIONS;
 pub const NUM_FIXED_LWLOCKS: i32 =
     PREDICATELOCK_MANAGER_LWLOCK_OFFSET + NUM_PREDICATELOCK_PARTITIONS;
+
+// Named individual-lock offsets used by predicate.c (SSI), from lwlocklist.h.
+/// `SerializableXactHashLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_XACT_HASH_LOCK: i32 = 28;
+/// `SerializableFinishedListLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_FINISHED_LIST_LOCK: i32 = 29;
+/// `SerializablePredicateListLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_PREDICATE_LIST_LOCK: i32 = 30;
+/// `SerialControlLock` (lwlocklist.h offset).
+pub const SERIAL_CONTROL_LOCK: i32 = 52;
 
 // `BuiltinTrancheIds` (`storage/lwlock.h`) — the full chain from
 // `LWTRANCHE_XACT_BUFFER = NUM_INDIVIDUAL_LWLOCKS` to

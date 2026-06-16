@@ -18,3 +18,11 @@ seam_core::seam!(
     /// signal mask from the owner's `UnBlockSig` set. Infallible.
     pub fn unblock_signals()
 );
+
+seam_core::seam!(
+    /// `sigaddset(&UnBlockSig, signo)` — persistently add `signo` to the
+    /// owner's `UnBlockSig` set. waiteventset.c's signalfd build does this for
+    /// `SIGURG` so that signal is delivered through the signalfd rather than a
+    /// handler. Infallible.
+    pub fn add_unblock_sig(signo: i32)
+);

@@ -165,6 +165,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_any_to_server(s, len, encoding)` (mbutils.c): convert from an
+    /// arbitrary `encoding` to the server encoding, always validating (input
+    /// comes from outside the database). As with the other dispatchers,
+    /// `Ok(None)` means no conversion happened (the caller's bytes stand);
+    /// `Ok(Some(v))` carries the converted bytes (no trailing NUL) allocated in
+    /// `mcx`. `Err` carries the conversion failure / out-of-memory
+    /// `ereport(ERROR)`.
+    pub fn pg_any_to_server<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: &[u8],
+        encoding: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
     /// `pg_get_client_encoding()` (mbutils.c): the current client encoding id.
     /// Pure global read.
     pub fn pg_get_client_encoding() -> i32

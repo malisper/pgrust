@@ -57,6 +57,15 @@
 
 extern crate alloc;
 
+// Per-family `_read<Type>` reader modules. Each exposes a `try_read(mcx, label)
+// -> Option<PgResult<Node>>` that, if it owns `label`, reads the node's fields
+// (in the exact order the OUT side wrote them) and returns `Some(Ok(node))`.
+// `parse_node_string` walks the chain. Independently editable (no shared `match`).
+pub(crate) mod read_expr_family;
+pub(crate) mod read_parse_family;
+pub(crate) mod read_plan_family;
+pub(crate) mod read_ddl_family;
+
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -75,7 +84,7 @@ use backend_nodes_core::read::{self, Token};
 /// `elog(ERROR, msg)` — an internal-error `PgError` (`ERRCODE_INTERNAL_ERROR`),
 /// the shape `readfuncs.c`'s `elog(ERROR, ...)` raises for a malformed node
 /// string, matching the `read.c` family's error helper.
-fn elog_error(message: impl Into<String>) -> PgError {
+pub(crate) fn elog_error(message: impl Into<String>) -> PgError {
     PgError::error(message).with_sqlstate(ERRCODE_INTERNAL_ERROR)
 }
 
@@ -92,7 +101,7 @@ fn next_token<'a>() -> PgResult<Token<'a>> {
 
 /// The UTF-8 text of a token's bytes (the reader only sees ASCII-superset
 /// source produced by `nodeToString`).
-fn tok_str(tok: &Token<'_>) -> String {
+pub(crate) fn tok_str(tok: &Token<'_>) -> String {
     String::from_utf8_lossy(tok.bytes).into_owned()
 }
 
@@ -104,30 +113,30 @@ fn read_field_value<'a>() -> PgResult<Token<'a>> {
 }
 
 /// `READ_INT_FIELD` — `atoi`.
-fn read_int_field() -> PgResult<i32> {
+pub(crate) fn read_int_field() -> PgResult<i32> {
     let v = read_field_value()?;
     Ok(atoi_i64(&tok_str(&v)) as i32)
 }
 
 /// `READ_UINT_FIELD` — `atoui` (`strtoul`, base 10).
-fn read_uint_field() -> PgResult<u32> {
+pub(crate) fn read_uint_field() -> PgResult<u32> {
     let v = read_field_value()?;
     Ok(atoui_u64(&tok_str(&v)) as u32)
 }
 
 /// `READ_OID_FIELD` — `atooid` (an unsigned read).
-fn read_oid_field() -> PgResult<u32> {
+pub(crate) fn read_oid_field() -> PgResult<u32> {
     read_uint_field()
 }
 
 /// `READ_BOOL_FIELD` — `strtobool` (`*token == 't'`).
-fn read_bool_field() -> PgResult<bool> {
+pub(crate) fn read_bool_field() -> PgResult<bool> {
     let v = read_field_value()?;
     Ok(v.bytes.first() == Some(&b't'))
 }
 
 /// `READ_ENUM_FIELD` — `(enumtype) atoi(token)`; returns the raw integer code.
-fn read_enum_field() -> PgResult<i32> {
+pub(crate) fn read_enum_field() -> PgResult<i32> {
     let v = read_field_value()?;
     Ok(atoi_i64(&tok_str(&v)) as i32)
 }
@@ -135,7 +144,7 @@ fn read_enum_field() -> PgResult<i32> {
 /// `READ_LOCATION_FIELD` — in a non-debug build, the value is read but the field
 /// is set to `-1` (the C `#else` branch). We consume the value token and return
 /// `-1` to mirror that exactly.
-fn read_location_field() -> PgResult<i32> {
+pub(crate) fn read_location_field() -> PgResult<i32> {
     let _v = read_field_value()?;
     Ok(-1)
 }
@@ -158,7 +167,7 @@ fn read_string_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgString<'mcx>>> {
 /// `READ_BITMAPSET_FIELD` (readfuncs.c `_readBitmapset`): skip the `:fldname`
 /// label, then read a `(b m1 m2 ...)` member list back into the word storage
 /// carried by [`ExprRelids`].
-fn read_bitmapset_field() -> PgResult<ExprRelids> {
+pub(crate) fn read_bitmapset_field() -> PgResult<ExprRelids> {
     let _label = next_token()?; // skip :fldname
     // C _readBitmapset: expect '(' then 'b', then members until ')'.
     let open = next_token()?;
@@ -244,9 +253,117 @@ fn read_opt_expr_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
     }
 }
 
+/// `READ_INT64_FIELD` — `strtoi64` over the value token.
+pub(crate) fn read_int64_field() -> PgResult<i64> {
+    let v = read_field_value()?;
+    Ok(atoi_i64(&tok_str(&v)))
+}
+
+/// `READ_UINT64_FIELD` — `strtou64`.
+pub(crate) fn read_uint64_field() -> PgResult<u64> {
+    let v = read_field_value()?;
+    Ok(atoui_u64(&tok_str(&v)))
+}
+
+/// `READ_LONG_FIELD` — `atol`.
+pub(crate) fn read_long_field() -> PgResult<i64> {
+    read_int64_field()
+}
+
+/// `READ_FLOAT_FIELD` — `atof`/`strtod` of the value token (`outDouble`'s
+/// shortest-decimal text parses back exactly via Rust's `f64::from_str`).
+pub(crate) fn read_float_field() -> PgResult<f64> {
+    let v = read_field_value()?;
+    Ok(tok_str(&v).parse::<f64>().unwrap_or(0.0))
+}
+
+/// `READ_CHAR_FIELD` — a `<>` token is `\0`, else the first debackslashed byte.
+pub(crate) fn read_char_field() -> PgResult<u8> {
+    let v = read_field_value()?;
+    if v.bytes.is_empty() {
+        return Ok(0);
+    }
+    let s = read::debackslash(v.bytes);
+    Ok(s.as_bytes().first().copied().unwrap_or(0))
+}
+
+/// `READ_BITMAPSET_FIELD` returning an owned optional `Bitmapset` (C: a `(b)`
+/// empty set is the NULL `Bitmapset *`, i.e. `None`).
+pub(crate) fn read_bitmapset_opt_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>>> {
+    let er = read_bitmapset_field()?;
+    if er.words.iter().all(|w| *w == 0) {
+        return Ok(None);
+    }
+    let mut words = mcx::PgVec::new_in(mcx);
+    words
+        .try_reserve(er.words.len())
+        .map_err(|_| elog_error("out of memory reading bitmapset"))?;
+    for w in &er.words {
+        words.push(*w);
+    }
+    Ok(Some(mcx::alloc_in(
+        mcx,
+        types_nodes::bitmapset::Bitmapset { words },
+    )?))
+}
+
+/// `READ_NODE_FIELD` over a single optional child `Node *`: skip the label,
+/// `node_read` the value; `<>` is C `NULL` (`None`).
+pub(crate) fn read_node_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
+    let _label = next_token()?;
+    read::node_read(mcx, None)
+}
+
+/// `READ_NODE_FIELD` over a `List *` of `Node`: skip the label, `node_read`; a
+/// `(...)` list comes back as a `Node::List`. `<>` (C `NIL`) is the empty list.
+pub(crate) fn read_node_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<PgBox<'mcx, Node<'mcx>>>> {
+    let _label = next_token()?;
+    match read::node_read(mcx, None)? {
+        None => Ok(Vec::new()),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::List(elements) => Ok(elements.into_iter().collect()),
+            other => Err(elog_error(alloc::format!(
+                "expected List for node-list field, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
+/// A `List *` of `int` (`READ_NODE_FIELD` of a `T_IntList`): `<>` is C `NIL`.
+pub(crate) fn read_int_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<i32>> {
+    let _label = next_token()?;
+    match read::node_read(mcx, None)? {
+        None => Ok(Vec::new()),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::List(elements) => {
+                let mut out = Vec::with_capacity(elements.len());
+                for c in elements {
+                    match PgBox::into_inner(c) {
+                        Node::Integer(i) => out.push(i.ival),
+                        other => {
+                            return Err(elog_error(alloc::format!(
+                                "expected Integer in IntList, got {:?}",
+                                other.node_tag()
+                            )))
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(elog_error(alloc::format!(
+                "expected IntList, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
 /// `atoi`-style i64 parse: leading optional sign + digit run, stop at first
 /// non-digit (C `atoi`/`atol`). Returns 0 when no leading integer.
-fn atoi_i64(s: &str) -> i64 {
+pub(crate) fn atoi_i64(s: &str) -> i64 {
     let b = s.as_bytes();
     let mut i = 0;
     let neg = if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
@@ -282,7 +399,7 @@ fn atoi_i64(s: &str) -> i64 {
 }
 
 /// `strtoul`-style u64 parse over the leading digit run (C `atoui`/`atooid`).
-fn atoui_u64(s: &str) -> u64 {
+pub(crate) fn atoui_u64(s: &str) -> u64 {
     let b = s.as_bytes();
     let mut i = 0;
     // strtoul accepts a leading '+'; OID/uint outputs never carry a sign.
@@ -627,16 +744,26 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
         b"FUNCEXPR" => Node::Expr(Expr::FuncExpr(read_funcexpr(mcx)?)),
         b"BOOLEXPR" => Node::Expr(Expr::BoolExpr(read_boolexpr(mcx)?)),
         b"TARGETENTRY" => Node::TargetEntry(read_targetentry(mcx)?),
-        // No per-tag reader ported for this LABEL yet — C's
-        // `elog(ERROR, "badly formatted node string \"%.32s\"...")` tail
-        // (`mirror-pg-and-panic`, surfaced as the exact error). A framed label
-        // this reader does not yet handle is a not-yet-ported per-node reader.
+        // The remaining per-tag `_read<Type>` readers are dispatched through the
+        // per-family `try_read` chain (each reads its fields in the exact order
+        // the OUT side wrote them). A LABEL no family claims falls through to C's
+        // `elog(ERROR, "badly formatted node string \"%.32s\"...")` tail.
         other => {
-            let n = core::cmp::min(other.len(), 32);
-            let preview = String::from_utf8_lossy(&other[..n]).into_owned();
-            return Err(elog_error(alloc::format!(
-                "badly formatted node string \"{preview}\"..."
-            )));
+            if let Some(res) = read_expr_family::try_read(mcx, other) {
+                res?
+            } else if let Some(res) = read_parse_family::try_read(mcx, other) {
+                res?
+            } else if let Some(res) = read_plan_family::try_read(mcx, other) {
+                res?
+            } else if let Some(res) = read_ddl_family::try_read(mcx, other) {
+                res?
+            } else {
+                let n = core::cmp::min(other.len(), 32);
+                let preview = String::from_utf8_lossy(&other[..n]).into_owned();
+                return Err(elog_error(alloc::format!(
+                    "badly formatted node string \"{preview}\"..."
+                )));
+            }
         }
     };
 
@@ -653,6 +780,18 @@ pub fn init_seams() {
 
 #[cfg(test)]
 extern crate std;
+
+/// Install `parse_node_string` exactly ONCE across the whole crate's test
+/// binary (the seam's `OnceLock` panics on a second `set`). Every test module
+/// — the lib `tests` and each `read_*_family::tests` — routes through this one
+/// global `Once`, so the seam is set at most once regardless of which module's
+/// test runs first.
+#[cfg(test)]
+pub(crate) fn ensure_seams_for_tests() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(init_seams);
+}
 
 #[cfg(test)]
 mod tests {
@@ -765,13 +904,7 @@ mod tests {
         Var, VarReturningType,
     };
 
-    /// Install `parse_node_string` exactly once across all tests (the seam's
-    /// `OnceLock` panics on a second `set`).
-    fn ensure_seams() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(init_seams);
-    }
+    use super::ensure_seams_for_tests as ensure_seams;
 
     /// OUT a framed node, READ it back, and assert byte-stable re-serialization.
     /// `parse_node_string` is the installed seam `string_to_node` recurses
