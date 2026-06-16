@@ -801,6 +801,31 @@ pub fn clause_selectivity<'mcx>(
     )
 }
 
+/// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)`
+/// (clausesel.c) — the **bare expression** form (C `rinfo == NULL`). selfuncs.c's
+/// `booltestsel` reaches this to estimate a raw boolean argument when no variable
+/// statistics are available. Runs `clause_selectivity_ext` with a
+/// [`ClauseRef::Bare`], matching the C `clause_selectivity(root, arg, ...)` call.
+pub fn clause_selectivity_node<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clause: &Expr,
+    var_relid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> PgResult<f64> {
+    clause_selectivity_ext(
+        run,
+        root,
+        ClauseRef::Bare,
+        clause,
+        var_relid,
+        jointype,
+        sjinfo,
+        true,
+    )
+}
+
 /// `clause_selectivity_ext(root, clause, varRelid, jointype, sjinfo,
 /// use_extended_stats)` (clausesel.c).
 ///
@@ -1647,6 +1672,7 @@ fn elog_error(msg: &str) -> types_error::PgError {
 pub fn init_seams() {
     seam::clauselist_selectivity::set(clauselist_selectivity);
     seam::clause_selectivity::set(clause_selectivity);
+    seam::clause_selectivity_node::set(clause_selectivity_node);
 }
 
 #[cfg(test)]

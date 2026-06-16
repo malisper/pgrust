@@ -18279,6 +18279,7 @@ dependencies = [
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-path-small-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-plancat-ext-seams",

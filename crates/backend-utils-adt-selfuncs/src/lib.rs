@@ -49,6 +49,7 @@ pub mod examine;
 pub mod ineq;
 pub mod join;
 pub mod misc;
+pub mod node_sel;
 pub mod scalar;
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h), re-exported from [`types_selfuncs`] for the
@@ -75,6 +76,15 @@ pub fn init_seams() {
     // `join_selectivity` / `function_selectivity` reach these): map the
     // operator's `oprrest`/`oprjoin` OID to the ported estimator.
     dispatch::init_dispatch_seams();
+
+    // The clausesel-owned per-clause-node estimators (boolvarsel / booltestsel /
+    // nulltestsel / nulltestsel_var / rowcomparesel) that selfuncs.c owns the
+    // bodies of and clausesel.c dispatches directly (not through oprrest).
+    backend_optimizer_path_small_seams::boolvarsel::set(node_sel::seam_boolvarsel);
+    backend_optimizer_path_small_seams::booltestsel::set(node_sel::seam_booltestsel);
+    backend_optimizer_path_small_seams::nulltestsel::set(node_sel::seam_nulltestsel);
+    backend_optimizer_path_small_seams::nulltestsel_var::set(node_sel::seam_nulltestsel);
+    backend_optimizer_path_small_seams::rowcomparesel::set(node_sel::seam_rowcomparesel);
 }
 
 /* ---------------------------------------------------------------------------

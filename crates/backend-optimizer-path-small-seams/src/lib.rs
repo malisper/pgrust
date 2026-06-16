@@ -72,6 +72,23 @@ seam_core::seam!(
     ) -> PgResult<f64>
 );
 
+seam_core::seam!(
+    /// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)`
+    /// (clausesel.c) — the **bare expression** form (C `rinfo == NULL`), used by
+    /// `selfuncs.c`'s `booltestsel` when no variable statistics are available
+    /// (it asks `clause_selectivity` to estimate the raw boolean argument). The
+    /// owning crate (`backend-optimizer-path-small`) installs it from its
+    /// `init_seams()` (running `clause_selectivity_ext` with a `ClauseRef::Bare`).
+    pub fn clause_selectivity_node<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        clause: &Expr,
+        var_relid: i32,
+        jointype: JoinType,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> PgResult<f64>
+);
+
 /* ======================================================================
  * statistics/extstats.c — extended-statistics estimator (unported owner).
  * ==================================================================== */
