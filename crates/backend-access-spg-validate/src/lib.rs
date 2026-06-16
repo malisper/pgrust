@@ -364,20 +364,12 @@ pub fn spgvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
 // spgadjustmembers (spgvalidate.c:322)
 // ===========================================================================
 
-/// One `OpFamilyMember` (`amapi.h`) as projected for the dependency-shape
-/// adjustment: the support/operator number plus the mutable hard/family/refobjid
-/// dependency flags `amadjustmembers` rewrites.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OpFamilyMember {
-    /// `number` — strategy (operator) or support-function number.
-    pub number: i32,
-    /// `ref_is_hard` — true for a hard dependency.
-    pub ref_is_hard: bool,
-    /// `ref_is_family` — true if the dependency points at the opfamily.
-    pub ref_is_family: bool,
-    /// `refobjid` — the referenced object OID.
-    pub refobjid: Oid,
-}
+/// `OpFamilyMember` (`amapi.h`). Canonical definition lives in `types_opclass`;
+/// re-exported here so this crate names the same type (no duplicate definition).
+/// `spgadjustmembers` reads only `number` and rewrites the
+/// hard/family/`refobjid` dependency flags; the remaining C fields are present
+/// but untouched here.
+pub use types_opclass::OpFamilyMember;
 
 /// `spgadjustmembers(opfamilyoid, opclassoid, operators, functions)`
 /// (spgvalidate.c:322) — prechecking for adding operators/functions to an

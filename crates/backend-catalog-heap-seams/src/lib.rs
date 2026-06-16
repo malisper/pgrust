@@ -7,7 +7,7 @@
 
 use mcx::Mcx;
 use types_cluster::RelOptionsToken;
-use types_core::primitive::Oid;
+use types_core::primitive::{Oid, RelFileNumber, TransactionId};
 use types_error::PgResult;
 use types_nodes::primnodes::OnCommitAction;
 use types_rel::Relation;
@@ -123,4 +123,100 @@ seam_core::seam!(
     /// for an ordinary table/relation object. Removes the relation and its
     /// catalog rows. Can `ereport(ERROR)`, carried on `Err`.
     pub fn heap_drop_with_catalog(relid: Oid) -> PgResult<()>
+);
+
+/* ===========================================================================
+ * Low-level relation-create seams `index_create` (catalog/index.c) calls
+ * directly (it does NOT go through `heap_create_with_catalog`): `heap_create`
+ * creates the uncataloged index relcache entry and `InsertPgClassTuple`
+ * registers its pg_class row. (`RelationBuildLocalRelation`, which
+ * `heap_create` itself calls, is owned by the relcache and seamed there.)
+ * ========================================================================= */
+
+/// The frozen-xid / min-mxid `heap_create` writes through its
+/// `relfrozenxid` / `relminmxid` out-parameters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapCreateXids {
+    /// `*relfrozenxid`.
+    pub relfrozenxid: TransactionId,
+    /// `*relminmxid` (the underlying `uint32` `MultiXactId`).
+    pub relminmxid: u32,
+}
+
+/// The created relation plus the frozen-xid out-parameters `heap_create`
+/// computes (in C, `rel` is the return value and the xids are written through
+/// out-params).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapCreateResult {
+    /// The new relcache entry's OID (`heap_create`'s return `Relation`).
+    pub rel: Oid,
+    /// The frozen-xid / min-mxid out-parameters.
+    pub xids: HeapCreateXids,
+}
+
+/// The pg_class columns that `AddNewRelationTuple` writes onto `rd_rel` just
+/// before `InsertPgClassTuple` (the ones the trimmed relcache
+/// `FormData_pg_class` does not carry, or that `AddNewRelationTuple`
+/// overrides). Carried explicitly so `InsertPgClassTuple` is a faithful image
+/// of every value the C scribbles on `new_rel_desc->rd_rel`.
+#[derive(Clone, Copy, Debug)]
+pub struct PgClassWriteFields {
+    pub relpages: i32,
+    pub reltuples: f32,
+    pub relallvisible: i32,
+    pub relallfrozen: i32,
+    pub relfrozenxid: TransactionId,
+    pub relminmxid: u32,
+    pub relowner: Oid,
+    pub reltype: Oid,
+    pub reloftype: Oid,
+    pub relispartition: bool,
+    pub relrewrite: Oid,
+}
+
+seam_core::seam!(
+    /// `heap_create(relname, relnamespace, reltablespace, relid, relfilenumber,
+    /// accessmtd, tupDesc, relkind, relpersistence, shared_relation,
+    /// mapped_relation, allow_system_table_mods, &relfrozenxid, &relminmxid,
+    /// create_storage)` (catalog/heap.c): create an uncataloged relation. In C
+    /// the return is the new `Relation` and the frozen xids are written through
+    /// the two out-parameters; the owned model returns the new relcache entry's
+    /// OID plus the xids in [`HeapCreateResult`]. Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn heap_create<'mcx>(
+        mcx: Mcx<'mcx>,
+        relname: &str,
+        relnamespace: Oid,
+        reltablespace: Oid,
+        relid: Oid,
+        relfilenumber: RelFileNumber,
+        accessmtd: Oid,
+        tup_desc: &TupleDescData<'_>,
+        relkind: u8,
+        relpersistence: u8,
+        shared_relation: bool,
+        mapped_relation: bool,
+        allow_system_table_mods: bool,
+        create_storage: bool,
+    ) -> PgResult<HeapCreateResult>
+);
+
+seam_core::seam!(
+    /// `InsertPgClassTuple(pg_class_desc, new_rel_desc, new_rel_oid, relacl,
+    /// reloptions)` (catalog/heap.c): construct and insert a new pg_class tuple.
+    /// Tuple data is taken from `new_rel_desc->rd_rel` plus the write-only
+    /// columns (`write`) that `AddNewRelationTuple` scribbles on `rd_rel` but
+    /// the trimmed relcache `FormData_pg_class` does not carry. The C `Datum
+    /// relacl` / `Datum reloptions` cross as `Option<ArrayType>` / `Option<Vec<u8>>`
+    /// (`None` is the C `(Datum) 0` → SQL NULL). Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn InsertPgClassTuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        pg_class_desc: &Relation<'mcx>,
+        new_rel_desc: &Relation<'mcx>,
+        new_rel_oid: Oid,
+        write: &PgClassWriteFields,
+        relacl: Option<types_array::ArrayType>,
+        reloptions: Option<std::vec::Vec<u8>>,
+    ) -> PgResult<()>
 );

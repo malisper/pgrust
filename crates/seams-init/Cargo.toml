@@ -396,6 +396,15 @@ backend-conv-utf8-and-euc-jp = { path = "../backend-conv-utf8-and-euc-jp" }
 backend-conv-utf8-and-euc-kr = { path = "../backend-conv-utf8-and-euc-kr" }
 backend-conv-utf8-and-euc-tw = { path = "../backend-conv-utf8-and-euc-tw" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+backend-conv-utf8-and-gb18030 = { path = "../backend-conv-utf8-and-gb18030" }
+backend-conv-utf8-and-gbk = { path = "../backend-conv-utf8-and-gbk" }
+backend-conv-utf8-and-iso8859-1 = { path = "../backend-conv-utf8-and-iso8859-1" }
+backend-conv-utf8-and-iso8859 = { path = "../backend-conv-utf8-and-iso8859" }
+backend-conv-utf8-and-johab = { path = "../backend-conv-utf8-and-johab" }
+backend-conv-utf8-and-sjis = { path = "../backend-conv-utf8-and-sjis" }
+backend-conv-utf8-and-sjis2004 = { path = "../backend-conv-utf8-and-sjis2004" }
+backend-conv-utf8-and-uhc = { path = "../backend-conv-utf8-and-uhc" }
+backend-conv-utf8-and-win = { path = "../backend-conv-utf8-and-win" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
