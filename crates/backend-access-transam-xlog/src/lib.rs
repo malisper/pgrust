@@ -97,6 +97,8 @@ pub use startup::{
     PerformRecoveryXLogAction, StartupXLOG, ValidateXLOGDirectoryStructure, XLogInitNewTimeline,
 };
 
+pub mod guc_state;
+
 pub mod driver;
 pub use driver::{
     CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
@@ -723,6 +725,11 @@ pub fn CreateRestartPoint(flags: i32) -> bool {
 pub fn init_seams() {
     use backend_access_transam_xlog_seams as s;
     s::xlog_redo::set(redo::xlog_redo);
+
+    // xlog.c-owned GUC variable accessors + assign hooks (max_wal_size /
+    // min_wal_size / checkpoint_completion_target). The GUC machinery fires the
+    // assign hooks during InitializeGUCOptions to seed CheckPointSegments.
+    guc_state::install();
 
     // LocalProcessControlFile(reset) (xlog.c:4908) — the single-user boot driver
     // (backend-tcop-postgres) reads pg_control through this seam before shmem
