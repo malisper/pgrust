@@ -392,10 +392,17 @@ pub fn bool_anytrue(state: Option<BoolAggState>) -> Option<bool> {
     }
 }
 
-/// This unit has no inbound cyclic callers, so it owns no seam crate and
-/// installs no seams. The empty `init_seams()` keeps the uniform
-/// `seams-init::init_all()` wiring (one line per ported crate).
-pub fn init_seams() {}
+/// Installs the `parse_bool` seam declared in
+/// `backend-utils-adt-scalar-seams`. The seam's nominal owner is the
+/// `backend-utils-adt-scalar` unit (`bool.c`/`datum.c`/`oid.c`/…), still
+/// unported as one crate; `bool.c` itself is fully ported here, so this crate
+/// is `parse_bool`'s real home and installs it for the GUC / walsender
+/// `replication=...` consumers (`backend-tcop-backend-startup`). The sibling
+/// `datum_copy` seam in that same crate is installed by its own owner
+/// (`backend-utils-adt-scalar-datum-core`).
+pub fn init_seams() {
+    backend_utils_adt_scalar_seams::parse_bool::set(parse_bool);
+}
 
 #[cfg(test)]
 mod tests;
