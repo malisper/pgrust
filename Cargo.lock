@@ -15686,12 +15686,17 @@ dependencies = [
 name = "backend-tcop-dest"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact-seams",
  "backend-commands-copyto-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-tcop-cmdtag",
  "backend-tcop-dest-seams",
  "mcx",
  "types-dest",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-tuple",
 ]
 
@@ -20075,6 +20080,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-amcheck-verify-common"
+version = "0.0.0"
+dependencies = [
+ "amcheck-verify-common-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-index-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-elog-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "contrib-amcheck-verify-heapam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation-seams",
+ "backend-access-common-scankey",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-visibilitymap-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-storage-aio-read-stream",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-ipc-procarray-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error-elog-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "contrib-amcheck-verify-nbtree"
 version = "0.0.0"
 dependencies = [
@@ -20846,6 +20914,7 @@ dependencies = [
  "common-prng-base64",
  "common-scram-common",
  "common-string",
+ "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",

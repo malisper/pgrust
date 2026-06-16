@@ -73,6 +73,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_report_activity(STATE_RUNNING, cmd_str)` (`backend_status.c`):
+    /// mark this backend as actively running the given query string and stamp
+    /// the activity start timestamp. `exec_simple_query` /
+    /// `exec_execute_message` (postgres.c) call this at the start of command
+    /// processing. The `BackendState` discriminant is baked into the seam name
+    /// (the `BackendState` enum is not yet modeled), matching the existing
+    /// [`pgstat_report_activity_idle`] convention. Infallible.
+    pub fn pgstat_report_activity_running(cmd_str: alloc::string::String)
+);
+
+seam_core::seam!(
     /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
     pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
 );

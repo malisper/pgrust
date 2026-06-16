@@ -134,6 +134,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, &elems,
+    /// &nulls, &nelems)` (arrayfuncs.c), preserving per-element NULLs — the
+    /// null-permitting form of [`deconstruct_text_array`]. Each element comes
+    /// back as `Some(payload)` (a non-null `text` element's UTF-8 string) or
+    /// `None` (the C `nulls[i] == true`), in order, so a caller can apply its
+    /// own object-specific null-error message (e.g.
+    /// `textarray_to_strvaluelist` / `pg_get_object_address` in objectaddress.c,
+    /// which `ereport(ERROR)` "name or argument lists may not contain nulls").
+    /// The on-disk `text[]` byte image is detoasted (`DatumGetArrayTypeP`).
+    /// Fallible on detoast / malformed array / invalid UTF-8.
+    pub fn deconstruct_text_array_nullable<'mcx>(
+        mcx: Mcx<'mcx>,
+        array: &[u8],
+    ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `DatumGetArrayTypeP(arraydatum)` then
     /// `deconstruct_array_builtin(itemarray, TIDOID, &ipdatums, &ipnulls,
     /// &ndatums)` (arrayfuncs.c): detoast the `tid[]` array `Datum` and split

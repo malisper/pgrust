@@ -125,6 +125,53 @@ pub const fn TransactionIdIsNormal(xid: TransactionId) -> bool {
     xid >= FirstNormalTransactionId
 }
 
+/// `TransactionIdEquals(id1, id2)` (`access/transam.h`).
+#[inline]
+pub const fn TransactionIdEquals(id1: TransactionId, id2: TransactionId) -> bool {
+    id1 == id2
+}
+
+/// `TransactionIdPrecedes(id1, id2)` (`transam.c`) — modular "id1 < id2".
+/// `BootstrapTransactionId` and `FrozenTransactionId` sort before all normal
+/// xids; the modular comparison only applies to two normal xids.
+#[inline]
+pub fn TransactionIdPrecedes(id1: TransactionId, id2: TransactionId) -> bool {
+    if !TransactionIdIsNormal(id1) || !TransactionIdIsNormal(id2) {
+        return id1 < id2;
+    }
+    (id1.wrapping_sub(id2) as i32) < 0
+}
+
+/// `TransactionIdPrecedesOrEquals(id1, id2)` (`transam.c`) — modular "id1 <= id2".
+#[inline]
+pub fn TransactionIdPrecedesOrEquals(id1: TransactionId, id2: TransactionId) -> bool {
+    if !TransactionIdIsNormal(id1) || !TransactionIdIsNormal(id2) {
+        return id1 <= id2;
+    }
+    (id1.wrapping_sub(id2) as i32) <= 0
+}
+
+/// `MultiXactIdPrecedes(multi1, multi2)` (`multixact.c`) — modular "multi1 <
+/// multi2". Unlike xids, multixacts have no Bootstrap/Frozen special values,
+/// so the comparison is always the plain modular one.
+#[inline]
+pub fn MultiXactIdPrecedes(
+    multi1: crate::primitive::MultiXactId,
+    multi2: crate::primitive::MultiXactId,
+) -> bool {
+    (multi1.wrapping_sub(multi2) as i32) < 0
+}
+
+/// `MultiXactIdPrecedesOrEquals(multi1, multi2)` (`multixact.c`) — modular
+/// "multi1 <= multi2".
+#[inline]
+pub fn MultiXactIdPrecedesOrEquals(
+    multi1: crate::primitive::MultiXactId,
+    multi2: crate::primitive::MultiXactId,
+) -> bool {
+    (multi1.wrapping_sub(multi2) as i32) <= 0
+}
+
 /// One created/dropped pgstat item carried on commit/abort/prepare WAL
 /// records, matching C's `xl_xact_stats_item` (`access/xact.h`:
 /// `{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`). The split
@@ -203,6 +250,27 @@ impl FullTransactionId {
     /// `FullTransactionIdIsValid`
     pub const fn is_valid(self) -> bool {
         self.xid() != InvalidTransactionId
+    }
+
+    /// `U64FromFullTransactionId(x)` — `(x).value`.
+    pub const fn to_u64(self) -> u64 {
+        self.value
+    }
+
+    /// `FullTransactionIdIsNormal(x)` — the xid part is a normal xid.
+    pub const fn is_normal(self) -> bool {
+        TransactionIdIsNormal(self.xid())
+    }
+
+    /// `FullTransactionIdPrecedes(a, b)` (`access/transam.h`) — `a.value < b.value`.
+    /// Full xids are 64-bit and never wrap, so this is a plain comparison.
+    pub const fn precedes(self, other: FullTransactionId) -> bool {
+        self.value < other.value
+    }
+
+    /// `FullTransactionIdPrecedesOrEquals(a, b)` — `a.value <= b.value`.
+    pub const fn precedes_or_equals(self, other: FullTransactionId) -> bool {
+        self.value <= other.value
     }
 }
 
