@@ -50,7 +50,9 @@ use types_gist::{
 use types_rel::Relation;
 use types_storage::buf::BufferIsValid;
 use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tuple::backend_access_common_heaptuple::Datum;
+use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
 use crate::gist_page::{
     gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage, gistfillbuffer,
@@ -61,7 +63,7 @@ use crate::gist_page::{
 use crate::gistutil::{
     gist_tuple_is_invalid, gist_tuple_set_valid, gistFormTuple, gistNewBuffer, gistchoose,
     gistextractpage, gistfillitupvec, gistfitpage, gistgetadjusted, gistjoinvector, gistnospace,
-    index_tuple_size, itup_block_number, itup_set_block_number,
+    index_tuple_size, initGISTstate, itup_block_number, itup_set_block_number,
 };
 
 /// `BUFFER_LOCK_UNLOCK` / `GIST_UNLOCK` (bufmgr.h / gist_private.h).
@@ -820,6 +822,60 @@ pub fn gistprunepage<'mcx>(
 // insert) with `parent: Option<usize>` linking by index; the "current" frame is
 // a separate `cur: usize`.
 // ===========================================================================
+
+/// `gistinsert(r, values, isnull, ht_ctid, heapRel, checkUnique, indexUnchanged,
+/// indexInfo)` (gist.c:164): the public `aminsert` entry — the thin wrapper for
+/// GiST tuple insertion. It locks no relation itself; it just forms an index
+/// tuple over the heap row's `values`/`isnull`, stamps the heap CTID into the
+/// tuple's `t_tid`, and hands off to [`gistdoinsert`] to descend the tree and
+/// place it. GiST never reports a unique conflict, so it always returns `false`.
+///
+/// In C the per-statement `GISTSTATE` is cached in `indexInfo->ii_AmCache` (built
+/// once, with its own `tempCxt` temporary memory context reset after each insert)
+/// so it is rebuilt only on the first call of a statement. Our `IndexInfo`
+/// carrier (`payload: Option<Box<dyn Any + 'static>>`) cannot hold the
+/// `'mcx`-bound `GISTSTATE`, so we rebuild it on every call from `initGISTstate`
+/// (behaviour-preserving — the cache is a pure performance hint that changes no
+/// on-disk state and produces identical results, exactly like the documented
+/// `brininsert` `ii_AmCache` rebuild-per-call). The C `tempCxt` reset is the
+/// owned-model `mcx` lifetime: the per-call `GISTSTATE`, the formed tuple, and
+/// everything `gistdoinsert` allocates live in `mcx` and are reclaimed when the
+/// caller's context ends.
+#[allow(clippy::too_many_arguments)]
+pub fn gistinsert<'mcx>(
+    mcx: Mcx<'mcx>,
+    r: &Relation<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    ht_ctid: &ItemPointerData,
+    heap_rel: &Relation<'mcx>,
+    _check_unique: IndexUniqueCheck,
+    _index_unchanged: bool,
+    index_info: &mut IndexInfo,
+) -> PgResult<bool> {
+    // See the function doc: the C ii_AmCache GISTSTATE cache cannot be expressed
+    // over the 'static IndexInfo payload, so rebuild per call (behaviour-
+    // preserving). createTempGistContext's temporary context is the mcx lifetime.
+    let _ = index_info;
+    let giststate = initGISTstate(mcx, r)?;
+
+    // itup = gistFormTuple(giststate, r, values, isnull, true);
+    let mut itup = gistFormTuple(mcx, &giststate, r, values, isnull, true)?;
+
+    // itup->t_tid = *ht_ctid;  -- the leading ItemPointerData of the on-disk
+    // image is `BlockIdData ip_blkid` (`bi_hi` then `bi_lo`, each u16) followed by
+    // `OffsetNumber ip_posid` (u16): 6 bytes at offset 0. This overwrites the
+    // 0xffff sentinel offset that gistFormTuple stamped.
+    itup[0..2].copy_from_slice(&ht_ctid.ip_blkid.bi_hi.to_ne_bytes());
+    itup[2..4].copy_from_slice(&ht_ctid.ip_blkid.bi_lo.to_ne_bytes());
+    itup[4..6].copy_from_slice(&ht_ctid.ip_posid.to_ne_bytes());
+
+    // gistdoinsert(r, itup, 0, giststate, heapRel, false);
+    gistdoinsert(mcx, r, &itup, 0, &giststate, heap_rel, false)?;
+
+    // GiST never reports a unique-constraint conflict.
+    Ok(false)
+}
 
 /// `gistdoinsert(r, itup, freespace, giststate, heapRel, is_build)` (gist.c:638):
 /// the workhorse for inserting one tuple into a GiST index. Walks down the path
