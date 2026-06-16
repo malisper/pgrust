@@ -5717,12 +5717,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-typecmds"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-cast",
+ "backend-catalog-pg-enum",
+ "backend-catalog-pg-opclass-seams",
+ "backend-catalog-pg-range",
+ "backend-catalog-pg-type",
+ "backend-catalog-pg-type-seams",
+ "backend-commands-define-seams",
+ "backend-commands-functioncmds-seams",
+ "backend-commands-opclasscmds-seams",
+ "backend-commands-typecmds-seams",
+ "backend-parser-coerce-seams",
+ "backend-parser-func",
+ "backend-parser-parse-type-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-typecmds-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
+ "types-parsenodes",
 ]
 
 [[package]]
