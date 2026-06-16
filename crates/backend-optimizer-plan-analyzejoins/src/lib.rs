@@ -31,9 +31,15 @@
 //!   seams). These remain uninstalled in `backend-optimizer-plan-init-subselect-seams`
 //!   and panic loudly until filled — mirror-pg-and-panic.
 //! * The `RTE_SUBQUERY` distinctness legs (`query_supports_distinctness` /
-//!   `query_is_distinct_for`) — blocked on the planner `Query` carrier, which is
-//!   trimmed (no `distinctClause`/`groupClause`/`groupingSets`/`havingQual`/
-//!   `setOperations`/`targetList`). They panic via [`subquery_distinctness_unported`].
+//!   `query_is_distinct_for`) — the planner `Query` carrier
+//!   (`types_nodes::copy_query::Query<'mcx>`) now carries every field these need
+//!   (`distinctClause`/`groupClause`/`groupingSets`/`havingQual`/
+//!   `setOperations`/`targetList`/`sortClause`/`limitOffset`/`limitCount`/
+//!   `windowClause`), resolvable from a subquery RTE's `QueryId` via
+//!   `types_pathnodes::planner_run::PlannerRun::resolve`. The legs still panic via
+//!   [`subquery_distinctness_unported`] only because porting them (and threading
+//!   `&PlannerRun` into `rel_supports_distinctness` / `rel_is_distinct_for`) is
+//!   the follow-up (#294) — the carrier itself is no longer the blocker.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -80,15 +86,18 @@ fn rinfo_is_pushed_down(root: &PlannerInfo, rinfo: RinfoId, joinrelids: &Relids)
 }
 
 /// Diverging panic for the still-unported `RTE_SUBQUERY` distinctness legs
-/// (`query_supports_distinctness` / `query_is_distinct_for`). The planner
-/// `Query` carrier is trimmed of the clauses these need; this mirror-pg-and-panic
-/// marks the exact boundary rather than silently returning a wrong answer.
+/// (`query_supports_distinctness` / `query_is_distinct_for`). The planner `Query`
+/// carrier now models every clause these read (resolvable from the subquery
+/// RTE's `QueryId` via `PlannerRun::resolve`); what remains is porting the legs
+/// themselves and threading `&PlannerRun` into the distinctness chain (#294).
+/// This mirror-pg-and-panic marks the exact boundary rather than silently
+/// returning a wrong answer.
 fn subquery_distinctness_unported() -> ! {
     panic!(
         "analyzejoins: RTE_SUBQUERY distinctness (query_supports_distinctness / \
-         query_is_distinct_for) needs the full planner Query carrier \
-         (distinctClause/groupClause/groupingSets/havingQual/setOperations/targetList), \
-         which is not yet modeled"
+         query_is_distinct_for) is not yet ported (#294); the planner Query carrier \
+         already models distinctClause/groupClause/groupingSets/havingQual/\
+         setOperations/targetList — thread &PlannerRun and port the legs"
     )
 }
 
