@@ -72,3 +72,25 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`. Owner unported; scaffolded slot.
     pub fn extend_commit_ts(newest_xact: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `StartupCommitTs()` (commit_ts.c) — activate the commit-timestamp module
+    /// at startup. Called once from `StartupXLOG` (xlog.c:5690). The owner wraps
+    /// its private `CommitTsState`. SLRU activation can `ereport(ERROR)`.
+    pub fn startup_commit_ts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CompleteCommitTsInitialization()` (commit_ts.c) — finish commit-ts setup
+    /// at end of recovery, activating or deactivating per the GUC. Called once
+    /// from `StartupXLOG` (xlog.c:6211). Fallible (SLRU writes).
+    pub fn complete_commit_ts_initialization() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetCommitTsLimit(oldestXact, newestXact)` (commit_ts.c) — seed the oldest
+    /// and newest XID endpoints for which a commit timestamp can be consulted.
+    /// Called from `StartupXLOG` (xlog.c:5641) and `BootStrapXLOG`. Plain
+    /// shared-memory store under `CommitTsLock`; fallible to match the channel.
+    pub fn set_commit_ts_limit(oldest_xact: TransactionId, newest_xact: TransactionId) -> PgResult<()>
+);

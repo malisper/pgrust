@@ -993,4 +993,13 @@ pub fn init_seams() {
         let owned: Vec<u8> = data.to_vec();
         with_commit_ts_state(|state| commit_ts_redo(state, info, &owned))
     });
+
+    // WAL-startup entry points called once by `StartupXLOG` (xlog.c) on the
+    // clean DB_SHUTDOWNED / end-of-recovery path. They wrap the owner-private
+    // `CommitTsState` through the same ambient accessor the other seams use.
+    seams::startup_commit_ts::set(|| with_commit_ts_state(StartupCommitTs));
+    seams::complete_commit_ts_initialization::set(|| {
+        with_commit_ts_state(CompleteCommitTsInitialization)
+    });
+    seams::set_commit_ts_limit::set(SetCommitTsLimit);
 }

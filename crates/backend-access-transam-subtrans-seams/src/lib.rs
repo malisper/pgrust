@@ -51,3 +51,11 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`. Owner unported; scaffolded slot.
     pub fn extend_subtrans(newest_xact: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `StartupSUBTRANS(oldestActiveXID)` (subtrans.c) — zero the currently
+    /// active pg_subtrans page range at startup. Called from `StartupXLOG`
+    /// (xlog.c:5870 / 6155). The owner wraps its private `SubTransState`; the
+    /// SLRU page zeroing can `ereport(ERROR)`, carried on `Err`.
+    pub fn startup_subtrans(oldest_active_xid: TransactionId) -> PgResult<()>
+);

@@ -105,3 +105,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn replication_origin_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `StartupReplicationOrigin()` (origin.c) — read `pg_logical/replorigin_checkpoint`
+    /// into the shared-memory replication-origin slots at startup. Called once
+    /// from `StartupXLOG` (xlog.c:5695). File read / shared-memory population can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn startup_replication_origin() -> PgResult<()>
+);

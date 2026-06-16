@@ -1069,6 +1069,11 @@ pub fn init_seams() {
     clog_seams::clog_shmem_size::set(clog_shmem_size_seam);
     clog_seams::clog_shmem_init::set(clog_shmem_init_seam);
     clog_seams::extend_clog::set(ExtendCLOG);
+
+    // WAL-startup entry points called once by `StartupXLOG` (xlog.c) on the
+    // clean DB_SHUTDOWNED / end-of-recovery path.
+    clog_seams::startup_clog::set(StartupCLOG);
+    clog_seams::trim_clog::set(TrimCLOG);
 }
 
 /// `CLOGShmemSize()` wrapper for the `clog_shmem_size` seam (`PgResult<Size>`:

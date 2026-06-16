@@ -807,6 +807,20 @@ pub fn init_seams() {
     // `clog_redo` caller) carries the shared-state-mutation channel on `Err`.
     seams::advance_oldest_clog_xid::set(AdvanceOldestClogXid);
 
+    // `SetTransactionIdLimit(oldest, oldest_db)` — the WAL-startup (xlog.c:5639)
+    // and vacuum wraparound-limit setter. `varsup.c` OWNS the body but the seam
+    // contract was scaffolded in the consumer crate
+    // (`backend-commands-vacuum-seams`, `::call`ed by vacuum and the future
+    // StartupXLOG driver); install it here so the single declared seam resolves.
+    // The seam is `Mcx`-free; the body only consults its `mcx` to format a
+    // database-name warning while inside a live transaction (never during
+    // `StartupXLOG`), so a throwaway context suffices, mirroring the
+    // `get_new_transaction_id` install above.
+    backend_commands_vacuum_seams::set_transaction_id_limit::set(|oldest, oldest_db| {
+        let cx = MemoryContext::new("SetTransactionIdLimit seam");
+        SetTransactionIdLimit(cx.mcx(), oldest, oldest_db)
+    });
+
     // `GetNewObjectId()` and `StopGeneratingPinnedObjectIds()` (catalog.c
     // callers) carry their `ereport(ERROR)` paths on `Err`.
     seams::get_new_object_id::set(GetNewObjectId);
