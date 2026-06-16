@@ -57,7 +57,54 @@ use backend_utils_cache_relcache_seams::{relation_rules, RewriteRuleImage};
 use types_storage::lock::NoLock;
 use types_tuple::heaptuple::FormData_pg_attribute;
 
-use crate::view_has_instead_trigger;
+use crate::{build_generation_expression, view_has_instead_trigger};
+
+// `attgenerated` chars (catalog/pg_attribute.h).
+const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
+const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
+
+/// `get_generated_columns(rel, rt_index, include_stored)` (rewriteHandler.c) —
+/// build a target list of `TargetEntry`s, one per VIRTUAL (and, when
+/// `include_stored`, STORED) generated column of `rel`, whose expression is the
+/// column's generation expression with its self-references re-pointed at
+/// `rt_index`. Used by `rewriteRuleAction` to expose `NEW.<gencol>` references.
+fn get_generated_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    rt_index: i32,
+    include_stored: bool,
+) -> PgResult<Vec<types_nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut gen_cols: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let tupdesc = &rel.rd_att;
+
+    let has_gen = tupdesc.constr.as_ref().is_some_and(|c| {
+        c.has_generated_virtual || (include_stored && c.has_generated_stored)
+    });
+    if !has_gen {
+        return Ok(gen_cols);
+    }
+
+    let natts = tupdesc.natts as usize;
+    for i in 0..natts {
+        let attr = tupdesc.attr(i);
+        if attr.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL
+            || (include_stored && attr.attgenerated == ATTRIBUTE_GENERATED_STORED)
+        {
+            let defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
+            // ChangeVarNodes(defexpr, 1, rt_index, 0)
+            let mut defnode = Node::Expr(defexpr);
+            ChangeVarNodes(&mut defnode, 1, rt_index, 0);
+            let defexpr = match defnode {
+                Node::Expr(e) => e,
+                _ => unreachable!("ChangeVarNodes preserves the node kind"),
+            };
+            let te = make_target_entry(mcx, defexpr, (i + 1) as i16, None, false)?;
+            gen_cols.push(te);
+        }
+    }
+
+    Ok(gen_cols)
+}
 
 // `RELKIND_*` (the `i8` stored in `RangeTblEntry.relkind`) used by the engine.
 const RELKIND_VIEW: i8 = b'v' as i8;
@@ -1716,6 +1763,10 @@ fn RewriteQuery<'mcx>(
     let mut updatableview = false;
     let mut qual_product: Option<Query<'mcx>> = None;
     let mut rewritten: Vec<Query<'mcx>> = Vec::new();
+    // Captured before `parsetree` is consumed into `rewritten`: the C end-of-
+    // function check rejects a WITH query that rules expanded into multiple
+    // (non-utility) result queries.
+    let had_cte_list = !parsetree.cteList.is_empty();
 
     // First, recursively process data-modifying CTEs.
     let cte_count = parsetree.cteList.len() as i32;
@@ -1979,6 +2030,12 @@ fn RewriteQuery<'mcx>(
             ));
         }
 
+        // Whether fireRules produced any product queries (the C
+        // `product_queries != NIL` test, captured before they are consumed by
+        // the recursive rewrite below — a product query can itself rewrite to
+        // nothing, so `rewritten` is not an equivalent witness).
+        let product_queries_nonempty = !product_queries.is_empty();
+
         // Recursively rewrite product queries (with recursion guard).
         if !product_queries.is_empty() {
             let guard = RewriteEvent {
@@ -2035,12 +2092,11 @@ fn RewriteQuery<'mcx>(
         }
 
         // ON CONFLICT + rules error.
+        // C: onConflict && (product_queries != NIL || hasUpdate) && !updatableview
         if parsetree.onConflict.is_some()
-            && (!rewritten.is_empty() || has_update)
+            && (product_queries_nonempty || has_update)
             && !updatableview
         {
-            // (rewritten holds product results at this point; the C tests
-            // product_queries != NIL — equivalent since we just consumed them.)
             rt_entry_relation.close(NoLock)?;
             return Err(PgError::new(
                 ERROR,
@@ -2068,6 +2124,23 @@ fn RewriteQuery<'mcx>(
         }
     } else {
         // parsetree consumed conceptually; nothing to add.
+    }
+
+    // If the original query has a CTE list, and we generated more than one
+    // (non-utility) query, reject it: CTEs must be evaluated exactly once.
+    if had_cte_list {
+        let qcount = rewritten
+            .iter()
+            .filter(|q| q.commandType != CmdType::CMD_UTILITY)
+            .count();
+        if qcount > 1 {
+            return Err(PgError::new(
+                ERROR,
+                "WITH cannot be used in a query that is rewritten by rules into multiple queries"
+                    .to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
     }
 
     Ok(rewritten)
