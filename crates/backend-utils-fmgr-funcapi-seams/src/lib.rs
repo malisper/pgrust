@@ -149,6 +149,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PG_GETARG_HEAPTUPLEHEADER(n)` against the call frame: read a composite
+    /// (row-type) argument at position `n` as a [`FormedTuple`] (owned header +
+    /// user-data area). The fmgr owns the trimmed `args` array AND the
+    /// bare-word -> composite-Datum detoast boundary, so the read is seamed.
+    /// Used by `json[b]_populate_record` to obtain the optional record argument
+    /// whose existing field values seed the result tuple. Returns the detoasted
+    /// composite as a `FormedTuple`; `Err` carries detoast OOM. The caller must
+    /// have already checked `PG_ARGISNULL(n)` is false (C reads the header only
+    /// when the arg is non-null).
+    pub fn srf_arg_record<'mcx>(
+        mcx: Mcx<'mcx>,
+        fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
+);
+
+seam_core::seam!(
     /// `get_expr_result_tupdesc(expr, noError)` (funcapi.c): get the tuple
     /// descriptor describing the result of an expression of composite type. Used
     /// by `ParseComplexProjection` (parse_func.c). With `no_error = true` an

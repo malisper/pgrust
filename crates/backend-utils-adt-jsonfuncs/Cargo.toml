@@ -36,6 +36,12 @@ backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# populate_record copies the cached composite tuple descriptor.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+# populate_domain enforces domain constraints via domain_check.
+backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
+# get_fn_expr_argtype for the record argument's declared type.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 # Inward seam crate this unit owns (json/jsonb call json_categorize_type etc.)
 backend-utils-adt-jsonfuncs-seams = { path = "../backend-utils-adt-jsonfuncs-seams" }
 # Outward seam crates for not-yet-ported owners.
