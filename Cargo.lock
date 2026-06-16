@@ -12915,6 +12915,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-float"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-float-seams",
+ "backend-utils-error",
+ "common-ryu",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-float-seams"
 version = "0.0.0"
 dependencies = [
@@ -13043,6 +13057,38 @@ dependencies = [
 
 [[package]]
 name = "backend-utils-adt-json-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-json",
+ "types-jsonb",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
@@ -15193,9 +15239,11 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-storage-file-buffile-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-sortsupport-seams",
  "backend-utils-sort-storage",
  "backend-utils-sort-storage-seams",
+ "backend-utils-sort-tuplesort-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -16139,6 +16187,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-float",
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
@@ -16196,6 +16245,7 @@ dependencies = [
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-sortsupport",
  "backend-utils-sort-storage",
+ "backend-utils-sort-tuplesort",
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
  "common-checksum-helper",
