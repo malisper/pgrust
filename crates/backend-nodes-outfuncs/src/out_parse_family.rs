@@ -136,7 +136,7 @@ fn write_value_vec_field<T>(
 // _outQuery
 // ===========================================================================
 
-fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool) {
+pub(crate) fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool) {
     buf.push_str("QUERY");
     write_enum_field(buf, "commandType", n.commandType as i32);
     write_enum_field(buf, "querySource", n.querySource as i32);

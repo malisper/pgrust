@@ -221,20 +221,25 @@ fn out_plan_fields(buf: &mut String, plan: &Plan<'_>, prefix: &str, write_loc: b
         None => buf.push_str("<>"),
         Some(n) => out_node_inner(buf, n, write_loc),
     }
-    // initPlan: `List *` of `SubPlan` (an Expr). The C `WRITE_NODE_FIELD`
-    // renders NIL as `<>`; a populated list recurses through `out_expr`, which
-    // panics for `SubPlan` until that Expr writer lands (mirror-pg-and-panic —
-    // initPlan is empty in the common case).
+    // initPlan: `List *` of `SubPlan`. The C `WRITE_NODE_FIELD(initPlan)` calls
+    // `outNode` on the List, rendering NIL as `<>` and a populated list as
+    // `({SUBPLAN ...} {SUBPLAN ...} ...)` (each element framed by `out_subplan`).
     let _ = write!(buf, " :{} ", p("initPlan"));
     match &plan.initPlan {
         None => buf.push_str("<>"),
         Some(list) if list.is_empty() => buf.push_str("<>"),
-        Some(_) => panic!(
-            "outPlan: initPlan carries SubPlan; the {{SUBPLAN ...}} Expr writer is \
-             not ported into this enum's serialization stage yet (out_expr panics on \
-             Expr::SubPlan). initPlan is empty in the common stored-plan case; a \
-             non-empty list is unmodeled here (mirror-pg-and-panic)"
-        ),
+        Some(list) => {
+            buf.push('(');
+            let mut first = true;
+            for sp in list.iter() {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                crate::framed(buf, |b| crate::out_expr_family::out_subplan(b, sp, write_loc));
+            }
+            buf.push(')');
+        }
     }
     write_bitmapset_opt_field(buf, &p("extParam"), plan.extParam.as_deref());
     write_bitmapset_opt_field(buf, &p("allParam"), plan.allParam.as_deref());

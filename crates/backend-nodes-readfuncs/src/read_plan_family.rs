@@ -221,6 +221,150 @@ fn read_expr_box_opt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Expr>>
     }
 }
 
+/// `READ_INT_LIST` returning a `PgVec<i32>` (`(i v0 v1 ...)` form; `<>`/empty →
+/// empty Vec). Mirrors `read_expr_family::read_int_list_field` but allocates the
+/// repo's `PgVec<i32>` SubPlan carrier directly.
+fn read_int_list_pgvec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, i32>> {
+    let _label = next_tok()?;
+    let open = next_tok()?;
+    let mut out = PgVec::new_in(mcx);
+    if open.bytes.is_empty() {
+        return Ok(out);
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for int list"));
+    }
+    let tag = next_tok()?;
+    if tag.bytes != b"i" && tag.bytes != b")" {
+        return Err(elog_error("expected 'i' for int list"));
+    }
+    if tag.bytes == b")" {
+        return Ok(out);
+    }
+    loop {
+        let t = next_tok()?;
+        if t.bytes == b")" {
+            break;
+        }
+        out.push(crate::atoi_i64(&tok_str(&t)) as i32);
+    }
+    Ok(out)
+}
+
+/// `READ_NODE_FIELD` over the `:args` list of `Expr` written by
+/// `write_pgbox_expr_list_field` (`(child child ...)`; empty → `()`); returns
+/// `PgVec<PgBox<Expr>>`.
+fn read_expr_box_pgvec<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PgVec<'mcx, PgBox<'mcx, Expr>>> {
+    let _label = next_tok()?;
+    let mut out = PgVec::new_in(mcx);
+    match read::node_read(mcx, None)? {
+        None => Ok(out),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::List(elems) => {
+                for c in elems {
+                    match PgBox::into_inner(c) {
+                        Node::Expr(e) => out.push(alloc_in(mcx, e)?),
+                        other => {
+                            return Err(elog_error(alloc::format!(
+                                "expected Expr in args list, got {:?}",
+                                other.node_tag()
+                            )))
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(elog_error(alloc::format!(
+                "expected List for args field, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
+/// `_readSubPlan` (readfuncs.funcs.c) — reads the `{SUBPLAN ...}` body fields in
+/// the exact order `out_expr_family::out_subplan` writes them, reconstructing the
+/// `'mcx`-carrying `SubPlan<'mcx>` (the `Plan.initPlan` element type; distinct
+/// from the lifetime-free `Expr::SubPlan` carrier). The opening `{`/LABEL is
+/// consumed by the caller.
+fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubPlan<'mcx>> {
+    let subLinkType = crate::read_expr_family::sublink_type_from(read_enum_field()?);
+    let testexpr = read_expr_box_opt(mcx)?;
+    let paramIds = read_int_list_pgvec(mcx)?;
+    let plan_id = read_int_field()?;
+    let plan_name = read_string(mcx)?;
+    let firstColType = read_oid_field()?;
+    let firstColTypmod = read_int_field()?;
+    let firstColCollation = read_oid_field()?;
+    let useHashTable = read_bool_field()?;
+    let unknownEqFalse = read_bool_field()?;
+    let parallel_safe = read_bool_field()?;
+    let setParam = read_int_list_pgvec(mcx)?;
+    let parParam = read_int_list_pgvec(mcx)?;
+    let args = read_expr_box_pgvec(mcx)?;
+    let startup_cost = read_float_field()?;
+    let per_call_cost = read_float_field()?;
+    Ok(types_nodes::primnodes::SubPlan {
+        subLinkType,
+        testexpr,
+        paramIds,
+        plan_id,
+        plan_name,
+        firstColType,
+        firstColTypmod,
+        firstColCollation,
+        useHashTable,
+        unknownEqFalse,
+        parallel_safe,
+        setParam,
+        parParam,
+        args,
+        startup_cost,
+        per_call_cost,
+    })
+}
+
+/// Read the `:initPlan` field: the `<>` NULL form → `None`, or a
+/// `({SUBPLAN ...} ...)` list of framed SubPlan bodies → `Some(PgVec<SubPlan>)`.
+/// Mirrors `out_plan`'s initPlan emission exactly (each element framed by `{`/`}`
+/// and read by `read_subplan`).
+fn read_initplan_list<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::SubPlan<'mcx>>>> {
+    let _label = next_tok()?; // :initPlan
+    let open = next_tok()?;
+    if open.bytes.is_empty() {
+        // `<>` — C NIL.
+        return Ok(None);
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' or '<>' for initPlan list"));
+    }
+    let mut out = PgVec::new_in(mcx);
+    loop {
+        let t = next_tok()?;
+        if t.bytes == b")" {
+            break;
+        }
+        // Each element is a framed `{SUBPLAN ...}`. `t` is the opening `{`.
+        if t.bytes.first() != Some(&b'{') {
+            return Err(elog_error("expected '{' opening a SubPlan in initPlan"));
+        }
+        let label = next_tok()?;
+        if label.bytes != b"SUBPLAN" {
+            return Err(elog_error("expected SUBPLAN label in initPlan list"));
+        }
+        out.push(read_subplan(mcx)?);
+        let close = next_tok()?;
+        if close.bytes.first() != Some(&b'}') {
+            return Err(elog_error("did not find '}' at end of SubPlan in initPlan"));
+        }
+    }
+    Ok(Some(out))
+}
+
 /// `readXxxCols`: read the `:fldname` label, then a `( v0 v1 ...)` token run of
 /// `n` values (or `<>` for a NULL array, returning an empty Vec). `parse` maps
 /// the token text to `T`.
@@ -312,18 +456,12 @@ fn read_plan_fields<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Plan<'mcx>> {
     let qual = read_expr_pgvec_opt(mcx)?;
     let lefttree = read_node_opt(mcx)?;
     let righttree = read_node_opt(mcx)?;
-    // initPlan: the OUT side emits `<>` for the empty/None case (SubPlan list
-    // emission is unported); read it back as None.
-    let _label = next_tok()?; // skip :...initPlan
-    let initPlan = match read::node_read(mcx, None)? {
-        None => None,
-        Some(_) => {
-            return Err(elog_error(
-                "readPlan: non-empty initPlan SubPlan list is unmodeled in this \
-                 serialization stage (out side panics on non-empty initPlan)",
-            ))
-        }
-    };
+    // initPlan: a `List *` of `SubPlan`, written by out_plan as `<>` (None) or
+    // `({SUBPLAN ...} {SUBPLAN ...} ...)`. Each element is a framed `{SUBPLAN}`
+    // body read by `read_subplan` into a `'mcx`-carrying `SubPlan<'mcx>` (this is
+    // NOT routed through the central `node_read`/Expr::SubPlan dispatch, whose
+    // `'static` SubPlanExpr carrier is a separate seam-blocked path).
+    let initPlan = read_initplan_list(mcx)?;
     let extParam = read_bitmapset_opt_field(mcx)?;
     let allParam = read_bitmapset_opt_field(mcx)?;
     Ok(Plan {
@@ -1237,6 +1375,56 @@ mod tests {
         assert!(text.starts_with("{SEQSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":scan.plan.targetlist <>"), "{text}");
         assert!(text.ends_with(":scan.scanrelid 3}"), "{text}");
+    }
+
+    #[test]
+    fn initplan_subplan_round_trips() {
+        // A SeqScan whose Plan.initPlan carries one SubPlan — exercises the
+        // `({SUBPLAN ...})` list emission (out) and `read_subplan`/`read_initplan_list`
+        // (read), and the byte-stable round-trip across both.
+        let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("initplan")));
+        let mcx = ctx.mcx();
+        let sp = types_nodes::primnodes::SubPlan {
+            subLinkType: types_nodes::primnodes::SubLinkType::Exists,
+            testexpr: None,
+            paramIds: PgVec::new_in(mcx),
+            plan_id: 7,
+            plan_name: Some(mcx::PgString::from_str_in("InitPlan 1", mcx).unwrap()),
+            firstColType: 23,
+            firstColTypmod: -1,
+            firstColCollation: 0,
+            useHashTable: false,
+            unknownEqFalse: false,
+            parallel_safe: true,
+            setParam: PgVec::new_in(mcx),
+            parParam: PgVec::new_in(mcx),
+            args: PgVec::new_in(mcx),
+            startup_cost: 0.0,
+            per_call_cost: 0.0,
+        };
+        let mut init = PgVec::new_in(mcx);
+        init.push(sp);
+        let mut s = types_nodes::nodeseqscan::SeqScan {
+            scan: types_nodes::nodeindexscan::Scan::default(),
+        };
+        s.scan.plan.initPlan = Some(init);
+        s.scan.scanrelid = 1;
+        let text = assert_framed_round_trip(&Node::SeqScan(s));
+        assert!(text.contains("initPlan ({SUBPLAN :subLinkType"), "{text}");
+        assert!(text.contains(":plan_id 7"), "{text}");
+
+        // Read it back and confirm the SubPlan survived.
+        ensure_seams();
+        let parsed = string_to_node(mcx, &text).expect("read");
+        match PgBox::into_inner(parsed) {
+            Node::SeqScan(s) => {
+                let ip = s.scan.plan.initPlan.expect("initPlan lost");
+                assert_eq!(ip.len(), 1);
+                assert_eq!(ip[0].plan_id, 7);
+                assert!(ip[0].parallel_safe);
+            }
+            other => panic!("expected SeqScan, got {:?}", other.node_tag()),
+        }
     }
 
     #[test]
