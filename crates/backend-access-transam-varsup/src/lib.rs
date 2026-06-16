@@ -840,6 +840,17 @@ pub fn init_seams() {
     // `ProcArrayLock`. The fields live in the `TransamVariables` singleton owned
     // here; procarray reaches them through these owner seams (the backing
     // `Mutex` provides the mutual exclusion the LWLock gives in C).
+    // `TransamVariables->nextXid = checkPoint.nextXid; nextOid = checkPoint.nextOid;
+    // oidCount = 0;` — the WAL-startup (xlog.c:5631-5634) seed of the XID/OID
+    // counters from the starting checkpoint. No other process is up yet in C, so
+    // there is no lock; the backing `Mutex` is incidental.
+    seams::set_transam_variables_at_startup::set(|next_xid, next_oid| {
+        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        tv.nextXid = next_xid;
+        tv.nextOid = next_oid;
+        tv.oidCount = 0;
+    });
+
     seams::get_latest_completed_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid);
     seams::set_latest_completed_xid::set(|fxid| {
         TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid = fxid;

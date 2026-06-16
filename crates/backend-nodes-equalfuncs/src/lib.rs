@@ -912,7 +912,9 @@ fn equal_table_func(
         })
         && equal_opt_list(&a.passingvalexprs, &b.passingvalexprs, |p, q| equal_expr(p, q))
         && equal_bms(a.notnulls.as_deref(), b.notnulls.as_deref())
+        && equal_opt_node(a.plan.as_ref(), b.plan.as_ref())
         && a.ordinalitycol == b.ordinalitycol
+    // `location` is `COMPARE_LOCATION_FIELD` (no-op).
 }
 
 /// `_equalCommonTableExpr` (equalfuncs.funcs.c).
