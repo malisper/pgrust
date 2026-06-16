@@ -1426,5 +1426,13 @@ pub fn init_seams() {
     seams::report_invalid_encoding::set(report_invalid_encoding);
     seams::report_untranslatable_char::set(report_untranslatable_char);
     seams::check_encoding_conversion_args::set(check_encoding_conversion_args);
+
+    // `SetMessageEncoding` is a mbutils.c routine, but its declaration is homed in
+    // pg_locale.c's seam crate (the consumer is pg_perm_setlocale). Install it
+    // here, in the real owner. `pg_enc` is `i32`, so the cast is identity; the
+    // `PgResult` is infallible for a valid encoding (debug_assert only).
+    backend_utils_adt_pg_locale_env_seams::set_message_encoding::set(|encoding| {
+        SetMessageEncoding(encoding).expect("SetMessageEncoding on an invalid encoding")
+    });
 }
 

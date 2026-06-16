@@ -617,14 +617,10 @@ pub fn init_seams() {
     // unwinds (here: panic at the void seam boundary, matching the longjmp).
     funcs_seams::shutdown_wal_rcv::set(|| ShutdownWalRcv().expect("ShutdownWalRcv failed"));
 
-    // `GetWalRcvFlushRecPtr` is also reachable across a cycle via the
-    // walreceiver-seams crate (xlog checkpoint / walsummarizer consume the
-    // `(lsn, tli)` form). Install that here, in the real owner.
-    backend_replication_walreceiver_seams::get_wal_rcv_flush_rec_ptr::set(|| {
-        let mut tli: TimeLineID = 0;
-        let lsn = GetWalRcvFlushRecPtr(None, Some(&mut tli));
-        (lsn, tli)
-    });
+    // Note: `backend_replication_walreceiver_seams::get_wal_rcv_flush_rec_ptr`
+    // (the `(lsn, tli)` form consumed by xlog checkpoint / walsummarizer) is
+    // installed by the `walreceiver` crate, where `walreceiver.h` declares it.
+    // It is NOT installed here to avoid a double-install of the same seam.
 }
 
 #[cfg(test)]

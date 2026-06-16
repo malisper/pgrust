@@ -1440,7 +1440,9 @@ mod recurrence_guard {
         // value-per-call SRF machinery. It is therefore no longer an uninstalled
         // contract divergence and must NOT be allowlisted here (the guard would
         // flag a stale entry).
-        ("backend_utils_init_small", "init_process_globals"),
+        // RETIRED: `init_process_globals` is now installed by init-small's
+        // init_seams() (the InitProcessGlobals body landed there, homed next to
+        // the MyStartTime[stamp] setters until postmaster.c lands).
         // DESIGN_DEBT (TD-PORTAL-HANDLE): PREPARE/EXECUTE's `-pre-seams` slice of
         // portalmem.c is written against the parsestmt opaque handle newtypes
         // (`PortalHandle(String)`, `MemoryContextHandle(u64)`), while the owner's

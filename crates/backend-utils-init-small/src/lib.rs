@@ -21,8 +21,58 @@ pub fn my_cancel_key<'mcx>(
     mcx::slice_in(mcx, &key[..len])
 }
 
+/// `InitProcessGlobals()` (`postmaster/postmaster.c:1932`) -- set
+/// `MyStartTime[stamp]` and the per-process random seed. Called early in the
+/// postmaster and every backend.
+///
+/// The real owner (postmaster.c) is not yet ported as a crate; the seam is
+/// homed here (next to the backend-global setters it touches), so the body
+/// lives here.
+pub fn InitProcessGlobals() -> types_error::PgResult<()> {
+    let my_start_timestamp = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
+    globals::SetMyStartTimestamp(my_start_timestamp);
+    globals::SetMyStartTime(
+        backend_utils_adt_timestamp_seams::timestamptz_to_time_t::call(my_start_timestamp),
+    );
+
+    // Set a different global seed in every process. C: prefer high-quality OS
+    // random bits (`pg_prng_strong_seed`); on failure, fall back to a seed
+    // derived from the PID and start timestamp. The CSPRNG (`pg_strong_random`)
+    // owner may not be ported yet; when its seam is uninstalled we go straight
+    // to C's documented fallback rather than panicking.
+    let strong_ok = if port_pg_strong_random_seams::pg_strong_random::is_installed() {
+        let mut bytes = [0u8; 16];
+        if port_pg_strong_random_seams::pg_strong_random::call(&mut bytes) {
+            let s0 = u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+            let s1 = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+            pg_prng::global_prng(|state| {
+                *state = pg_prng::PgPrng::from_raw(s0, s1);
+                // pg_prng_seed_check: replace an all-zero state with a fallback.
+                state.ensure_seeded()
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !strong_ok {
+        // Since PIDs and timestamps tend to change more in their least
+        // significant bits, shift the timestamp left to allow a larger total
+        // number of seeds in a given time period, and also mix in higher bits.
+        let pid = globals::MyProcPid() as u64;
+        let ts = my_start_timestamp as u64;
+        let rseed = pid ^ (ts << 12) ^ (ts >> 20);
+        pg_prng::global_prng(|state| state.seed(rseed));
+    }
+
+    Ok(())
+}
+
 /// Install this unit's seams (`backend-utils-init-small-seams`).
 pub fn init_seams() {
+    backend_utils_init_small_seams::init_process_globals::set(InitProcessGlobals);
     backend_utils_init_small_seams::work_mem::set(globals::work_mem);
     backend_utils_init_small_seams::max_worker_processes::set(globals::max_worker_processes);
     backend_utils_init_small_seams::max_parallel_workers::set(globals::max_parallel_workers);

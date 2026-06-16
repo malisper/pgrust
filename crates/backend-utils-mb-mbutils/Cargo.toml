@@ -30,6 +30,9 @@ backend-utils-adt-name = { path = "../backend-utils-adt-name" }
 
 # inward seams this crate owns + installs
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+# SetMessageEncoding/pg_any_to_server are mbutils.c routines, but pg_locale.c's
+# seam crate homes their declarations; this crate (their real owner) installs them.
+backend-utils-adt-pg-locale-env-seams = { path = "../backend-utils-adt-pg-locale-env-seams" }
 
 # outward seam crates (callees; panic until owners land)
 common-encnames-seams = { path = "../common-encnames-seams" }

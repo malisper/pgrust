@@ -16,6 +16,12 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# InitProcessGlobals: GetCurrentTimestamp / timestamptz_to_time_t (datetime owner)
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+# InitProcessGlobals: seed the backend-private global PRNG state
+pg-prng = { path = "../pg-prng" }
+# InitProcessGlobals: pg_prng_strong_seed -> pg_strong_random (port CSPRNG)
+port-pg-strong-random-seams = { path = "../port-pg-strong-random-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

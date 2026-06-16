@@ -491,6 +491,7 @@ fn seam_isoweek2j(year: i32, week: i32) -> i32 {
 pub fn init_seams() {
     use backend_utils_adt_timestamp_seams as ts;
     ts::get_current_timestamp::set(crate::timestamp::GetCurrentTimestamp);
+    ts::timestamptz_to_time_t::set(crate::convert::timestamptz_to_time_t);
     ts::parse_recovery_target_time::set(parse_recovery_target_time);
     ts::timestamp_difference::set(timestamp_difference);
     ts::timestamp_difference_exceeds::set(timestamp_difference_exceeds);

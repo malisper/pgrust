@@ -14,6 +14,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `timestamptz_to_time_t(t)` (`utils/adt/timestamp.c`): convert a
+    /// `TimestampTz` (microseconds since the PG epoch, UTC) to a `pg_time_t`
+    /// (seconds since the Unix epoch). Pure arithmetic; never errors. Used by
+    /// `InitProcessGlobals` to set `MyStartTime` from `MyStartTimestamp`.
+    pub fn timestamptz_to_time_t(t: TimestampTz) -> types_core::pg_time_t
+);
+
+seam_core::seam!(
     /// `timestamptz_pl_interval(timestamp, span)` (`utils/adt/timestamp.c`):
     /// add an [`Interval`] to a [`TimestampTz`], the SQL `timestamptz + interval`
     /// operator. uuid.c reaches it via `DirectFunctionCall2` from

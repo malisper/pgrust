@@ -807,10 +807,8 @@ pub fn init_seams() {
 
     // Remaining miscinit.c-owned declarations (added by later consumers). Each
     // delegates to this crate's own function so the seam is no longer an
-    // uninstalled panic.
-    s::process_shared_preload_libraries_in_progress::set(
-        process_shared_preload_libraries_in_progress,
-    );
+    // uninstalled panic. (process_shared_preload_libraries_in_progress is
+    // already installed above.)
     s::in_no_force_rls_operation::set(InNoForceRLSOperation);
     s::in_security_restricted_operation::set(InSecurityRestrictedOperation);
     s::in_local_user_id_change::set(InLocalUserIdChange);
