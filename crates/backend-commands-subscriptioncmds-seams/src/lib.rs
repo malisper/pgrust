@@ -13,3 +13,12 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn alter_subscription_owner_oid(subid: Oid, new_owner_id: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AlterSubscriptionOwner(const char *name, Oid newOwnerId)`
+    /// (subscriptioncmds.c) — ALTER SUBSCRIPTION ... OWNER TO.
+    pub fn AlterSubscriptionOwner(
+        name: &str,
+        new_owner_id: Oid,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);

@@ -69,6 +69,7 @@ use crate::eval_composite;
 use crate::eval_json_xml;
 use crate::eval_misc;
 use crate::eval_scalar;
+use crate::eval_subscript;
 
 /// Read the `(value, isnull)` of the cell named by [`ResultCellId`] `id`.
 ///
@@ -77,7 +78,7 @@ use crate::eval_scalar;
 /// (kept on the `ExprState` itself), so reads of that id come from the
 /// `ExprState` scalar fields; all other ids index the arena.
 #[inline]
-fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, bool) {
+pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, bool) {
     if id == types_nodes::execexpr::STATE_RESULT_CELL {
         (state.resvalue.clone(), state.resnull)
     } else {
@@ -88,7 +89,12 @@ fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, b
 
 /// Write the `(value, isnull)` of the cell named by `id` (see [`read_cell`]).
 #[inline]
-fn write_cell<'mcx>(state: &mut ExprState<'mcx>, id: ResultCellId, value: Datum<'mcx>, isnull: bool) {
+pub(crate) fn write_cell<'mcx>(
+    state: &mut ExprState<'mcx>,
+    id: ResultCellId,
+    value: Datum<'mcx>,
+    isnull: bool,
+) {
     if id == types_nodes::execexpr::STATE_RESULT_CELL {
         state.resvalue = value;
         state.resnull = isnull;
@@ -746,37 +752,46 @@ pub fn ExecInterpExpr<'mcx>(
                 //        EEO_NEXT();
                 //    else EEO_JUMP(op->d.sbsref_subscript.jumpdone);
                 //
-                // subscriptfunc is an ExecEvalBoolSubroutine installed by a
-                // type-specific subscript handler (array_subscript.c /
-                // jsonb_subscript.c, both unported). The F0 ExecEvalBoolSubroutine
-                // fn-pointer shape (bool (*)(ExprState*, ExprEvalStep*,
-                // ExprContext*)) also does not thread the EState the body needs
-                // (slot/cell/SubscriptingRefState access), so there is no faithful
-                // body to dispatch.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_SBSREF_SUBSCRIPTS: dispatches \
-                     op->d.sbsref_subscript.subscriptfunc, a subscript-handler-owned \
-                     ExecEvalBoolSubroutine (array/jsonb subscript handlers unported) \
-                     whose F0 shape does not thread the EState; blocked until a \
-                     subscript handler lands"
-                );
+                // subscriptfunc is a SubscriptMethod discriminant; the EState is
+                // threaded in (see eval_subscript module note).
+                let (method, jumpdone) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::SbsRefSubscript {
+                            subscriptfunc: Some(m),
+                            jumpdone,
+                            ..
+                        } => (*m, *jumpdone),
+                        other => unreachable!(
+                            "EEOP_SBSREF_SUBSCRIPTS: step.d is not SbsRefSubscript: {other:?}"
+                        ),
+                    }
+                };
+                if eval_subscript::exec_sbsref_subscripts(
+                    state, op, econtext, estate, method, resv,
+                )? {
+                    op += 1;
+                } else {
+                    op = jumpdone as usize;
+                }
             }
 
             EEOP_SBSREF_OLD | EEOP_SBSREF_ASSIGN | EEOP_SBSREF_FETCH => {
                 // C: op->d.sbsref.subscriptfunc(state, op, econtext);
-                //
-                // Same blocker as EEOP_SBSREF_SUBSCRIPTS: subscriptfunc is a
-                // subscript-handler-owned ExecEvalSubroutine (unported owner) and
-                // the F0 shape does not thread the EState.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_SBSREF_OLD/ASSIGN/FETCH: dispatches \
-                     op->d.sbsref.subscriptfunc, a subscript-handler-owned \
-                     ExecEvalSubroutine (array/jsonb subscript handlers unported) \
-                     whose F0 shape does not thread the EState; blocked until a \
-                     subscript handler lands"
-                );
+                let method = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::SbsRef {
+                            subscriptfunc: Some(m),
+                            ..
+                        } => *m,
+                        other => unreachable!(
+                            "EEOP_SBSREF_OLD/ASSIGN/FETCH: step.d is not SbsRef: {other:?}"
+                        ),
+                    }
+                };
+                eval_subscript::exec_sbsref(state, op, econtext, estate, method, resv)?;
+                op += 1;
             }
 
             EEOP_CONVERT_ROWTYPE => {

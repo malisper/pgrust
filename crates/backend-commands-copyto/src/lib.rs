@@ -1121,6 +1121,7 @@ fn copy_dest_receive(receiver: u64, slot: &mut types_nodes::tuptable::SlotData<'
 /// The dest-router vtable's `rStartup` slot; the leading `state` token is the
 /// copyto `RECEIVERS` index (the `DR_copy` stand-in), unused here as in C.
 fn copy_dest_startup(
+    _mcx: mcx::Mcx<'_>,
     _state: u64,
     _operation: CmdType,
     _typeinfo: &types_tuple::heaptuple::TupleDescData<'_>,
@@ -1129,7 +1130,7 @@ fn copy_dest_startup(
 }
 
 /// `copy_dest_shutdown(self)` (copyto.c:1417) — `/* no-op */`.
-fn copy_dest_shutdown(_state: u64) -> PgResult<()> {
+fn copy_dest_shutdown(_mcx: mcx::Mcx<'_>, _state: u64) -> PgResult<()> {
     Ok(())
 }
 
@@ -1145,9 +1146,13 @@ fn copy_dest_shutdown(_state: u64) -> PgResult<()> {
 /// the real `CopyOneRowTo`. This is the unified `DestReceiver` identity for
 /// `DestCopyOut`; the [`copy_dest_receive`] inward seam delegates here.
 fn copy_dest_receive_slot(
+    _mcx: mcx::Mcx<'_>,
     state: u64,
     slot: &mut types_nodes::tuptable::SlotData<'_>,
 ) -> PgResult<bool> {
+    // COPY-TO writes the tuple out as bytes; it never needs the per-query arena
+    // (no `'mcx`-bound sink), so the threaded `mcx` is unused here — unlike an
+    // `intorel`-style receiver, which would drive `table_tuple_insert(mcx, …)`.
     copy_dest_receive(state, slot)
 }
 

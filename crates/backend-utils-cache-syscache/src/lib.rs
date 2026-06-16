@@ -881,6 +881,7 @@ pub fn init_seams() {
         projections::lookup_enum_by_typoid_name,
     );
     backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
+    backend_utils_cache_syscache_seams::search_rewrite_oid::set(projections::search_rewrite_oid);
     backend_utils_cache_syscache_seams::search_relation_reloftype::set(projections::search_relation_reloftype);
     backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);
     backend_utils_cache_syscache_seams::search_opclass::set(projections::search_opclass);
@@ -953,6 +954,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::lookup_language::set(projections::lookup_language);
     backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
         projections::pg_index_has_predicate,
+    );
+    backend_utils_cache_syscache_seams::rule_tuple_by_relname::set(
+        projections::rule_tuple_by_relname,
+    );
+    backend_utils_cache_syscache_seams::class_relkind_namespace::set(
+        projections::class_relkind_namespace,
     );
     backend_utils_cache_syscache_seams::collation_qualified_name::set(
         projections::collation_qualified_name,

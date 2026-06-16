@@ -20,7 +20,8 @@ use crate::{
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
+    LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID,
+    RULERELNAME, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
@@ -51,6 +52,10 @@ use types_nodes::nodes::{Node, NodePtr};
 const Anum_pg_class_relam: i32 = 7;
 /// `Anum_pg_class_reloftype` (`catalog/pg_class.h`).
 const Anum_pg_class_reloftype: i32 = 5;
+
+// `catalog/pg_rewrite.h` attribute numbers.
+const Anum_pg_rewrite_oid: i32 = 1;
+const Anum_pg_rewrite_ev_class: i32 = 3;
 
 // `catalog/pg_cast.h` attribute numbers.
 const Anum_pg_cast_oid: i32 = 1;
@@ -181,6 +186,29 @@ pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let relam = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?;
     ReleaseSysCache(tup);
     Ok(Some(relam))
+}
+
+/// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(relid),
+/// PointerGetDatum(rulename))` projected to the `Form_pg_rewrite`
+/// `(oid, ev_class)` fields (rewriteSupport.c `get_rewrite_oid`). `Ok(None)`
+/// on a cache miss (`!HeapTupleIsValid`); the caller keeps the missing_ok /
+/// `Assert(relid == ev_class)` logic.
+pub(crate) fn search_rewrite_oid(relid: Oid, rulename: &str) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache pg_rewrite oid projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        crate::RULERELNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Str(rulename),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let ruleoid = getattr_oid(mcx, crate::RULERELNAME, &tup, Anum_pg_rewrite_oid)?;
+    let ev_class = getattr_oid(mcx, crate::RULERELNAME, &tup, Anum_pg_rewrite_ev_class)?;
+    ReleaseSysCache(tup);
+    Ok(Some((ruleoid, ev_class)))
 }
 
 /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
@@ -1477,6 +1505,63 @@ pub(crate) fn language_tuple_by_name<'mcx>(
 
 const Anum_pg_language_oid: i32 = 1;
 const Anum_pg_language_lanowner: i32 = 3;
+
+/// `SearchSysCache2(RULERELNAME, ev_class, rulename)` projected to the writable
+/// `pg_rewrite` tuple plus its deformed fixed columns (rewriteDefine.c). `None`
+/// on a cache miss.
+pub(crate) fn rule_tuple_by_relname<'mcx>(
+    mcx: Mcx<'mcx>,
+    ev_class: Oid,
+    rulename: &str,
+) -> PgResult<Option<(FormedTuple<'mcx>, types_catalog::pg_rewrite::FormData_pg_rewrite)>> {
+    use types_catalog::pg_rewrite::{
+        Anum_pg_rewrite_ev_class, Anum_pg_rewrite_ev_enabled, Anum_pg_rewrite_ev_type,
+        Anum_pg_rewrite_is_instead, Anum_pg_rewrite_oid, Anum_pg_rewrite_rulename,
+        FormData_pg_rewrite,
+    };
+    let tuple = SearchSysCache2(
+        mcx,
+        RULERELNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(ev_class)),
+        SysCacheKey::Str(rulename),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // (Form_pg_rewrite) GETSTRUCT(tup): the fixed-width scalar columns.
+    let name_bytes =
+        SysCacheGetAttrNotNull(mcx, RULERELNAME, &tup, Anum_pg_rewrite_rulename as i32)?;
+    let mut rulename_image = [0u8; 64];
+    if let Datum::ByRef(b) = &name_bytes {
+        let n = b.len().min(64);
+        rulename_image[..n].copy_from_slice(&b[..n]);
+    }
+    let form = FormData_pg_rewrite {
+        oid: getattr_oid(mcx, RULERELNAME, &tup, Anum_pg_rewrite_oid as i32)?,
+        rulename: rulename_image,
+        ev_class: getattr_oid(mcx, RULERELNAME, &tup, Anum_pg_rewrite_ev_class as i32)?,
+        ev_type: getattr_char(mcx, RULERELNAME, &tup, Anum_pg_rewrite_ev_type as i32)? as u8,
+        ev_enabled: getattr_char(mcx, RULERELNAME, &tup, Anum_pg_rewrite_ev_enabled as i32)? as u8,
+        is_instead: getattr_bool(mcx, RULERELNAME, &tup, Anum_pg_rewrite_is_instead as i32)?,
+    };
+    Ok(Some((tup, form)))
+}
+
+/// `SearchSysCache1(RELOID, relid)` projected to `(relkind, relnamespace)`,
+/// `None` on a cache miss (rewriteDefine.c RangeVarCallbackForRenameRule).
+pub(crate) fn class_relkind_namespace(relid: Oid) -> PgResult<Option<(u8, Oid)>> {
+    const Anum_pg_class_relnamespace: i32 = 3;
+    const Anum_pg_class_relkind: i32 = 18;
+    let scratch = MemoryContext::new("syscache rule-class projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relkind = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8;
+    let relnamespace = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?;
+    Ok(Some((relkind, relnamespace)))
+}
 
 /// `SearchSysCache1(INDEXRELID, index_oid)` then whether `indpred` is non-null
 /// (`!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)`).

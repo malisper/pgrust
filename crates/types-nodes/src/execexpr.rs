@@ -324,15 +324,56 @@ pub type ExecEvalSubroutine = for<'mcx> fn(&mut ExprState<'mcx>, &mut ExprEvalSt
 pub type ExecEvalBoolSubroutine =
     for<'mcx> fn(&mut ExprState<'mcx>, &mut ExprEvalStep<'mcx>, EcxtId) -> bool;
 
+/// The `SubscriptExecSteps` callback pointers in C (`sbs_check_subscripts`,
+/// `sbs_fetch`, `sbs_assign`, `sbs_fetch_old`) are bare
+/// `ExecEvalSubroutine`/`ExecEvalBoolSubroutine` function pointers
+/// (`void (*)(ExprState *, ExprEvalStep *, ExprContext *)`). In the owned model
+/// those raw `void` shapes cannot thread the `&mut EStateData<'mcx>` / `Mcx`
+/// the type-specific bodies need to reach the per-step result cell, the
+/// `SubscriptingRefState`, and the array-construction arena — exactly the same
+/// obstruction the `Func` step works around by re-dispatching on `finfo.fn_oid`
+/// instead of storing a callable address. So a `SubscriptingRef` step does not
+/// store a callable pointer; it stores a `SubscriptMethod` *discriminant*
+/// naming which type-specific method to run, and the interpreter owner
+/// (`execExprInterp`) re-dispatches it with the EState threaded in. This is the
+/// faithful re-sign of `ExecEvalSubroutine`/`ExecEvalBoolSubroutine` for the
+/// subscripting family (the param/field-store subroutines keep the raw
+/// fn-pointer shape; they are reached differently).
+///
+/// Each variant corresponds 1:1 to one of the `static` callback functions a
+/// `*_subscript_handler`'s `exec_setup` installs into `*methods`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptMethod {
+    /// `array_subscript_check_subscripts` (arraysubs.c) — the
+    /// `sbs_check_subscripts` method for varlena/raw arrays.
+    ArrayCheckSubscripts,
+    /// `array_subscript_fetch` (arraysubs.c) — element FETCH.
+    ArrayFetch,
+    /// `array_subscript_fetch_slice` (arraysubs.c) — slice FETCH.
+    ArrayFetchSlice,
+    /// `array_subscript_assign` (arraysubs.c) — element ASSIGN.
+    ArrayAssign,
+    /// `array_subscript_assign_slice` (arraysubs.c) — slice ASSIGN.
+    ArrayAssignSlice,
+    /// `array_subscript_fetch_old` (arraysubs.c) — element OLD fetch for a
+    /// nested assignment.
+    ArrayFetchOld,
+    /// `array_subscript_fetch_old_slice` (arraysubs.c) — slice OLD fetch.
+    ArrayFetchOldSlice,
+}
+
 /// `SubscriptingRefState` (execExpr.h) — non-inline data for container
 /// (`SubscriptingRef`) operations. Pointed at by the `sbsref*` steps.
 #[derive(Debug)]
 pub struct SubscriptingRefState<'mcx> {
     /// `bool isassignment` — is it assignment, or just fetch?
     pub isassignment: bool,
-    /// `void *workspace` — type-specific subscripting workspace (opaque to this
-    /// layer; carried as an address until the subscript handler owner lands).
-    pub workspace: usize,
+    /// `void *workspace` — type-specific subscripting workspace. In C this is an
+    /// opaque `palloc`'d block whose layout only the type-specific callbacks
+    /// know; the only producer in core PostgreSQL is `array_exec_setup`, which
+    /// stores an `ArraySubWorkspace`. The owned model carries that real typed
+    /// workspace (no opacity); a NULL workspace is [`SubscriptWorkspace::None`].
+    pub workspace: SubscriptWorkspace,
     /// `int numupper`.
     pub numupper: i32,
     /// `bool *upperprovided` — indicates if this position is supplied.
@@ -357,6 +398,32 @@ pub struct SubscriptingRefState<'mcx> {
     pub prevvalue: Datum<'mcx>,
     /// `bool prevnull`.
     pub prevnull: bool,
+    // ---- owned-model arena bridge -----------------------------------------
+    //
+    // In C, `ExecInitExprRec` writes each subscript directly into
+    // `&sbsrefstate->upperindex[i]` / `&sbsrefstate->lowerindex[i]` (raw
+    // `Datum *` aliases), and the replacement value into
+    // `&sbsrefstate->replacevalue`. The owned model has `ExecInitExprRec` write
+    // a `ResultCellId` instead, so the SUBSCRIPTS/ASSIGN step bodies gather
+    // those arena cells into the `upperindex`/`lowerindex`/`replacevalue`
+    // fields at runtime. These vectors record which arena cell each subscript /
+    // the replacement value was compiled into (parallel to the index arrays).
+    /// Arena cell each upper subscript expression writes (parallel to
+    /// `upperindex`; an omitted slice bound has no cell).
+    pub upper_cells: Option<PgVec<'mcx, Option<ResultCellId>>>,
+    /// Arena cell each lower subscript expression writes (parallel to
+    /// `lowerindex`).
+    pub lower_cells: Option<PgVec<'mcx, Option<ResultCellId>>>,
+    /// Arena cell the replacement value (`refassgnexpr`) writes
+    /// (`&sbsrefstate->replacevalue` in C); `None` for a fetch.
+    pub replace_cell: Option<ResultCellId>,
+    /// Arena cell aliased to `prevvalue`/`prevnull` for the nested-assignment
+    /// `CaseTestExpr` mechanism. In C `state->innermost_caseval` is pointed at
+    /// `&sbsrefstate->prevvalue`; the owned `innermost_caseval` is a
+    /// `ResultCellId`, so the SBSREF_OLD step writes both `prevvalue`/`prevnull`
+    /// and this arena cell (which the nested `CaseTestExpr` reads). `None` when
+    /// no nested-assignment OLD fetch is compiled.
+    pub prev_cell: Option<ResultCellId>,
 }
 
 impl Default for SubscriptingRefState<'_> {
@@ -364,7 +431,7 @@ impl Default for SubscriptingRefState<'_> {
         // C `palloc0` zero-init of the sbsref workspace.
         SubscriptingRefState {
             isassignment: false,
-            workspace: 0,
+            workspace: SubscriptWorkspace::None,
             numupper: 0,
             upperprovided: None,
             upperindex: None,
@@ -377,8 +444,126 @@ impl Default for SubscriptingRefState<'_> {
             replacenull: false,
             prevvalue: Datum::null(),
             prevnull: false,
+            upper_cells: None,
+            lower_cells: None,
+            replace_cell: None,
+            prev_cell: None,
         }
     }
+}
+
+/// `MAXDIM` (utils/array.h) — maximum number of array dimensions. Mirrored here
+/// for the fixed-size [`ArraySubWorkspace`] index arrays.
+pub const MAXDIM: usize = 6;
+
+/// `ArraySubWorkspace` (utils/adt/arraysubs.c) — the array-type-specific
+/// subscripting workspace `array_exec_setup` `palloc`s and stores into
+/// `sbsrefstate->workspace`. Holds the looked-up element-type details plus the
+/// integer subscript arrays `sbs_check_subscripts` converts the `Datum`
+/// subscripts into and `sbs_fetch`/`sbs_assign` read.
+#[derive(Clone, Copy, Debug)]
+pub struct ArraySubWorkspace {
+    /// `Oid refelemtype` — OID of the array element type.
+    pub refelemtype: Oid,
+    /// `int16 refattrlength` — typlen of the array (container) type.
+    pub refattrlength: i16,
+    /// `int16 refelemlength` — typlen of the element type.
+    pub refelemlength: i16,
+    /// `bool refelembyval` — is the element type pass-by-value?
+    pub refelembyval: bool,
+    /// `char refelemalign` — typalign of the element type.
+    pub refelemalign: u8,
+    /// `int upperindex[MAXDIM]` — the converted upper subscripts.
+    pub upperindex: [i32; MAXDIM],
+    /// `int lowerindex[MAXDIM]` — the converted lower subscripts.
+    pub lowerindex: [i32; MAXDIM],
+}
+
+impl Default for ArraySubWorkspace {
+    fn default() -> Self {
+        ArraySubWorkspace {
+            refelemtype: types_core::primitive::InvalidOid,
+            refattrlength: 0,
+            refelemlength: 0,
+            refelembyval: false,
+            refelemalign: 0,
+            upperindex: [0; MAXDIM],
+            lowerindex: [0; MAXDIM],
+        }
+    }
+}
+
+/// Typed replacement for the C `void *workspace` field of
+/// [`SubscriptingRefState`]. The only producer in core PostgreSQL is
+/// `array_exec_setup`, which stores an [`ArraySubWorkspace`]; a freshly
+/// `palloc0`'d state (or a type whose `exec_setup` allocates no workspace) has
+/// `None`.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SubscriptWorkspace {
+    /// C NULL `workspace` (no type-specific workspace allocated).
+    #[default]
+    None,
+    /// `(ArraySubWorkspace *) workspace` — the array handler's workspace.
+    Array(ArraySubWorkspace),
+}
+
+impl SubscriptWorkspace {
+    /// Borrow the [`ArraySubWorkspace`], panicking if the workspace is not an
+    /// array workspace (the C `(ArraySubWorkspace *) sbsrefstate->workspace`
+    /// downcast is unchecked; a wrong kind here is a programming error).
+    pub fn array(&self) -> &ArraySubWorkspace {
+        match self {
+            SubscriptWorkspace::Array(w) => w,
+            SubscriptWorkspace::None => {
+                panic!("SubscriptWorkspace: expected an array workspace, found None")
+            }
+        }
+    }
+
+    /// Mutable form of [`SubscriptWorkspace::array`].
+    pub fn array_mut(&mut self) -> &mut ArraySubWorkspace {
+        match self {
+            SubscriptWorkspace::Array(w) => w,
+            SubscriptWorkspace::None => {
+                panic!("SubscriptWorkspace: expected an array workspace, found None")
+            }
+        }
+    }
+}
+
+/// `SubscriptRoutines` (nodes/subscripting.h) — the struct a type's SQL-visible
+/// subscripting handler (`array_subscript_handler` / `jsonb_subscript_handler`,
+/// reached through `getSubscriptingRoutines`) returns. Provides the parse and
+/// execution methods plus the strict/leakproof flags.
+///
+/// The C `transform`/`exec_setup` members are function pointers. In the owned
+/// model `transform` is reached through the separate `subscripting_transform`
+/// parser seam, and `exec_setup` is named by an [`SubscriptHandler`]
+/// discriminant the executor (`ExecInitSubscriptingRef`) dispatches on — no
+/// opaque pointer is stored.
+#[derive(Clone, Copy, Debug)]
+pub struct SubscriptRoutines {
+    /// Which type-specific `exec_setup` (and thus method family) this handler
+    /// provides. Replaces the C `SubscriptExecSetup exec_setup` fn pointer.
+    pub handler: SubscriptHandler,
+    /// `bool fetch_strict` — is a fetch `SubscriptRef` strict?
+    pub fetch_strict: bool,
+    /// `bool fetch_leakproof` — is a fetch `SubscriptRef` leakproof?
+    pub fetch_leakproof: bool,
+    /// `bool store_leakproof` — is an assignment `SubscriptRef` leakproof?
+    pub store_leakproof: bool,
+}
+
+/// Names the type-specific subscripting `exec_setup` (and method family) a
+/// [`SubscriptRoutines`] provides; the discriminant replacing the C
+/// `exec_setup` fn pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptHandler {
+    /// `array_subscript_handler` — standard varlena arrays (`array_exec_setup`).
+    Array,
+    /// `raw_array_subscript_handler` — fixed-length "raw" arrays (also
+    /// `array_exec_setup`).
+    RawArray,
 }
 
 /// `JsonConstructorExprState` (execExpr.h) — EEOP_JSON_CONSTRUCTOR state, too
@@ -661,16 +846,21 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `sbsref_subscript` — for EEOP_SBSREF_SUBSCRIPTS.
     SbsRefSubscript {
-        /// `ExecEvalBoolSubroutine subscriptfunc`.
-        subscriptfunc: Option<ExecEvalBoolSubroutine>,
+        /// `ExecEvalBoolSubroutine subscriptfunc` — the type-specific
+        /// `sbs_check_subscripts` method, named by discriminant (see
+        /// [`SubscriptMethod`]) so the interpreter can re-dispatch it with the
+        /// EState threaded in.
+        subscriptfunc: Option<SubscriptMethod>,
         state: Option<PgBox<'mcx, SubscriptingRefState<'mcx>>>,
         /// jump here on null
         jumpdone: i32,
     },
     /// `sbsref` — for EEOP_SBSREF_OLD / ASSIGN / FETCH.
     SbsRef {
-        /// `ExecEvalSubroutine subscriptfunc`.
-        subscriptfunc: Option<ExecEvalSubroutine>,
+        /// `ExecEvalSubroutine subscriptfunc` — the type-specific
+        /// `sbs_fetch`/`sbs_assign`/`sbs_fetch_old` method, named by
+        /// discriminant (see [`SubscriptMethod`]).
+        subscriptfunc: Option<SubscriptMethod>,
         state: Option<PgBox<'mcx, SubscriptingRefState<'mcx>>>,
     },
     /// `domaincheck` — for EEOP_DOMAIN_NOTNULL / DOMAIN_CHECK.
@@ -915,13 +1105,13 @@ pub struct ExprEvalStep<'mcx> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SubscriptExecSteps {
     /// `sbs_check_subscripts` — process subscripts.
-    pub sbs_check_subscripts: Option<ExecEvalBoolSubroutine>,
+    pub sbs_check_subscripts: Option<SubscriptMethod>,
     /// `sbs_fetch` — fetch an element.
-    pub sbs_fetch: Option<ExecEvalSubroutine>,
+    pub sbs_fetch: Option<SubscriptMethod>,
     /// `sbs_assign` — assign to an element.
-    pub sbs_assign: Option<ExecEvalSubroutine>,
+    pub sbs_assign: Option<SubscriptMethod>,
     /// `sbs_fetch_old` — fetch old value for assignment.
-    pub sbs_fetch_old: Option<ExecEvalSubroutine>,
+    pub sbs_fetch_old: Option<SubscriptMethod>,
 }
 
 /// Index of a per-step result cell in an [`ExprState`]'s [`ResultCellArena`].

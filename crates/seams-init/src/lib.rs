@@ -90,11 +90,14 @@ pub fn init_all() {
     backend_catalog_pg_depend::init_seams();
     backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_operator::init_seams();
+    backend_catalog_pg_aggregate::init_seams();
     backend_catalog_pg_type::init_seams();
     backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
+    backend_catalog_pg_publication::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
@@ -106,8 +109,11 @@ pub fn init_all() {
     backend_commands_conversioncmds::init_seams();
     backend_commands_statscmds::init_seams();
     backend_commands_copyto::init_seams();
+    backend_commands_createas::init_seams();
     backend_commands_define::init_seams();
+    backend_commands_alter::init_seams();
     backend_commands_dropcmds::init_seams();
+    backend_commands_extension::init_seams();
     backend_commands_explain::init_seams();
     backend_commands_foreigncmds::init_seams();
     backend_commands_lockcmds::init_seams();
@@ -166,6 +172,7 @@ pub fn init_all() {
     backend_executor_nodeNamedtuplestorescan::init_seams();
     backend_executor_nodeResult::init_seams();
     backend_executor_nodeSamplescan::init_seams();
+    backend_access_tablesample_core::init_seams();
     backend_executor_nodeSeqscan::init_seams();
     backend_executor_nodeSetOp::init_seams();
     backend_executor_nodeSubqueryscan::init_seams();
@@ -313,9 +320,12 @@ pub fn init_all() {
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
+    backend_utils_adt_jsonb_gin::init_seams();
     backend_utils_adt_like::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
+    backend_utils_adt_network_gist::init_seams();
+    backend_utils_adt_network_selfuncs::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
@@ -875,15 +885,10 @@ mod recurrence_guard {
         //   * index_compute_xid_horizon_for_tuples — the full index-buffer
         //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
         //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
-        //   * heap_multi_insert — heapam.c's slot-based batch heap insert (one
-        //     WAL record per page, buffer extension, toast via
-        //     heap_prepare_insert, visibility-map clears). The merged heap-AM
-        //     slice ports only the page-count helper `heap_multi_insert_pages`;
-        //     the batch engine is unwritten. `CatalogTuplesMultiInsertWithInfo`
-        //     (catalog/indexing.c, now ported in backend-catalog-indexing) is the
-        //     live consumer.
+        // (heap_multi_insert — heapam.c's page-at-a-time batch heap insert — is
+        //  now ported in backend-access-heap-heapam (insert::heap_multi_insert)
+        //  and installed from its init_seams(); its allowlist entry was removed.)
         // DELETE each entry when its driver lands in the heap-AM port.
-        ("backend_access_heap_heapam", "heap_multi_insert"),
         ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
         ("backend_access_heap_heapam", "insert_one_tuple"),
         ("backend_access_heap_heapam", "log_heap_visible"),
@@ -1319,27 +1324,22 @@ mod recurrence_guard {
         // (walrecovery.rs) — the held prefetcher/reader is now allocated by the
         // landed recovery driver, so the stats call has a real body.
         //
-        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
-        // (now ported into backend-access-transam-xlogrecovery) still reaches the
-        // walreceiverfuncs streaming-control owners on its standby legs:
-        //   * walreceiverfuncs (wal_rcv_streaming / xlog_shutdown_wal_rcv /
-        //     request_xlog_streaming / set+reset_install_xlog_file_segment_active /
-        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is now CATALOG
-        //     `audited`, so the old "unported" blocker is gone, but these 6 stay
-        //     uninstalled: set/reset_install_xlog_file_segment_active have no body
-        //     (the segment-active flag lives in xlog's ControlFileData),
-        //     request_xlog_streaming diverges (seam `&str` recptr vs owner
-        //     `Option<&[u8]>`), and all 6 are reached ONLY from the
-        //     xlogrecovery standby streaming legs — sanctioned walreceiver-fetch
-        //     panic legs of the standby state machine.
-        // All become real installs when the ControlFileData segment-active flag +
-        // the streaming-source contract land. See DESIGN_DEBT.md.
-        ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
-        ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
-        ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),
-        ("backend_replication_walreceiverfuncs", "set_install_xlog_file_segment_active"),
-        ("backend_replication_walreceiverfuncs", "reset_install_xlog_file_segment_active"),
-        ("backend_replication_walreceiverfuncs", "get_wal_rcv_flush_rec_ptr_full"),
+        // RETIRED (walreceiverfuncs streaming-control): the 6 streaming-control
+        // seams the recovery page-read driver reaches on its standby legs are now
+        // installed with real bodies:
+        //   * wal_rcv_streaming / request_xlog_streaming /
+        //     get_wal_rcv_flush_rec_ptr_full — the genuine walreceiverfuncs.c
+        //     routines, installed by backend-replication-walreceiverfuncs'
+        //     init_seams (WalRcvStreaming / RequestXLogStreaming /
+        //     GetWalRcvFlushRecPtr). The `&str` conninfo/slotname divergence is
+        //     resolved by an in-owner adapter mapping both to `Some(bytes)`.
+        //   * xlog_shutdown_wal_rcv / set+reset_install_xlog_file_segment_active —
+        //     these are xlog.c functions touching the xlog-owned
+        //     `XLogCtl->InstallXLogFileSegmentActive` flag under ControlFileLock;
+        //     ported in backend-access-transam-xlog (write.rs) and installed from
+        //     xlog's init_seams (the real owner). XLogShutdownWalRcv reaches the
+        //     inner ShutdownWalRcv via the new `shutdown_wal_rcv` seam.
+        // Allowlist entries removed.
         // DESIGN_DEBT (TD-ANALYZE-PLANCACHE-HANDLE / #159 + TD-ANALYZE-REWRITE):
         // 19 parser/analyze.c seams `::call`ed in live consumers (chiefly
         // plancache, bootstrap) on the audited analyze owner, none installable:
@@ -1393,25 +1393,10 @@ mod recurrence_guard {
         // Installing needs an arena->owned TypeName bridge (a contract reconcile),
         // not a bare `::set`. See DESIGN_DEBT.md.
         ("backend_parser_driver", "raw_parse_type_name"),
-        // DESIGN_DEBT (TD-TUPLESORT-INDEX-VARIANTS, F3b): the tuplesort unit's
-        // INDEX-tuple sort variants — `tuplesort_begin_index_btree`
-        // (nbtsort.c `_bt_leafbuild`), `tuplesort_begin_index_hash`
-        // (hash.c index build), `tuplesort_putindextuplevalues` +
-        // `tuplesort_getindextuple` (both index builds). F3a landed the engine +
-        // the heap/datum variants (begin_heap/begin_datum + the variant-agnostic
-        // put/get/performsort/end/rescan/markpos/get_stats seams); the index
-        // variants' `comparetup_index_*` / `writetup_index` / `readtup_index` +
-        // `removeabbrev_index` (tuplesortvariants.c) and their `begin_index_*`
-        // entry points are F3b. The begin seams are NOT installed (and the engine
-        // loud-panics in the index writetup/comparetup arms), so the four
-        // index-only seams stay seam-panics until F3b lands. (begin_index_gist
-        // is called by backend-access-gist-build's sorted build.) DELETE each
-        // entry as F3b installs its begin/put/get index seam.
-        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_btree"),
-        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_hash"),
-        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_gist"),
-        ("backend_utils_sort_tuplesort", "tuplesort_putindextuplevalues"),
-        ("backend_utils_sort_tuplesort", "tuplesort_getindextuple"),
+        // (TD-TUPLESORT-INDEX-VARIANTS retired by F3b: the tuplesort unit now
+        // installs tuplesort_begin_index_btree/hash/gist + putindextuplevalues +
+        // getindextuple from its init_seams(), with real comparetup_index_* /
+        // writetup_index / readtup_index / removeabbrev_index bodies.)
         // DESIGN_DEBT (TD-BUFMGR-DBASE-BUFFERS): dbcommands.c's `dbase_redo`
         // (XLOG_DBASE_CREATE_FILE_COPY / XLOG_DBASE_DROP) calls
         // `FlushDatabaseBuffers(dbid)` and `DropDatabaseBuffers(dbid)` — two
@@ -1424,6 +1409,88 @@ mod recurrence_guard {
         // DESIGN_DEBT.md. DELETE when bufmgr installs them.
         ("backend_storage_buffer_bufmgr", "drop_database_buffers"),
         ("backend_storage_buffer_bufmgr", "flush_database_buffers"),
+        // DESIGN_DEBT (TD-INDEXING-PERCATALOG-OWNERS): backend-catalog-indexing
+        // is `merged` (its keystone engine — CatalogOpenIndexes/CatalogTupleInsert/
+        // Update/Delete + the F1 substrate-present per-catalog inserts — landed),
+        // but the seams below are owner-side per-catalog mutation bodies whose
+        // OWNING catalog .c unit is unported. Unlike the installed F1 family
+        // (mcx + open `rel` passed in, pure heap_form_tuple), these contracts
+        // encode logic that needs UNPORTED infrastructure — `table_open` by
+        // catalog OID, `SearchSysCacheCopy1` full-tuple copies, multi-insert
+        // batching, or per-catalog column-forming bodies that live in the
+        // not-yet-landed owner (pg_type.c, pg_constraint.c, foreign.c,
+        // namespace.c, sequence.c, large_object, db-role-setting, shdepend,
+        // cluster). They loud-panic until the respective owner lands; install
+        // (move the body into backend-catalog-indexing's family*.rs init_seams)
+        // when it does. DELETE each entry as its owner ports.
+        //
+        // -- generic catalog mutators consumed by unported callers --
+        ("backend_catalog_indexing", "catalog_open_indexes"),
+        ("backend_catalog_indexing", "catalog_close_indexes"),
+        ("backend_catalog_indexing", "catalog_tuple_delete"),
+        ("backend_catalog_indexing", "get_catalog_object_by_oid"),
+        // -- pg_type (pg_type.c TypeCreate/TypeShellMake/RenameTypeInternal) --
+        ("backend_catalog_indexing", "get_new_oid_with_index_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typname_pg_type"),
+        // -- pg_constraint (heap.c/index.c CreateConstraintEntry + rename) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_constraint"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_constraint"),
+        // -- pg_depend update (dependency.c changeDependencyFor*) --
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_depend"),
+        // -- pg_shdepend (pg_shdepend.c shdepChangeDep/recordSharedDependency) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_shdepend"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_shdepend"),
+        // -- pg_sequence (sequence.c DefineSequence/AlterSequence/Delete) --
+        ("backend_catalog_indexing", "catalog_insert_pg_sequence"),
+        ("backend_catalog_indexing", "catalog_update_pg_sequence"),
+        ("backend_catalog_indexing", "catalog_delete_pg_sequence"),
+        // -- pg_class / pg_index updates (cluster.c, index.c) --
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_class"),
+        ("backend_catalog_indexing", "catalog_tuple_update_with_info_pg_class"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_index"),
+        // -- pg_largeobject (inv_api.c large-object page writes) --
+        ("backend_catalog_indexing", "deform_lo_page"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_with_info_pg_largeobject"),
+        ("backend_catalog_indexing", "catalog_tuple_update_with_info_pg_largeobject"),
+        // -- pg_db_role_setting (pg_db_role_setting.c AlterSetting) --
+        ("backend_catalog_indexing", "decode_db_role_setting_setconfig"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_db_role_setting"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_db_role_setting"),
+        // -- namespace.c (RenameSchema / AlterSchemaOwner) --
+        ("backend_catalog_indexing", "rename_namespace_tuple"),
+        ("backend_catalog_indexing", "update_namespace_owner_tuple"),
+        // -- alter.c (AlterObjectOwner_internal, generic catalog) --
+        // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
+        // AlterObjectOwner_internal builds the modified owner tuple for an
+        // ARBITRARY simple catalog — set the owner column and, when the catalog
+        // has an ACL column, re-serialize aclnewowner(acl, old, new) back into
+        // the aclitem[] varlena — then CatalogTupleUpdate + UnlockTuple. The
+        // generic aclitem[]-varlena re-serialization into an arbitrary tuple
+        // column has no owned-model counterpart at this layer (every other
+        // owner-change uses a per-catalog typed writer, e.g.
+        // update_namespace_owner_tuple). Declared on the indexing owner so the
+        // landed alter dispatch can call it; loud-panics until indexing's
+        // generic aclitem[] write lands. DELETE when indexing installs it.
+        ("backend_catalog_indexing", "update_object_owner_tuple"),
+        // -- foreign-data catalogs (foreigncmds.c: FDW / server / table / um) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_update_owner_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_update_owner_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_table"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_user_mapping"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_user_mapping"),
+        // -- class-(B): blocked on the trimmed-PgClassForm cannot-reform keystone.
+        // The field write + invalidation must run on the owner's full syscache
+        // copy because Form_pg_class is a trimmed projection that cannot
+        // losslessly reform the on-disk tuple (rewriteSupport.c / toasting.c).
+        ("backend_catalog_indexing", "set_relation_rule_status"),
+        ("backend_catalog_indexing", "set_pg_class_reltoastrelid"),
+        ("backend_catalog_indexing", "set_pg_class_reltoastrelid_inplace"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

@@ -16,5 +16,15 @@ pub const CONSTROID: SysCacheIdentifier = 19;
 pub const DATABASEOID: SysCacheIdentifier = 21;
 /// `NAMESPACEOID`
 pub const NAMESPACEOID: SysCacheIdentifier = 38;
+/// `PUBLICATIONNAME`
+pub const PUBLICATIONNAME: SysCacheIdentifier = 48;
+/// `PUBLICATIONNAMESPACEMAP`
+pub const PUBLICATIONNAMESPACEMAP: SysCacheIdentifier = 50;
+/// `PUBLICATIONOID`
+pub const PUBLICATIONOID: SysCacheIdentifier = 51;
+/// `PUBLICATIONRELMAP`
+pub const PUBLICATIONRELMAP: SysCacheIdentifier = 53;
 /// `RELOID`
 pub const RELOID: SysCacheIdentifier = 57;
+/// `RULERELNAME`
+pub const RULERELNAME: SysCacheIdentifier = 60;

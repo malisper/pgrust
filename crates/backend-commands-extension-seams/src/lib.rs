@@ -48,13 +48,20 @@ seam_core::seam!(
     pub fn RemoveExtensionById(extId: Oid) -> PgResult<()>
 );
 
+// NOTE: `checkMembershipInCurrentExtension` is NOT an extension.c function — it
+// is defined in `catalog/pg_depend.c` (and declared in commands/extension.h
+// only as an extern). Its seam is owned by `backend-catalog-pg-depend-seams`
+// (`checkMembershipInCurrentExtension`, installed by `backend-catalog-pg-depend`);
+// consumers (sequence.c, …) call it there. It was mis-homed here previously.
+
 seam_core::seam!(
-    /// `checkMembershipInCurrentExtension(object)` (extension.c): when running
-    /// inside a CREATE EXTENSION script, insist the addressed object is a
-    /// member of the extension being created; raise `ERRCODE_DUPLICATE_OBJECT`
-    /// otherwise. A no-op when not `creating_extension`. `Err` carries the
-    /// `ereport(ERROR)`.
-    pub fn check_membership_in_current_extension(
-        object: &types_catalog::catalog_dependency::ObjectAddress,
-    ) -> PgResult<()>
+    /// `AlterExtensionNamespace(const char *extensionName, const char
+    /// *newschema, Oid *oldschema)` (extension.c) — ALTER EXTENSION SET SCHEMA.
+    /// When `want_oldschema` is true the previous schema OID rides the tuple's
+    /// second slot (the C `*oldschema` out-parameter).
+    pub fn AlterExtensionNamespace(
+        extension_name: &str,
+        newschema: &str,
+        want_oldschema: bool,
+    ) -> PgResult<(types_catalog::catalog_dependency::ObjectAddress, Oid)>
 );

@@ -418,9 +418,12 @@ pub fn standard_ExecutorRun(
     if send_tuples {
         // dest->rStartup(dest, operation, queryDesc->tupDesc);
         let res = query_desc.with_estate_and_planstate_mut(|estate, planstate| {
+            // dest->rStartup runs in the per-query arena (mcx-vtable keystone):
+            // an intorel-style receiver opens its relation/BulkInsertState here.
+            let mcx = estate.es_query_cxt;
             let tupdesc = result_tupdesc(estate, planstate.as_deref());
             match tupdesc {
-                Some(td) => dest::dest_rstartup::call(dest_handle, operation, td),
+                Some(td) => dest::dest_rstartup::call(mcx, dest_handle, operation, td),
                 None => {
                     // No result tupdesc (degenerate plan); the C would still pass
                     // the (NULL-ish) descriptor. A plain SELECT always has one.
@@ -445,8 +448,16 @@ pub fn standard_ExecutorRun(
     });
 
     // shutdown tuple receiver, if we started it.
+    //
+    // The receiver's shutdown runs in the per-query arena (mcx-vtable keystone:
+    // an intorel-style receiver frees its BulkInsertState / closes its relation
+    // here). The McxOwned bundle never lets an `Mcx<'mcx>` escape its closure,
+    // so the dispatch is done inside `with_estate_mut`.
     if send_tuples {
-        dest::dest_rshutdown::call(dest_handle)?;
+        query_desc.with_estate_mut(|estate| {
+            let mcx = estate.es_query_cxt;
+            dest::dest_rshutdown::call(mcx, dest_handle)
+        })?;
     }
     Ok(())
 }
@@ -523,8 +534,12 @@ fn ExecutePlan(
             //   if (!dest->receiveSlot(slot, dest)) break;
             if send_tuples {
                 let cont = {
+                    // The per-query arena the receiver works in (mcx-vtable
+                    // keystone): an intorel-style receiver drives
+                    // `table_tuple_insert(mcx, &rel, slot, …)` here.
+                    let mcx = estate.es_query_cxt;
                     let slot_data = estate.slot_data_mut(out_slot);
-                    dest::dest_receive_slot::call(slot_data, dest_handle)?
+                    dest::dest_receive_slot::call(mcx, slot_data, dest_handle)?
                 };
                 if !cont {
                     break;

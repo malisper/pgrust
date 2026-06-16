@@ -18,6 +18,7 @@ use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::{EStateData, EcxtId};
 use types_namespace::{CharArrayDatum, OidArrayDatum, TextArrayDatum};
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 /// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.
 /// `None` is the C `NULL` (no accumulator yet / empty result).
@@ -418,4 +419,120 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         bytes: &[u8],
     ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
+
+// ---- array subscripting exec callbacks (arraysubs.c) ----------------------
+//
+// The `SubscriptExecSteps` method bodies for varlena/raw arrays. The executor
+// (execExprInterp EEOP_SBSREF_* steps) dispatches these by `SubscriptMethod`
+// discriminant; the array logic lives in the arrayfuncs owner. The container
+// and result cross as the canonical `DatumV`.
+
+seam_core::seam!(
+    /// `array_subscript_fetch` (arraysubs.c): fetch one element from a non-NULL
+    /// array `container`, given the (already integer-converted) `upperindex`
+    /// subscripts and the element-type storage attributes. Returns
+    /// `(element, isnull)`.
+    pub fn array_subscript_fetch<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        numupper: i32,
+        upperindex: &[i32],
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `array_subscript_fetch_slice` (arraysubs.c): fetch a slice (never NULL).
+    pub fn array_subscript_fetch_slice<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        numupper: i32,
+        upperindex: &[i32],
+        lowerindex: &[i32],
+        upperprovided: &[bool],
+        lowerprovided: &[bool],
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `array_subscript_assign` (arraysubs.c): assign one element, returning the
+    /// new whole-array value.
+    pub fn array_subscript_assign<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        container_null: bool,
+        numupper: i32,
+        upperindex: &[i32],
+        replacevalue: DatumV<'mcx>,
+        replacenull: bool,
+        refelemtype: Oid,
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `array_subscript_assign_slice` (arraysubs.c): assign a slice.
+    pub fn array_subscript_assign_slice<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        container_null: bool,
+        numupper: i32,
+        upperindex: &[i32],
+        lowerindex: &[i32],
+        upperprovided: &[bool],
+        lowerprovided: &[bool],
+        replacevalue: DatumV<'mcx>,
+        replacenull: bool,
+        refelemtype: Oid,
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `array_subscript_fetch_old` (arraysubs.c): fetch the existing element for
+    /// a nested assignment (copes with a NULL container).
+    pub fn array_subscript_fetch_old<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        container_null: bool,
+        numupper: i32,
+        upperindex: &[i32],
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `array_subscript_fetch_old_slice` (arraysubs.c): fetch the existing slice
+    /// for a nested assignment.
+    pub fn array_subscript_fetch_old_slice<'mcx>(
+        mcx: Mcx<'mcx>,
+        container: DatumV<'mcx>,
+        container_null: bool,
+        numupper: i32,
+        upperindex: &[i32],
+        lowerindex: &[i32],
+        upperprovided: &[bool],
+        lowerprovided: &[bool],
+        refattrlength: i16,
+        refelemlength: i16,
+        refelembyval: bool,
+        refelemalign: u8,
+    ) -> PgResult<(DatumV<'mcx>, bool)>
 );

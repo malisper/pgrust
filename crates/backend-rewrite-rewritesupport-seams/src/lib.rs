@@ -15,3 +15,21 @@ seam_core::seam!(
     /// `OBJECT_RULE` arm.
     pub fn get_rewrite_oid(relid: Oid, rulename: &str, missing_ok: bool) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `SetRelationRuleStatus(relationId, relHasRules)` (rewriteSupport.c): set
+    /// the event relation's `pg_class.relhasrules` flag to `rel_has_rules`,
+    /// broadcasting an SI relcache inval so all backends pick up the new rule.
+    /// Called by `DefineQueryRewrite` after installing a rule. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn SetRelationRuleStatus(relation_id: Oid, rel_has_rules: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IsDefinedRewriteRule(owningRel, ruleName)` (rewriteSupport.c): true iff
+    /// a rule of the given name already exists on the owning relation
+    /// (`SearchSysCacheExists2(RULERELNAME, ...)`). Used by `RenameRewriteRule`
+    /// to reject a duplicate target name. Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn IsDefinedRewriteRule(owning_rel: Oid, rule_name: &str) -> PgResult<bool>
+);
