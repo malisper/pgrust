@@ -591,4 +591,7 @@ pub fn init_seams() {
     s::ReorderBufferImmediateInvalidation::set(seam_immediate_invalidation);
     s::ReorderBufferAddInvalidations::set(seam_add_invalidations);
     s::ReorderBufferRememberPrepareInfo::set(seam_remember_prepare_info);
+
+    // WAL-startup cleanup of leftover on-disk spill files (StartupXLOG).
+    s::startup_reorder_buffer::set(crate::spill::startup_reorder_buffer);
 }

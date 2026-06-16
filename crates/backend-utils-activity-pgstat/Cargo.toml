@@ -23,5 +23,6 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-activity-shmem-seams = { path = "../backend-utils-activity-shmem-seams" }
