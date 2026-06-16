@@ -13,23 +13,23 @@
 //! The plain-transition fast paths (`ExecAggPlainTransByVal` / `ByRef`) and the
 //! strict-init path (`ExecAggInitGroup`) read and write
 //! `pertrans->transfn_fcinfo->args[]` and invoke the transition function via
-//! `FunctionCallInvoke(fcinfo)`. In this F0 cut the transfn call frame is the
-//! nodeAgg-parked [`types_nodes::fmgr::FunctionCallInfoBaseData`], trimmed to
-//! its `resultinfo` field: it carries **no** `args` / `isnull` / `flinfo`
-//! payload (docs/types.md rule 3), and the resolved C function pointer
-//! (`PGFunction`) the call dispatches through is not in the shared vocabulary
-//! either ([`FmgrInfo::fn_addr`] is an opaque address word). The compiler
-//! gathers the transfn argument sub-expressions into those arg cells before the
-//! AGG_PLAIN_TRANS step runs; the actual frame that holds them is nodeAgg's.
+//! `FunctionCallInvoke(fcinfo)`. The transfn call frame is the nodeAgg-parked
+//! [`types_nodes::fmgr::FunctionCallInfoBaseData`], which now carries the real
+//! `args: Vec<NullableDatum>` / `isnull` / `flinfo` payload (#296 widened the
+//! frame). The OID-keyed shared fmgr dispatch
+//! [`backend_utils_fmgr_fmgr_seams::function_call_invoke`] runs the function by
+//! re-resolving `pertrans->transfn.fn_oid` under `pertrans->aggCollation` over
+//! the gathered `args`, exactly as the merged eval_scalar.rs `EEOP_FUNCEXPR`
+//! path already does. So the by-value transfn call-frame reads/writes and the
+//! invoke are implemented faithfully here (Lane 1).
 //!
-//! This is the same gap the merged nodeAgg port documents in `finalize.rs`
-//! (`local_fcinfo_set_arg` / `invoke_finalfn`: "the trimmed
-//! `FunctionCallInfoBaseData` carries no args"). Mirroring that precedent
-//! (mirror-pg-and-panic), the call-frame reads/writes and the invoke are
-//! private helpers that panic with a precise rationale until the fmgr call
-//! frame is plumbed through the shared vocabulary. Every other line of these
-//! handlers — the strictness / no-trans-value branching, the memory-context
-//! switches, the pass-by-ref reparenting decision, `datumCopy`, the
+//! What still panics: the **by-reference** transition copy
+//! (`ExecAggCopyTransValue` / `datumCopy` into the aggcontext — Lane 4, gated on
+//! datum.c's by-ref `Datum` round-trip + expanded-object helpers), and the
+//! ordered/presorted paths that reach `op->d.agg_trans.pertrans` through
+//! `state->parent` (the AggState-into-interp keystone — Lane 3). Every other
+//! line of these handlers — the strictness / no-trans-value branching, the
+//! memory-context switches, the pass-by-ref reparenting decision, the
 //! presorted-distinct comparisons, and the ordered-aggregate tuplesort feed —
 //! is the interpreter's own logic and is implemented faithfully here.
 
@@ -62,47 +62,73 @@ use backend_executor_nodeAgg::{
 use types_nodes::EStateData;
 
 // ---------------------------------------------------------------------------
-// transfn call frame (nodeAgg-parked fmgr frame; not in the shared vocabulary)
+// transfn call frame (nodeAgg-parked fmgr frame; Lane 1 — by-value invoke)
 //
 // C: `FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;`, then
 // `fcinfo->args[i].value` / `fcinfo->args[i].isnull`, `fcinfo->isnull`, and
-// `FunctionCallInvoke(fcinfo)`. The trimmed `FunctionCallInfoBaseData` carries
-// none of `args`/`isnull`/`flinfo`, and `FmgrInfo.fn_addr` is an opaque word,
-// so these reads/writes and the call cannot be expressed here yet.
+// `FunctionCallInvoke(fcinfo)`. The widened `FunctionCallInfoBaseData` carries
+// the real `args: Vec<NullableDatum>` / `isnull`, and the transfn OID lives on
+// `pertrans->transfn.fn_oid`, so the call dispatches through the OID-keyed
+// shared `function_call_invoke` seam (#296), as eval_scalar's EEOP_FUNCEXPR
+// path does.
 // ---------------------------------------------------------------------------
 
 /// `pertrans->transfn_fcinfo->args[n].value` — read a transfn argument cell.
-fn transfn_arg_value(_pertrans: &AggStatePerTransData<'_>, _n: usize) -> Datum {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: reading pertrans->transfn_fcinfo->args is \
-         part of the fmgr call frame; the trimmed FunctionCallInfoBaseData carries no args \
-         (fmgr call-frame payload not yet in the shared vocabulary)"
-    );
+fn transfn_arg_value(pertrans: &AggStatePerTransData<'_>, n: usize) -> Datum {
+    let fcinfo = pertrans
+        .transfn_fcinfo
+        .as_ref()
+        .expect("eval_agg: pertrans->transfn_fcinfo not initialized by ExecInitAgg");
+    fcinfo.args[n].value
 }
 
 /// `pertrans->transfn_fcinfo->args[n].isnull` — read a transfn argument's null.
-fn transfn_arg_isnull(_pertrans: &AggStatePerTransData<'_>, _n: usize) -> bool {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: reading pertrans->transfn_fcinfo->args is \
-         part of the fmgr call frame; the trimmed FunctionCallInfoBaseData carries no args \
-         (fmgr call-frame payload not yet in the shared vocabulary)"
-    );
+fn transfn_arg_isnull(pertrans: &AggStatePerTransData<'_>, n: usize) -> bool {
+    let fcinfo = pertrans
+        .transfn_fcinfo
+        .as_ref()
+        .expect("eval_agg: pertrans->transfn_fcinfo not initialized by ExecInitAgg");
+    fcinfo.args[n].isnull
 }
 
 /// `fcinfo->args[0].value = transValue; fcinfo->args[0].isnull = isnull;
 /// fcinfo->isnull = false; newVal = FunctionCallInvoke(fcinfo);` — set the
 /// running transition value into arg 0 and invoke the transition function.
 /// Returns `(newVal, fcinfo->isnull)`.
+///
+/// Lane 1 (by-value): the transfn is re-resolved by `pertrans->transfn.fn_oid`
+/// and run under `pertrans->aggCollation` over the gathered `transfn_fcinfo`
+/// args via the shared OID-keyed `function_call_invoke` dispatch (the resolved
+/// `FmgrInfo` itself cannot cross the seam, mirroring eval_scalar's EEOP_FUNCEXPR
+/// path). The strict-null short-circuit for strict transfns is applied by the
+/// AGG_PLAIN_TRANS opcode dispatch upstream (the `*_strict` variants), exactly
+/// as in C — `ExecAggPlainTransByVal`/`ByRef` themselves never null-check, so
+/// neither does this helper.
 fn invoke_transfn(
-    _pertrans: &mut AggStatePerTransData<'_>,
-    _trans_value: Datum,
-    _trans_value_is_null: bool,
-) -> (Datum, bool) {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: FunctionCallInvoke of pertrans->transfn is \
-         the fmgr call dispatch through FmgrInfo.fn_addr (an opaque address word in the shared \
-         FmgrInfo) over the trimmed transfn_fcinfo frame; not yet in the shared vocabulary"
-    );
+    pertrans: &mut AggStatePerTransData<'_>,
+    trans_value: Datum,
+    trans_value_is_null: bool,
+) -> PgResult<(Datum, bool)> {
+    // The transfn OID + collation the call dispatches through.
+    let fn_oid = pertrans.transfn.fn_oid;
+    let collation = pertrans.agg_collation;
+
+    let fcinfo = pertrans
+        .transfn_fcinfo
+        .as_mut()
+        .expect("eval_agg: pertrans->transfn_fcinfo not initialized by ExecInitAgg");
+
+    // fcinfo->args[0].value = pergroup->transValue;
+    // fcinfo->args[0].isnull = pergroup->transValueIsNull;
+    fcinfo.args[0].value = trans_value;
+    fcinfo.args[0].isnull = trans_value_is_null;
+    // fcinfo->isnull = false;  /* just in case transfn doesn't set it */
+    fcinfo.isnull = false;
+
+    // newVal = FunctionCallInvoke(fcinfo);  (re-resolved by OID, run under the
+    // aggregate collation over the args[] frame just populated). A transfn
+    // ereport propagates, as in C's advance_transition_function.
+    backend_utils_fmgr_fmgr_seams::function_call_invoke::call(fn_oid, collation, &fcinfo.args)
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +667,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
         .as_mut()
         .expect("ExecAggPlainTransByVal: pertrans")[pertrans];
     let (new_val, fcinfo_isnull) =
-        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null);
+        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null)?;
 
     // pergroup->transValue = newVal;
     pergroup.trans_value = DatumV::ByVal(new_val.as_usize());
@@ -676,7 +702,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
             .pertrans
             .as_mut()
             .expect("ExecAggPlainTransByRef: pertrans")[pertrans];
-        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null)
+        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null)?
     };
 
     // For pass-by-ref: must copy the new value into aggcontext and free the
@@ -730,4 +756,93 @@ fn ecxt_id_to_aggcontext_index<'mcx>(
         .and_then(|a| a.iter().position(|id| *id == aggcontext))
         .map(|i| i as i32)
         .expect("eval_agg: aggcontext EcxtId not found in aggstate->aggcontexts")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use backend_executor_nodeAgg::AggStatePerTransData;
+
+    /// `1219` — `pg_proc.dat` OID of `int8inc(int8) -> int8`, a by-value
+    /// strict transition function (the SUM/COUNT increment leg).
+    const INT8INC_OID: types_core::primitive::Oid = 1219;
+
+    /// Install a `function_call_invoke` stub that mirrors the by-value transfns
+    /// the test exercises: `int8inc` returns `args[0] + 1`. The shared seam is a
+    /// process-global `OnceLock`, so every invoke_transfn assertion shares this
+    /// one installation.
+    fn install_invoke_stub() {
+        use std::sync::Once;
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            backend_utils_fmgr_fmgr_seams::function_call_invoke::set(
+                |fn_oid, _collation, args| match fn_oid {
+                    INT8INC_OID => {
+                        // int8inc is strict; the by-value fast path never calls
+                        // it with a NULL arg0 (the *_strict opcode guards it),
+                        // but assert the contract here for clarity.
+                        assert!(!args[0].isnull, "int8inc stub: arg0 is NULL");
+                        let v = args[0].value.as_i64();
+                        Ok((Datum::from_i64(v + 1), false))
+                    }
+                    other => panic!("function_call_invoke stub: unexpected fn_oid {other}"),
+                },
+            );
+        });
+    }
+
+    /// Build a minimal by-value transfn pertrans: `transfn.fn_oid = int8inc`,
+    /// a one-element `transfn_fcinfo.args` frame (arg0 = the running trans
+    /// value), and a collation.
+    fn pertrans_int8inc<'mcx>(mcx: mcx::Mcx<'mcx>) -> AggStatePerTransData<'mcx> {
+        let mut pt = AggStatePerTransData::default();
+        pt.transfn.fn_oid = INT8INC_OID;
+        pt.transfn.fn_strict = true;
+        pt.agg_collation = 0; // InvalidOid
+        pt.transtype_by_val = true;
+
+        let mut fcinfo = types_nodes::fmgr::FunctionCallInfoBaseData::default();
+        // One argument cell (transfn nargs = 1: arg0 is the running state).
+        fcinfo.nargs = 1;
+        fcinfo.args = vec![types_datum::NullableDatum::null()];
+        pt.transfn_fcinfo = Some(mcx::alloc_in(mcx, fcinfo).expect("alloc transfn_fcinfo"));
+        pt
+    }
+
+    #[test]
+    fn invoke_transfn_by_value_increments() {
+        install_invoke_stub();
+        let ctx = mcx::MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let mut pt = pertrans_int8inc(mcx);
+
+        // advance: transValue 41 (non-null) -> int8inc -> 42.
+        let (new_val, isnull) = invoke_transfn(&mut pt, Datum::from_i64(41), false)
+            .expect("invoke_transfn");
+        assert!(!isnull);
+        assert_eq!(new_val.as_i64(), 42);
+
+        // The frame's args[0] was written from the passed trans value before the
+        // call (mirrors `fcinfo->args[0].value = pergroup->transValue`).
+        let fcinfo = pt.transfn_fcinfo.as_ref().unwrap();
+        assert_eq!(fcinfo.args[0].value.as_i64(), 41);
+        assert!(!fcinfo.args[0].isnull);
+
+        // A second advance feeds the running accumulator: 42 -> 43.
+        let (next, _) = invoke_transfn(&mut pt, new_val, false).expect("invoke_transfn 2");
+        assert_eq!(next.as_i64(), 43);
+    }
+
+    #[test]
+    fn transfn_arg_value_and_isnull_read_frame() {
+        let ctx = mcx::MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let mut pt = pertrans_int8inc(mcx);
+        {
+            let fcinfo = pt.transfn_fcinfo.as_mut().unwrap();
+            fcinfo.args[0] = types_datum::NullableDatum::value(Datum::from_i64(7));
+        }
+        assert_eq!(transfn_arg_value(&pt, 0).as_i64(), 7);
+        assert!(!transfn_arg_isnull(&pt, 0));
+    }
 }
