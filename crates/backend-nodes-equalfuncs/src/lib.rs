@@ -30,13 +30,14 @@
 use backend_nodes_node_support::PgNodeEqual;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
-    Aggref, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen,
-    CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CollateExpr, Const,
-    ConvertRowtypeExpr, CurrentOfExpr, Expr, FieldSelect, FieldStore, FuncExpr, GroupingFunc,
-    InferenceElem, JsonConstructorExpr, JsonExpr, JsonIsPredicate, JsonValueExpr, MergeSupportFunc,
-    MinMaxExpr, NamedArgExpr, NextValueExpr, NullTest, OpExpr, Param, RelabelType, ReturningExpr,
-    RowCompareExpr, RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink,
-    SubscriptingRef, TargetEntry, Var, WindowFunc, XmlExpr,
+    Aggref, AlternativeSubPlan, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr,
+    CaseTestExpr, CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
+    CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, Expr, FieldSelect, FieldStore, FuncExpr,
+    GroupingFunc, InferenceElem, JsonConstructorExpr, JsonExpr, JsonIsPredicate, JsonValueExpr,
+    MergeSupportFunc, MinMaxExpr, NamedArgExpr, NextValueExpr, NullTest, OpExpr, Param,
+    PlaceHolderVar, RelabelType, ReturningExpr, RowCompareExpr, RowExpr, SQLValueFunction,
+    ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan, SubscriptingRef, TargetEntry, Var,
+    WindowFunc, XmlExpr,
 };
 use types_nodes::rawnodes::SortGroupClause;
 
@@ -1024,6 +1025,54 @@ fn equal_query(
     // stmt_location / stmt_len are COMPARE_LOCATION_FIELD (no-ops).
 }
 
+/// `_equalSubPlan` (equalfuncs.funcs.c). All scalar/string/node fields are
+/// compared (subLinkType, testexpr, paramIds, plan_id, plan_name, firstCol*,
+/// useHashTable, unknownEqFalse, parallel_safe, setParam, parParam, args,
+/// startup_cost, per_call_cost). `paramIds`/`setParam`/`parParam` are `List *`
+/// of Integer value nodes in C, carried here as scalar `PgVec<i32>` (slice
+/// equality has the same semantics).
+fn equal_sub_plan(a: &SubPlan<'_>, b: &SubPlan<'_>) -> bool {
+    a.subLinkType == b.subLinkType
+        && equal_opt_expr(a.testexpr.as_deref(), b.testexpr.as_deref())
+        && &a.paramIds[..] == &b.paramIds[..]
+        && a.plan_id == b.plan_id
+        && equalstr(a.plan_name.as_deref(), b.plan_name.as_deref())
+        && a.firstColType == b.firstColType
+        && a.firstColTypmod == b.firstColTypmod
+        && a.firstColCollation == b.firstColCollation
+        && a.useHashTable == b.useHashTable
+        && a.unknownEqFalse == b.unknownEqFalse
+        && a.parallel_safe == b.parallel_safe
+        && &a.setParam[..] == &b.setParam[..]
+        && &a.parParam[..] == &b.parParam[..]
+        && a.args.len() == b.args.len()
+        && a.args
+            .iter()
+            .zip(b.args.iter())
+            .all(|(x, y)| equal_expr(x, y))
+        && a.startup_cost == b.startup_cost
+        && a.per_call_cost == b.per_call_cost
+}
+
+/// `_equalAlternativeSubPlan` (equalfuncs.funcs.c): the single `List *subplans`
+/// field of `SubPlan *` children, compared element-wise by `_equalSubPlan`.
+fn equal_alternative_sub_plan(a: &AlternativeSubPlan<'_>, b: &AlternativeSubPlan<'_>) -> bool {
+    a.subplans.len() == b.subplans.len()
+        && a.subplans
+            .iter()
+            .zip(b.subplans.iter())
+            .all(|(x, y)| equal_sub_plan(x, y))
+}
+
+/// `_equalPlaceHolderVar` (equalfuncs.funcs.c). Per the node definition,
+/// `phexpr` and `phrels` are NOT compared (gen marks them `equal_ignore`); only
+/// `phnullingrels` (COMPARE_BITMAPSET_FIELD), `phid` and `phlevelsup`.
+fn equal_place_holder_var(a: &PlaceHolderVar, b: &PlaceHolderVar) -> bool {
+    a.phnullingrels == b.phnullingrels // COMPARE_BITMAPSET_FIELD
+        && a.phid == b.phid
+        && a.phlevelsup == b.phlevelsup
+}
+
 // ===========================================================================
 // equal() — the central tag-discriminated dispatch
 // ===========================================================================
@@ -1088,18 +1137,11 @@ pub fn equal_expr(a: &Expr, b: &Expr) -> bool {
         // as the scalar arena id (C compares RestrictInfo by pointer at this
         // layer — the orclause BoolExpr embeds the same live RestrictInfo).
         (Expr::RestrictInfo(x), Expr::RestrictInfo(y)) => x == y,
-        // SubPlan / AlternativeSubPlan / PlaceHolderVar carry context-allocated
-        // planner children (`SubPlanExpr`/`AlternativeSubPlanExpr` clone panics
-        // by design) and are not de-duplicated by equal() in the prep/parse
-        // layer; reaching equal() on them is a not-yet-ported boundary.
-        (Expr::SubPlan(_), Expr::SubPlan(_))
-        | (Expr::AlternativeSubPlan(_), Expr::AlternativeSubPlan(_))
-        | (Expr::PlaceHolderVar(_), Expr::PlaceHolderVar(_)) => {
-            panic!(
-                "equalfuncs: equal() not yet ported for planner-internal Expr \
-                 variant (SubPlan/AlternativeSubPlan/PlaceHolderVar)"
-            )
+        (Expr::SubPlan(x), Expr::SubPlan(y)) => equal_sub_plan(&x.0, &y.0),
+        (Expr::AlternativeSubPlan(x), Expr::AlternativeSubPlan(y)) => {
+            equal_alternative_sub_plan(&x.0, &y.0)
         }
+        (Expr::PlaceHolderVar(x), Expr::PlaceHolderVar(y)) => equal_place_holder_var(x, y),
         // Different tags are never equal (the `nodeTag(a) != nodeTag(b)` early
         // return in equal()).
         _ => false,
@@ -1297,6 +1339,45 @@ mod tests {
         });
         assert!(equal_expr(&a, &b));
         assert!(!equal_expr(&a, &c));
+    }
+
+    #[test]
+    fn place_holder_var_compares_id_levelsup_nullingrels() {
+        use types_nodes::primnodes::PlaceHolderVar;
+        let mk = |phid: u32, phlevelsup: u32| {
+            Expr::PlaceHolderVar(PlaceHolderVar {
+                phexpr: None,
+                phrels: Default::default(),
+                phnullingrels: Default::default(),
+                phid,
+                phlevelsup,
+            })
+        };
+        assert!(equal_expr(&mk(3, 0), &mk(3, 0)));
+        assert!(!equal_expr(&mk(3, 0), &mk(4, 0)));
+        assert!(!equal_expr(&mk(3, 0), &mk(3, 1)));
+    }
+
+    #[test]
+    fn place_holder_var_ignores_phexpr_and_phrels() {
+        // phexpr and phrels are equal_ignore in equalfuncs.c; differing values
+        // must not make two PHVs unequal.
+        use types_nodes::primnodes::PlaceHolderVar;
+        let a = Expr::PlaceHolderVar(PlaceHolderVar {
+            phexpr: Some(Box::new(var(1, 1))),
+            phrels: Default::default(),
+            phnullingrels: Default::default(),
+            phid: 7,
+            phlevelsup: 0,
+        });
+        let b = Expr::PlaceHolderVar(PlaceHolderVar {
+            phexpr: None,
+            phrels: Default::default(),
+            phnullingrels: Default::default(),
+            phid: 7,
+            phlevelsup: 0,
+        });
+        assert!(equal_expr(&a, &b));
     }
 
     #[test]

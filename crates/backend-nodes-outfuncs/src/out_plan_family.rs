@@ -280,6 +280,43 @@ fn out_seqscan(buf: &mut String, n: &types_nodes::nodeseqscan::SeqScan<'_>, wl: 
     out_scan_fields(buf, &n.scan, "scan.", wl);
 }
 
+/// `WRITE_NODE_FIELD(functions)` over the `List *` of framed `RangeTblFunction`
+/// (C: `outNode` of the list → `({RANGETBLFUNCTION ...} ...)`). Each element is
+/// the parse-family-owned `_outRangeTblFunction`, framed by `{`/`}`. A `None`
+/// (C `NIL`) list renders `<>` (`outNode(NULL)`).
+fn write_rtf_list_field(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[types_nodes::rawnodes::RangeTblFunction<'_>]>,
+    wl: bool,
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(elems) => {
+            buf.push('(');
+            let mut first = true;
+            for rtf in elems {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                crate::framed(buf, |b| crate::out_parse_family::out_range_tbl_function(b, rtf, wl));
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// `_outFunctionScan` (outfuncs.funcs.c): `WRITE_SCAN_FIELDS()`, then the
+/// `functions` node list and the `funcordinality` flag.
+fn out_functionscan(buf: &mut String, n: &types_nodes::nodefunctionscan::FunctionScan<'_>, wl: bool) {
+    buf.push_str("FUNCTIONSCAN");
+    out_scan_fields(buf, &n.scan, "scan.", wl);
+    write_rtf_list_field(buf, "functions", n.functions.as_deref(), wl);
+    write_bool_field(buf, "funcordinality", n.funcordinality);
+}
+
 fn out_material(buf: &mut String, n: &types_nodes::nodeforeigncustom::Material<'_>, wl: bool) {
     buf.push_str("MATERIAL");
     out_plan_fields(buf, &n.plan, "plan.", wl);
@@ -800,11 +837,7 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
              TableFunc struct, whose framed `{{TABLEFUNC ...}}` writer lives in another \
              node family (not reachable as a Node here)"
         ),
-        Node::FunctionScan(_) => panic!(
-            "_outFunctionScan: not serialized — `functions` is a List of \
-             RangeTblFunction whose framed writer lives in another node family \
-             (not reachable as a Node here)"
-        ),
+        Node::FunctionScan(n) => crate::framed(buf, |b| out_functionscan(b, n, wl)),
         Node::SampleScan(_) => panic!(
             "_outSampleScan: not serialized — `tablesample` is a bare \
              TableSampleClause whose framed writer lives in another node family \
