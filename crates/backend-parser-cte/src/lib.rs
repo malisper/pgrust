@@ -595,7 +595,9 @@ fn analyzeCTE<'mcx>(
     // the cycle mark column if any, since the query could refer to that.
     // Other validity checks on the cycle clause will be done afterwards.
     if let Some(cycle_box) = cte.cycle_clause.take() {
-        let mut cycle_clause: CTECycleClause<'mcx> = PgBox::into_inner(cycle_box);
+        let mut cycle_clause: CTECycleClause<'mcx> = PgBox::into_inner(cycle_box)
+            .into_cte_cycle_clause()
+            .ok_or_else(|| elog_error("cycle_clause is not a CTECycleClause node"))?;
 
         // cycle_mark_value = transformExpr(EXPR_KIND_CYCLE_MARK)
         let mut mark_value = transform_cycle_expr(pstate, cycle_clause.cycle_mark_value.take())?;
@@ -673,7 +675,10 @@ fn analyzeCTE<'mcx>(
         cycle_clause.cycle_mark_value = wrap_expr_node(mcx, mark_value)?;
         cycle_clause.cycle_mark_default = wrap_expr_node(mcx, mark_default)?;
 
-        cte.cycle_clause = Some(mcx::alloc_in(mcx, cycle_clause)?);
+        cte.cycle_clause = Some(mcx::alloc_in(
+            mcx,
+            types_nodes::nodes::Node::CTECycleClause(cycle_clause),
+        )?);
     }
 
     // Now we can get on with analyzing the CTE's query
@@ -884,7 +889,7 @@ fn analyzeCTE<'mcx>(
         }
     }
 
-    if let Some(cycle_clause) = cte.cycle_clause.as_deref() {
+    if let Some(cycle_clause) = cte.cycle_clause.as_deref().and_then(|n| n.as_cte_cycle_clause()) {
         let mut seen: Vec<String> = Vec::new();
 
         for colname_node in cycle_clause.cycle_col_list.iter() {
@@ -958,6 +963,7 @@ fn analyzeCTE<'mcx>(
         let cycle_clause = cte
             .cycle_clause
             .as_deref()
+            .and_then(|n| n.as_cte_cycle_clause())
             .ok_or_else(|| elog_error("cycle_clause missing"))?;
         let seq = search_clause
             .search_seq_column

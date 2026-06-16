@@ -88,6 +88,7 @@ pub const T_MergeAction: NodeTag = NodeTag(54);
 // for the K1-parsetree `Node` variants.
 pub const T_Alias: NodeTag = NodeTag(2);
 pub const T_RangeVar: NodeTag = NodeTag(3);
+pub const T_TableFunc: NodeTag = NodeTag(4);
 pub const T_TargetEntry: NodeTag = NodeTag(62);
 pub const T_RangeTblRef: NodeTag = NodeTag(63);
 pub const T_JoinExpr: NodeTag = NodeTag(64);
@@ -260,6 +261,7 @@ pub const T_LockingClause: NodeTag = NodeTag(94);
 pub const T_WithClause: NodeTag = NodeTag(110);
 pub const T_InferClause: NodeTag = NodeTag(111);
 pub const T_OnConflictClause: NodeTag = NodeTag(112);
+pub const T_CTECycleClause: NodeTag = NodeTag(114);
 pub const T_CommonTableExpr: NodeTag = NodeTag(115);
 pub const T_MergeWhenClause: NodeTag = NodeTag(116);
 pub const T_ReturningClause: NodeTag = NodeTag(118);
@@ -412,6 +414,11 @@ pub enum Node<'mcx> {
     RangeTblFunction(crate::rawnodes::RangeTblFunction<'mcx>),
     /// `T_TargetEntry`.
     TargetEntry(crate::primnodes::TargetEntry<'mcx>),
+    /// `T_TableFunc` — an XMLTABLE/JSON_TABLE table function. In C this is a
+    /// `Node *` carried by `RangeTblEntry.tablefunc` and walked by
+    /// `expression_tree_walker`; a first-class `Node` arm so the walkers can
+    /// dispatch it and the parser can store it in the RTE's `tablefunc` slot.
+    TableFunc(crate::primnodes::TableFunc<'mcx>),
     /// `T_RangeTblRef`.
     RangeTblRef(crate::rawnodes::RangeTblRef),
     /// `T_FromExpr`.
@@ -435,6 +442,11 @@ pub enum Node<'mcx> {
     LockingClause(crate::rawnodes::LockingClause<'mcx>),
     /// `T_WithCheckOption`.
     WithCheckOption(crate::rawnodes::WithCheckOption<'mcx>),
+    /// `T_CTECycleClause` — the CYCLE clause of a recursive CTE. In C this is a
+    /// `Node *` carried by `CommonTableExpr.cycle_clause` and walked by
+    /// `expression_tree_walker` (into `cycle_mark_value`/`cycle_mark_default`);
+    /// a first-class `Node` arm so the walkers can dispatch it.
+    CTECycleClause(crate::rawnodes::CTECycleClause<'mcx>),
     /// `T_CommonTableExpr`.
     CommonTableExpr(crate::rawnodes::CommonTableExpr<'mcx>),
     /// `T_SetOperationStmt`.
@@ -844,6 +856,43 @@ impl<'mcx> Node<'mcx> {
         }
     }
 
+    /// `castNode(TableFunc, node)` (borrow).
+    pub fn as_table_func(&self) -> Option<&crate::primnodes::TableFunc<'mcx>> {
+        match self {
+            Node::TableFunc(t) => Some(t),
+            _ => None,
+        }
+    }
+    /// `castNode(TableFunc, node)` (mutable borrow).
+    pub fn as_table_func_mut(&mut self) -> Option<&mut crate::primnodes::TableFunc<'mcx>> {
+        match self {
+            Node::TableFunc(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// `castNode(CTECycleClause, node)` (borrow).
+    pub fn as_cte_cycle_clause(&self) -> Option<&crate::rawnodes::CTECycleClause<'mcx>> {
+        match self {
+            Node::CTECycleClause(c) => Some(c),
+            _ => None,
+        }
+    }
+    /// `castNode(CTECycleClause, node)` (mutable borrow).
+    pub fn as_cte_cycle_clause_mut(&mut self) -> Option<&mut crate::rawnodes::CTECycleClause<'mcx>> {
+        match self {
+            Node::CTECycleClause(c) => Some(c),
+            _ => None,
+        }
+    }
+    /// Consume into the `CTECycleClause`.
+    pub fn into_cte_cycle_clause(self) -> Option<crate::rawnodes::CTECycleClause<'mcx>> {
+        match self {
+            Node::CTECycleClause(c) => Some(c),
+            _ => None,
+        }
+    }
+
     /// `castNode(JoinExpr, node)` (borrow).
     pub fn as_joinexpr(&self) -> Option<&crate::rawnodes::JoinExpr<'mcx>> {
         match self {
@@ -919,6 +968,7 @@ impl<'mcx> Node<'mcx> {
             Node::RTEPermissionInfo(_) => T_RTEPermissionInfo,
             Node::RangeTblFunction(_) => T_RangeTblFunction,
             Node::TargetEntry(_) => T_TargetEntry,
+            Node::TableFunc(_) => T_TableFunc,
             Node::RangeTblRef(_) => T_RangeTblRef,
             Node::FromExpr(_) => T_FromExpr,
             Node::JoinExpr(_) => T_JoinExpr,
@@ -930,6 +980,7 @@ impl<'mcx> Node<'mcx> {
             Node::RowMarkClause(_) => T_RowMarkClause,
             Node::LockingClause(_) => T_LockingClause,
             Node::WithCheckOption(_) => T_WithCheckOption,
+            Node::CTECycleClause(_) => T_CTECycleClause,
             Node::CommonTableExpr(_) => T_CommonTableExpr,
             Node::SetOperationStmt(_) => T_SetOperationStmt,
             Node::Alias(_) => T_Alias,
@@ -1237,6 +1288,7 @@ impl<'mcx> Node<'mcx> {
             Node::RTEPermissionInfo(r) => Ok(Node::RTEPermissionInfo(r.clone_in(mcx)?)),
             Node::RangeTblFunction(r) => Ok(Node::RangeTblFunction(r.clone_in(mcx)?)),
             Node::TargetEntry(t) => Ok(Node::TargetEntry(t.clone_in(mcx)?)),
+            Node::TableFunc(t) => Ok(Node::TableFunc(t.clone_in(mcx)?)),
             Node::RangeTblRef(r) => Ok(Node::RangeTblRef(r.clone_in(mcx)?)),
             Node::FromExpr(f) => Ok(Node::FromExpr(f.clone_in(mcx)?)),
             Node::JoinExpr(j) => Ok(Node::JoinExpr(j.clone_in(mcx)?)),
@@ -1248,6 +1300,7 @@ impl<'mcx> Node<'mcx> {
             Node::RowMarkClause(r) => Ok(Node::RowMarkClause(r.clone_in(mcx)?)),
             Node::LockingClause(l) => Ok(Node::LockingClause(l.clone_in(mcx)?)),
             Node::WithCheckOption(w) => Ok(Node::WithCheckOption(w.clone_in(mcx)?)),
+            Node::CTECycleClause(c) => Ok(Node::CTECycleClause(c.clone_in(mcx)?)),
             Node::CommonTableExpr(c) => Ok(Node::CommonTableExpr(c.clone_in(mcx)?)),
             Node::SetOperationStmt(s) => Ok(Node::SetOperationStmt(s.clone_in(mcx)?)),
             Node::Alias(a) => Ok(Node::Alias(a.clone_in(mcx)?)),

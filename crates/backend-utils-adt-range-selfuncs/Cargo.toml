@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-cache = { path = "../types-cache" }
 types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
 types-rangetypes = { path = "../types-rangetypes" }
 types-selfuncs = { path = "../types-selfuncs" }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
