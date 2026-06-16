@@ -316,6 +316,17 @@ fn seam_queue_change(
     panic!("ReorderBufferQueueChange: change-replay family not yet ported");
 }
 
+fn seam_queue_truncate(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _cascade: bool,
+    _restart_seqs: bool,
+    _relids: alloc::vec::Vec<types_core::Oid>,
+) {
+    panic!("ReorderBufferQueueTruncate: change-replay family not yet ported");
+}
+
 fn seam_queue_message(
     _rb: ReorderBufferHandle,
     _xid: TransactionId,
@@ -395,6 +406,10 @@ fn seam_remember_prepare_info(
     _origin_lsn: XLogRecPtr,
 ) -> bool {
     panic!("ReorderBufferRememberPrepareInfo: change-replay family not yet ported");
+}
+
+fn seam_invalidate(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
+    panic!("ReorderBufferInvalidate: change-replay family not yet ported");
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +565,7 @@ pub fn init_seams() {
     // families land; see above).
     s::ReorderBufferProcessXid::set(seam_process_xid);
     s::ReorderBufferQueueChange::set(seam_queue_change);
+    s::ReorderBufferQueueTruncate::set(seam_queue_truncate);
     s::ReorderBufferQueueMessage::set(seam_queue_message);
     s::ReorderBufferForget::set(seam_forget);
     s::ReorderBufferAbort::set(seam_abort);
@@ -557,6 +573,7 @@ pub fn init_seams() {
     s::ReorderBufferFinishPrepared::set(seam_finish_prepared);
     s::ReorderBufferPrepare::set(seam_prepare);
     s::ReorderBufferSkipPrepare::set(seam_skip_prepare);
+    s::ReorderBufferInvalidate::set(seam_invalidate);
     s::ReorderBufferImmediateInvalidation::set(seam_immediate_invalidation);
     s::ReorderBufferAddInvalidations::set(seam_add_invalidations);
     s::ReorderBufferRememberPrepareInfo::set(seam_remember_prepare_info);

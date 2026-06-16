@@ -12997,6 +12997,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-decode"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xactdesc",
+ "backend-access-transam-rmgr",
+ "backend-access-transam-xlogreader-seams",
+ "backend-replication-logical-decode-seams",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-logical-snapbuild-seams",
+ "backend-utils-error",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-storage",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-replication-logical-decode-seams"
 version = "0.0.0"
 dependencies = [
@@ -20210,6 +20231,7 @@ dependencies = [
  "backend-replication-libpqwalreceiver",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
+ "backend-replication-logical-decode",
  "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
  "backend-replication-logical-message",
@@ -21287,6 +21309,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-logical",
  "types-storage",
 ]
 

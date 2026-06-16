@@ -7,9 +7,12 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::{Oid, TransactionId, XLogRecPtr};
+extern crate alloc;
+
+use alloc::vec::Vec;
+use types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
 use types_error::PgResult;
-use types_logical::ReorderBufferCallback;
+use types_logical::{LogicalDecodingContext, ReorderBufferCallback};
 
 seam_core::seam!(
     /// `ResetLogicalStreamingState()` — reset logical streaming state on
@@ -60,4 +63,40 @@ seam_core::seam!(
         current_lsn: XLogRecPtr,
         restart_lsn: XLogRecPtr,
     ) -> PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
+// Output-plugin filter wrappers + stats update consumed by decode.c.
+//
+// `decode.c` calls these `logical.c`-owned wrappers (`filter_prepare_cb_wrapper`
+// / `filter_by_origin_cb_wrapper` / `UpdateDecodingStats`) directly, passing the
+// live decoding context it received. They set the ctx output state and invoke
+// the loaded output plugin's optional callbacks (panicking until the plugin
+// loader lands) / report the reorder-buffer decoding stats to pgstat.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `filter_prepare_cb_wrapper(ctx, xid, gid)` (logical.c:1169) — ask the
+    /// output plugin whether to skip a 2PC at PREPARE time. `gid` is the real
+    /// (NUL-stripped) global-transaction-id bytes.
+    pub fn filter_prepare_cb_wrapper(
+        ctx: &mut LogicalDecodingContext,
+        xid: TransactionId,
+        gid: Vec<u8>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `filter_by_origin_cb_wrapper(ctx, origin_id)` (logical.c:1201) — ask the
+    /// output plugin whether it is interested in changes from `origin_id`.
+    pub fn filter_by_origin_cb_wrapper(
+        ctx: &mut LogicalDecodingContext,
+        origin_id: RepOriginId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `UpdateDecodingStats(ctx)` (logical.c:1954) — report the reorder
+    /// buffer's spill/stream/total decoding stats to pgstat.
+    pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) -> PgResult<()>
 );
