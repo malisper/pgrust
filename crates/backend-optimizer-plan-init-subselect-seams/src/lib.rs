@@ -23,8 +23,13 @@ use types_pathnodes::{JoinlistNode, PlannerInfo};
 seam_core::seam!(
     /// `remove_useless_joins(root, joinlist)` (analyzejoins.c:90): remove any
     /// useless outer joins, returning the (possibly trimmed) joinlist.
-    pub fn remove_useless_joins(
+    ///
+    /// Threads the planner-run resolver (`run`): `join_is_removable` proves the
+    /// inner rel distinct, and for a subquery inner rel that resolves the
+    /// sub-`Query` off the RTE store via `&PlannerRun<'mcx>`.
+    pub fn remove_useless_joins<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         joinlist: alloc::vec::Vec<JoinlistNode>,
     ) -> alloc::vec::Vec<JoinlistNode>
 );

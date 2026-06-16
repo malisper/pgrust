@@ -92,7 +92,7 @@ fn install_join_seams() {
 
     // joinpath-local bms helper.
     jp::bms_difference::set(|_a, _b| None);
-    jp::innerrel_is_unique::set(|_r, _j, _o, _i, _jt, _rl, _f| false);
+    jp::innerrel_is_unique::set(|_r, _run, _j, _o, _i, _jt, _rl, _f| false);
 
     // pathkeys: a join keeps no order in this synthetic setup.
     jp::build_join_pathkeys::set(|_r, _jr, _jt, _opk| Ok(Vec::new()));
