@@ -1,0 +1,33 @@
+[package]
+name = "backend-commands-vacuum"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_vacuum"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-vacuum = { path = "../types-vacuum" }
+types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-rel = { path = "../types-rel" }
+types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-cluster = { path = "../types-cluster" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+
+# own seam crate (inward)
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+
+# owner seam crates (outward / inward-install targets)
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }

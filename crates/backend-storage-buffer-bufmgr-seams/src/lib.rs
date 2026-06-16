@@ -1034,6 +1034,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bgwriter_flush_after` GUC (bufmgr.c `int bgwriter_flush_after`) — after
+    /// how many buffer writes the background writer issues a kernel writeback
+    /// hint (the bgwriter writeback context's `max_pending`, in pages; 0 disables
+    /// writeback control). Owned by the GUC machinery when it ports.
+    pub fn bgwriter_flush_after() -> i32
+);
+
+seam_core::seam!(
     /// `CheckpointWriteDelay(flags, progress)` (checkpointer.c) — throttle the
     /// checkpoint write rate to spread the I/O across the checkpoint interval,
     /// also servicing checkpointer requests / barrier events. `progress` is the

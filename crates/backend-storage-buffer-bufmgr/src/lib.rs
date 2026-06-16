@@ -34,6 +34,7 @@ mod page;
 mod read;
 mod refcount;
 
+pub use buf_flush::{writeback_context_init, BgBufferSyncState, WritebackContext};
 pub use mgr::BufferManager;
 pub use read::ReadOp;
 
