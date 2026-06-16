@@ -205,6 +205,38 @@ pub fn find_expr_references_walker(
             /* fall through to examine arguments */
             run_subwalk(node, context)
         }
+        Node::TableFunc(tf) => {
+            /*
+             * Add refs for the datatypes and collations used in the TableFunc.
+             */
+            if let Some(coltypes) = tf.coltypes.as_ref() {
+                for ct in coltypes.iter() {
+                    add_object_address(TypeRelationId, *ct, 0, &mut context.addrs);
+                }
+            }
+            if let Some(colcollations) = tf.colcollations.as_ref() {
+                for collid in colcollations.iter() {
+                    if OidIsValid(*collid) && *collid != DEFAULT_COLLATION_OID {
+                        add_object_address(CollationRelationId, *collid, 0, &mut context.addrs);
+                    }
+                }
+            }
+            /* fall through to examine substructure */
+            run_subwalk(node, context)
+        }
+        Node::CTECycleClause(cc) => {
+            if OidIsValid(cc.cycle_mark_type) {
+                add_object_address(TypeRelationId, cc.cycle_mark_type, 0, &mut context.addrs);
+            }
+            if OidIsValid(cc.cycle_mark_collation) {
+                add_object_address(CollationRelationId, cc.cycle_mark_collation, 0, &mut context.addrs);
+            }
+            if OidIsValid(cc.cycle_mark_neop) {
+                add_object_address(OperatorRelationId, cc.cycle_mark_neop, 0, &mut context.addrs);
+            }
+            /* fall through to examine substructure */
+            run_subwalk(node, context)
+        }
         _ => run_subwalk(node, context),
     }
 }

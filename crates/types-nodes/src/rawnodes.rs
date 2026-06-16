@@ -663,8 +663,10 @@ pub struct CommonTableExpr<'mcx> {
     pub ctequery: Option<NodePtr<'mcx>>,
     /// `CTESearchClause *search_clause`.
     pub search_clause: Option<PgBox<'mcx, CTESearchClause<'mcx>>>,
-    /// `CTECycleClause *cycle_clause`.
-    pub cycle_clause: Option<PgBox<'mcx, CTECycleClause<'mcx>>>,
+    /// `CTECycleClause *cycle_clause`. Carried as a `Node *` (`Node::CTECycleClause`)
+    /// so `expression_tree_walker` can dispatch it into its
+    /// `cycle_mark_value`/`cycle_mark_default` subexpressions.
+    pub cycle_clause: Option<NodePtr<'mcx>>,
     /// `ParseLoc location`.
     pub location: i32,
     /// `bool cterecursive` — is this CTE actually recursive? (set in analysis)
@@ -693,10 +695,7 @@ impl CommonTableExpr<'_> {
                 Some(s) => Some(mcx::alloc_in(mcx, s.clone_in(mcx)?)?),
                 None => None,
             },
-            cycle_clause: match &self.cycle_clause {
-                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
-                None => None,
-            },
+            cycle_clause: copy_opt_node(&self.cycle_clause, mcx)?,
             location: self.location,
             cterecursive: self.cterecursive,
             cterefcount: self.cterefcount,

@@ -30,6 +30,7 @@ backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 # Engine callees crossed as seams (owners are sibling-spine deps).
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 
 # F1 per-catalog typed-insert seam bodies: form the catalog tuple from the

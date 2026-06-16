@@ -8,6 +8,7 @@ pub fn init_all() {
     // One line per ported crate, kept sorted:
     contrib_amcheck_verify_nbtree::init_seams();
     backend_archive_shell_archive::init_seams();
+    backend_commands_async::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -83,11 +84,13 @@ pub fn init_all() {
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
+    backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_type::init_seams();
     backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
@@ -96,6 +99,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
@@ -107,8 +111,10 @@ pub fn init_all() {
     backend_commands_functioncmds::init_seams();
     backend_commands_opclasscmds::init_seams();
     backend_commands_matview::init_seams();
+    backend_commands_schemacmds::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_commands_seclabel::init_seams();
+    backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
@@ -306,6 +312,7 @@ pub fn init_all() {
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
+    backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();
     backend_utils_adt_version::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
@@ -838,7 +845,7 @@ mod recurrence_guard {
         // relcache GinOptions keystone lands.
         ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
         ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
-        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): five heapam-seams whose real
+        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): six heapam-seams whose real
         // bodies are NOT in the merged heap-AM slice yet — sanctioned
         // mirror-pg-and-panic on a complete owner. Each is `::call`ed in a live
         // consumer but the owner has no contract-matching body:
@@ -855,7 +862,15 @@ mod recurrence_guard {
         //   * index_compute_xid_horizon_for_tuples — the full index-buffer
         //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
         //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
+        //   * heap_multi_insert — heapam.c's slot-based batch heap insert (one
+        //     WAL record per page, buffer extension, toast via
+        //     heap_prepare_insert, visibility-map clears). The merged heap-AM
+        //     slice ports only the page-count helper `heap_multi_insert_pages`;
+        //     the batch engine is unwritten. `CatalogTuplesMultiInsertWithInfo`
+        //     (catalog/indexing.c, now ported in backend-catalog-indexing) is the
+        //     live consumer.
         // DELETE each entry when its driver lands in the heap-AM port.
+        ("backend_access_heap_heapam", "heap_multi_insert"),
         ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
         ("backend_access_heap_heapam", "insert_one_tuple"),
         ("backend_access_heap_heapam", "log_heap_visible"),

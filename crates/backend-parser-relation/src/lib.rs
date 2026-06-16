@@ -2005,7 +2005,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         n_dontexpand_columns += 1;
     }
 
-    if let Some(cc) = cte.cycle_clause.as_deref() {
+    if let Some(cc) = cte.cycle_clause.as_deref().and_then(|n| n.as_cte_cycle_clause()) {
         let eref_mut = rte.eref.as_deref_mut().unwrap();
         let mark_col = cc.cycle_mark_column.as_deref().unwrap_or("");
         eref_mut.colnames.push(make_string_node(mcx, mark_col)?);

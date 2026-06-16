@@ -1700,6 +1700,8 @@ pub fn init_seams() {
     seams::set_xact_iso_level_read_committed::set(seam_set_xact_iso_level_read_committed);
     seams::set_xact_iso_level_repeatable_read::set(seam_set_xact_iso_level_repeatable_read);
     seams::set_xact_read_only::set(SetXactReadOnly);
+    seams::xact_read_only::set(XactReadOnly);
+    seams::xact_iso_level::set(XactIsoLevel);
 }
 
 #[cfg(test)]
