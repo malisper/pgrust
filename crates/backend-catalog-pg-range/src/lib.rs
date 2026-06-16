@@ -90,43 +90,43 @@ pub fn RangeCreate(
     indexing_seams::catalog_tuple_insert_pg_range::call(range_ctx.mcx(), &pg_range, &row)?;
 
     /* record type's dependencies on range-related items */
-    let addrs = dependency_seams::new_object_addresses::call()?;
+    let mut addrs = dependency_seams::new_object_addresses::call()?;
 
     // ObjectAddressSet(myself, TypeRelationId, rangeTypeOid);
     let myself = ObjectAddressSet(TYPE_RELATION_ID, rangeTypeOid);
 
     dependency_seams::add_exact_object_address::call(
         ObjectAddressSet(TYPE_RELATION_ID, rangeSubType),
-        addrs,
+        &mut addrs,
     )?;
 
     dependency_seams::add_exact_object_address::call(
         ObjectAddressSet(OPERATOR_CLASS_RELATION_ID, rangeSubOpclass),
-        addrs,
+        &mut addrs,
     )?;
 
     if OidIsValid(rangeCollation) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(COLLATION_RELATION_ID, rangeCollation),
-            addrs,
+            &mut addrs,
         )?;
     }
 
     if OidIsValid(rangeCanonical) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(PROCEDURE_RELATION_ID, rangeCanonical),
-            addrs,
+            &mut addrs,
         )?;
     }
 
     if OidIsValid(rangeSubDiff) {
         dependency_seams::add_exact_object_address::call(
             ObjectAddressSet(PROCEDURE_RELATION_ID, rangeSubDiff),
-            addrs,
+            &mut addrs,
         )?;
     }
 
-    dependency_seams::record_object_address_dependencies::call(myself, addrs, DEPENDENCY_NORMAL)?;
+    dependency_seams::record_object_address_dependencies::call(myself, &mut addrs, DEPENDENCY_NORMAL)?;
     dependency_seams::free_object_addresses::call(addrs)?;
 
     /* record multirange type's dependency on the range type */

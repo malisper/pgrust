@@ -55,6 +55,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid, Selectivity};
 use types_datum::datum::Datum;
 use types_error::{PgError, PgResult, ERROR};
+use types_pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{
     VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES, STATISTIC_KIND_DECHIST,
     STATISTIC_KIND_MCELEM,
@@ -234,14 +235,14 @@ fn element_compare(d1: Datum, d2: Datum, typentry: &ElemCmpInfo) -> PgResult<i32
  *
  * Returns selectivity (0..1), or -1 if we fail to estimate selectivity.
  *
- * `root` / `leftop` / `rightop` are the raw planner words (`PlannerInfo *` /
- * `Node *`), carried as `Datum`.
+ * `root` is the planner state; `leftop` / `rightop` are the planner node
+ * handles for the operator's operands (C `Node *`).
  * =========================================================================== */
 pub fn scalararraysel_containment(
     mcx: Mcx<'_>,
-    root: Datum,
-    leftop: Datum,
-    rightop: Datum,
+    root: &PlannerInfo,
+    leftop: NodeId,
+    rightop: NodeId,
     elemtype: Oid,
     is_equality: bool,
     mut use_or: bool,
@@ -471,13 +472,14 @@ fn slot_numbers(numbers: &[f32]) -> Option<&[f32]> {
  *
  * The C entry point reads its four arguments out of `FunctionCallInfo`
  * (root, operator, args, varRelid); here they are explicit parameters.
- * `root` / `args` are the raw planner words (`PlannerInfo *` / `List *`).
+ * `root` is the planner state; `args` is the operator's argument `List *` as a
+ * borrowed slice of planner node handles.
  * =========================================================================== */
 pub fn arraycontsel(
     mcx: Mcx<'_>,
-    root: Datum,
+    root: &PlannerInfo,
     mut operator: Oid,
-    args: Datum,
+    args: &[NodeId],
     var_relid: i32,
 ) -> PgResult<Selectivity> {
     let selec: Selectivity;
