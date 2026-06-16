@@ -12903,6 +12903,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-fork-process"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqsignal",
+ "backend-postmaster-fork-process-seams",
+ "backend-utils-init-small",
+ "libc",
+ "port-pg-strong-random-seams",
+ "types-core",
+]
+
+[[package]]
 name = "backend-postmaster-fork-process-seams"
 version = "0.0.0"
 dependencies = [
@@ -20851,6 +20863,7 @@ dependencies = [
  "backend-postmaster-bgworker",
  "backend-postmaster-bgwriter",
  "backend-postmaster-checkpointer",
+ "backend-postmaster-fork-process",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
  "backend-postmaster-pgarch",
