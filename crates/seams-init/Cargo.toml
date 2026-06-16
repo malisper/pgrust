@@ -93,6 +93,7 @@ backend-backup-walsummary = { path = "../backend-backup-walsummary" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-backup-sink-support = { path = "../backend-backup-sink-support" }
 backend-backup-throttle = { path = "../backend-backup-throttle" }
+backend-bootstrap-bootparse = { path = "../backend-bootstrap-bootparse" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-storage = { path = "../backend-catalog-storage" }
@@ -392,6 +393,7 @@ backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+backend-utils-adt-jsonpath-gram = { path = "../backend-utils-adt-jsonpath-gram" }
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

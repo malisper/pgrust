@@ -4001,9 +4001,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-bootparse"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-common-tupdesc",
+ "backend-bootstrap-bootparse-seams",
+ "backend-bootstrap-bootscanner",
+ "backend-bootstrap-bootstrap",
+ "backend-catalog-heap",
+ "backend-catalog-heap-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-toasting",
+ "backend-commands-indexcmds-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-bootstrap-bootparse-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -6509,10 +6536,13 @@ dependencies = [
 name = "backend-commands-indexcmds-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-amapi",
+ "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -16845,10 +16875,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-jsonpath-scan",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numutils",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-jsonpath",
+ "types-regex",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonpath-gram-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-fgram",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "port-pgstrcasecmp",
  "types-error",
  "types-jsonpath",
 ]
@@ -20312,6 +20373,7 @@ dependencies = [
  "backend-backup-throttle",
  "backend-backup-walsummary",
  "backend-backup-zstd",
+ "backend-bootstrap-bootparse",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
@@ -20627,6 +20689,7 @@ dependencies = [
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-jsonfuncs",
+ "backend-utils-adt-jsonpath-gram",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
