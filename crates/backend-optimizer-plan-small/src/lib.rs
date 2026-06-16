@@ -125,12 +125,12 @@ pub fn query_planner<'mcx>(
     if let Some(varno) = trivial_varno {
         // int varno = ((RangeTblRef *) jtnode)->rtindex;
         // RangeTblEntry *rte = root->simple_rte_array[varno]; Assert(rte != NULL);
-        let rtekind = rte::rte_rtekind::call(root, varno as u32);
+        let rtekind = rte::rte_rtekind::call(run, root, varno as u32);
 
         if rtekind == RTE_RESULT {
             // Make the RelOptInfo for it directly. build_simple_rel registers it
             // in root.simple_rel_array[varno]; that handle is our final_rel.
-            let final_rel = relnode::build_simple_rel(root, varno, None)?;
+            let final_rel = relnode::build_simple_rel(run, root, varno, None)?;
 
             /*
              * If query allows parallelism in general, check whether the quals
@@ -247,14 +247,14 @@ pub fn query_planner<'mcx>(
      * equivalence classes.  (This could result in further additions or mergings
      * of classes.)
      */
-    equivclass::reconsider_outer_join_clauses(root)?;
+    equivclass::reconsider_outer_join_clauses(root, run)?;
 
     /*
      * If we formed any equivalence classes, generate additional restriction
      * clauses as appropriate.  (Implied join clauses are formed on-the-fly
      * later.)
      */
-    equivclass::generate_base_implied_equalities(root)?;
+    equivclass::generate_base_implied_equalities(root, run)?;
 
     /*
      * We have completed merging equivalence sets, so it's now possible to
@@ -283,7 +283,7 @@ pub fn query_planner<'mcx>(
      * Also, reduce any semijoins with unique inner rels to plain inner joins.
      * Likewise, this can't be done until now for lack of needed info.
      */
-    analyzejoins_seam::reduce_unique_semijoins::call(root);
+    analyzejoins_seam::reduce_unique_semijoins::call(root, run);
 
     /*
      * Remove self joins on a unique column.
@@ -337,7 +337,7 @@ pub fn query_planner<'mcx>(
     /*
      * Ready to do the primary planning.
      */
-    let final_rel = allpaths::make_one_rel(mcx, root, &joinlist)?;
+    let final_rel = allpaths::make_one_rel(mcx, run, root, &joinlist)?;
 
     /* Check that we got at least one usable path */
     // if (!final_rel || !final_rel->cheapest_total_path ||

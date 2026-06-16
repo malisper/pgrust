@@ -43,6 +43,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     JoinType, PlannerInfo, RelId, Relids, RinfoId, JOIN_ANTI, JOIN_FULL, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
@@ -365,7 +366,7 @@ pub fn innerrel_is_unique(
 /// `reduce_unique_semijoins(root)` (analyzejoins.c:844) — reduce semijoins whose
 /// inner rel is provably unique for the join clauses to plain inner joins, by
 /// deleting their `SpecialJoinInfo` from `root.join_info_list`.
-pub fn reduce_unique_semijoins(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn reduce_unique_semijoins<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>) -> PgResult<()> {
     /*
      * Scan join_info_list for semijoins. We collect the indices to delete after
      * the scan, since proving uniqueness re-borrows root mutably.  (C uses
@@ -417,6 +418,7 @@ pub fn reduce_unique_semijoins(root: &mut PlannerInfo) -> PgResult<()> {
          */
         let ec_clauses = equivclass::generate_join_implied_equalities(
             root,
+            run,
             relids::copy(&joinrelids),
             relids::copy(&min_lefthand),
             innerrel,
@@ -467,11 +469,11 @@ use pg_list as _pg_list_doc;
 /// pending the heavy in-place-surgery follow-up (see crate docs).
 pub fn init_seams() {
     backend_optimizer_plan_init_subselect_seams::reduce_unique_semijoins::set(
-        |root| {
+        |root, run| {
             // The seam is `void`; analyzejoins.c's reduce_unique_semijoins cannot
             // ereport on this path. The EC-implied-equalities generation returns
             // a PgResult; an error there is a planner bug, so surface it.
-            reduce_unique_semijoins(root).expect("reduce_unique_semijoins")
+            reduce_unique_semijoins(root, run).expect("reduce_unique_semijoins")
         },
     );
 

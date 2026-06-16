@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{JoinlistNode, PlannerInfo};
 
 seam_core::seam!(
@@ -31,7 +32,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `reduce_unique_semijoins(root)` (analyzejoins.c:844): reduce semijoins
     /// whose inner rel is unique to plain inner joins.
-    pub fn reduce_unique_semijoins(root: &mut PlannerInfo)
+    ///
+    /// Threads the planner-run resolver (`run`): the body reaches
+    /// `generate_join_implied_equalities`, which reads RTE fields through the
+    /// re-signed `rte_*` seams that take `&PlannerRun<'mcx>`.
+    pub fn reduce_unique_semijoins<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
 );
 
 seam_core::seam!(

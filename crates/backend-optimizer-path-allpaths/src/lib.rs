@@ -190,7 +190,7 @@ pub fn make_one_rel<'mcx>(
     set_base_rel_pathlists(mcx, run, root)?;
 
     // Generate access paths for the entire join tree.
-    let rel = make_rel_from_joinlist(mcx, root, joinlist)?
+    let rel = make_rel_from_joinlist(mcx, root, run, joinlist)?
         .expect("make_one_rel: empty joinlist");
 
     // The result should join all and only the query's base + outer-join rels.
@@ -313,7 +313,7 @@ pub fn set_rel_size<'mcx>(
     {
         // Proven empty by constraint exclusion: install a dummy path now. (Only
         // for regular baserels; otherrels had CE checked in set_append_rel_size.)
-        set_dummy_rel_pathlist(root, rel)?;
+        set_dummy_rel_pathlist(root, run, rel)?;
     } else if rte::rte_inh::call(run, root, rti) {
         // It's an "append relation".
         set_append_rel_size(mcx, run, root, rel, rti)?;
@@ -325,11 +325,11 @@ pub fn set_rel_size<'mcx>(
                     set_foreign_size(run, root, rel, rti)?;
                 } else if relkind == RELKIND_PARTITIONED_TABLE {
                     // Partitioned table scanned with ONLY: no partitions, dummy.
-                    set_dummy_rel_pathlist(root, rel)?;
+                    set_dummy_rel_pathlist(root, run, rel)?;
                 } else if rte::rte_has_tablesample::call(run, root, rti) {
-                    set_tablesample_rel_size(mcx, root, rel, rti)?;
+                    set_tablesample_rel_size(mcx, root, run, rel, rti)?;
                 } else {
-                    set_plain_rel_size(mcx, root, rel)?;
+                    set_plain_rel_size(mcx, root, run, rel)?;
                 }
             }
             RTE_SUBQUERY => {
@@ -348,8 +348,8 @@ pub fn set_rel_size<'mcx>(
                     subquery::set_cte_pathlist(root, rel, rti)?;
                 }
             }
-            RTE_NAMEDTUPLESTORE => set_namedtuplestore_pathlist(root, rel)?,
-            RTE_RESULT => set_result_pathlist(root, rel)?,
+            RTE_NAMEDTUPLESTORE => set_namedtuplestore_pathlist(run, root, rel)?,
+            RTE_RESULT => set_result_pathlist(run, root, rel)?,
             other => {
                 return Err(PgError::error(alloc::format!("unexpected rtekind: {other}")));
             }
@@ -384,15 +384,15 @@ pub fn set_rel_pathlist<'mcx>(
                 if rte::rte_relkind::call(run, root, rti) == RELKIND_FOREIGN_TABLE {
                     set_foreign_pathlist(run, root, rel, rti)?;
                 } else if rte::rte_has_tablesample::call(run, root, rti) {
-                    set_tablesample_rel_pathlist(root, rel, rti)?;
+                    set_tablesample_rel_pathlist(root, run, rel, rti)?;
                 } else {
-                    set_plain_rel_pathlist(mcx, root, rel)?;
+                    set_plain_rel_pathlist(mcx, root, run, rel)?;
                 }
             }
             RTE_SUBQUERY => {}        // fully handled during set_rel_size
             RTE_FUNCTION => set_function_pathlist(run, root, rel, rti)?,
-            RTE_TABLEFUNC => set_tablefunc_pathlist(root, rel)?,
-            RTE_VALUES => set_values_pathlist(root, rel)?,
+            RTE_TABLEFUNC => set_tablefunc_pathlist(run, root, rel)?,
+            RTE_VALUES => set_values_pathlist(run, root, rel)?,
             RTE_CTE => {}            // fully handled during set_rel_size
             RTE_NAMEDTUPLESTORE => {} // fully handled during set_rel_size
             RTE_RESULT => {}        // fully handled during set_rel_size
@@ -411,7 +411,7 @@ pub fn set_rel_pathlist<'mcx>(
     if root.rel(rel).reloptkind == RELOPT_BASEREL
         && !bms::relids_equal::call(&root.rel(rel).relids, &root.all_query_rels)
     {
-        generate_useful_gather_paths(root, rel, false)?;
+        generate_useful_gather_paths(root, run, rel, false)?;
     }
 
     // Find the cheapest of the paths for this rel.
@@ -424,9 +424,14 @@ pub fn set_rel_pathlist<'mcx>(
  * ======================================================================== */
 
 /// `set_plain_rel_size` (allpaths.c:571) — size estimates for a plain relation.
-pub fn set_plain_rel_size<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+pub fn set_plain_rel_size<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<()> {
     // Test partial indexes first (partial unique indexes can affect estimates).
-    check_index_predicates(mcx, root, rel)?;
+    check_index_predicates(mcx, root, run, rel)?;
     // Mark rel with estimated output rows, width, etc.
     backend_optimizer_path_costsize::sizeest::set_baserel_size_estimates(root, rel);
     Ok(())
@@ -517,6 +522,7 @@ pub fn set_rel_consider_parallel<'mcx>(
 pub fn set_plain_rel_pathlist<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
 ) -> PgResult<()> {
     // Seqscan can't take join clauses, but may be parameterized by LATERAL refs.
@@ -524,21 +530,21 @@ pub fn set_plain_rel_pathlist<'mcx>(
 
     // Consider TID scans. If create_tidscan_paths returns true, a TID scan is
     // forced (CurrentOfExpr); add no other paths.
-    if create_tidscan_paths(root, rel)? {
+    if create_tidscan_paths(root, run, rel)? {
         return Ok(());
     }
 
     // Consider sequential scan.
-    let seqscan = pathnode::create_seqscan_path::call(root, rel, &required_outer, 0)?;
+    let seqscan = pathnode::create_seqscan_path::call(root, run, rel, &required_outer, 0)?;
     pathnode::add_path::call(root, rel, seqscan)?;
 
     // If appropriate, consider parallel sequential scan.
     if root.rel(rel).consider_parallel && required_outer.is_none() {
-        create_plain_partial_paths(root, rel)?;
+        create_plain_partial_paths(root, run, rel)?;
     }
 
     // Consider index scans.
-    create_index_paths(mcx, root, rel)?;
+    create_index_paths(mcx, root, run, rel)?;
     Ok(())
 }
 
@@ -548,7 +554,7 @@ pub fn set_plain_rel_pathlist<'mcx>(
 
 /// `create_plain_partial_paths` (allpaths.c:805) — partial paths for parallel
 /// scan of a plain relation.
-pub fn create_plain_partial_paths(root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+pub fn create_plain_partial_paths<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let pages = root.rel(rel).pages as f64;
     let parallel_workers = compute_parallel_worker(
         root,
@@ -562,7 +568,7 @@ pub fn create_plain_partial_paths(root: &mut PlannerInfo, rel: RelId) -> PgResul
         return Ok(());
     }
     // Add an unordered partial path based on a parallel sequential scan.
-    let path = pathnode::create_seqscan_path::call(root, rel, &None, parallel_workers)?;
+    let path = pathnode::create_seqscan_path::call(root, run, rel, &None, parallel_workers)?;
     pathnode::add_partial_path::call(root, rel, path)?;
     Ok(())
 }
@@ -576,11 +582,12 @@ pub fn create_plain_partial_paths(root: &mut PlannerInfo, rel: RelId) -> PgResul
 pub fn set_tablesample_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     rti: Index,
 ) -> PgResult<()> {
     // Test partial indexes first.
-    check_index_predicates(mcx, root, rel)?;
+    check_index_predicates(mcx, root, run, rel)?;
 
     // Call the sampling method's estimation function. Unported (TSM dispatch).
     let (pages, tuples) = tablesample_get_sample_size(root, rel, rti)?;
@@ -595,15 +602,16 @@ pub fn set_tablesample_rel_size<'mcx>(
 
 /// `set_tablesample_rel_pathlist` (allpaths.c:866) — access paths for a sampled
 /// relation.
-pub fn set_tablesample_rel_pathlist(
+pub fn set_tablesample_rel_pathlist<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     rti: Index,
 ) -> PgResult<()> {
     // Samplescan can't take join clauses, but may be parameterized by LATERAL.
     let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
 
-    let mut path = pathnode::create_samplescan_path::call(root, rel, &required_outer)?;
+    let mut path = pathnode::create_samplescan_path::call(root, run, rel, &required_outer)?;
 
     // If the sampling method does not support repeatable scans and a join might
     // occur, wrap the SampleScan in a Materialize node.
@@ -706,21 +714,35 @@ fn relation_excluded_by_constraints<'mcx>(
 }
 
 /// `check_index_predicates(root, rel)` (indxpath.c).
-fn check_index_predicates<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
-    backend_optimizer_path_indxpath::check_index_predicates(mcx, root, rel)
+fn check_index_predicates<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<()> {
+    backend_optimizer_path_indxpath::check_index_predicates(mcx, root, run, rel)
 }
 
 /// `create_index_paths(root, rel)` (indxpath.c).
-fn create_index_paths<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
-    backend_optimizer_path_indxpath::create_index_paths(mcx, root, rel)
+fn create_index_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<()> {
+    backend_optimizer_path_indxpath::create_index_paths(mcx, root, run, rel)
 }
 
 /// `create_tidscan_paths(root, rel)` (tidpath.c, here via path-small). The C
 /// reads `enable_tidscan` as a GUC global inside `create_tidscan_paths`; the
 /// path-small port lifts it to an explicit parameter, so we pass the live value.
-fn create_tidscan_paths(root: &mut PlannerInfo, rel: RelId) -> PgResult<bool> {
+fn create_tidscan_paths<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<bool> {
     let enable_tidscan = backend_utils_misc_guc_tables::vars::enable_tidscan.read();
-    backend_optimizer_path_small::create_tidscan_paths(root, rel, enable_tidscan)
+    backend_optimizer_path_small::create_tidscan_paths(root, run, rel, enable_tidscan)
 }
 
 /// `get_rel_persistence(relid)` (lsyscache.c).
@@ -863,14 +885,15 @@ fn compute_parallel_worker_seam(
 /// so we run the join build in a fresh local planner memory context (the path
 /// work allocates into the `PlannerInfo` arena; the `Mcx` is only the OOM
 /// channel for `make_join_rel`'s fallible reserves).
-fn build_and_cost_join_rel_seam(
+fn build_and_cost_join_rel_seam<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
 ) -> Option<RelId> {
     let cx = mcx::MemoryContext::new("geqo merge_clump");
     let mcx = cx.mcx();
-    build_and_cost_join_rel(mcx, root, rel1, rel2)
+    build_and_cost_join_rel(mcx, root, run, rel1, rel2)
         .unwrap_or_else(|e| panic!("build_and_cost_join_rel: {e:?}"))
 }
 
@@ -879,20 +902,21 @@ fn build_and_cost_join_rel_seam(
 pub fn build_and_cost_join_rel<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
 ) -> PgResult<Option<RelId>> {
-    let joinrel = match make_join_rel(mcx, root, rel1, rel2)? {
+    let joinrel = match make_join_rel(mcx, root, run, rel1, rel2)? {
         Some(r) => r,
         None => return Ok(None),
     };
 
     // Create paths for partitionwise joins.
-    generate_partitionwise_join_paths(mcx, root, joinrel)?;
+    generate_partitionwise_join_paths(mcx, root, run, joinrel)?;
 
     // Except for the topmost scan/join rel, consider gathering partial paths.
     if !bms::relids_equal::call(&root.rel(joinrel).relids, &root.all_query_rels) {
-        generate_useful_gather_paths(root, joinrel, false)?;
+        generate_useful_gather_paths(root, run, joinrel, false)?;
     }
 
     // Find and save the cheapest paths for this rel.

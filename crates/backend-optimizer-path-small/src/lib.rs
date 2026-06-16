@@ -45,6 +45,7 @@ use types_error::PgResult;
 
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_nodes::primnodes::{Expr, NullTestType, Var, AND_EXPR, NOT_EXPR, OR_EXPR};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RestrictInfo, RinfoId, PlannerInfo,
     SpecialJoinInfo, JOIN_INNER, RTE_RELATION,
@@ -1444,8 +1445,9 @@ fn TidRangeQualFromRestrictInfoList(
 
 /// `BuildParameterizedTidPaths(root, rel, clauses)` (tidpath.c): for each join
 /// clause that is a suitable TidEqual clause, create a parameterized TidPath.
-fn BuildParameterizedTidPaths(
+fn BuildParameterizedTidPaths<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
 ) -> PgResult<()> {
@@ -1475,7 +1477,7 @@ fn BuildParameterizedTidPaths(
         let mut required_outer = ps::relids_union::call(&required_relids, &lateral_relids);
         required_outer = relids_del_member(required_outer, root.rel(rel).relid as i32);
 
-        let path = ps::create_tidscan_path::call(root, rel, tidquals, &required_outer)?;
+        let path = ps::create_tidscan_path::call(root, run, rel, tidquals, &required_outer)?;
         ps::add_path::call(root, rel, path)?;
     }
     Ok(())
@@ -1492,8 +1494,9 @@ fn ec_member_matches_ctid(root: &PlannerInfo, rel: RelId, _ec: EcId, em: EmId) -
 /// `create_tidscan_paths(root, rel)` (tidpath.c): create direct-TID-scan paths
 /// for `rel`, adding them to its pathlist. Returns `true` iff a CurrentOf path
 /// was added (the caller must then add no others).
-pub fn create_tidscan_paths(
+pub fn create_tidscan_paths<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     enable_tidscan: bool,
 ) -> PgResult<bool> {
@@ -1517,7 +1520,7 @@ pub fn create_tidscan_paths(
             .map(|&rid| root.rinfo(rid).clause)
             .collect();
 
-        let path = ps::create_tidscan_path::call(root, rel, tidquals, &required_outer)?;
+        let path = ps::create_tidscan_path::call(root, run, rel, tidquals, &required_outer)?;
         ps::add_path::call(root, rel, path)?;
 
         // When the qual is CurrentOfExpr, the path we just added is the only one
@@ -1544,7 +1547,7 @@ pub fn create_tidscan_paths(
             .map(|&rid| root.rinfo(rid).clause)
             .collect();
         let path =
-            ps::create_tidrangescan_path::call(root, rel, tidrangequals, &required_outer)?;
+            ps::create_tidrangescan_path::call(root, run, rel, tidrangequals, &required_outer)?;
         ps::add_path::call(root, rel, path)?;
     }
 
@@ -1561,12 +1564,12 @@ pub fn create_tidscan_paths(
         )?;
 
         // Generate a path for each usable join clause
-        BuildParameterizedTidPaths(root, rel, &clauses)?;
+        BuildParameterizedTidPaths(root, run, rel, &clauses)?;
     }
 
     // Also consider parameterized TidPaths using "loose" join quals.
     let joininfo: Vec<RinfoId> = root.rel(rel).joininfo.clone();
-    BuildParameterizedTidPaths(root, rel, &joininfo)?;
+    BuildParameterizedTidPaths(root, run, rel, &joininfo)?;
 
     Ok(false)
 }
