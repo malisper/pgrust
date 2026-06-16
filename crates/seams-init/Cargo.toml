@@ -352,6 +352,7 @@ backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }

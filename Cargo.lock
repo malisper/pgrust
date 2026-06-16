@@ -1016,6 +1016,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gist-build"
+version = "0.1.0"
+dependencies = [
+ "backend-access-gist-core",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-buffile-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-sort-tuplesort-seams",
+ "libm",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gist-core"
 version = "0.1.0"
 dependencies = [
@@ -12996,6 +13028,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-json",
+ "types-jsonb",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-util"
 version = "0.0.0"
 dependencies = [
@@ -15136,9 +15200,11 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-storage-file-buffile-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-sortsupport-seams",
  "backend-utils-sort-storage",
  "backend-utils-sort-storage-seams",
+ "backend-utils-sort-tuplesort-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -15599,6 +15665,12 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "mcx"
@@ -16133,6 +16205,7 @@ dependencies = [
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-sortsupport",
  "backend-utils-sort-storage",
+ "backend-utils-sort-tuplesort",
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
  "common-checksum-helper",
