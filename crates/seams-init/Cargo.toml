@@ -270,6 +270,7 @@ backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-s
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
+backend-replication-walsender = { path = "../backend-replication-walsender" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }

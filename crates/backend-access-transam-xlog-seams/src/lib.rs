@@ -612,3 +612,11 @@ seam_core::seam!(
         ckpt_agg_sync_time: u64,
     )
 );
+
+seam_core::seam!(
+    /// `XLogBackgroundFlush()` (xlog.c) — flush as much WAL to disk as is
+    /// cheaply available; called by a stopping walsender to trigger pending WAL
+    /// to be written out. Returns whether it flushed anything (discarded by the
+    /// walsender caller).
+    pub fn xlog_background_flush() -> bool
+);
