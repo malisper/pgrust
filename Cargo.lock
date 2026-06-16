@@ -11602,6 +11602,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-statistics-mvdistinct"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
 name = "backend-storage-aio-aio-seams"
 version = "0.0.0"
 dependencies = [
