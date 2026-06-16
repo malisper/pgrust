@@ -547,7 +547,7 @@ fn out_boolexpr(buf: &mut String, node: &BoolExpr, write_loc: bool) {
 }
 
 /// `_outTargetEntry` (outfuncs.funcs.c).
-fn out_targetentry(buf: &mut String, node: &TargetEntry<'_>, write_loc: bool) {
+pub(crate) fn out_targetentry(buf: &mut String, node: &TargetEntry<'_>, write_loc: bool) {
     buf.push_str("TARGETENTRY");
     // WRITE_NODE_FIELD(expr): the child Expr (or `<>` for NULL).
     buf.push_str(" :expr ");

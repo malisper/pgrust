@@ -5,9 +5,9 @@
 //! `label`.
 //!
 //! Symmetry with `out_plan_family`: a node the OUT side `mirror-pg-and-panic`s
-//! (ModifyTable / WindowAgg / TableFuncScan / FunctionScan / SampleScan /
-//! CustomScan — a trimmed supertype field or a child sub-struct not reachable
-//! as a `Node`) is likewise not read here (those labels fall through to the C
+//! (ModifyTable / WindowAgg / TableFuncScan / SampleScan / CustomScan — a
+//! trimmed supertype field or a child sub-struct not reachable as a `Node`) is
+//! likewise not read here (those labels fall through to the C
 //! `elog(ERROR, "badly formatted node string ...")` tail, which is the explicit
 //! signal). Every node the OUT side serializes is read back here.
 
@@ -440,6 +440,51 @@ fn subquery_scan_status_from(code: i32) -> types_nodes::nodeindexscan::SubqueryS
 fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodeseqscan::SeqScan<'mcx>> {
     Ok(types_nodes::nodeseqscan::SeqScan {
         scan: read_scan_fields(mcx)?,
+    })
+}
+
+/// `_readFunctionScan` (readfuncs.funcs.c): `READ_SCAN_FIELDS()`, the
+/// `functions` node list (each cell a framed `RANGETBLFUNCTION`, read back via
+/// `node_read` → `Node::RangeTblFunction` and unwrapped into the typed Vec), and
+/// the `funcordinality` flag. Reads in the exact order `_outFunctionScan` wrote.
+fn read_functionscan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodefunctionscan::FunctionScan<'mcx>> {
+    let scan = read_scan_fields(mcx)?;
+    // READ_NODE_FIELD(functions): a List of RangeTblFunction, or NIL → None.
+    let _label = next_tok()?;
+    let functions = match read::node_read(mcx, None)? {
+        None => None,
+        Some(n) => match PgBox::into_inner(n) {
+            Node::List(elems) => {
+                let mut out = vec_with_capacity_in(mcx, elems.len())?;
+                for c in elems {
+                    match PgBox::into_inner(c) {
+                        Node::RangeTblFunction(rtf) => out.push(rtf),
+                        other => {
+                            return Err(elog_error(alloc::format!(
+                                "_readFunctionScan: expected RangeTblFunction in \
+                                 functions list, got {:?}",
+                                other.node_tag()
+                            )))
+                        }
+                    }
+                }
+                Some(out)
+            }
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "_readFunctionScan: expected List for functions, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        },
+    };
+    let funcordinality = read_bool_field()?;
+    Ok(types_nodes::nodefunctionscan::FunctionScan {
+        scan,
+        functions,
+        funcordinality,
     })
 }
 
@@ -1124,6 +1169,7 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"NAMEDTUPLESTORESCAN" => read_namedtuplestorescan(mcx).map(Node::NamedTuplestoreScan),
         b"VALUESSCAN" => read_valuesscan(mcx).map(Node::ValuesScan),
         b"FOREIGNSCAN" => read_foreignscan(mcx).map(Node::ForeignScan),
+        b"FUNCTIONSCAN" => read_functionscan(mcx).map(Node::FunctionScan),
         _ => return None,
     };
     Some(r)
@@ -1164,6 +1210,35 @@ mod tests {
         assert!(text.starts_with("{SEQSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":scan.plan.targetlist <>"), "{text}");
         assert!(text.ends_with(":scan.scanrelid 3}"), "{text}");
+    }
+
+    #[test]
+    fn functionscan_round_trips() {
+        // A FunctionScan with one RangeTblFunction (funccolcount set, lists empty)
+        // and funcordinality — exercises the framed RANGETBLFUNCTION list bridge.
+        let ctx = MemoryContext::new("funcscan");
+        let mcx = ctx.mcx();
+        let rtf = types_nodes::rawnodes::RangeTblFunction {
+            funcexpr: None,
+            funccolcount: 2,
+            funccolnames: PgVec::new_in(mcx),
+            funccoltypes: PgVec::new_in(mcx),
+            funccoltypmods: PgVec::new_in(mcx),
+            funccolcollations: PgVec::new_in(mcx),
+            funcparams: None,
+        };
+        let mut funcs = PgVec::new_in(mcx);
+        funcs.push(rtf);
+        let mut fs = types_nodes::nodefunctionscan::FunctionScan {
+            scan: types_nodes::nodeindexscan::Scan::default(),
+            functions: Some(funcs),
+            funcordinality: true,
+        };
+        fs.scan.scanrelid = 5;
+        let text = assert_framed_round_trip(&Node::FunctionScan(fs));
+        assert!(text.starts_with("{FUNCTIONSCAN :scan.plan.disabled_nodes 0"), "{text}");
+        assert!(text.contains(":functions ({RANGETBLFUNCTION"), "{text}");
+        assert!(text.ends_with(":funcordinality true}"), "{text}");
     }
 
     #[test]
