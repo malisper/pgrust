@@ -2079,6 +2079,7 @@ pub fn init_seams() {
     seams::constraint_type_oids::set(constraint_type_oids);
     seams::get_relation_constraint_oid::set(get_relation_constraint_oid);
     seams::get_domain_constraint_oid::set(get_domain_constraint_oid);
+    seams::RemoveConstraintById::set(RemoveConstraintById);
 }
 
 /* ===========================================================================

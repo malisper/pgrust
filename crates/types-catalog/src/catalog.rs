@@ -45,6 +45,10 @@ pub const PG_CATALOG_NAMESPACE: Oid = 11;
 /// `RELKIND_SEQUENCE` (`catalog/pg_class.h`) — `pg_class.relkind` for a
 /// sequence object.
 pub const RELKIND_SEQUENCE: u8 = b'S';
+/// `RELKIND_INDEX` (`catalog/pg_class.h`) — secondary index.
+pub const RELKIND_INDEX: u8 = b'i';
+/// `RELKIND_PARTITIONED_INDEX` (`catalog/pg_class.h`) — partitioned index.
+pub const RELKIND_PARTITIONED_INDEX: u8 = b'I';
 
 /* Catalog relation OIDs consumed by the pg_shdepend port
  * (`catalog/pg_*_d.h`). */
@@ -218,3 +222,41 @@ pub const PG_SUBSCRIPTION_TOAST_INDEX: Oid = 4184;
 pub const PG_TABLESPACE_TOAST_TABLE: Oid = 4185;
 /// `PgTablespaceToastIndex`.
 pub const PG_TABLESPACE_TOAST_INDEX: Oid = 4186;
+
+/* --- Catalog relation OIDs additionally required by dependency.c dispatch --- */
+
+/// `AttrDefaultRelationId` — `pg_attrdef` (`pg_attrdef_d.h`).
+pub const ATTR_DEFAULT_RELATION_ID: Oid = 2604;
+/// `RewriteRelationId` — `pg_rewrite` (`pg_rewrite_d.h`).
+pub const REWRITE_RELATION_ID: Oid = 2618;
+/// `TriggerRelationId` — `pg_trigger` (`pg_trigger_d.h`).
+pub const TRIGGER_RELATION_ID: Oid = 2620;
+/// `PolicyRelationId` — `pg_policy` (`pg_policy_d.h`).
+pub const POLICY_RELATION_ID: Oid = 3256;
+/// `PublicationNamespaceRelationId` — `pg_publication_namespace`.
+pub const PUBLICATION_NAMESPACE_RELATION_ID: Oid = 6237;
+/// `PublicationRelRelationId` — `pg_publication_rel`.
+pub const PUBLICATION_REL_RELATION_ID: Oid = 6106;
+/// `CastRelationId` — `pg_cast` (`pg_cast_d.h`).
+pub const CAST_RELATION_ID: Oid = 2605;
+/// `TSParserRelationId` — `pg_ts_parser` (`pg_ts_parser_d.h`).
+pub const TS_PARSER_RELATION_ID: Oid = 3601;
+/// `TSTemplateRelationId` — `pg_ts_template` (`pg_ts_template_d.h`).
+pub const TS_TEMPLATE_RELATION_ID: Oid = 3764;
+/// `TransformRelationId` — `pg_transform` (`pg_transform_d.h`).
+pub const TRANSFORM_RELATION_ID: Oid = 3576;
+/// `TableSpaceRelationId` — `pg_tablespace` (shared) (`pg_tablespace_d.h`).
+pub const TABLESPACE_RELATION_ID: Oid = 1213;
+/// `InitPrivsRelationId` — `pg_init_privs` (`pg_init_privs_d.h`).
+pub const INIT_PRIVS_RELATION_ID: Oid = 3394;
+/// `InitPrivsObjIndexId` — `pg_init_privs_o_c_o_index`, btree on
+/// (objoid, classoid, objsubid) (`pg_init_privs.h` `DECLARE_UNIQUE_INDEX_PKEY`).
+pub const INIT_PRIVS_OBJ_INDEX_ID: Oid = 3395;
+
+/* `Anum_pg_init_privs_*` (`pg_init_privs_d.h`) — CATALOG field order. */
+/// `Anum_pg_init_privs_objoid`.
+pub const Anum_pg_init_privs_objoid: types_core::primitive::AttrNumber = 1;
+/// `Anum_pg_init_privs_classoid`.
+pub const Anum_pg_init_privs_classoid: types_core::primitive::AttrNumber = 2;
+/// `Anum_pg_init_privs_objsubid`.
+pub const Anum_pg_init_privs_objsubid: types_core::primitive::AttrNumber = 3;

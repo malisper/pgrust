@@ -7,6 +7,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
@@ -81,4 +83,12 @@ seam_core::seam!(
         conname: &str,
         missing_ok: bool,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RemoveConstraintById(conId)` (catalog/pg_constraint.c): the per-class
+    /// `OCLASS_CONSTRAINT` drop handler dependency.c's `doDeletion` invokes for
+    /// a `pg_constraint` object. Removes the constraint's catalog row. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveConstraintById(conId: Oid) -> PgResult<()>
 );

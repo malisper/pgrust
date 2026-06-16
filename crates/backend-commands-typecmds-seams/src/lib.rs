@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use types_core::Oid;
 use types_error::PgResult;
 
@@ -17,4 +19,12 @@ seam_core::seam!(
         new_owner_id: Oid,
         has_depend_entry: bool,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RemoveTypeById(typeOid)` (commands/typecmds.c): the per-class
+    /// `OCLASS_TYPE` drop handler dependency.c's `doDeletion` invokes for a
+    /// `pg_type` object. Removes the type's catalog row. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn RemoveTypeById(typeOid: Oid) -> PgResult<()>
 );

@@ -20,6 +20,7 @@
 
 use mcx::Mcx;
 use seam_core::seam;
+use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_rel::Relation;
@@ -201,4 +202,13 @@ seam!(
         objoid: Oid,
         classoid: Oid,
     ) -> PgResult<()>
+);
+
+seam!(
+    /// `DeleteSecurityLabel(object)` (commands/seclabel.c): remove all security
+    /// labels (every provider) attached to `object`. dependency.c's
+    /// `deleteObjectsInList` calls this to clean up `pg_seclabel`/`pg_shseclabel`
+    /// rows for a dropped object. Allocations land in `mcx`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn DeleteSecurityLabel<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()>
 );
