@@ -696,7 +696,6 @@ pub fn inv_write(obj_desc: &mut LargeObjectDesc, buf: &[u8]) -> PgResult<i32> {
     // the varlena framing (`SET_VARSIZE`) happens in the indexing seam.
     let mut workb: Vec<u8> = alloc_workbuf();
     let mut neednextpage: bool;
-    let indstate: types_cluster::CatalogIndexStateToken;
 
     /* enforce writability because snapshot is probably wrong otherwise */
     if (obj_desc.flags & IFS_WRLOCK) == 0 {
@@ -725,7 +724,7 @@ pub fn inv_write(obj_desc: &mut LargeObjectDesc, buf: &[u8]) -> PgResult<i32> {
     let (lo_heap_r, lo_index_r) = open_lo_relation(mcx)?;
 
     // indstate = CatalogOpenIndexes(lo_heap_r);
-    indstate = indexing::catalog_open_indexes::call(mcx, &lo_heap_r)?;
+    let mut indstate = indexing::catalog_open_indexes::call(mcx, &lo_heap_r)?;
 
     // ScanKeyInit loid = id; pageno >= pageno.
     let skey = [
@@ -825,10 +824,11 @@ pub fn inv_write(obj_desc: &mut LargeObjectDesc, buf: &[u8]) -> PgResult<i32> {
             // newtup = heap_modify_tuple(oldtuple, ..., values, nulls, replace);
             // CatalogTupleUpdateWithInfo(lo_heap_r, &newtup->t_self, newtup, indstate);
             indexing::catalog_tuple_update_with_info_pg_largeobject::call(
+                mcx,
                 &lo_heap_r,
                 old.tid,
                 &workb[..len as usize],
-                &indstate,
+                &mut indstate,
             )?;
             // heap_freetuple(newtup);  -- seam owns the tuple memory.
 
@@ -876,11 +876,12 @@ pub fn inv_write(obj_desc: &mut LargeObjectDesc, buf: &[u8]) -> PgResult<i32> {
             // newtup = heap_form_tuple(lo_heap_r->rd_att, values, nulls);
             // CatalogTupleInsertWithInfo(lo_heap_r, newtup, indstate);
             indexing::catalog_tuple_insert_with_info_pg_largeobject::call(
+                mcx,
                 &lo_heap_r,
                 obj_desc.id,
                 pageno,
                 &workb[..len as usize],
-                &indstate,
+                &mut indstate,
             )?;
             // heap_freetuple(newtup);  -- seam owns the tuple memory.
         }
@@ -915,7 +916,6 @@ pub fn inv_truncate(obj_desc: &mut LargeObjectDesc, len: int64) -> PgResult<()> 
     let off: i32;
     // workbuf scratch page as a Vec<u8>; varlena framing in the seam.
     let mut workb: Vec<u8> = alloc_workbuf();
-    let indstate: types_cluster::CatalogIndexStateToken;
 
     /* enforce writability because snapshot is probably wrong otherwise */
     if (obj_desc.flags & IFS_WRLOCK) == 0 {
@@ -943,7 +943,7 @@ pub fn inv_truncate(obj_desc: &mut LargeObjectDesc, len: int64) -> PgResult<()> 
     let (lo_heap_r, lo_index_r) = open_lo_relation(mcx)?;
 
     // indstate = CatalogOpenIndexes(lo_heap_r);
-    indstate = indexing::catalog_open_indexes::call(mcx, &lo_heap_r)?;
+    let mut indstate = indexing::catalog_open_indexes::call(mcx, &lo_heap_r)?;
 
     /*
      * Set up to find all pages with desired loid and pageno >= target
@@ -1018,10 +1018,11 @@ pub fn inv_truncate(obj_desc: &mut LargeObjectDesc, len: int64) -> PgResult<()> 
         // newtup = heap_modify_tuple(oldtuple, ..., values, nulls, replace);
         // CatalogTupleUpdateWithInfo(lo_heap_r, &newtup->t_self, newtup, indstate);
         indexing::catalog_tuple_update_with_info_pg_largeobject::call(
+            mcx,
             &lo_heap_r,
             old.tid,
             &workb[..off as usize],
-            &indstate,
+            &mut indstate,
         )?;
     } else {
         /*
@@ -1058,11 +1059,12 @@ pub fn inv_truncate(obj_desc: &mut LargeObjectDesc, len: int64) -> PgResult<()> 
         // newtup = heap_form_tuple(lo_heap_r->rd_att, values, nulls);
         // CatalogTupleInsertWithInfo(lo_heap_r, newtup, indstate);
         indexing::catalog_tuple_insert_with_info_pg_largeobject::call(
+            mcx,
             &lo_heap_r,
             obj_desc.id,
             pageno,
             &workb[..off as usize],
-            &indstate,
+            &mut indstate,
         )?;
     }
 

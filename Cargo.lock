@@ -19866,6 +19866,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-nodes",
+ "types-rel",
  "types-tuple",
  "types-vacuum",
 ]
