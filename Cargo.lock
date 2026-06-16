@@ -3682,6 +3682,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-walsummary"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-walsummary-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "common-blkreftable",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-blkreftable",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-walsummarizer",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -18715,6 +18734,7 @@ dependencies = [
  "backend-backup-sink",
  "backend-backup-sink-support",
  "backend-backup-throttle",
+ "backend-backup-walsummary",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",

@@ -16,10 +16,11 @@
 //!  * open a summary file by name ([`open_wal_summary_file`]);
 //!  * remove a stale summary file older than a cutoff
 //!    ([`remove_wal_summary_if_older_than`]);
-//!  * read / write a summary's bytes through the block-ref-table
-//!    reader/writer callbacks ([`read_wal_summary`] / [`write_wal_summary`]);
-//!    and
-//!  * report a block-ref-table read error ([`report_wal_summary_error`]).
+//!  * write a summary's bytes through the block-ref-table writer callback
+//!    ([`write_wal_summary`]); and
+//!  * set up the block-ref-table reader over a summary file, building the
+//!    `ReadWalSummary` read callback and handing it to the blkreftable owner
+//!    ([`wal_summary_create_reader`]).
 //!
 //! # Ported logic vs. seamed externals
 //!
@@ -40,24 +41,22 @@
 //! # Reader bundling
 //!
 //! `pg_wal_summary_contents` (walsummaryfuncs.c) opens a summary file and wraps
-//! it in a `BlockRefTableReader` whose `io_callback` is [`read_wal_summary`]
-//! and whose `error_callback` is [`report_wal_summary_error`], over a
-//! `WalSummaryIO` cursor (`{ file, filepos }`). Because the open `File`, the
-//! read callback and the error callback are all walsummary-owned while the
-//! reader struct is blkreftable-owned, the open + reader construction is
-//! bundled into the [`wal_summary_create_reader`] owner seam and the matching
-//! `FileClose` into [`wal_summary_reader_file_close`]. This owner keeps the
-//! per-reader `WalSummaryIO` in a registry keyed by the reader handle;
-//! blkreftable reaches the cursor through the [`read_wal_summary`] /
-//! [`report_wal_summary_error`] seams (also installed here) keyed by that same
-//! handle, and `CreateBlockRefTableReader` itself is the
-//! `common-blkreftable` `create_block_ref_table_reader` seam (owner not yet
-//! ported: loud seam-and-panic).
+//! it in a `BlockRefTableReader` whose `io_callback` is `ReadWalSummary` over a
+//! `WalSummaryIO` cursor (`{ file, filepos }`). The open + reader construction
+//! is bundled into the [`wal_summary_create_reader`] owner seam: it opens the
+//! `File`, builds the `ReadWalSummary` read-callback closure over the cursor,
+//! and hands it directly to the blkreftable owner's
+//! `common_blkreftable::create_block_ref_table_reader` (a plain pub fn — the C
+//! `CreateBlockRefTableReader`), which mints and returns the reader handle.
+//! blkreftable assembles and raises its own corruption `ereport(ERROR)`
+//! (subsuming C's `ReportWalSummaryError`), keyed by the `error_filename` this
+//! owner passes. The matching `FileClose` is [`wal_summary_reader_file_close`];
+//! this owner records the open `File` keyed by the returned reader handle so
+//! that teardown can find and close it.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use mcx::{Mcx, PgVec};
 
@@ -65,14 +64,14 @@ use backend_utils_error::ereport;
 use backend_utils_error::errno::sqlstate_for_file_access;
 use types_blkreftable::BlockRefTableReaderHandle;
 use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
-use types_error::{ErrorLocation, PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_error::{ErrorLocation, PgError, PgResult, DEBUG2};
 use types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARY_READ, WAIT_EVENT_WAL_SUMMARY_WRITE};
 use types_storage::file::File;
 use types_walsummarizer::WalSummaryFile;
 
 use backend_backup_walsummary_seams as walsummary_seams;
 use backend_storage_file_fd_seams as fd;
-use common_blkreftable_seams as blkreftable;
+use common_blkreftable as blkreftable_owner;
 
 /// `XLOGDIR "/summaries"` — the directory enumerated and addressed by name
 /// throughout this module.
@@ -115,12 +114,6 @@ struct WalSummaryIo {
 fn io_registry() -> &'static Mutex<HashMap<u64, WalSummaryIo>> {
     static REGISTRY: OnceLock<Mutex<HashMap<u64, WalSummaryIo>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Mint a fresh, never-reused reader handle.
-fn next_reader_handle() -> BlockRefTableReaderHandle {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    BlockRefTableReaderHandle(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 // ---------------------------------------------------------------------------
@@ -406,55 +399,15 @@ pub fn is_wal_summary_filename(filename: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// ReadWalSummary (walsummary.c:269) — installed as `wal_summary_read`.
+// ReadWalSummary (walsummary.c:269).
+//
+// The C `io_callback_fn` `ReadWalSummary` is no longer a separate installed
+// seam: blkreftable's `CreateBlockRefTableReader` takes the read callback
+// directly (`common_blkreftable::create_block_ref_table_reader`), so the cursor
+// read is built inline as the `read_callback` closure in
+// `wal_summary_create_reader` (advancing the captured `filepos` exactly as
+// `io->filepos += nbytes`).
 // ---------------------------------------------------------------------------
-
-/// Data read callback for use with `CreateBlockRefTableReader`
-/// (`ReadWalSummary`). Reads up to `length` bytes at the cursor's current
-/// `filepos`, advancing it by the count returned. A read error (the C
-/// `nbytes < 0`) is reported.
-///
-/// The cursor is resolved from the reader handle's registry entry.
-pub fn read_wal_summary<'mcx>(
-    mcx: Mcx<'mcx>,
-    reader: BlockRefTableReaderHandle,
-    length: usize,
-) -> PgResult<PgVec<'mcx, u8>> {
-    // io = wal_summary_io; (resolved from the registry)
-    let (file, filepos) = {
-        let registry = io_registry().lock().unwrap();
-        let io = registry
-            .get(&reader.0)
-            .expect("read_wal_summary: unknown WAL summary reader handle");
-        (io.file, io.filepos)
-    };
-
-    // nbytes = FileRead(io->file, data, length, io->filepos,
-    //                   WAIT_EVENT_WAL_SUMMARY_READ);
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, length)?;
-    buf.resize(length, 0u8);
-    let nbytes = fd::file_read::call(file, &mut buf, filepos, WAIT_EVENT_WAL_SUMMARY_READ)?;
-
-    // if (nbytes < 0)
-    //     ereport(ERROR, errcode_for_file_access, "could not read file ...");
-    if nbytes < 0 {
-        let path = fd::file_path_name::call(file);
-        return Err(file_access_error("could not read file", &path, fd::last_errno::call()));
-    }
-    let nbytes = nbytes as usize;
-
-    // io->filepos += nbytes;
-    {
-        let mut registry = io_registry().lock().unwrap();
-        if let Some(io) = registry.get_mut(&reader.0) {
-            io.filepos += nbytes as i64;
-        }
-    }
-
-    // return nbytes;  (the caller reads `nbytes` bytes of `data`)
-    buf.truncate(nbytes);
-    Ok(buf)
-}
 
 // ---------------------------------------------------------------------------
 // WriteWalSummary (walsummary.c:288).
@@ -506,25 +459,14 @@ fn write_wal_summary(io: &mut WalSummaryIo, data: &[u8]) -> PgResult<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// ReportWalSummaryError (walsummary.c:315) — installed as
-// `wal_summary_report_error`.
+// ReportWalSummaryError (walsummary.c:315).
+//
+// The C `report_error_fn` `ReportWalSummaryError` is no longer a separate
+// installed seam: blkreftable's reader assembles and raises its own
+// `ereport(ERROR)` (`report_error`, keyed by the `error_filename` passed to
+// `create_block_ref_table_reader`), folding in the corruption message C built
+// from the printf-style format. No error callback is threaded from this owner.
 // ---------------------------------------------------------------------------
-
-/// Error-reporting callback for use with `CreateBlockRefTableReader`
-/// (`ReportWalSummaryError`). The C function assembles a message from a
-/// printf-style format and varargs; in the owned model blkreftable assembles
-/// the message and passes it here. Always raises `ereport(ERROR,
-/// errcode(ERRCODE_DATA_CORRUPTED), errmsg_internal("%s", buf))`.
-pub fn report_wal_summary_error(
-    _reader: BlockRefTableReaderHandle,
-    message: &str,
-) -> PgResult<()> {
-    // ereport(ERROR, errcode(ERRCODE_DATA_CORRUPTED), errmsg_internal("%s", buf.data));
-    ereport(ERROR)
-        .errcode(ERRCODE_DATA_CORRUPTED)
-        .errmsg_internal(message.to_owned())
-        .finish(loc("ReportWalSummaryError"))
-}
 
 // ---------------------------------------------------------------------------
 // ListComparatorForWalSummaryFiles (walsummary.c:336).
@@ -544,12 +486,22 @@ fn list_comparator_for_wal_summary_files(ws1: &WalSummaryFile, ws2: &WalSummaryF
 /// `wal_summary_create_reader` — the `pg_wal_summary_contents` reader setup:
 /// `OpenWalSummaryFile(&ws, false)` followed by
 /// `CreateBlockRefTableReader(ReadWalSummary, &io, FilePathName(io.file),
-/// ReportWalSummaryError, NULL)`. Opens the summary file, mints a reader handle
-/// and registers its `WalSummaryIO` cursor, then asks blkreftable to construct
-/// the reader (which verifies the magic via the [`read_wal_summary`] /
-/// [`report_wal_summary_error`] callbacks keyed by the handle).
+/// ReportWalSummaryError, NULL)`. Opens the summary file, builds the
+/// `ReadWalSummary` `io_callback` over the file's `WalSummaryIO` cursor, and
+/// hands it to the blkreftable owner's `CreateBlockRefTableReader`
+/// (`common_blkreftable::create_block_ref_table_reader`) which mints and returns
+/// the reader handle after verifying the magic number. The open `File` is then
+/// recorded in this owner's registry keyed by that handle so the matching
+/// `FileClose` teardown can find it.
+///
+/// The C `read_callback_arg` is `&io` (the `WalSummaryIO` cursor); here the
+/// cursor (`file` + `filepos`) is captured directly by the `io_callback`
+/// closure, which advances `filepos` on each read. The C `error_callback`
+/// (`ReportWalSummaryError`) is folded into the blkreftable owner's own
+/// `report_error` `ereport(ERROR)` assembly (keyed by `error_filename`), so no
+/// separate error callback is threaded.
 fn wal_summary_create_reader<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     ws: WalSummaryFile,
 ) -> PgResult<BlockRefTableReaderHandle> {
     // io.filepos = 0;
@@ -559,27 +511,60 @@ fn wal_summary_create_reader<'mcx>(
         Some(file) => file,
         None => unreachable!("OpenWalSummaryFile(missing_ok=false) returned None"),
     };
+    // FilePathName(io.file) — supplies the "%s" of blkreftable's error messages.
     let error_filename = fd::file_path_name::call(file);
 
-    // Mint the reader handle and register the cursor before constructing the
-    // reader, so blkreftable's initial magic read can resolve it.
-    let reader = next_reader_handle();
-    io_registry()
-        .lock()
-        .unwrap()
-        .insert(reader.0, WalSummaryIo { file, filepos: 0 });
+    // Build the ReadWalSummary read callback over the WalSummaryIO cursor
+    // (`{ File file; off_t filepos; }`). The closure owns the cursor: `file`
+    // (a Copy VFD handle) and a mutable `filepos` advanced by each read, exactly
+    // as C's `io->filepos += nbytes`.
+    //
+    //   static int ReadWalSummary(void *callback_arg, void *data, int length) {
+    //       WalSummaryIO *io = callback_arg;
+    //       nbytes = FileRead(io->file, data, length, io->filepos,
+    //                         WAIT_EVENT_WAL_SUMMARY_READ);
+    //       if (nbytes < 0) ereport(ERROR, ... "could not read file ...");
+    //       io->filepos += nbytes;
+    //       return nbytes;
+    //   }
+    //
+    // FileRead's `Err` / negative-count error path is the C `ereport(ERROR)`
+    // longjmp; the `io_callback_fn` contract returns a plain byte count, so a
+    // read failure surfaces as a zero-byte read, which blkreftable's buffered
+    // reader turns into the `"file \"%s\" ends unexpectedly"` `ereport(ERROR)`
+    // (same fatal outcome, aborting the SRF).
+    let mut filepos: i64 = 0;
+    let read_callback: blkreftable_owner::ReadCallback = Box::new(move |data: &mut [u8]| {
+        match fd::file_read::call(file, data, filepos, WAIT_EVENT_WAL_SUMMARY_READ) {
+            Ok(nbytes) if nbytes >= 0 => {
+                let nbytes = nbytes as usize;
+                filepos += nbytes as i64;
+                nbytes
+            }
+            // nbytes < 0 (OS read error) or a hard fd.c ereport(ERROR): the C
+            // path would ereport(ERROR); signal EOF so the reader raises its own
+            // corruption ereport.
+            _ => 0,
+        }
+    });
 
     // reader = CreateBlockRefTableReader(ReadWalSummary, &io,
     //                                    FilePathName(io.file),
     //                                    ReportWalSummaryError, NULL);
-    match blkreftable::create_block_ref_table_reader::call(mcx, reader, &error_filename) {
-        Ok(()) => Ok(reader),
+    match blkreftable_owner::create_block_ref_table_reader(read_callback, error_filename) {
+        Ok(reader) => {
+            // Record the open File keyed by the reader handle so the matching
+            // FileClose teardown (wal_summary_reader_file_close) can close it.
+            io_registry()
+                .lock()
+                .unwrap()
+                .insert(reader.0, WalSummaryIo { file, filepos: 0 });
+            Ok(reader)
+        }
         Err(e) => {
-            // The reader was not constructed; drop the cursor and close the
-            // file we opened so it does not leak.
-            if let Some(io) = io_registry().lock().unwrap().remove(&reader.0) {
-                fd::file_close::call(io.file);
-            }
+            // The reader was not constructed; close the file we opened so it
+            // does not leak (the C path FileCloses on the error too).
+            fd::file_close::call(file);
             Err(e)
         }
     }
@@ -667,8 +652,6 @@ pub fn init_seams() {
     walsummary_seams::write_wal_summary_file::set(write_wal_summary_file);
     walsummary_seams::wal_summary_create_reader::set(wal_summary_create_reader);
     walsummary_seams::wal_summary_reader_file_close::set(wal_summary_reader_file_close);
-    walsummary_seams::wal_summary_read::set(read_wal_summary);
-    walsummary_seams::wal_summary_report_error::set(report_wal_summary_error);
 }
 
 // ---------------------------------------------------------------------------
