@@ -27,15 +27,19 @@
 //!   (`table_open` + `get_catalog_object_by_oid` + `heap_getattr`, or
 //!   `SearchSysCache2(ATTNUM)` + `SysCacheGetAttr(attacl)` for a relation
 //!   attribute), returning it verbatim (`PG_RETURN_DATUM` / `PG_RETURN_NULL`).
+//! - `pg_identify_object` — filled: opens the object's catalog via the
+//!   `relation_open` seam, fetches the object tuple through the F0
+//!   `get_catalog_object_by_oid` (genam seam, installed), reads the
+//!   namespace/name attributes with `heap_getattr` (the `heap_attisnull` +
+//!   `nocachegetattr` primitives) against `RelationGetDescr`, then
+//!   `quote_identifier` / `get_namespace_name` for the schema/name columns and
+//!   the F2 `getObjectTypeDescription` + F3 `getObjectIdentity` legs.
 //! - `textarray_to_strvaluelist`, `strlist_to_textarray` — still
 //!   mirror-and-panic, genuinely gated on the array Datum value lane
 //!   (`types_array::ArrayType` is header-only, no element-bytes payload).
 //! - `pg_get_object_address` — mirror-and-panic, gated on the parser
-//!   node-construction lane (`typeStringToTypeName`/`makeFloat`/`ObjectWithArgs`)
-//!   plus the array deconstruct lane.
-//! - `pg_identify_object` — mirror-and-panic, gated on the catalog-tuple read
-//!   lane (`table_open`/`get_catalog_object_by_oid`/`heap_getattr` +
-//!   `quote_identifier`/`get_namespace_name`).
+//!   node-construction lane (`makeFloat`/`makeString`/`ObjectWithArgs`) plus the
+//!   array deconstruct lane (`textarray_to_strvaluelist`).
 
 use mcx::{Mcx, PgString};
 use types_array::ArrayType;
@@ -105,18 +109,21 @@ pub fn pg_get_object_address<'mcx>(
     _object_names: &[Option<String>],
     _object_args: &[Option<String>],
 ) -> PgResult<ObjectAddress> {
-    // Gated on (a) the array Datum value lane — the per-type-name and per-arg
-    // `deconstruct_array_builtin` decoding of `object_names` / `object_args` —
-    // and (b) the parser node-construction lane: the C builds parser `Node`s
-    // (`typeStringToTypeName`, `makeFloat`, `makeString`, `ObjectWithArgs`,
-    // `list_make2`/`lcons`) per object type before invoking the
-    // `get_object_address` seam. `read_objtype_from_string` (F0) is ready, but
-    // the Node assembly + `typeStringToTypeName` (backend-parser) are unported.
-    // Mirror-and-panic until those land.
+    // Gated on (a) the array Datum value lane — the C deconstructs the
+    // `object_names`/`object_args` `text[]` inputs via `deconstruct_array_builtin`
+    // / `textarray_to_strvaluelist` (both blocked: `types_array::ArrayType` is
+    // header-only, no element-bytes payload) — and (b) the parser
+    // node-construction lane: the C assembles parser `Node`s (`makeFloat`,
+    // `makeString` String-value lists, `ObjectWithArgs`, `list_make2`/`lcons`)
+    // per object type before invoking the `get_object_address` seam.
+    // `read_objtype_from_string` (F0) and `typeStringToTypeName` (now installed)
+    // are ready, but the String/Float/ObjectWithArgs Node assembly + the array
+    // deconstruct lane are not. Mirror-and-panic until those land.
     panic!(
         "decomp: pg_get_object_address gated on the parser node-construction \
-         lane (typeStringToTypeName / makeFloat / ObjectWithArgs assembly) and \
-         the array Datum value lane (deconstruct of object_names/object_args)"
+         lane (makeFloat / makeString / ObjectWithArgs assembly) and the array \
+         Datum value lane (deconstruct of object_names/object_args via \
+         textarray_to_strvaluelist)"
     )
 }
 
@@ -163,24 +170,180 @@ pub struct IdentifyObjectRow<'mcx> {
 /// type/schema/name/identity record for a `(classid, objid, objsubid)` tuple
 /// (uses `get_call_result_type` to build the result descriptor).
 pub fn pg_identify_object<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _classid: Oid,
-    _objid: Oid,
-    _objsubid: i32,
+    mcx: Mcx<'mcx>,
+    classid: Oid,
+    objid: Oid,
+    objsubid: i32,
 ) -> PgResult<IdentifyObjectRow<'mcx>> {
-    // Gated on the catalog-tuple read lane: the schema/name extraction opens the
-    // object's catalog (`table_open(classId)`), fetches the object tuple via
-    // `get_catalog_object_by_oid` (an F0 helper that itself mirror-and-panics
-    // until the relcache/heaptuple lane lands), and reads the namespace/name
-    // attributes with `heap_getattr` against the catalog tupdesc, then
-    // `quote_identifier` / `get_namespace_name`. The type (F2) and identity (F3)
-    // legs are ready in-crate, but the tuple-read + quoting cross-crate lanes
-    // are unported. Mirror-and-panic until they land.
-    panic!(
-        "decomp: pg_identify_object gated on the catalog-tuple read lane \
-         (table_open + get_catalog_object_by_oid + heap_getattr for schema/name, \
-         plus quote_identifier / get_namespace_name)"
-    )
+    use backend_utils_adt_ruleutils_seams as ruleutils;
+    use backend_utils_cache_lsyscache_seams as lsyscache;
+    use types_core::primitive::{InvalidAttrNumber, INVALID_OID};
+    use types_storage::lock::AccessShareLock;
+
+    use crate::identity::get_object_identity;
+    use crate::properties::{
+        get_object_attnum_name, get_object_attnum_namespace, get_object_attnum_oid,
+        get_object_namensp_unique, is_objectclass_supported,
+    };
+    use crate::resolve::get_catalog_object_by_oid;
+
+    let address = ObjectAddress {
+        classId: classid,
+        objectId: objid,
+        objectSubId: objsubid,
+    };
+
+    // The C calls get_call_result_type() purely to assert the SQL return type is
+    // a row type; that has no value-boundary representation here (the caller
+    // already drives a 4-column record), so it is elided.
+
+    let mut schema_oid: Oid = INVALID_OID;
+    let mut objname: Option<PgString<'mcx>> = None;
+
+    if is_objectclass_supported(address.classId) {
+        // Relation catalog = table_open(address.classId, AccessShareLock);
+        let catalog = backend_access_common_relation_seams::relation_open::call(
+            mcx,
+            address.classId,
+            AccessShareLock,
+        )?;
+
+        // objtup = get_catalog_object_by_oid(catalog, get_object_attnum_oid(...),
+        //                                    address.objectId);
+        let objtup = get_catalog_object_by_oid(
+            mcx,
+            &catalog,
+            get_object_attnum_oid(address.classId)?,
+            address.objectId,
+        )?;
+
+        if let Some(objtup) = objtup {
+            // nspAttnum = get_object_attnum_namespace(address.classId);
+            let nsp_attnum = get_object_attnum_namespace(address.classId)?;
+            if nsp_attnum != InvalidAttrNumber {
+                // schema_oid = heap_getattr(objtup, nspAttnum,
+                //                           RelationGetDescr(catalog), &isnull);
+                match heap_getattr(mcx, &objtup, nsp_attnum as i32, &catalog.rd_att)? {
+                    None => {
+                        return Err(types_error::PgError::error(format!(
+                            "invalid null namespace in object {}/{}/{}",
+                            address.classId, address.objectId, address.objectSubId
+                        )));
+                    }
+                    Some(d) => schema_oid = d.as_oid(),
+                }
+            }
+
+            // We only return the object name if it can be used (together with the
+            // schema name, if any) as a unique identifier.
+            if get_object_namensp_unique(address.classId)? {
+                // nameAttnum = get_object_attnum_name(address.classId);
+                let name_attnum = get_object_attnum_name(address.classId)?;
+                if name_attnum != InvalidAttrNumber {
+                    // nameDatum = heap_getattr(objtup, nameAttnum,
+                    //                          RelationGetDescr(catalog), &isnull);
+                    match heap_getattr(mcx, &objtup, name_attnum as i32, &catalog.rd_att)? {
+                        None => {
+                            return Err(types_error::PgError::error(format!(
+                                "invalid null name in object {}/{}/{}",
+                                address.classId, address.objectId, address.objectSubId
+                            )));
+                        }
+                        Some(d) => {
+                            // objname = quote_identifier(NameStr(*DatumGetName(...)));
+                            let name = datum_get_name(&d);
+                            objname = Some(ruleutils::quote_identifier::call(mcx, &name)?);
+                        }
+                    }
+                }
+            }
+        }
+
+        // table_close(catalog, AccessShareLock);
+        catalog.close(AccessShareLock)?;
+    }
+
+    let mut row = IdentifyObjectRow::default();
+
+    // object type, which can never be NULL:
+    //   values[0] = CStringGetTextDatum(getObjectTypeDescription(&address, true));
+    // The F2 body models the never-NULL C result as `Option<PgString>`; a `None`
+    // would crash the C (unconditional CStringGetTextDatum), so surface it as an
+    // `elog`-style error rather than fabricate a value.
+    row.type_ = match f2_get_object_type_description(mcx, &address, true)? {
+        Some(s) => Some(s),
+        None => {
+            return Err(types_error::PgError::error(format!(
+                "could not identify object type for {classid}/{objid}/{objsubid}"
+            )));
+        }
+    };
+
+    // Before doing anything, extract the object identity.  If the identity could
+    // not be found, set all the fields except the object type to NULL.
+    //   objidentity = getObjectIdentity(&address, true);
+    let objidentity = get_object_identity(mcx, &address, true)?;
+
+    // schema name
+    if OidIsValid(schema_oid) && objidentity.is_some() {
+        match lsyscache::get_namespace_name::call(mcx, schema_oid)? {
+            Some(schema) => {
+                row.schema = Some(ruleutils::quote_identifier::call(mcx, schema.as_str())?);
+            }
+            // get_namespace_name returns NULL for a dropped namespace; the C
+            // `quote_identifier(NULL)` would crash, so a vanished namespace is
+            // an `elog`-style error here.
+            None => {
+                return Err(types_error::PgError::error(format!(
+                    "cache lookup failed for namespace {schema_oid}"
+                )));
+            }
+        }
+    }
+
+    // object name
+    if objname.is_some() && objidentity.is_some() {
+        row.name = objname;
+    }
+
+    // object identity
+    row.identity = objidentity;
+
+    Ok(row)
+}
+
+/// `heap_getattr(tup, attnum, tupleDesc, &isnull)` (htup_details.h) for a
+/// user attribute (`attnum > 0`): `Ok(None)` is the C `isnull == true` (with the
+/// returned `Datum` being `(Datum) 0`, never read by the caller); `Ok(Some(d))`
+/// carries the fetched value. Mirrors the macro's null short-circuit followed by
+/// `nocachegetattr` (`fastgetattr`'s cached-offset fast path collapses into
+/// `nocachegetattr`, which honours any existing `attcacheoff`).
+fn heap_getattr<'mcx>(
+    mcx: Mcx<'mcx>,
+    formed: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+    attnum: i32,
+    tuple_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>> {
+    // if (att_isnull(...)) isnull = true; else value = fastgetattr(...);
+    if backend_access_common_heaptuple::heap_attisnull(&formed.tuple, attnum, Some(tuple_desc)) {
+        return Ok(None);
+    }
+    Ok(Some(backend_access_common_heaptuple::nocachegetattr(
+        mcx,
+        &formed.tuple,
+        attnum,
+        tuple_desc,
+        formed.data.as_slice(),
+    )?))
+}
+
+/// `NameStr(*DatumGetName(datum))` (objectaddress.c 4310): a name-typed
+/// (`NAMEOID`, fixed 64-byte by-reference) column lands as the `ByRef` Datum arm
+/// holding the `NameData` bytes; the name is the run up to the first NUL.
+fn datum_get_name(datum: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> String {
+    let bytes = datum.as_ref_bytes();
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..len]).into_owned()
 }
 
 /// One row of `pg_identify_object_as_address` (objectaddress.c 4365): the
