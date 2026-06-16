@@ -8,8 +8,17 @@ publish.workspace = true
 name = "seams_init"
 path = "src/lib.rs"
 
+# The `postgres` executable entry shell (mirrors src/backend/main/main.c's
+# `main()`): create the top memory context, install every seam, then dispatch
+# through backend_main_main::pg_main.
+[[bin]]
+name = "postgres"
+path = "src/bin/postgres.rs"
+
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
 backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
 contrib-amcheck-verify-common = { path = "../contrib-amcheck-verify-common" }
@@ -96,6 +105,7 @@ backend-backup-sink = { path = "../backend-backup-sink" }
 backend-backup-sink-support = { path = "../backend-backup-sink-support" }
 backend-backup-throttle = { path = "../backend-backup-throttle" }
 backend-bootstrap-bootparse = { path = "../backend-bootstrap-bootparse" }
+backend-bootstrap-catalog-data = { path = "../backend-bootstrap-catalog-data" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-storage = { path = "../backend-catalog-storage" }
