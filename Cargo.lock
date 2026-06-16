@@ -13777,6 +13777,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-mcxtfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-procsignal-seams",
+ "backend-utils-adt-mcxtfuncs-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-utils-adt-mcxtfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
