@@ -1,0 +1,47 @@
+[package]
+name = "backend-commands-dbcommands"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_dbcommands"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# Inward seams this unit owns + installs.
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+
+# pg_database read/mutate substrate (the landed keystone owner's seams).
+backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-seams" }
+
+# Outward owner crates / -seams consumed by F0 + dbase_redo.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+backend-catalog-pg-authid-seams = { path = "../backend-catalog-pg-authid-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+
+# Real ported owners called directly.
+backend-common-relpath = { path = "../backend-common-relpath" }
+backend-storage-file-copydir = { path = "../backend-storage-file-copydir" }
+backend-storage-smgr-md = { path = "../backend-storage-smgr-md" }
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
+backend-replication-slot = { path = "../backend-replication-slot" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-catalog = { path = "../types-catalog" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }

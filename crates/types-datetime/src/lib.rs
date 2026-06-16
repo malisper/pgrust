@@ -369,7 +369,6 @@ pub const JULIAN_MAXDAY: i32 = 3;
 
 pub const UNIX_EPOCH_JDATE: i32 = 2_440_588;
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
-
 pub const DATETIME_MIN_JULIAN: i32 = 0;
 pub const DATE_END_JULIAN: i32 = 2_147_483_494;
 pub const TIMESTAMP_END_JULIAN: i32 = 109_203_528;

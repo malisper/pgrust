@@ -835,6 +835,7 @@ pub fn init_seams() {
     });
     seams::get_xact_completion_count::set(|| TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount);
     seams::get_oldest_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestXid);
+    seams::get_oldest_clog_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestClogXid);
 
     // `TransamVariables->{oldest,newest}CommitTsXid` (access/transam.h field
     // accessors). commit_ts.c reads/writes these under `CommitTsLock`, which it

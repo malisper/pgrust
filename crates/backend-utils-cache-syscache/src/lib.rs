@@ -876,6 +876,10 @@ fn set_locktag_tuple(tag: &mut LOCKTAG, dboid: Oid, reloid: Oid, blocknum: u32, 
 /// Install this unit's inward seams (the caller-shaped projected-row lookups
 /// in `backend-utils-cache-syscache-seams`).
 pub fn init_seams() {
+    backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
+    backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
+        projections::lookup_enum_by_typoid_name,
+    );
     backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
     backend_utils_cache_syscache_seams::search_relation_reloftype::set(projections::search_relation_reloftype);
     backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);
@@ -974,9 +978,25 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::set(
         projections::search_constraint_tuple_by_oid,
     );
-
     // amutils.c SQL-level property reporting: the pg_class / pg_index catalog
     // projections `indexam_property` reads.
     backend_utils_adt_amutils_seams::index_relation::set(projections::amutils_index_relation);
     backend_utils_adt_amutils_seams::index_form::set(projections::amutils_index_form);
+
+    // ACL/owner catalog-row projections (the aclmask/aclcheck F0 keystone).
+    backend_utils_cache_syscache_seams::pg_class_owner_acl::set(projections::pg_class_owner_acl);
+    backend_utils_cache_syscache_seams::pg_attribute_owner_acl::set(
+        projections::pg_attribute_owner_acl,
+    );
+    backend_utils_cache_syscache_seams::pg_namespace_owner_acl::set(
+        projections::pg_namespace_owner_acl,
+    );
+    backend_utils_cache_syscache_seams::pg_type_owner_acl::set(projections::pg_type_owner_acl);
+    backend_utils_cache_syscache_seams::object_owner_acl::set(projections::object_owner_acl);
+    backend_utils_cache_syscache_seams::parameter_acl_by_name::set(
+        projections::parameter_acl_by_name,
+    );
+    backend_utils_cache_syscache_seams::parameter_acl_by_oid::set(
+        projections::parameter_acl_by_oid,
+    );
 }

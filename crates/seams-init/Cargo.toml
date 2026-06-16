@@ -104,6 +104,7 @@ backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
+backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
@@ -305,6 +306,7 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
+backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
@@ -312,6 +314,7 @@ backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetyp
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
+backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }
 backend-utils-adt-quote = { path = "../backend-utils-adt-quote" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }

@@ -48,6 +48,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TransamVariables->oldestClogXid` (`access/transam.h`) — the oldest XID
+    /// whose clog entry is guaranteed to still exist. Read under
+    /// `XactTruncationLock` by xid8funcs.c's `TransactionIdInRecentPast` to
+    /// decide whether a recent-past XID can still be looked up in clog. Owned in
+    /// varsup (the `TransamVariables` singleton); plain shared-memory read.
+    pub fn get_oldest_clog_xid() -> TransactionId
+);
+
+seam_core::seam!(
     /// `TransamVariables->oldestCommitTsXid` (`access/transam.h`) — the oldest
     /// XID for which a commit timestamp can be consulted. Read under
     /// `CommitTsLock` by commit_ts.c.

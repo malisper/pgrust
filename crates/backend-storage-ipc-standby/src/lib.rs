@@ -1465,6 +1465,7 @@ pub fn init_seams() {
     seams::log_access_exclusive_lock::set(LogAccessExclusiveLock);
     seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
     seams::log_standby_invalidations::set(LogStandbyInvalidations);
+    seams::in_hot_standby::set(in_hot_standby);
 }
 
 #[cfg(test)]
