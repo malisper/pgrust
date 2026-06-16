@@ -18,6 +18,9 @@ types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-slot = { path = "../types-slot" }
 types-sortsupport = { path = "../types-sortsupport" }
+# `SK_BT_NULLS_FIRST` / `SK_BT_DESC` (the btree index begin variant reads these
+# from the `_bt_mkscankey` scankey `sk_flags`).
+types-scan = { path = "../types-scan" }
 mcx = { path = "../mcx" }
 # Direct dependency on the now-landed real LogicalTapeSet engine (logtape.c).
 # `backend-utils-sort-storage` does NOT depend on tuplesort, so this edge is
@@ -38,6 +41,13 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 # `get_typlenbyval` (tuplesort_begin_datum's datum-type length/byval lookup).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Index-tuple ops for the index sort variants (F3b): index_form_tuple (put),
+# index_deform_tuple / nocache_index_getattr (datum1 + tiebreak extraction).
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+# `_bt_mkscankey` — the btree-index begin variant's per-column sort-key source.
+backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+# `BuildIndexValueDescription` — the unique-violation error detail (cold path).
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 
 [dev-dependencies]
 # An in-memory BufFile provider for the external-merge tape tests (a leaf-crate
