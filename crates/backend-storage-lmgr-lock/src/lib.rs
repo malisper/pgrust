@@ -32,6 +32,8 @@
 
 extern crate alloc;
 
+mod fastpath;
+mod locking;
 mod state;
 mod tables;
 
@@ -239,4 +241,69 @@ pub fn init_seams() {
     seams::get_lockmode_name::set(get_lockmode_name);
     seams::conflict_tab::set(conflict_tab);
     seams::get_lock_method_table::set(get_lock_method_table);
+
+    // F1 LockAcquire / LockRelease pair.
+    seams::lock_acquire_impl::set(|tag, mode, session, dont_wait| {
+        locking::LockAcquire(tag, mode, session, dont_wait)
+    });
+    seams::lock_acquire::set(|tag, mode, session, dont_wait| {
+        locking::LockAcquire(tag, mode, session, dont_wait)
+    });
+    seams::lock_acquire_extended::set(|tag, mode, session, dont_wait, log_lock_failure| {
+        locking::LockAcquireExtended(tag, mode, session, dont_wait, log_lock_failure)
+    });
+    seams::lock_release_impl::set(|tag, mode, session| locking::LockRelease(tag, mode, session));
+    // The bare `lock_release` seam discards the C `elog(ERROR, "unrecognized
+    // lock mode")` leg into the bool (the WARNING-and-false path returns false);
+    // no consumer relies on that error surface, so map any Err to false.
+    seams::lock_release::set(|tag, mode, session| {
+        locking::LockRelease(tag, mode, session).unwrap_or(false)
+    });
+    seams::mark_lock_clear::set(|tag, mode| locking::MarkLockClear(&tag, mode));
+
+    // F1 release-all / session / introspection.
+    seams::lock_release_all::set(locking::LockReleaseAll);
+    seams::lock_release_all_user::set(|| {
+        locking::LockReleaseAll(types_storage::lock::USER_LOCKMETHOD, true)
+    });
+    seams::lock_release_session::set(|lockmethodid| {
+        // The C is infallible (no ereport on a valid method id from advisory
+        // unlock-all); surface any Err as a no-op (cannot fire for a valid id).
+        let _ = locking::LockReleaseSession(lockmethodid);
+    });
+    seams::lock_held_by_me::set(|tag, mode, orstronger| {
+        locking::LockHeldByMe(&tag, mode, orstronger)
+    });
+    seams::lock_has_waiters::set(|tag, mode, session| {
+        locking::LockHasWaiters(&tag, mode, session)
+    });
+    seams::lock_waiter_count::set(|tag| locking::LockWaiterCount(&tag));
+
+    // F2 awaited-lock + strong-lock interlock (proc.c LockErrorCleanup).
+    seams::abort_strong_lock_acquire::set(locking::AbortStrongLockAcquire);
+    seams::get_awaited_lock_hashcode::set(locking::GetAwaitedLockHashcode);
+    seams::grant_awaited_lock::set(locking::GrantAwaitedLock);
+    seams::reset_awaited_lock::set(locking::ResetAwaitedLock);
+    seams::remove_from_wait_queue::set(locking::RemoveFromWaitQueue);
+
+    // Fine-grained (LOCKTAG, ProcNumber) callbacks proc.c's wait-queue
+    // machinery (JoinWaitQueue / ProcSleep / ProcLockWakeup / CheckDeadLock)
+    // and deadlock.c call back into. These RETIRE the latent panics those
+    // merged units carried for the lmgr/deadlock wait path.
+    seams::grant_lock::set(locking::seam_grant_lock);
+    seams::lock_check_conflicts::set(locking::seam_lock_check_conflicts);
+    seams::proclock_hold_mask::set(locking::seam_proclock_hold_mask);
+    seams::lock_group_held_locks::set(locking::seam_lock_group_held_locks);
+    seams::lock_wait_queue_is_empty::set(locking::seam_lock_wait_queue_is_empty);
+    seams::lock_wait_queue_insert_before::set(locking::seam_lock_wait_queue_insert_before);
+    seams::lock_wait_queue_push_tail::set(locking::seam_lock_wait_queue_push_tail);
+    seams::lock_set_wait_mask_bit::set(locking::seam_lock_set_wait_mask_bit);
+    seams::lock_wait_queue_delete::set(locking::seam_lock_wait_queue_delete);
+    seams::lock_wait_queue_waiters_snapshot::set(locking::seam_lock_wait_queue_waiters_snapshot);
+    seams::get_lock_holders_and_waiters::set(locking::get_lock_holders_and_waiters_seam);
+
+    // `describe_lock_tag` (proc.c's log path): delegate to lmgr.c's owner.
+    seams::describe_lock_tag::set(|tag| {
+        backend_storage_lmgr_lmgr_seams::describe_lock_tag::call(tag)
+    });
 }
