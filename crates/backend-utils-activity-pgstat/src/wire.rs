@@ -50,6 +50,12 @@ pub fn install_seams() {
     // pgstat_clear_snapshot().
     pgstat_seam::pgstat_clear_snapshot::set(pgcore::pgstat_clear_snapshot);
 
+    // pgstat_fetch_entry(kind, dboid, objid): the variable-numbered snapshot
+    // fetch. Installed now that pgstat.c's variable-snapshot path is ported, so
+    // the per-kind pgstat_fetch_stat_{dbentry,funcentry,tabentry,replslot,
+    // subscription,backend} paths go live.
+    pgstat_seam::pgstat_fetch_entry::set(pgcore::pgstat_fetch_entry);
+
     // pgstat_reset(kind, dboid, objid).
     pgstat_seam::pgstat_reset::set(pgcore::pgstat_reset);
 

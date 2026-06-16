@@ -16,6 +16,7 @@ types-pgstat = { path = "../types-pgstat" }
 types-dsa = { path = "../types-dsa" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
