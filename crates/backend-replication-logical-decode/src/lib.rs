@@ -864,7 +864,7 @@ fn DecodeCommit(
             commit_time,
             origin_id,
             origin_lsn,
-            commit_gid_bytes(data, parsed),
+            parsed_commit_gid(data, parsed).to_vec(),
             true,
         );
     } else {
@@ -988,7 +988,7 @@ fn DecodeAbort(
             abort_time,
             origin_id,
             origin_lsn,
-            commit_gid_bytes(data, parsed),
+            parsed_commit_gid(data, parsed).to_vec(),
             false,
         );
     } else {
@@ -1394,21 +1394,6 @@ fn DecodeTXNNeedSkip(
 #[inline]
 fn shortalign(x: usize) -> usize {
     (x + 1) & !1
-}
-
-/// The `char *gid` the reorderbuffer / filter callbacks take, taken from the
-/// parsed commit/abort's twophase gid. xactdesc keeps the gid as the trailing
-/// NUL-terminated string in `data` when `XACT_XINFO_HAS_GID`/`HAS_TWOPHASE` is
-/// set; the parser exposes it via [`ParsedCommitAbort`]'s gid offset, so we read
-/// it back as the NUL-stripped bytes.
-fn commit_gid_bytes(_data: &[u8], _parsed: &ParsedCommitAbort) -> Vec<u8> {
-    // The parsed commit/abort record's twophase gid lives at the parser's gid
-    // offset; xactdesc exposes it via `twophase_gid`-style accessors only on
-    // ParsedPrepare. For commit/abort the gid is only present for the
-    // *_PREPARED forms and is consumed by FilterPrepare (which gets it via
-    // `parsed_commit_gid`). The reorderbuffer FinishPrepared call needs the
-    // same gid bytes; reuse the same reader.
-    parsed_commit_gid(_data, _parsed).to_vec()
 }
 
 /// Read the twophase gid bytes out of a parsed commit/abort record's payload.
