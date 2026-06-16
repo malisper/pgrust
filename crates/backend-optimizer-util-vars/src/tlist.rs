@@ -15,11 +15,14 @@
 //! `mcx`) the C versions don't — the minimal change to resolve handles in the
 //! arena model.
 //!
-//! Per the gap note in [`crate`], the SRF-leveling family
-//! (`split_pathtarget_at_srfs*`) and `make_pathtarget_from_tlist` are not
-//! defined here: they switch on `root->parse` (`Query`) fields that the opaque
-//! `PlannerInfo.parse` (`QueryId`) handle cannot resolve, and need
-//! `set_pathtarget_cost_width` (costsize.c).
+//! `make_pathtarget_from_tlist` is defined here over the arena model (it takes
+//! `&PlannerInfo` to resolve the `TargetEntry` handles, then builds the
+//! `PathTarget.exprs`/`sortgrouprefs` directly). The `create_pathtarget()`
+//! macro wrapper (`set_pathtarget_cost_width(root, make_pathtarget_from_tlist(...))`)
+//! is applied by the caller in the planner crate, which can reach costsize.c.
+//! The SRF-leveling family (`split_pathtarget_at_srfs*`) is still not defined
+//! here: it switches on `root->parse` (`Query`) targetlist-SRF data that the
+//! opaque `PlannerInfo.parse` handle cannot resolve.
 
 #![allow(non_snake_case)]
 
@@ -375,6 +378,32 @@ pub fn create_empty_pathtarget() -> PathTarget {
 /// arena handles / sortgrouprefs are scalars, so a clone is exact).
 pub fn copy_pathtarget(src: &PathTarget) -> PathTarget {
     src.clone()
+}
+
+/// `make_pathtarget_from_tlist(tlist)` (tlist.c:614).
+///
+/// Build a `PathTarget` from a target list. In C the input is a `List` of
+/// `TargetEntry *`; in the arena model `tlist` is a slice of [`NodeId`] handles
+/// that each resolve (through `root`) to a `TargetEntryNode`. The PathTarget's
+/// `exprs` becomes the list of each TargetEntry's `expr` handle, and
+/// `sortgrouprefs[i]` its `ressortgroupref` (always allocated, length =
+/// `tlist.len()`, matching the C `palloc(list_length(tlist) * sizeof(Index))`).
+///
+/// Volatility is marked UNKNOWN; `contain_volatile_functions` will fill it in
+/// the first time it is asked. Cost/width are left 0 — the caller is expected to
+/// wrap this in `create_pathtarget()` (i.e. run `set_pathtarget_cost_width`).
+pub fn make_pathtarget_from_tlist(root: &PlannerInfo, tlist: &[NodeId]) -> PathTarget {
+    let mut target = create_empty_pathtarget();
+    // C always allocates a sortgrouprefs array sized to the tlist, so model it
+    // as a full-length (zero-filled) vector that we then stamp.
+    target.sortgrouprefs = alloc::vec![0u32; tlist.len()];
+    for (i, &te_id) in tlist.iter().enumerate() {
+        let te = root.targetentry(te_id);
+        target.exprs.push(te.expr);
+        target.sortgrouprefs[i] = te.ressortgroupref;
+    }
+    target.has_volatile_expr = VOLATILITY_UNKNOWN;
+    target
 }
 
 /// `add_column_to_pathtarget(target, expr, sortgroupref)` (tlist.c). Append the

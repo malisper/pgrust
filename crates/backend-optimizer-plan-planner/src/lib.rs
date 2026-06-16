@@ -15,14 +15,16 @@
 //!    handle (`root.parse: QueryId`). The planner driver threads
 //!    `&mut PlannerRun<'mcx>` alongside `&mut PlannerInfo`.
 //!
-//!  * `grouping_planner`'s upper-rel machinery (`create_pathtarget` and
-//!    everything after it: grouping / window / distinct / ordered / final path
-//!    builders) is NOT ported in this repo — `PathTarget` has no arena handle
-//!    so it cannot cross a value seam. The regular planning branch reaches
-//!    `query_planner` and then the
-//!    [`create_pathtarget_for_processed_tlist`](backend_optimizer_plan_planner_ext_seams)
-//!    ext-seam, which loud-panics. Everything in `grouping_planner` past that
-//!    point is unreachable and intentionally not written here.
+//!  * `grouping_planner`'s simple-SELECT spine (no GROUP BY / aggregate /
+//!    window / DISTINCT / ORDER BY / set-op / SRF / LIMIT, plain `CMD_SELECT`,
+//!    no rowmarks) is ported in full: `create_pathtarget` over
+//!    `processed_tlist` (`make_pathtarget_from_tlist` + `set_pathtarget_cost_width`),
+//!    `apply_scanjoin_target_to_paths` (the non-partitioned single-target case),
+//!    saving `upper_targets[]`, building the `UPPERREL_FINAL` rel, and adding
+//!    every surviving scan/join path to it. The grouping / window / distinct /
+//!    ordered / SRF / limit / ModifyTable upper-path builders are NOT ported and
+//!    each path through `grouping_planner` that needs one loud-panics at the
+//!    precise C site.
 //!
 //!  * The per-field expression-preprocessing block in `subquery_planner`
 //!    (`preprocess_expression` over `targetList` / quals / etc.) crosses the
@@ -62,7 +64,9 @@ use types_nodes::rawnodes::LockClauseStrength;
 
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
-    JoinDomain, PlannerGlobal, PlannerInfo, RangeTblEntryId, Relids, UPPERREL_FINAL,
+    JoinDomain, PathId, PathTarget, PlannerGlobal, PlannerInfo, RangeTblEntryId, RelId, Relids,
+    UPPERREL_DISTINCT, UPPERREL_FINAL, UPPERREL_GROUP_AGG, UPPERREL_ORDERED,
+    UPPERREL_PARTIAL_DISTINCT, UPPERREL_WINDOW,
 };
 
 use types_core::Oid;
@@ -840,20 +844,25 @@ fn subquery_planner<'mcx>(
         backend_optimizer_plan_init_subselect::correlation::SS_identify_outer_params(&mut root);
 
         // final_rel = fetch_upper_rel(...); SS_charge_for_initplans(root, final_rel)
-        // (C:1235-1236). SS_charge_for_initplans has no ported owner.
-        let _final_rel = backend_optimizer_util_relnode::fetch_upper_rel(
+        // (C:1235-1236).
+        let final_rel = backend_optimizer_util_relnode::fetch_upper_rel(
             &mut root,
             UPPERREL_FINAL,
             &None,
         );
-        panic!(
-            "subquery_planner: SS_charge_for_initplans (subselect.c) has no ported \
-             owner"
+        backend_optimizer_plan_init_subselect::finalize::SS_charge_for_initplans(
+            &mut root, final_rel,
         );
 
+        // The set of relations consulted to prepare the query is what we will
+        // need to lock before executing the resulting plan.  ... (C:1238-1241)
+        // glob->finalrtable etc. is assembled in standard_planner's PlannedStmt
+        // build; nothing extra to do here on the value model.
+
         // set_cheapest(final_rel) (C:1243).
-        // backend_optimizer_util_pathnode::set_cheapest(&mut root, final_rel)?;
-        // Ok(root)
+        backend_optimizer_util_pathnode::set_cheapest(&mut root, final_rel)?;
+
+        Ok(root)
     }
 }
 
@@ -1276,19 +1285,367 @@ fn grouping_planner<'mcx>(
     // expressible here.
     let _ = &mut qp_callback;
     let mut noop_callback = standard_qp_callback_pathkeys_empty;
-    let _current_rel = backend_optimizer_plan_small::query_planner(mcx, run, root, &mut noop_callback)?;
+    let current_rel = backend_optimizer_plan_small::query_planner(mcx, run, root, &mut noop_callback)?;
 
-    // create_pathtarget(root, root->processed_tlist) (C:1665). THE STOP POINT:
-    // the whole upper-rel path/target machinery is unported. This loud-panics
-    // and never returns; everything in grouping_planner after this (sort/group/
-    // window/distinct/ordered/final path building, C:1665-end) is gated here.
-    backend_optimizer_plan_planner_ext_seams::create_pathtarget_for_processed_tlist::call(root)?;
+    // create_pathtarget(root, root->processed_tlist) (C:1665) =
+    // set_pathtarget_cost_width(root, make_pathtarget_from_tlist(processed_tlist)).
+    let mut final_target = backend_optimizer_util_vars::tlist::make_pathtarget_from_tlist(
+        root,
+        &root.processed_tlist,
+    );
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut final_target);
+    let final_target_parallel_safe = is_target_exprs_parallel_safe(root, &final_target.exprs);
 
-    // Unreachable past the ext-seam panic above.
-    unreachable!(
-        "grouping_planner: create_pathtarget ext-seam returned, but it must \
-         loud-panic until the upper-rel path/target machinery lands"
-    )
+    // Read the clauses that decide which upper-rel phases are needed (C:1670+).
+    let (
+        has_sort,
+        has_distinct,
+        has_window,
+        has_target_srfs,
+        has_group_clause,
+        has_grouping_sets,
+        has_aggs,
+    ) = {
+        let parse = run.resolve(root.parse);
+        (
+            !parse.sortClause.is_empty(),
+            !parse.distinctClause.is_empty(),
+            parse.hasWindowFuncs,
+            parse.hasTargetSRFs,
+            !parse.groupClause.is_empty(),
+            !parse.groupingSets.is_empty(),
+            parse.hasAggs,
+        )
+    };
+
+    // ORDER BY post-sort projection (C:1672-1686). Unsupported here: a
+    // sortClause needs make_sort_input_target + create_ordered_paths over the
+    // unported upper-sort path machinery. Panic precisely before computing
+    // sort_input_target.
+    if has_sort {
+        panic!(
+            "grouping_planner: ORDER BY needs make_sort_input_target + \
+             create_ordered_paths (planner.c:1674/1852) — the upper-sort path \
+             machinery is not ported"
+        );
+    }
+    // With no sortClause, sort_input_target = final_target (C:1683-1685).
+
+    // Window functions were already rejected above (C:1588-1609 panic); assert.
+    debug_assert!(!has_window);
+    // With no activeWindows, grouping_target = sort_input_target = final_target
+    // (C:1703-1705).
+
+    // Grouping/aggregation (C:1709-1726). have_grouping = groupClause ||
+    // groupingSets || hasAggs || hasHavingQual. The hasAggs / groupingSets
+    // legs already panicked above (preprocess_minmax_aggregates /
+    // preprocess_grouping_sets); a bare GROUP BY (groupClause without aggs)
+    // and a HAVING qual still need make_group_input_target +
+    // create_grouping_paths, which are not ported. Panic precisely.
+    let have_grouping =
+        has_group_clause || has_grouping_sets || has_aggs || root.hasHavingQual;
+    if have_grouping {
+        panic!(
+            "grouping_planner: grouping/aggregation (make_group_input_target + \
+             create_grouping_paths, planner.c:1718/1799) is not ported"
+        );
+    }
+    // With no grouping, scanjoin_target = grouping_target = final_target
+    // (C:1722-1725).
+
+    // Targetlist SRFs (C:1733-1768). split_pathtarget_at_srfs is not ported.
+    if has_target_srfs {
+        panic!(
+            "grouping_planner: targetlist set-returning functions need \
+             split_pathtarget_at_srfs (planner.c:1733) — not ported"
+        );
+    }
+
+    // DISTINCT (C:1834-1841): create_distinct_paths is not ported.
+    if has_distinct {
+        panic!(
+            "grouping_planner: DISTINCT needs create_distinct_paths \
+             (planner.c:1837) — not ported"
+        );
+    }
+
+    // No SRFs: scanjoin_targets = list_make1(scanjoin_target) (C:1764-1767).
+    // scanjoin_target == final_target on this simple path.
+    let scanjoin_target = final_target;
+    let scanjoin_target_parallel_safe = final_target_parallel_safe;
+
+    // scanjoin_target_same_exprs = list_length(scanjoin_targets) == 1
+    //   && equal(scanjoin_target->exprs, current_rel->reltarget->exprs) (C:1771).
+    let scanjoin_target_same_exprs = {
+        let cur_exprs: &[types_pathnodes::NodeId] = root
+            .rel(current_rel)
+            .reltarget
+            .as_ref()
+            .map(|t| t.exprs.as_slice())
+            .unwrap_or(&[]);
+        equal_expr_handle_lists(root, &scanjoin_target.exprs, cur_exprs)
+    };
+
+    // apply_scanjoin_target_to_paths(root, current_rel, [scanjoin_target], NIL,
+    //   scanjoin_target_parallel_safe, scanjoin_target_same_exprs) (C:1773).
+    apply_scanjoin_target_to_paths(
+        run,
+        root,
+        current_rel,
+        &scanjoin_target,
+        scanjoin_target_parallel_safe,
+        scanjoin_target_same_exprs,
+    )?;
+
+    // Save the upper-rel PathTargets into root.upper_targets[] (C:1785-1791).
+    // On this simple path final_target == sort_input_target == grouping_target,
+    // so every saved target is `scanjoin_target` (= final_target). The core
+    // code does not read these; they are a convenience for extensions.
+    root.upper_targets[UPPERREL_FINAL as usize] = Some(Box::new(scanjoin_target.clone()));
+    root.upper_targets[UPPERREL_ORDERED as usize] = Some(Box::new(scanjoin_target.clone()));
+    root.upper_targets[UPPERREL_DISTINCT as usize] = Some(Box::new(scanjoin_target.clone()));
+    root.upper_targets[UPPERREL_PARTIAL_DISTINCT as usize] =
+        Some(Box::new(scanjoin_target.clone()));
+    root.upper_targets[UPPERREL_WINDOW as usize] = Some(Box::new(scanjoin_target.clone()));
+    root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(Box::new(scanjoin_target.clone()));
+
+    // No grouping / window / distinct / ordered upper rels on this path
+    // (C:1797-1864 all guarded out). current_rel is unchanged.
+
+    // Now build the final-output upperrel (C:1868).
+    let final_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_FINAL, &None);
+
+    // consider_parallel propagation (C:1870-1880). current_rel->consider_parallel
+    // is false here (glob.max_parallel_hazard is UNSAFE in this repo), so the
+    // is_parallel_safe(limitOffset/limitCount) checks short-circuit away and
+    // final_rel->consider_parallel stays false. We mirror that exactly without
+    // evaluating the (latent) limit parallel-safety.
+    if root.rel(current_rel).consider_parallel {
+        // Unreachable here, but kept faithful: would require is_parallel_safe
+        // over parse->limitOffset / limitCount.
+        panic!(
+            "grouping_planner: final_rel consider_parallel propagation needs \
+             is_parallel_safe(limitOffset/limitCount) (planner.c:1877) — \
+             unreachable in this repo (glob is parallel-unsafe)"
+        );
+    }
+
+    // If current_rel belongs to a single FDW, so does final_rel (C:1883-1888).
+    {
+        let (serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let cr = root.rel(current_rel);
+            (cr.serverid, cr.userid, cr.useridiscurrent, cr.has_fdwroutine)
+        };
+        let fr = root.rel_mut(final_rel);
+        fr.serverid = serverid;
+        fr.userid = userid;
+        fr.useridiscurrent = useridiscurrent;
+        fr.has_fdwroutine = has_fdwroutine;
+    }
+
+    // Generate paths for final_rel: insert all surviving current_rel paths with
+    // LockRows / Limit / ModifyTable added if needed (C:1891-2131). On the
+    // simple SELECT path (no rowMarks, no LIMIT/OFFSET, CMD_SELECT) each path is
+    // inserted verbatim.
+    let (has_rowmarks, has_limit_clause, command_type) = {
+        let parse = run.resolve(root.parse);
+        (
+            !parse.rowMarks.is_empty(),
+            parse.limitCount.is_some() || parse.limitOffset.is_some(),
+            parse.commandType,
+        )
+    };
+    if has_rowmarks {
+        panic!(
+            "grouping_planner: FOR [KEY] UPDATE/SHARE adds create_lockrows_path \
+             (planner.c:1907) — not reached on a plain SELECT"
+        );
+    }
+    if has_limit_clause {
+        panic!(
+            "grouping_planner: LIMIT/OFFSET adds create_limit_path \
+             (planner.c:1917) — the limit upper path is not ported"
+        );
+    }
+    if command_type != CmdType::CMD_SELECT {
+        panic!(
+            "grouping_planner: INSERT/UPDATE/DELETE/MERGE adds \
+             create_modifytable_path (planner.c:2111) — not ported"
+        );
+    }
+
+    let surviving: Vec<PathId> = root.rel(current_rel).pathlist.clone();
+    for path in surviving {
+        backend_optimizer_util_pathnode::add_path(root, final_rel, path)?;
+    }
+
+    // Partial paths for final_rel (C:2134-2146): final_rel->consider_parallel is
+    // false (see above), so this block is skipped.
+
+    // GetForeignUpperPaths / create_upper_paths_hook (C:2152-2167): no FDW
+    // upper-path routine is modeled and there is no hook; nothing to add.
+
+    // Note: caller (subquery_planner) does set_cheapest(final_rel) (C:2169).
+    Ok(())
+}
+
+/// `is_parallel_safe(root, (Node *) exprs)` over a PathTarget's expr handle list
+/// (planner.c uses this on `final_target->exprs`). Mirrors clauses.c
+/// `is_parallel_safe`, which walks a `List` node by recursing into each element;
+/// AND-ing the per-expr result is equivalent. `safe_param_ids` is gathered from
+/// this root's (and parents') init_plans `SubPlan.setParam`, as in C; on the
+/// simple SELECT path init_plans is empty so it is the empty set.
+fn is_target_exprs_parallel_safe(root: &PlannerInfo, exprs: &[types_pathnodes::NodeId]) -> bool {
+    let max_hazard: u8 = root
+        .glob
+        .as_ref()
+        .map(|g| g.max_parallel_hazard as u8)
+        .unwrap_or(PROPARALLEL_UNSAFE as u8);
+    let param_exec_empty = root
+        .glob
+        .as_ref()
+        .map(|g| g.param_exec_types.is_empty())
+        .unwrap_or(true);
+
+    // safe_param_ids = concat of init_plans' SubPlan.setParam, this level + parents.
+    // (parent_root chain is not modeled on the value root; this level only.)
+    let mut safe_param_ids: Vec<i32> = Vec::new();
+    for &ipl in &root.init_plans {
+        if let Expr::SubPlan(sp) = root.node(ipl) {
+            for &p in sp.0.setParam.iter() {
+                safe_param_ids.push(p);
+            }
+        }
+    }
+
+    for &id in exprs {
+        let node = root.node(id);
+        let safe = backend_optimizer_util_clauses::is_parallel_safe(
+            max_hazard,
+            param_exec_empty,
+            safe_param_ids.clone(),
+            Some(node),
+        )
+        .unwrap_or(false);
+        if !safe {
+            return false;
+        }
+    }
+    true
+}
+
+/// `equal((Node *) a, (Node *) b)` over two PathTarget expr handle lists. Used
+/// for the `scanjoin_target_same_exprs` test (planner.c:1771). Equal iff same
+/// length and each pair is structurally `equal()` (resolved through the arena).
+fn equal_expr_handle_lists(
+    root: &PlannerInfo,
+    a: &[types_pathnodes::NodeId],
+    b: &[types_pathnodes::NodeId],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(&x, &y)| {
+        backend_nodes_equalfuncs_seams::equal_expr::call(root.node(x), root.node(y))
+    })
+}
+
+/// `apply_scanjoin_target_to_paths(root, rel, scanjoin_targets, ...)`
+/// (planner.c:7669). Ported for the non-partitioned single-target case reached
+/// by a simple SELECT: apply the SRF-free scan/join target to every existing
+/// path of `rel`, then set `rel->reltarget` to it.
+///
+/// Partitioned rels (`IS_PARTITIONED_REL`), targetlist SRFs
+/// (`root->parse->hasTargetSRFs` ⇒ `adjust_paths_for_srfs`), and the recursive
+/// per-partition / `add_paths_to_append_rel` machinery are not reached here and
+/// panic precisely.
+fn apply_scanjoin_target_to_paths<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    scanjoin_target: &PathTarget,
+    scanjoin_target_parallel_safe: bool,
+    tlist_same_exprs: bool,
+) -> PgResult<()> {
+    // This function recurses for partitioned rels; we don't support that yet.
+    // IS_PARTITIONED_REL(rel): a base/join (or other-member) rel that has a
+    // partitioning scheme and partition children.
+    let rel_is_partitioned = {
+        let r = root.rel(rel);
+        matches!(
+            r.reloptkind,
+            types_pathnodes::RELOPT_BASEREL | types_pathnodes::RELOPT_JOINREL
+        ) && r.part_scheme.is_some()
+            && r.nparts > 0
+    };
+    if rel_is_partitioned {
+        panic!(
+            "apply_scanjoin_target_to_paths: partitioned-rel recursion + \
+             add_paths_to_append_rel (planner.c:7770) is not ported"
+        );
+    }
+
+    // If the scan/join target is not parallel-safe, partial paths cannot
+    // generate it; build Gather path(s) over the partials, then drop them
+    // (C:7700-7716). On the simple single-table path there are no partial paths,
+    // so generate_useful_gather_paths is a no-op; we still mirror the structure.
+    if !scanjoin_target_parallel_safe {
+        backend_optimizer_path_allpaths::generate_useful_gather_paths(root, run, rel, false)?;
+        root.rel_mut(rel).partial_pathlist = Vec::new();
+        root.rel_mut(rel).consider_parallel = false;
+    }
+
+    // Apply the SRF-free scan/join target to each existing path (C:7727-7747).
+    let pathlist: Vec<PathId> = root.rel(rel).pathlist.clone();
+    for (i, &subpath) in pathlist.iter().enumerate() {
+        // Shouldn't have any parameterized paths anymore.
+        debug_assert!(root.path(subpath).base().param_info.is_none());
+        if tlist_same_exprs {
+            // Inject the sortgroupref info into the existing pathtarget.
+            let sgr = scanjoin_target.sortgrouprefs.clone();
+            if let Some(t) = root.path_mut(subpath).base_mut().pathtarget.as_deref_mut() {
+                t.sortgrouprefs = sgr;
+            }
+        } else {
+            // Replace with a projection path that generates the scan/join target.
+            let newpath = backend_optimizer_util_pathnode::create::create_projection_path(
+                root,
+                rel,
+                subpath,
+                Box::new(scanjoin_target.clone()),
+            )?;
+            root.rel_mut(rel).pathlist[i] = newpath;
+        }
+    }
+
+    // Likewise adjust the targets for any partial paths (C:7750-7770).
+    let partial: Vec<PathId> = root.rel(rel).partial_pathlist.clone();
+    for (i, &subpath) in partial.iter().enumerate() {
+        debug_assert!(root.path(subpath).base().param_info.is_none());
+        if tlist_same_exprs {
+            let sgr = scanjoin_target.sortgrouprefs.clone();
+            if let Some(t) = root.path_mut(subpath).base_mut().pathtarget.as_deref_mut() {
+                t.sortgrouprefs = sgr;
+            }
+        } else {
+            let newpath = backend_optimizer_util_pathnode::create::create_projection_path(
+                root,
+                rel,
+                subpath,
+                Box::new(scanjoin_target.clone()),
+            )?;
+            root.rel_mut(rel).partial_pathlist[i] = newpath;
+        }
+    }
+
+    // SRF insertion (C:7777-7780) is gated on hasTargetSRFs, rejected above.
+
+    // Update the rel's target to be the final scan/join target (C:7792). This
+    // matches the actual output of all paths and is required so create_plan /
+    // create_append_path see the right pathtarget.
+    root.rel_mut(rel).reltarget = Some(Box::new(scanjoin_target.clone()));
+
+    Ok(())
 }
 
 /// Hack placeholder — see `grouping_planner`'s qp_callback note. Not called.

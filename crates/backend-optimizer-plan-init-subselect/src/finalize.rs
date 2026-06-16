@@ -29,7 +29,7 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{Expr, ParamKind};
 use types_pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
-use types_pathnodes::PlannerInfo;
+use types_pathnodes::{PlannerInfo, RelId};
 
 use backend_nodes_core::bitmapset as bms;
 use backend_optimizer_plan_init_subselect_ext_seams as initext;
@@ -871,6 +871,54 @@ pub fn SS_compute_initplan_cost(root: &PlannerInfo) -> (f64, bool) {
         }
     }
     (initplan_cost, unsafe_initplans)
+}
+
+/// `SS_charge_for_initplans(root, final_rel)` (subselect.c). Add up the disabled
+/// cost of all the query's initPlans and apply it to every path of `final_rel`
+/// (initPlans run once before the query proper, so they add the same fixed cost
+/// to every candidate top path), and propagate parallel-unsafety.
+///
+/// Nothing to do — and this returns immediately — when the query has no
+/// initPlans (`root.init_plans` empty), which is the common case (and the only
+/// one reachable on a simple SELECT, where no SubPlans were promoted to
+/// initPlans). The path-cost mutation walks `final_rel`'s `pathlist` /
+/// `partial_pathlist` (path handles into `root.path_arena`).
+pub fn SS_charge_for_initplans(root: &mut PlannerInfo, final_rel: RelId) {
+    // Nothing to do if no initPlans (C:2356-2358).
+    if root.init_plans.is_empty() {
+        return;
+    }
+
+    // Compute the cost increment just once; also detect parallel-unsafe
+    // initPlans (C:2364-2365).
+    let (initplan_cost, unsafe_initplans) = SS_compute_initplan_cost(root);
+
+    // Adjust the costs and parallel_safe flags of the main paths (C:2370-2378).
+    let pathlist = root.rel(final_rel).pathlist.clone();
+    for pid in pathlist {
+        let path = root.path_mut(pid).base_mut();
+        path.startup_cost += initplan_cost;
+        path.total_cost += initplan_cost;
+        if unsafe_initplans {
+            path.parallel_safe = false;
+        }
+    }
+
+    // Adjust partial paths' costs too, or forget them entirely if we must
+    // consider the rel parallel-unsafe (C:2384-2402).
+    if unsafe_initplans {
+        root.rel_mut(final_rel).partial_pathlist = alloc::vec::Vec::new();
+        root.rel_mut(final_rel).consider_parallel = false;
+    } else {
+        let partials = root.rel(final_rel).partial_pathlist.clone();
+        for pid in partials {
+            let path = root.path_mut(pid).base_mut();
+            path.startup_cost += initplan_cost;
+            path.total_cost += initplan_cost;
+        }
+    }
+
+    // We needn't do set_cheapest() here, caller will do it (C:2404).
 }
 
 /// `SS_attach_initplans(root, plan)` (subselect.c): attach any initplans created

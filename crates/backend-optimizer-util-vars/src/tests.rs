@@ -105,3 +105,42 @@ fn pull_var_clause_collects_vars() {
     let vars = pull_var_clause(&node, 0);
     assert_eq!(vars.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// make_pathtarget_from_tlist (tlist.c) over the arena TargetEntry model.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn make_pathtarget_from_tlist_carries_exprs_and_sortgrouprefs() {
+    use crate::tlist::make_pathtarget_from_tlist;
+    use types_pathnodes::{PlannerInfo, TargetEntryNode};
+
+    let mut root = PlannerInfo::default();
+
+    // Intern two leaf exprs and two TargetEntry nodes referencing them. The
+    // second column carries a nonzero ressortgroupref.
+    let e0 = root.alloc_node(Expr::Var(var_at(1, 0)));
+    let e1 = root.alloc_node(Expr::Var(var_at(2, 0)));
+    let te0 = root.alloc_targetentry(TargetEntryNode {
+        expr: e0,
+        resno: 1,
+        ressortgroupref: 0,
+        ..TargetEntryNode::default()
+    });
+    let te1 = root.alloc_targetentry(TargetEntryNode {
+        expr: e1,
+        resno: 2,
+        ressortgroupref: 3,
+        ..TargetEntryNode::default()
+    });
+
+    let tlist = vec![te0, te1];
+    let target = make_pathtarget_from_tlist(&root, &tlist);
+
+    // exprs are the TargetEntry exprs, in order.
+    assert_eq!(target.exprs, vec![e0, e1]);
+    // sortgrouprefs array is allocated full-length (= tlist length) and stamped.
+    assert_eq!(target.sortgrouprefs, vec![0u32, 3u32]);
+    // cost/width are left for set_pathtarget_cost_width.
+    assert_eq!(target.width, 0);
+}

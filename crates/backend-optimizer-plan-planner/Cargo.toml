@@ -16,10 +16,10 @@ types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+# equal() over PathTarget expr handles (scanjoin_target_same_exprs test).
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # This unit's own inward seams (pg_plan_query / plan_cluster_use_sort).
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
-# Outward STOP point for grouping_planner's upper-rel machinery.
-backend-optimizer-plan-planner-ext-seams = { path = "../backend-optimizer-plan-planner-ext-seams" }
 # plan_set_operations (prepunion.c — no crate yet).
 backend-optimizer-prep-prepunion-seams = { path = "../backend-optimizer-prep-prepunion-seams" }
 # create_plan dispatch spine.
@@ -54,8 +54,10 @@ backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" 
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 # eval_const_expressions / estimate_expression_value / contain_* / is_parallel_safe / convert_saop.
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
-# get_sortgroupref_clause.
+# get_sortgroupref_clause / make_pathtarget_from_tlist / copy_pathtarget.
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+# set_pathtarget_cost_width (the create_pathtarget macro tail).
+backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 # CheckSelectLocking.
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 # has_subclass.
