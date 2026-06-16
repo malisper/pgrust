@@ -260,13 +260,14 @@ fn make_item_like_regex(
     };
 
     // C: check regex validity — pg_mb2wchar_with_len + pg_regcomp + pg_regfree.
+    let _ = pattern_len;
     {
-        let wpattern =
-            backend_utils_mb_fgram::pg_mb2wchar_with_len(&pattern_bytes, pattern_len)?;
         let cx = MemoryContext::new("JsonPathRegexValidate");
+        let wpattern =
+            backend_utils_mb_mbutils::pg_mb2wchar_with_len(cx.mcx(), &pattern_bytes)?;
         match backend_regex_core::regex_compile::pg_regcomp(
             cx.mcx(),
-            &wpattern,
+            wpattern.as_slice(),
             cflags,
             types_tuple::heaptuple::DEFAULT_COLLATION_OID,
         ) {
@@ -275,7 +276,7 @@ fn make_item_like_regex(
             }
             Err(e) => {
                 // C: pg_regerror(...) -> ereturn ERRCODE_INVALID_REGULAR_EXPRESSION.
-                let msg = backend_regex_core::pg_regerror(e.0);
+                let msg = backend_regex_core::regex_export_free_error::pg_regerror(e.0);
                 return ereturn(
                     escontext.as_deref_mut(),
                     None,
@@ -362,11 +363,10 @@ fn numeric_uminus_bytes(num: &[u8]) -> PgResult<Vec<u8>> {
 // bison grammar. Operates over the fully-scanned token vector.
 // ===========================================================================
 
-struct Parser<'a, 'e> {
+struct Parser<'e, 's> {
     toks: Vec<Lexeme>,
     idx: usize,
-    input: &'a [u8],
-    escontext: &'e mut Option<&'e mut SoftErrorContext>,
+    escontext: &'e mut Option<&'s mut SoftErrorContext>,
     /// Set when a `makeItem*` action recorded a soft error (C: YYABORT after a
     /// failed `makeItemLikeRegex`/`.decimal()` shape check). The parse stops.
     aborted: bool,
@@ -376,7 +376,7 @@ struct Parser<'a, 'e> {
 /// which bison would surface by `jsonpath_yyparse` returning nonzero.
 type POut<T> = PgResult<Option<T>>;
 
-impl<'a, 'e> Parser<'a, 'e> {
+impl<'e, 's> Parser<'e, 's> {
     fn peek(&self) -> Option<&Lexeme> {
         self.toks.get(self.idx)
     }
@@ -1309,13 +1309,15 @@ pub fn parsejsonpath(
         let mut parser = Parser {
             toks,
             idx: 0,
-            input: str,
             escontext: &mut escontext_ref,
             aborted: false,
         };
         let parsed = parser.parse_result()?;
         let aborted = parser.aborted;
         let consumed_all = parser.peek().is_none();
+        // Release the parser's borrow of `escontext_ref` before re-borrowing it
+        // for the error path below (the parser's job is done).
+        drop(parser);
         // Re-borrow escontext for the error path below.
         match parsed {
             Some(r) if !aborted && consumed_all => Ok::<_, PgError>(Some(r)),
@@ -1332,4 +1334,103 @@ pub fn parsejsonpath(
     };
 
     result.map(|opt| opt.flatten())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_jsonpath::parse::JsonPathParseValue;
+
+    fn parse(s: &str) -> Option<JsonPathParseResult> {
+        parsejsonpath(s.as_bytes(), None).expect("hard error")
+    }
+
+    #[test]
+    fn empty_is_none() {
+        assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn lax_default_strict_keyword() {
+        assert!(parse("$").unwrap().lax);
+        assert!(parse("lax $").unwrap().lax);
+        assert!(!parse("strict $").unwrap().lax);
+    }
+
+    #[test]
+    fn root_key_accessor() {
+        let r = parse("$.a").unwrap();
+        let head = r.expr.as_ref().unwrap();
+        assert_eq!(head.typ, JsonPathItemType::jpiRoot);
+        let next = head.next.as_ref().unwrap();
+        assert_eq!(next.typ, JsonPathItemType::jpiKey);
+        match &next.value {
+            JsonPathParseValue::String(b) => assert_eq!(b, b"a"),
+            _ => panic!("expected key string"),
+        }
+    }
+
+    #[test]
+    fn arithmetic_precedence() {
+        // 1 + 2 * 3 -> Add(1, Mul(2,3))
+        let r = parse("1 + 2 * 3").unwrap();
+        let e = r.expr.as_ref().unwrap();
+        assert_eq!(e.typ, JsonPathItemType::jpiAdd);
+        match &e.value {
+            JsonPathParseValue::Args { right, .. } => {
+                assert_eq!(right.as_ref().unwrap().typ, JsonPathItemType::jpiMul);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn unary_minus_numeric_fold() {
+        // -5 folds into a single jpiNumeric (not a jpiMinus over jpiNumeric).
+        let r = parse("-5").unwrap();
+        assert_eq!(r.expr.as_ref().unwrap().typ, JsonPathItemType::jpiNumeric);
+    }
+
+    #[test]
+    fn filter_and_comparison() {
+        // $.a ? (@ > 1)
+        let r = parse("$.a ? (@ > 1)").unwrap();
+        // Walk to the filter node.
+        let mut item = r.expr.as_ref().unwrap().as_ref();
+        let mut saw_filter = false;
+        loop {
+            if item.typ == JsonPathItemType::jpiFilter {
+                saw_filter = true;
+                break;
+            }
+            match item.next.as_ref() {
+                Some(n) => item = n.as_ref(),
+                None => break,
+            }
+        }
+        assert!(saw_filter, "expected a jpiFilter in the chain");
+    }
+
+    #[test]
+    fn array_subscript() {
+        let r = parse("$[0 to 2]").unwrap();
+        let next = r.expr.as_ref().unwrap().next.as_ref().unwrap();
+        assert_eq!(next.typ, JsonPathItemType::jpiIndexArray);
+    }
+
+    #[test]
+    fn syntax_error_is_none_soft() {
+        let mut ctx = SoftErrorContext::new(true);
+        let res = parsejsonpath(b"$.", Some(&mut ctx)).expect("no hard error");
+        assert!(res.is_none());
+        assert!(ctx.error_occurred());
+    }
+
+    #[test]
+    fn keyword_as_key() {
+        // `.size` is the size() method, but `.with` (a keyword) used as a key.
+        let r = parse("$.with").unwrap();
+        let next = r.expr.as_ref().unwrap().next.as_ref().unwrap();
+        assert_eq!(next.typ, JsonPathItemType::jpiKey);
+    }
 }

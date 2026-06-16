@@ -17,7 +17,8 @@ mcx = { path = "../mcx" }
 backend-utils-adt-jsonpath-scan = { path = "../backend-utils-adt-jsonpath-scan" }
 backend-utils-adt-jsonpath-gram-seams = { path = "../backend-utils-adt-jsonpath-gram-seams" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
-backend-utils-adt-numutils-fgram = { path = "../backend-utils-adt-numutils-fgram" }
-backend-utils-mb-fgram = { path = "../backend-utils-mb-fgram" }
+backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-regex-core = { path = "../backend-regex-core" }
+types-tuple = { path = "../types-tuple" }
 seam-core = { path = "../seam-core" }
