@@ -156,3 +156,70 @@ pub struct ForeignServerFormRow<'mcx> {
     /// `srvfdw` — the server's foreign-data wrapper OID.
     pub srvfdw: types_core::Oid,
 }
+
+/* ---------------------------------------------------------------------------
+ * ACL/owner catalog-row projections (the aclmask/aclcheck family in
+ * catalog/aclchk.c). Each `*_owner_acl` projection returns the object's owner
+ * plus the decoded `aclitem[]` ACL the C `aclmask()` consumes — `Some(items)`
+ * for a present ACL, `None` for the SQL-null column (where aclchk builds the
+ * hardwired default via `acldefault`). The C reads these off SearchSysCache1
+ * + GETSTRUCT (owner) + SysCacheGetAttr (the `aclitem[]` column, detoasted via
+ * `DatumGetAclP`). `aclmask` takes `&[AclItem]` in this port, so the ACL is
+ * carried as its decoded item vector (the `Acl *` / `ArrayType` payload), not
+ * an opaque byte blob.
+ * ------------------------------------------------------------------------- */
+
+use types_acl::AclItem;
+
+/// `Form_pg_class` ACL/owner fields the table aclmask path reads
+/// (`pg_class_aclmask_ext`, aclchk.c). `relowner` + `relkind` drive aclchk's
+/// system-catalog-deny and `acldefault(OBJECT_SEQUENCE|OBJECT_TABLE, ...)`
+/// branch; `relnamespace` lets aclchk compute `IsSystemClass` (via
+/// catalog.c's `IsToastClass`/`IsCatalogRelationOid`). `acl` is the decoded
+/// `relacl` (`None` = SQL null -> build default).
+#[derive(Debug)]
+pub struct ClassOwnerAcl<'mcx> {
+    /// `relowner` (`Form_pg_class.relowner`).
+    pub relowner: OidT,
+    /// `relkind` (`Form_pg_class.relkind`).
+    pub relkind: i8,
+    /// `relnamespace` (`Form_pg_class.relnamespace`) — for `IsToastClass`.
+    pub relnamespace: OidT,
+    /// `relacl` decoded to its `aclitem[]` items, or `None` for SQL null.
+    pub acl: Option<PgVec<'mcx, AclItem>>,
+}
+
+/// `Form_pg_namespace` ACL/owner fields (`pg_namespace_aclmask_ext`, aclchk.c).
+#[derive(Debug)]
+pub struct NamespaceOwnerAcl<'mcx> {
+    /// `nspowner` (`Form_pg_namespace.nspowner`).
+    pub nspowner: OidT,
+    /// `nspacl` decoded to its `aclitem[]` items, or `None` for SQL null.
+    pub acl: Option<PgVec<'mcx, AclItem>>,
+}
+
+/// `Form_pg_type` ACL/owner fields (`pg_type_aclmask_ext`, aclchk.c), after the
+/// true-array-element and multirange redirects have been resolved (so `owner`
+/// and `acl` are the *effective* type's). `typtype`/`typelem`/`typsubscript`
+/// are not surfaced: the redirect is performed inside the projection so the
+/// caller sees one resolved `(owner, acl)`.
+#[derive(Debug)]
+pub struct TypeOwnerAcl<'mcx> {
+    /// `typowner` of the effective type (`Form_pg_type.typowner`).
+    pub typowner: OidT,
+    /// `typacl` of the effective type decoded to `aclitem[]`, or `None`.
+    pub acl: Option<PgVec<'mcx, AclItem>>,
+}
+
+/// A generic catalog object's owner + ACL (`object_aclmask_ext`, aclchk.c),
+/// projected off `SearchSysCache1(cacheid, objectid)` using the owner/acl
+/// attribute numbers `get_object_attnum_owner`/`get_object_attnum_acl` resolve
+/// for `classid`. `owner` is the `DatumGetObjectId(SysCacheGetAttrNotNull(...))`
+/// result; `acl` is the decoded `aclitem[]` column, `None` for SQL null.
+#[derive(Debug)]
+pub struct ObjectOwnerAcl<'mcx> {
+    /// The object's owning-role OID.
+    pub owner: OidT,
+    /// The object's ACL decoded to `aclitem[]`, or `None` for SQL null.
+    pub acl: Option<PgVec<'mcx, AclItem>>,
+}
