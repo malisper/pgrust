@@ -26,35 +26,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `FilterWalSummaries(wslist, tli, start_lsn, end_lsn)` (walsummary.c) —
-    /// return the subset of `wslist` that is on timeline `tli` and overlaps
-    /// `[start_lsn, end_lsn)`. The result `List *` is palloc'd in the caller's
-    /// context, so the port allocates the filtered vector in `mcx`. Pure list
-    /// filtering — infallible in C apart from OOM.
-    pub fn filter_wal_summaries<'mcx>(
-        mcx: Mcx<'mcx>,
-        wslist: &[WalSummaryFile],
-        tli: TimeLineID,
-        start_lsn: XLogRecPtr,
-        end_lsn: XLogRecPtr,
-    ) -> PgResult<PgVec<'mcx, WalSummaryFile>>
-);
-
-seam_core::seam!(
-    /// `WalSummariesAreComplete(wslist, start_lsn, end_lsn, &missing_lsn)`
-    /// (walsummary.c) — whether `wslist` covers the whole `[start_lsn,
-    /// end_lsn)` range with no gaps. Returns `(complete, missing_lsn)` where
-    /// `missing_lsn` (the C `*missing_lsn` out-param) is the first
-    /// unsummarized LSN when incomplete (`InvalidXLogRecPtr` when no summaries
-    /// at all). Pure computation — infallible in C.
-    pub fn wal_summaries_are_complete(
-        wslist: &[WalSummaryFile],
-        start_lsn: XLogRecPtr,
-        end_lsn: XLogRecPtr,
-    ) -> (bool, XLogRecPtr)
-);
-
-seam_core::seam!(
     /// `RemoveWalSummaryIfOlderThan(ws, cutoff_time)` (walsummary.c) — unlink
     /// the summary file if its last-modification time precedes `cutoff_time`.
     /// `Err` carries the stat/unlink `ereport(ERROR)`.

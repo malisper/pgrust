@@ -21,6 +21,7 @@ backend-common-relpath = { path = "../backend-common-relpath" }
 common-hashfn = { path = "../common-hashfn" }
 common-blkreftable-seams = { path = "../common-blkreftable-seams" }
 common-parse-manifest-seams = { path = "../common-parse-manifest-seams" }
+backend-backup-walsummary = { path = "../backend-backup-walsummary" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }
 backend-postmaster-walsummarizer-seams = { path = "../backend-postmaster-walsummarizer-seams" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }

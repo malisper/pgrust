@@ -3593,6 +3593,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-timeline-seams",
  "backend-access-transam-xlog-seams",
+ "backend-backup-walsummary",
  "backend-backup-walsummary-seams",
  "backend-common-relpath",
  "backend-postmaster-walsummarizer-seams",
@@ -3704,6 +3705,25 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-backup-walsummary"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-walsummary-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "common-blkreftable-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-blkreftable",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-walsummarizer",
 ]
 
 [[package]]
@@ -18750,6 +18770,7 @@ dependencies = [
  "backend-backup-sink",
  "backend-backup-sink-support",
  "backend-backup-throttle",
+ "backend-backup-walsummary",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",

@@ -476,7 +476,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
             if tle.tli == earliest_wal_range_tli {
                 tli_start_lsn = earliest_wal_range_start_lsn;
             }
-            let tli_wslist = walsummary::filter_wal_summaries::call(
+            let tli_wslist = backend_backup_walsummary::filter_wal_summaries(
                 self.mcx,
                 &all_wslist,
                 tle.tli,
@@ -488,10 +488,12 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
             // entire range of LSNs for which summaries are required, or indeed
             // that we found any WAL summaries at all. Check whether we have a
             // problem of that sort.
-            let (complete, tli_missing_lsn) = walsummary::wal_summaries_are_complete::call(
+            let mut tli_missing_lsn: XLogRecPtr = InvalidXLogRecPtr;
+            let complete = backend_backup_walsummary::wal_summaries_are_complete(
                 &tli_wslist,
                 tli_start_lsn,
                 tli_end_lsn,
+                &mut tli_missing_lsn,
             );
             if !complete {
                 if XLogRecPtrIsInvalid(tli_missing_lsn) {
