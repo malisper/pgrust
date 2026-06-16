@@ -20,7 +20,7 @@ use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow
 use types_cache::AuthIdRow;
 use types_cache::syscache::{
     ClassOwnerAcl, ForeignDataWrapperFormRow, ForeignServerFormRow, NamespaceOwnerAcl,
-    ObjectOwnerAcl, TypeOwnerAcl,
+    ObjectOwnerAcl, RolePasswordLookup, TypeOwnerAcl,
 };
 use types_acl::AclItem;
 use types_catalog::pg_aggregate::AggRow;
@@ -69,6 +69,16 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         rolename: &str,
     ) -> PgResult<Option<AuthIdRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHNAME, PointerGetDatum(role))` for
+    /// `get_role_password` (`libpq/crypt.c`): projects `rolpassword`
+    /// (`TextDatumGetCString`) and `rolvaliduntil` (`DatumGetTimestampTz`),
+    /// distinguishing no-such-role / no-password / found via
+    /// [`RolePasswordLookup`]. The `ReleaseSysCache` is subsumed by returning
+    /// the data by value.
+    pub fn fetch_role_password(role: &str) -> PgResult<RolePasswordLookup>
 );
 
 seam_core::seam!(

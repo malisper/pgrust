@@ -8935,6 +8935,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-crypt"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-crypt-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-authid",
+ "types-cache",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-libpq-crypt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-libpq-hba-seams"
 version = "0.0.0"
 dependencies = [
@@ -18159,6 +18185,7 @@ dependencies = [
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-libpq-auth",
+ "backend-libpq-crypt",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
