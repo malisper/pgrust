@@ -18,3 +18,5 @@ types-rel = { path = "../types-rel" }
 types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-catalog = { path = "../types-catalog" }
+types-tuple = { path = "../types-tuple" }
+types-cluster = { path = "../types-cluster" }

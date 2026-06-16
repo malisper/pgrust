@@ -36,3 +36,17 @@ common-hashfn-seams = { path = "../common-hashfn-seams" }
 # lock.c owns the max_locks_per_transaction / log_lock_failures GUC storage
 # cells (installs their accessors into the GUC table).
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
+# resowner.c bookkeeping (RememberLock / ForgetLock / GetParent /
+# CurrentResourceOwner) the LOCALLOCK grant/release paths call.
+backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }
+
+# lmgr.c owns DescribeLockTag; lock.c's describe_lock_tag seam (proc.c's
+# log path) delegates to it.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+
+# Error reporting (WARNING / LOG ereports) + my_proc_pid + recovery-state +
+# DeadLockReport.
+backend-utils-error = { path = "../backend-utils-error" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }

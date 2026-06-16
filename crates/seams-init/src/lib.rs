@@ -126,6 +126,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_tablecmds::init_seams();
     backend_commands_vacuum::init_seams();
     backend_commands_vacuumparallel::init_seams();
     backend_commands_variable::init_seams();
@@ -306,6 +307,7 @@ pub fn init_all() {
     backend_replication_libpqwalreceiver::init_seams();
     backend_replication_logical_applyparallelworker::init_seams();
     backend_replication_logical_conflict::init_seams();
+    backend_replication_logical_decode::init_seams();
     backend_replication_logical_launcher::init_seams();
     backend_replication_logical_logical::init_seams();
     backend_replication_logical_origin::init_seams();
@@ -1538,26 +1540,19 @@ mod recurrence_guard {
         //
         // The entries that REMAIN below are still genuinely uninstalled+called:
         // the typecmds.c F3/F4 narrow single-column pg_type mutators (their
-        // owning typecmds arms are not yet ported) and the generic
-        // update_object_owner_tuple. DELETE each as its owner installs it.
+        // owning typecmds arms are not yet ported). DELETE each as its owner
+        // installs it.
+        //
+        // The generic update_object_owner_tuple (alter.c AlterObjectOwner_internal)
+        // is now INSTALLED by backend-catalog-indexing's family2 — it deforms the
+        // re-fetched row, sets the owner column, re-serializes aclnewowner(acl,
+        // old, new) into the aclitem[] varlena via the shared acl_new_owner_datum
+        // codec, CatalogTupleUpdate + UnlockTuple — so its entry was DELETED.
         ("backend_catalog_indexing", "catalog_tuple_update_typowner_typacl_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typnamespace_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typnotnull_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typdefault_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_attrs_pg_type"),
-        // -- alter.c (AlterObjectOwner_internal, generic catalog) --
-        // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
-        // AlterObjectOwner_internal builds the modified owner tuple for an
-        // ARBITRARY simple catalog — set the owner column and, when the catalog
-        // has an ACL column, re-serialize aclnewowner(acl, old, new) back into
-        // the aclitem[] varlena — then CatalogTupleUpdate + UnlockTuple. The
-        // generic aclitem[]-varlena re-serialization into an arbitrary tuple
-        // column has no owned-model counterpart at this layer (every other
-        // owner-change uses a per-catalog typed writer, e.g.
-        // update_namespace_owner_tuple). Declared on the indexing owner so the
-        // landed alter dispatch can call it; loud-panics until indexing's
-        // generic aclitem[] write lands. DELETE when indexing installs it.
-        ("backend_catalog_indexing", "update_object_owner_tuple"),
         // ===================================================================
         // AUDIT-FIX #345 — blind-spot revealed by the col-4-fallback guard fix.
         // The 24 merged/audited rows with an EMPTY `crate` column (and the
@@ -1702,6 +1697,32 @@ mod recurrence_guard {
         ("backend_utils_cache_relcache", "relation_get_index_expressions"),
         ("backend_utils_cache_relcache", "relation_get_index_predicate"),
         ("backend_utils_cache_relcache", "relation_get_exclusion_info"),
+        // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE, cont.):
+        // `RelationGetDummyIndexExpressions` (relcache.c) is `BuildDummyIndexInfo`'s
+        // (#334, catalog/index.c) expression source — same `pg_index.indexprs`
+        // `stringToNode` node-tree decode as `RelationGetIndexExpressions`, then
+        // replaces every leaf with a null `Const` of the right type/typmod/coll.
+        // It rides on the SAME unported node-tree string reader, so the relcache
+        // owner cannot install it and it loud-panics until `stringToNode` lands.
+        // The live `BuildDummyIndexInfo` consumer (TRUNCATE of an index) only
+        // reaches the decode on an expression index; simple-column indexes return
+        // NIL. Install + DELETE alongside the three entries above.
+        ("backend_utils_cache_relcache", "relation_get_dummy_index_expressions"),
+        //
+        // -- backend-catalog-indexing (pg_attribute insert substrate unported) --
+        // DESIGN_DEBT (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES): `AppendAttributeTuples`
+        // (#334, catalog/index.c) inserts one `pg_attribute` row per index column
+        // (`InsertPgAttributeTuples(pg_attribute, indexTupDesc, InvalidOid,
+        // attrs_extra, indstate)`), having first run `InitializeAttributeOids`
+        // (scribble the new index's OID onto its stored descriptor's `attrelid`s).
+        // The catalog-indexing owner owns pg_attribute writes but has not yet
+        // ported `InsertPgAttributeTuples` (the `heap_form_tuple` over
+        // `Form_pg_attribute` + `CatalogTuplesMultiInsertWithInfo` path) nor the
+        // descriptor-mutation entry point, so it cannot install this and the seam
+        // loud-panics (mirror-PG-and-panic). Reached only from `index_create`,
+        // which is itself uninstalled (catalog-write driver substrate unported).
+        // Install + DELETE when catalog-indexing ports `InsertPgAttributeTuples`.
+        ("backend_catalog_indexing", "append_attribute_tuples"),
         //
         // -- backend-utils-cache-inval (OID-refetch wrapper unported) --
         // DESIGN_DEBT (TD-INVAL-OID-REFETCH): `cache_invalidate_heap_tuple`
@@ -1780,6 +1801,30 @@ mod recurrence_guard {
         // DELETE these entries when funcapi grows the fmgr arg-detoast accessors.
         ("backend_utils_fmgr_funcapi", "srf_arg_varlena_bytes"),
         ("backend_utils_fmgr_funcapi", "srf_arg_record"),
+        // DESIGN_DEBT (TD-TABLECMDS-F1F6-UNPORTED): tablecmds.c is a 22k-LOC giant
+        // ported in families. Only FAMILY F0 (relation create/drop/truncate +
+        // on_commit + small helpers) is landed in `backend-commands-tablecmds`
+        // (audited). The eleven seams below are tablecmds.c functions belonging to
+        // the not-yet-ported families F1-F6 (the ALTER phase machine, column /
+        // constraint / ALTER TYPE / inheritance-partition / RENAME / SET SCHEMA /
+        // change-owner machinery, and the sequence-create driver). They are
+        // declared in `backend-commands-tablecmds-seams` and `::call`ed by already-
+        // merged consumers (commands/alter.c, parse-utilcmd, sequence.c, REASSIGN
+        // OWNED, etc.). The F0 owner crate has no body for them yet, so it cannot
+        // install them — they loud-panic (mirror-pg-and-panic) on a real call path
+        // until the owning family lands. DELETE each entry as its family ports the
+        // function and installs the seam in `init_seams()`.
+        ("backend_commands_tablecmds", "RenameRelation"),
+        ("backend_commands_tablecmds", "renameatt"),
+        ("backend_commands_tablecmds", "RenameConstraint"),
+        ("backend_commands_tablecmds", "AlterTableNamespace"),
+        ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
+        ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
+        ("backend_commands_tablecmds", "at_exec_change_owner"),
+        ("backend_commands_tablecmds", "rename_relation_internal"),
+        ("backend_commands_tablecmds", "reset_rel_rewrite"),
+        ("backend_commands_tablecmds", "range_var_callback_owns_relation"),
+        ("backend_commands_tablecmds", "define_sequence_relation"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

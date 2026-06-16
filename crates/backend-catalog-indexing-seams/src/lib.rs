@@ -245,6 +245,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AppendAttributeTuples(indexRelation, attopts, stattargets)`
+    /// (catalog/index.c): `table_open(AttributeRelationId, RowExclusiveLock)`,
+    /// `CatalogOpenIndexes`, `InsertPgAttributeTuples(pg_attribute,
+    /// RelationGetDescr(indexRelation), InvalidOid, attrs_extra, indstate)`,
+    /// `CatalogCloseIndexes`, `table_close`. The per-attribute `attoptions`
+    /// (`attopts[i]` as a reloptions text array) and `attstattarget`
+    /// (`stattargets[i]`, `None` ⇒ SQL NULL) overrides ride in optional parallel
+    /// arrays indexed by attno-1; `None` for the whole array == the C NULL
+    /// `attopts` / `stattargets` (the only shape the `index_create` call site
+    /// here passes). Delegated to the catalog-indexing / heap layer (which owns
+    /// `InsertPgAttributeTuples` and the index's stored `RelationGetDescr`); the
+    /// owner installs it from `init_seams()`. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn append_attribute_tuples<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: &types_rel::Relation<'mcx>,
+        attopts: Option<&[Option<std::vec::Vec<u8>>]>,
+        stattargets: Option<&[Option<i16>]>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(rel, OpfamilyOidIndexId, Anum_pg_opfamily_oid)` +
     /// `heap_form_tuple` + `CatalogTupleInsert` for one pg_opfamily row
     /// (opclasscmds.c `CreateOpFamily`): assign the row OID, form the tuple
@@ -832,6 +854,34 @@ seam_core::seam!(
         object_id: Oid,
         locktuple: bool,
     ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `pg_get_acl(classId, objectId, objsubid)`'s catalog read (objectaddress.c
+    /// 4426): resolve the object's catalog (`pg_largeobject_metadata` substitutes
+    /// for `pg_largeobject`), `get_object_attnum_acl(catalogId)` — return `None`
+    /// when there is no ACL column — then read the `aclitem[]` column. For a
+    /// relation attribute (`classId == RelationRelationId && objsubid != 0`) the
+    /// ACL is `pg_attribute.attacl` fetched via `SearchSysCache2(ATTNUM,
+    /// objectId, objsubid)` + `SysCacheGetAttr(attacl)`; otherwise
+    /// `table_open(catalogId, AccessShareLock)` + `get_catalog_object_by_oid(rel,
+    /// get_object_attnum_oid(catalogId), objectId)` + `heap_getattr(Anum_acl)`.
+    /// `None` is the C `PG_RETURN_NULL` (missing object, missing ACL column, or a
+    /// SQL-NULL ACL); `Some(datum)` is the raw `aclitem[]` varlena `Datum`
+    /// (`PG_RETURN_DATUM`) copied into `mcx`. Owned by the indexing/catalog-form
+    /// layer (it holds `table_open` / the genam scan / `heap_getattr`); the
+    /// `anum_acl` / `anum_oid` resolution crosses in as parameters from the
+    /// objectaddress caller (`get_object_attnum_*`). `Err` carries the
+    /// heap/cache-fetch `ereport(ERROR)`s.
+    pub fn get_acl_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        catalog_id: Oid,
+        anum_oid: i16,
+        anum_acl: i16,
+        object_id: Oid,
+        objsubid: i32,
+        is_relation_attr: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>>
 );
 
 /* ---- pg_db_role_setting catalog-tuple decode / mutators ------------------- *

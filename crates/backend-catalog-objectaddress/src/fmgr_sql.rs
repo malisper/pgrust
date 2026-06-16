@@ -21,7 +21,13 @@
 //!   + F3 `getObjectIdentityParts` legs, returning the deconstructed
 //!   name/arg `text[]` columns directly (no `strlist_to_textarray` payload
 //!   needed at the value boundary).
-//! - `textarray_to_strvaluelist`, `strlist_to_textarray`, `pg_get_acl` — still
+//! - `pg_get_acl` — filled: resolves the catalog (pg_largeobject ->
+//!   pg_largeobject_metadata) + the `aclitem[]` column attnum, then reads the
+//!   raw varlena ACL `Datum` through the indexing owner's `get_acl_datum` seam
+//!   (`table_open` + `get_catalog_object_by_oid` + `heap_getattr`, or
+//!   `SearchSysCache2(ATTNUM)` + `SysCacheGetAttr(attacl)` for a relation
+//!   attribute), returning it verbatim (`PG_RETURN_DATUM` / `PG_RETURN_NULL`).
+//! - `textarray_to_strvaluelist`, `strlist_to_textarray` — still
 //!   mirror-and-panic, genuinely gated on the array Datum value lane
 //!   (`types_array::ArrayType` is header-only, no element-bytes payload).
 //! - `pg_get_object_address` — mirror-and-panic, gated on the parser
@@ -254,23 +260,51 @@ pub fn pg_identify_object_as_address<'mcx>(
 /// `pg_get_acl(PG_FUNCTION_ARGS)` (objectaddress.c 4426): the `aclitem[]` of a
 /// `(classid, objid, objsubid)` object, or NULL when it has no ACL column.
 pub fn pg_get_acl<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _classid: Oid,
-    _objid: Oid,
-    _objsubid: i32,
-) -> PgResult<Option<ArrayType>> {
-    // Gated on the array Datum value lane: the ACL is read out of the object's
-    // catalog tuple (`heap_getattr` / `SysCacheGetAttr` of the `aclitem[]`
-    // column) and returned verbatim as a `Datum` (the array payload), but
-    // `types_array::ArrayType` models only the fixed header — there is no
-    // element-bytes lane to carry the aclitem[] payload across this boundary.
-    // The catalog-tuple read lane (table_open / get_catalog_object_by_oid /
-    // SearchSysCacheCopyAttNum) is likewise unported. Mirror-and-panic until the
-    // SQL value lane lands.
-    panic!(
-        "decomp: pg_get_acl gated on the array Datum value lane (the aclitem[] \
-         column Datum has no payload in the header-only types_array::ArrayType) \
-         and the catalog-tuple read lane"
+    mcx: Mcx<'mcx>,
+    classid: Oid,
+    objid: Oid,
+    objsubid: i32,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>> {
+    use crate::consts::{
+        LargeObjectMetadataRelationId, LargeObjectRelationId, RelationRelationId,
+    };
+    use crate::properties::{get_object_attnum_acl, get_object_attnum_oid};
+
+    // for "pinned" items in pg_depend, return null.
+    if !OidIsValid(classid) && !OidIsValid(objid) {
+        return Ok(None);
+    }
+
+    // for large objects, the catalog to look at is pg_largeobject_metadata.
+    let catalog_id = if classid == LargeObjectRelationId {
+        LargeObjectMetadataRelationId
+    } else {
+        classid
+    };
+    let anum_acl = get_object_attnum_acl(catalog_id)?;
+
+    // return NULL if no ACL field for this catalog.
+    if anum_acl == 0 {
+        return Ok(None);
+    }
+
+    // If dealing with a relation's attribute (objsubid is set), the ACL is
+    // retrieved from pg_attribute; otherwise from the object's own catalog row.
+    let is_relation_attr = classid == RelationRelationId && objsubid != 0;
+    let anum_oid = if is_relation_attr {
+        0 // unused on the attribute path
+    } else {
+        get_object_attnum_oid(catalog_id)?
+    };
+
+    backend_catalog_indexing_seams::get_acl_datum::call(
+        mcx,
+        catalog_id,
+        anum_oid,
+        anum_acl,
+        objid,
+        objsubid,
+        is_relation_attr,
     )
 }
 

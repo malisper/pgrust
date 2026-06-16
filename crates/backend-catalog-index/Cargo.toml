@@ -38,6 +38,32 @@ backend-utils-activity-backend-progress-seams = { path = "../backend-utils-activ
 # SerializeReindexState / RestoreReindexState).
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 
+# `UpdateIndexRelation`: pg_index INSERT carrier + the catalog-indexing
+# `catalog_tuple_insert_pg_index` writer (keystone #341), `table_open`/
+# `table_close` of pg_index, and the `nodeToString` (outfuncs) image of the
+# index expressions / predicate (`make_ands_explicit` is a real fn in
+# backend-nodes-core).
+types-catalog = { path = "../types-catalog" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+# `BuildSpeculativeIndexInfo`: per-key unique-operator lookup.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+
+# ConstructTupleDescriptor: index AM vtable lookup (amkeytype), the heap
+# TupleDesc reads, CheckAttributeType, CreateTemplateTupleDesc /
+# populate_compact_attribute, get_base_element_type, and AppendAttributeTuples.
+backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+types-tuple = { path = "../types-tuple" }
+# CompareIndexInfo: map_variable_attnos over the index expression/predicate
+# lists + equal().
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+
 # Seam crates for not-yet-ported (or cyclic) owners.
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

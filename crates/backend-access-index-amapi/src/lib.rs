@@ -84,6 +84,7 @@ const BTMaxStrategyNumber: StrategyNumber = types_nbtree::BTMaxStrategyNumber;
 /// Install every seam declared in `backend-access-index-amapi-seams`.
 pub fn init_seams() {
     sx::get_index_am_routine::set(get_index_am_routine);
+    sx::get_index_am_routine_by_amid::set(get_index_am_routine_by_amid);
     sx::get_index_am_info::set(get_index_am_info);
     sx::index_am_translate_strategy::set(index_am_translate_strategy);
     sx::index_am_translate_cmptype::set(index_am_translate_cmptype);
@@ -345,6 +346,14 @@ fn compare_type_from_i32(v: i32) -> CompareType {
 /// call the handler and return the vtable to cache in `rd_indam`.
 fn get_index_am_routine(amhandler: Oid) -> PgResult<IndexAmRoutine> {
     GetIndexAmRoutine(amhandler)
+}
+
+/// `get_index_am_routine_by_amid(amoid)` — `GetIndexAmRoutineByAmId(amoid,
+/// false)`: resolve the AM's `amhandler` from pg_am, call it, and return the
+/// full `IndexAmRoutine` vtable (read by `catalog/index.c`
+/// `ConstructTupleDescriptor` for `amroutine->amkeytype`).
+fn get_index_am_routine_by_amid(amoid: Oid) -> PgResult<IndexAmRoutine> {
+    GetIndexAmRoutineByAmId(amoid)
 }
 
 /// `get_index_am_info(amoid)` — `GetIndexAmRoutineByAmId(amoid, false)` projected
