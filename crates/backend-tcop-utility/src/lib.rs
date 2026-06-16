@@ -79,6 +79,7 @@ pub use returns::{QueryReturnsTuples, UtilityContainsQuery, UtilityReturnsTuples
 /// `Mcx` through the inward seam + pquery).
 pub fn init_seams() {
     backend_tcop_utility_seams::create_command_tag::set(CreateCommandTag);
+    backend_tcop_utility_seams::get_command_log_level::set(GetCommandLogLevel);
     backend_tcop_utility_seams::utility_returns_tuples::set(UtilityReturnsTuples);
     backend_tcop_utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
     backend_tcop_utility_seams::prevent_command_during_recovery::set(PreventCommandDuringRecovery);

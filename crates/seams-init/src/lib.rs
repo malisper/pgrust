@@ -1023,6 +1023,28 @@ mod recurrence_guard {
         ("backend_access_heap_heapam", "log_heap_visible"),
         ("backend_access_heap_heapam", "read_pg_type"),
         ("backend_access_heap_heapam", "scan_indisclustered"),
+        // DESIGN_DEBT (TD-DEST-COMMAND-LIFECYCLE): four dest.c/printtup.c
+        // command-lifecycle seams the tcop/postgres.c F1 simple-Query pipeline
+        // (`exec_simple_query`) `::call`s, whose real bodies are NOT in the
+        // merged dest slice yet — sanctioned mirror-pg-and-panic on a complete
+        // owner (`backend-tcop-dest`). A sibling dest/printtup lane owns the
+        // start/finish-of-command reporting + the DestRemote printtup routing:
+        //   * begin_command  — dest.c `BeginCommand` (per-parsetree start-of-
+        //     command hook; a no-op for every current CommandDest).
+        //   * end_command    — dest.c `EndCommand` (the per-parsetree
+        //     CommandComplete client report).
+        //   * null_command   — dest.c `NullCommand` (EmptyQueryResponse for an
+        //     empty query string).
+        //   * set_remote_dest_receiver_params — printtup.c
+        //     `SetRemoteDestReceiverParams`; printtup is not yet routed into the
+        //     dest router (CreateDestReceiver(DestRemote) returns the unwired
+        //     vtable), so binding the receiver to the portal has no landing.
+        // DELETE each entry when the dest/printtup command-lifecycle + DestRemote
+        // routing lands.
+        ("backend_tcop_dest", "begin_command"),
+        ("backend_tcop_dest", "end_command"),
+        ("backend_tcop_dest", "null_command"),
+        ("backend_tcop_dest", "set_remote_dest_receiver_params"),
         // DESIGN_DEBT (TD-PATHNODE-CAN-CREATE-UNIQUE): pathnode.c's
         // `can_create_unique_path` is the `create_unique_path(...) != NULL` test.
         // Its body (`create_unique_path`, pathnode.c:1730) is itself genuinely
@@ -1485,17 +1507,22 @@ mod recurrence_guard {
         //     off opaque handles — the K1 plancache de-handle redesign (#159). The
         //     owner's Cargo.toml does not even dep the -pc-seams crate. Same blocker
         //     as the plancache pc-seam cluster above.
-        //   * 3 reach the unported QueryRewrite (rewriter) leg:
-        //     pg_analyze_and_rewrite_fixedparams (owner has analyze-only
-        //     parse_analyze_fixedparams, not the rewrite to PgVec<CopyQuery>),
+        //   * 2 reach the unported QueryRewrite (rewriter) leg:
         //     analyze_and_rewrite_varparams (varparam analyze+rewrite absent),
         //     run_post_parse_analyze_hook (hook is NULL by default, no body).
+        //     (pg_analyze_and_rewrite_fixedparams now lands via tcop/postgres.c
+        //     F1, which threads the canonical owned-value rewrite leg — entry
+        //     retired below.)
         // DELETE these as #159 (de-handle) and the rewriter leg land.
         ("backend_parser_analyze", "analyze_and_rewrite_fixedparams"),
         ("backend_parser_analyze", "analyze_and_rewrite_varparams"),
         ("backend_parser_analyze", "analyze_and_rewrite_withcb"),
         ("backend_parser_analyze", "analyze_requires_snapshot"),
-        ("backend_parser_analyze", "pg_analyze_and_rewrite_fixedparams"),
+        // pg_analyze_and_rewrite_fixedparams is now installed by the
+        // tcop/postgres.c owner (backend-tcop-postgres init_seams; the F1
+        // simple-Query pipeline owns this function and installs it via the
+        // canonical owned-value query_rewrite_canonical leg). Allowlist entry
+        // retired.
         ("backend_parser_analyze", "query_can_set_tag"),
         ("backend_parser_analyze", "query_command_type_is_utility"),
         ("backend_parser_analyze", "query_cte_queries"),

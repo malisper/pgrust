@@ -27,6 +27,44 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BeginCommand(commandTag, dest)` (tcop/dest.c) — start-of-command
+    /// processing for the destination (a no-op for every current `dest`). The
+    /// command-processor loop calls it once per raw parsetree before parse
+    /// analysis. Owner (`dest.c`) unported; scaffolded slot.
+    pub fn begin_command(command_tag: types_portal::CommandTag, dest: CommandDest)
+);
+
+seam_core::seam!(
+    /// `EndCommand(qc, dest, force_undecorated)` (tcop/dest.c) — tell the client
+    /// the command finished, emitting one `CommandComplete` per raw parsetree.
+    /// `Err` carries the send failure. Owner (`dest.c`) unported; scaffolded
+    /// slot.
+    pub fn end_command(
+        qc: &types_portal::QueryCompletion,
+        dest: CommandDest,
+        force_undecorated: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `NullCommand(dest)` (tcop/dest.c) — emit the `EmptyQueryResponse` when a
+    /// query string parsed to no statements. Owner (`dest.c`) unported;
+    /// scaffolded slot.
+    pub fn null_command(dest: CommandDest)
+);
+
+seam_core::seam!(
+    /// `SetRemoteDestReceiverParams(receiver, portal)` (printtup.c) — bind the
+    /// `DestRemote*` receiver to `portal` (its portal name + result formats).
+    /// `exec_simple_query` calls this for `DestRemote`. Owner routing
+    /// (printtup -> dest router) unported; scaffolded slot.
+    pub fn set_remote_dest_receiver_params(
+        receiver: DestReceiverHandle,
+        portal: &types_portal::Portal,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `dest->rStartup(dest, operation, tupdesc)` (tcop/dest.h): tell the
     /// receiver a result set of `tupdesc` rows is about to be sent under the
     /// given command type (`begin_tup_output_tupdesc` passes `CMD_SELECT`).
