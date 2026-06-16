@@ -29,6 +29,35 @@ impl WordEntry {
     pub fn pos(self) -> uint32 {
         (self.word >> 12) & 0xFFFFF
     }
+    /// Set the `haspos:1` bit.
+    #[inline]
+    pub fn set_haspos(&mut self, v: uint32) {
+        self.word = (self.word & !0x1) | (v & 0x1);
+    }
+    /// Set the `len:11` field.
+    #[inline]
+    pub fn set_len(&mut self, v: uint32) {
+        self.word = (self.word & !(0x7FF << 1)) | ((v & 0x7FF) << 1);
+    }
+    /// Set the `pos:20` field.
+    #[inline]
+    pub fn set_pos(&mut self, v: uint32) {
+        self.word = (self.word & !(0xFFFFF << 12)) | ((v & 0xFFFFF) << 12);
+    }
+}
+
+/// `DATAHDRSIZE` (ts_type.h) — `offsetof(TSVectorData, entries)`: the varlena
+/// length word (`int32 vl_len_`) plus the `int32 size` field.
+pub const DATAHDRSIZE: usize = 8;
+
+/// `LIMITPOS(x)` (ts_type.h) — clamp a position to `MAXENTRYPOS - 1`.
+#[inline]
+pub fn LIMITPOS(x: i32) -> i32 {
+    if x >= MAXENTRYPOS as i32 {
+        MAXENTRYPOS as i32 - 1
+    } else {
+        x
+    }
 }
 
 /// `MAXSTRLEN` (ts_type.h) — `(1<<11) - 1`.

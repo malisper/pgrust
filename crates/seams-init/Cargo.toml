@@ -314,6 +314,7 @@ backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
+backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
