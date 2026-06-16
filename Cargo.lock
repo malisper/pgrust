@@ -10880,6 +10880,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-bgwriter"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-bgwriter-seams",
+ "backend-postmaster-checkpointer",
+ "backend-postmaster-interrupt",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-small",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-resowner-seams",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-postmaster-bgwriter-seams"
 version = "0.0.0"
 dependencies = [
@@ -17924,6 +17959,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
+ "backend-postmaster-bgwriter",
  "backend-postmaster-checkpointer",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",

@@ -452,6 +452,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyBackendType = B_BG_WRITER` — set this backend's type to the background
+    /// writer (globals.c stores `MyBackendType`; the bgwriter sets it before
+    /// `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_bg_writer()
+);
+
+seam_core::seam!(
     /// `CritSectionCount > 0` (miscadmin.h `START_CRIT_SECTION` counter) — true
     /// when in a critical section. `CompactCheckpointerRequestQueue` checks this
     /// to avoid allocating inside one. Pure backend-local read.

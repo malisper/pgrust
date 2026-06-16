@@ -251,6 +251,7 @@ backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
+backend-postmaster-bgwriter = { path = "../backend-postmaster-bgwriter" }
 backend-postmaster-checkpointer = { path = "../backend-postmaster-checkpointer" }
 backend-postmaster-pgarch = { path = "../backend-postmaster-pgarch" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
