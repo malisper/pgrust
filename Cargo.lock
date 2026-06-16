@@ -16847,6 +16847,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-fgram",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
 name = "backend-utils-adt-like"
 version = "0.0.0"
 dependencies = [
