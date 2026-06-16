@@ -20,11 +20,63 @@ use types_tuple::pg_type::FormData_pg_type;
 // Statistic values that may be pass-by-reference (text/numeric/varchar/…) must
 // live in this safe byte lane, NOT a bare `usize` word (which cannot carry the
 // referenced bytes and would dangle when copied into a temporary context).
-use types_tuple::{Datum, HeapTuple, TupleDesc};
+use types_tuple::{Datum, FormedTuple, TupleDesc};
 
 /// `STATISTIC_NUM_SLOTS` (`catalog/pg_statistic.h:127`): the number of
 /// statistic-kind slots in a `pg_statistic` row (and thus in [`VacAttrStats`]).
 pub const STATISTIC_NUM_SLOTS: usize = 5;
+
+/* ---------------------------------------------------------------------------
+ * `pg_statistic` catalog vocabulary (`catalog/pg_statistic.h`, generated
+ * `pg_statistic_d.h`) consumed by `update_attstats` (commands/analyze.c). The
+ * attribute numbers follow the 1-based `FormData_pg_statistic` field order; the
+ * slotted fields (`stakind1`/`staop1`/`stacoll1`/`stanumbers1`/`stavalues1`)
+ * are the first of `STATISTIC_NUM_SLOTS` consecutive columns each.
+ * ------------------------------------------------------------------------- */
+
+/// `StatisticRelationId` (`catalog/pg_statistic.h:29`) — the OID of the
+/// `pg_statistic` catalog (`2619`).
+pub const StatisticRelationId: Oid = 2619;
+
+/// `Natts_pg_statistic` (`catalog/pg_statistic_d.h`) — number of columns in a
+/// `pg_statistic` row (3 key + nullfrac/width/distinct + 5×{kind,op,coll,numbers,values}).
+pub const Natts_pg_statistic: usize = 31;
+
+/// `Anum_pg_statistic_starelid` (1).
+pub const Anum_pg_statistic_starelid: usize = 1;
+/// `Anum_pg_statistic_staattnum` (2).
+pub const Anum_pg_statistic_staattnum: usize = 2;
+/// `Anum_pg_statistic_stainherit` (3).
+pub const Anum_pg_statistic_stainherit: usize = 3;
+/// `Anum_pg_statistic_stanullfrac` (4).
+pub const Anum_pg_statistic_stanullfrac: usize = 4;
+/// `Anum_pg_statistic_stawidth` (5).
+pub const Anum_pg_statistic_stawidth: usize = 5;
+/// `Anum_pg_statistic_stadistinct` (6).
+pub const Anum_pg_statistic_stadistinct: usize = 6;
+/// `Anum_pg_statistic_stakind1` (7) — first of `STATISTIC_NUM_SLOTS` `stakindN`.
+pub const Anum_pg_statistic_stakind1: usize = 7;
+/// `Anum_pg_statistic_staop1` (12) — first of `STATISTIC_NUM_SLOTS` `staopN`.
+pub const Anum_pg_statistic_staop1: usize = 12;
+/// `Anum_pg_statistic_stacoll1` (17) — first of `STATISTIC_NUM_SLOTS` `stacollN`.
+pub const Anum_pg_statistic_stacoll1: usize = 17;
+/// `Anum_pg_statistic_stanumbers1` (22) — first of `STATISTIC_NUM_SLOTS`
+/// `stanumbersN`.
+pub const Anum_pg_statistic_stanumbers1: usize = 22;
+/// `Anum_pg_statistic_stavalues1` (27) — first of `STATISTIC_NUM_SLOTS`
+/// `stavaluesN`.
+pub const Anum_pg_statistic_stavalues1: usize = 27;
+
+/// `STATISTIC_KIND_MCV` (`catalog/pg_statistic.h:190`) — most-common-values slot.
+pub const STATISTIC_KIND_MCV: i16 = 1;
+/// `STATISTIC_KIND_HISTOGRAM` (`catalog/pg_statistic.h:210`) — histogram slot.
+pub const STATISTIC_KIND_HISTOGRAM: i16 = 2;
+/// `STATISTIC_KIND_CORRELATION` (`catalog/pg_statistic.h:222`) — correlation slot.
+pub const STATISTIC_KIND_CORRELATION: i16 = 3;
+
+/// `FLOAT4OID` (`catalog/pg_type.dat`) — the `float4` (`real`) type OID (`700`),
+/// used by `update_attstats` to build the `stanumbersN` `float4[]` arrays.
+pub const FLOAT4OID: Oid = 700;
 
 /// `STATS_MAX_DIMENSIONS` (`statistics/statistics.h`): the maximum number of
 /// columns/expressions an extended statistics object may cover.
@@ -292,7 +344,17 @@ pub struct VacAttrStats<'mcx> {
     /// `tupattnum` — attribute number within tuples.
     pub tupattnum: i32,
     /// `rows` — access info for the std fetch function (C `HeapTuple *rows`).
-    pub rows: Vec<HeapTuple<'mcx>>,
+    ///
+    /// The C `HeapTuple` is a fully materialized tuple (header + user-data area)
+    /// the fetch routine reads attributes from via `heap_getattr`. The repo's
+    /// header-only `HeapTuple` alias (`Option<PgBox<HeapTupleData>>`) cannot
+    /// carry the user-data bytes `heap_getattr`/`nocachegetattr` need, so the
+    /// reservoir holds the repo's real materialized-tuple carrier
+    /// [`types_tuple::FormedTuple`] (header + `data`), which is exactly what
+    /// `ExecCopySlotHeapTuple` produces. This is the C-faithful carrier for
+    /// `HeapTuple *rows` in this repo's value model; it is private to the main
+    /// ANALYZE code (no other unit reads it).
+    pub rows: Vec<FormedTuple<'mcx>>,
     /// `tupDesc` — tuple descriptor for `rows`.
     pub tup_desc: TupleDesc<'mcx>,
     /// `exprvals` — access info for the index fetch function (C `Datum *exprvals`).
