@@ -464,7 +464,11 @@ pub fn largeobject_owner_acl<'mcx>(
     }
     let ownerId: Oid = match owner_val {
         Datum::ByVal(v) => *v as u32,
-        Datum::ByRef(_) => {
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(types_error::PgError::error(
                 "pg_largeobject_metadata.lomowner is by-reference",
             ))
@@ -477,7 +481,11 @@ pub fn largeobject_owner_acl<'mcx>(
     } else {
         match acl_val {
             Datum::ByRef(b) => Some(decode_acl(mcx, &b[..])?),
-            Datum::ByVal(_) => {
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 return Err(types_error::PgError::error(
                     "pg_largeobject_metadata.lomacl is by-value",
                 ))

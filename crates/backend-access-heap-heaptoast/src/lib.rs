@@ -772,7 +772,11 @@ pub fn heap_fetch_toast_slice(
         // DatumGetInt32(...): the chunk-index column is int4 (by value).
         let curchunk: i32 = match &cur_value {
             Datum::ByVal(_) => cur_value.as_i32(),
-            Datum::ByRef(_) => {
+            Datum::ByRef(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATA_CORRUPTED)
                     .errmsg_internal(format!(
@@ -788,7 +792,11 @@ pub fn heap_fetch_toast_slice(
         debug_assert!(!isnull);
         let chunk: &[u8] = match &chunk_value {
             Datum::ByRef(bytes) => bytes,
-            Datum::ByVal(_) => {
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATA_CORRUPTED)
                     .errmsg_internal(format!(
