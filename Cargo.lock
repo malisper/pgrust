@@ -4535,6 +4535,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-operator"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-operator-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-parser-parse-oper",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
@@ -5156,13 +5190,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-createas"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-table-table",
+ "backend-access-table-tableam",
+ "backend-access-transam-xact",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-depend",
+ "backend-commands-createas-seams",
+ "backend-commands-matview-seams",
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-tcop-dest",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-misc-more-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-matview",
+ "types-nodes",
+ "types-portal",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-createas-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-portal",
+ "types-rel",
 ]
 
 [[package]]
@@ -13956,6 +14029,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-gin"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-gin-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonpath",
+ "backend-utils-adt-numeric",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-jsonb",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-gin-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-op"
 version = "0.0.0"
 dependencies = [
@@ -14028,6 +14129,45 @@ dependencies = [
  "types-fmgr",
  "types-jsonpath",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-exec"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonpath",
+ "backend-utils-adt-jsonpath-exec-seams",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-regexp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
+ "types-jsonpath",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-exec-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
 ]
 
 [[package]]
@@ -17258,6 +17398,7 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
+ "backend-catalog-pg-operator",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
  "backend-catalog-pg-type",
@@ -17269,6 +17410,7 @@ dependencies = [
  "backend-commands-comment",
  "backend-commands-conversioncmds",
  "backend-commands-copyto",
+ "backend-commands-createas",
  "backend-commands-dbcommands",
  "backend-commands-define",
  "backend-commands-dropcmds",
@@ -17471,6 +17613,7 @@ dependencies = [
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
+ "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",

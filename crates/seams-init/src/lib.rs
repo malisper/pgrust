@@ -91,6 +91,7 @@ pub fn init_all() {
     backend_catalog_pg_depend::init_seams();
     backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_operator::init_seams();
     backend_catalog_pg_aggregate::init_seams();
     backend_catalog_pg_type::init_seams();
     backend_catalog_pg_inherits::init_seams();
@@ -108,6 +109,7 @@ pub fn init_all() {
     backend_commands_conversioncmds::init_seams();
     backend_commands_statscmds::init_seams();
     backend_commands_copyto::init_seams();
+    backend_commands_createas::init_seams();
     backend_commands_define::init_seams();
     backend_commands_dropcmds::init_seams();
     backend_commands_extension::init_seams();
@@ -315,6 +317,7 @@ pub fn init_all() {
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
+    backend_utils_adt_jsonb_gin::init_seams();
     backend_utils_adt_like::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
