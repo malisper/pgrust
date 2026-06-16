@@ -72,6 +72,14 @@ struct IterEntry {
     txn_xid: TransactionId,
     /// Index of the next change to yield from that txn's `changes` Vec.
     next_idx: usize,
+    /// `TXNEntryFile file` — the open spill segment + read cursor for a
+    /// serialized txn (C `entries[off].file`). Default (no file open) until the
+    /// txn is serialized and its changes are paged back through
+    /// `ReorderBufferRestoreChanges`.
+    file: crate::spill::TxnEntryFile,
+    /// `XLogSegNo segno` — the segment the next restore batch reads from
+    /// (C `entries[off].segno`). 0 == not yet started.
+    segno: u64,
 }
 
 /// The binary-heap node: `(lsn, entry-index)`. The C heap stores the int32
@@ -245,16 +253,21 @@ impl ReorderBuffer {
         let mut entries: Vec<IterEntry> = Vec::with_capacity(nr_txns);
 
         for &m_xid in &member_xids {
+            let mut file = crate::spill::TxnEntryFile::default();
+            let mut segno: u64 = 0;
             if self.with_txn_pub(m_xid, |t| t.is_serialized()) {
-                // serialize remaining changes, then restore the first segment.
+                // serialize any remaining in-memory changes, then page the first
+                // batch back from disk (C ReorderBufferIterTXNInit).
                 self.serialize_txn(m_xid);
-                self.restore_changes(m_xid);
+                self.restore_changes(m_xid, &mut file, &mut segno);
             }
             let lsn = self.with_txn_pub(m_xid, |t| t.changes[0].lsn);
             entries.push(IterEntry {
                 lsn,
                 txn_xid: m_xid,
                 next_idx: 1,
+                file,
+                segno,
             });
         }
 
@@ -308,7 +321,19 @@ impl ReorderBuffer {
         if nentries != nentries_mem {
             let txn_size = self.with_txn_pub(entry_xid, |t| t.size) as i64;
             self.totalbytes_add(txn_size);
-            if self.restore_changes(entry_xid) {
+            // Page the next batch back in; restore_changes threads the entry's
+            // persistent open segment + cursor.
+            let restored = {
+                let entry = &mut state.entries[off as usize];
+                let mut file = core::mem::take(&mut entry.file);
+                let mut segno = entry.segno;
+                let n = self.restore_changes(entry_xid, &mut file, &mut segno);
+                let entry = &mut state.entries[off as usize];
+                entry.file = file;
+                entry.segno = segno;
+                n
+            };
+            if restored > 0 {
                 let next_lsn = self.with_txn_pub(entry_xid, |t| t.changes[0].lsn);
                 state.entries[off as usize].lsn = next_lsn;
                 state.entries[off as usize].next_idx = 1;
@@ -322,9 +347,14 @@ impl ReorderBuffer {
         Some(change)
     }
 
-    /// `ReorderBufferIterTXNFinish(rb, state)` — free the iterator. The on-disk
-    /// vfd close belongs to the spill family; the in-memory heap drops here.
+    /// `ReorderBufferIterTXNFinish(rb, state)` — free the iterator: close any
+    /// still-open spill segment vfds, then drop the heap.
     fn iter_txn_finish(&mut self, state: IterTxnState) {
+        for entry in &state.entries {
+            if let Some(vfd) = entry.file.vfd {
+                backend_storage_file_fd_seams::file_close::call(vfd);
+            }
+        }
         state.heap.free();
     }
 

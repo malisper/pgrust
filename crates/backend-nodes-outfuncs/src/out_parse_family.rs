@@ -136,7 +136,7 @@ fn write_value_vec_field<T>(
 // _outQuery
 // ===========================================================================
 
-fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool) {
+pub(crate) fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool) {
     buf.push_str("QUERY");
     write_enum_field(buf, "commandType", n.commandType as i32);
     write_enum_field(buf, "querySource", n.querySource as i32);
@@ -326,7 +326,7 @@ pub(crate) fn out_range_tbl_function(
 // _outTableSampleClause
 // ===========================================================================
 
-fn out_table_sample_clause(buf: &mut String, n: &types_nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
+pub(crate) fn out_table_sample_clause(buf: &mut String, n: &types_nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
     buf.push_str("TABLESAMPLECLAUSE");
     write_oid_field(buf, "tsmhandler", n.tsmhandler);
     // args: Option<PgVec<Expr>>. C WRITE_NODE_FIELD of a List of Expr → bare

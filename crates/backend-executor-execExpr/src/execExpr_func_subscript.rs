@@ -881,10 +881,10 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
     // accessor and returns `None` for every current variant), so the owned model
     // can faithfully realize the `default:` arm for every parent that can reach
     // here: `subplan` is `None`, and the junk-filter block is correctly skipped.
-    if let Some(parent) = state.parent.as_deref() {
+    if let Some(parent) = state.parent.map(|l| l.get()) {
         use types_nodes::nodes::T_SubqueryScanState;
 
-        let subplan: Option<&types_nodes::planstate::PlanStateNode<'mcx>> = match parent.tag() {
+        let subplan = match parent.tag() {
             // C: case T_SubqueryScanState: subplan = ...->subplan;
             //    case T_CteScanState: subplan = ...->cteplanstate;
             // Reached via the modeled SubqueryScan/CteScan child-plan accessor.

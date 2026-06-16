@@ -28,23 +28,32 @@
 //!   `types_scan::genam::SysScanDescData`), which owns `scan_cx` so the erased
 //!   borrows never dangle.
 //!
-//! ## The heap-fetch leg (sanctioned mirror-and-panic)
+//! ## The heap-fetch leg
 //!
 //! `systable_getnext` runs `index_getnext_slot` / `table_scan_getnextslot`
 //! (indexam.c / tableam.c, both ported) which dispatch the actual heap-tuple
 //! fetch + visibility check to the heap AM provider (heapam_handler.c /
-//! heapam.c, still `todo`, bufmgr-gated). That provider is unported, so its
-//! vtable callback panics loudly — the sanctioned `mirror-pg-and-panic` for the
-//! one unported dependency. The `systable_*` dispatch logic itself (index-vs-
-//! heap decision, scan-key attribute-number conversion, snapshot bookkeeping,
-//! scan begin/rescan/end, lossy-recheck guard, concurrent-abort handling) is
-//! fully real.
+//! heapam.c), now ported and installed. The `systable_*` dispatch logic itself
+//! (index-vs-heap decision, scan-key attribute-number conversion, snapshot
+//! bookkeeping, scan begin/rescan/end, lossy-recheck guard, concurrent-abort
+//! handling) is fully real.
+//!
+//! ## `systable_inplace_update`
+//!
+//! The combined `systable_inplace_update_{begin,finish,cancel}` primitive
+//! (the overwrite-in-place path catalog stats writes use) is bodied here: it
+//! drives the begin/getnext retry loop, takes the heavyweight tuple lock +
+//! exclusive buffer lock through `heap_inplace_lock`, runs the caller's
+//! `mutate` callback over the live tuple's user-data area, and finishes with
+//! `heap_inplace_update_and_unlock` (dirty) or `heap_inplace_unlock` (clean) —
+//! the inplace trio ported in `backend-access-heap-heapam::inplace`.
 
 extern crate alloc;
 
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
+use backend_utils_error::ereport;
 use types_nodes::tuptable::SlotData;
 use types_rel::{Relation, RelationData};
 use types_scan::genam::{SysScanDescData, SysScanLive};
@@ -122,6 +131,7 @@ pub fn init_seams() {
     seam::systable_beginscan_ordered::set(systable_beginscan_ordered);
     seam::systable_getnext_ordered::set(systable_getnext_ordered);
     seam::systable_endscan_ordered::set(systable_endscan_ordered);
+    seam::systable_inplace_update::set(systable_inplace_update);
 }
 
 // ===========================================================================
@@ -538,6 +548,168 @@ fn take_live_state<'mcx>(desc: &mut SysScanDescData) -> Box<SysScanLiveState<'mc
     let boxed: Box<dyn SysScanLive + '_> = desc.take_live();
     let raw = Box::into_raw(boxed) as *mut SysScanLiveState<'mcx>;
     unsafe { Box::from_raw(raw) }
+}
+
+// ===========================================================================
+// systable_inplace_update — the begin/mutate/finish-or-cancel inplace primitive
+// ===========================================================================
+
+/// `systable_inplace_update_begin` + `systable_inplace_update_finish` /
+/// `systable_inplace_update_cancel` (genam.c), combined into the single
+/// `mutate`-callback shape the seam exposes. The C three-call protocol is:
+///
+/// ```text
+/// systable_inplace_update_begin([...], &tup, &state);
+/// if (!HeapTupleIsValid(tup)) elog(ERROR, [...]);
+/// ...mutate GETSTRUCT(tup) under the exclusive buffer lock...
+/// if (dirty) systable_inplace_update_finish(state, tup);
+/// else       systable_inplace_update_cancel(state);
+/// ```
+///
+/// The `mutate` callback receives the live tuple's user-data byte area (C's
+/// `GETSTRUCT(tup)`), may both *read* the current column bytes and *write* the
+/// new image in place, and returns the C `dirty` flag, which selects `_finish`
+/// (WAL + inplace cache inval, via `heap_inplace_update_and_unlock`) versus
+/// `_cancel` (`heap_inplace_unlock`, no WAL). The found tuple's `t_self` is
+/// returned (`None` when the key found no live tuple — C's `*oldtupcopy = NULL`).
+fn systable_inplace_update<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &RelationData<'mcx>,
+    index_id: Oid,
+    index_ok: bool,
+    keys: &[ScanKeyData<'_>],
+    mutate: &mut dyn FnMut(&mut [u8]) -> PgResult<bool>,
+) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+    // For now, we don't allow parallel updates.
+    if backend_access_transam_xact_seams::is_in_parallel_mode::call() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
+            .errmsg("cannot update tuples during a parallel operation".to_string())
+            .into_error());
+    }
+
+    // The C `snapshot` argument is always NULL; begin uses the catalog snapshot.
+
+    let mut retries = 0;
+
+    // Loop for an exclusive-locked buffer of a non-updated tuple.
+    loop {
+        backend_access_transam_parallel_rt_seams::check_for_interrupts::call()?;
+
+        // Processes issuing heap_update at maximum speed could drive us here.
+        retries += 1;
+        if retries > 10000 {
+            return Err(PgError::error(
+                "giving up after too many tries to overwrite row",
+            ));
+        }
+
+        // scan = systable_beginscan(relation, indexId, indexOK, NULL, nkeys, key);
+        let mut guard = systable_beginscan(relation, index_id, index_ok, None, keys)?;
+
+        // oldtup = systable_getnext(scan);
+        let oldtup = systable_getnext(mcx, guard.desc_mut())?;
+        let oldtup = match oldtup {
+            None => {
+                // systable_endscan(scan); *oldtupcopy = NULL; return.
+                guard.end()?;
+                return Ok(None);
+            }
+            Some(t) => t,
+        };
+
+        // slot = scan->slot; bslot = (BufferHeapTupleTableSlot *) slot;
+        // bslot->base.tuple, bslot->buffer.
+        let self_tid = oldtup.tuple.t_self;
+        let buffer = match &live_of(guard.desc_mut()).slot {
+            SlotData::BufferHeap(s) => s.buffer,
+            _ => {
+                return Err(PgError::error(
+                    "systable_inplace_update: result slot is not a buffer-heap slot",
+                ))
+            }
+        };
+
+        // Alias the heap relation out of the live state so the inplace lock can
+        // borrow it while the release callback ends (drops) the scan — C passes
+        // `scan->heap_rel` and `systable_endscan` as separate args.
+        let heap_rel = live_of(guard.desc_mut()).heap_rel.alias();
+
+        // while (!heap_inplace_lock(scan->heap_rel, bslot->base.tuple,
+        //                           bslot->buffer, systable_endscan, scan))
+        // The release callback (run only when the lock could not be taken)
+        // ends the current scan, exactly as C's `systable_endscan(scan)`.
+        // `oldtup` carries the on-page tuple's identity (`t_self`); the inplace
+        // primitives re-materialize the live page state through `buffer`.
+        let mut guard_slot: Option<seam::SysScanGuard> = Some(guard);
+        let mut release_err: Option<PgError> = None;
+        let locked = {
+            let guard_ref = &mut guard_slot;
+            let release_err_ref = &mut release_err;
+            let mut release = || -> PgResult<()> {
+                if let Some(g) = guard_ref.take() {
+                    if let Err(e) = g.end() {
+                        *release_err_ref = Some(e);
+                    }
+                }
+                Ok(())
+            };
+            backend_access_heap_heapam_seams::heap_inplace_lock::call(
+                mcx,
+                &heap_rel,
+                &oldtup.tuple,
+                buffer,
+                &mut release,
+            )?
+        };
+        if let Some(e) = release_err {
+            return Err(e);
+        }
+
+        if !locked {
+            // The release callback already ended the scan; retry from the top.
+            debug_assert!(guard_slot.is_none());
+            continue;
+        }
+
+        // Locked: the buffer is exclusive-locked and `guard_slot` still owns the
+        // scan. *oldtupcopy = heap_copytuple(oldtup): we already hold `oldtup`.
+        let guard = guard_slot.expect("scan consumed despite a successful lock");
+
+        // Build the new tuple image (a copy of the on-page tuple) and run the
+        // caller's mutate over its user-data area (C: GETSTRUCT(tup)).
+        let mut newtuple = oldtup.clone_in(mcx)?;
+        let dirty = {
+            let data: &mut [u8] = newtuple.data.as_mut_slice();
+            mutate(data)?
+        };
+
+        if dirty {
+            // systable_inplace_update_finish(state, tup):
+            // heap_inplace_update_and_unlock(relation, oldtup, tuple, buffer).
+            let new_data: alloc::vec::Vec<u8> = newtuple.data.iter().copied().collect();
+            backend_access_heap_heapam_seams::heap_inplace_update_and_unlock::call(
+                mcx,
+                &heap_rel,
+                &oldtup.tuple,
+                &newtuple.tuple,
+                &new_data,
+                buffer,
+            )?;
+        } else {
+            // systable_inplace_update_cancel(state):
+            // heap_inplace_unlock(relation, oldtup, buffer).
+            backend_access_heap_heapam_seams::heap_inplace_unlock::call(
+                &heap_rel,
+                &oldtup.tuple,
+                buffer,
+            )?;
+        }
+
+        // systable_endscan(scan) — both finish and cancel end with it.
+        guard.end()?;
+        return Ok(Some(self_tid));
+    }
 }
 
 // ===========================================================================
