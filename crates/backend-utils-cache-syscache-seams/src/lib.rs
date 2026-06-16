@@ -1207,6 +1207,44 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` projected to
+    /// `Form_pg_index.indisprimary` (`catalog/index.c` `relationHasPrimaryKey`).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`) so the caller raises the
+    /// exact `elog(ERROR, "cache lookup failed for index %u")`; the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn index_get_indisprimary(index_oid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// projected to `Form_pg_attribute.attnotnull` (`catalog/index.c`
+    /// `index_check_primary_key`). Returns `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`) so the caller raises its own `elog(ERROR, "cache
+    /// lookup failed for attribute %d of relation %u")`; the installer owns the
+    /// `ReleaseSysCache`. The C also reads `NameStr(attname)` for the error
+    /// message, returned alongside the flag.
+    pub fn att_get_attnotnull<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<(bool, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass))` +
+    /// `GETSTRUCT(Form_pg_opclass)` projected to the fields
+    /// `catalog/index.c` `ConstructTupleDescriptor` reads: `(opckeytype,
+    /// opcintype, opcname)`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`)
+    /// so the caller raises `elog(ERROR, "cache lookup failed for opclass %u")`
+    /// or the nondeterministic-collation `errmsg`; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn pg_opclass_keytype<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        opclass: Oid,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid))` +
     /// `GETSTRUCT(Form_pg_type)` (`utils/cache/lsyscache.c` reads). Returns the
     /// fixed-length `pg_type` columns by value (every field through

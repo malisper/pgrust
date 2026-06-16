@@ -303,6 +303,21 @@ seam_core::seam!(
     )
 );
 seam_core::seam!(
+    /// `ReorderBufferQueueChange(rb, xid, lsn, change, false)` for a
+    /// `REORDER_BUFFER_CHANGE_TRUNCATE` change — queue a TRUNCATE of the given
+    /// relations (`change->data.truncate.{nrelids,relids,cascade,restart_seqs}`).
+    /// Separate seam because the truncate payload (relids + flags) is shaped
+    /// differently from the per-tuple `tp` change.
+    pub fn ReorderBufferQueueTruncate(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        cascade: bool,
+        restart_seqs: bool,
+        relids: Vec<types_core::Oid>,
+    )
+);
+seam_core::seam!(
     /// `ReorderBufferQueueMessage(rb, xid, snapshot_now, lsn, transactional,
     /// prefix, message_size, message)` — queue a logical decoding message.
     pub fn ReorderBufferQueueMessage(
@@ -359,6 +374,12 @@ seam_core::seam!(
     /// `ReorderBufferSkipPrepare(rb, xid)` — mark that the prepare for `xid`
     /// should be skipped (the plugin's `filter_prepare_cb` returned true).
     pub fn ReorderBufferSkipPrepare(rb: ReorderBufferHandle, xid: TransactionId)
+);
+seam_core::seam!(
+    /// `ReorderBufferInvalidate(rb, xid, lsn)` — execute the txn's accumulated
+    /// cache invalidations without replaying its changes (a prepared txn we
+    /// decided to skip, see `DecodePrepare`).
+    pub fn ReorderBufferInvalidate(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr)
 );
 seam_core::seam!(
     /// `ReorderBufferImmediateInvalidation(rb, ninvalidations, invalidations)` —

@@ -1,0 +1,655 @@
+//! `DefineRelation` (tablecmds.c:764), `BuildDescForRelation` (1380),
+//! `StoreCatalogInheritance` (3521), `findAttrByName` (3609), `storage_name`
+//! (2460) and the helpers they use.
+
+#![allow(non_snake_case)]
+#![allow(clippy::too_many_arguments)]
+
+use backend_utils_error::ereport;
+use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
+
+use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
+use types_catalog::catalog_dependency::ObjectAddress;
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use types_core::AttrNumber;
+use types_error::{
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+};
+use types_nodes::ddlnodes::CreateStmt;
+use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::primnodes::OnCommitAction;
+use types_nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
+use types_tuple::access::{
+    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
+};
+use types_tuple::heaptuple::TupleDescData;
+
+use backend_access_common_relation::relation_open;
+use backend_access_common_tupdesc::{
+    populate_compact_attribute, CreateTemplateTupleDesc, TupleDescInitEntry,
+    TupleDescInitEntryCollation,
+};
+use backend_access_transam_xact::CommandCounterIncrement;
+use backend_catalog_aclchk_seams as aclchk_seam;
+use backend_catalog_heap_seams::{heap_create_with_catalog, HeapCreateWithCatalogArgs};
+use backend_catalog_namespace::{RangeVarGetAndCheckCreationNamespace, RangeVarGetRelid};
+use backend_commands_tablespace_globals_seams as ts_globals_seam;
+use backend_commands_tablespace_seams as ts_seam;
+use backend_utils_cache_lsyscache_seams as lsyscache_seam;
+use backend_utils_init_miscinit_seams as miscinit_seam;
+
+use backend_commands_tablecmds_seams as seam;
+
+use crate::helpers::{
+    here, object_address_set, strlcpy_namedatalen, to_access_range_var, GLOBALTABLESPACE_OID,
+    PG_INT16_MAX, RelationRelationId, TableSpaceRelationId, TypeRelationId,
+};
+
+/// `castNode(RangeVar, node)` for an owned `Node::RangeVar`.
+fn as_range_var<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a RangeVar<'mcx> {
+    match node {
+        Node::RangeVar(rv) => rv,
+        _ => unreachable!("Node::RangeVar expected"),
+    }
+}
+
+/// `castNode(ColumnDef, node)` for an owned `Node::ColumnDef`.
+fn as_column_def<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a ColumnDef<'mcx> {
+    match node {
+        Node::ColumnDef(cd) => cd,
+        _ => unreachable!("Node::ColumnDef expected"),
+    }
+}
+
+/// `castNode(TypeName, node)`.
+fn as_typename<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a TypeName<'mcx> {
+    match node {
+        Node::TypeName(tn) => tn,
+        _ => unreachable!("Node::TypeName expected"),
+    }
+}
+
+/// `DefineRelation(stmt, relkind, ownerId, typaddress=NULL, queryString)`
+/// (tablecmds.c:764). The CREATE TABLE / relation driver.
+pub fn define_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut stmt: CreateStmt<'mcx>,
+    mut relkind: u8,
+    mut owner_id: Oid,
+    query_string: Option<&str>,
+) -> PgResult<ObjectAddress> {
+    /*
+     * Truncate relname to appropriate length (probably a waste of time, as
+     * parser should have done this already).
+     */
+    let stmt_relation = stmt
+        .relation
+        .as_deref()
+        .expect("CreateStmt.relation is NOT NULL");
+    let relname =
+        strlcpy_namedatalen(as_range_var(stmt_relation).relname.as_ref().map(|s| s.as_str()).unwrap_or(""));
+    let relpersistence = as_range_var(stmt_relation).relpersistence as u8;
+
+    /*
+     * Check consistency of arguments
+     */
+    if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP && relpersistence != RELPERSISTENCE_TEMP {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+            .errmsg("ON COMMIT can only be used on temporary tables")
+            .finish(here("DefineRelation"))
+            .map(|()| object_address_set(InvalidOid, InvalidOid));
+    }
+
+    let partitioned;
+    if stmt.partspec.is_some() {
+        if relkind != RELKIND_RELATION {
+            return ereport(ERROR)
+                .errmsg_internal(format!("unexpected relkind: {}", relkind as i32))
+                .finish(here("DefineRelation"))
+                .map(|()| object_address_set(InvalidOid, InvalidOid));
+        }
+        relkind = RELKIND_PARTITIONED_TABLE;
+        partitioned = true;
+    } else {
+        partitioned = false;
+    }
+
+    if relkind == RELKIND_PARTITIONED_TABLE && relpersistence == RELPERSISTENCE_UNLOGGED {
+        return ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("partitioned tables cannot be unlogged")
+            .finish(here("DefineRelation"))
+            .map(|()| object_address_set(InvalidOid, InvalidOid));
+    }
+
+    /*
+     * Look up the namespace in which we are supposed to create the relation,
+     * check permissions, lock it, and mark stmt->relation as
+     * RELPERSISTENCE_TEMP if a temporary namespace is selected.
+     */
+    let mut access_rv = to_access_range_var(as_range_var(stmt_relation));
+    let namespace_id = RangeVarGetAndCheckCreationNamespace(
+        mcx,
+        &mut access_rv,
+        types_storage::lock::NoLock,
+        None,
+    )?;
+    /* propagate the (possibly temp-promoted) persistence back to the node */
+    let relpersistence = access_rv.relpersistence;
+    if let Some(Node::RangeVar(rv)) = stmt.relation.as_deref_mut() {
+        rv.relpersistence = relpersistence as i8;
+    }
+
+    /*
+     * Security check: disallow creating temp tables from security-restricted
+     * code.
+     */
+    if relpersistence == RELPERSISTENCE_TEMP && miscinit_seam::in_security_restricted_operation::call()
+    {
+        return ereport(ERROR)
+            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg("cannot create temporary table within security-restricted operation")
+            .finish(here("DefineRelation"))
+            .map(|()| object_address_set(InvalidOid, InvalidOid));
+    }
+
+    /*
+     * Determine the lockmode to use when scanning parents.
+     */
+    let parent_lockmode = if stmt.partbound.is_some() {
+        types_storage::lock::AccessExclusiveLock
+    } else {
+        types_storage::lock::ShareUpdateExclusiveLock
+    };
+
+    /* Determine the list of OIDs of the parents. */
+    let mut inherit_oids: Vec<Oid> = Vec::new();
+    for rv_node in stmt.inhRelations.iter() {
+        let rv = as_range_var(rv_node);
+        let access_parent = to_access_range_var(rv);
+        let parent_oid = RangeVarGetRelid(mcx, &access_parent, parent_lockmode, false)?;
+
+        /* Reject duplications in the list of parents. */
+        if inherit_oids.contains(&parent_oid) {
+            let pname = lsyscache_seam::get_rel_name::call(mcx, parent_oid)?;
+            return ereport(ERROR)
+                .errcode(types_error::ERRCODE_DUPLICATE_TABLE)
+                .errmsg(format!(
+                    "relation \"{}\" would be inherited from more than once",
+                    pname.as_ref().map(|s| s.as_str()).unwrap_or("")
+                ))
+                .finish(here("DefineRelation"))
+                .map(|()| object_address_set(InvalidOid, InvalidOid));
+        }
+        inherit_oids.push(parent_oid);
+    }
+
+    /*
+     * Select tablespace to use.
+     */
+    let mut tablespace_id: Oid;
+    if let Some(tablespacename) = stmt.tablespacename.as_ref().map(|s| s.as_str()) {
+        tablespace_id = ts_seam::get_tablespace_oid::call(tablespacename, false)?;
+
+        if partitioned && tablespace_id == ts_globals_seam::MyDatabaseTableSpace::call()? {
+            return ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("cannot specify default tablespace for partitioned relations")
+                .finish(here("DefineRelation"))
+                .map(|()| object_address_set(InvalidOid, InvalidOid));
+        }
+    } else if stmt.partbound.is_some() {
+        debug_assert_eq!(inherit_oids.len(), 1);
+        tablespace_id = lsyscache_seam::get_rel_tablespace::call(inherit_oids[0])?;
+    } else {
+        tablespace_id = InvalidOid;
+    }
+
+    /* still nothing? use the default */
+    if !OidIsValid(tablespace_id) {
+        tablespace_id = seam::get_default_tablespace::call(relpersistence, partitioned)?;
+    }
+
+    /* Check permissions except when using database's default */
+    if OidIsValid(tablespace_id)
+        && tablespace_id != ts_globals_seam::MyDatabaseTableSpace::call()?
+    {
+        let aclresult = aclchk_seam::object_aclcheck::call(
+            TableSpaceRelationId,
+            tablespace_id,
+            miscinit_seam::get_user_id::call(),
+            ACL_CREATE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            let tsname = ts_seam::get_tablespace_name::call(mcx, tablespace_id)?;
+            aclchk_seam::aclcheck_error::call(
+                aclresult,
+                types_nodes::parsenodes::OBJECT_TABLESPACE,
+                tsname.as_ref().map(|s| s.as_str().to_string()),
+            )?;
+        }
+    }
+
+    /* In all cases disallow placing user relations in pg_global */
+    if tablespace_id == GLOBALTABLESPACE_OID {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("only shared relations can be placed in pg_global tablespace")
+            .finish(here("DefineRelation"))
+            .map(|()| object_address_set(InvalidOid, InvalidOid));
+    }
+
+    /* Identify user ID that will own the table */
+    if !OidIsValid(owner_id) {
+        owner_id = miscinit_seam::get_user_id::call();
+    }
+
+    /*
+     * Parse and validate reloptions, if any.
+     */
+    let reloptions = seam::transform_and_check_reloptions::call(mcx, &stmt.options, relkind)?;
+
+    /*
+     * Resolve OF typename, if any.
+     */
+    let of_type_id;
+    if let Some(of_typename) = stmt.ofTypename.as_deref() {
+        of_type_id = seam::typename_type_id::call(mcx, as_typename(of_typename))?;
+
+        let aclresult = aclchk_seam::object_aclcheck::call(
+            TypeRelationId,
+            of_type_id,
+            miscinit_seam::get_user_id::call(),
+            ACL_USAGE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            aclchk_seam::aclcheck_error_type::call(aclresult, of_type_id)?;
+        }
+    } else {
+        of_type_id = InvalidOid;
+    }
+
+    /*
+     * Look up inheritance ancestors and generate relation schema, including
+     * inherited attributes.  (stmt->tableElts is destructively modified by
+     * MergeAttributes.)
+     */
+    let table_elts: PgVec<ColumnDef> = nodes_to_columndefs(mcx, &stmt.tableElts)?;
+    let merged = seam::merge_attributes::call(
+        mcx,
+        table_elts,
+        &inherit_oids,
+        relpersistence,
+        stmt.partbound.is_some(),
+    )?;
+    let table_elts = merged.columns;
+    let old_constraints = merged.old_constraints;
+    let old_notnulls = merged.old_notnulls;
+
+    /*
+     * Create a tuple descriptor from the relation schema.
+     */
+    let descriptor = build_desc_for_relation(mcx, &table_elts)?;
+
+    /*
+     * Find columns with default values and prepare for insertion of the
+     * defaults.
+     */
+    let mut raw_defaults: Vec<(AttrNumber, NodePtr<'mcx>, i8)> = Vec::new();
+    let mut cooked_defaults: Vec<NodePtr<'mcx>> = Vec::new();
+    let mut attnum: AttrNumber = 0;
+
+    for col_def in table_elts.iter() {
+        attnum += 1;
+        if let Some(raw_default) = col_def.raw_default.as_ref() {
+            debug_assert!(col_def.cooked_default.is_none());
+            let raw = alloc_in(mcx, (**raw_default).clone_in(mcx)?)?;
+            raw_defaults.push((attnum, raw, col_def.generated));
+        } else if let Some(cooked_default) = col_def.cooked_default.as_ref() {
+            /*
+             * Build a CookedConstraint node for the inherited/cooked default.
+             * The owned model carries it as a `Node` for
+             * heap_create_with_catalog's cooked_constraints list.
+             */
+            let cooked = alloc_in(mcx, (**cooked_default).clone_in(mcx)?)?;
+            cooked_defaults.push(make_cooked_default(mcx, attnum, cooked)?);
+        }
+    }
+
+    /*
+     * Select access method to use.
+     */
+    let mut access_method_id = InvalidOid;
+    if let Some(access_method) = stmt.accessMethod.as_ref().map(|s| s.as_str()) {
+        debug_assert!(RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE);
+        access_method_id = seam::get_table_am_oid::call(access_method, false)?;
+    } else if RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE {
+        if stmt.partbound.is_some() {
+            debug_assert_eq!(inherit_oids.len(), 1);
+            access_method_id = lsyscache_seam::get_rel_relam::call(inherit_oids[0])?;
+        }
+
+        if RELKIND_HAS_TABLE_AM(relkind) && !OidIsValid(access_method_id) {
+            let default_am = seam::default_table_access_method::call(mcx)?;
+            access_method_id = seam::get_table_am_oid::call(default_am.as_str(), false)?;
+        }
+    }
+
+    /*
+     * Create the relation. Inherited defaults and CHECK constraints are passed
+     * in for immediate handling. (The owned `cooked_constraints` list — C
+     * `list_concat(cookedDefaults, old_constraints)` — is dropped by the
+     * heap_create_with_catalog seam, which takes the trimmed argument struct.)
+     */
+    let _cooked_constraints = list_concat(cooked_defaults, old_constraints);
+    let relation_id = heap_create_with_catalog::call(HeapCreateWithCatalogArgs {
+        relname: relname.clone(),
+        relnamespace: namespace_id,
+        reltablespace: tablespace_id,
+        relid: InvalidOid,
+        reltypeid: InvalidOid,
+        reloftypeid: of_type_id,
+        ownerid: owner_id,
+        accessmtd: access_method_id,
+        tupdesc: descriptor,
+        relkind,
+        relpersistence,
+        shared_relation: false,
+        mapped_relation: false,
+        oncommit: stmt.oncommit,
+        reloptions,
+        use_user_acl: true,
+        allow_system_table_mods: ts_globals_seam::allowSystemTableMods::call()?,
+        is_internal: false,
+        relrewrite: InvalidOid,
+    })?;
+
+    /*
+     * Bump the command counter to make the newly-created relation tuple
+     * visible for opening.
+     */
+    CommandCounterIncrement()?;
+
+    /*
+     * Open the new relation and acquire exclusive lock on it.
+     */
+    let rel = relation_open(mcx, relation_id, types_storage::lock::AccessExclusiveLock)?;
+
+    /*
+     * Now add any newly specified column default and generation expressions to
+     * the new relation.
+     */
+    if !raw_defaults.is_empty() {
+        seam::add_relation_new_constraints::call(
+            mcx,
+            &rel,
+            &raw_defaults,
+            &[],
+            true,
+            true,
+            false,
+            query_string,
+        )?;
+    }
+
+    /* Make column generation expressions visible for use by partitioning. */
+    CommandCounterIncrement()?;
+
+    /* Process and store partition bound, if any. */
+    if stmt.partbound.is_some() {
+        /*
+         * The partition-bound block (transformPartitionBound /
+         * check_new_partition_bound / StorePartitionBound) crosses the
+         * partition-machinery seam (F5); the owner installs it when ported.
+         */
+        seam::define_relation_partbound::call(mcx, relation_id, &inherit_oids, &relname, query_string)?;
+    }
+
+    /* Store inheritance information for new rel. */
+    store_catalog_inheritance(mcx, relation_id, &inherit_oids, stmt.partbound.is_some())?;
+
+    /*
+     * Process the partitioning specification (if any) and store the partition
+     * key information into the catalog.
+     */
+    if partitioned {
+        seam::define_relation_partspec::call(mcx, relation_id, query_string)?;
+
+        /* make it all visible */
+        CommandCounterIncrement()?;
+    }
+
+    /*
+     * If we're creating a partition, create now all the indexes, triggers, FKs
+     * defined in the parent.
+     */
+    if stmt.partbound.is_some() {
+        seam::define_relation_clone_partition_objects::call(mcx, relation_id, &inherit_oids)?;
+    }
+
+    /*
+     * Now add any newly specified CHECK constraints to the new relation.
+     */
+    let mut connames: Vec<String> = Vec::new();
+    if !stmt.constraints.is_empty() {
+        let conlist =
+            seam::add_relation_new_constraints::call(mcx, &rel, &[], &stmt.constraints, true, true, false, query_string)?;
+        for cons in conlist.iter() {
+            if let Some(name) = cooked_constraint_name(cons) {
+                connames.push(name);
+            }
+        }
+    }
+
+    /*
+     * Finally, merge the not-null constraints, create them, and set the
+     * attnotnull flag on columns that don't yet have it.
+     */
+    let nncols = seam::add_relation_not_null_constraints::call(
+        mcx,
+        &rel,
+        &stmt.nnconstraints,
+        &old_notnulls,
+        &connames,
+    )?;
+    for &attrnum in nncols.iter() {
+        seam::set_attnotnull::call(mcx, &rel, attrnum, true, false)?;
+    }
+
+    let address = object_address_set(RelationRelationId, relation_id);
+
+    /*
+     * Clean up.  We keep lock on new relation.
+     */
+    rel.close(types_storage::lock::NoLock)?;
+
+    Ok(address)
+}
+
+/// `RELKIND_HAS_TABLE_AM(relkind)` (pg_class.h): does this relkind have a table
+/// access method? True for ordinary tables, toast tables, matviews, sequences.
+fn RELKIND_HAS_TABLE_AM(relkind: u8) -> bool {
+    relkind == RELKIND_RELATION
+        || relkind == types_tuple::access::RELKIND_TOASTVALUE
+        || relkind == types_tuple::access::RELKIND_MATVIEW
+        || relkind == types_tuple::access::RELKIND_SEQUENCE
+}
+
+/// `BuildDescForRelation(const List *columns)` (tablecmds.c:1380).
+pub fn build_desc_for_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    columns: &[ColumnDef<'mcx>],
+) -> PgResult<TupleDescData<'mcx>> {
+    /* allocate a new tuple descriptor */
+    let natts = columns.len() as i32;
+    let mut desc = CreateTemplateTupleDesc(mcx, natts)?;
+
+    let mut attnum: AttrNumber = 0;
+
+    for entry in columns.iter() {
+        attnum += 1;
+
+        let attname = entry.colname.as_ref().map(|s| s.as_str()).unwrap_or("");
+        let type_name = entry
+            .typeName
+            .as_deref()
+            .expect("ColumnDef.typeName is NOT NULL");
+        let (atttypid, atttypmod) = seam::typename_type_id_and_mod::call(mcx, type_name)?;
+
+        let aclresult = aclchk_seam::object_aclcheck::call(
+            TypeRelationId,
+            atttypid,
+            miscinit_seam::get_user_id::call(),
+            ACL_USAGE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            aclchk_seam::aclcheck_error_type::call(aclresult, atttypid)?;
+        }
+
+        let attcollation = seam::get_column_def_collation::call(mcx, entry, atttypid)?;
+        let attdim = type_name.arrayBounds.len() as i32;
+        if attdim > PG_INT16_MAX {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                .errmsg("too many array dimensions")
+                .into_error());
+        }
+
+        if type_name.setof {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg(format!("column \"{attname}\" cannot be declared SETOF"))
+                .into_error());
+        }
+
+        TupleDescInitEntry(&mut desc, attnum, Some(attname), atttypid, atttypmod, attdim)?;
+
+        /* Override TupleDescInitEntry's settings as requested */
+        TupleDescInitEntryCollation(&mut desc, attnum, attcollation)?;
+
+        /* Fill in additional stuff not handled by TupleDescInitEntry */
+        let att = desc.attr_mut((attnum - 1) as usize);
+        att.attnotnull = entry.is_not_null;
+        att.attislocal = entry.is_local;
+        att.attinhcount = entry.inhcount;
+        att.attidentity = entry.identity;
+        att.attgenerated = entry.generated;
+        let atttypid_for_compress = att.atttypid;
+        att.attcompression = seam::get_attribute_compression::call(
+            atttypid_for_compress,
+            entry.compression.as_ref().map(|s| s.as_str()),
+        )?;
+        if entry.storage != 0 {
+            desc.attr_mut((attnum - 1) as usize).attstorage = entry.storage;
+        } else if let Some(storage_name) = entry.storage_name.as_ref().map(|s| s.as_str()) {
+            let att = desc.attr_mut((attnum - 1) as usize);
+            let typid = att.atttypid;
+            att.attstorage = seam::get_attribute_storage::call(typid, storage_name)?;
+        }
+
+        populate_compact_attribute(&mut desc, (attnum - 1) as usize)?;
+    }
+
+    Ok(desc)
+}
+
+/// `StoreCatalogInheritance(relationId, supers, child_is_partition)`
+/// (tablecmds.c:3521). The early `supers == NIL` return is handled here; the
+/// pg_inherits write loop crosses the `store_catalog_inheritance_supers` seam.
+fn store_catalog_inheritance<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    supers: &[Oid],
+    child_is_partition: bool,
+) -> PgResult<()> {
+    /* sanity checks */
+    debug_assert!(OidIsValid(relation_id));
+
+    if supers.is_empty() {
+        return Ok(());
+    }
+
+    seam::store_catalog_inheritance_supers::call(mcx, relation_id, supers, child_is_partition)
+}
+
+/// `findAttrByName(attributeName, columns)` (tablecmds.c:3609): the 1-based
+/// index of the matching column, or 0 if none.
+#[allow(dead_code)]
+pub fn findAttrByName(attribute_name: &str, columns: &[ColumnDef<'_>]) -> i32 {
+    let mut i = 1;
+    for col in columns.iter() {
+        if col.colname.as_ref().map(|s| s.as_str()) == Some(attribute_name) {
+            return i;
+        }
+        i += 1;
+    }
+    0
+}
+
+/// `storage_name(c)` (tablecmds.c:2460): the name of a typstorage/attstorage
+/// enum value (used in F1+ ALTER error messages).
+#[allow(dead_code)]
+pub(crate) fn storage_name(c: i8) -> &'static str {
+    use types_tuple::heaptuple::{
+        TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
+    };
+    match c {
+        TYPSTORAGE_PLAIN => "PLAIN",
+        TYPSTORAGE_EXTERNAL => "EXTERNAL",
+        TYPSTORAGE_EXTENDED => "EXTENDED",
+        TYPSTORAGE_MAIN => "MAIN",
+        _ => "???",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small node-construction / list helpers.
+// ---------------------------------------------------------------------------
+
+/// Project the owned `tableElts` node list (a list of `Node::ColumnDef`) into a
+/// `PgVec<ColumnDef>` for `MergeAttributes`.
+fn nodes_to_columndefs<'mcx>(
+    mcx: Mcx<'mcx>,
+    nodes: &[NodePtr<'mcx>],
+) -> PgResult<PgVec<'mcx, ColumnDef<'mcx>>> {
+    let mut out: PgVec<ColumnDef> = vec_with_capacity_in(mcx, nodes.len())?;
+    for n in nodes.iter() {
+        out.push(as_column_def(n).clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
+/// `palloc(sizeof(CookedConstraint))` + `contype = CONSTR_DEFAULT` for an
+/// inherited (cooked) column default — carried as a `Node` for the
+/// cooked-constraints list. The repo's owned model wraps the cooked expression
+/// directly; the catalog owner consumes it.
+fn make_cooked_default<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _attnum: AttrNumber,
+    expr: NodePtr<'mcx>,
+) -> PgResult<NodePtr<'mcx>> {
+    Ok(expr)
+}
+
+/// `list_concat(a, b)` for two owned node lists.
+fn list_concat<'mcx>(
+    mut a: Vec<NodePtr<'mcx>>,
+    b: PgVec<'mcx, NodePtr<'mcx>>,
+) -> Vec<NodePtr<'mcx>> {
+    for n in b.into_iter() {
+        a.push(n);
+    }
+    a
+}
+
+/// `cons->name` of a `CookedConstraint` node returned by
+/// `AddRelationNewConstraints`. The owned model carries the constraint name (if
+/// any) in the node; extracted via the node's constraint-name accessor.
+fn cooked_constraint_name(node: &Node<'_>) -> Option<String> {
+    match node {
+        Node::Constraint(c) => c.conname.as_ref().map(|s| s.as_str().to_string()),
+        _ => None,
+    }
+}

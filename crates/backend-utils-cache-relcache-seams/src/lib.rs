@@ -411,6 +411,41 @@ seam_core::seam!(
     pub fn rd_rel_reltablespace(rel: &types_rel::Relation<'_>) -> types_error::PgResult<types_core::Oid>
 );
 seam_core::seam!(
+    /// `RelationGetForm(rel)->relnatts` — number of (live + dropped) columns in
+    /// the relation, read by `catalog/index.c` `ConstructTupleDescriptor` as a
+    /// bounds check (`atnum > natts` is the C "invalid column number" error).
+    pub fn rd_rel_relnatts(rel: &types_rel::Relation<'_>) -> types_error::PgResult<i16>
+);
+seam_core::seam!(
+    /// `rel->rd_rel->relispartition` — read by `catalog/index.c`
+    /// `index_check_primary_key` (a CREATE TABLE .. PARTITION OF check).
+    pub fn rd_rel_relispartition(rel: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `RelationGetDescr(rel)` (`access/htup_details.h`): the relation's tuple
+    /// descriptor. The C shares the relcache's reference-counted descriptor; the
+    /// safe port returns an owned `mcx`-backed copy. Read by `catalog/index.c`
+    /// `ConstructTupleDescriptor` (the heap relation's per-column
+    /// `FormData_pg_attribute` fields the index columns copy from). `Err`
+    /// carries OOM.
+    pub fn relation_get_descr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+seam_core::seam!(
+    /// `RelationGetDummyIndexExpressions(relation)` (relcache.c): like
+    /// `RelationGetIndexExpressions`, but returns null `Const`s of the right
+    /// types/typmods/collations in place of the real index expressions (used by
+    /// `catalog/index.c` `BuildDummyIndexInfo` to avoid running user code). The
+    /// fresh expression list is allocated in `mcx`; `None` for a non-expression
+    /// index. `Err` carries the `pg_node_tree` decode `ereport(ERROR)`.
+    pub fn relation_get_dummy_index_expressions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>>>
+);
+seam_core::seam!(
     /// `rel->rd_rel->relowner`.
     pub fn rd_rel_relowner(rel: &types_rel::Relation<'_>) -> types_error::PgResult<types_core::Oid>
 );
