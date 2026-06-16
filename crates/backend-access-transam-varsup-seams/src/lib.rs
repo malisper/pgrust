@@ -136,6 +136,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TransamVariables->nextXid = checkPoint.nextXid; nextOid = ...; oidCount = 0`
+    /// (xlog.c:5631-5634 in `StartupXLOG`) — seed the cluster-wide XID/OID
+    /// counters from the starting checkpoint record at WAL startup. The C code
+    /// writes these `TransamVariables` fields directly (no lock; no other process
+    /// is up yet); varsup owns the singleton, so the WAL-startup driver reaches
+    /// them through this owner seam. Plain shared-memory store.
+    pub fn set_transam_variables_at_startup(next_xid: FullTransactionId, next_oid: Oid)
+);
+
+seam_core::seam!(
     /// `TransamVariables->xactCompletionCount++` — bump the completed-transaction
     /// generation counter (procarray.c's end-of-xact / clear-transaction paths,
     /// under `ProcArrayLock`). Owned in varsup; plain shared-memory increment.

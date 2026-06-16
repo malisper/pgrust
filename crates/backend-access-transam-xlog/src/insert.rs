@@ -232,7 +232,7 @@ unsafe fn inserting_at(i: usize) -> &'static types_storage::storage::pg_atomic_u
 }
 
 /// `WALInsertLockAcquire(void)` (xlog.c:1398).
-fn WALInsertLockAcquire() -> PgResult<()> {
+pub(crate) fn WALInsertLockAcquire() -> PgResult<()> {
     if LOCK_TO_TRY.with(Cell::get) == -1 {
         let n = globals::MyProcNumber().rem_euclid(NUM_XLOGINSERT_LOCKS as i32);
         LOCK_TO_TRY.with(|c| c.set(n));
@@ -401,7 +401,7 @@ unsafe fn ReserveXLogSwitch(ctl: &XLogCtlData) -> (bool, XLogRecPtr, XLogRecPtr,
 /// # Safety
 /// `ctl` must reference the live `XLogCtl` shmem region; the caller must hold a
 /// WAL insertion lock (see the C function comment).
-unsafe fn GetXLogBuffer(ctl: &XLogCtlData, ptr: XLogRecPtr, tli: TimeLineID) -> PgResult<*mut u8> {
+pub(crate) unsafe fn GetXLogBuffer(ctl: &XLogCtlData, ptr: XLogRecPtr, tli: TimeLineID) -> PgResult<*mut u8> {
     let blcksz = XLOG_BLCKSZ as u64;
 
     // Fast path: same page as last time.
@@ -960,4 +960,14 @@ pub fn XLogInsertAllowed() -> bool {
     }
     LOCAL_XLOG_INSERT_ALLOWED.with(|c| c.set(1));
     true
+}
+
+/// `LocalSetXLogInsertAllowed(void)` (xlog.c:6478) — set `LocalXLogInsertAllowed
+/// = 1` and return the previous value, so the caller can restore it. Used by
+/// `StartupXLOG` (to enable WAL writes for the startup process at end of
+/// recovery) and the checkpointer's shutdown-checkpoint path.
+pub fn LocalSetXLogInsertAllowed() -> i32 {
+    let old = LOCAL_XLOG_INSERT_ALLOWED.with(Cell::get);
+    LOCAL_XLOG_INSERT_ALLOWED.with(|c| c.set(1));
+    old
 }
