@@ -19,3 +19,10 @@ seam_core::seam!(
         startup_data: &[u8]
     ) -> i32
 );
+
+seam_core::seam!(
+    /// `PostmasterChildName(child_type)` (`launch_backend.c`) — the human-readable
+    /// name of a postmaster child kind, used in postmaster/pmchild log messages.
+    /// Pure lookup into the static child-process-kinds table; cannot fail.
+    pub fn postmaster_child_name(child_type: types_core::init::BackendType) -> &'static str
+);

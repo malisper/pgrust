@@ -292,6 +292,7 @@ pub fn init_seams() {
     backend_postmaster_launch_backend_seams::postmaster_child_launch::set(
         postmaster_child_launch_seam_adapter,
     );
+    backend_postmaster_launch_backend_seams::postmaster_child_name::set(postmaster_child_name);
 }
 
 #[cfg(test)]
