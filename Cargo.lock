@@ -3334,6 +3334,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
+ "backend-access-transam-xloginsert-seams",
  "backend-postmaster-checkpointer-seams",
  "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
@@ -4247,15 +4248,19 @@ dependencies = [
  "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-access-table-tableam-seams",
+ "backend-access-transam-xact",
  "backend-catalog-aclchk-seams",
  "backend-catalog-binary-upgrade-seams",
  "backend-catalog-catalog",
  "backend-catalog-catalog-seams",
  "backend-catalog-dependency",
  "backend-catalog-heap-seams",
+ "backend-catalog-indexing",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess",
  "backend-catalog-partition",
+ "backend-catalog-pg-attrdef",
+ "backend-catalog-pg-constraint",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-shdepend-seams",
  "backend-catalog-pg-subscription-seams",
@@ -4264,12 +4269,23 @@ dependencies = [
  "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-commands-typecmds",
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-outfuncs",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-parser-coerce",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-relation",
+ "backend-parser-small1",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
@@ -13551,6 +13567,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-repl-scanner"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scansup-seams",
+ "backend-replication-repl-scanner-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-repl-scanner-seams"
 version = "0.0.0"
 dependencies = [
@@ -13953,6 +13982,32 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-rewrite-rewritehandler"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-table-table",
+ "backend-catalog-pg-depend",
+ "backend-commands-view-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-core",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-trigger",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20452,6 +20507,7 @@ dependencies = [
  "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
+ "backend-replication-repl-scanner",
  "backend-replication-slot",
  "backend-replication-syncrep",
  "backend-replication-syncrep-scanner",
@@ -20459,6 +20515,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-replication-walsender",
  "backend-rewrite-core",
+ "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",

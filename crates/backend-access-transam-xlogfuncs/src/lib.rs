@@ -282,7 +282,7 @@ pub fn pg_switch_wal() -> PgResult<XLogRecPtr> {
         return Err(recovery_in_progress_error());
     }
 
-    let switchpoint = xlog::RequestXLogSwitch(false);
+    let switchpoint = xlog::RequestXLogSwitch(false)?;
 
     Ok(switchpoint)
 }
@@ -332,7 +332,7 @@ pub fn pg_create_restore_point(restore_name: &str) -> PgResult<XLogRecPtr> {
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
-    let restorepoint = xlog::XLogRestorePoint(restore_name_str);
+    let restorepoint = xlog::XLogRestorePoint(restore_name_str)?;
 
     Ok(restorepoint)
 }

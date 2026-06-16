@@ -31,6 +31,23 @@ backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 
+# Constraint-cooker producers (real owners).
+backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
 # Catalog-write producers + scan/syscache (real owners).
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }

@@ -1,15 +1,13 @@
-//! The pg_statistic maintenance of `catalog/heap.c`: `RemoveStatistics`.
-//!
-//! `CopyStatistics` (heap.c) is NOT landed here: it scans `pg_statistic`,
-//! `heap_copytuple`s each row, rewrites `starelid`, and re-inserts the modified
-//! tuple via `CatalogTupleInsertWithInfo`. The typed catalog-write model has no
-//! `pg_statistic` insert carrier (`catalog_tuple_insert*_pg_statistic`) nor a
-//! generic "insert a column-mutated `FormedTuple`" path, so a faithful
-//! `CopyStatistics` is blocked on a pg_statistic INSERT carrier keystone in
-//! `backend-catalog-indexing`. It is left unported (no stub).
+//! The pg_statistic maintenance of `catalog/heap.c`: `RemoveStatistics` and
+//! `CopyStatistics`. `CopyStatistics` scans `pg_statistic`, `heap_copytuple`s
+//! each row, rewrites `starelid` (the fixed-width column 1) via
+//! `heap_modify_tuple`, and re-inserts the modified tuple through
+//! `CatalogTupleInsertWithInfo` (the `catalog/indexing.c` keystone).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+use alloc::vec;
 
 use backend_access_common_scankey::ScanKeyInit;
 use mcx::Mcx;
@@ -19,6 +17,8 @@ use types_error::PgResult;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 
+extern crate alloc;
+
 /* genbki catalog + index OIDs (catalog/pg_statistic.h, catalog/indexing.h). */
 const StatisticRelationId: Oid = 2619;
 const StatisticRelidAttnumInhIndexId: Oid = 2696;
@@ -26,6 +26,91 @@ const StatisticRelidAttnumInhIndexId: Oid = 2696;
 /* pg_statistic attribute numbers (catalog/pg_statistic.h). */
 const Anum_pg_statistic_starelid: AttrNumber = 1;
 const Anum_pg_statistic_staattnum: AttrNumber = 2;
+
+/*
+ * CopyStatistics --- copy entries in pg_statistic from one rel to another
+ */
+pub fn CopyStatistics<'mcx>(mcx: Mcx<'mcx>, fromrelid: Oid, torelid: Oid) -> PgResult<()> {
+    let statrel = backend_access_table_table::table_open(
+        mcx,
+        StatisticRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    /* Now search for stat records */
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_statistic_starelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(fromrelid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &statrel,
+        StatisticRelidAttnumInhIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    // CatalogIndexState indstate = NULL; — opened lazily on the first row.
+    let mut indstate: Option<
+        backend_catalog_indexing::keystone::CatalogIndexState<'mcx>,
+    > = None;
+
+    let natts = statrel.rd_att.natts as usize;
+    loop {
+        let Some(tup) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        /* make a modifiable copy and update the copy of the tuple */
+        /* statform->starelid = torelid; — column 1 is the only one rewritten. */
+        let mut repl_values = vec![Datum::ByVal(0); natts];
+        let repl_isnull = vec![false; natts];
+        let mut do_replace = vec![false; natts];
+        repl_values[(Anum_pg_statistic_starelid - 1) as usize] = Datum::from_oid(torelid);
+        do_replace[(Anum_pg_statistic_starelid - 1) as usize] = true;
+
+        let mut newtup = backend_access_common_heaptuple::heap_modify_tuple(
+            mcx,
+            &tup,
+            &statrel.rd_att,
+            &repl_values,
+            &repl_isnull,
+            &do_replace,
+        )
+        .map_err(|e| {
+            backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal(format!("heap_modify_tuple failed in CopyStatistics: {e:?}"))
+                .into_error()
+        })?;
+
+        /* fetch index information when we know we need it */
+        if indstate.is_none() {
+            indstate =
+                Some(backend_catalog_indexing::keystone::CatalogOpenIndexes(mcx, &statrel)?);
+        }
+
+        backend_catalog_indexing::keystone::CatalogTupleInsertWithInfo(
+            mcx,
+            &statrel,
+            &mut newtup,
+            indstate.as_mut().unwrap(),
+        )?;
+    }
+
+    scan.end()?;
+
+    if let Some(indstate) = indstate {
+        backend_catalog_indexing::keystone::CatalogCloseIndexes(indstate)?;
+    }
+    statrel.close(types_storage::lock::RowExclusiveLock)
+}
 
 /*
  * RemoveStatistics --- remove entries in pg_statistic for a rel or column

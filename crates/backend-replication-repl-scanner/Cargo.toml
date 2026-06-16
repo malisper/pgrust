@@ -1,0 +1,18 @@
+[package]
+name = "backend-replication-repl-scanner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_replication_repl_scanner"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-replication = { path = "../types-replication" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
+backend-replication-repl-scanner-seams = { path = "../backend-replication-repl-scanner-seams" }

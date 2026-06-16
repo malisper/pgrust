@@ -39,28 +39,35 @@
 //! producers in `backend-catalog-indexing` form the heap tuples; the trimmed
 //! relcache `rd_rel` carries the read-side fields.
 //!
-//! ## STOP — the constraint-cooker / partition-store / truncate / attribute-
-//! mutate families are carrier-blocked (not landed here)
+//! ## Constraint-cooker / attribute-mutate families (landed in `constraints.rs`)
 //!
-//! `StoreConstraints` is mirrored faithfully for its only live call surface
-//! (NIL `cooked_constraints` ⇒ no-op; the `heap_create_with_catalog` inward
-//! seam carries no cooked-constraint list). The constraint *writers* themselves
-//! — `StoreRelCheck` / `StoreRelNotNull` / `StoreConstraints` (real) /
-//! `AddRelationNewConstraints` / `AddRelationNotNullConstraints` /
-//! `SetRelationNumChecks` / `MergeWithExistingConstraint` / `cookDefault` /
-//! `cookConstraint` — are blocked: `AddRelationNewConstraints` iterates a
-//! `RawColumnDefault` node type that does not yet exist in `types-nodes`, and
-//! `MergeWithExistingConstraint` needs a `pg_constraint` full-row UPDATE carrier
-//! the typed catalog-write model has not assembled. (`CreateConstraintEntry`,
-//! `transformExpr`, `coerce_to_*`, `assign_expr_collations`, `make_parsestate`,
-//! `addRangeTableEntryForRelation`, `pull_var_clause`, `nodeToString` are all
-//! reachable now — only the `RawColumnDefault` node + pg_constraint UPDATE
-//! carrier are missing.)
+//! The constraint cooker is now ported faithfully (see `constraints.rs`):
+//! `cookDefault` / `cookConstraint` (working in `Expr`, wrapped to `Node::Expr`
+//! at the storage boundary), the generated-column walkers
+//! `check_nested_generated` / `check_virtual_generated_security`, the writers
+//! `StoreRelCheck` / `StoreRelNotNull` / `StoreConstraints` /
+//! `AddRelationNewConstraints` / `AddRelationNotNullConstraints`, and
+//! `SetRelationNumChecks`. The `add_relation_new_constraints` /
+//! `add_relation_not_null_constraints` outward seams (the live tablecmds
+//! CREATE-TABLE consumer) are INSTALLED here. `CopyStatistics` is ported in
+//! `statistics.rs` (heap_modify_tuple-on-column-1 + `CatalogTupleInsertWithInfo`).
 //!
-//! `RemoveAttributeById` / `RelationClearMissing` / `StoreAttrMissingVal` /
-//! `SetAttrMissing` need a writable full-row `ATTNUM` syscache copy plus a
-//! `pg_attribute` `catalog_tuple_update` carrier (and `construct_array`-of-
-//! missingval), none of which the typed catalog-write model exposes yet.
+//! Mirror-and-panic boundaries (genuinely-unported carriers, loud panic):
+//!   * `MergeWithExistingConstraint`'s pg_constraint lookup + `conbin` reader +
+//!     field-update (`merge_with_existing_constraint` seam);
+//!   * `SetRelationNumChecks`'s disk-store branch (the trimmed `PgClassForm`
+//!     carries no `relchecks`; `set_relation_num_checks` seam) — the
+//!     `relchecks == numchecks` `CacheInvalidate` branch is real;
+//!   * `RemoveAttributeById` / `RelationClearMissing` / `StoreAttrMissingVal`
+//!     need a writable full-row `ATTNUM` syscache copy + a `pg_attribute`
+//!     `CatalogTupleUpdate` carrier (and `construct_array`-of-missingval)
+//!     (`remove_attribute_by_id_update` / `relation_clear_missing_update` /
+//!     `store_attr_missing_val` seams). The inward `RemoveAttributeById` /
+//!     `relation_clear_missing` entry seams are INSTALLED; `RemoveAttributeById`
+//!     runs the real `RemoveStatistics` half in-crate. `SetAttrMissing`
+//!     (binary-upgrade only, no in-tree caller) is deferred.
+//!
+//! ## STOP — partition-store / truncate families are carrier-blocked
 //!
 //! `StorePartitionKey` / `StorePartitionBound` need `buildint2vector` /
 //! `buildoidvector` (private to `backend-catalog-indexing`) plus a
@@ -69,9 +76,7 @@
 //! need `table_relation_nontransactional_truncate` (no tableam seam) +
 //! `BuildDummyIndexInfo` (only `BuildIndexInfo` exists).
 //! `heap_truncate_check_FKs` / `heap_truncate_find_FKs` need a `pg_constraint`
-//! seqscan deform helper. `CopyStatistics` needs a `pg_statistic` INSERT carrier.
-//! Each remains unported (no stub); where an inward seam is declared, it stays
-//! uninstalled (a loud panic = the mirror-and-panic posture).
+//! seqscan deform helper. Each remains unported (no stub).
 
 extern crate alloc;
 
@@ -345,6 +350,12 @@ pub fn RelFileNumberIsValid(rnum: RelFileNumber) -> bool {
 /// `format_type_be(type_oid)` — the type's printable name for an error message.
 fn format_type_be(type_oid: Oid) -> PgResult<String> {
     backend_utils_adt_format_type_seams::format_type_be_owned::call(type_oid)
+}
+
+/// `format_type_be(type_oid)` — crate-internal re-export for sibling modules
+/// (`constraints.rs`'s `cookDefault` error messages).
+pub(crate) fn format_type_be_pub(type_oid: Oid) -> PgResult<String> {
+    format_type_be(type_oid)
 }
 
 /* --------------------------------
@@ -827,6 +838,7 @@ pub fn heap_create<'mcx>(
     Ok(HeapCreateResult { rel, xids })
 }
 
+mod constraints;
 mod create;
 mod delete;
 mod drop;
@@ -843,4 +855,9 @@ pub use delete::{
 };
 pub use drop::heap_drop_with_catalog;
 pub use partition::RemovePartitionKeyByRelId;
-pub use statistics::RemoveStatistics;
+pub use statistics::{CopyStatistics, RemoveStatistics};
+
+pub use constraints::{
+    AddRelationNewConstraints, AddRelationNotNullConstraints, RelationClearMissing,
+    RemoveAttributeById, StoreAttrMissingVal, StoreConstraints,
+};
