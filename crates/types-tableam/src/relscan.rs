@@ -65,7 +65,7 @@ pub struct TableScanDescData<'mcx> {
     pub rs_nkeys: i32,
     /// `rs_key` — array of scan key descriptors, allocated in the scan's `mcx`
     /// arena (convention A).
-    pub rs_key: mcx::PgVec<'mcx, ScanKeyData>,
+    pub rs_key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `rs_flags` — `SO_*` `ScanOptions` bitmask.
     pub rs_flags: u32,
     /// `rs_parallel` — parallel scan information (shared descriptor).

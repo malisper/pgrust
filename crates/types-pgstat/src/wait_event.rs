@@ -88,6 +88,14 @@ pub const WAIT_EVENT_CHECKPOINT_DONE: u32 = PG_WAIT_IPC + 11;
 /// 134217740).
 pub const WAIT_EVENT_CHECKPOINT_START: u32 = PG_WAIT_IPC + 12;
 
+/// `WAIT_EVENT_BASE_BACKUP_THROTTLE` — "Waiting during base backup when
+/// throttling activity." 1st entry (0-based 0) of the `WaitEventTimeout`
+/// section of `wait_event_names.txt` (BASE_BACKUP_THROTTLE=0,
+/// CHECKPOINT_WRITE_DELAY=1, PG_SLEEP=2, ...), so the generated enum value is
+/// `PG_WAIT_TIMEOUT | 0` (= 0x09000000). `basebackup_throttle.c` sleeps on
+/// `MyLatch` with this wait event when the transfer rate exceeds the limit.
+pub const WAIT_EVENT_BASE_BACKUP_THROTTLE: u32 = PG_WAIT_TIMEOUT | 0;
+
 /// `WAIT_EVENT_CHECKPOINT_WRITE_DELAY` — "Waiting between writes while
 /// performing a checkpoint." Timeout section entry, `PG_WAIT_TIMEOUT + 1`
 /// (= 0x09000001, matching c2rust's 150994945).
@@ -295,6 +303,15 @@ pub const WAIT_EVENT_WAL_RECEIVER_WAIT_START: u32 = PG_WAIT_IPC + 54;
 /// `WAIT_EVENT_WAL_WRITE` — index 80 of the IO section of
 /// `wait_event_names.txt`.
 pub const WAIT_EVENT_WAL_WRITE: u32 = PG_WAIT_IO + 80;
+
+/// `WAIT_EVENT_WAL_SUMMARY_READ` — "Waiting for a read from a WAL summary
+/// file." Index 76 of the IO section of `wait_event_names.txt` (it sorts
+/// between `WAL_SENDER_WRITE_DATA` and `WAL_SUMMARY_WRITE`).
+pub const WAIT_EVENT_WAL_SUMMARY_READ: u32 = PG_WAIT_IO + 76;
+
+/// `WAIT_EVENT_WAL_SUMMARY_WRITE` — "Waiting for a write to a WAL summary
+/// file." Index 77 of the IO section of `wait_event_names.txt`.
+pub const WAIT_EVENT_WAL_SUMMARY_WRITE: u32 = PG_WAIT_IO + 77;
 
 /// `WAIT_EVENT_LOGICAL_LAUNCHER_MAIN` — 9th entry (index 8) of the Activity
 /// section of `wait_event_names.txt` (ARCHIVER_MAIN, AUTOVACUUM_MAIN,

@@ -97,6 +97,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReadWalSummary(wal_summary_io, data, length)` (walsummary.c) — the
+    /// `io_callback` registered with `CreateBlockRefTableReader`. Reads up to
+    /// `length` bytes at the `WalSummaryIO` cursor's current `filepos`
+    /// (`FileRead(io->file, ..., WAIT_EVENT_WAL_SUMMARY_READ)`), advancing the
+    /// cursor by the count read. The `WalSummaryIO` (open `File` + `filepos`)
+    /// lives in the walsummary owner keyed by the reader handle, so blkreftable
+    /// invokes this through the same handle. `Err` carries the read
+    /// `ereport(ERROR)` (`could not read file`); a short/zero read is the
+    /// normal end-of-data signal returned in the byte count.
+    pub fn wal_summary_read<'mcx>(
+        mcx: Mcx<'mcx>,
+        reader: BlockRefTableReaderHandle,
+        length: usize,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `ReportWalSummaryError(callback_arg, fmt, ...)` (walsummary.c) — the
+    /// `error_callback` registered with `CreateBlockRefTableReader`. The C
+    /// assembles the message from a printf-style format + varargs; in the owned
+    /// model blkreftable assembles the message and passes it here, and this
+    /// raises `ereport(ERROR, errcode(ERRCODE_DATA_CORRUPTED),
+    /// errmsg_internal("%s", msg))`. Always returns `Err` (it never returns in
+    /// C); keyed by the reader handle for symmetry with the read callback.
+    pub fn wal_summary_report_error(
+        reader: BlockRefTableReaderHandle,
+        message: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// The `pg_wal_summary_contents` reader teardown: after
     /// `DestroyBlockRefTableReader(reader)` (blkreftable-owned), `FileClose(
     /// io.file)` closes the WAL summary file the reader was reading. The open

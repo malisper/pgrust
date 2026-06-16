@@ -323,25 +323,17 @@ fn begin_unordered<'mcx>(
 }
 
 /// Project the (unconverted) heap-relative keys into the table-AM scan-key
-/// shape for the heap-scan path (no attribute-number conversion — the heap
-/// case uses the keys as-is). The table-AM `ScanKeyData` is the trimmed
-/// `access/skey.h` carrier the `scan_begin` callback receives; the comparison
-/// function / argument payload (`sk_func` / `sk_argument`) is read by the heap
-/// AM provider, which is unported (bufmgr-gated), so this projection carries
-/// the structural key as the tableam contract spells it.
+/// array for the heap-scan path (no attribute-number conversion — the heap
+/// case uses the keys as-is). The table-AM `ScanKeyData` is the same full
+/// `access/skey.h` carrier index scans use (`sk_func`/`sk_argument` included),
+/// so this is a faithful copy of each key into the scan's `mcx` arena.
 fn clone_keys_in<'mcx>(
     mcx: Mcx<'mcx>,
     keys: &[ScanKeyData<'_>],
-) -> PgResult<PgVec<'mcx, TableScanKeyData>> {
+) -> PgResult<PgVec<'mcx, TableScanKeyData<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, keys.len())?;
     for key in keys {
-        out.push(TableScanKeyData {
-            sk_flags: key.sk_flags,
-            sk_attno: key.sk_attno,
-            sk_strategy: key.sk_strategy,
-            sk_subtype: key.sk_subtype,
-            sk_collation: key.sk_collation,
-        });
+        out.push(key.clone_in(mcx)?);
     }
     Ok(out)
 }

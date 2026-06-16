@@ -401,6 +401,12 @@ pub fn init_seams() {
     // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
     heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
 
+    // `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (access/valid.h)
+    // — the qualified-scan scan-key evaluation (#281).
+    heapam_seam::heap_key_test::set(|mcx, tuple, rel, keys| {
+        scan::heap_key_test(mcx, tuple, rel, keys)
+    });
+
     // F5 FREEZE: `heap_tuple_should_freeze(buffer, offnum, cutoffs, ...)` reads
     // the on-page `HeapTupleHeader` at `offnum` and runs the pure
     // `freeze::heap_tuple_should_freeze`, returning the advanced "no freeze"

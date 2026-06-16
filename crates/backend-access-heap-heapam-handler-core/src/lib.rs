@@ -132,7 +132,7 @@ fn heapam_scan_begin<'mcx>(
     rel: &Relation<'mcx>,
     snapshot: Snapshot,
     nkeys: i32,
-    key: PgVec<'mcx, ScanKeyData>,
+    key: PgVec<'mcx, ScanKeyData<'mcx>>,
     pscan: Option<Arc<ParallelTableScanDescData>>,
     flags: u32,
 ) -> PgResult<TableScanDesc<'mcx>> {

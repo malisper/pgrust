@@ -1374,6 +1374,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-spccache",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
@@ -3678,6 +3679,31 @@ dependencies = [
  "types-core",
  "types-error",
  "types-pgstat",
+]
+
+[[package]]
+name = "backend-backup-throttle"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "backend-backup-throttle-seams",
+ "backend-storage-ipc-latch-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datetime",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-backup-throttle-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -18723,6 +18749,7 @@ dependencies = [
  "backend-backup-server",
  "backend-backup-sink",
  "backend-backup-sink-support",
+ "backend-backup-throttle",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
@@ -19768,6 +19795,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
  "types-snapshot",
  "types-tuple",
 ]

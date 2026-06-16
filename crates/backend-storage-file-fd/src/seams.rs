@@ -13,6 +13,7 @@ use std::os::fd::FromRawFd;
 use std::path::Path;
 
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
+use types_storage::file::File;
 
 use backend_storage_file_fd_seams::{
     CreateEmptyFileOutcome, PgFileStream, PipeReadLine, RelmapReadOutcome, RelmapWriteOutcome,
@@ -833,6 +834,48 @@ pub fn get_dirent_type(path: &str) -> i32 {
     } else {
         PGFILETYPE_UNKNOWN
     }
+}
+
+/// `PathNameOpenFile(fileName, fileFlags)` (fd.c) — open a named file into a
+/// VFD with the default file-create mode. The ported `vfd_io::PathNameOpenFile`
+/// returns `File(-1)` (with `errno` set) on a failed open and `Err` only on a
+/// VFD-allocation `ereport(ERROR)`; we relay that verbatim so the caller can
+/// inspect `errno` via `last_errno`, exactly like the C `< 0` contract.
+pub fn path_name_open_file(file_name: &str, file_flags: i32) -> PgResult<File> {
+    vfd_io::PathNameOpenFile(file_name, file_flags)
+}
+
+/// `lstat(path, &statbuf)` returning the raw `st_mtime` (walsummary.c
+/// `RemoveWalSummaryIfOlderThan`). Mirrors C: `Ok(None)` on `errno == ENOENT`,
+/// `Err(ereport(ERROR, errcode_for_file_access, "could not stat file"))` on any
+/// other failure, and the unconverted `st_mtime` (`time_t`, seconds) on success.
+pub fn lstat_mtime(path: &str) -> PgResult<Option<i64>> {
+    let cpath = match std::ffi::CString::new(path) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not stat file \"{path}\": %m"),
+            ));
+        }
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+    let sret = unsafe { libc::lstat(cpath.as_ptr(), &mut st) };
+    if sret != 0 {
+        let errno = errno_now();
+        // if (errno == ENOENT) return; -> Ok(None)
+        if errno == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not stat file \"{path}\": %m"),
+        ));
+    }
+    Ok(Some(st.st_mtime as i64))
 }
 
 /// `rmtree(path, rmtopdir)` (common/rmtree.c) — recursively remove a directory

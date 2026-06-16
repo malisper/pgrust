@@ -163,7 +163,7 @@ pub struct TableAmRoutine {
         rel: &Relation<'mcx>,
         snapshot: Snapshot,
         nkeys: i32,
-        key: PgVec<'mcx, ScanKeyData>,
+        key: PgVec<'mcx, ScanKeyData<'mcx>>,
         pscan: Option<Arc<ParallelTableScanDescData>>,
         flags: u32,
     ) -> PgResult<TableScanDesc<'mcx>>,
@@ -227,7 +227,7 @@ pub struct TableAmRoutine {
     pub scan_rescan: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
-        key: Option<&[ScanKeyData]>,
+        key: Option<&[ScanKeyData<'mcx>]>,
         set_params: bool,
         allow_strat: bool,
         allow_sync: bool,
