@@ -1754,6 +1754,7 @@ pub fn init_seams() {
     backend_replication_walreceiver_seams::get_wal_rcv_flush_rec_ptr::set(
         get_wal_rcv_flush_rec_ptr,
     );
+    backend_replication_walreceiver_seams::wal_rcv_force_reply::set(WalRcvForceReply);
 }
 
 #[cfg(test)]

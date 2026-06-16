@@ -42,3 +42,11 @@ seam_core::seam!(
 // `backend-replication-walreceiverfuncs-seams` (the real owner unit). The ipci
 // `CalculateShmemSize`/`CreateOrAttachShmemStructs` accumulators reach them
 // there. No mis-homed decl lives here.
+
+seam_core::seam!(
+    /// `WalRcvForceReply(void)` (walreceiver.c) — set the walreceiver's
+    /// `force_reply` flag and wake it so it sends an immediate reply to the
+    /// primary (used by the redo loop after replaying a record that requested
+    /// a reply). Async-signal-safe / infallible in C.
+    pub fn wal_rcv_force_reply()
+);

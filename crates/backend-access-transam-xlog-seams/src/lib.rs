@@ -645,3 +645,33 @@ seam_core::seam!(
     /// walsender caller).
     pub fn xlog_background_flush() -> bool
 );
+
+seam_core::seam!(
+    /// `ReachedEndOfBackup(XLogRecPtr EndRecPtr, TimeLineID tli)` (xlog.c) —
+    /// at the end of a backup, mark the control file consistent
+    /// (`ControlFile->minRecoveryPoint`/`backupStartPoint`/`backupEndRequired`
+    /// updates) and `UpdateControlFile()`. `ereport(ERROR)` on the control-file
+    /// write path.
+    pub fn reached_end_of_backup(
+        end_rec_ptr: XLogRecPtr,
+        tli: TimeLineID
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)`
+    /// (xlog.c) — after a timeline switch during recovery, remove any WAL
+    /// segments on the old timeline(s) that are not part of `newTLI`'s history.
+    /// `ereport(ERROR)` on the directory-scan / unlink path.
+    pub fn remove_non_parent_xlog_files(
+        switchpoint: XLogRecPtr,
+        new_tli: TimeLineID
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AllowCascadeReplication()` (xlog.h) — `EnableHotStandby && server is in
+    /// archive recovery`: whether cascading walsenders may run, governing
+    /// whether the redo loop wakes physical/logical walsenders.
+    pub fn allow_cascade_replication() -> bool
+);

@@ -939,6 +939,7 @@ pub fn init_seams() {
     backend_access_transam_xlogutils_seams::set_in_recovery::set(set_in_recovery);
     backend_access_transam_xlogutils_seams::ignore_invalid_pages::set(ignore_invalid_pages);
     backend_access_transam_xlogutils_seams::set_ignore_invalid_pages::set(set_ignore_invalid_pages);
+    backend_access_transam_xlogutils_seams::xlog_check_invalid_pages::set(XLogCheckInvalidPages);
     backend_access_transam_xlogutils_seams::xlog_read_buffer_for_redo::set(
         |record, block_id| XLogReadBufferForRedo(record, block_id),
     );

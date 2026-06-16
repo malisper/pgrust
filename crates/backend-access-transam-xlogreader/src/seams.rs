@@ -125,6 +125,14 @@ fn restore_block_image(
     super::restore_block_image(record, block_id, buf)
 }
 
+fn restore_block_image_bytes(
+    record: &XLogReaderState<'_>,
+    block_id: u8,
+    page: &mut [u8],
+) -> PgResult<bool> {
+    super::restore_block_image_bytes(record, block_id, page)
+}
+
 fn reader_read_len(reader: &XLogReaderState<'_>) -> u32 {
     super::reader_read_len(reader)
 }
@@ -181,6 +189,7 @@ pub fn init_seams() {
     seam::xlog_rec_block_image_apply::set(xlog_rec_block_image_apply);
     seam::xlog_rec_has_block_image::set(xlog_rec_has_block_image);
     seam::restore_block_image::set(restore_block_image);
+    seam::restore_block_image_bytes::set(restore_block_image_bytes);
     seam::reader_errormsg_buf::set(reader_errormsg_buf);
 
     seam::reader_read_len::set(reader_read_len);
