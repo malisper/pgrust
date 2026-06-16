@@ -11448,6 +11448,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-statistics-core-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
+name = "backend-statistics-dependencies"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
 name = "backend-storage-aio-aio-seams"
 version = "0.0.0"
 dependencies = [
@@ -17900,6 +17922,13 @@ name = "types-startup"
 version = "0.0.0"
 dependencies = [
  "types-bgworker",
+ "types-core",
+]
+
+[[package]]
+name = "types-statistics"
+version = "0.0.0"
+dependencies = [
  "types-core",
 ]
 
