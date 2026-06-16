@@ -17,7 +17,8 @@ use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
-    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPERNAME,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
+    FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
     LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
@@ -30,7 +31,10 @@ use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
 use types_core::primitive::OidIsValid;
-use types_tuple::heaptuple::HeapTupleHeaderGetRawXmin;
+use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
+    HeapTupleHeaderXminCommitted};
+use types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
+    EnumTupleData};
 use backend_utils_cache_syscache_seams::{PgClassFullForm, PgOperatorForm, PgProcForm};
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
@@ -1352,6 +1356,60 @@ fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthI
         rolbypassrls: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolbypassrls)?,
         rolconnlimit: getattr_i32(mcx, AUTHOID, tup, Anum_pg_authid_rolconnlimit)?,
     })
+}
+
+/// Project one `pg_enum` `FormedTuple` to an [`EnumTupleData`]: the
+/// `(Form_pg_enum) GETSTRUCT(tup)` columns enum.c reads plus the tuple-header
+/// `xmin`/`xmin_committed` `check_safe_enum_use` needs.
+fn project_enum(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>) -> PgResult<EnumTupleData> {
+    let header = tup
+        .tuple
+        .t_data
+        .as_ref()
+        .expect("pg_enum tuple has a header");
+    Ok(EnumTupleData {
+        oid: getattr_oid(mcx, cache_id, tup, Anum_pg_enum_oid as i32)?,
+        enumtypid: getattr_oid(mcx, cache_id, tup, Anum_pg_enum_enumtypid as i32)?,
+        enumlabel: getattr_namedata(mcx, cache_id, tup, Anum_pg_enum_enumlabel as i32)?,
+        xmin_committed: HeapTupleHeaderXminCommitted(header),
+        xmin: HeapTupleHeaderGetXmin(header),
+    })
+}
+
+/// `SearchSysCache1(ENUMOID, ObjectIdGetDatum(enumval))` projected to an
+/// [`EnumTupleData`].
+pub(crate) fn lookup_enum_by_oid(enumval: Oid) -> PgResult<Option<EnumTupleData>> {
+    let scratch = MemoryContext::new("syscache enum-by-oid projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, ENUMOID, SysCacheKey::Value(KeyDatum::from_oid(enumval)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_enum(mcx, ENUMOID, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache2(ENUMTYPOIDNAME, ObjectIdGetDatum(enumtypoid),
+/// CStringGetDatum(name))` projected to an [`EnumTupleData`].
+pub(crate) fn lookup_enum_by_typoid_name(
+    enumtypoid: Oid,
+    name: &str,
+) -> PgResult<Option<EnumTupleData>> {
+    let scratch = MemoryContext::new("syscache enum-by-typoid-name projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        ENUMTYPOIDNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(enumtypoid)),
+        SysCacheKey::Str(name),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_enum(mcx, ENUMTYPOIDNAME, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
 }
 
 /// `SearchSysCache1(LANGOID, language_id)` projected to the language facts
