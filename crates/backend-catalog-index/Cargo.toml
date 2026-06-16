@@ -51,6 +51,7 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 # `BuildSpeculativeIndexInfo`: per-key unique-operator lookup.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 
 # ConstructTupleDescriptor: index AM vtable lookup (amkeytype), the heap
 # TupleDesc reads, CheckAttributeType, CreateTemplateTupleDesc /

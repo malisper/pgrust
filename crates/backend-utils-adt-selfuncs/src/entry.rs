@@ -20,6 +20,7 @@ use types_core::primitive::{Oid, OidIsValid};
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo};
 
 use backend_utils_cache_lsyscache_seams as lsc;
@@ -33,7 +34,8 @@ use crate::{DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL_FROM_TYPES as DEFAULT_INEQ_SEL};
 /// (`negate == false`) and `neqsel` (`negate == true`). 1:1 with the C body.
 pub fn eqsel_internal<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     mut operator: Oid,
     args: &[NodeId],
     var_relid: i32,
@@ -51,7 +53,7 @@ pub fn eqsel_internal<'mcx>(
 
     // If expression is not var = something or something = var, punt.
     let (vardata, other, varonleft) =
-        match get_restriction_variable(mcx, root, args, var_relid)? {
+        match get_restriction_variable(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => {
                 return Ok(if negate {
@@ -86,32 +88,35 @@ pub fn eqsel_internal<'mcx>(
 /// `eqsel(PG_FUNCTION_ARGS)` (selfuncs.c) — selectivity of `=`.
 pub fn eqsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    eqsel_internal(mcx, root, operator, args, var_relid, collation, false)
+    eqsel_internal(mcx, run, root, operator, args, var_relid, collation, false)
 }
 
 /// `neqsel(PG_FUNCTION_ARGS)` (selfuncs.c) — selectivity of `<>`.
 pub fn neqsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    eqsel_internal(mcx, root, operator, args, var_relid, collation, true)
+    eqsel_internal(mcx, run, root, operator, args, var_relid, collation, true)
 }
 
 /// `scalarineqsel_wrapper(fcinfo, isgt, iseq)` (selfuncs.c) — common code for
 /// the four scalar inequality selectivity estimators. 1:1 with the C body.
 pub fn scalarineqsel_wrapper<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     mut operator: Oid,
     args: &[NodeId],
     var_relid: i32,
@@ -121,7 +126,7 @@ pub fn scalarineqsel_wrapper<'mcx>(
 ) -> PgResult<f64> {
     // If not var op something or something op var, punt.
     let (vardata, other, varonleft) =
-        match get_restriction_variable(mcx, root, args, var_relid)? {
+        match get_restriction_variable(mcx, run, root, args, var_relid)? {
             Some(t) => t,
             None => return Ok(DEFAULT_INEQ_SEL),
         };
@@ -166,47 +171,51 @@ pub fn scalarineqsel_wrapper<'mcx>(
 /// `scalarltsel` (selfuncs.c) — selectivity of `<`.
 pub fn scalarltsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    scalarineqsel_wrapper(mcx, root, operator, args, var_relid, collation, false, false)
+    scalarineqsel_wrapper(mcx, run, root, operator, args, var_relid, collation, false, false)
 }
 
 /// `scalarlesel` (selfuncs.c) — selectivity of `<=`.
 pub fn scalarlesel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    scalarineqsel_wrapper(mcx, root, operator, args, var_relid, collation, false, true)
+    scalarineqsel_wrapper(mcx, run, root, operator, args, var_relid, collation, false, true)
 }
 
 /// `scalargtsel` (selfuncs.c) — selectivity of `>`.
 pub fn scalargtsel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    scalarineqsel_wrapper(mcx, root, operator, args, var_relid, collation, true, false)
+    scalarineqsel_wrapper(mcx, run, root, operator, args, var_relid, collation, true, false)
 }
 
 /// `scalargesel` (selfuncs.c) — selectivity of `>=`.
 pub fn scalargesel<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
     var_relid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    scalarineqsel_wrapper(mcx, root, operator, args, var_relid, collation, true, true)
+    scalarineqsel_wrapper(mcx, run, root, operator, args, var_relid, collation, true, true)
 }

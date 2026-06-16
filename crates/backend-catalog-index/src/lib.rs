@@ -202,6 +202,7 @@ use backend_catalog_indexing_seams as indexing;
 use backend_nodes_core_seams as nodes_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_access_index_amapi_seams as amapi;
+use backend_access_index_indexam_seams as indexam;
 use backend_catalog_heap_seams as heap;
 use backend_nodes_nodeFuncs_seams as nodefuncs;
 use backend_nodes_equalfuncs_seams as equalfuncs;
@@ -848,19 +849,22 @@ use types_catalog::catalog_dependency::{
 use types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 /// `index_create(...)` (catalog/index.c): create the catalog entries for a new
-/// index relation and (unless deferred) build it. Returns the new index
-/// relation's OID.
+/// index relation and (unless deferred) build it. Returns
+/// `(indexRelationId, createdConstraintId)` — the new index relation's OID and
+/// the OID of the constraint created for it (the C `Oid *constraintId`
+/// out-parameter; `InvalidOid` when no constraint was created).
 ///
 /// Faithful to the C; see the seam doc on [`backend_catalog_index_seams::index_create`]
-/// for the parameter-carrier mapping. The `opclassOptions` / `stattargets`
-/// out-args and the `Oid *constraintId` out-param are NULL/ignored at the
-/// current call sites and are not carried (the `IndexCreateArgs` carrier omits
-/// them); the constraint OID is therefore not returned to the caller here (it is
-/// still recorded in pg_constraint by `index_constraint_create`).
+/// for the parameter-carrier mapping. The per-column `opclassOptions`
+/// (attoptions) ride in `args.opclass_options` and are threaded to
+/// `AppendAttributeTuples` (so each index `pg_attribute` row stores its
+/// `attoptions`) and validated per-column via `index_opclass_options`. The
+/// `stattargets` out-arg remains NULL/ignored at the current call sites and is
+/// not carried.
 pub fn index_create<'mcx>(
     heap_relation: &Relation<'mcx>,
     args: backend_catalog_index_seams::IndexCreateArgs<'mcx>,
-) -> PgResult<Oid> {
+) -> PgResult<(Oid, Oid)> {
     // The carrier owns the mcx-bound IndexInfo; pull out the pieces and reborrow.
     let mcx = args
         .index_info
@@ -880,12 +884,17 @@ pub fn index_create<'mcx>(
     let opclass_ids = args.opclass_ids;
     let coloptions = args.coloptions;
     let reloptions = args.reloptions;
+    let opclass_options = args.opclass_options;
     let flags = args.flags;
     let constr_flags = args.constr_flags;
     let allow_system_table_mods = args.allow_system_table_mods;
     let is_internal = args.is_internal;
 
     let heap_relation_id = heap_relation.rd_id;
+
+    // The C `Oid *constraintId` out-parameter, returned to the caller. Only the
+    // INDEX_CREATE_ADD_CONSTRAINT path writes it; InvalidOid otherwise.
+    let mut created_constraint_id = InvalidOid;
 
     let isprimary = (flags & INDEX_CREATE_IS_PRIMARY) != 0;
     let invalid = (flags & INDEX_CREATE_INVALID) != 0;
@@ -1005,7 +1014,7 @@ pub fn index_create<'mcx>(
         if (flags & INDEX_CREATE_IF_NOT_EXISTS) != 0 {
             // ereport(NOTICE, "relation already exists, skipping")
             table_am::relation_close::call(pg_class.rd_id, ROW_EXCLUSIVE_LOCK)?;
-            return Ok(InvalidOid);
+            return Ok((InvalidOid, InvalidOid));
         }
         return Err(PgError::error(alloc::format!(
             "relation \"{index_relation_name}\" already exists"
@@ -1132,7 +1141,7 @@ pub fn index_create<'mcx>(
      * (InitializeAttributeOids runs inside AppendAttributeTuples' seam in the
      * owned model — see AppendAttributeTuples.)
      */
-    AppendAttributeTuples(mcx, &index_relation)?;
+    AppendAttributeTuples(mcx, &index_relation, opclass_options.as_deref())?;
 
     /*
      * update pg_index (append INDEX tuple). Stows away "predicate".
@@ -1192,9 +1201,9 @@ pub fn index_create<'mcx>(
                 return elog_error("constraint must be PRIMARY, UNIQUE or EXCLUDE".into());
             };
 
-            // localaddr = index_constraint_create(...); (constraintId out-param
-            // is ignored at the current call sites — not carried).
-            let _localaddr = index_constraint_create(
+            // localaddr = index_constraint_create(...);
+            // if (constraintId) *constraintId = localaddr.objectId;
+            let localaddr = index_constraint_create(
                 heap_relation,
                 index_relation_id,
                 parent_constraint_id,
@@ -1205,6 +1214,7 @@ pub fn index_create<'mcx>(
                 allow_system_table_mods,
                 is_internal,
             )?;
+            created_constraint_id = localaddr.objectId;
         } else {
             let mut have_simple_col = false;
             let mut addrs = dependency::new_object_addresses::call()?;
@@ -1356,7 +1366,23 @@ pub fn index_create<'mcx>(
      * so it is already correct; the trimmed cross-unit handle exposes no setter.
      */
 
-    /* opclassOptions is NULL at the current call sites — no index_opclass_options. */
+    /*
+     * Validate opclass-specific options.
+     *   if (opclassOptions)
+     *       for (i = 0; i < indexInfo->ii_NumIndexKeyAttrs; i++)
+     *           (void) index_opclass_options(indexRelation, i + 1,
+     *                                        opclassOptions[i], true);
+     */
+    if let Some(ref opclass_options) = opclass_options {
+        for i in 0..index_info.ii_NumIndexKeyAttrs as usize {
+            let _ = indexam::index_opclass_options::call(
+                &index_relation,
+                (i + 1) as types_core::primitive::AttrNumber,
+                opclass_options[i].clone_in(mcx)?,
+                true, /* validate */
+            )?;
+        }
+    }
 
     /*
      * If bootstrap, or the caller asked to skip the build, don't fill the index
@@ -1380,7 +1406,7 @@ pub fn index_create<'mcx>(
      */
     table_am::relation_close::call(index_relation.rd_id, NO_LOCK)?;
 
-    Ok(index_relation_id)
+    Ok((index_relation_id, created_constraint_id))
 }
 
 /// `CStringGetTextDatum(NULL)` vs the `Datum reloptions` argument — in the owned
@@ -2141,13 +2167,47 @@ fn ConstructTupleDescriptor<'mcx>(
 /// the catalog-write leg; it routes to the catalog-indexing `append_attribute_-
 /// tuples` seam (which owns `InsertPgAttributeTuples` and the index's stored
 /// `RelationGetDescr`). `InitializeAttributeOids` runs inside that seam (it
-/// scribbles `attrelid` on the index's relcache descriptor before the insert);
-/// here at the `index_create` call site `attopts`/`stattargets` are both NULL.
+/// scribbles `attrelid` on the index's relcache descriptor before the insert).
+///
+/// `opclass_options` is the C `const Datum *attopts` (one canonical attoptions
+/// `Datum` per index attribute); `None` is the C NULL `attopts`. Each
+/// per-column `Datum` is reduced to its `attoptions` bytea image (the varlena
+/// `text[]` bytes) for the `append_attribute_tuples` seam — a null `Datum`
+/// (`Datum::null()`) becomes `None` (SQL NULL `attoptions`); a real options
+/// value rides as its varlena bytes. The C `stattargets` is NULL here.
 fn AppendAttributeTuples<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
+    opclass_options: Option<&[types_tuple::Datum<'mcx>]>,
 ) -> PgResult<()> {
-    indexing::append_attribute_tuples::call(mcx, index_relation, None, None)
+    use types_tuple::Datum;
+    // C: InsertPgAttributeTuples is given attopts == opclassOptions verbatim.
+    // The owned `append_attribute_tuples` seam takes the per-attno bytea image;
+    // map each attoptions Datum to its varlena bytes (null Datum -> SQL NULL).
+    let attopts: Option<Vec<Option<Vec<u8>>>> = opclass_options.map(|opts| {
+        opts.iter()
+            .map(|d| match d {
+                // C `(Datum) 0` — no options for this column (SQL NULL attoptions).
+                Datum::ByVal(0) => None,
+                // attoptions is always a `text[]` varlena, carried as its
+                // detoasted on-disk bytes in the `ByRef` arm.
+                Datum::ByRef(bytes) => Some(bytes.to_vec()),
+                // Any other shape is not a valid attoptions image; it cannot
+                // arise from a faithful caller (DefineIndex builds attoptions
+                // via transformRelOptions, always a text[] varlena or NULL).
+                _ => panic!(
+                    "AppendAttributeTuples: attoptions Datum is not a text[] \
+                     varlena image"
+                ),
+            })
+            .collect()
+    });
+    indexing::append_attribute_tuples::call(
+        mcx,
+        index_relation,
+        attopts.as_deref(),
+        None,
+    )
 }
 
 /* ===========================================================================
