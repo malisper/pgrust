@@ -1,0 +1,305 @@
+//! F3 — the DDL-cluster catalog-write producers (`catalog/heap.c`):
+//! `InsertPgClassTuple`, `InsertPgAttributeTuples`, and `StoreAttrDefault`'s
+//! pg_attrdef insert.
+//!
+//! Each producer forms the catalog heap tuple from a typed `*InsertRow` against
+//! the open catalog relation's descriptor (`heap_form_tuple(RelationGetDescr(
+//! rel), values, nulls)`) and calls the F0 engine ([`crate::keystone`]). These
+//! are the form-and-insert leaves the unported `catalog/heap.c`
+//! (`heap_create_with_catalog`) drives; they install over the DDL-cluster seams
+//! in `backend-catalog-indexing-seams`.
+//!
+//! The variable-length / array columns (`relacl` / `reloptions` /
+//! `attoptions`) arrive as already-built on-disk varlena byte images (the C
+//! caller built them: `relacl` from `aclitem[]`, `reloptions` /`attoptions`
+//! from `text[]`); the producer wraps each image as a by-reference Datum
+//! unchanged. The `pg_node_tree` text columns (`adbin`) are rendered to a
+//! `text` varlena here (the C `CStringGetTextDatum(nodeToString(expr))`).
+
+#![allow(non_snake_case)]
+
+use mcx::Mcx;
+use types_catalog as cat;
+use types_error::PgResult;
+use types_rel::Relation;
+use types_tuple::backend_access_common_heaptuple::Datum;
+
+use backend_access_common_heaptuple::heap_form_tuple;
+use backend_catalog_catalog::GetNewOidWithIndex;
+
+use crate::keystone::{CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert};
+
+/// `NameGetDatum(&name)` over a 64-byte `NameData` image (a by-reference Datum
+/// over the column's on-disk bytes; the `name` type is fixed-length 64 stored
+/// inline). The `InsertRow` carriers already hold the NUL-padded image
+/// (`namestrcpy` ran in the caller), so this wraps the bytes unchanged.
+fn name_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8; 64]) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+}
+
+/// Wrap an already-built on-disk varlena image (an `aclitem[]` / `text[]`
+/// array, with its 4-byte length header) as a by-reference Datum, unchanged.
+fn bytes_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, bytes)?))
+}
+
+/// `CStringGetTextDatum(s)` — a `text` varlena image (4-byte header
+/// `SET_VARSIZE(len + VARHDRSZ)` then the payload), carried as `Datum::ByRef`.
+/// Used for the `pg_node_tree` text columns (`adbin`).
+fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    let payload = s.as_bytes();
+    let total = 4 + payload.len();
+    let word = (total as u32) << 2;
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.extend_from_slice(&word.to_ne_bytes());
+    buf.extend_from_slice(payload);
+    Ok(Datum::ByRef(buf))
+}
+
+/* ======================================================================== *
+ * pg_class — InsertPgClassTuple (catalog/heap.c).
+ * ======================================================================== */
+
+/// `InsertPgClassTuple(pg_class_desc, new_rel_desc, new_rel_oid, relacl,
+/// reloptions)` (catalog/heap.c): build the full 34-column `pg_class` row from
+/// the new relation's `rd_rel` (carried in [`cat::pg_class::PgClassInsertRow`]),
+/// `heap_form_tuple(RelationGetDescr(pg_class_desc), values, nulls)`, and
+/// `CatalogTupleInsert(pg_class_desc, tup)`.
+fn catalog_tuple_insert_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_class::PgClassInsertRow,
+) -> PgResult<()> {
+    use cat::pg_class as pc;
+
+    // memset(values, 0, ...); memset(nulls, false, ...);
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    for _ in 0..pc::Natts_pg_class {
+        values.push(Datum::null());
+        nulls.push(false);
+    }
+
+    // The fixed columns, in pg_class.h field order (oid=1 .. relminmxid=31).
+    values[pc::Anum_pg_class_oid as usize - 1] = Datum::from_oid(row.oid);
+    values[pc::Anum_pg_class_relname as usize - 1] = name_datum(mcx, &row.relname)?;
+    values[pc::Anum_pg_class_relnamespace as usize - 1] = Datum::from_oid(row.relnamespace);
+    values[pc::Anum_pg_class_reltype as usize - 1] = Datum::from_oid(row.reltype);
+    values[pc::Anum_pg_class_reloftype as usize - 1] = Datum::from_oid(row.reloftype);
+    values[pc::Anum_pg_class_relowner as usize - 1] = Datum::from_oid(row.relowner);
+    values[pc::Anum_pg_class_relam as usize - 1] = Datum::from_oid(row.relam);
+    values[pc::Anum_pg_class_relfilenode as usize - 1] = Datum::from_oid(row.relfilenode);
+    values[pc::Anum_pg_class_reltablespace as usize - 1] = Datum::from_oid(row.reltablespace);
+    values[pc::Anum_pg_class_relpages as usize - 1] = Datum::from_i32(row.relpages);
+    values[pc::Anum_pg_class_reltuples as usize - 1] = Datum::from_f32(row.reltuples);
+    values[pc::Anum_pg_class_relallvisible as usize - 1] = Datum::from_i32(row.relallvisible);
+    values[pc::Anum_pg_class_relallfrozen as usize - 1] = Datum::from_i32(row.relallfrozen);
+    values[pc::Anum_pg_class_reltoastrelid as usize - 1] = Datum::from_oid(row.reltoastrelid);
+    values[pc::Anum_pg_class_relhasindex as usize - 1] = Datum::from_bool(row.relhasindex);
+    values[pc::Anum_pg_class_relisshared as usize - 1] = Datum::from_bool(row.relisshared);
+    values[pc::Anum_pg_class_relpersistence as usize - 1] = Datum::from_char(row.relpersistence);
+    values[pc::Anum_pg_class_relkind as usize - 1] = Datum::from_char(row.relkind);
+    values[pc::Anum_pg_class_relnatts as usize - 1] = Datum::from_i16(row.relnatts);
+    values[pc::Anum_pg_class_relchecks as usize - 1] = Datum::from_i16(row.relchecks);
+    values[pc::Anum_pg_class_relhasrules as usize - 1] = Datum::from_bool(row.relhasrules);
+    values[pc::Anum_pg_class_relhastriggers as usize - 1] = Datum::from_bool(row.relhastriggers);
+    values[pc::Anum_pg_class_relrowsecurity as usize - 1] = Datum::from_bool(row.relrowsecurity);
+    values[pc::Anum_pg_class_relforcerowsecurity as usize - 1] =
+        Datum::from_bool(row.relforcerowsecurity);
+    values[pc::Anum_pg_class_relhassubclass as usize - 1] = Datum::from_bool(row.relhassubclass);
+    values[pc::Anum_pg_class_relispopulated as usize - 1] = Datum::from_bool(row.relispopulated);
+    values[pc::Anum_pg_class_relreplident as usize - 1] = Datum::from_char(row.relreplident);
+    values[pc::Anum_pg_class_relispartition as usize - 1] = Datum::from_bool(row.relispartition);
+    values[pc::Anum_pg_class_relrewrite as usize - 1] = Datum::from_oid(row.relrewrite);
+    values[pc::Anum_pg_class_relfrozenxid as usize - 1] =
+        Datum::from_transaction_id(row.relfrozenxid);
+    values[pc::Anum_pg_class_relminmxid as usize - 1] = Datum::from_u32(row.relminmxid);
+
+    // if (relacl != (Datum) 0) values[..relacl] = relacl; else nulls[..] = true;
+    match &row.relacl {
+        Some(image) => {
+            values[pc::Anum_pg_class_relacl as usize - 1] = bytes_datum(mcx, image)?;
+        }
+        None => nulls[pc::Anum_pg_class_relacl as usize - 1] = true,
+    }
+    // if (reloptions != (Datum) 0) values[..reloptions] = reloptions; else NULL.
+    match &row.reloptions {
+        Some(image) => {
+            values[pc::Anum_pg_class_reloptions as usize - 1] = bytes_datum(mcx, image)?;
+        }
+        None => nulls[pc::Anum_pg_class_reloptions as usize - 1] = true,
+    }
+
+    // relpartbound is set by updating this tuple, if necessary.
+    nulls[pc::Anum_pg_class_relpartbound as usize - 1] = true;
+
+    // tup = heap_form_tuple(RelationGetDescr(pg_class_desc), values, nulls);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // CatalogTupleInsert(pg_class_desc, tup); heap_freetuple(tup);
+    CatalogTupleInsert(mcx, rel, &mut tup)
+}
+
+/* ======================================================================== *
+ * pg_attribute — InsertPgAttributeTuples (catalog/heap.c).
+ * ======================================================================== */
+
+/// `InsertPgAttributeTuples(pg_attribute_rel, tupdesc, new_rel_oid, extra,
+/// indstate)` (catalog/heap.c): form one `pg_attribute` heap tuple per row and
+/// multi-insert the batch (`CatalogOpenIndexes` +
+/// `CatalogTuplesMultiInsertWithInfo` + `CatalogCloseIndexes`).
+///
+/// The C batches into `MAX_CATALOG_MULTI_INSERT_BYTES`-sized slot windows and
+/// re-uses an existing `indstate` when passed; the typed-row design opens the
+/// indexes once for the whole batch (the index-state lifecycle is per-call
+/// here, which is logic-invisible — the same index entries are inserted). The
+/// caller pre-resolves each row's `attrelid` (the C
+/// `new_rel_oid != InvalidOid ? new_rel_oid : attrs->attrelid` selection).
+fn catalog_insert_pg_attribute_tuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    rows: &[cat::pg_attribute::PgAttributeInsertRow],
+) -> PgResult<()> {
+    use types_tuple::backend_access_common_heaptuple::FormedTuple;
+
+    // /* Nothing to do */ — no rows, no index work.
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+    for row in rows {
+        let (values, nulls) = attribute_values(mcx, row)?;
+        let tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+        tuples.push(tup);
+    }
+
+    // indstate = CatalogOpenIndexes(pg_attribute_rel);
+    let mut indstate = CatalogOpenIndexes(mcx, rel)?;
+    // CatalogTuplesMultiInsertWithInfo(pg_attribute_rel, slot, slotCount, indstate);
+    crate::keystone::CatalogTuplesMultiInsertWithInfo(mcx, rel, tuples, &mut indstate)?;
+    // CatalogCloseIndexes(indstate);
+    CatalogCloseIndexes(indstate)
+}
+
+/// The `values[]` / `nulls[]` for one `pg_attribute` row (the per-slot fill in
+/// `InsertPgAttributeTuples`).
+fn attribute_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    row: &cat::pg_attribute::PgAttributeInsertRow,
+) -> PgResult<(mcx::PgVec<'mcx, Datum<'mcx>>, mcx::PgVec<'mcx, bool>)> {
+    use cat::pg_attribute as pa;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    for _ in 0..pa::Natts_pg_attribute {
+        values.push(Datum::null());
+        nulls.push(false);
+    }
+
+    // The fixed-layout part (columns 1..=20), from the Form_pg_attribute.
+    values[pa::Anum_pg_attribute_attrelid as usize - 1] = Datum::from_oid(row.attrelid);
+    values[pa::Anum_pg_attribute_attname as usize - 1] = name_datum(mcx, &row.attname)?;
+    values[pa::Anum_pg_attribute_atttypid as usize - 1] = Datum::from_oid(row.atttypid);
+    values[pa::Anum_pg_attribute_attlen as usize - 1] = Datum::from_i16(row.attlen);
+    values[pa::Anum_pg_attribute_attnum as usize - 1] = Datum::from_i16(row.attnum);
+    values[pa::Anum_pg_attribute_atttypmod as usize - 1] = Datum::from_i32(row.atttypmod);
+    values[pa::Anum_pg_attribute_attndims as usize - 1] = Datum::from_i16(row.attndims);
+    values[pa::Anum_pg_attribute_attbyval as usize - 1] = Datum::from_bool(row.attbyval);
+    values[pa::Anum_pg_attribute_attalign as usize - 1] = Datum::from_char(row.attalign);
+    values[pa::Anum_pg_attribute_attstorage as usize - 1] = Datum::from_char(row.attstorage);
+    values[pa::Anum_pg_attribute_attcompression as usize - 1] =
+        Datum::from_char(row.attcompression);
+    values[pa::Anum_pg_attribute_attnotnull as usize - 1] = Datum::from_bool(row.attnotnull);
+    values[pa::Anum_pg_attribute_atthasdef as usize - 1] = Datum::from_bool(row.atthasdef);
+    values[pa::Anum_pg_attribute_atthasmissing as usize - 1] = Datum::from_bool(row.atthasmissing);
+    values[pa::Anum_pg_attribute_attidentity as usize - 1] = Datum::from_char(row.attidentity);
+    values[pa::Anum_pg_attribute_attgenerated as usize - 1] = Datum::from_char(row.attgenerated);
+    values[pa::Anum_pg_attribute_attisdropped as usize - 1] = Datum::from_bool(row.attisdropped);
+    values[pa::Anum_pg_attribute_attislocal as usize - 1] = Datum::from_bool(row.attislocal);
+    values[pa::Anum_pg_attribute_attinhcount as usize - 1] = Datum::from_i16(row.attinhcount);
+    values[pa::Anum_pg_attribute_attcollation as usize - 1] = Datum::from_oid(row.attcollation);
+
+    // attstattarget / attoptions from FormExtraData_pg_attribute (NULL when
+    // unset, the no-`tupdesc_extra` path or an explicitly-null extra field).
+    match row.attstattarget {
+        Some(v) => values[pa::Anum_pg_attribute_attstattarget as usize - 1] = Datum::from_i16(v),
+        None => nulls[pa::Anum_pg_attribute_attstattarget as usize - 1] = true,
+    }
+    match &row.attoptions {
+        Some(image) => {
+            values[pa::Anum_pg_attribute_attoptions as usize - 1] = bytes_datum(mcx, image)?
+        }
+        None => nulls[pa::Anum_pg_attribute_attoptions as usize - 1] = true,
+    }
+
+    // The remaining fields are not set for new columns.
+    nulls[pa::Anum_pg_attribute_attacl as usize - 1] = true;
+    nulls[pa::Anum_pg_attribute_attfdwoptions as usize - 1] = true;
+    nulls[pa::Anum_pg_attribute_attmissingval as usize - 1] = true;
+
+    Ok((values, nulls))
+}
+
+/* ======================================================================== *
+ * pg_attrdef — StoreAttrDefault's insert (catalog/heap.c).
+ * ======================================================================== */
+
+/// `StoreAttrDefault`'s pg_attrdef INSERT (catalog/heap.c): allocate the
+/// pg_attrdef OID (`GetNewOidWithIndex(adrel, AttrDefaultOidIndexId,
+/// Anum_pg_attrdef_oid)`), form the 4-column row (`oid`, `adrelid`, `adnum`,
+/// `adbin` pg_node_tree text), `CatalogTupleInsert`, and return the OID.
+fn catalog_tuple_insert_pg_attrdef<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_attrdef::PgAttrdefInsertRow,
+) -> PgResult<types_core::Oid> {
+    use cat::pg_attrdef as pd;
+
+    // attrdefOid = GetNewOidWithIndex(adrel, AttrDefaultOidIndexId,
+    //                                 Anum_pg_attrdef_oid);
+    let attrdef_oid =
+        GetNewOidWithIndex(rel, pd::AttrDefaultOidIndexId, pd::Anum_pg_attrdef_oid)?;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
+    for _ in 0..pd::Natts_pg_attrdef {
+        values.push(Datum::null());
+        nulls.push(false);
+    }
+
+    // values[Anum_pg_attrdef_oid - 1]    = ObjectIdGetDatum(attrdefOid);
+    // values[Anum_pg_attrdef_adrelid - 1]= ObjectIdGetDatum(RelationGetRelid(rel));
+    // values[Anum_pg_attrdef_adnum - 1]  = Int16GetDatum(attnum);
+    // values[Anum_pg_attrdef_adbin - 1]  = CStringGetTextDatum(adbin);
+    values[pd::Anum_pg_attrdef_oid as usize - 1] = Datum::from_oid(attrdef_oid);
+    values[pd::Anum_pg_attrdef_adrelid as usize - 1] = Datum::from_oid(row.adrelid);
+    values[pd::Anum_pg_attrdef_adnum as usize - 1] = Datum::from_i16(row.adnum);
+    values[pd::Anum_pg_attrdef_adbin as usize - 1] = cstring_to_text_datum(mcx, &row.adbin)?;
+
+    // tuple = heap_form_tuple(adrel->rd_att, values, nulls);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // CatalogTupleInsert(adrel, tuple);
+    CatalogTupleInsert(mcx, rel, &mut tup)?;
+
+    Ok(attrdef_oid)
+}
+
+/// Install the F3 DDL-cluster catalog-write seams. Wired from
+/// [`crate::init_seams`].
+pub fn install() {
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_class::set(
+        catalog_tuple_insert_pg_class,
+    );
+    backend_catalog_indexing_seams::catalog_insert_pg_attribute_tuples::set(
+        catalog_insert_pg_attribute_tuples,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_attrdef::set(
+        catalog_tuple_insert_pg_attrdef,
+    );
+}
