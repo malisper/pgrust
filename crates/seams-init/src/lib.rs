@@ -31,6 +31,7 @@ pub fn init_all() {
     backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_pruneheap::init_seams();
+    backend_access_heap_rewriteheap::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_amapi::init_seams();
@@ -93,6 +94,7 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_partition::init_seams();
     backend_catalog_indexing::init_seams();
     backend_catalog_heap::init_seams();
     backend_catalog_index::init_seams();
@@ -124,6 +126,7 @@ pub fn init_all() {
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_vacuum::init_seams();
+    backend_commands_vacuumparallel::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_proclang::init_seams();
@@ -151,6 +154,7 @@ pub fn init_all() {
     backend_commands_sequence::init_seams();
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
+    backend_commands_tsearchcmds::init_seams();
     backend_commands_typecmds::init_seams();
     backend_conv_utf8_and_big5::init_seams();
     backend_conv_utf8_and_cyrillic::init_seams();
@@ -293,6 +297,7 @@ pub fn init_all() {
     backend_postmaster_walsummarizer::init_seams();
     backend_postmaster_walwriter::init_seams();
     backend_regex_core::init_seams();
+    backend_replication_libpqwalreceiver::init_seams();
     backend_replication_logical_applyparallelworker::init_seams();
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_launcher::init_seams();
@@ -350,6 +355,7 @@ pub fn init_all() {
     backend_tcop_utility::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
+    backend_snowball_dict_snowball::init_seams();
     backend_timezone_strftime::init_seams();
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
@@ -372,6 +378,7 @@ pub fn init_all() {
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_jsonb_gin::init_seams();
+    backend_utils_adt_jsonfuncs::init_seams();
     backend_utils_adt_like::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
@@ -1709,6 +1716,21 @@ mod recurrence_guard {
         // it; it loud-panics until encnames lands. DELETE this entry when encnames is
         // ported and installs the seam.
         ("backend_utils_mb_mbutils", "is_encoding_supported_by_icu"),
+        // DESIGN_DEBT (TD-JSONFUNCS-FMGR-ARG-DETOAST): jsonfuncs.c's SQL entry
+        // points (`json[b]_object_keys`/`_each`/`_array_elements`/`populate_*`/
+        // `to_record(set)`) read a `json`/`jsonb` varlena argument and (for
+        // populate_recordset) a composite `record` argument from the fmgr call
+        // frame. The repo's trimmed `FunctionCallInfoBaseData` carries args as
+        // bare-word `types_datum::Datum`, and the bare-word -> detoasted bytes /
+        // -> `FormedTuple` conversion is the project-wide fmgr argument-detoast
+        // boundary that funcapi (the call-frame owner) has not yet grown. These
+        // two seams (`srf_arg_varlena_bytes` for the json/jsonb arg bytes,
+        // `srf_arg_record` for the composite record arg) are declared on funcapi
+        // and called by jsonfuncs; funcapi cannot install them until that
+        // detoast boundary lands, so they loud-panic on a real SRF call path.
+        // DELETE these entries when funcapi grows the fmgr arg-detoast accessors.
+        ("backend_utils_fmgr_funcapi", "srf_arg_varlena_bytes"),
+        ("backend_utils_fmgr_funcapi", "srf_arg_record"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

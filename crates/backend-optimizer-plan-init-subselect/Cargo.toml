@@ -28,6 +28,8 @@ backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-s
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# createplan.c consumes SS_attach_initplans (subselect.c-owned); installed here.
+backend-optimizer-plan-createplan-seams = { path = "../backend-optimizer-plan-createplan-seams" }
 
 # Outward seams for unported / not-acyclically-reachable callees this crate
 # declares + uses (loud-panic until installed):
@@ -40,3 +42,10 @@ backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" 
 backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
+
+# subselect.c (SubPlan-building half) dependencies:
+backend-optimizer-util-paramassign = { path = "../backend-optimizer-util-paramassign" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
+types-tuple = { path = "../types-tuple" }

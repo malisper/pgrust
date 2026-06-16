@@ -337,3 +337,25 @@ pub const WAIT_EVENT_WAL_SUMMARIZER_WAL: u32 = PG_WAIT_ACTIVITY | 16;
 /// 10th entry (0-based 9) of the `WaitEventTimeout` section, so
 /// `PG_WAIT_TIMEOUT | 9`.
 pub const WAIT_EVENT_WAL_SUMMARIZER_ERROR: u32 = PG_WAIT_TIMEOUT | 9;
+
+// --- LogicalRewrite* WaitEventIO events (rewriteheap.c). 0-based indexes
+// 34..39 within the alphabetically-sorted `WaitEventIO` section of
+// `wait_event_names.txt`. ---
+/// `WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC` — "Waiting for logical rewrite
+/// mappings to reach durable storage during a checkpoint." (0-based 34.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC: u32 = PG_WAIT_IO + 34;
+/// `WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC` — "Waiting for mapping data to
+/// reach durable storage during a logical rewrite." (0-based 35.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC: u32 = PG_WAIT_IO + 35;
+/// `WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE` — "Waiting for a write of mapping
+/// data during a logical rewrite." (0-based 36.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE: u32 = PG_WAIT_IO + 36;
+/// `WAIT_EVENT_LOGICAL_REWRITE_SYNC` — "Waiting for logical rewrite mappings to
+/// reach durable storage." (0-based 37.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_SYNC: u32 = PG_WAIT_IO + 37;
+/// `WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE` — "Waiting for truncate of mapping data
+/// during a logical rewrite." (0-based 38.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE: u32 = PG_WAIT_IO + 38;
+/// `WAIT_EVENT_LOGICAL_REWRITE_WRITE` — "Waiting for a write of logical rewrite
+/// mappings." (0-based 39.)
+pub const WAIT_EVENT_LOGICAL_REWRITE_WRITE: u32 = PG_WAIT_IO + 39;

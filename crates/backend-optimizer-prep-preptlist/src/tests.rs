@@ -102,7 +102,7 @@ fn empty_select_targetlist_yields_empty_processed_tlist() {
 #[test]
 fn get_plan_rowmark_empty_is_none() {
     // SELECT path: rowMarks is empty, so the lookup finds nothing.
-    let empty: alloc::vec::Vec<types_pathnodes::NodeId> = alloc::vec::Vec::new();
+    let empty: alloc::vec::Vec<types_pathnodes::PlanRowMarkId> = alloc::vec::Vec::new();
     assert!(get_plan_rowmark(&empty, 1).is_none());
 }
 

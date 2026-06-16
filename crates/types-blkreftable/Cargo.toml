@@ -9,3 +9,6 @@ name = "types_blkreftable"
 path = "src/lib.rs"
 
 [dependencies]
+types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+hashbrown = "0.14"

@@ -502,11 +502,18 @@ seam_core::seam!(
     pub fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuumInit>
 );
 seam_core::seam!(
-    /// `parallel_vacuum_end(pvs, indstats)`.
+    /// `parallel_vacuum_end(pvs, istats)`.
+    ///
+    /// In C this is `void parallel_vacuum_end(ParallelVacuumState *pvs,
+    /// IndexBulkDeleteResult **istats)`, where `istats[]` is an OUT-parameter:
+    /// the per-index stats accumulated in the DSM-resident `pvs->indstats[]`
+    /// are copied back into the caller's array before the parallel context is
+    /// torn down. Since the repo cannot expose a `&mut` slice across this seam,
+    /// the updated stats are RETURNED here (one entry per index, `None` for an
+    /// index whose stats were never updated) and the caller stores them.
     pub fn parallel_vacuum_end(
         pvs: ParallelVacuumStateHandle,
-        indstats: Vec<Option<IndexBulkDeleteResult>>,
-    ) -> PgResult<()>
+    ) -> PgResult<Vec<Option<IndexBulkDeleteResult>>>
 );
 seam_core::seam!(
     /// `parallel_vacuum_get_dead_items(pvs, &dead_items_info)`.

@@ -894,6 +894,7 @@ pub fn init_seams() {
     seams::GetOldestSafeDecodingTransactionId::set(GetOldestSafeDecodingTransactionId);
     seams::proc_array_set_replication_slot_xmin::set(ProcArraySetReplicationSlotXmin);
     seams::get_replication_horizons::set(GetReplicationHorizons);
+    seams::proc_array_get_replication_slot_xmin::set(ProcArrayGetReplicationSlotXmin);
     seams::get_conflicting_virtual_xids::set(GetConflictingVirtualXIDs);
 
     // Logical-decoding flag bookkeeping + ProcArrayLock bracket.

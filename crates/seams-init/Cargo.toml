@@ -34,6 +34,7 @@ backend-access-heap-heapam-handler-dml = { path = "../backend-access-heap-heapam
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
+backend-access-heap-rewriteheap = { path = "../backend-access-heap-rewriteheap" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
@@ -97,6 +98,7 @@ backend-catalog-storage = { path = "../backend-catalog-storage" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-partition = { path = "../backend-catalog-partition" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-catalog-index = { path = "../backend-catalog-index" }
@@ -129,6 +131,7 @@ backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }
+backend-commands-vacuumparallel = { path = "../backend-commands-vacuumparallel" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
@@ -156,6 +159,7 @@ backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-tsearchcmds = { path = "../backend-commands-tsearchcmds" }
 backend-commands-typecmds = { path = "../backend-commands-typecmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }
@@ -299,6 +303,7 @@ backend-replication-logical-logical = { path = "../backend-replication-logical-l
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 backend-replication-logical-reorderbuffer = { path = "../backend-replication-logical-reorderbuffer" }
+backend-replication-libpqwalreceiver = { path = "../backend-replication-libpqwalreceiver" }
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
@@ -348,6 +353,7 @@ backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-tcop-utility = { path = "../backend-tcop-utility" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
+backend-snowball-dict-snowball = { path = "../backend-snowball-dict-snowball" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
@@ -368,6 +374,7 @@ backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }
+backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

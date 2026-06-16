@@ -22,7 +22,7 @@ use backend_utils_error::ereport;
 use common_hashfn::hash_bytes;
 use mcx::Mcx;
 use std::collections::HashMap;
-use types_blkreftable::BlockRefTableHandle;
+use types_blkreftable::BlockRefTable;
 use types_core::{
     BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, Oid, RelFileNumber, TimeLineID,
     XLogRecPtr, BLCKSZ, FSM_FORKNUM, INVALID_PROC_NUMBER, MAIN_FORKNUM,
@@ -129,8 +129,8 @@ struct BackupFileEntry {
 /// owner-seam allocations (block-reference table, reader blocks, parser
 /// records). The manifest staging buffer (`StringInfoData buf`), WAL ranges
 /// (`List *manifest_wal_ranges`), manifest file hash (`backup_file_hash
-/// *manifest_files`), and block-reference table handle (`BlockRefTable *brtab`)
-/// are owned here.
+/// *manifest_files`), and block-reference table (`BlockRefTable *brtab`, the
+/// genuine owned value) are owned here.
 pub struct IncrementalBackupInfo<'mcx> {
     /// Memory context for this object and its subsidiary objects.
     mcx: Mcx<'mcx>,
@@ -160,8 +160,10 @@ pub struct IncrementalBackupInfo<'mcx> {
     manifest_files: HashMap<String, BackupFileEntry>,
 
     /// Block-reference table for the incremental backup (`BlockRefTable
-    /// *brtab`), populated by [`Self::prepare_for_incremental_backup`].
-    brtab: Option<BlockRefTableHandle>,
+    /// *brtab`), populated by [`Self::prepare_for_incremental_backup`]. The
+    /// genuine owned table (the C `BlockRefTable *`), held for the lifetime of
+    /// this `IncrementalBackupInfo`.
+    brtab: Option<BlockRefTable>,
 }
 
 /// `hash_string_pointer` — helper for the filemap hash table. Retained even
@@ -535,13 +537,15 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
 
         // Read all of the required block reference table files and merge all of
         // the data into a single in-memory block reference table.
-        let brtab = blkreftable::create_empty_block_ref_table::call(self.mcx)?;
+        let mut brtab = blkreftable::create_empty_block_ref_table::call(self.mcx)?;
         for ws in &required_wslist {
             // OpenWalSummaryFile(ws, false) + CreateBlockRefTableReader(
             // ReadWalSummary, &io, FilePathName(io.file), ReportWalSummaryError,
-            // NULL): bundled into the walsummary owner seam, which threads the
-            // open File through the reader's callback arg.
-            let reader = walsummary::wal_summary_create_reader::call(self.mcx, *ws)?;
+            // NULL): bundled into the walsummary owner seam, which returns the
+            // owned reader plus the open File (the reader's read callback
+            // captured a copy of the File; the File is threaded back to the
+            // FileClose teardown).
+            let (mut reader, file) = walsummary::wal_summary_create_reader::call(self.mcx, *ws)?;
             // C logs `FilePathName(wsio.file)` (the open File's path); the File
             // lives below the seam, so this DEBUG1 message identifies the summary
             // by its (tli, start_lsn, end_lsn) instead. Log text only.
@@ -555,16 +559,16 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
                 .finish(here("PrepareForIncrementalBackup"))?;
 
             while let Some((rlocator, forknum, limit_block)) =
-                blkreftable::block_ref_table_reader_next_relation::call(reader)?
+                blkreftable::block_ref_table_reader_next_relation::call(&mut reader)?
             {
                 blkreftable::block_ref_table_set_limit_block::call(
-                    brtab, rlocator, forknum, limit_block,
+                    &mut brtab, rlocator, forknum, limit_block,
                 )?;
 
                 loop {
                     let blocks = blkreftable::block_ref_table_reader_get_blocks::call(
                         self.mcx,
-                        reader,
+                        &mut reader,
                         BLOCKS_PER_READ,
                     )?;
                     if blocks.is_empty() {
@@ -572,15 +576,17 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
                     }
                     for &blkno in blocks.iter() {
                         blkreftable::block_ref_table_mark_block_modified::call(
-                            brtab, rlocator, forknum, blkno,
+                            &mut brtab, rlocator, forknum, blkno,
                         )?;
                     }
                 }
             }
 
-            // DestroyBlockRefTableReader(reader) + FileClose(wsio.file).
+            // DestroyBlockRefTableReader(reader) + FileClose(wsio.file). The
+            // reader is consumed (dropped, freeing its buffers + read callback);
+            // the File is threaded back to its FileClose teardown.
             blkreftable::destroy_block_ref_table_reader::call(reader);
-            walsummary::wal_summary_reader_file_close::call(reader);
+            walsummary::wal_summary_reader_file_close::call(file);
         }
         self.brtab = Some(brtab);
 
@@ -620,6 +626,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
 
         let brtab = self
             .brtab
+            .as_ref()
             .expect("GetFileBackupMethod before PrepareForIncrementalBackup");
 
         // If the file size is too large or not a multiple of BLCKSZ, then

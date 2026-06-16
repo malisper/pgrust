@@ -317,3 +317,200 @@ seam_core::seam!(pub fn set_vacuum_cost_active(v: bool) -> PgResult<()>);
 seam_core::seam!(pub fn set_vacuum_cost_balance(v: i32) -> PgResult<()>);
 // `bits32` is referenced by callers wiring options; keep the import live.
 const _: bits32 = 0;
+
+// =======================================================================
+// vacuumparallel.c outward seams.
+//
+// The owners (vacuum.c index-AM bridges, table.c, relcache, lsyscache,
+// optimizer/paths GUCs, pgstat, instrument, tidstore, freelist, proc,
+// tcopprot, error_context_stack) are not yet reconciled to this handle
+// model, so these default to the seam_core loud panic until installed.
+// =======================================================================
+
+seam_core::seam!(
+    /// `vac_bulkdel_one_index(&ivinfo, istat, dead_items, &dead_items_info)`
+    /// (vacuum.c) — one index bulk-deletion pass, returns the updated stats.
+    pub fn vac_bulkdel_one_index(
+        ivinfo: IndexVacuumInfo,
+        istat: Option<IndexBulkDeleteResult>,
+        dead_items: TidStore,
+        dead_items_info: VacDeadItemsInfo,
+    ) -> PgResult<IndexBulkDeleteResult>
+);
+seam_core::seam!(
+    /// `vac_cleanup_one_index(&ivinfo, istat)` (vacuum.c) — one index cleanup
+    /// pass (`NULL` => `None` when amvacuumcleanup returns no stats).
+    pub fn vac_cleanup_one_index(
+        ivinfo: IndexVacuumInfo,
+        istat: Option<IndexBulkDeleteResult>,
+    ) -> PgResult<Option<IndexBulkDeleteResult>>
+);
+seam_core::seam!(
+    /// `vac_open_indexes(rel, lockmode, &nindexes, &indrels)` — open all of the
+    /// relation's indexes (the worker path needs only the index Oids).
+    pub fn vac_open_indexes_lock(rel: Oid, lockmode: i32) -> PgResult<Vec<Oid>>
+);
+seam_core::seam!(
+    /// `vac_close_indexes(nindexes, indrels, lockmode)`.
+    pub fn vac_close_indexes_lock(indrels: Vec<Oid>, lockmode: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `table_open(relid, lockmode)`.
+    pub fn table_open_lock(relid: Oid, lockmode: i32) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `table_close(rel, lockmode)`.
+    pub fn table_close_lock(rel: Oid, lockmode: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `indrel->rd_indam->amparallelvacuumoptions`.
+    pub fn am_parallel_vacuum_options(indrel: Oid) -> PgResult<u8>
+);
+seam_core::seam!(
+    /// `indrel->rd_indam->amusemaintenanceworkmem`.
+    pub fn am_use_maintenance_work_mem(indrel: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `RelationGetNumberOfBlocks(indrel)`.
+    pub fn relation_get_number_of_blocks_pv(indrel: Oid) -> PgResult<u32>
+);
+seam_core::seam!(
+    /// `get_namespace_name(RelationGetNamespace(rel))`.
+    pub fn relation_get_namespace_name_pv(rel: Oid) -> PgResult<String>
+);
+seam_core::seam!(
+    /// `min_parallel_index_scan_size` GUC (optimizer/paths.h).
+    pub fn min_parallel_index_scan_size() -> PgResult<i32>
+);
+seam_core::seam!(
+    /// `max_parallel_maintenance_workers` GUC.
+    pub fn max_parallel_maintenance_workers() -> PgResult<i32>
+);
+seam_core::seam!(
+    /// `IsUnderPostmaster`.
+    pub fn is_under_postmaster_pv() -> PgResult<bool>
+);
+seam_core::seam!(
+    /// Read the `maintenance_work_mem` GUC.
+    pub fn pv_maintenance_work_mem() -> PgResult<i32>
+);
+seam_core::seam!(
+    /// Set the `maintenance_work_mem` GUC (worker path — guc.c would complain so
+    /// the owner pokes the global directly).
+    pub fn set_pv_maintenance_work_mem(v: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `pgstat_get_my_query_id()`.
+    pub fn pgstat_get_my_query_id() -> PgResult<i64>
+);
+seam_core::seam!(
+    /// `pgstat_report_activity(STATE_RUNNING, query)`.
+    pub fn pgstat_report_activity_running_pv(query: String) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `pgstat_report_query_id(queryid, force)`.
+    pub fn pgstat_report_query_id_pv(queryid: i64, force: bool) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `pgstat_progress_parallel_incr_param(index, incr)`.
+    pub fn pgstat_progress_parallel_incr_param(index: i32, incr: i64) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `FreeAccessStrategy(strategy)`.
+    pub fn free_access_strategy_pv(strategy: StrategyHandle) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `GetAccessStrategyWithSize(BAS_VACUUM, ring_size)` — worker's own ring.
+    pub fn get_access_strategy_with_size_basvac(ring_size: i32) -> PgResult<StrategyHandle>
+);
+seam_core::seam!(
+    /// `GetAccessStrategyBufferCount(bstrategy)` — number of buffers in the
+    /// strategy ring (`freelist.c`); `0` for the NULL strategy.
+    pub fn get_access_strategy_buffer_count(strategy: StrategyHandle) -> PgResult<i32>
+);
+seam_core::seam!(
+    /// `InstrStartParallelQuery()`.
+    pub fn instr_start_parallel_query_pv() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `InstrAccumParallelQuery(&buffer_usage[worker], &wal_usage[worker])` —
+    /// the leader-side accumulation of one worker's usage.
+    pub fn instr_accum_parallel_query_pv(worker: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `InstrEndParallelQuery(&buffer_usage[worker], &wal_usage[worker])` —
+    /// the worker storing its own usage into its DSM slot.
+    pub fn instr_end_parallel_query_pv(worker: i32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// Push `parallel_vacuum_error_callback` onto `error_context_stack`.
+    pub fn push_parallel_vacuum_error_context() -> PgResult<()>
+);
+seam_core::seam!(
+    /// Pop the parallel-vacuum error context off `error_context_stack`.
+    pub fn pop_parallel_vacuum_error_context() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `TidStoreCreateShared(max_bytes, tranche_id)`.
+    pub fn tid_store_create_shared_pv(max_bytes: usize, tranche_id: i32) -> PgResult<TidStore>
+);
+seam_core::seam!(
+    /// `TidStoreGetHandle(ts)`.
+    pub fn tid_store_get_handle_pv(ts: TidStore) -> PgResult<types_dsa::DsaPointer>
+);
+seam_core::seam!(
+    /// `dsa_get_handle(TidStoreGetDSA(ts))`.
+    pub fn tid_store_get_dsa_handle_pv(ts: TidStore) -> PgResult<types_dsa::DsaHandle>
+);
+seam_core::seam!(
+    /// `TidStoreAttach(dsa_handle, handle)`.
+    pub fn tid_store_attach_pv(
+        dsa: types_dsa::DsaHandle,
+        ptr: types_dsa::DsaPointer,
+    ) -> PgResult<TidStore>
+);
+seam_core::seam!(
+    /// `TidStoreDestroy(ts)`.
+    pub fn tid_store_destroy_pv(ts: TidStore) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `TidStoreDetach(ts)`.
+    pub fn tid_store_detach_pv(ts: TidStore) -> PgResult<()>
+);
+seam_core::seam!(
+    /// Read `debug_query_string` (`None` when `NULL`).
+    pub fn debug_query_string_pv() -> PgResult<Option<String>>
+);
+seam_core::seam!(
+    /// Set `debug_query_string`.
+    pub fn set_debug_query_string_pv(s: Option<String>) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `Assert(MyProc->statusFlags == PROC_IN_VACUUM)`.
+    pub fn my_proc_in_vacuum_only() -> PgResult<bool>
+);
+seam_core::seam!(
+    /// Enable/disable `VacuumSharedCostBalance` (set to `&shared->cost_balance`
+    /// initialized to `initial`, or `NULL`).
+    pub fn set_vacuum_shared_cost_balance_enable(enable: bool, initial: u32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// Enable/disable `VacuumActiveNWorkers`.
+    pub fn set_vacuum_active_nworkers_enable(enable: bool, initial: u32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `VacuumActiveNWorkers != NULL`.
+    pub fn vacuum_active_nworkers_is_set() -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `pg_atomic_add_fetch_u32(VacuumActiveNWorkers, v)`.
+    pub fn vacuum_active_nworkers_add(v: u32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `pg_atomic_sub_fetch_u32(VacuumActiveNWorkers, v)`.
+    pub fn vacuum_active_nworkers_sub(v: u32) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `pg_atomic_read_u32(VacuumSharedCostBalance)`.
+    pub fn vacuum_shared_cost_balance_read() -> PgResult<u32>
+);

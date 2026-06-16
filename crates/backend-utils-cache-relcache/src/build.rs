@@ -205,6 +205,7 @@ fn project_form_pg_class<'mcx>(
         relreplident: f.relreplident as u8,
         relispartition: f.relispartition,
         relfrozenxid: f.relfrozenxid,
+        relminmxid: f.relminmxid,
     })
 }
 
