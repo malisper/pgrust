@@ -491,10 +491,26 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
         // ----- T_Aggref -----
         Expr::Aggref(aggref) => {
-            // The parent AggState->aggs accumulation is owned by nodeAgg; the
-            // owned model lends the parent explicitly. Emit the EEOP_AGGREF
-            // step (the planner-set aggno drives it); the aggs-list append is
-            // performed by the nodeAgg owner when it threads the parent.
+            // C (execExpr.c ExecInitExprRec T_Aggref):
+            //   AggState *aggstate = castNode(AggState, state->parent);
+            //   aggstate->aggs = lappend(aggstate->aggs, astate);
+            //   ... scratch.d.aggref.aggno = aggref->aggno;
+            // The parent-AggState->aggs accumulation cannot mutate the parent
+            // directly here: the parent surface is the head-only PlanStateData
+            // (and during ExecInitAgg the in-flight AggState is not yet a
+            // PlanStateNode). So the discovered Aggref is collected onto the
+            // ExprState's `found_aggs` channel; the nodeAgg owner drains it into
+            // aggstate->aggs after compilation (planner-set aggno makes the
+            // collection-order divergence behaviorally inert).
+            if state.found_aggs.is_none() {
+                state.found_aggs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+            }
+            state
+                .found_aggs
+                .as_mut()
+                .expect("found_aggs just initialized")
+                .push(aggref.clone_in(mcx)?);
+
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_AGGREF,
                 resvalue: resv,

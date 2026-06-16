@@ -25,6 +25,8 @@ use crate::nodenestloop::T_NestLoopState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
 use crate::nodehash::HashState;
 use crate::execstate_tags::T_HashState;
+use crate::aggstate_carrier::AggStateLive;
+use crate::aggstate_carrier::downcast_agg_state_ref;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -109,6 +111,12 @@ pub enum PlanStateNode<'mcx> {
     Hash(PgBox<'mcx, HashState<'mcx>>),
     /// `T_ModifyTableState`.
     ModifyTable(PgBox<'mcx, crate::modifytable::ModifyTableState<'mcx>>),
+    /// `T_AggState`. The concrete `AggStateData` lives in
+    /// `backend-executor-nodeAgg` (ABOVE this crate), so it is carried as an
+    /// owned, tag-checked erased [`AggStateLive`] trait object rather than a
+    /// direct `PgBox<AggStateData>` (which would be a crate cycle). See
+    /// [`crate::aggstate_carrier`].
+    Agg(PgBox<'mcx, dyn AggStateLive<'mcx> + 'mcx>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -156,6 +164,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::CustomScan(_) => crate::nodes::T_CustomScanState,
             PlanStateNode::Hash(_) => T_HashState,
             PlanStateNode::ModifyTable(_) => crate::nodes::T_ModifyTableState,
+            PlanStateNode::Agg(a) => a.tag(),
         }
     }
 
@@ -200,6 +209,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::CustomScan(c) => &c.ss.ps,
             PlanStateNode::Hash(h) => &h.ps,
             PlanStateNode::ModifyTable(m) => &m.ps,
+            PlanStateNode::Agg(a) => a.ps(),
         }
     }
 
@@ -243,6 +253,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::CustomScan(c) => &mut c.ss.ps,
             PlanStateNode::Hash(h) => &mut h.ps,
             PlanStateNode::ModifyTable(m) => &mut m.ps,
+            PlanStateNode::Agg(a) => a.ps_mut(),
         }
     }
 
@@ -257,6 +268,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Group(g) => Some(&g.ss),
             // `WindowAggState` begins with a `ScanState`.
             PlanStateNode::WindowAgg(w) => Some(&w.ss),
+            // `AggState` begins with a `ScanState`.
+            PlanStateNode::Agg(a) => Some(a.ss()),
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `TidScanState` begins with a `ScanState`.
@@ -307,16 +320,40 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// [`Self::as_scan_state`]); the C `castNode` asserts the tag, so a caller
     /// that reaches this for a non-Agg parent is a planner/compiler bug.
     ///
-    /// Returns a type-erased `&dyn Any`: the concrete `AggStateData` lives in
-    /// the `backend-executor-nodeAgg` crate (which sits ABOVE `types-nodes`), so
-    /// this low crate cannot name it. The consumer (execExprInterp) downcasts to
-    /// the real `AggStateData`. This is the same owning-crate-indirection the
-    /// `Tuplesortstate` carrier uses — the faithful rendering of C's `void *`
-    /// across a crate boundary, not a side-table/registry.
-    pub fn as_agg_state(&self) -> Option<&dyn core::any::Any> {
+    /// Returns the type-erased [`AggStateLive`] trait object: the concrete
+    /// `AggStateData` lives in the `backend-executor-nodeAgg` crate (which sits
+    /// ABOVE `types-nodes`), so this low crate cannot name it. The consumer
+    /// (execExprInterp / execExpr) recovers the concrete type with
+    /// [`crate::aggstate_carrier::downcast_agg_state_ref`]. `dyn Any` is unusable
+    /// here because `AggStateData<'mcx>` is not `'static`; the tag-checked
+    /// carrier is the faithful rendering of C's `castNode(AggState, ...)` across
+    /// the crate boundary, not a side-table/registry.
+    pub fn as_agg_state(&self) -> Option<&(dyn AggStateLive<'mcx> + 'mcx)> {
         match self {
-            // nodeAgg's `T_AggState` variant lands here when it threads into
-            // this enum; no current variant carries an `AggState`.
+            PlanStateNode::Agg(a) => Some(&**a),
+            _ => None,
+        }
+    }
+
+    /// `castNode(AggState, node)` recovered as the concrete `T` (the nodeAgg
+    /// `AggStateData`), tag-checked. `None` if this is not an Agg node or the
+    /// tag does not match `T`.
+    pub fn as_agg_state_typed<T: crate::aggstate_carrier::AggStateTagged<'mcx>>(
+        &self,
+    ) -> Option<&T> {
+        downcast_agg_state_ref::<T>(self.as_agg_state()?)
+    }
+
+    /// `&mut` form of [`Self::as_agg_state_typed`] — recovers `&mut T` (the
+    /// nodeAgg `AggStateData`) from a `PlanStateNode::Agg`, tag-checked. Used by
+    /// the `ExecProcNode`/`ExecReScan`/`ExecEndNode` dispatch wrappers.
+    pub fn as_agg_state_mut_typed<T: crate::aggstate_carrier::AggStateTagged<'mcx>>(
+        &mut self,
+    ) -> Option<&mut T> {
+        match self {
+            PlanStateNode::Agg(a) => {
+                crate::aggstate_carrier::downcast_agg_state_mut::<T>(&mut **a)
+            }
             _ => None,
         }
     }

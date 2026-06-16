@@ -61,7 +61,7 @@ pub use aggapi::{
     AggStateIsShared, ExecAggEstimate, ExecAggInitializeDSM, ExecAggInitializeWorker,
     ExecAggRetrieveInstrumentation,
 };
-pub use exec_init_agg::ExecInitAgg;
+pub use exec_init_agg::{erase_agg_state, ExecInitAgg};
 pub use hash_grouping::hash_agg_entry_size;
 pub use node_lifecycle::{ExecAgg, ExecEndAgg, ExecReScanAgg};
 pub use spill::hash_agg_set_limits;

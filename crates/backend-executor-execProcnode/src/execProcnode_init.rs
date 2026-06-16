@@ -304,23 +304,17 @@ pub fn exec_init_node<'mcx>(
             alloc_in(mcx, PlanStateNode::Group(s))?
         }
 
-        // case T_Agg: ExecInitAgg(...) (nodeAgg.c)
+        // case T_Agg: ExecInitAgg((Agg *) node, estate, eflags) (nodeAgg.c)
         //
-        // The `Agg` Plan variant now exists on the central `Node` enum (#330),
-        // but the matching `PlanStateNode::Agg` variant does NOT: the owner's
-        // `AggStateData` lives in `backend-executor-nodeAgg`, which sits ABOVE
-        // `types-nodes`, so `PlanStateNode` cannot name it by value without a
-        // dependency cycle. Relocating `AggStateData` (the #200/#165 keystone)
-        // is the prerequisite; until then `ExecInitAgg` (which returns an
-        // `AggStateData`) has no `PlanStateNode` arm to land in. The owner
-        // `ExecInitAgg` is ported and ready; a query containing an aggregate
-        // reaches this loud panic (mirror PG and panic).
-        Node::Agg(_) => panic!(
-            "backend-executor-nodeAgg::ExecInitAgg: ExecInitNode T_Agg arm \
-             blocked on the AggStateData-relocation keystone (#200/#165) — \
-             PlanStateNode cannot carry nodeAgg's AggStateData (crate cycle); \
-             not wirable until that keystone lands"
-        ),
+        // `AggStateData` lives in `backend-executor-nodeAgg` (ABOVE `types-nodes`),
+        // so the `PlanStateNode::Agg` variant carries it behind the owned,
+        // tag-checked erased `AggStateLive` carrier (#324/#165 keystone). The
+        // `ExecInitAgg` result is unsized into that trait object here.
+        Node::Agg(agg) => {
+            let s = backend_executor_nodeAgg::ExecInitAgg(agg, estate, eflags, mcx)?;
+            let live = backend_executor_nodeAgg::erase_agg_state(s);
+            alloc_in(mcx, PlanStateNode::Agg(live))?
+        }
 
         // case T_WindowAgg: ExecInitWindowAgg((WindowAgg *) node, estate, eflags)
         Node::WindowAgg(_) => {

@@ -330,6 +330,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecBuildAggTrans(aggstate, phase, doSort, doHash, nullcheck)`
+    /// (execExpr.c:3679): build the transition/combine evaluation program for
+    /// one Agg grouping-sets phase. Owned by execExpr (the opcode-emission
+    /// recursion is private to `execExpr_core`), but called by nodeAgg's
+    /// `ExecInitAgg`, which sits ABOVE execExpr — so the call crosses this seam.
+    /// The `AggStateData<'mcx>` lives in `backend-executor-nodeAgg` (above the
+    /// seams crate), so it is carried as the erased, tag-checked
+    /// [`AggStateLive`](types_nodes::aggstate_carrier::AggStateLive) trait
+    /// object; the execExpr implementation downcasts it back to the concrete
+    /// `AggStateData`. `phase` indexes `aggstate.phases`. Allocated in the
+    /// per-query context; fallible on `ereport(ERROR)`.
+    pub fn exec_build_agg_trans<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        aggstate: &mut (dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+        phase: i32,
+        do_sort: bool,
+        do_hash: bool,
+        nullcheck: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
+);
+
+seam_core::seam!(
     /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h):
     /// evaluate a compiled `ExprState` in the given expression context (id into
     /// the EState pool), returning the result `Datum` and its is-null flag. The

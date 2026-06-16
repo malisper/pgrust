@@ -37,6 +37,7 @@ use backend_executor_nodeForeignscan as nodeForeignscan;
 use backend_executor_nodeGather as nodeGather;
 use backend_executor_nodeGatherMerge as nodeGatherMerge;
 use backend_executor_nodeGroup as nodeGroup;
+use backend_executor_nodeAgg as nodeAgg;
 use backend_executor_nodeHash as nodeHash;
 use backend_executor_nodeHashjoin as nodeHashjoin;
 use backend_executor_nodeIndexonlyscan as nodeIndexonlyscan;
@@ -308,6 +309,14 @@ pub fn exec_re_scan<'mcx>(
             }
             // case T_GroupState: ExecReScanGroup((GroupState *) node);
             PlanStateNode::Group(m) => nodeGroup::ExecReScanGroup(m, estate)?,
+            // case T_AggState: ExecReScanAgg((AggState *) node);
+            PlanStateNode::Agg(a) => {
+                let agg = types_nodes::aggstate_carrier::downcast_agg_state_mut::<
+                    nodeAgg::AggStateData<'_>,
+                >(&mut **a)
+                .expect("castNode(AggState, node) failed");
+                nodeAgg::ExecReScanAgg(agg, estate)?
+            }
             // case T_WindowAggState: ExecReScanWindowAgg((WindowAggState *) node);
             PlanStateNode::WindowAgg(m) => nodeWindowAgg::ExecReScanWindowAgg(m, estate)?,
             // case T_UniqueState: ExecReScanUnique((UniqueState *) node);

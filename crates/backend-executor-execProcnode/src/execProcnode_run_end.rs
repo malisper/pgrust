@@ -379,6 +379,15 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::SetOp(state) => {
             backend_executor_nodeSetOp::ExecEndSetOp(state, estate)
         }
+        // case T_AggState: ExecEndAgg((AggState *) node);
+        PlanStateNode::Agg(a) => {
+            let agg = types_nodes::aggstate_carrier::downcast_agg_state_mut::<
+                backend_executor_nodeAgg::AggStateData<'_>,
+            >(&mut **a)
+            .expect("castNode(AggState, node) failed");
+            backend_executor_nodeAgg::ExecEndAgg(agg, estate)
+        }
+
         // case T_WindowAggState: ExecEndWindowAgg((WindowAggState *) node);
         PlanStateNode::WindowAgg(state) => {
             backend_executor_nodeWindowAgg::ExecEndWindowAgg(state, estate)

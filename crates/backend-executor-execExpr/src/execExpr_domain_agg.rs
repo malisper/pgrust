@@ -325,6 +325,30 @@ pub fn exec_init_coerce_to_domain<'mcx>(
 ///     `AggDeserialize` payloads carry the `pertrans`/fcinfo back-pointers as
 ///     parked addresses and have no arg-cell vector. Wiring those external
 ///     targets is a keystone-type change beyond this family's module.
+/// Seam adapter for `exec_build_agg_trans` — recovers the concrete
+/// `AggStateData<'mcx>` from the erased [`AggStateLive`] carrier that crosses
+/// the `nodeAgg -> execExpr` seam edge, then delegates to the real builder.
+/// (nodeAgg sits above execExpr, so it cannot call the concrete fn directly;
+/// the seam carries the AggState type-erased, this adapter downcasts it.)
+pub fn seam_exec_build_agg_trans<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggstate: &mut (dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+    phase: i32,
+    do_sort: bool,
+    do_hash: bool,
+    nullcheck: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let concrete = types_nodes::aggstate_carrier::downcast_agg_state_mut::<AggStateData<'mcx>>(
+        aggstate,
+    )
+    .expect(
+        "exec_build_agg_trans: PlanState payload is not an AggStateData (tag mismatch across \
+         the nodeAgg->execExpr seam)",
+    );
+    exec_build_agg_trans(mcx, concrete, phase, do_sort, do_hash, nullcheck, estate)
+}
+
 pub fn exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     aggstate: &mut AggStateData<'mcx>,
