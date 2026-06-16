@@ -280,6 +280,20 @@ pub fn pt_contained_poly(p: &Point, poly: &Polygon) -> PgResult<bool> {
     Ok(point_inside(p, &poly.points)? != 0)
 }
 
+/// Seam body for `poly_contain_pt_image`: decode the in-memory `POLYGON`
+/// varlena image (`DatumGetPolygonP`) and apply [`poly_contain_pt`]. Used by the
+/// GiST polygon/point opclasses, which carry the query polygon as a raw image.
+pub fn poly_contain_pt_image(image: &[u8], p: &Point) -> PgResult<bool> {
+    let poly = Polygon::from_datum_image(image);
+    poly_contain_pt(&poly, p)
+}
+
+/// Seam body for `poly_query_boundbox`: extract the bounding box of an in-memory
+/// `POLYGON` varlena image (`(DatumGetPolygonP(q))->boundbox`).
+pub fn poly_query_boundbox(image: &[u8]) -> BOX {
+    Polygon::from_datum_image(image).boundbox
+}
+
 /// `poly_distance()` (geo_ops.c:4026): minimum distance between two polygons
 /// (0 if they overlap), or `None` if either is empty.
 pub fn poly_distance(a: &Polygon, b: &Polygon) -> PgResult<Option<f64>> {
