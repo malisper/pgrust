@@ -196,3 +196,42 @@ seam_core::seam!(
     /// `ereport` surface.
     pub fn get_oldest_multi_xact_id() -> types_error::PgResult<types_core::primitive::MultiXactId>
 );
+
+seam_core::seam!(
+    /// `MultiXactSetNextMXact(nextMulti, nextMultiOffset)` (multixact.c) — seed
+    /// `MultiXactState->nextMXact`/`nextOffset` at startup from the checkpoint.
+    /// Called from `StartupXLOG` (xlog.c:5637) and `BootStrapXLOG`. Takes
+    /// `MultiXactGenLock` and may extend the offsets SLRU during binary upgrade,
+    /// so it is fallible.
+    pub fn multi_xact_set_next_m_xact(
+        next_multi: types_core::primitive::MultiXactId,
+        next_multi_offset: types_core::primitive::MultiXactOffset,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `StartupMultiXact()` (multixact.c) — set the SLRU latest-page numbers from
+    /// the seeded `nextMXact`/`nextOffset` at startup. Called once from
+    /// `StartupXLOG` (xlog.c:5681). Plain shared-memory stores; fallible to match
+    /// the channel.
+    pub fn startup_multixact() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TrimMultiXact()` (multixact.c) — zero the tails of the current
+    /// offsets/members pages at end of recovery. Called once from `StartupXLOG`
+    /// (xlog.c:6161). The SLRU writes can `ereport(ERROR)`, carried on `Err`.
+    pub fn trim_multixact() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetMultiXactIdLimit(oldest_datminmxid, oldest_datoid, is_startup)`
+    /// (multixact.c) — set the multixact wraparound-protection limits. Called
+    /// from `StartupXLOG` (xlog.c:5640, with `is_startup=true`) and from vacuum.
+    /// Reads/writes shared state and may signal autovacuum; fallible.
+    pub fn set_multi_xact_id_limit(
+        oldest_multi: types_core::primitive::MultiXactId,
+        oldest_multi_db: types_core::Oid,
+        is_startup: bool,
+    ) -> types_error::PgResult<()>
+);

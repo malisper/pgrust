@@ -68,3 +68,19 @@ seam_core::seam!(
     /// on `Err`. Owner unported; scaffolded slot.
     pub fn extend_clog(newest_xact: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `StartupCLOG()` (clog.c) — set clog's idea of the latest page number from
+    /// `TransamVariables->nextXid` at startup. Called once from `StartupXLOG`
+    /// (xlog.c:5675) on the WAL-startup path; reads `nextXid` through the varsup
+    /// seam and writes the SLRU `latest_page_number` under the bank lock. Plain
+    /// shared-memory store; kept fallible to match the shared-state channel.
+    pub fn startup_clog() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TrimCLOG()` (clog.c) — zero the tail of the current clog page at the end
+    /// of recovery. Called once from `StartupXLOG` (xlog.c:6160). The SLRU page
+    /// write can `ereport(ERROR)`, carried on `Err`.
+    pub fn trim_clog() -> PgResult<()>
+);

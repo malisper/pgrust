@@ -2608,6 +2608,13 @@ pub fn init_seams() {
     mx_seams::multi_xact_shmem_init::set(MultiXactShmemInit);
     mx_seams::get_oldest_multi_xact_id::set(GetOldestMultiXactId);
     mx_seams::read_multi_xact_id_range::set(ReadMultiXactIdRange);
+
+    // WAL-startup entry points called by `StartupXLOG` (xlog.c) on the clean
+    // DB_SHUTDOWNED / end-of-recovery path.
+    mx_seams::multi_xact_set_next_m_xact::set(MultiXactSetNextMXact);
+    mx_seams::startup_multixact::set(StartupMultiXact);
+    mx_seams::trim_multixact::set(TrimMultiXact);
+    mx_seams::set_multi_xact_id_limit::set(SetMultiXactIdLimit);
 }
 
 /// `get_multi_xact_id_members` seam: the inward contract returns a `PgVec` in

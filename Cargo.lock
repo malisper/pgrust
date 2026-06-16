@@ -3248,6 +3248,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-commands-dbcommands-seams",
+ "backend-commands-vacuum-seams",
  "backend-storage-ipc-pmsignal-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",

@@ -589,6 +589,12 @@ pub fn init_seams() {
     seams::sub_trans_shmem_init::set(SUBTRANSShmemInit);
     seams::extend_subtrans::set(|newest_xact| with_ctl(|st| ExtendSUBTRANS(st, newest_xact)));
 
+    // WAL-startup entry point called by `StartupXLOG` (xlog.c) on the clean
+    // DB_SHUTDOWNED / end-of-recovery path.
+    seams::startup_subtrans::set(|oldest_active_xid| {
+        with_ctl(|st| StartupSUBTRANS(st, oldest_active_xid))
+    });
+
     // The C GUC `int subtransaction_buffers` lives in the thread_local here;
     // the GUC machinery reaches it through these accessors, and the check
     // hook validates new values via check_slru_buffers (subtrans.c

@@ -109,3 +109,52 @@ seam_core::seam!(
     pub fn two_phase_shmem_init() -> PgResult<()>
 
 );
+
+seam_core::seam!(
+    /// `restoreTwoPhaseData()` (twophase.c) — scan `pg_twophase/` and load each
+    /// prepared-transaction state file into shared memory at the end of recovery.
+    /// Called from `StartupXLOG` (xlog.c:5731). The owner wraps its private
+    /// `TwoPhaseStateData`; `orig_next_xid` is `TransamVariables->nextXid` and
+    /// `transaction_xmin` is `TransactionXmin`, which the WAL-startup driver
+    /// reads from their owners and threads in (the values are globals in C).
+    pub fn restore_two_phase_data(
+        orig_next_xid: TransactionId,
+        transaction_xmin: TransactionId,
+        reached_consistency: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PrescanPreparedTransactions(NULL, NULL)` (twophase.c) — return the oldest
+    /// XID having an unfinished prepared transaction (or `nextXid` if none) so
+    /// `StartupSUBTRANS` knows how far back to zero. Called from `StartupXLOG`
+    /// (xlog.c:5988). The clean path discards the xids list (only used for hot
+    /// standby), so the seam returns just the `oldestActiveXID`.
+    pub fn prescan_prepared_transactions(
+        orig_next_xid: TransactionId,
+        transaction_xmin: TransactionId,
+    ) -> PgResult<TransactionId>
+);
+
+seam_core::seam!(
+    /// `StandbyRecoverPreparedTransactions()` (twophase.c) — re-acquire locks for
+    /// prepared transactions during hot-standby startup. Called from
+    /// `StartupXLOG` (xlog.c:5884) on the standby path. Owner wraps its private
+    /// state; fallible.
+    pub fn standby_recover_prepared_transactions(
+        orig_next_xid: TransactionId,
+        transaction_xmin: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RecoverPreparedTransactions()` (twophase.c) — reconstruct full in-memory
+    /// state for each prepared transaction at the end of recovery. Called from
+    /// `StartupXLOG` (xlog.c:6168). Owner wraps its private state + the
+    /// per-backend `my_locked_gxact` slot; fallible.
+    pub fn recover_prepared_transactions(
+        orig_next_xid: TransactionId,
+        transaction_xmin: TransactionId,
+        in_hot_standby: bool,
+    ) -> PgResult<()>
+);

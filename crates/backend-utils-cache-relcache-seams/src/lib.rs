@@ -947,3 +947,12 @@ seam_core::seam!(
         reltype: types_core::primitive::Oid,
     ) -> types_relcache_entry::BootstrapCatalogSchema
 );
+
+seam_core::seam!(
+    /// `RelationCacheInitFileRemove()` (relcache.c) — unlink the relcache init
+    /// files (`global/` and each tablespace's `pg_internal.init`) at startup so
+    /// a stale cache from a previous lifecycle is not reused. Called once from
+    /// `StartupXLOG` (xlog.c:5657). The unlink path can `ereport`, carried on
+    /// `Err`.
+    pub fn relation_cache_init_file_remove() -> types_error::PgResult<()>
+);

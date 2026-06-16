@@ -118,6 +118,9 @@ pub fn init_seams() {
 
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
+
+    // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
+    sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
 }
 
 /// `relation_rules(mcx, reloid)` — the per-query rewrite-rule reader for
