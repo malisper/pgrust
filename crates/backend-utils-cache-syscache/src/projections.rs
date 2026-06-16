@@ -19,7 +19,7 @@ use crate::{
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
+    LANGOID, OPEROID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
@@ -30,7 +30,7 @@ use backend_utils_error::ereport;
 use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
 use types_core::primitive::OidIsValid;
 use types_tuple::heaptuple::HeapTupleHeaderGetRawXmin;
-use backend_utils_cache_syscache_seams::{PgClassFullForm, PgProcForm};
+use backend_utils_cache_syscache_seams::{PgClassFullForm, PgOperatorForm, PgProcForm};
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
@@ -56,6 +56,20 @@ const Anum_pg_opclass_opcname: i32 = 3;
 const Anum_pg_opclass_opcfamily: i32 = 6;
 const Anum_pg_opclass_opcintype: i32 = 7;
 const Anum_pg_opclass_opckeytype: i32 = 9;
+
+// `catalog/pg_operator.h` attribute numbers.
+const Anum_pg_operator_oprname: i32 = 2;
+const Anum_pg_operator_oprkind: i32 = 5;
+const Anum_pg_operator_oprcanmerge: i32 = 6;
+const Anum_pg_operator_oprcanhash: i32 = 7;
+const Anum_pg_operator_oprleft: i32 = 8;
+const Anum_pg_operator_oprright: i32 = 9;
+const Anum_pg_operator_oprresult: i32 = 10;
+const Anum_pg_operator_oprcom: i32 = 11;
+const Anum_pg_operator_oprnegate: i32 = 12;
+const Anum_pg_operator_oprcode: i32 = 13;
+const Anum_pg_operator_oprrest: i32 = 14;
+const Anum_pg_operator_oprjoin: i32 = 15;
 
 // `catalog/pg_amop.h` attribute numbers.
 const Anum_pg_amop_amoplefttype: i32 = 3;
@@ -225,6 +239,35 @@ pub(crate) fn search_opclass<'mcx>(
     Ok(Some(form))
 }
 
+/// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` + `GETSTRUCT` of the
+/// fixed-width `Form_pg_operator` columns. `Ok(None)` on a cache miss.
+pub(crate) fn pg_operator_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    opno: Oid,
+) -> PgResult<Option<PgOperatorForm>> {
+    let tuple = SearchSysCache1(mcx, OPEROID, SysCacheKey::Value(KeyDatum::from_oid(opno)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oprname = getattr_name(mcx, OPEROID, &tup, Anum_pg_operator_oprname)?;
+    let form = PgOperatorForm {
+        oprname: oprname.as_str().to_owned(),
+        oprkind: getattr_char(mcx, OPEROID, &tup, Anum_pg_operator_oprkind)?,
+        oprcanmerge: getattr_bool(mcx, OPEROID, &tup, Anum_pg_operator_oprcanmerge)?,
+        oprcanhash: getattr_bool(mcx, OPEROID, &tup, Anum_pg_operator_oprcanhash)?,
+        oprleft: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprleft)?,
+        oprright: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprright)?,
+        oprresult: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprresult)?,
+        oprcom: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprcom)?,
+        oprnegate: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprnegate)?,
+        oprcode: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprcode)?,
+        oprrest: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprrest)?,
+        oprjoin: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprjoin)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
 /// `SearchSysCacheList1(AMOPSTRATEGY, ObjectIdGetDatum(opfamilyoid))` member
 /// rows, projected.
 pub(crate) fn search_amop_list<'mcx>(
@@ -297,6 +340,29 @@ pub(crate) fn search_amproc_list2<'mcx>(
             amprocnum: getattr_i16(mcx, AMPROCNUM, tup, Anum_pg_amproc_amprocnum)?,
             amproc: getattr_oid(mcx, AMPROCNUM, tup, Anum_pg_amproc_amproc)?,
         });
+    }
+    Ok(rows)
+}
+
+/// `SearchSysCacheList1(CLAAMNAMENSP, ObjectIdGetDatum(amoid))` member rows,
+/// projected to `(oid, opcfamily, opcintype)` (`Form_pg_opclass`). Consumed by
+/// amvalidate.c's `opclass_for_family_datatype`.
+pub(crate) fn search_opclass_list_by_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    amoid: Oid,
+) -> PgResult<PgVec<'mcx, (Oid, Oid, Oid)>> {
+    let members = SearchSysCacheList1(
+        mcx,
+        CLAAMNAMENSP,
+        SysCacheKey::Value(KeyDatum::from_oid(amoid)),
+    )?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push((
+            getattr_oid(mcx, CLAAMNAMENSP, tup, Anum_pg_opclass_oid)?,
+            getattr_oid(mcx, CLAAMNAMENSP, tup, Anum_pg_opclass_opcfamily)?,
+            getattr_oid(mcx, CLAAMNAMENSP, tup, Anum_pg_opclass_opcintype)?,
+        ));
     }
     Ok(rows)
 }

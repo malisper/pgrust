@@ -883,6 +883,10 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_amop_list::set(projections::search_amop_list);
     backend_utils_cache_syscache_seams::search_amproc_list::set(projections::search_amproc_list);
     backend_utils_cache_syscache_seams::search_amproc_list2::set(projections::search_amproc_list2);
+    backend_utils_cache_syscache_seams::search_opclass_list_by_am::set(
+        projections::search_opclass_list_by_am,
+    );
+    backend_utils_cache_syscache_seams::pg_operator_form::set(projections::pg_operator_form);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
     backend_utils_cache_syscache_seams::foreign_data_wrapper_options::set(

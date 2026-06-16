@@ -131,6 +131,9 @@ pub fn init_seams() {
     );
     backend_executor_execUtils_seams::exec_assign_expr_context::set(ExecAssignExprContext);
     backend_executor_execUtils_seams::create_expr_context::set(CreateExprContext);
+    backend_executor_execUtils_seams::create_standalone_expr_context::set(
+        CreateStandaloneExprContext,
+    );
     backend_executor_execUtils_seams::exec_assign_projection_info::set(ExecAssignProjectionInfo);
 
     // `ExecOpenScanRelation(estate, scanrelid, eflags)` — the C / seam signature
