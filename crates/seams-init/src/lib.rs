@@ -1702,6 +1702,32 @@ mod recurrence_guard {
         ("backend_utils_cache_relcache", "relation_get_index_expressions"),
         ("backend_utils_cache_relcache", "relation_get_index_predicate"),
         ("backend_utils_cache_relcache", "relation_get_exclusion_info"),
+        // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE, cont.):
+        // `RelationGetDummyIndexExpressions` (relcache.c) is `BuildDummyIndexInfo`'s
+        // (#334, catalog/index.c) expression source — same `pg_index.indexprs`
+        // `stringToNode` node-tree decode as `RelationGetIndexExpressions`, then
+        // replaces every leaf with a null `Const` of the right type/typmod/coll.
+        // It rides on the SAME unported node-tree string reader, so the relcache
+        // owner cannot install it and it loud-panics until `stringToNode` lands.
+        // The live `BuildDummyIndexInfo` consumer (TRUNCATE of an index) only
+        // reaches the decode on an expression index; simple-column indexes return
+        // NIL. Install + DELETE alongside the three entries above.
+        ("backend_utils_cache_relcache", "relation_get_dummy_index_expressions"),
+        //
+        // -- backend-catalog-indexing (pg_attribute insert substrate unported) --
+        // DESIGN_DEBT (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES): `AppendAttributeTuples`
+        // (#334, catalog/index.c) inserts one `pg_attribute` row per index column
+        // (`InsertPgAttributeTuples(pg_attribute, indexTupDesc, InvalidOid,
+        // attrs_extra, indstate)`), having first run `InitializeAttributeOids`
+        // (scribble the new index's OID onto its stored descriptor's `attrelid`s).
+        // The catalog-indexing owner owns pg_attribute writes but has not yet
+        // ported `InsertPgAttributeTuples` (the `heap_form_tuple` over
+        // `Form_pg_attribute` + `CatalogTuplesMultiInsertWithInfo` path) nor the
+        // descriptor-mutation entry point, so it cannot install this and the seam
+        // loud-panics (mirror-PG-and-panic). Reached only from `index_create`,
+        // which is itself uninstalled (catalog-write driver substrate unported).
+        // Install + DELETE when catalog-indexing ports `InsertPgAttributeTuples`.
+        ("backend_catalog_indexing", "append_attribute_tuples"),
         //
         // -- backend-utils-cache-inval (OID-refetch wrapper unported) --
         // DESIGN_DEBT (TD-INVAL-OID-REFETCH): `cache_invalidate_heap_tuple`
