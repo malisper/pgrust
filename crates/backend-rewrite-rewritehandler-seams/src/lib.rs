@@ -60,3 +60,19 @@ seam_core::seam!(
     /// to a crate, so the seam-install guard does not require an installer.
     pub fn relation_has_security_invoker(relation: &types_rel::Relation<'_>) -> bool
 );
+
+seam_core::seam!(
+    /// `relation_is_updatable(reloid, outer_reloids, include_triggers,
+    /// include_cols)` (rewriteHandler.c): the bitmask of `CMD_*` events the
+    /// relation supports for auto-updatable-view purposes. `include_cols` is
+    /// `None` for the relation-level probe (C `NULL`) and `Some(col)` for the
+    /// single-column probe (C `bms_make_singleton(col)`); `outer_reloids` is the
+    /// C `NIL` recursion guard, always empty for the SQL-callable entry points.
+    /// Walks the view rewrite tree; can `ereport(ERROR)`. Owner unported, so this
+    /// panics until rewriteHandler lands.
+    pub fn relation_is_updatable(
+        reloid: types_core::Oid,
+        include_triggers: bool,
+        include_col: Option<i32>,
+    ) -> PgResult<i32>
+);

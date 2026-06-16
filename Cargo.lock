@@ -11438,6 +11438,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-rel",
@@ -13939,6 +13940,45 @@ name = "backend-utils-adt-mcxtfuncs-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-misc"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-dbcommands",
+ "backend-parser-parse-type-seams",
+ "backend-parser-small1",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-misc-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mb-mbutils-seams",
+ "common-keywords",
+ "mcx",
+ "types-adt-misc",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-misc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-adt-misc",
  "types-core",
  "types-error",
 ]
@@ -17290,6 +17330,13 @@ dependencies = [
 
 [[package]]
 name = "types-acl"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-adt-misc"
 version = "0.0.0"
 dependencies = [
  "types-core",
