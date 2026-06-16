@@ -771,6 +771,22 @@ pub fn HeapTupleHeaderGetRawXmin(tup: &HeapTupleHeaderData) -> TransactionId {
     }
 }
 
+/// `HeapTupleHeaderXminFrozen(tup)` (`htup_details.h`) — is the tuple's xmin
+/// frozen (`(t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN`).
+pub const fn HeapTupleHeaderXminFrozen(tup: &HeapTupleHeaderData) -> bool {
+    (tup.t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN
+}
+
+/// `HeapTupleHeaderGetXmin(tup)` (`htup_details.h`) — the effective xmin:
+/// `FrozenTransactionId` if the tuple is frozen, else the raw xmin.
+pub fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData) -> TransactionId {
+    if HeapTupleHeaderXminFrozen(tup) {
+        types_core::xact::FrozenTransactionId
+    } else {
+        HeapTupleHeaderGetRawXmin(tup)
+    }
+}
+
 /// `HeapTupleHeaderGetRawCommandId(tup)` (`htup_details.h`) —
 /// `tup->t_choice.t_heap.t_field3.t_cid`. Panics on the TXvac / composite-Datum
 /// arms (C would reinterpret the union bytes — a caller bug there too).
