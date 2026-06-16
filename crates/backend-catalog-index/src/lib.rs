@@ -944,7 +944,7 @@ pub fn index_check_primary_key<'mcx>(
     {
         return Err(PgError::error(alloc::format!(
             "multiple primary keys for table \"{}\" are not allowed",
-            heap_rel.rd_id
+            heap_rel.name()
         )));
     }
 
