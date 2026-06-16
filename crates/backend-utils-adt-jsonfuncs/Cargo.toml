@@ -21,10 +21,16 @@ types-jsonb = { path = "../types-jsonb" }
 types-jsonfuncs = { path = "../types-jsonfuncs" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
+backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+# SRF entry points (json[b]_object_keys) call the funcapi seams directly
+# (InitMaterializedSRF / materialized_srf_putvalues / srf_arg_varlena_bytes /
+# cstring_get_text_datum), mirroring backend-backup-walsummaryfuncs.
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }

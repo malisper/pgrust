@@ -14,6 +14,19 @@ use types_jsonb::jsonb::jbvType;
 /// buffers, matching the C source unit name.
 pub const MCTX_NAME: &str = "backend-utils-adt-jsonfuncs";
 
+// `enum` (jsonfuncs.h:25) — the GIN/iterate value-kind selector flags shared by
+// `parse_jsonb_index_flags` (setops) and `iterate_*`/`transform_*` (iterate).
+/// `jtiKey = 0x01`.
+pub const jtiKey: u32 = 0x01;
+/// `jtiString = 0x02`.
+pub const jtiString: u32 = 0x02;
+/// `jtiNumeric = 0x04`.
+pub const jtiNumeric: u32 = 0x04;
+/// `jtiBool = 0x08`.
+pub const jtiBool: u32 = 0x08;
+/// `jtiAll = jtiKey | jtiString | jtiNumeric | jtiBool`.
+pub const jtiAll: u32 = jtiKey | jtiString | jtiNumeric | jtiBool;
+
 /// `JsonbValueAsText(JsonbValue *v)` (jsonfuncs.c:1805): render a scalar (or
 /// binary) `JsonbValue` to its `text` byte representation. Returns `None` for
 /// the C `NULL` (a `jbvNull`); otherwise the text bytes (no varlena header,
