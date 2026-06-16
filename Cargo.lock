@@ -11365,6 +11365,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-rewriteDefine"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-objectaddress",
+ "backend-catalog-pg-class",
+ "backend-catalog-pg-depend",
+ "backend-nodes-core",
+ "backend-nodes-outfuncs",
+ "backend-parser-parse-utilcmd-seams",
+ "backend-rewrite-core",
+ "backend-rewrite-rewritesupport-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [

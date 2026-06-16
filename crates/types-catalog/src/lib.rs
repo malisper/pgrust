@@ -15,6 +15,7 @@ pub mod pg_conversion;
 pub mod pg_enum;
 pub mod pg_type;
 pub mod pg_inherits;
+pub mod pg_rewrite;
 pub mod pg_language;
 pub mod pg_range;
 pub mod pg_sequence;
