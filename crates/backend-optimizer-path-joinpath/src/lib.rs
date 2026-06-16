@@ -43,6 +43,7 @@ use backend_optimizer_path_joinpath_seams as jp;
 use backend_optimizer_util_relnode_seams as bms;
 
 use types_pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     JoinType, NodeId, PathId, PathKey, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
     SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI,
@@ -188,6 +189,7 @@ fn path_param_by_rel(root: &PlannerInfo, path: PathId, rel: RelId) -> bool {
 pub fn add_paths_to_joinrel<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -304,20 +306,20 @@ pub fn add_paths_to_joinrel<'mcx>(
 
     // 1. Mergejoin paths sorting both rels.
     if mergejoin_allowed {
-        sort_inner_and_outer(mcx, root, joinrel, outerrel, innerrel, jointype, &extra)?;
+        sort_inner_and_outer(mcx, root, run, joinrel, outerrel, innerrel, jointype, &extra)?;
     }
 
     // 2. Paths where the outer need not be explicitly sorted (nestloop +
     //    already-ordered mergejoin).
     if mergejoin_allowed {
-        match_unsorted_outer(mcx, root, joinrel, outerrel, innerrel, jointype, &extra, enable)?;
+        match_unsorted_outer(mcx, root, run, joinrel, outerrel, innerrel, jointype, &extra, enable)?;
     }
 
     // (3. match_unsorted_inner is diked out in C — #ifdef NOT_USED.)
 
     // 4. Hashjoin paths (FULL overrides enable_hashjoin).
     if enable.enable_hashjoin || jointype == JOIN_FULL {
-        hash_inner_and_outer(mcx, root, joinrel, outerrel, innerrel, jointype, &extra, enable)?;
+        hash_inner_and_outer(mcx, root, run, joinrel, outerrel, innerrel, jointype, &extra, enable)?;
     }
 
     // 5. FDW join pushdown (presence-checked inside the seam).
@@ -695,8 +697,9 @@ fn get_memoize_path<'mcx>(
  * try_nestloop_path (joinpath.c:830)
  * ======================================================================== */
 
-fn try_nestloop_path(
+fn try_nestloop_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -779,6 +782,7 @@ fn try_nestloop_path(
         let owned = extra.materialize(root);
         let p = jp::create_nestloop_path::call(
             root,
+            run,
             joinrel,
             jointype,
             &workspace,
@@ -798,8 +802,9 @@ fn try_nestloop_path(
  * try_partial_nestloop_path (joinpath.c:949)
  * ======================================================================== */
 
-fn try_partial_nestloop_path(
+fn try_partial_nestloop_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -856,6 +861,7 @@ fn try_partial_nestloop_path(
     let owned = extra.materialize(root);
     let p = jp::create_nestloop_path::call(
         root,
+        run,
         joinrel,
         jointype,
         &workspace,
@@ -877,6 +883,7 @@ fn try_partial_nestloop_path(
 fn try_mergejoin_path<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -892,6 +899,7 @@ fn try_mergejoin_path<'mcx>(
         return try_partial_mergejoin_path(
             mcx,
             root,
+            run,
             joinrel,
             outer_path,
             inner_path,
@@ -967,6 +975,7 @@ fn try_mergejoin_path<'mcx>(
         let owned = extra.materialize(root);
         let p = jp::create_mergejoin_path::call(
             root,
+            run,
             joinrel,
             jointype,
             &workspace,
@@ -993,6 +1002,7 @@ fn try_mergejoin_path<'mcx>(
 fn try_partial_mergejoin_path<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -1052,6 +1062,7 @@ fn try_partial_mergejoin_path<'mcx>(
     let owned = extra.materialize(root);
     let p = jp::create_mergejoin_path::call(
         root,
+        run,
         joinrel,
         jointype,
         &workspace,
@@ -1074,8 +1085,9 @@ fn try_partial_mergejoin_path<'mcx>(
  * try_hashjoin_path (joinpath.c:1221)
  * ======================================================================== */
 
-fn try_hashjoin_path(
+fn try_hashjoin_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -1126,6 +1138,7 @@ fn try_hashjoin_path(
         let owned = extra.materialize(root);
         let p = jp::create_hashjoin_path::call(
             root,
+            run,
             joinrel,
             jointype,
             &workspace,
@@ -1146,8 +1159,9 @@ fn try_hashjoin_path(
  * try_partial_hashjoin_path (joinpath.c:1298)
  * ======================================================================== */
 
-fn try_partial_hashjoin_path(
+fn try_partial_hashjoin_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -1185,6 +1199,7 @@ fn try_partial_hashjoin_path(
     let owned = extra.materialize(root);
     let p = jp::create_hashjoin_path::call(
         root,
+        run,
         joinrel,
         jointype,
         &workspace,
@@ -1207,6 +1222,7 @@ fn try_partial_hashjoin_path(
 fn sort_inner_and_outer<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1311,6 +1327,7 @@ fn sort_inner_and_outer<'mcx>(
         try_mergejoin_path(
             mcx,
             root,
+            run,
             joinrel,
             outer_path,
             inner_path,
@@ -1328,6 +1345,7 @@ fn sort_inner_and_outer<'mcx>(
             try_partial_mergejoin_path(
                 mcx,
                 root,
+                run,
                 joinrel,
                 cpo,
                 csi,
@@ -1351,6 +1369,7 @@ fn sort_inner_and_outer<'mcx>(
 fn generate_mergejoin_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     innerrel: RelId,
     outerpath: PathId,
@@ -1395,6 +1414,7 @@ fn generate_mergejoin_paths<'mcx>(
     try_mergejoin_path(
         mcx,
         root,
+        run,
         joinrel,
         outerpath,
         inner_cheapest_total,
@@ -1471,6 +1491,7 @@ fn generate_mergejoin_paths<'mcx>(
                 try_mergejoin_path(
                     mcx,
                     root,
+                    run,
                     joinrel,
                     outerpath,
                     innerpath,
@@ -1523,6 +1544,7 @@ fn generate_mergejoin_paths<'mcx>(
                     try_mergejoin_path(
                         mcx,
                         root,
+                        run,
                         joinrel,
                         outerpath,
                         innerpath,
@@ -1557,6 +1579,7 @@ fn generate_mergejoin_paths<'mcx>(
 fn match_unsorted_outer<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1655,6 +1678,7 @@ fn match_unsorted_outer<'mcx>(
             // Nestloop with the unique-ified cheapest inner path.
             try_nestloop_path(
                 root,
+                run,
                 joinrel,
                 outerpath,
                 inner_cheapest_total.unwrap(),
@@ -1668,6 +1692,7 @@ fn match_unsorted_outer<'mcx>(
             for &innerpath in inner_params.iter() {
                 try_nestloop_path(
                     root,
+                    run,
                     joinrel,
                     outerpath,
                     innerpath,
@@ -1684,6 +1709,7 @@ fn match_unsorted_outer<'mcx>(
                 if let Some(mpath) = mpath {
                     try_nestloop_path(
                         root,
+                        run,
                         joinrel,
                         outerpath,
                         mpath,
@@ -1698,6 +1724,7 @@ fn match_unsorted_outer<'mcx>(
             if let Some(matpath) = matpath {
                 try_nestloop_path(
                     root,
+                    run,
                     joinrel,
                     outerpath,
                     matpath,
@@ -1722,6 +1749,7 @@ fn match_unsorted_outer<'mcx>(
         generate_mergejoin_paths(
             mcx,
             root,
+            run,
             joinrel,
             innerrel,
             outerpath,
@@ -1745,7 +1773,7 @@ fn match_unsorted_outer<'mcx>(
     {
         if nestjoinOK {
             consider_parallel_nestloop(
-                mcx, root, joinrel, outerrel, innerrel, save_jointype, extra, enable,
+                mcx, root, run, joinrel, outerrel, innerrel, save_jointype, extra, enable,
             )?;
         }
 
@@ -1764,7 +1792,7 @@ fn match_unsorted_outer<'mcx>(
 
         if let Some(ict) = inner_cheapest_total {
             consider_parallel_mergejoin(
-                mcx, root, joinrel, outerrel, innerrel, save_jointype, extra, ict,
+                mcx, root, run, joinrel, outerrel, innerrel, save_jointype, extra, ict,
             )?;
         }
     }
@@ -1779,6 +1807,7 @@ fn match_unsorted_outer<'mcx>(
 fn consider_parallel_mergejoin<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1795,6 +1824,7 @@ fn consider_parallel_mergejoin<'mcx>(
         generate_mergejoin_paths(
             mcx,
             root,
+            run,
             joinrel,
             innerrel,
             outerpath,
@@ -1817,6 +1847,7 @@ fn consider_parallel_mergejoin<'mcx>(
 fn consider_parallel_nestloop<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1872,7 +1903,7 @@ fn consider_parallel_nestloop<'mcx>(
                     };
             }
 
-            try_partial_nestloop_path(root, joinrel, outerpath, innerpath, &pathkeys, jointype, extra)?;
+            try_partial_nestloop_path(root, run, joinrel, outerpath, innerpath, &pathkeys, jointype, extra)?;
 
             // Try a memoize path.
             let mpath = get_memoize_path(
@@ -1880,13 +1911,13 @@ fn consider_parallel_nestloop<'mcx>(
                 enable.enable_memoize,
             )?;
             if let Some(mpath) = mpath {
-                try_partial_nestloop_path(root, joinrel, outerpath, mpath, &pathkeys, jointype, extra)?;
+                try_partial_nestloop_path(root, run, joinrel, outerpath, mpath, &pathkeys, jointype, extra)?;
             }
         }
 
         // Materialized form of the cheapest inner path.
         if let Some(matpath) = matpath {
-            try_partial_nestloop_path(root, joinrel, outerpath, matpath, &pathkeys, jointype, extra)?;
+            try_partial_nestloop_path(root, run, joinrel, outerpath, matpath, &pathkeys, jointype, extra)?;
         }
     }
 
@@ -1900,6 +1931,7 @@ fn consider_parallel_nestloop<'mcx>(
 fn hash_inner_and_outer<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1976,6 +2008,7 @@ fn hash_inner_and_outer<'mcx>(
         jointype = JOIN_INNER;
         try_hashjoin_path(
             root,
+            run,
             joinrel,
             cheapest_total_outer,
             cheapest_total_inner,
@@ -1993,6 +2026,7 @@ fn hash_inner_and_outer<'mcx>(
         jointype = JOIN_INNER;
         try_hashjoin_path(
             root,
+            run,
             joinrel,
             cheapest_total_outer,
             cheapest_total_inner,
@@ -2004,6 +2038,7 @@ fn hash_inner_and_outer<'mcx>(
             if cso != cheapest_total_outer {
                 try_hashjoin_path(
                     root,
+                    run,
                     joinrel,
                     cso,
                     cheapest_total_inner,
@@ -2018,6 +2053,7 @@ fn hash_inner_and_outer<'mcx>(
         if let Some(cso) = cheapest_startup_outer {
             try_hashjoin_path(
                 root,
+                run,
                 joinrel,
                 cso,
                 cheapest_total_inner,
@@ -2047,6 +2083,7 @@ fn hash_inner_and_outer<'mcx>(
 
                 try_hashjoin_path(
                     root,
+                    run,
                     joinrel,
                     outerpath,
                     innerpath,
@@ -2076,6 +2113,7 @@ fn hash_inner_and_outer<'mcx>(
             let cheapest_partial_inner = root.rel(innerrel).partial_pathlist[0];
             try_partial_hashjoin_path(
                 root,
+                run,
                 joinrel,
                 cheapest_partial_outer,
                 cheapest_partial_inner,
@@ -2102,6 +2140,7 @@ fn hash_inner_and_outer<'mcx>(
         if let Some(csi) = cheapest_safe_inner {
             try_partial_hashjoin_path(
                 root,
+                run,
                 joinrel,
                 cheapest_partial_outer,
                 csi,

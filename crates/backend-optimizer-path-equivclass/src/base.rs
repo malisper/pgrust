@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{EcId, EmId, PlannerInfo, RELOPT_BASEREL};
 
 use backend_optimizer_path_equivclass_ext_seams as ec_seam;
@@ -24,7 +25,10 @@ const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0010;
  * ==================================================================== */
 
 /// `generate_base_implied_equalities(root)` (equivclass.c:1188).
-pub fn generate_base_implied_equalities(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn generate_base_implied_equalities<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+) -> PgResult<()> {
     /* done absorbing equivalences: no further merging; ECs are canonical */
     root.ec_merging_done = true;
 
@@ -39,13 +43,13 @@ pub fn generate_base_implied_equalities(root: &mut PlannerInfo) -> PgResult<()> 
 
         if root.ec(ec).ec_members.len() > 1 {
             if root.ec(ec).ec_has_const {
-                generate_base_implied_equalities_const(root, ec)?;
+                generate_base_implied_equalities_const(root, run, ec)?;
             } else {
-                generate_base_implied_equalities_no_const(root, ec)?;
+                generate_base_implied_equalities_no_const(root, run, ec)?;
             }
             /* recover if we failed to generate required derived clauses */
             if root.ec(ec).ec_broken {
-                generate_base_implied_equalities_broken(root, ec)?;
+                generate_base_implied_equalities_broken(root, run, ec)?;
             }
             let relids = root.ec(ec).ec_relids.clone();
             can_generate_joinclause =
@@ -88,11 +92,15 @@ pub fn generate_base_implied_equalities(root: &mut PlannerInfo) -> PgResult<()> 
  * generate_base_implied_equalities_const (equivclass.c:1272)
  * ==================================================================== */
 
-fn generate_base_implied_equalities_const(root: &mut PlannerInfo, ec: EcId) -> PgResult<()> {
+fn generate_base_implied_equalities_const<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+) -> PgResult<()> {
     /* trivial single "var = const" clause: push the original back */
     if root.ec(ec).ec_members.len() == 2 && root.ec(ec).ec_sources.len() == 1 {
         let restrictinfo = root.ec(ec).ec_sources[0];
-        ec_seam::distribute_restrictinfo_to_rels::call(root, restrictinfo)?;
+        ec_seam::distribute_restrictinfo_to_rels::call(run, root, restrictinfo)?;
         return Ok(());
     }
 
@@ -141,6 +149,7 @@ fn generate_base_implied_equalities_const(root: &mut PlannerInfo, ec: EcId) -> P
         let cur_is_const = root.em(cur_em).em_is_const;
 
         let rinfo = ec_seam::process_implied_equality::call(
+            run,
             root,
             eq_op,
             collation,
@@ -173,7 +182,11 @@ fn generate_base_implied_equalities_const(root: &mut PlannerInfo, ec: EcId) -> P
  * generate_base_implied_equalities_no_const (equivclass.c:1371)
  * ==================================================================== */
 
-fn generate_base_implied_equalities_no_const(root: &mut PlannerInfo, ec: EcId) -> PgResult<()> {
+fn generate_base_implied_equalities_no_const<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+) -> PgResult<()> {
     /* track last-seen member for each base relation */
     let mut prev_ems: Vec<Option<EmId>> = alloc::vec![None; root.simple_rel_array_size as usize];
 
@@ -207,6 +220,7 @@ fn generate_base_implied_equalities_no_const(root: &mut PlannerInfo, ec: EcId) -
             let cur_relids = root.em(cur_em).em_relids.clone();
 
             let rinfo = ec_seam::process_implied_equality::call(
+                run,
                 root,
                 eq_op,
                 collation,
@@ -248,13 +262,17 @@ fn generate_base_implied_equalities_no_const(root: &mut PlannerInfo, ec: EcId) -
  * generate_base_implied_equalities_broken (equivclass.c:1487)
  * ==================================================================== */
 
-fn generate_base_implied_equalities_broken(root: &mut PlannerInfo, ec: EcId) -> PgResult<()> {
+fn generate_base_implied_equalities_broken<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+) -> PgResult<()> {
     let has_const = root.ec(ec).ec_has_const;
     let sources = root.ec(ec).ec_sources.clone();
     for restrictinfo in sources {
         let required = root.rinfo(restrictinfo).required_relids.clone();
         if has_const || bms::relids_membership::call(&required) != BMS_MULTIPLE {
-            ec_seam::distribute_restrictinfo_to_rels::call(root, restrictinfo)?;
+            ec_seam::distribute_restrictinfo_to_rels::call(run, root, restrictinfo)?;
         }
     }
     Ok(())

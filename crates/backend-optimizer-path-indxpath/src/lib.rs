@@ -118,14 +118,24 @@ pub fn init_seams() {
     // nodes-core `Bitmapset`/Mcx model rather than the planner Vec arena; the
     // inward wrappers stand up a transient context (the C
     // `CurrentMemoryContext`) and thread its `Mcx` down.
-    ix::create_index_paths::set(|root: &mut PlannerInfo, rel: RelId| -> PgResult<()> {
-        let ctx = mcx::MemoryContext::new("indxpath");
-        drivers::create_index_paths(ctx.mcx(), root, rel)
-    });
-    ix::check_index_predicates::set(|root: &mut PlannerInfo, rel: RelId| -> PgResult<()> {
-        let ctx = mcx::MemoryContext::new("indxpath");
-        predicates::check_index_predicates(ctx.mcx(), root, rel)
-    });
+    ix::create_index_paths::set(
+        |run: &types_pathnodes::planner_run::PlannerRun<'_>,
+         root: &mut PlannerInfo,
+         rel: RelId|
+         -> PgResult<()> {
+            let ctx = mcx::MemoryContext::new("indxpath");
+            drivers::create_index_paths(ctx.mcx(), root, run, rel)
+        },
+    );
+    ix::check_index_predicates::set(
+        |run: &types_pathnodes::planner_run::PlannerRun<'_>,
+         root: &mut PlannerInfo,
+         rel: RelId|
+         -> PgResult<()> {
+            let ctx = mcx::MemoryContext::new("indxpath");
+            predicates::check_index_predicates(ctx.mcx(), root, run, rel)
+        },
+    );
     ix::relation_has_unique_index_for::set(
         |root: &mut PlannerInfo,
          rel: RelId,

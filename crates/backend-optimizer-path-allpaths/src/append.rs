@@ -10,6 +10,7 @@ use mcx::Mcx;
 use types_core::primitive::{Index, InvalidAttrNumber};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     BackwardScanDirection, ForwardScanDirection, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RELOPT_BASEREL,
@@ -33,6 +34,7 @@ const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
 /// tuples/rows/width by accumulating over the live children.
 pub fn set_append_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
@@ -48,7 +50,7 @@ pub fn set_append_rel_size<'mcx>(
     // partitionwise join consideration.
     if enable_partitionwise_join()
         && root.rel(rel).reloptkind == RELOPT_BASEREL
-        && crate::rte::rte_relkind::call(root, rti) == RELKIND_PARTITIONED_TABLE
+        && crate::rte::rte_relkind::call(run, root, rti) == RELKIND_PARTITIONED_TABLE
     {
         let min_attr = root.rel(rel).min_attr;
         let idx = (InvalidAttrNumber - min_attr) as usize;
@@ -91,8 +93,8 @@ pub fn set_append_rel_size<'mcx>(
 
         // Constraint exclusion on the child (its baserestrictinfo was already
         // substituted when its RelOptInfo was built).
-        if crate::relation_excluded_by_constraints(root, childrel, child_rtindex) {
-            set_dummy_rel_pathlist(root, childrel)?;
+        if crate::relation_excluded_by_constraints(run, root, childrel, child_rtindex) {
+            set_dummy_rel_pathlist(root, run, childrel)?;
             continue;
         }
 
@@ -157,11 +159,11 @@ pub fn set_append_rel_size<'mcx>(
 
         // Parallel-safety for the child (only if the appendrel is still safe).
         if parallel_mode_ok(root) && root.rel(rel).consider_parallel {
-            set_rel_consider_parallel(root, childrel, child_rtindex);
+            set_rel_consider_parallel(run, root, childrel, child_rtindex);
         }
 
         // Compute the child's size.
-        set_rel_size(mcx, root, childrel, child_rtindex)?;
+        set_rel_size(mcx, run, root, childrel, child_rtindex)?;
 
         // Constraint exclusion may have detected a contradiction in a child
         // subquery even though we didn't prove one above.
@@ -251,7 +253,7 @@ pub fn set_append_rel_size<'mcx>(
         // rel->pages stays zero (avoid double-counting in total_table_pages).
     } else {
         // All children excluded by constraints: mark the whole appendrel dummy.
-        set_dummy_rel_pathlist(root, rel)?;
+        set_dummy_rel_pathlist(root, run, rel)?;
     }
     Ok(())
 }
@@ -261,6 +263,7 @@ pub fn set_append_rel_size<'mcx>(
 /// the parent's append paths.
 pub fn set_append_rel_pathlist<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
@@ -286,7 +289,7 @@ pub fn set_append_rel_pathlist<'mcx>(
         }
 
         // Compute the child's access paths.
-        set_rel_pathlist(mcx, root, childrel, child_rtindex as Index)?;
+        set_rel_pathlist(mcx, run, root, childrel, child_rtindex as Index)?;
 
         if crate::is_dummy_rel(root, childrel) {
             continue;
@@ -294,7 +297,7 @@ pub fn set_append_rel_pathlist<'mcx>(
         live_childrels.push(childrel);
     }
 
-    add_paths_to_append_rel(mcx, root, rel, &live_childrels)?;
+    add_paths_to_append_rel(mcx, root, run, rel, &live_childrels)?;
     Ok(())
 }
 
@@ -303,6 +306,7 @@ pub fn set_append_rel_pathlist<'mcx>(
 pub fn add_paths_to_append_rel<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     live_childrels: &[RelId],
 ) -> PgResult<()> {
@@ -423,7 +427,7 @@ pub fn add_paths_to_append_rel<'mcx>(
     // Unparameterized unordered Append.
     if subpaths_valid {
         let p = pathnode::create_append_path::call(
-            root, true, rel, subpaths.clone(), Vec::new(), Vec::new(), &None, 0, false, -1.0,
+            root, run, true, rel, subpaths.clone(), Vec::new(), Vec::new(), &None, 0, false, -1.0,
         )?;
         pathnode::add_path::call(root, rel, p)?;
     }
@@ -431,7 +435,7 @@ pub fn add_paths_to_append_rel<'mcx>(
     // AppendPath for the cheap startup paths.
     if startup_subpaths_valid {
         let p = pathnode::create_append_path::call(
-            root, true, rel, startup_subpaths, Vec::new(), Vec::new(), &None, 0, false, -1.0,
+            root, run, true, rel, startup_subpaths, Vec::new(), Vec::new(), &None, 0, false, -1.0,
         )?;
         pathnode::add_path::call(root, rel, p)?;
     }
@@ -453,6 +457,7 @@ pub fn add_paths_to_append_rel<'mcx>(
 
         let appendpath = pathnode::create_append_path::call(
             root,
+            run,
             true,
             rel,
             Vec::new(),
@@ -480,6 +485,7 @@ pub fn add_paths_to_append_rel<'mcx>(
 
         let appendpath = pathnode::create_append_path::call(
             root,
+            run,
             true,
             rel,
             pa_nonpartial_subpaths,
@@ -495,7 +501,7 @@ pub fn add_paths_to_append_rel<'mcx>(
 
     // Unparameterized ordered append paths.
     if subpaths_valid {
-        generate_orderedappend_paths(mcx, root, rel, live_childrels, &all_child_pathkeys)?;
+        generate_orderedappend_paths(mcx, root, run, rel, live_childrels, &all_child_pathkeys)?;
     }
 
     // Append paths for each child parameterization.
@@ -518,7 +524,7 @@ pub fn add_paths_to_append_rel<'mcx>(
         }
         if sp_valid {
             let p = pathnode::create_append_path::call(
-                root, true, rel, sp, Vec::new(), Vec::new(), &required_outer, 0, false, -1.0,
+                root, run, true, rel, sp, Vec::new(), Vec::new(), &required_outer, 0, false, -1.0,
             )?;
             pathnode::add_path::call(root, rel, p)?;
         }
@@ -536,6 +542,7 @@ pub fn add_paths_to_append_rel<'mcx>(
             let workers = root.path(path).base().parallel_workers;
             let appendpath = pathnode::create_append_path::call(
                 root,
+                run,
                 true,
                 rel,
                 Vec::new(),
@@ -664,6 +671,7 @@ pub fn get_singleton_append_subpath(root: &PlannerInfo, path: PathId) -> PathId 
 pub fn generate_orderedappend_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     live_childrels: &[RelId],
     all_child_pathkeys: &[Vec<PathKey>],
@@ -793,18 +801,18 @@ pub fn generate_orderedappend_paths<'mcx>(
         // Build the Append or MergeAppend paths.
         if match_partition_order {
             let p = pathnode::create_append_path::call(
-                root, true, rel, startup_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
+                root, run, true, rel, startup_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
             )?;
             pathnode::add_path::call(root, rel, p)?;
             if startup_neq_total {
                 let p = pathnode::create_append_path::call(
-                    root, true, rel, total_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
+                    root, run, true, rel, total_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
                 )?;
                 pathnode::add_path::call(root, rel, p)?;
             }
             if !fractional_subpaths.is_empty() {
                 let p = pathnode::create_append_path::call(
-                    root, true, rel, fractional_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
+                    root, run, true, rel, fractional_subpaths, Vec::new(), pathkeys.clone(), &None, 0, false, -1.0,
                 )?;
                 pathnode::add_path::call(root, rel, p)?;
             }

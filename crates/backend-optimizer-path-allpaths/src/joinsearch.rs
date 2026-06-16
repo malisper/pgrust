@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId};
 
 use backend_optimizer_path_joinrels::join_search_one_level;
@@ -28,6 +29,7 @@ pub use types_pathnodes::JoinlistNode;
 pub fn make_rel_from_joinlist<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinlist: &[JoinlistNode],
 ) -> PgResult<Option<RelId>> {
     // The number of child joinlist nodes is the DP depth.
@@ -42,7 +44,7 @@ pub fn make_rel_from_joinlist<'mcx>(
     for jlnode in joinlist {
         let thisrel = match jlnode {
             JoinlistNode::Rel(varno) => bms::find_base_rel::call(root, *varno),
-            JoinlistNode::Sub(sub) => match make_rel_from_joinlist(mcx, root, sub)? {
+            JoinlistNode::Sub(sub) => match make_rel_from_joinlist(mcx, root, run, sub)? {
                 Some(r) => r,
                 None => {
                     return Err(PgError::error("unrecognized joinlist node type: empty sublist"))
@@ -67,12 +69,13 @@ pub fn make_rel_from_joinlist<'mcx>(
         let config = geqo_config_from_gucs();
         Ok(Some(backend_geqo_all::main::geqo(
             root,
+            run,
             levels_needed,
             initial_rels,
             &config,
         )))
     } else {
-        Ok(Some(standard_join_search(mcx, root, levels_needed, initial_rels)?))
+        Ok(Some(standard_join_search(mcx, root, run, levels_needed, initial_rels)?))
     }
 }
 
@@ -94,6 +97,7 @@ fn geqo_config_from_gucs() -> backend_geqo_all::main::GeqoConfig {
 pub fn standard_join_search<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     levels_needed: i32,
     initial_rels: Vec<RelId>,
 ) -> PgResult<RelId> {
@@ -109,7 +113,7 @@ pub fn standard_join_search<'mcx>(
 
     for lev in 2..=levels_needed {
         // Build all join rels at this level.
-        join_search_one_level(mcx, root, lev)?;
+        join_search_one_level(mcx, root, run, lev)?;
 
         // Then, for each just-processed joinrel, run partitionwise-join +
         // (non-topmost) gather + set_cheapest. (Deferred until now because both
@@ -117,12 +121,12 @@ pub fn standard_join_search<'mcx>(
         // join_search_one_level.)
         let level_rels: Vec<RelId> = root.join_rel_level[lev as usize].clone();
         for rel in level_rels {
-            generate_partitionwise_join_paths(mcx, root, rel)?;
+            generate_partitionwise_join_paths(mcx, root, run, rel)?;
 
             // Except for the topmost scan/join rel, consider gathering partial
             // paths. (The topmost rel is postponed to grouping_planner.)
             if !bms::relids_equal::call(&root.rel(rel).relids, &root.all_query_rels) {
-                generate_useful_gather_paths(root, rel, false)?;
+                generate_useful_gather_paths(root, run, rel, false)?;
             }
 
             pathnode::set_cheapest::call(root, rel)?;

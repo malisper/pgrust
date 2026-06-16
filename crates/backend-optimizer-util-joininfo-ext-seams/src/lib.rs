@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, Relids};
 
 seam_core::seam!(
@@ -61,7 +62,14 @@ seam_core::seam!(
     /// `find_base_rel_ignore_join(root, relid)` (relnode.c): the base
     /// `RelOptInfo` for an RT index, or `None` if the slot is empty / the relid
     /// names a join rel rather than a base rel.
-    pub fn find_base_rel_ignore_join(root: &PlannerInfo, relid: i32) -> Option<RelId>
+    ///
+    /// Threads the planner-run resolver (`run`): the relnode.c body reads RTE
+    /// fields through the re-signed `rte_*` seams that take `&PlannerRun<'mcx>`.
+    pub fn find_base_rel_ignore_join<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        relid: i32,
+    ) -> Option<RelId>
 );
 seam_core::seam!(
     /// `restriction_is_always_true(root, restrictinfo)` (initsplan.c).
