@@ -1425,20 +1425,8 @@ mod recurrence_guard {
         // (forbidden token-registry hack / opacity-introduced) or migrating
         // PREPARE/EXECUTE off the opaque parsestmt handles onto owned portal
         // values (the K1 de-handle work, #159/#169). Handle-divergent.
-        ("backend_utils_mmgr_portalmem", "copy_param_list_into_portal"),
-        // DESIGN_DEBT (TD-PORTAL-COPYIN): the deep-copy-into-portal-context seams
-        // copy foreign objects (param lists / tuple descriptors / planned stmts)
-        // into the portal's `'static`-lifetime owned arenas. That copy
-        // infrastructure (copyParamList / CreateTupleDescCopy into a portal/hold
-        // context that outlives the source transaction) lands with the
-        // tuplestore/tupdesc copy owners; until then these stay seam-and-panic
-        // (matching the pre-port `todo` state) rather than being wrongly stubbed.
-        ("backend_utils_mmgr_portalmem", "copy_tup_desc_into_hold_context"),
-        // TD-PORTAL-HANDLE, see the handle-divergent note above.
         ("backend_utils_mmgr_portalmem", "create_new_portal"),
         ("backend_utils_mmgr_portalmem", "portal_define_query"),
-        // TD-PORTAL-COPYIN, see the deep-copy note above.
-        ("backend_utils_mmgr_portalmem", "portal_define_query_select"),
         // TD-PORTAL-HANDLE, see the handle-divergent note above.
         ("backend_utils_mmgr_portalmem", "portal_get_portal_context"),
         ("backend_utils_mmgr_portalmem", "portal_set_visible"),
