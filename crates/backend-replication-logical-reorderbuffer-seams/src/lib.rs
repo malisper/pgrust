@@ -415,3 +415,13 @@ seam_core::seam!(
         origin_lsn: XLogRecPtr,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `StartupReorderBuffer()` (reorderbuffer.c:4907) — at WAL startup, delete
+    /// all logical-decoding data spilled to disk by a previous (crashed or
+    /// restarted) run, iterating `pg_replslot` and calling
+    /// `ReorderBufferCleanupSerializedTXNs` for each surviving logical slot. The
+    /// WAL-startup driver (`StartupXLOG`, xlog.c:5660) calls this unconditionally.
+    /// Fallible: the directory scan / unlink paths `ereport(ERROR)`.
+    pub fn startup_reorder_buffer() -> types_error::PgResult<()>
+);

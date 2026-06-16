@@ -342,3 +342,18 @@ seam_core::seam!(
     /// seam-and-panic. Shared-memory scan; cannot `ereport`.
     pub fn pgstat_backend_pid_lookup(pid: i32) -> Option<(ProcNumber, BackendType, i32)>
 );
+
+seam_core::seam!(
+    /// `pgstat_restore_stats()` (pgstat.c:506) — at WAL startup on a clean
+    /// (non-crash) boot, read the on-disk `pg_stat/` statistics file and load it
+    /// into shared memory. Called from `StartupXLOG` (xlog.c). Fallible: the file
+    /// read / shmem-load path `ereport(ERROR)`s on corruption.
+    pub fn pgstat_restore_stats() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_discard_stats()` (pgstat.c:518) — at WAL startup on a crash boot,
+    /// throw away any stale on-disk statistics. Called from `StartupXLOG`
+    /// (xlog.c). Fallible: the unlink path `ereport(ERROR)`s.
+    pub fn pgstat_discard_stats() -> types_error::PgResult<()>
+);
