@@ -66,16 +66,27 @@ use types_error::{PgError, PgResult};
 use types_nodes::nodeindexscan::{Plan, Scan};
 use types_nodes::noderesult::Result as ResultNode;
 use types_nodes::nodes::{Node, NodeTag};
+use types_nodes::nodectescan::CteScan;
+use types_nodes::nodefunctionscan::FunctionScan;
+use types_nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
+use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScan;
+use types_nodes::nodesamplescan::{SampleScan, TableSampleClause};
 use types_nodes::nodeseqscan::SeqScan;
+use types_nodes::nodetidrangescan::TidRangeScan;
 use types_nodes::nodevaluesscan::ValuesScan;
+use types_nodes::nodeworktablescan::WorkTableScan;
 use types_nodes::primnodes::{Expr, TargetEntry};
+use types_nodes::rawnodes::RangeTblFunction;
+use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
     NodeId, Path, PathId, PathNode, PathTarget, PlannerInfo, RinfoId, RELOPT_BASEREL, RTE_RELATION,
 };
 
-use backend_nodes_core::makefuncs::make_target_entry;
+use backend_nodes_core::makefuncs::{make_orclause, make_target_entry};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
+use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
+use backend_optimizer_path_equivclass_seams as equivclass;
 use backend_optimizer_plan_createplan_seams as cp_seam;
 use backend_optimizer_util_joininfo::restrictinfo::extract_actual_clauses;
 use backend_optimizer_util_paramassign_seams as paramassign;
@@ -1331,6 +1342,816 @@ fn order_qual_clauses_rinfo(root: &mut PlannerInfo, quals: &[RinfoId]) -> Vec<Ri
 }
 
 // ---------------------------------------------------------------------------
+// make_samplescan (createplan.c ~5660) / make_tidscan (~5780) /
+// make_tidrangescan (~5799) / make_functionscan (~5838) /
+// make_ctescan (~5897) / make_namedtuplestorescan (~5918) /
+// make_worktablescan (~5938) / make_subqueryscan (~5818).
+// ---------------------------------------------------------------------------
+
+/// `make_samplescan(qptlist, qpqual, scanrelid, tsc)` — build a `SampleScan`
+/// plan node.
+fn make_samplescan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    tsc: TableSampleClause<'mcx>,
+) -> SampleScan<'mcx> {
+    let mut node = SampleScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.tablesample = Some(alloc::boxed::Box::new(tsc));
+    node
+}
+
+/// `make_tidscan(qptlist, qpqual, scanrelid, tidquals)` — build a `TidScan`
+/// plan node.
+fn make_tidscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    tidquals: Option<PgVec<'mcx, Expr>>,
+) -> TidScan<'mcx> {
+    let mut node = TidScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.tidquals = tidquals;
+    node
+}
+
+/// `make_tidrangescan(qptlist, qpqual, scanrelid, tidrangequals)` — build a
+/// `TidRangeScan` plan node.
+fn make_tidrangescan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    tidrangequals: Option<PgVec<'mcx, Expr>>,
+) -> TidRangeScan<'mcx> {
+    let mut node = TidRangeScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.tidrangequals = tidrangequals;
+    node
+}
+
+/// `make_functionscan(qptlist, qpqual, scanrelid, functions, funcordinality)`
+/// — build a `FunctionScan` plan node.
+fn make_functionscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    functions: Option<PgVec<'mcx, RangeTblFunction<'mcx>>>,
+    funcordinality: bool,
+) -> FunctionScan<'mcx> {
+    let mut node = FunctionScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.functions = functions;
+    node.funcordinality = funcordinality;
+    node
+}
+
+/// `make_ctescan(qptlist, qpqual, scanrelid, ctePlanId, cteParam)` — build a
+/// `CteScan` plan node.
+fn make_ctescan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    cte_plan_id: i32,
+    cte_param: i32,
+) -> CteScan<'mcx> {
+    let mut node = CteScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.ctePlanId = cte_plan_id;
+    node.cteParam = cte_param;
+    node
+}
+
+/// `make_namedtuplestorescan(qptlist, qpqual, scanrelid, enrname)` — build a
+/// `NamedTuplestoreScan` plan node. (Cost is inserted by the caller.)
+fn make_namedtuplestorescan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    enrname: Option<PgString<'mcx>>,
+) -> NamedTuplestoreScan<'mcx> {
+    let mut node = NamedTuplestoreScan {
+        scan: Scan::default(),
+        enrname,
+    };
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// `make_worktablescan(qptlist, qpqual, scanrelid, wtParam)` — build a
+/// `WorkTableScan` plan node.
+fn make_worktablescan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    wt_param: i32,
+) -> WorkTableScan<'mcx> {
+    let mut node = WorkTableScan::default();
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node.wtParam = wt_param;
+    node
+}
+
+/// `make_subqueryscan(qptlist, qpqual, scanrelid, subplan)` — build a
+/// `SubqueryScan` plan node. The child plan is stored on `node.subplan` (the C
+/// places it on the plan node, not `lefttree`, so walkers do not recurse).
+fn make_subqueryscan<'mcx>(
+    mcx: Mcx<'mcx>,
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    subplan: Node<'mcx>,
+) -> PgResult<SubqueryScan<'mcx>> {
+    let mut node = SubqueryScan::default();
+    {
+        let plan: &mut Plan = &mut node.scan.plan;
+        plan.targetlist = qptlist;
+        plan.qual = qpqual;
+        plan.lefttree = None;
+        plan.righttree = None;
+    }
+    node.scan.scanrelid = scanrelid;
+    node.subplan = Some(mcx::alloc_in(mcx, subplan)?);
+    node.scanstatus = SubqueryScanStatus::Unknown;
+    Ok(node)
+}
+
+// ---------------------------------------------------------------------------
+// nestloop-param replacement over owned Expr lists / owned sub-objects.
+//
+// The C `replace_nestloop_params(root, (Node *) list)` walks a whole subtree.
+// The createplan crate's `replace_nestloop_params` operates over arena handles,
+// but the function / tablesample / values payloads resolved out of the RTE are
+// already owned `Expr` / sub-object trees, so the mutator is applied directly
+// (the same shape as `create_valuesscan_plan`'s values-list rewrite).
+// ---------------------------------------------------------------------------
+
+/// Apply `replace_nestloop_params_mutator` to an owned `Expr`. Errors are
+/// surfaced through `err` (the infallible-mutator stash pattern).
+fn replace_nestloop_params_expr(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    expr: Expr,
+    err: &mut Option<PgError>,
+) -> Expr {
+    replace_nestloop_params_mutator(mcx, root, expr, err)
+}
+
+// ---------------------------------------------------------------------------
+// create_samplescan_plan (createplan.c ~2948)
+// ---------------------------------------------------------------------------
+
+/// `create_samplescan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// samplescan plan for the base relation scanned by `best_path`.
+fn create_samplescan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let scan_relid = root.path(best_path).base().parent;
+    let scan_relid = root.rel(scan_relid).relid;
+
+    // it should be a base rel with a tablesample clause...
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_RELATION);
+    // tsc = rte->tablesample; Assert(tsc != NULL);
+    let tsc_node = rte
+        .tablesample
+        .as_deref()
+        .expect("create_samplescan_plan: RTE has no tablesample clause");
+    let mut tsc: TableSampleClause<'mcx> = match tsc_node {
+        Node::TableSampleClause(t) => t.clone_in(mcx)?,
+        _ => {
+            return Err(PgError::error(
+                "create_samplescan_plan: RTE tablesample is not a TableSampleClause",
+            ))
+        }
+    };
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // The TableSampleClause args / repeatable could contain nestloop params, too.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        if let Some(args) = tsc.args.take() {
+            let mut new_args: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, args.len())?;
+            for e in args.into_iter() {
+                new_args.push(replace_nestloop_params_expr(mcx, root, e, &mut err));
+            }
+            tsc.args = Some(new_args);
+        }
+        if let Some(rep) = tsc.repeatable.take() {
+            let out = replace_nestloop_params_expr(mcx, root, *rep, &mut err);
+            tsc.repeatable = Some(alloc::boxed::Box::new(out));
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_samplescan(tlist, qpqual, scan_relid, tsc);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::SampleScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_tidscan_plan (createplan.c ~3533)
+// ---------------------------------------------------------------------------
+
+/// `create_tidscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// tidscan plan for the base relation scanned by `best_path`.
+fn create_tidscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+    // tidquals = best_path->tidquals (bare expr handles).
+    let tidquals_nodes: Vec<NodeId> = match root.path(best_path) {
+        PathNode::TidPath(p) => p.tidquals.clone(),
+        _ => return Err(PgError::error("create_tidscan_plan: path is not a TidPath")),
+    };
+
+    // it should be a base rel...
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, scan_relid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+
+    // The qpqual list must contain all restrictions not enforced by the
+    // tidquals list. Handle the single-tidqual case separately: drop any
+    // scan_clause that is redundant with the tidqual, while still in
+    // RestrictInfo form.
+    let mut scan_clauses = scan_clauses;
+    if tidquals_nodes.len() == 1 {
+        // Resolve the single tidqual node to a RinfoId for redundancy checks
+        // (tidquals are bare expr nodes; tidpath.c built them from the same
+        // RestrictInfos, so identity/EC-derivation must be checked against the
+        // RestrictInfo list). In C list_member_ptr / is_redundant_derived_clause
+        // operate over the tidquals (which here is a bare-expr list); the
+        // single-tidqual redundancy test needs the original RestrictInfo. We
+        // mirror C by keeping a RestrictInfo handle for each scan clause and
+        // comparing via is_redundant_derived_clause against the bare tidqual.
+        let mut qpqual: Vec<RinfoId> = Vec::new();
+        for &rinfo_id in scan_clauses.iter() {
+            let rinfo = root.rinfo(rinfo_id);
+            if rinfo.pseudoconstant {
+                continue; // we may drop pseudoconstants here
+            }
+            // list_member_ptr(tidquals, rinfo): tidquals here are bare expr
+            // handles, so pointer-identity to the RestrictInfo cannot match;
+            // the EC-derivation test below subsumes the duplicate case.
+            // is_redundant_derived_clause(rinfo, tidquals): tidquals in C is a
+            // List<RestrictInfo>; here tidpath stored bare exprs, so this test
+            // is over the (single) tidqual clause node. The seam compares the
+            // RestrictInfo's parent EC against the tidqual clause list.
+            if is_redundant_derived_from_tidquals(root, rinfo_id, &tidquals_nodes) {
+                continue; // derived from same EquivalenceClass
+            }
+            qpqual.push(rinfo_id);
+        }
+        scan_clauses = qpqual;
+    }
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+
+    // Reduce RestrictInfo lists to bare expressions; ignore pseudoconstants.
+    // tidquals are already bare expr handles.
+    let mut tidquals = tidquals_nodes;
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+
+    // If we have multiple tidquals, remove duplicate scan_clauses after
+    // stripping the RestrictInfos: convert the tidquals list to an explicit OR
+    // clause and drop any scan clause that equal()s it.
+    let mut scan_clauses = scan_clauses;
+    if tidquals.len() > 1 {
+        // make_orclause(tidquals) over the bare exprs.
+        let or_exprs: Vec<Expr> = tidquals.iter().map(|&n| root.node(n).clone()).collect();
+        let orclause = make_orclause(or_exprs);
+        // list_difference(scan_clauses, list_make1(orclause)): drop any
+        // scan_clause that equal()s the OR clause.
+        scan_clauses = scan_clauses
+            .into_iter()
+            .filter(|&c| !equal_expr_seam::call(root.node(c), &orclause))
+            .collect();
+    }
+
+    // Replace any outer-relation variables with nestloop params.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        tidquals = tidquals
+            .into_iter()
+            .map(|n| {
+                let e = root.node(n).clone();
+                let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
+                root.alloc_node(out)
+            })
+            .collect();
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // Build the owned tidquals expr list.
+    let tidquals_field: Option<PgVec<'mcx, Expr>> = if tidquals.is_empty() {
+        None
+    } else {
+        let mut out = vec_with_capacity_in(mcx, tidquals.len())?;
+        for &n in tidquals.iter() {
+            out.push(root.node(n).clone());
+        }
+        Some(out)
+    };
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_tidscan(tlist, qpqual, scan_relid, tidquals_field);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::TidScan(scan_plan))
+}
+
+/// `is_redundant_derived_clause(rinfo, tidquals)` over a bare-expr tidqual list.
+/// tidpath.c builds `tidquals` as bare expressions extracted from RestrictInfos;
+/// to mirror the C redundancy test (which runs over a `List<RestrictInfo>`) we
+/// route it through the equivclass seam against the single tidqual node's
+/// parent RestrictInfo when available, else fall back to `equal()` identity.
+fn is_redundant_derived_from_tidquals(
+    root: &PlannerInfo,
+    rinfo_id: RinfoId,
+    tidquals: &[NodeId],
+) -> bool {
+    // Collect the RestrictInfo handles backing the tidquals. tidpath stores
+    // bare expr nodes; when a tidqual node resolves to an Expr::RestrictInfo we
+    // can run is_redundant_derived_clause; otherwise the single-qual case
+    // reduces to an equal() identity test against rinfo's clause.
+    let mut rinfos: Vec<RinfoId> = Vec::new();
+    for &n in tidquals {
+        if let Expr::RestrictInfo(r) = root.node(n) {
+            rinfos.push(RinfoId::from(*r));
+        }
+    }
+    if !rinfos.is_empty() {
+        return equivclass::is_redundant_derived_clause::call(root, rinfo_id, rinfos);
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// create_tidrangescan_plan (createplan.c ~3630)
+// ---------------------------------------------------------------------------
+
+/// `create_tidrangescan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// tidrangescan plan for the base relation scanned by `best_path`.
+fn create_tidrangescan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+    let tidrangequals_nodes: Vec<NodeId> = match root.path(best_path) {
+        PathNode::TidRangePath(p) => p.tidrangequals.clone(),
+        _ => {
+            return Err(PgError::error(
+                "create_tidrangescan_plan: path is not a TidRangePath",
+            ))
+        }
+    };
+
+    // it should be a base rel...
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, scan_relid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+
+    // The qpqual list must contain all restrictions not enforced by the
+    // tidrangequals list. tidrangequals has AND semantics, so we simply remove
+    // any qual that appears in it (matched by EC-derivation / identity over the
+    // RestrictInfos backing the tidrangequals).
+    let trq_rinfos: Vec<RinfoId> = tidrangequals_nodes
+        .iter()
+        .filter_map(|&n| match root.node(n) {
+            Expr::RestrictInfo(r) => Some(RinfoId::from(*r)),
+            _ => None,
+        })
+        .collect();
+    let mut qpqual: Vec<RinfoId> = Vec::new();
+    for &rinfo_id in scan_clauses.iter() {
+        let rinfo = root.rinfo(rinfo_id);
+        if rinfo.pseudoconstant {
+            continue; // we may drop pseudoconstants here
+        }
+        // list_member_ptr(tidrangequals, rinfo): identity over RestrictInfos.
+        if trq_rinfos.iter().any(|&r| r == rinfo_id) {
+            continue; // simple duplicate
+        }
+        qpqual.push(rinfo_id);
+    }
+    let scan_clauses = qpqual;
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo lists to bare expressions; ignore pseudoconstants.
+    // tidrangequals are already bare expr handles.
+    let mut tidrangequals = tidrangequals_nodes;
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+
+    // Replace any outer-relation variables with nestloop params.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        tidrangequals = tidrangequals
+            .into_iter()
+            .map(|n| {
+                let e = root.node(n).clone();
+                let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
+                root.alloc_node(out)
+            })
+            .collect();
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tidrangequals_field: Option<PgVec<'mcx, Expr>> = if tidrangequals.is_empty() {
+        None
+    } else {
+        let mut out = vec_with_capacity_in(mcx, tidrangequals.len())?;
+        for &n in tidrangequals.iter() {
+            out.push(root.node(n).clone());
+        }
+        Some(out)
+    };
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_tidrangescan(tlist, qpqual, scan_relid, tidrangequals_field);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::TidRangeScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_functionscan_plan (createplan.c ~3754)
+// ---------------------------------------------------------------------------
+
+/// `create_functionscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// functionscan plan for the base relation scanned by `best_path`.
+fn create_functionscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    // it should be a function base rel...
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_FUNCTION);
+    let funcordinality = rte.funcordinality;
+    // functions = rte->functions (List<RangeTblFunction>). Resolve each into an
+    // owned RangeTblFunction.
+    let mut functions: Vec<RangeTblFunction<'mcx>> = Vec::with_capacity(rte.functions.len());
+    for f in rte.functions.iter() {
+        match &**f {
+            Node::RangeTblFunction(rtf) => functions.push(rtf.clone_in(mcx)?),
+            _ => {
+                return Err(PgError::error(
+                    "create_functionscan_plan: RTE functions element is not a RangeTblFunction",
+                ))
+            }
+        }
+    }
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // The function expressions could contain nestloop params, too.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        for func in functions.iter_mut() {
+            if let Some(fe) = func.funcexpr.as_deref_mut() {
+                // funcexpr is a Node *; replace nestloop params within its Expr.
+                if let Node::Expr(e) = fe {
+                    let old = e.clone();
+                    *e = replace_nestloop_params_expr(mcx, root, old, &mut err);
+                }
+            }
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+
+    let functions_field: Option<PgVec<'mcx, RangeTblFunction<'mcx>>> = if functions.is_empty() {
+        None
+    } else {
+        let mut out = vec_with_capacity_in(mcx, functions.len())?;
+        for f in functions {
+            out.push(f);
+        }
+        Some(out)
+    };
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_functionscan(tlist, qpqual, scan_relid, functions_field, funcordinality);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::FunctionScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_namedtuplestorescan_plan (createplan.c ~3979)
+// ---------------------------------------------------------------------------
+
+/// `create_namedtuplestorescan_plan(root, best_path, tlist, scan_clauses)` —
+/// return a tuplestorescan plan for the base relation scanned by `best_path`.
+fn create_namedtuplestorescan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(
+        rte.rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_NAMEDTUPLESTORE
+    );
+    let enrname: Option<PgString<'mcx>> = match &rte.enrname {
+        Some(n) => Some(n.clone_in(mcx)?),
+        None => None,
+    };
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_namedtuplestorescan(tlist, qpqual, scan_relid, enrname);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::NamedTuplestoreScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_ctescan_plan (createplan.c ~3884)
+//
+// The SubPlan-init-plan resolution leg (locating the CTE's `plan_id` /
+// `cte_param_id` via `cteroot->parse->cteList` + `cteroot->init_plans`) reads
+// the init `SubPlan`s built by subselect.c (`SS_process_ctes`), which is
+// unported. The plan_id lookup over `cte_plan_ids` is portable, but the
+// `cte_param_id = linitial_int(ctesplan->setParam)` step dereferences a built
+// SubPlan node, so the whole CTE-param resolution is routed 1:1 through the
+// subselect seam. The rest of the converter (clause ordering / nestloop params
+// / make_ctescan) is ported.
+// ---------------------------------------------------------------------------
+
+/// `create_ctescan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// ctescan plan for the base relation scanned by `best_path`.
+fn create_ctescan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(!rte.self_reference);
+
+    // Find the referenced CTE, locate its SubPlan, and pull out the CTE param
+    // ID (the sole member of the SubPlan's setParam list). This dereferences
+    // the init SubPlans built by subselect.c (SS_process_ctes), which is
+    // unported, so the (plan_id, cte_param_id) pair is resolved 1:1 through the
+    // subselect seam.
+    let (plan_id, cte_param_id) =
+        cp_seam::resolve_cte_subplan::call(root, scan_relid)?;
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_ctescan(tlist, qpqual, scan_relid, plan_id, cte_param_id);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::CteScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_worktablescan_plan (createplan.c ~4055)
+//
+// The work-table param ID is found in the plan level processing the recursive
+// UNION (one level below where the CTE comes from): cteroot->wt_param_id. The
+// parent_root walk is portable, but identifying the correct cteroot and reading
+// its wt_param_id depends on subselect.c having set wt_param_id during
+// recursive-CTE planning (SS_make_initplan_from_plan / build_subplan), so the
+// param-ID resolution is routed 1:1 through the subselect seam.
+// ---------------------------------------------------------------------------
+
+/// `create_worktablescan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// worktablescan plan for the base relation scanned by `best_path`.
+fn create_worktablescan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(rte.self_reference);
+
+    // Find the worktable param ID, which is in the plan level processing the
+    // recursive UNION (one level below where the CTE comes from):
+    // cteroot->wt_param_id. The parent_root walk + wt_param_id read are owned
+    // by subselect's recursive-CTE planning, so the resolution is routed 1:1
+    // through the subselect seam.
+    let wt_param_id = cp_seam::resolve_worktable_param::call(root, scan_relid)?;
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_worktablescan(tlist, qpqual, scan_relid, wt_param_id);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::WorkTableScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_subqueryscan_plan (createplan.c ~3695)
+//
+// The subquery's child plan is built by recursing into create_plan with the
+// subquery's own PlannerInfo (rel->subroot), a *different* planner context.
+// rel->subroot is the unported subquery_planner output; building its plan
+// (create_plan over the subroot's path tree) needs the subroot's PlannerRun
+// (its own range table), which the planner driver owns. So the subplan
+// construction (subroot recursion) is routed 1:1 through the subselect seam;
+// the rest of the converter (process_subquery_nestloop_params + clause
+// ordering / nestloop params / make_subqueryscan) is ported.
+// ---------------------------------------------------------------------------
+
+/// `create_subqueryscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// subqueryscan plan for the base relation scanned by `best_path`.
+fn create_subqueryscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    // it should be a subquery base rel...
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(root.rel(rel_id).rtekind, RTE_SUBQUERY);
+
+    // Recursively create Plan from Path for the subquery. Since we are entering
+    // a different planner context (subroot), C recurses to create_plan (not
+    // create_plan_recurse) with rel->subroot. Building the subroot's plan
+    // requires the subroot PlannerInfo + its PlannerRun, owned by the planner
+    // driver; routed 1:1 through the subselect/planner seam.
+    let subplan = cp_seam::create_subqueryscan_subplan::call(mcx, root, run, best_path)?;
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+
+    // Replace any outer-relation variables with nestloop params. We must
+    // provide nestloop params for both lateral references of the subquery and
+    // outer vars in the scan_clauses; assign the former first.
+    if has_param_info {
+        let subplan_params = root.rel(rel_id).subplan_params.clone();
+        paramassign::process_subquery_nestloop_params::call(mcx, root, &subplan_params)?;
+    }
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut scan_plan = make_subqueryscan(mcx, tlist, qpqual, scan_relid, subplan)?;
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::SubqueryScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
 // Seam installation (this crate OWNS create_scan_plan).
 // ---------------------------------------------------------------------------
 
@@ -1347,6 +2168,18 @@ pub fn init_seams() {
     cp_seam::create_seqscan_plan::set(create_seqscan_plan);
     cp_seam::create_valuesscan_plan::set(create_valuesscan_plan);
     cp_seam::create_resultscan_plan::set(create_resultscan_plan);
+    // F2d rest-of-scan converters. The SubPlan-init-plan resolution legs of
+    // cte / worktable and the subroot recursion of subquery stay seam-panicked
+    // into subselect (resolve_cte_subplan / resolve_worktable_param /
+    // create_subqueryscan_subplan) until subselect.c lands.
+    cp_seam::create_samplescan_plan::set(create_samplescan_plan);
+    cp_seam::create_tidscan_plan::set(create_tidscan_plan);
+    cp_seam::create_tidrangescan_plan::set(create_tidrangescan_plan);
+    cp_seam::create_functionscan_plan::set(create_functionscan_plan);
+    cp_seam::create_namedtuplestorescan_plan::set(create_namedtuplestorescan_plan);
+    cp_seam::create_ctescan_plan::set(create_ctescan_plan);
+    cp_seam::create_worktablescan_plan::set(create_worktablescan_plan);
+    cp_seam::create_subqueryscan_plan::set(create_subqueryscan_plan);
 }
 
 #[cfg(test)]

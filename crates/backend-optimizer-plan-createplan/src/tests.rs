@@ -181,6 +181,101 @@ fn create_resultscan_plan_builds_result_node() {
 }
 
 #[test]
+fn create_functionscan_plan_builds_functionscan_node() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut root, run, path_id) =
+        scan_setup(mcx, RTEKind::RTE_FUNCTION, crate::T_FunctionScan);
+    let plan = crate::create_functionscan_plan(
+        mcx,
+        &mut root,
+        &run,
+        path_id,
+        alloc::vec::Vec::new(),
+        alloc::vec::Vec::new(),
+    )
+    .expect("create_functionscan_plan");
+    match plan {
+        Node::FunctionScan(f) => {
+            assert_eq!(f.scan.scanrelid, 1);
+            // Empty RTE functions -> NIL.
+            assert!(f.functions.is_none());
+            assert!(!f.funcordinality);
+        }
+        other => panic!("expected FunctionScan, got {:?}", other.tag()),
+    }
+}
+
+#[test]
+fn create_namedtuplestorescan_plan_builds_node() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut root, run, path_id) =
+        scan_setup(mcx, RTEKind::RTE_NAMEDTUPLESTORE, crate::T_NamedTuplestoreScan);
+    let plan = crate::create_namedtuplestorescan_plan(
+        mcx,
+        &mut root,
+        &run,
+        path_id,
+        alloc::vec::Vec::new(),
+        alloc::vec::Vec::new(),
+    )
+    .expect("create_namedtuplestorescan_plan");
+    match plan {
+        Node::NamedTuplestoreScan(n) => {
+            assert_eq!(n.scan.scanrelid, 1);
+            assert!(n.enrname.is_none());
+        }
+        other => panic!("expected NamedTuplestoreScan, got {:?}", other.tag()),
+    }
+}
+
+#[test]
+fn create_tidscan_plan_builds_tidscan_node() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut root, run, _seq_path) =
+        scan_setup(mcx, RTEKind::RTE_RELATION, crate::T_SeqScan);
+    // Build a TidPath (empty tidquals) over the same base rel.
+    let rel_id = root.path(_seq_path).base().parent;
+    let tid_path = types_pathnodes::TidPath {
+        path: Path {
+            type_: crate::T_TidScan,
+            pathtype: crate::T_TidScan,
+            parent: rel_id,
+            pathtarget: Some(Box::new(PathTarget::default())),
+            param_info: None,
+            parallel_aware: false,
+            parallel_safe: false,
+            parallel_workers: 0,
+            rows: 0.0,
+            disabled_nodes: 0,
+            startup_cost: 0.0,
+            total_cost: 0.0,
+            pathkeys: alloc::vec::Vec::new(),
+        },
+        tidquals: alloc::vec::Vec::new(),
+    };
+    let path_id = root.alloc_path(PathNode::TidPath(tid_path));
+    let plan = crate::create_tidscan_plan(
+        mcx,
+        &mut root,
+        &run,
+        path_id,
+        alloc::vec::Vec::new(),
+        alloc::vec::Vec::new(),
+    )
+    .expect("create_tidscan_plan");
+    match plan {
+        Node::TidScan(t) => {
+            assert_eq!(t.scan.scanrelid, 1);
+            assert!(t.tidquals.is_none());
+        }
+        other => panic!("expected TidScan, got {:?}", other.tag()),
+    }
+}
+
+#[test]
 fn create_valuesscan_plan_builds_valuesscan_node() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

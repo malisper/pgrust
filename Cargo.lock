@@ -8133,6 +8133,8 @@ name = "backend-optimizer-plan-createplan"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-paramassign-seams",

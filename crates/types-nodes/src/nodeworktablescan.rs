@@ -32,6 +32,20 @@ pub struct WorkTableScan<'mcx> {
     pub wtParam: i32,
 }
 
+impl WorkTableScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(
+        &self,
+        mcx: mcx::Mcx<'b>,
+    ) -> types_error::PgResult<WorkTableScan<'b>> {
+        Ok(WorkTableScan {
+            scan: self.scan.clone_in(mcx)?,
+            wtParam: self.wtParam,
+        })
+    }
+}
+
 /// `WorkTableScanState` (execnodes.h):
 ///
 /// ```c
