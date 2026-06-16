@@ -127,7 +127,7 @@ fn install_join_seams() {
     // The two pathnode.c constructors this branch reaches: build a real
     // NestPath and add it to the joinrel pathlist (the C `add_path`).
     jp::create_nestloop_path::set(
-        |root, joinrel, jointype, _ws, _extra, outer_path, inner_path, rc, pathkeys, _ro| {
+        |root, _run, joinrel, jointype, _ws, _extra, outer_path, inner_path, rc, pathkeys, _ro| {
             let mut path = mk_path(joinrel);
             path.pathtype = NodeTag(335); // a join plan tag
             path.pathkeys = pathkeys.to_vec();
@@ -198,8 +198,10 @@ fn add_paths_to_joinrel_adds_nestloop_for_inner_join() {
         enable_memoize: false,
     };
 
+    let run = PlannerRun::new(mcx);
     add_paths_to_joinrel(
-        mcx, &mut root, joinrel, outerrel, innerrel, JOIN_INNER, &sjinfo, &restrictlist, enable,
+        mcx, &mut root, &run, joinrel, outerrel, innerrel, JOIN_INNER, &sjinfo, &restrictlist,
+        enable,
     )
     .expect("add_paths_to_joinrel");
 
