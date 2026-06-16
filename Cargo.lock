@@ -11974,6 +11974,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11999,6 +12000,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
