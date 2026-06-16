@@ -12727,6 +12727,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-selfuncs",
 ]
 
@@ -13284,6 +13285,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-rangetypes",
  "types-selfuncs",
 ]
@@ -16839,6 +16841,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]

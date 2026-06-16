@@ -1,23 +1,29 @@
-//! Selectivity-estimation vocabulary (`utils/selfuncs.h`), trimmed to what the
-//! range/multirange selectivity ports consume: the default-selectivity
-//! constants, the planner's `VariableStatData` (filled by
-//! `get_restriction_variable`, released by `ReleaseVariableStats`), and the
-//! `AttStatsSlot` the `get_attstatsslot` lookups return.
+//! Selectivity-estimation vocabulary (`utils/selfuncs.h`): the
+//! default-selectivity constants, the planner's `VariableStatData` (filled by
+//! `examine_variable` / `get_restriction_variable`, released by
+//! `ReleaseVariableStats`), and the `AttStatsSlot` the `get_attstatsslot`
+//! lookups return.
 //!
-//! These cross the per-neighbor selectivity / lsyscache seams; the in-crate
-//! `rangesel` / `multirangesel` orchestrate over them. The `statsTuple` and the
-//! `var` node are planner/syscache-owned memory the selectivity crate only
-//! threads back through the seams, so they stay opaque handles here
-//! ([`StatsTuple`] / [`StatsVarNode`]); the `AttStatsSlot` value/number arrays
-//! are detoasted copies allocated in the caller's `mcx`.
+//! These cross the per-neighbor selectivity / lsyscache seams; the selectivity
+//! crates orchestrate over them. `VariableStatData` is modeled
+//! field-for-field against the C struct (`utils/selfuncs.h`): the examined
+//! expression `var` is the planner node handle [`NodeId`] (`Node *`), `rel` is
+//! the [`RelId`] index into `PlannerInfo.simple_rel_array` (`RelOptInfo *`, or
+//! `None` when not identifiable), and `statsTuple` is the syscache-pinned
+//! `pg_statistic` tuple [`StatsTuple`] (a C `HeapTuple` pointer the syscache
+//! owns; the caller must run [`VariableStatData::freefunc`] when done — the
+//! faithful model of the C `void (*freefunc)(HeapTuple)` member). The
+//! `AttStatsSlot` value/number arrays are detoasted copies allocated in the
+//! caller's `mcx`.
 
 #![no_std]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
 use mcx::PgVec;
-use types_core::primitive::Oid;
+use types_core::primitive::{InvalidOid, Oid};
 use types_datum::datum::Datum;
+use types_pathnodes::{NodeId, RelId};
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h) — `0.3333333333333333`.
 pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
@@ -73,58 +79,83 @@ pub struct ConstNodeInfo {
     pub consttype: Oid,
 }
 
-/// A `HeapTuple` from `pg_statistic` (`VariableStatData.statsTuple`). It is
-/// syscache-owned memory the selectivity code only passes back to the
-/// `get_attstatsslot` / `statistic_proc_security_check` seams, so it stays an
-/// opaque handle here.
+/// A `pg_statistic` `HeapTuple` (`VariableStatData.statsTuple`,
+/// `get_attstatsslot`'s `statstuple`). This mirrors the C `HeapTuple` type
+/// exactly: a pointer to a tuple the syscache (or `statext_expressions_load`)
+/// owns. It is C-faithful syscache-pinned memory — not an invented handle —
+/// and must be released by the matching [`VariableStatData::freefunc`]
+/// (`ReleaseSysCache` for a pinned syscache tuple, `pfree` for a copied one).
 #[derive(Copy, Clone, Debug)]
 pub struct StatsTuple {
-    /// The `HeapTuple` address (syscache-owned).
+    /// The `HeapTuple` address (syscache-owned, as in C).
     pub ptr: *mut core::ffi::c_void,
 }
 
-/// The `Node *var` of a `VariableStatData` — the planner expression the stats
-/// describe. Opaque (planner-owned); threaded through `ReleaseVariableStats`.
-#[derive(Copy, Clone, Debug)]
-pub struct StatsVarNode {
-    /// The `Node *` address (planner-owned).
-    pub ptr: *mut core::ffi::c_void,
+/// How a [`VariableStatData::stats_tuple`] is freed by `ReleaseVariableStats` —
+/// the faithful model of the C `void (*freefunc)(HeapTuple tuple)` member of
+/// `VariableStatData`. selfuncs.c only ever assigns one of two functions to it
+/// (`ReleaseSysCache` for a pinned syscache tuple, `ReleaseDummy` = `pfree` for
+/// a `statext_expressions_load` copy), so this closed enum replaces the C
+/// function pointer without any opacity.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatsTupleFreeFunc {
+    /// C `freefunc == ReleaseSysCache`: drop the syscache pin.
+    ReleaseSysCache,
+    /// C `freefunc == ReleaseDummy`: `pfree(tuple)` (a copied tuple).
+    ReleaseDummy,
 }
 
-/// The `RelOptInfo *rel` of a `VariableStatData` — the relation the variable
-/// belongs to (`NULL` when `examine_variable` could not identify one). Opaque
-/// (planner-owned); the selectivity code only tests it for presence
-/// (C: `if (!vardata.rel)`).
-#[derive(Copy, Clone, Debug)]
-pub struct StatsRelNode {
-    /// The `RelOptInfo *` address (planner-owned).
-    pub ptr: *mut core::ffi::c_void,
-}
-
-/// `VariableStatData` (selfuncs.h), trimmed to the fields the range selectivity
-/// estimators consume. Filled by `get_restriction_variable`; released by
-/// `ReleaseVariableStats` (which runs `freefunc(statsTuple)` — modeled by the
-/// `release_variable_stats` seam, called from the consumer's RAII guard).
+/// `VariableStatData` (selfuncs.h), modeled field-for-field against the C
+/// struct. Filled by `examine_variable` / `get_restriction_variable`; released
+/// by `ReleaseVariableStats` (which runs `freefunc(statsTuple)` — modeled by
+/// the `release_variable_stats` seam, called from the consumer's RAII guard).
 #[derive(Copy, Clone, Debug)]
 pub struct VariableStatData {
-    /// `Node *var` — the examined expression (opaque, planner-owned).
-    pub var: StatsVarNode,
-    /// `RelOptInfo *rel` — the relation the variable belongs to, or `None`
-    /// (`NULL`). `scalararraysel_containment` punts when this is `None`.
-    pub rel: Option<StatsRelNode>,
+    /// `Node *var` — the Var or expression tree the stats describe, as the
+    /// planner node handle into `PlannerInfo`'s node arena.
+    pub var: NodeId,
+    /// `RelOptInfo *rel` — the relation the variable belongs to as the index
+    /// into `PlannerInfo.simple_rel_array`, or `None` (`NULL`) when not
+    /// identifiable. `scalararraysel_containment` punts when this is `None`.
+    pub rel: Option<RelId>,
     /// `HeapTuple statsTuple` — the `pg_statistic` row, or `None`
-    /// (`!HeapTupleIsValid`).
+    /// (`!HeapTupleIsValid`). Freed per [`Self::freefunc`].
     pub stats_tuple: Option<StatsTuple>,
-    /// `Oid vartype` — the variable's type OID.
+    /// `void (*freefunc)(HeapTuple)` — how to free [`Self::stats_tuple`], or
+    /// `None` when there is no tuple to free (C `freefunc == NULL`).
+    pub freefunc: Option<StatsTupleFreeFunc>,
+    /// `Oid vartype` — exposed type of the expression.
     pub vartype: Oid,
-    /// `Oid atttype` — the attribute's type OID.
+    /// `Oid atttype` — actual type (after stripping relabel).
     pub atttype: Oid,
-    /// `int32 atttypmod` — the attribute's typmod.
+    /// `int32 atttypmod` — actual typmod (after stripping relabel).
     pub atttypmod: i32,
-    /// Opaque cookie the owner needs to run `freefunc` in
-    /// `ReleaseVariableStats` (e.g. the `freefunc` pointer / acl flags). The
-    /// selectivity crate only threads it back through the release seam.
-    pub release_cookie: usize,
+    /// `bool isunique` — matches a unique index, DISTINCT or GROUP-BY clause.
+    pub isunique: bool,
+    /// `bool acl_ok` — true if the user has SELECT privilege on all rows from
+    /// the table or column.
+    pub acl_ok: bool,
+}
+
+impl VariableStatData {
+    /// `MemSet(&vardata, 0, sizeof(vardata))` (selfuncs.c `examine_variable` /
+    /// `examine_simple_variable` entry): a freshly zeroed `VariableStatData`
+    /// the examine layer then fills in. `var` is the node the stats will
+    /// describe; everything else starts cleared (no relation, no stats tuple,
+    /// no freefunc, `acl_ok = false`).
+    pub fn zeroed(var: NodeId) -> Self {
+        VariableStatData {
+            var,
+            rel: None,
+            stats_tuple: None,
+            freefunc: None,
+            vartype: InvalidOid,
+            atttype: InvalidOid,
+            atttypmod: 0,
+            isunique: false,
+            acl_ok: false,
+        }
+    }
 }
 
 /// `AttStatsSlot` (lsyscache.h), trimmed. `values` / `numbers` are detoasted
