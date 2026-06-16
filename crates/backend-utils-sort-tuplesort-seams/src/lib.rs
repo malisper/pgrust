@@ -210,3 +210,27 @@ seam_core::seam!(
     ) -> PgResult<Tuplesortstate<'mcx>>
 );
 
+// === index-GiST sorted build sort (tuplesortvariants.c) ====================
+//
+// Consumed by the sorted GiST build (`gist_indexsortbuild` →
+// `tuplesort_begin_index_gist`). Unlike the btree variant there are no
+// uniqueness flags: GiST sets `enforceUnique`/`uniqueNullsNotDistinct` to
+// `false` and keys the sort by the opclass' sortsupport
+// (`PrepareSortSupportFromGistIndexRel`). The build never passes a parallel
+// `SortCoordinate` (always the C `NULL`), so the begin seam omits it like the
+// other build variants. Owned by the still-`todo` tuplesort unit; a call
+// panics loudly until that unit lands and installs it from `init_seams()`.
+seam_core::seam!(
+    /// `tuplesort_begin_index_gist(heapRel, indexRel, workMem,
+    /// coordinate=NULL, sortopt)` (tuplesortvariants.c): begin a GiST-index
+    /// build sort keyed by the index opclass' sortsupport. Allocates the sort
+    /// state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_index_gist<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &types_rel::Relation<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
