@@ -103,6 +103,7 @@ pub fn init_all() {
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_proc::init_seams();
     backend_catalog_pg_publication::init_seams();
+    backend_catalog_pg_subscription::init_seams();
     backend_commands_publicationcmds::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();

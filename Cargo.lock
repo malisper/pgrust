@@ -4883,11 +4883,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-subscription"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-indexing",
+ "backend-catalog-pg-subscription-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-subscription-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-replication-launcher",
@@ -6932,7 +6964,6 @@ name = "backend-conv-utf8-and-gb18030"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6943,7 +6974,6 @@ name = "backend-conv-utf8-and-gbk"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6955,7 +6985,6 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-error",
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6977,7 +7006,6 @@ name = "backend-conv-utf8-and-johab"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6988,7 +7016,6 @@ name = "backend-conv-utf8-and-sjis"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6999,7 +7026,6 @@ name = "backend-conv-utf8-and-sjis2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -7010,7 +7036,6 @@ name = "backend-conv-utf8-and-uhc"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -7022,7 +7047,6 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-error",
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -17135,6 +17159,7 @@ dependencies = [
  "backend-utils-mb-mbutils-seams",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "common-encnames-seams",
  "common-wchar",
  "mcx",
  "types-error",
@@ -18494,6 +18519,7 @@ dependencies = [
  "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
+ "backend-catalog-pg-subscription",
  "backend-catalog-pg-type",
  "backend-catalog-storage",
  "backend-catalog-toasting",
