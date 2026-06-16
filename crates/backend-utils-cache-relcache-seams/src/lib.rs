@@ -926,3 +926,24 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn relation_init_index_access_info(index_id: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `formrdesc`'s hardcoded `Schema_pg_*[]` `FormData_pg_attribute` rows for a
+    /// nailed bootstrap catalog, keyed by the catalog's row-type OID
+    /// (`*Relation_Rowtype_Id`, the value relcache's Phase2/3 passes).
+    ///
+    /// This is genbki-generated catalog-header bootstrap data
+    /// (`catalog/schemapg.h`), owned by the `backend-bootstrap-catalog-data`
+    /// crate; it crosses into relcache as a pure value carrier
+    /// ([`BootstrapCatalogSchema`] = the row vector plus the catalog relation OID
+    /// `formrdesc` reads for `rd_id`, which the `OwnedAttr` rows cannot carry).
+    ///
+    /// OUTWARD seam from relcache's perspective: relcache CALLS it (from
+    /// `formrdesc`'s Phase2/3 callers), the bootstrap-catalog-data owner INSTALLS
+    /// it from its `init_seams()`. Declared here (not in a separate seams crate)
+    /// to avoid a relcache→catalog-data dependency cycle. Infallible in C (a pure
+    /// static-data lookup); panics on an unknown `reltype` (a bootstrap bug).
+    pub fn catalog_schema_attrs(
+        reltype: types_core::primitive::Oid,
+    ) -> types_relcache_entry::BootstrapCatalogSchema
+);
