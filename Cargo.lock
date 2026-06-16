@@ -12029,6 +12029,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-parse-utilcmd"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs",
+ "backend-parser-parse-utilcmd-outward-seams",
+ "backend-parser-parse-utilcmd-seams",
+ "backend-parser-small1",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-parse-utilcmd-outward-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-parser-parse-utilcmd-seams"
 version = "0.0.0"
 dependencies = [
