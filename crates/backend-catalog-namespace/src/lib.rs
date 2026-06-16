@@ -165,6 +165,7 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_ts_config_oid::set(seam_get_ts_config_oid);
     backend_catalog_namespace_seams::type_is_visible::set(crate::TypeIsVisible);
     backend_catalog_namespace_seams::is_temp_namespace::set(seam_is_temp_namespace);
+    backend_catalog_namespace_seams::is_any_temp_namespace::set(crate::isAnyTempNamespace);
     backend_catalog_namespace_seams::lookup_creation_namespace::set(seam_lookup_creation_namespace);
     backend_catalog_namespace_seams::get_conversion_oid::set(seam_get_conversion_oid);
     backend_catalog_namespace_seams::get_ts_parser_oid::set(seam_get_ts_parser_oid);

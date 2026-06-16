@@ -2639,6 +2639,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-tablesample-core"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeSamplescan-seams",
+ "backend-optimizer-path-costsize",
+ "backend-optimizer-util-clauses",
+ "common-hashfn",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-samplescan",
+]
+
+[[package]]
 name = "backend-access-transam-clog"
 version = "0.0.0"
 dependencies = [
@@ -3852,7 +3870,6 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "mcx",
  "seam-core",
- "types-array",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -4560,51 +4577,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-catalog-pg-proc"
+name = "backend-catalog-pg-publication"
 version = "0.0.0"
 dependencies = [
- "backend-access-table-table",
- "backend-access-transam-xact-seams",
- "backend-catalog-aclchk-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-catalog",
  "backend-catalog-dependency",
- "backend-catalog-indexing-seams",
- "backend-catalog-objectaccess",
- "backend-catalog-pg-depend",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-partition-seams",
+ "backend-catalog-pg-class-seams",
  "backend-catalog-pg-depend-seams",
- "backend-catalog-pg-proc-seams",
- "backend-catalog-pg-shdepend",
- "backend-commands-functioncmds-seams",
- "backend-parser-coerce",
- "backend-utils-adt-arrayfuncs",
- "backend-utils-adt-format-type-seams",
- "backend-utils-adt-regproc-seams",
+ "backend-catalog-pg-inherits-seams",
+ "backend-catalog-pg-publication-seams",
+ "backend-nodes-core-seams",
+ "backend-nodes-outfuncs",
+ "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
  "backend-utils-error",
- "backend-utils-mb-mbutils-seams",
  "mcx",
- "types-acl",
- "types-array",
+ "seam-core",
+ "types-cache",
  "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
- "types-parsenodes",
+ "types-rel",
+ "types-scan",
  "types-storage",
+ "types-syscache",
  "types-tuple",
 ]
 
 [[package]]
-name = "backend-catalog-pg-proc-seams"
+name = "backend-catalog-pg-publication-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
  "types-core",
- "types-datum",
  "types-error",
- "types-parsenodes",
- "types-tuple",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -11732,8 +11752,10 @@ dependencies = [
 name = "backend-statistics-core-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-statistics",
 ]
@@ -11746,6 +11768,19 @@ dependencies = [
  "backend-utils-adt-varlena",
  "mcx",
  "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
+name = "backend-statistics-mcv"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-statistics",
 ]
@@ -17375,6 +17410,7 @@ dependencies = [
  "backend-access-spgist-core",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-tablesample-core",
  "backend-access-transam-clog",
  "backend-access-transam-commit-ts",
  "backend-access-transam-generic-xlog",
@@ -17418,7 +17454,7 @@ dependencies = [
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-operator",
- "backend-catalog-pg-proc",
+ "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
  "backend-catalog-pg-type",
@@ -18452,6 +18488,7 @@ name = "types-statistics"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-datum",
 ]
 
 [[package]]
