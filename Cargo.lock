@@ -13072,6 +13072,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-slotfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-logical-logical",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-slot",
+ "backend-replication-walsender",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-logical",
+ "types-nodes",
+ "types-replication-slot",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-replication-snapbuild-seams"
 version = "0.0.0"
 dependencies = [
