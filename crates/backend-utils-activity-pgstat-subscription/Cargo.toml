@@ -1,0 +1,19 @@
+[package]
+name = "backend-utils-activity-pgstat-subscription"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_activity_pgstat_subscription"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-replication = { path = "../types-replication" }
+types-pgstat = { path = "../types-pgstat" }
+backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
+backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }

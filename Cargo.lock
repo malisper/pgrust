@@ -16487,6 +16487,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-replslot"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-slot",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-replslot-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-pgstat",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-replslot-seams"
 version = "0.0.0"
 dependencies = [
@@ -16520,6 +16537,20 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-subscription"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-xact",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-replication",
 ]
 
 [[package]]
@@ -21276,7 +21307,9 @@ dependencies = [
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-replslot",
  "backend-utils-activity-pgstat-slru",
+ "backend-utils-activity-pgstat-subscription",
  "backend-utils-activity-pgstat-wal",
  "backend-utils-activity-small",
  "backend-utils-activity-waitevent",

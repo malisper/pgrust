@@ -397,6 +397,8 @@ backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
 backend-utils-activity-pgstat-io = { path = "../backend-utils-activity-pgstat-io" }
 backend-utils-activity-pgstat-wal = { path = "../backend-utils-activity-pgstat-wal" }
+backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgstat-replslot" }
+backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
 backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-slru" }
 backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }

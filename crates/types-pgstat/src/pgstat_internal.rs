@@ -65,6 +65,7 @@ impl Default for PgStat_Kind {
 /// the `PgStatShared_*` variable-amount entries; embedded as the first member
 /// of each.
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Common {
     /// just a validity cross-check
     pub magic: u32,
@@ -121,6 +122,7 @@ pub struct PgStatShared_Function {
 
 /// `PgStatShared_Subscription` (`utils/pgstat_internal.h`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Subscription {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatSubEntry,
@@ -128,6 +130,7 @@ pub struct PgStatShared_Subscription {
 
 /// `PgStatShared_ReplSlot` (`utils/pgstat_internal.h`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_ReplSlot {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatReplSlotEntry,
