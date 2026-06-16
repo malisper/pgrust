@@ -86,6 +86,14 @@ pub struct ExternalFnExpr {
 /// `FunctionCallInfoBaseData` (fmgr.h) — the call frame every fmgr-called
 /// function receives. The flexible trailing `args[]` array is `Vec`; the
 /// by-reference argument/result payloads are the Option-4 side channels.
+///
+/// Deliberately distinct from `types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>`
+/// (the executor frame). WONTFIX dual-home — see DESIGN_DEBT.md "two
+/// `FunctionCallInfoBaseData` homes": this is the low-level, `std`,
+/// lifetime-free ABI carrier (by-ref side channels, typed `PGFunction`); the
+/// nodes copy is `no_std`+`'mcx`+arena/`Node` links. Neither crate deps the
+/// other (both on leaf `types-core`); unifying needs a cycle and/or breaks
+/// `no_std`, and they never meet (the `function_call_invoke` seam is value-based).
 pub struct FunctionCallInfoBaseData {
     /// `FmgrInfo *flinfo` — the caller lookup-info frame (`None` is C's NULL).
     pub flinfo: Option<Box<FmgrInfo>>,
