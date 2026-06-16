@@ -20,6 +20,7 @@ use std::mem::MaybeUninit;
 pub fn init_seams() {
     backend_libpq_pqsignal_seams::block_signals::set(block_signals);
     backend_libpq_pqsignal_seams::unblock_signals::set(unblock_signals);
+    backend_libpq_pqsignal_seams::add_unblock_sig::set(unblock_sig_add);
 }
 
 /// `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — block all signals.
@@ -177,6 +178,17 @@ pub fn set_block_sig_mask() {
 pub fn block_sig_delete(signal: libc::c_int) {
     let mut masks = MASKS.get();
     delete_signal(&mut masks.block_sig, signal);
+    MASKS.set(masks);
+}
+
+/// `sigaddset(&UnBlockSig, signal)` — persistently add `signal` to the owned
+/// `UnBlockSig` snapshot (mutating the C global `UnBlockSig`, mirroring
+/// waiteventset.c's `sigaddset(&UnBlockSig, SIGURG)` on the signalfd build).
+pub fn unblock_sig_add(signal: libc::c_int) {
+    let mut masks = MASKS.get();
+    // SAFETY: `unblock_sig` is a valid, initialized sigset_t.
+    let rc = unsafe { libc::sigaddset(&mut masks.unblock_sig as *mut libc::sigset_t, signal) };
+    debug_assert_eq!(rc, 0);
     MASKS.set(masks);
 }
 

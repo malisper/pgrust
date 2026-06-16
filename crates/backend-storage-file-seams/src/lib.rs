@@ -52,6 +52,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AcquireExternalFD()` — try to reserve one externally-consumed FD
+    /// against `max_safe_fds`, releasing LRU virtual FDs if needed. Returns
+    /// `false` if the reservation would exceed the limit (unlike
+    /// `ReserveExternalFD`, which `ereport`s). Used by `CreateWaitEventSet`
+    /// for the epoll/kqueue descriptor.
+    pub fn acquire_external_fd() -> bool
+);
+
+seam_core::seam!(
     /// `pg_fsync(int fd)` (`storage/file/fd.c`) — fsync honoring the
     /// `wal_sync_method` writethrough setting. Returns the fsync result
     /// (`0` on success, `-1` with `errno` set); infallible at the ereport

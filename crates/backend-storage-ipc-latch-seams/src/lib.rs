@@ -152,3 +152,36 @@ seam_core::seam!(
     /// `kill(2)`.
     pub fn kill_sigusr1(pid: i32) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Latch field accessors consumed by `waiteventset.c`. The C wait loop reads
+// `set->latch->is_set` / `->maybe_sleeping` / `->owner_pid` and writes
+// `->maybe_sleeping` directly; here the `Latch` storage lives in the latch
+// unit's registry, so the waiteventset owner reaches those atomic fields
+// through these seams (the latch unit installs them from `init_seams`).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `latch->is_set` (storage/latch.h) — read the latch's set flag (an
+    /// atomic `sig_atomic_t`). Infallible.
+    pub fn latch_is_set(latch: types_storage::latch::LatchHandle) -> bool
+);
+
+seam_core::seam!(
+    /// `latch->maybe_sleeping` (storage/latch.h) — read the "a waiter may be
+    /// sleeping on this latch" hint. Infallible.
+    pub fn latch_maybe_sleeping(latch: types_storage::latch::LatchHandle) -> bool
+);
+
+seam_core::seam!(
+    /// `latch->maybe_sleeping = value` (storage/latch.h) — the waiteventset
+    /// wait loop sets this before sleeping and clears it after. Infallible.
+    pub fn set_latch_maybe_sleeping(latch: types_storage::latch::LatchHandle, value: bool)
+);
+
+seam_core::seam!(
+    /// `latch->owner_pid` (storage/latch.h) — the PID of the process that owns
+    /// the latch (`AddWaitEventToSet`/`ModifyWaitEvent` check it equals
+    /// `MyProcPid`). Infallible.
+    pub fn latch_owner_pid(latch: types_storage::latch::LatchHandle) -> i32
+);

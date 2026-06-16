@@ -228,6 +228,8 @@ pub fn init_all() {
     backend_libpq_hba::init_seams();
     backend_libpq_be_gssapi_common::init_seams();
     backend_libpq_be_secure_common::init_seams();
+    backend_libpq_be_secure::init_seams();
+    backend_libpq_be_secure_openssl::init_seams();
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
@@ -284,6 +286,8 @@ pub fn init_all() {
     backend_parser_small1::init_seams();
     backend_parser_gram_core::init_seams();
     backend_port_atomics::init_seams();
+    backend_port_sysv_sema::init_seams();
+    backend_port_sysv_shmem::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
     backend_postmaster_bgwriter::init_seams();
@@ -333,6 +337,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_shmem::init_seams();
     backend_storage_ipc_sinval::init_seams();
+    backend_storage_ipc_waiteventset::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_large_object::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
