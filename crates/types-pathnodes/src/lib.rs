@@ -244,7 +244,7 @@ pub const VOLATILITY_NOVOLATILE: VolatileFunctionStatus = 2;
 /// shared by like-partitioned relations. The per-column arrays
 /// (`partopfamily`/`partopcintype`/`partcollation`/`parttyplen`/`parttypbyval`/
 /// `partsupfunc`) all have `partnatts` entries.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct PartitionSchemeData {
     /// `char strategy` — partition strategy (LIST/RANGE/HASH).
     pub strategy: i8,
@@ -262,6 +262,31 @@ pub struct PartitionSchemeData {
     pub parttypbyval: Vec<bool>,
     /// `struct FmgrInfo *partsupfunc` — cached partition comparison functions.
     pub partsupfunc: Vec<FmgrInfo>,
+}
+
+/// `PartitionSchemeData` equality. `FmgrInfo` is no longer `PartialEq` (it
+/// carries the erased `fn_expr` node), so the formerly-derived `PartialEq` is
+/// written by hand: every field is compared as before, and `partsupfunc` is
+/// compared by its resolved function OIDs (`fn_oid`) — the stable identity of
+/// a cached support function, the `find_partition_scheme` matching key. (The
+/// `fn_addr`/`fn_expr` of a `partsupfunc` entry are derived from its OID and
+/// never the distinguishing factor.)
+impl PartialEq for PartitionSchemeData {
+    fn eq(&self, other: &Self) -> bool {
+        self.strategy == other.strategy
+            && self.partnatts == other.partnatts
+            && self.partopfamily == other.partopfamily
+            && self.partopcintype == other.partopcintype
+            && self.partcollation == other.partcollation
+            && self.parttyplen == other.parttyplen
+            && self.parttypbyval == other.parttypbyval
+            && self.partsupfunc.len() == other.partsupfunc.len()
+            && self
+                .partsupfunc
+                .iter()
+                .zip(other.partsupfunc.iter())
+                .all(|(a, b)| a.fn_oid == b.fn_oid)
+    }
 }
 
 /// `PartitionScheme` — `PartitionSchemeData *`; `None` if the rel isn't

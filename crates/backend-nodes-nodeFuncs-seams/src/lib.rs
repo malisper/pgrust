@@ -52,6 +52,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_call_expr_argtype(expr, argnum)` (fmgr.c:1929) over a *field-bearing*
+    /// owned call-expression node (`&Expr`), as opposed to the tag-only
+    /// [`call_expr_argtype`] carrier. This is the entry the fmgr `get_fn_expr_*`
+    /// readers use once `fmgr_info_set_expr` stamps a real `Expr` onto the
+    /// `FmgrInfo.fn_expr` erased slot: the `IsA` dispatch over
+    /// `FuncExpr`/`OpExpr`/`DistinctExpr`/`ScalarArrayOpExpr`/`NullIfExpr`/
+    /// `WindowFunc`, `exprType(list_nth(args, argnum))` with the range guard, and
+    /// the `ScalarArrayOpExpr` `argnum == 1` element-type hack
+    /// (`get_base_element_type`). Returns `InvalidOid` out of range / for an
+    /// unhandled node kind (the C fall-through). `Err` carries the
+    /// `get_base_element_type` / `exprType` cache-lookup `ereport`.
+    pub fn get_call_expr_argtype_expr(expr: &Expr, argnum: i32) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `get_call_expr_arg_stable(expr, argnum)` (fmgr.c) — true iff the indexed
     /// argument is a `Const` or an external `Param` (the same `IsA` dispatch).
     pub fn call_expr_arg_stable(expr: ExternalFnExpr, argnum: i32) -> bool

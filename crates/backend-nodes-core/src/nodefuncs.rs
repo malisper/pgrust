@@ -1516,6 +1516,7 @@ pub fn init_seams() {
     seams::expr_type_info::set(seam_expr_type_info);
     seams::expr_type::set(seam_expr_type);
     seams::call_expr_argtype::set(seam_call_expr_argtype);
+    seams::get_call_expr_argtype_expr::set(seam_get_call_expr_argtype_expr);
     seams::call_expr_arg_stable::set(seam_call_expr_arg_stable);
     seams::expr_variadic::set(seam_expr_variadic);
     seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
@@ -1584,6 +1585,56 @@ fn seam_call_expr_argtype(_expr: types_fmgr::ExternalFnExpr, _argnum: i32) -> Oi
 /// `false` (the C fall-through: treat the argument as non-stable).
 fn seam_call_expr_arg_stable(_expr: types_fmgr::ExternalFnExpr, _argnum: i32) -> bool {
     false
+}
+
+/// `get_call_expr_argtype(expr, argnum)` (fmgr.c:1929) over the *field-bearing*
+/// owned `Expr` that `fmgr_info_set_expr` stamps onto `FmgrInfo.fn_expr`.
+///
+/// Verbatim port of the C:
+/// ```c
+/// if (expr == NULL) return InvalidOid;
+/// if (IsA(expr, FuncExpr))                 args = ((FuncExpr*)expr)->args;
+/// else if (IsA(expr, OpExpr))              args = ((OpExpr*)expr)->args;
+/// else if (IsA(expr, DistinctExpr))        args = ((DistinctExpr*)expr)->args;
+/// else if (IsA(expr, ScalarArrayOpExpr))   args = ((ScalarArrayOpExpr*)expr)->args;
+/// else if (IsA(expr, NullIfExpr))          args = ((NullIfExpr*)expr)->args;
+/// else if (IsA(expr, WindowFunc))          args = ((WindowFunc*)expr)->args;
+/// else return InvalidOid;
+/// if (argnum < 0 || argnum >= list_length(args)) return InvalidOid;
+/// argtype = exprType((Node*) list_nth(args, argnum));
+/// if (IsA(expr, ScalarArrayOpExpr) && argnum == 1)
+/// {   /* scalar array op uses the array's element type for the 2nd arg */
+///     argtype = get_base_element_type(argtype);
+/// }
+/// return argtype;
+/// ```
+fn seam_get_call_expr_argtype_expr(expr: &Expr, argnum: i32) -> PgResult<Oid> {
+    // Select the argument list by node kind (the C `IsA` dispatch). `DistinctExpr`
+    // / `NullIfExpr` are `OpExpr`-shaped here, so their `.args` is read the same.
+    let (args, is_saop): (&[Expr], bool) = match expr {
+        Expr::FuncExpr(f) => (&f.args, false),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => (&o.args, false),
+        Expr::ScalarArrayOpExpr(s) => (&s.args, true),
+        Expr::WindowFunc(w) => (&w.args, false),
+        // C: every other node kind falls through to InvalidOid.
+        _ => return Ok(InvalidOid),
+    };
+
+    // if (argnum < 0 || argnum >= list_length(args)) return InvalidOid;
+    if argnum < 0 || argnum as usize >= args.len() {
+        return Ok(InvalidOid);
+    }
+
+    // argtype = exprType((Node*) list_nth(args, argnum));
+    let mut argtype = expr_type(Some(&args[argnum as usize]))?;
+
+    // ScalarArrayOpExpr uses the array element type for the second argument
+    // (C: argtype = get_base_element_type(argtype), unconditionally returned).
+    if is_saop && argnum == 1 {
+        argtype = lsyscache::get_base_element_type::call(argtype)?;
+    }
+
+    Ok(argtype)
 }
 
 /// `get_fn_expr_variadic` body (fmgr.c): `IsA(expr, FuncExpr) ? funcvariadic :

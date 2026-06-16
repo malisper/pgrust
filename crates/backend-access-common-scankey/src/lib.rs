@@ -85,7 +85,7 @@ pub fn ScanKeyEntryInitializeWithInfo<'mcx>(
     entry.sk_collation = collation;
     entry.sk_argument = argument;
     // C: fmgr_info_copy(&entry->sk_func, finfo, CurrentMemoryContext).
-    entry.sk_func = *finfo;
+    entry.sk_func = finfo.clone();
 }
 
 /// `ScanKeyInit(entry, attributeNumber, strategy, procedure, argument)`
