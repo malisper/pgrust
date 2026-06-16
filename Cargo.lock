@@ -6284,6 +6284,7 @@ dependencies = [
  "backend-executor-nodeAgg",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",

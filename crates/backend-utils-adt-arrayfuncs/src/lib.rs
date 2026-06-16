@@ -46,6 +46,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod arraysubs;
 pub mod foundation;
 pub mod construct;
 pub mod element_slice;
@@ -88,4 +89,12 @@ pub fn init_seams() {
     seams::oidvector_to_oids_bytes::set(construct::oidvector_to_oids_bytes);
     seams::int2vector_to_i16s_bytes::set(construct::int2vector_to_i16s_bytes);
     seams::text_array_to_strings_bytes::set(construct::text_array_to_strings_bytes);
+
+    // arraysubs.c — array subscripting exec callbacks.
+    seams::array_subscript_fetch::set(arraysubs::array_subscript_fetch);
+    seams::array_subscript_fetch_slice::set(arraysubs::array_subscript_fetch_slice);
+    seams::array_subscript_assign::set(arraysubs::array_subscript_assign);
+    seams::array_subscript_assign_slice::set(arraysubs::array_subscript_assign_slice);
+    seams::array_subscript_fetch_old::set(arraysubs::array_subscript_fetch_old);
+    seams::array_subscript_fetch_old_slice::set(arraysubs::array_subscript_fetch_old_slice);
 }
