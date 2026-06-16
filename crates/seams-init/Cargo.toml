@@ -358,6 +358,7 @@ backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-executor-tstoreReceiver = { path = "../backend-executor-tstoreReceiver" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
+backend-tcop-postgres = { path = "../backend-tcop-postgres" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-tcop-utility = { path = "../backend-tcop-utility" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
