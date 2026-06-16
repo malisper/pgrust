@@ -61,3 +61,13 @@ seam_core::seam!(
     /// `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn init_shmem_index() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ShmemAllocUnlocked(Size size)` (shmem.c) — allocate a max-aligned
+    /// chunk from the main shared-memory segment without taking `ShmemLock`.
+    /// Used only for allocations that must happen before `ShmemLock` is ready
+    /// (e.g. `PGReserveSemaphores`' `sharedSemas` array). Returns the raw
+    /// address (genuinely shared memory, opacity inherited). `Err` carries the
+    /// C `ereport(WARNING)`/NULL-return out-of-shmem path folded into a fatal.
+    pub fn shmem_alloc_unlocked(size: Size) -> PgResult<*mut u8>
+);

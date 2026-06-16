@@ -144,6 +144,7 @@ pub fn init_seams() {
     file_seams::close_transient_file::set(allocated_desc::seam_close_transient_file);
     file_seams::reserve_external_fd::set(vfd_core::ReserveExternalFD);
     file_seams::release_external_fd::set(vfd_core::ReleaseExternalFD);
+    file_seams::acquire_external_fd::set(vfd_core::AcquireExternalFD);
     file_seams::pg_fsync::set(seams::seam_pg_fsync);
     file_seams::fsync_fname::set(seams::seam_fsync_fname);
     file_seams::data_sync_elevel::set(seams::seam_data_sync_elevel);

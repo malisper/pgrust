@@ -12079,6 +12079,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-sysv-sema"
+version = "0.0.0"
+dependencies = [
+ "backend-port-pg-sema-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-port-sysv-shmem"
+version = "0.0.0"
+dependencies = [
+ "backend-port-sysv-shmem-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-port-sysv-shmem-seams"
 version = "0.0.0"
 dependencies = [
@@ -14472,6 +14504,27 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+]
+
+[[package]]
+name = "backend-storage-ipc-waiteventset"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqsignal-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-error",
+ "types-signal",
+ "types-storage",
 ]
 
 [[package]]
@@ -19741,6 +19794,8 @@ dependencies = [
  "backend-parser-relation",
  "backend-parser-small1",
  "backend-port-atomics",
+ "backend-port-sysv-sema",
+ "backend-port-sysv-shmem",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
  "backend-postmaster-bgwriter",
@@ -19790,6 +19845,7 @@ dependencies = [
  "backend-storage-ipc-shmem",
  "backend-storage-ipc-sinval",
  "backend-storage-ipc-standby",
+ "backend-storage-ipc-waiteventset",
  "backend-storage-large-object",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",

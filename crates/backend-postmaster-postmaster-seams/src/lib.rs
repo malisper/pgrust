@@ -91,6 +91,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `postmaster_alive_fds[POSTMASTER_FD_WATCH]` (postmaster.c) — the raw
+    /// read-end fd of the postmaster death-watch pipe. `AddWaitEventToSet`'s
+    /// `WL_POSTMASTER_DEATH` arm registers this fd with epoll/poll (Linux only;
+    /// the kqueue path watches `PostmasterPid` via `EVFILT_PROC` instead).
+    pub fn postmaster_death_watch_fd() -> i32
+);
+
+seam_core::seam!(
     /// Request a signal on parent (postmaster) death:
     /// `prctl(PR_SET_PDEATHSIG, signum)` / `procctl(PROC_PDEATHSIG_CTL, &signum)`
     /// (`PostmasterDeathSignalInit`, pmsignal.c). The platform mechanism is the

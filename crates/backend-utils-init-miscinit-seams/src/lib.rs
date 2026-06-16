@@ -237,6 +237,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AddToDataDirLockFile(target_line, str)` (miscinit.c): rewrite a
+    /// numbered line of `postmaster.pid` in place. `PGSharedMemoryCreate`
+    /// stores the shmem key/ID on `LOCK_FILE_LINE_SHMEM_KEY`. `Err` carries the
+    /// `ereport(LOG)`/file-rewrite failure surface.
+    pub fn add_to_data_dir_lock_file(target_line: i32, line: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `SetProcessingMode(BootstrapProcessing)` (miscadmin.h): set the `Mode`
     /// global. Backend-local write; infallible.
     pub fn set_processing_mode_bootstrap()

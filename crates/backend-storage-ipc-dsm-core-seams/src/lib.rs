@@ -31,6 +31,15 @@ seam_core::seam!(
     pub fn dsm_postmaster_startup(shim: *mut types_storage::PGShmemHeader) -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// `dsm_cleanup_using_control_segment(dsm_handle old_control_handle)`
+    /// (`dsm.c`) — when reclaiming an orphaned SysV shmem segment whose header
+    /// recorded a DSM control segment, clean up any DSM segments left behind by
+    /// the dead postmaster. Called from `PGSharedMemoryCreate`'s recycle path.
+    /// `Err` carries the `ereport`. Scaffolded slot.
+    pub fn dsm_cleanup_using_control_segment(old_control_handle: types_storage::dsm_handle) -> types_error::PgResult<()>
+);
+
 // ---------------------------------------------------------------------------
 // `storage/ipc/ipc.c` seams. These belong to the same `dsm-core` unit (which
 // also ports ipc.c); they live here so the seam-install owner derives to
