@@ -15686,12 +15686,17 @@ dependencies = [
 name = "backend-tcop-dest"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact-seams",
  "backend-commands-copyto-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-tcop-cmdtag",
  "backend-tcop-dest-seams",
  "mcx",
  "types-dest",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-tuple",
 ]
 
@@ -15704,6 +15709,7 @@ dependencies = [
  "types-dest",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-tuple",
 ]
 
