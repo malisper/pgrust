@@ -17586,6 +17586,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-error-small"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-syslogger-seams",
+ "backend-utils-error",
+ "backend-utils-error-small-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-error-small-seams"
 version = "0.0.0"
 dependencies = [
@@ -19653,6 +19664,7 @@ dependencies = [
  "backend-utils-cache-ts-cache",
  "backend-utils-cache-typcache",
  "backend-utils-error",
+ "backend-utils-error-small",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr",
  "backend-utils-fmgr-funcapi",
