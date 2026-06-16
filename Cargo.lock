@@ -4506,6 +4506,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-operator"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-operator-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-parser-parse-oper",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
@@ -13966,6 +14000,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-gin"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-gin-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonpath",
+ "backend-utils-adt-numeric",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-jsonb",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-gin-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-op"
 version = "0.0.0"
 dependencies = [
@@ -17267,6 +17329,7 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
+ "backend-catalog-pg-operator",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
  "backend-catalog-pg-type",
@@ -17481,6 +17544,7 @@ dependencies = [
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
+ "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
