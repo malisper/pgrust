@@ -40,7 +40,9 @@ use types_tuple::access::{
     RELKIND_TOASTVALUE,
 };
 
-use crate::core_entry_store::entry::{FormPgClass, OwnedAttr, OwnedTupleDesc, RelationData};
+use crate::core_entry_store::entry::{
+    FormPgClass, OwnedAttr, OwnedTupleConstr, OwnedTupleDesc, RelationData,
+};
 use crate::core_entry_store::{cache_insert, eoxact_list_add, with_state, RelationIncrementReferenceCount};
 use crate::{REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_NOTHING};
 
@@ -421,15 +423,23 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
  * ======================================================================== */
 
 /// `RelationBuildLocalRelation(...)` (relcache.c): build a relcache entry for a
-/// brand-new relation without catalog access. **Own logic.** The passed
-/// `TupleDesc` copy and `accessmtd` arguments of the C signature are handled by
-/// the build/index families; this family's signature carries the scalar identity
-/// the entry stores directly plus the `relfilenumber` the C uses to set
-/// `relfilenode` (unmapped relations) or seed the relation map (mapped).
-pub fn RelationBuildLocalRelation(
+/// brand-new relation without catalog access. **Own logic.**
+///
+/// `tup_desc` is the C `TupleDesc tupDesc` the caller passes
+/// (`heap_create`/`index_create`'s column descriptor); the entry deep-copies it
+/// into the owned [`OwnedTupleDesc`] (the cache-context `CreateTupleDescCopy`),
+/// carrying `natts` and the per-column `attnotnull` / `attidentity` /
+/// `attgenerated` (the only constraint-ish fields a brand-new relation may
+/// already have) and the `attnullability` of not-null columns, and stamps
+/// `constr.has_not_null` when any column is NOT NULL. `accessmtd` is the C
+/// `Oid accessmtd` argument, stored as `rd_rel->relam`. `relfilenumber` sets
+/// `relfilenode` (unmapped relations) or seeds the relation map (mapped).
+pub fn RelationBuildLocalRelation<'mcx>(
     relname: &str,
     relnamespace: Oid,
+    tup_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
     relid: Oid,
+    accessmtd: Oid,
     reltablespace: Oid,
     shared_relation: bool,
     mapped_relation: bool,
@@ -437,6 +447,8 @@ pub fn RelationBuildLocalRelation(
     relkind: i8,
     relfilenumber: types_core::RelFileNumber,
 ) -> PgResult<Oid> {
+    // int natts = tupDesc->natts; Assert(natts >= 0);
+    let natts = tup_desc.natts;
     // C: nailit for the seven bootstrap-nailed catalogs.
     let nailit = matches!(
         relid,
@@ -467,16 +479,59 @@ pub fn RelationBuildLocalRelation(
     rel.rd_firstRelfilelocatorSubid = InvalidSubTransactionId;
     rel.rd_droppedSubid = InvalidSubTransactionId;
 
-    // C: rd_att = CreateTupleDescCopy(tupDesc); the attribute rows are copied
-    // by the build family from the passed TupleDesc. This family's signature
-    // does not carry the TupleDesc; the owned descriptor starts with the
-    // composite-type metadata it can fill (natts is set from rd_rel below).
+    // C: rel->rd_att = CreateTupleDescCopy(tupDesc); rd_att->tdrefcount = 1.
+    // A new relation can't have any defaults or constraints yet (they're added
+    // in later steps), but attnotnull constraints + the attidentity/attgenerated
+    // markers + the attnullability of not-null columns ARE copied here, and
+    // has_not_null is computed for the constr stamp below. The owned entry
+    // mirror carries those per-column fields on OwnedAttr.
+    let mut attrs = Vec::<OwnedAttr>::with_capacity(natts.max(0) as usize);
+    let mut has_not_null = false;
+    for i in 0..(natts as usize) {
+        // Form_pg_attribute satt = TupleDescAttr(tupDesc, i);
+        let satt = tup_desc.attr(i);
+        // The compact attribute carries attnullability (copied for not-null
+        // columns; the C `dcatt->attnullability = scatt->attnullability`).
+        let attnullability = if satt.attnotnull {
+            tup_desc.compact_attrs[i].attnullability
+        } else {
+            // CreateTupleDescCopy leaves a nullable column's attnullability at
+            // its populate_compact_attribute default (recomputed on materialize).
+            tup_desc.compact_attrs[i].attnullability
+        };
+        has_not_null |= satt.attnotnull;
+        attrs.push(OwnedAttr {
+            // NameStr(satt->attname) -> owned String for the entry mirror.
+            attname: String::from_utf8_lossy(satt.attname.name_str()).into_owned(),
+            atttypid: satt.atttypid,
+            attlen: satt.attlen,
+            attnum: satt.attnum,
+            atttypmod: satt.atttypmod,
+            attbyval: satt.attbyval,
+            attalign: satt.attalign,
+            attnotnull: satt.attnotnull,
+            attidentity: satt.attidentity,
+            attgenerated: satt.attgenerated,
+            attisdropped: satt.attisdropped,
+            attcollation: satt.attcollation,
+            attnullability,
+        });
+    }
     rel.rd_att = OwnedTupleDesc {
-        natts: 0,
-        tdtypeid: types_tuple::heaptuple::RECORDOID,
-        tdtypmod: -1,
-        attrs: Vec::<OwnedAttr>::new(),
-        constr: None,
+        natts,
+        tdtypeid: tup_desc.tdtypeid,
+        tdtypmod: tup_desc.tdtypmod,
+        attrs,
+        // if (has_not_null) { constr = palloc0(...); constr->has_not_null = true;
+        //                     rd_att->constr = constr; }
+        constr: if has_not_null {
+            Some(OwnedTupleConstr {
+                has_not_null: true,
+                ..Default::default()
+            })
+        } else {
+            None
+        },
     };
 
     // C: rd_rel = palloc0(CLASS_TUPLE_SIZE); fill the pg_class form.
@@ -484,7 +539,7 @@ pub fn RelationBuildLocalRelation(
     relform.relname = relname.to_string();
     relform.relnamespace = relnamespace;
     relform.relkind = relkind;
-    relform.relnatts = 0; // set from rd_att once the build family fills it
+    relform.relnatts = natts as i16;
     relform.reltype = InvalidOid;
     relform.relowner = BOOTSTRAP_SUPERUSERID;
     relform.relpersistence = relpersistence;
@@ -547,7 +602,8 @@ pub fn RelationBuildLocalRelation(
     // C: RelationInitLockInfo(rel); RelationInitPhysicalAddr(rel); — index
     // family (physical addr) over the owned (not-yet-inserted) entry.
     crate::index::RelationInitPhysicalAddr(&mut rel)?;
-    rel.rd_rel.relam = InvalidOid;
+    // C: rel->rd_rel->relam = accessmtd;
+    rel.rd_rel.relam = accessmtd;
 
     // C: for relations with storage AM, RelationInitTableAccessMethod(rel).
     let relkind_u = relkind as u8;

@@ -1,0 +1,20 @@
+[package]
+name = "backend-tcop-utility"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_tcop_utility"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }

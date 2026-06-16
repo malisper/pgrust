@@ -1112,3 +1112,56 @@ seam_core::seam!(
         replaces: types_catalog::pg_aggregate::PgAggregateReplaces,
     ) -> PgResult<()>
 );
+
+/* ======================================================================== *
+ * DDL-cluster catalog writes (catalog/heap.c — InsertPgClassTuple,
+ * InsertPgAttributeTuples, StoreAttrDefault). Consumed by the heap.c port.
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `InsertPgClassTuple(pg_class_desc, new_rel_desc, new_rel_oid, relacl,
+    /// reloptions)` (catalog/heap.c): build the full 34-column `pg_class` row
+    /// from the new relation's `rd_rel` (carried in [`PgClassInsertRow`], which
+    /// folds in `new_rel_oid` and the `relacl` / `reloptions` Datums), then
+    /// `heap_form_tuple(RelationGetDescr(pg_class_desc), values, nulls)` +
+    /// `CatalogTupleInsert(pg_class_desc, tup)`. `rel` is the open pg_class
+    /// relation. `relpartbound` is stored NULL (set later by updating the
+    /// tuple). `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_class::PgClassInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InsertPgAttributeTuples(pg_attribute_rel, tupdesc, new_rel_oid, extra,
+    /// indstate)` (catalog/heap.c): form one `pg_attribute` heap tuple per row
+    /// (the fixed-layout part from each `Form_pg_attribute`, the nullable tail
+    /// from `FormExtraData_pg_attribute`, carried in [`PgAttributeInsertRow`])
+    /// and multi-insert the batch with index maintenance
+    /// (`CatalogOpenIndexes` + `CatalogTuplesMultiInsertWithInfo` +
+    /// `CatalogCloseIndexes`). The caller pre-resolves each row's `attrelid`
+    /// (the C `new_rel_oid != InvalidOid` selection). `rel` is the open
+    /// pg_attribute relation. `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_insert_pg_attribute_tuples<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        rows: &[types_catalog::pg_attribute::PgAttributeInsertRow],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `StoreAttrDefault`'s pg_attrdef INSERT (catalog/heap.c): `attrdefOid =
+    /// GetNewOidWithIndex(adrel, AttrDefaultOidIndexId, Anum_pg_attrdef_oid)` +
+    /// `heap_form_tuple(RelationGetDescr(adrel), values, nulls)` +
+    /// `CatalogTupleInsert(adrel, tuple)`, returning the freshly-allocated
+    /// pg_attrdef OID. `rel` is the open pg_attrdef relation. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_attrdef<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_attrdef::PgAttrdefInsertRow,
+    ) -> PgResult<Oid>
+);
