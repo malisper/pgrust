@@ -25,6 +25,7 @@ pub const RECORDARRAYOID: Oid = 2287;
 /// `VOIDOID` — `void` pseudo-type (`pg_type_d.h:228`).
 pub const VOIDOID: Oid = 2278;
 pub const BOOLOID: Oid = 16;
+pub const BYTEAOID: Oid = 17;
 pub const NAMEOID: Oid = 19;
 pub const INT8OID: Oid = 20;
 pub const INT2OID: Oid = 21;

@@ -854,6 +854,122 @@ pub fn init_seams() {
     s::type_name_list_to_string::set(seam_type_name_list_to_string);
     s::lookup_type_name_oid_owa::set(seam_lookup_type_name_oid_owa);
     s::func_name_as_type::set(seam_func_name_as_type);
+    s::typename_type_id_from_defelem::set(seam_typename_type_id_from_defelem);
+}
+
+/// Bridge the K1 owned-tree `types_nodes::rawnodes::TypeName<'mcx>` (carried in
+/// a `DefElem`'s `arg`) into the resolver-facing `types_parsenodes::TypeName`
+/// the owner's `typenameTypeId`/`LookupTypeName` operate on. Mirrors
+/// parse_expr's `typename_type_id_and_mod` converter: the qualified `names` are
+/// `String` nodes; `typmods` are not consulted by the OID lookup but are carried
+/// through (simple `A_Const`/identifier values, else `A_Star` so the owner
+/// raises the C "must be simple constants or identifiers" error); `arrayBounds`
+/// only need to be non-empty for `LookupTypeName` to resolve the array type.
+fn raw_typename_to_parse(
+    tn: &types_nodes::rawnodes::TypeName<'_>,
+) -> PgResult<types_parsenodes::TypeName> {
+    use types_nodes::nodes::Node as RawNode;
+
+    let mut names: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.names.len());
+    for n in tn.names.iter() {
+        match &**n {
+            RawNode::String(s) => names.push(types_parsenodes::Node::String(
+                types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
+            )),
+            other => {
+                return Err(PgError::error(format!(
+                    "defGetTypeName: TypeName.names element is not a String node (tag {})",
+                    other.node_tag().0
+                )));
+            }
+        }
+    }
+
+    let mut typmods: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
+    for tm in tn.typmods.iter() {
+        let bridged: types_parsenodes::Node = match &**tm {
+            RawNode::A_Const(ac) => match ac.val.as_deref() {
+                Some(RawNode::Integer(i)) => {
+                    types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+                }
+                Some(RawNode::Float(f)) => types_parsenodes::Node::Float(types_parsenodes::Float {
+                    fval: Some(f.fval.as_str().to_string()),
+                }),
+                Some(RawNode::String(s)) => types_parsenodes::Node::String(
+                    types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
+                ),
+                Some(RawNode::Boolean(b)) => {
+                    types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
+                }
+                Some(RawNode::BitString(b)) => types_parsenodes::Node::BitString(
+                    types_parsenodes::BitString { bsval: Some(b.bsval.as_str().to_string()) },
+                ),
+                _ => types_parsenodes::Node::A_Star,
+            },
+            RawNode::ColumnRef(cr) => {
+                if cr.fields.len() == 1 {
+                    if let RawNode::String(s) = &*cr.fields[0] {
+                        types_parsenodes::Node::String(types_parsenodes::StringNode {
+                            sval: Some(s.sval.as_str().to_string()),
+                        })
+                    } else {
+                        types_parsenodes::Node::A_Star
+                    }
+                } else {
+                    types_parsenodes::Node::A_Star
+                }
+            }
+            _ => types_parsenodes::Node::A_Star,
+        };
+        typmods.push(bridged);
+    }
+
+    let mut array_bounds: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.arrayBounds.len());
+    for n in tn.arrayBounds.iter() {
+        match &**n {
+            RawNode::Integer(i) => array_bounds
+                .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })),
+            _ => array_bounds
+                .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: -1 })),
+        }
+    }
+
+    Ok(types_parsenodes::TypeName {
+        names,
+        typeOid: tn.typeOid,
+        setof: tn.setof,
+        pct_type: tn.pct_type,
+        typmods,
+        typemod: tn.typemod,
+        arrayBounds: array_bounds,
+        location: tn.location,
+    })
+}
+
+/// `typenameTypeId(pstate, defGetTypeName(def))` (sequence.c `init_params`
+/// AS-type leg). `defGetTypeName` requires the `DefElem`'s `arg` to be a
+/// `TypeName` node; anything else raises (the C `elog`). The resolved
+/// `TypeName` is looked up to a type OID, erroring if absent or shell-only.
+fn seam_typename_type_id_from_defelem(
+    def: &types_nodes::ddlnodes::DefElem<'_>,
+) -> PgResult<Oid> {
+    use types_nodes::nodes::Node as RawNode;
+
+    // defGetTypeName: the value must be an IsA(arg, TypeName) node.
+    let tn = match def.arg.as_deref() {
+        Some(RawNode::TypeName(tn)) => tn,
+        _ => {
+            let name = def.defname.as_ref().map(|s| s.as_str()).unwrap_or("");
+            return Err(PgError::error(format!(
+                "argument of \"{}\" must be a type name",
+                name
+            )));
+        }
+    };
+
+    let tn_pn = raw_typename_to_parse(tn)?;
+    let scratch = mcx::MemoryContext::new("typenameTypeIdFromDefElem");
+    typenameTypeId(scratch.mcx(), None, &tn_pn)
 }
 
 /// `parse_type_string(str, soft)` — `parseTypeString(str, &typeid, &typmod,

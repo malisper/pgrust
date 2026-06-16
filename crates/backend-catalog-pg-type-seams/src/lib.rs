@@ -91,3 +91,25 @@ seam_core::seam!(
         type_namespace: Oid,
     ) -> PgResult<String>
 );
+
+seam_core::seam!(
+    /// Guts of `RemoveTypeById` (typecmds.c:656) that live on the pg_type side:
+    /// `table_open(TypeRelationId, RowExclusiveLock)` +
+    /// `SearchSysCache1(TYPEOID, typeOid)` +
+    /// `CatalogTupleDelete(relation, &tup->t_self)` + `ReleaseSysCache(tup)` +
+    /// `table_close(relation, RowExclusiveLock)`. Returns the deleted row's
+    /// `typtype` char so the caller (typecmds) can do the by-hand
+    /// `EnumValuesDelete`/`RangeDelete` cleanup. `elog(ERROR, "cache lookup
+    /// failed for type %u")` on a missing row, carried on `Err`.
+    pub fn remove_type_catalog_row(type_oid: Oid) -> PgResult<i8>
+);
+
+seam_core::seam!(
+    /// `table_open(TypeRelationId, AccessShareLock)` +
+    /// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)` +
+    /// `table_close(...)` — the non-binary-upgrade OID source shared by
+    /// `AssignTypeArrayOid` / `AssignTypeMultirangeOid` /
+    /// `AssignTypeMultirangeArrayOid` (typecmds.c:2447-2539). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn get_new_type_oid() -> PgResult<Oid>
+);

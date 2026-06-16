@@ -115,8 +115,10 @@ pub fn init_all() {
     backend_commands_schemacmds::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_commands_seclabel::init_seams();
+    backend_commands_sequence::init_seams();
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
+    backend_commands_typecmds::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
     backend_executor_execExpr::init_seams();
@@ -303,6 +305,7 @@ pub fn init_all() {
     backend_utils_adt_char::init_seams();
     backend_utils_adt_float::init_seams();
     backend_utils_adt_format_type::init_seams();
+    backend_utils_adt_xml::init_seams();
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
@@ -315,6 +318,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_pseudotypes::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
     backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();

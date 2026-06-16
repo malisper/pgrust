@@ -119,8 +119,10 @@ backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
+backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-typecmds = { path = "../backend-commands-typecmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }
 backend-executor-execExpr = { path = "../backend-executor-execExpr" }
@@ -307,6 +309,7 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
+backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
@@ -314,6 +317,7 @@ backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetyp
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
+backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }
 backend-utils-adt-quote = { path = "../backend-utils-adt-quote" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
