@@ -19,3 +19,8 @@ synthetic = []
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-pathnodes = { path = "../types-pathnodes" }
+
+[dev-dependencies]
+# Needed by the synthetic fixture's tests to build an (empty) PlannerRun in an
+# Mcx so the re-signed `(run, root, rti)` seams can be called.
+mcx = { path = "../mcx" }

@@ -3,6 +3,7 @@
 use backend_nodes_core::makefuncs::make_bool_const;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, Relids, RinfoId};
 
 use crate::bms;
@@ -43,7 +44,8 @@ pub fn have_relevant_joinclause(root: &PlannerInfo, rel1: RelId, rel2: RelId) ->
 
 /// `add_join_clause_to_rels`
 ///	  Add 'restrictinfo' to the joininfo list of each relation it requires.
-pub fn add_join_clause_to_rels(
+pub fn add_join_clause_to_rels<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     restrictinfo: RinfoId,
     join_relids: &Relids,
@@ -87,7 +89,7 @@ pub fn add_join_clause_to_rels(
             break;
         }
         // We only need to add the clause to baserels.
-        let rel = match ext_seam::find_base_rel_ignore_join::call(root, cur_relid) {
+        let rel = match ext_seam::find_base_rel_ignore_join::call(run, root, cur_relid) {
             Some(r) => r,
             None => continue,
         };
@@ -98,7 +100,8 @@ pub fn add_join_clause_to_rels(
 
 /// `remove_join_clause_from_rels`
 ///	  Delete 'restrictinfo' from all the joininfo lists it is in.
-pub fn remove_join_clause_from_rels(
+pub fn remove_join_clause_from_rels<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     restrictinfo: RinfoId,
     join_relids: &Relids,
@@ -110,7 +113,7 @@ pub fn remove_join_clause_from_rels(
             break;
         }
         // We would only have added the clause to baserels.
-        let rel = match ext_seam::find_base_rel_ignore_join::call(root, cur_relid) {
+        let rel = match ext_seam::find_base_rel_ignore_join::call(run, root, cur_relid) {
             Some(r) => r,
             None => continue,
         };

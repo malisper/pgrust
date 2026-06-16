@@ -8,6 +8,7 @@
 
 use types_core::primitive::Index;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId};
 
 use backend_optimizer_util_pathnode_seams as pathnode;
@@ -19,11 +20,16 @@ use crate::build_ordinality_pathkeys;
 /// `set_function_pathlist` (allpaths.c:2795) — the single access path for a
 /// function RTE. Ordered by the ordinal column when `WITH ORDINALITY` and that
 /// column is referenced in an EquivalenceClass.
-pub fn set_function_pathlist(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
+pub fn set_function_pathlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
     // Function scans can't take join clauses; LATERAL refs may parameterize.
     let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
 
-    let pathkeys = if rte::rte_funcordinality::call(root, rti) {
+    let pathkeys = if rte::rte_funcordinality::call(run, root, rti) {
         build_ordinality_pathkeys(root, rel)
     } else {
         alloc::vec::Vec::new()

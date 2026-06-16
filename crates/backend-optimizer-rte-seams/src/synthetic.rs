@@ -126,37 +126,38 @@ fn install_once() {
         return;
     }
 
-    rte_rtekind::set(|_root, rti| rte(rti).rtekind);
-    rte_relkind::set(|_root, rti| rte(rti).relkind);
-    rte_relid::set(|_root, rti| rte(rti).relid);
-    rte_inh::set(|_root, rti| rte(rti).inh);
-    rte_subquery::set(|_root, rti| rte(rti).subquery);
-    rte_functions_len::set(|_root, rti| rte(rti).functions_len);
-    rte_funcordinality::set(|_root, rti| rte(rti).funcordinality);
-    rte_ctename::set(|_root, rti| rte(rti).ctename.clone());
-    rte_ctelevelsup::set(|_root, rti| rte(rti).ctelevelsup);
-    rte_self_reference::set(|_root, rti| rte(rti).self_reference);
-    rte_has_tablesample::set(|_root, rti| rte(rti).has_tablesample);
-    rte_has_tablefunc::set(|_root, rti| rte(rti).has_tablefunc);
-    rte_security_barrier::set(|_root, rti| rte(rti).security_barrier);
-    rte_values_lists_len::set(|_root, rti| rte(rti).values_lists_len);
-    rte_lateral::set(|_root, rti| rte(rti).lateral);
-    rte_jointype::set(|_root, rti| rte(rti).jointype);
-    rte_enrtuples::set(|_root, rti| rte(rti).enrtuples);
+    rte_rtekind::set(|_run, _root, rti| rte(rti).rtekind);
+    rte_relkind::set(|_run, _root, rti| rte(rti).relkind);
+    rte_relid::set(|_run, _root, rti| rte(rti).relid);
+    rte_inh::set(|_run, _root, rti| rte(rti).inh);
+    rte_subquery::set(|_run, _root, rti| rte(rti).subquery);
+    rte_functions_len::set(|_run, _root, rti| rte(rti).functions_len);
+    rte_funcordinality::set(|_run, _root, rti| rte(rti).funcordinality);
+    rte_ctename::set(|_run, _root, rti| rte(rti).ctename.clone());
+    rte_ctelevelsup::set(|_run, _root, rti| rte(rti).ctelevelsup);
+    rte_self_reference::set(|_run, _root, rti| rte(rti).self_reference);
+    rte_has_tablesample::set(|_run, _root, rti| rte(rti).has_tablesample);
+    rte_has_tablefunc::set(|_run, _root, rti| rte(rti).has_tablefunc);
+    rte_security_barrier::set(|_run, _root, rti| rte(rti).security_barrier);
+    rte_values_lists_len::set(|_run, _root, rti| rte(rti).values_lists_len);
+    rte_lateral::set(|_run, _root, rti| rte(rti).lateral);
+    rte_jointype::set(|_run, _root, rti| rte(rti).jointype);
+    rte_enrtuples::set(|_run, _root, rti| rte(rti).enrtuples);
 
-    parse_rtable_len::set(|_root| table().entries.len() as i32);
-    parse_rte::set(|_root, rti| {
+    parse_rtable_len::set(|_run, _root| table().entries.len() as i32);
+    parse_rte::set(|_run, _root, rti| {
         // The flat-rtable handle is just the 1-based RT index (mirrors the C
         // `list_nth(parse->rtable, rti-1)` identity within this synthetic space).
         let _ = rte(rti); // bounds-check
         RangeTblEntryId(rti)
     });
-    parse_rteperminfos_len::set(|_root| table().rteperminfos_len);
+    parse_rteperminfos_len::set(|_run, _root| table().rteperminfos_len);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use types_pathnodes::planner_run::PlannerRun;
     use types_pathnodes::PlannerInfo;
 
     #[test]
@@ -184,26 +185,30 @@ mod tests {
         });
 
         let root = PlannerInfo::default();
+        // The synthetic install reads from its own global table and ignores the
+        // `run` parameter; an empty run satisfies the (re-signed) seam contract.
+        let cx = mcx::MemoryContext::new("rte-seams-synth-test");
+        let run = PlannerRun::new(cx.mcx());
 
         // RT index 1 (relation).
-        assert_eq!(rte_rtekind::call(&root, 1), types_pathnodes::RTE_RELATION);
-        assert_eq!(rte_relid::call(&root, 1), 1259);
-        assert_eq!(rte_relkind::call(&root, 1), b'r' as i8);
-        assert!(rte_inh::call(&root, 1));
-        assert_eq!(rte_subquery::call(&root, 1), None);
+        assert_eq!(rte_rtekind::call(&run, &root, 1), types_pathnodes::RTE_RELATION);
+        assert_eq!(rte_relid::call(&run, &root, 1), 1259);
+        assert_eq!(rte_relkind::call(&run, &root, 1), b'r' as i8);
+        assert!(rte_inh::call(&run, &root, 1));
+        assert_eq!(rte_subquery::call(&run, &root, 1), None);
 
         // RT index 2 (subquery).
-        assert_eq!(rte_subquery::call(&root, 2), Some(QueryId(7)));
-        assert!(rte_security_barrier::call(&root, 2));
-        assert!(rte_lateral::call(&root, 2));
+        assert_eq!(rte_subquery::call(&run, &root, 2), Some(QueryId(7)));
+        assert!(rte_security_barrier::call(&run, &root, 2));
+        assert!(rte_lateral::call(&run, &root, 2));
 
         // RT index 3 (function).
-        assert_eq!(rte_functions_len::call(&root, 3), 2);
-        assert!(rte_funcordinality::call(&root, 3));
+        assert_eq!(rte_functions_len::call(&run, &root, 3), 2);
+        assert!(rte_funcordinality::call(&run, &root, 3));
 
         // Query-level.
-        assert_eq!(parse_rtable_len::call(&root), 3);
-        assert_eq!(parse_rte::call(&root, 2), RangeTblEntryId(2));
-        assert_eq!(parse_rteperminfos_len::call(&root), 1);
+        assert_eq!(parse_rtable_len::call(&run, &root), 3);
+        assert_eq!(parse_rte::call(&run, &root, 2), RangeTblEntryId(2));
+        assert_eq!(parse_rteperminfos_len::call(&run, &root), 1);
     }
 }

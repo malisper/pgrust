@@ -48,6 +48,7 @@ use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     PathId, PlannerInfo, RelId, Relids, JOIN_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
 };
@@ -151,6 +152,7 @@ fn path_req_outer(root: &PlannerInfo, path: PathId) -> Relids {
 /// [`RelId`].
 pub fn make_one_rel<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     joinlist: &[JoinlistNode],
 ) -> PgResult<RelId> {
@@ -158,7 +160,7 @@ pub fn make_one_rel<'mcx>(
     set_base_rel_consider_startup(root);
 
     // Compute size estimates and consider_parallel flags for each base rel.
-    set_base_rel_sizes(mcx, root)?;
+    set_base_rel_sizes(mcx, run, root)?;
 
     // Now compute total_table_pages (appendrels not double-counted: parents
     // have pages = 0).
@@ -185,7 +187,7 @@ pub fn make_one_rel<'mcx>(
     root.total_table_pages = total_pages;
 
     // Generate access paths for each base rel.
-    set_base_rel_pathlists(mcx, root)?;
+    set_base_rel_pathlists(mcx, run, root)?;
 
     // Generate access paths for the entire join tree.
     let rel = make_rel_from_joinlist(mcx, root, joinlist)?
@@ -227,7 +229,11 @@ pub fn set_base_rel_consider_startup(root: &mut PlannerInfo) {
 
 /// `set_base_rel_sizes` (allpaths.c:289) — set the size estimates and
 /// `consider_parallel` flag for each base-relation entry.
-pub fn set_base_rel_sizes<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgResult<()> {
+pub fn set_base_rel_sizes<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<()> {
     let mut rti: usize = 1;
     while rti < root.simple_rel_array_size as usize {
         let rel = match root.simple_rel_array[rti] {
@@ -248,10 +254,10 @@ pub fn set_base_rel_sizes<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgRes
         // If parallelism is allowable for this query in general, see whether
         // it's allowable for this rel in particular (must precede set_rel_size).
         if parallel_mode_ok(root) {
-            set_rel_consider_parallel(root, rel, rti as Index);
+            set_rel_consider_parallel(run, root, rel, rti as Index);
         }
 
-        set_rel_size(mcx, root, rel, rti as Index)?;
+        set_rel_size(mcx, run, root, rel, rti as Index)?;
 
         rti += 1;
     }
@@ -264,7 +270,11 @@ pub fn set_base_rel_sizes<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgRes
 
 /// `set_base_rel_pathlists` (allpaths.c:332) — find all paths for scanning each
 /// base-relation entry.
-pub fn set_base_rel_pathlists<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgResult<()> {
+pub fn set_base_rel_pathlists<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<()> {
     let mut rti: usize = 1;
     while rti < root.simple_rel_array_size as usize {
         let rel = match root.simple_rel_array[rti] {
@@ -279,7 +289,7 @@ pub fn set_base_rel_pathlists<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> P
             rti += 1;
             continue;
         }
-        set_rel_pathlist(mcx, root, rel, rti as Index)?;
+        set_rel_pathlist(mcx, run, root, rel, rti as Index)?;
         rti += 1;
     }
     Ok(())
@@ -293,29 +303,30 @@ pub fn set_base_rel_pathlists<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> P
 /// (the RTE-kind dispatcher).
 pub fn set_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
 ) -> PgResult<()> {
     if root.rel(rel).reloptkind == RELOPT_BASEREL
-        && relation_excluded_by_constraints(root, rel, rti)
+        && relation_excluded_by_constraints(run, root, rel, rti)
     {
         // Proven empty by constraint exclusion: install a dummy path now. (Only
         // for regular baserels; otherrels had CE checked in set_append_rel_size.)
         set_dummy_rel_pathlist(root, rel)?;
-    } else if rte::rte_inh::call(root, rti) {
+    } else if rte::rte_inh::call(run, root, rti) {
         // It's an "append relation".
-        set_append_rel_size(mcx, root, rel, rti)?;
+        set_append_rel_size(mcx, run, root, rel, rti)?;
     } else {
-        match rte::rte_rtekind::call(root, rti) {
+        match rte::rte_rtekind::call(run, root, rti) {
             RTE_RELATION => {
-                let relkind = rte::rte_relkind::call(root, rti);
+                let relkind = rte::rte_relkind::call(run, root, rti);
                 if relkind == RELKIND_FOREIGN_TABLE {
-                    set_foreign_size(root, rel, rti)?;
+                    set_foreign_size(run, root, rel, rti)?;
                 } else if relkind == RELKIND_PARTITIONED_TABLE {
                     // Partitioned table scanned with ONLY: no partitions, dummy.
                     set_dummy_rel_pathlist(root, rel)?;
-                } else if rte::rte_has_tablesample::call(root, rti) {
+                } else if rte::rte_has_tablesample::call(run, root, rti) {
                     set_tablesample_rel_size(mcx, root, rel, rti)?;
                 } else {
                     set_plain_rel_size(mcx, root, rel)?;
@@ -331,7 +342,7 @@ pub fn set_rel_size<'mcx>(
             }
             RTE_VALUES => seams::set_values_size_estimates::call(root, rel),
             RTE_CTE => {
-                if rte::rte_self_reference::call(root, rti) {
+                if rte::rte_self_reference::call(run, root, rti) {
                     subquery::set_worktable_pathlist(root, rel, rti)?;
                 } else {
                     subquery::set_cte_pathlist(root, rel, rti)?;
@@ -358,27 +369,28 @@ pub fn set_rel_size<'mcx>(
 /// (the RTE-kind dispatcher) plus the post-dispatch finishing steps.
 pub fn set_rel_pathlist<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
 ) -> PgResult<()> {
     if is_dummy_rel(root, rel) {
         // Already proven empty; nothing more to do.
-    } else if rte::rte_inh::call(root, rti) {
-        set_append_rel_pathlist(mcx, root, rel, rti)?;
+    } else if rte::rte_inh::call(run, root, rti) {
+        set_append_rel_pathlist(mcx, run, root, rel, rti)?;
     } else {
-        match rte::rte_rtekind::call(root, rti) {
+        match rte::rte_rtekind::call(run, root, rti) {
             RTE_RELATION => {
-                if rte::rte_relkind::call(root, rti) == RELKIND_FOREIGN_TABLE {
-                    set_foreign_pathlist(root, rel, rti)?;
-                } else if rte::rte_has_tablesample::call(root, rti) {
+                if rte::rte_relkind::call(run, root, rti) == RELKIND_FOREIGN_TABLE {
+                    set_foreign_pathlist(run, root, rel, rti)?;
+                } else if rte::rte_has_tablesample::call(run, root, rti) {
                     set_tablesample_rel_pathlist(root, rel, rti)?;
                 } else {
                     set_plain_rel_pathlist(mcx, root, rel)?;
                 }
             }
             RTE_SUBQUERY => {}        // fully handled during set_rel_size
-            RTE_FUNCTION => set_function_pathlist(root, rel, rti)?,
+            RTE_FUNCTION => set_function_pathlist(run, root, rel, rti)?,
             RTE_TABLEFUNC => set_tablefunc_pathlist(root, rel)?,
             RTE_VALUES => set_values_pathlist(root, rel)?,
             RTE_CTE => {}            // fully handled during set_rel_size
@@ -426,26 +438,31 @@ pub fn set_plain_rel_size<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, rel: Rel
 
 /// `set_rel_consider_parallel` (allpaths.c:588) — set the rel's
 /// `consider_parallel` flag if it can safely be scanned from within a worker.
-pub fn set_rel_consider_parallel(root: &mut PlannerInfo, rel: RelId, rti: Index) {
+pub fn set_rel_consider_parallel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) {
     debug_assert!(!root.rel(rel).consider_parallel);
     debug_assert!(parallel_mode_ok(root));
     debug_assert!(is_simple_rel(root.rel(rel)));
 
     // Assorted checks based on rtekind.
-    match rte::rte_rtekind::call(root, rti) {
+    match rte::rte_rtekind::call(run, root, rti) {
         RTE_RELATION => {
             // Temp tables can't be accessed by workers.
-            if get_rel_persistence(rte::rte_relid::call(root, rti)) == RELPERSISTENCE_TEMP {
+            if get_rel_persistence(rte::rte_relid::call(run, root, rti)) == RELPERSISTENCE_TEMP {
                 return;
             }
             // TABLESAMPLE pushdown safety (the sample function + args).
-            if rte::rte_has_tablesample::call(root, rti) {
+            if rte::rte_has_tablesample::call(run, root, rti) {
                 if !tablesample_is_parallel_safe(root, rti) {
                     return;
                 }
             }
             // FDW parallel-safety dispatch.
-            if rte::rte_relkind::call(root, rti) == RELKIND_FOREIGN_TABLE {
+            if rte::rte_relkind::call(run, root, rti) == RELKIND_FOREIGN_TABLE {
                 if !foreign_scan_parallel_safe(root, rel, rti) {
                     return;
                 }
@@ -605,11 +622,16 @@ pub fn set_tablesample_rel_pathlist(
  * ======================================================================== */
 
 /// `set_foreign_size` (allpaths.c:913) — size estimates for a foreign table RTE.
-pub fn set_foreign_size(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
+pub fn set_foreign_size<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
     // Mark rel with estimated output rows, width, etc.
     set_foreign_size_estimates(root, rel);
     // Let the FDW adjust the size estimates (FDW dispatch — seamed).
-    foreign_get_rel_size(root, rel, rti)?;
+    foreign_get_rel_size(run, root, rel, rti)?;
     // But do not let it set the rows estimate to zero.
     let rows = costsize::clamp_row_est::call(root.rel(rel).rows);
     root.rel_mut(rel).rows = rows;
@@ -620,9 +642,14 @@ pub fn set_foreign_size(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgRes
 }
 
 /// `set_foreign_pathlist` (allpaths.c:937) — access paths for a foreign table RTE.
-pub fn set_foreign_pathlist(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
+pub fn set_foreign_pathlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
     // Call the FDW's GetForeignPaths (FDW dispatch — seamed).
-    foreign_get_paths(root, rel, rti)
+    foreign_get_paths(run, root, rel, rti)
 }
 
 mod append;
@@ -669,8 +696,13 @@ const RELPERSISTENCE_TEMP: i8 = b't' as i8;
 
 /// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c) — routes
 /// through the plancat-owned seam (installed once plancat lands).
-fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> bool {
-    seams::relation_excluded_by_constraints::call(root, rel, rti)
+fn relation_excluded_by_constraints<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> bool {
+    seams::relation_excluded_by_constraints::call(run, root, rel, rti)
 }
 
 /// `check_index_predicates(root, rel)` (indxpath.c).
@@ -702,12 +734,22 @@ fn set_foreign_size_estimates(root: &mut PlannerInfo, rel: RelId) {
 }
 
 /// FDW `GetForeignRelSize` dispatch (fdwapi.h).
-fn foreign_get_rel_size(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
-    seams::fdw_get_foreign_rel_size::call(root, rel, rte::rte_relid::call(root, rti))
+fn foreign_get_rel_size<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
+    seams::fdw_get_foreign_rel_size::call(root, rel, rte::rte_relid::call(run, root, rti))
 }
 /// FDW `GetForeignPaths` dispatch (fdwapi.h).
-fn foreign_get_paths(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
-    seams::fdw_get_foreign_paths::call(root, rel, rte::rte_relid::call(root, rti))
+fn foreign_get_paths<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
+    seams::fdw_get_foreign_paths::call(root, rel, rte::rte_relid::call(run, root, rti))
 }
 /// FDW `IsForeignScanParallelSafe` dispatch (fdwapi.h).
 fn foreign_scan_parallel_safe(root: &PlannerInfo, rel: RelId, rti: Index) -> bool {

@@ -283,7 +283,7 @@ pub fn rebuild_lateral_attr_needed(root: &mut PlannerInfo, _run: &PlannerRun<'_>
 ///
 /// Fill in the per-base-relation `direct_lateral_relids`, `lateral_relids` and
 /// `lateral_referencers` sets.
-pub fn create_lateral_join_info(root: &mut PlannerInfo, _run: &PlannerRun<'_>) {
+pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
     let mut found_laterals = false;
 
     // We need do nothing if the query contains no LATERAL RTEs.
@@ -388,7 +388,7 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, _run: &PlannerRun<'_>) {
                 if varno < 0 {
                     break;
                 }
-                match jiext::find_base_rel_ignore_join::call(root, varno) {
+                match jiext::find_base_rel_ignore_join::call(run, root, varno) {
                     None => continue, // ignore outer joins in eval_at
                     Some(brel) => {
                         let rel = root.rel_mut(brel);

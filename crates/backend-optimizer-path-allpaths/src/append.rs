@@ -10,6 +10,7 @@ use mcx::Mcx;
 use types_core::primitive::{Index, InvalidAttrNumber};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     BackwardScanDirection, ForwardScanDirection, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RELOPT_BASEREL,
@@ -33,6 +34,7 @@ const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
 /// tuples/rows/width by accumulating over the live children.
 pub fn set_append_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
@@ -48,7 +50,7 @@ pub fn set_append_rel_size<'mcx>(
     // partitionwise join consideration.
     if enable_partitionwise_join()
         && root.rel(rel).reloptkind == RELOPT_BASEREL
-        && crate::rte::rte_relkind::call(root, rti) == RELKIND_PARTITIONED_TABLE
+        && crate::rte::rte_relkind::call(run, root, rti) == RELKIND_PARTITIONED_TABLE
     {
         let min_attr = root.rel(rel).min_attr;
         let idx = (InvalidAttrNumber - min_attr) as usize;
@@ -91,7 +93,7 @@ pub fn set_append_rel_size<'mcx>(
 
         // Constraint exclusion on the child (its baserestrictinfo was already
         // substituted when its RelOptInfo was built).
-        if crate::relation_excluded_by_constraints(root, childrel, child_rtindex) {
+        if crate::relation_excluded_by_constraints(run, root, childrel, child_rtindex) {
             set_dummy_rel_pathlist(root, childrel)?;
             continue;
         }
@@ -157,11 +159,11 @@ pub fn set_append_rel_size<'mcx>(
 
         // Parallel-safety for the child (only if the appendrel is still safe).
         if parallel_mode_ok(root) && root.rel(rel).consider_parallel {
-            set_rel_consider_parallel(root, childrel, child_rtindex);
+            set_rel_consider_parallel(run, root, childrel, child_rtindex);
         }
 
         // Compute the child's size.
-        set_rel_size(mcx, root, childrel, child_rtindex)?;
+        set_rel_size(mcx, run, root, childrel, child_rtindex)?;
 
         // Constraint exclusion may have detected a contradiction in a child
         // subquery even though we didn't prove one above.
@@ -261,6 +263,7 @@ pub fn set_append_rel_size<'mcx>(
 /// the parent's append paths.
 pub fn set_append_rel_pathlist<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
@@ -286,7 +289,7 @@ pub fn set_append_rel_pathlist<'mcx>(
         }
 
         // Compute the child's access paths.
-        set_rel_pathlist(mcx, root, childrel, child_rtindex as Index)?;
+        set_rel_pathlist(mcx, run, root, childrel, child_rtindex as Index)?;
 
         if crate::is_dummy_rel(root, childrel) {
             continue;
