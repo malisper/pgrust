@@ -125,8 +125,12 @@ fn project_entry<'mcx>(
     let rd_att = r.rd_att.project_in(mcx, r.rd_id)?;
     // Index fields: `rd_index` / `rd_opcintype` (None/empty for a table).
     let rd_index = r.rd_index.as_ref().map(|ix| types_rel::FormData_pg_index {
+        indnatts: ix.indnatts,
         indnkeyatts: ix.indnkeyatts,
         indisunique: ix.indisunique,
+        indisprimary: ix.indisprimary,
+        indisexclusion: ix.indisexclusion,
+        indisready: ix.indisready,
         indimmediate: ix.indimmediate,
         indnullsnotdistinct: ix.indnullsnotdistinct,
         indrelid: ix.indrelid,

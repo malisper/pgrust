@@ -156,22 +156,11 @@ pub fn InsertPgClassTuple<'mcx>(
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_class::call(mcx, pg_class_desc, &row)
 }
 
-/// The pg_class columns that `AddNewRelationTuple` writes onto `rd_rel` just
-/// before `InsertPgClassTuple` (the ones the trimmed relcache `FormData_pg_class`
-/// does not carry, or that AddNewRelationTuple overrides).
-pub struct PgClassWriteFields {
-    pub relpages: i32,
-    pub reltuples: f32,
-    pub relallvisible: i32,
-    pub relallfrozen: i32,
-    pub relfrozenxid: TransactionId,
-    pub relminmxid: u32,
-    pub relowner: Oid,
-    pub reltype: Oid,
-    pub reloftype: Oid,
-    pub relispartition: bool,
-    pub relrewrite: Oid,
-}
+/// The pg_class write-only columns `AddNewRelationTuple` scribbles on `rd_rel`
+/// just before `InsertPgClassTuple`. Defined in the seams crate (so the
+/// cross-unit `InsertPgClassTuple` seam can name it without an owner
+/// dependency); re-exported here for the owner-internal callers.
+pub use backend_catalog_heap_seams::PgClassWriteFields;
 
 /* --------------------------------
  *		AddNewRelationTuple

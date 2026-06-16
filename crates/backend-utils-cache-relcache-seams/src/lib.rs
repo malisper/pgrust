@@ -459,6 +459,45 @@ seam_core::seam!(
     pub fn rd_index_indkey(index: &types_rel::Relation<'_>) -> types_error::PgResult<Option<std::vec::Vec<types_core::primitive::AttrNumber>>>
 );
 seam_core::seam!(
+    /// `index->rd_index->indnatts` — total number of columns in the index
+    /// (`IndexRelationGetNumberOfAttributes`). Read by `BuildIndexInfo`
+    /// (`catalog/index.c`) to size `ii_IndexAttrNumbers` and copy
+    /// `indkey.values[0..indnatts]`. `None` if `rd_index == NULL` (not an
+    /// index). Pure read.
+    pub fn rd_index_indnatts(index: &types_rel::Relation<'_>) -> types_error::PgResult<Option<i16>>
+);
+seam_core::seam!(
+    /// `index->rd_index->indnkeyatts` — number of key columns in the index
+    /// (`IndexRelationGetNumberOfKeyAttributes`). Read by `BuildIndexInfo`
+    /// for `makeIndexInfo`. `None` if `rd_index == NULL` (not an index). Pure
+    /// read.
+    pub fn rd_index_indnkeyatts(index: &types_rel::Relation<'_>) -> types_error::PgResult<Option<i16>>
+);
+seam_core::seam!(
+    /// `index->rd_index->indisunique` — is this a unique index? Read by
+    /// `BuildIndexInfo` for `makeIndexInfo`. `false` if `rd_index == NULL`
+    /// (not an index). Pure read.
+    pub fn rd_index_indisunique(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `index->rd_index->indisprimary` — is this index for a primary key?
+    /// `false` if `rd_index == NULL` (not an index). Pure read.
+    pub fn rd_index_indisprimary(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `index->rd_index->indisexclusion` — is this index for an exclusion
+    /// constraint? `BuildIndexInfo` uses `indisexclusion && indisunique` and
+    /// gates `RelationGetExclusionInfo`. `false` if `rd_index == NULL` (not an
+    /// index). Pure read.
+    pub fn rd_index_indisexclusion(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `index->rd_index->indisready` — is this index ready for inserts? Read
+    /// by `BuildIndexInfo` (`indexStruct->indisready`) for `makeIndexInfo`.
+    /// `false` if `rd_index == NULL` (not an index). Pure read.
+    pub fn rd_index_indisready(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
     /// `index->rd_indam->amclusterable`.
     pub fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
@@ -735,4 +774,28 @@ seam_core::seam!(
         mcx::PgVec<'mcx, types_core::primitive::Oid>,
         mcx::PgVec<'mcx, u16>,
     )>
+);
+
+seam_core::seam!(
+    /// `RelationBuildLocalRelation(relname, relnamespace, tupDesc, relid,
+    /// accessmtd, relfilenumber, reltablespace, shared_relation,
+    /// mapped_relation, relpersistence, relkind)` (relcache.c): build a local
+    /// (uncataloged) relcache entry for a freshly-created relation and add it to
+    /// the relcache. Called by `heap_create` (catalog/heap.c). In C the return
+    /// is the new `Relation`; the owned model returns the new relcache entry's
+    /// OID (the entry lives in the relcache store, addressed by OID). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_build_local_relation<'mcx>(
+        relname: &str,
+        relnamespace: types_core::primitive::Oid,
+        tup_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        relid: types_core::primitive::Oid,
+        accessmtd: types_core::primitive::Oid,
+        reltablespace: types_core::primitive::Oid,
+        shared_relation: bool,
+        mapped_relation: bool,
+        relpersistence: i8,
+        relkind: i8,
+        relfilenumber: types_core::primitive::RelFileNumber,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
 );
