@@ -4,6 +4,40 @@
 
 use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
 
+// ---------------------------------------------------------------------------
+// WAL-recovery orchestrator entry seams (xlogrecovery.c). The recovery owner
+// installs these from its `init_seams()`; `StartupXLOG` (xlog.c, the unported
+// driver) seam-and-calls them around the redo loop. They operate on the owner's
+// process-lifetime backend-local recovery state (C's file-static globals).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `void InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,`
+    /// `bool *haveBackupLabel_ptr, bool *haveTblspcMap_ptr)` (xlogrecovery.c:519)
+    /// — set up recovery: read signal/backup-label files, allocate the reader,
+    /// read the starting checkpoint, validate the timeline, and update the
+    /// in-memory `ControlFile`. Returns the three C out-params.
+    pub fn init_wal_recovery<'mcx>(
+        control_file: &mut types_control::ControlFileData,
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<types_wal::xlogrecovery_carriers::InitWalRecoveryResult>
+);
+
+seam_core::seam!(
+    /// `EndOfWalRecoveryInfo *FinishWalRecovery(void)` (xlogrecovery.c:1476) —
+    /// determine where to start writing WAL next; produce the end-of-recovery
+    /// info the caller uses to seed the WAL writer.
+    pub fn finish_wal_recovery<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<types_wal::xlogrecovery_carriers::EndOfWalRecoveryInfo>
+);
+
+seam_core::seam!(
+    /// `void ShutdownWalRecovery(void)` (xlogrecovery.c:1626) — clean up the WAL
+    /// reader and leftovers from restoring WAL from archive.
+    pub fn shutdown_wal_recovery() -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `GetXLogReceiptTime(*rtime, *fromStream)` — the last WAL receipt time
     /// and whether it arrived via streaming replication.

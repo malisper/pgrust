@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-wal = { path = "../types-wal" }
+types-control = { path = "../types-control" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 types-error = { path = "../types-error" }
@@ -46,7 +47,12 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
 backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+# FinishWalRecovery: kill the WAL receiver / slot-sync worker and turn off
+# streaming before writing end-of-recovery WAL.
+backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
 
 # Recovery-target GUC check/assign hooks (guc.rs): slot-name validation,
 # pg_lsn / timestamp parsing, and the GUC check-error reporting protocol.

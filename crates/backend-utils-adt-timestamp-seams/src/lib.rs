@@ -35,6 +35,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatumGetTimestampTz(DirectFunctionCall3(timestamptz_in, ...))` — the full
+    /// `timestamptz_in` conversion of `recovery_target_time_string`, run by
+    /// `validateRecoveryParameters` (xlogrecovery.c:1168). Distinct from the
+    /// syntax-only `parse_recovery_target_time`: this returns the actual
+    /// `TimestampTz` (time-zone-dependent), `Err` carrying the
+    /// `ereport(ERROR)` for an unparsable/out-of-range value. Owned by
+    /// `timestamp.c`.
+    pub fn recovery_target_timestamptz_in(
+        newval: String,
+    ) -> types_error::PgResult<TimestampTz>
+);
+
+seam_core::seam!(
     /// `void TimestampDifference(TimestampTz start, TimestampTz stop,
     /// long *secs, int *microsecs)` (`timestamp.c`) — returns `(secs, usecs)`
     /// of `stop - start`, clamped to 0 when negative.
