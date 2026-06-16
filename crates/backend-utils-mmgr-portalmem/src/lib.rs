@@ -43,7 +43,7 @@ use types_nodes::nodeindexscan::PlannedStmt;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_portal::{
     CachedPlanHandle, CommandTag, FcinfoHandle, PgCursorRow, Portal, PortalCleanupHook, PortalData,
-    PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_UNKNOWN,
+    PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_SELECT, CMDTAG_UNKNOWN,
     CURSOR_OPT_BINARY, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, MAX_PORTALNAME_LEN,
     PORTAL_ACTIVE, PORTAL_DEFINED, PORTAL_DONE, PORTAL_FAILED, PORTAL_MULTI_QUERY, PORTAL_NEW,
     PORTAL_ONE_SELECT, PORTAL_READY, RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS,
@@ -418,6 +418,147 @@ pub fn PortalDefineQuery(
     p.stmts = stmts;
     p.cplan = cplan;
     p.status = PORTAL_DEFINED;
+}
+
+/// Deep-copy `stmts` (working-context `PlannedStmt`s) into the portal's own
+/// `portalContext` arena, returning them carrying the portal-context-lived
+/// `'static` marker.
+///
+/// portalmem owns `portal->portalContext`; this is C's
+/// `MemoryContextSwitchTo(portal->portalContext); stmts = copyObject(stmts)`.
+/// Each copy is allocated in `portalContext` via [`PlannedStmt::clone_in`] (real
+/// `Global`-heap memory owned by the copy's inner `PgBox`/`PgVec`, accounted to
+/// that context). The descriptor is freed when the `stmts` field is dropped —
+/// which [`PortalData`]'s `Drop` and [`PortalDrop`] guarantee happens *before*
+/// `portalContext` — so extending the clone's lifetime to the field's `'static`
+/// marker is sound, exactly as [`portal_set_tup_desc`]/[`set_result_tup_desc_with`]
+/// argue for `tupDesc`.
+fn copy_stmts_into_portal_context(
+    portal: &Portal,
+    stmts: &[PlannedStmt<'_>],
+) -> PgResult<Vec<PlannedStmt<'static>>> {
+    let p = portal.borrow();
+    let ctx = p.portalContext.as_ref().ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal("copy_stmts_into_portal_context: portal has no portalContext")
+            .into_error()
+    })?;
+    let mcx = ctx.mcx();
+    let mut out: Vec<PlannedStmt<'static>> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let copied = stmt.clone_in(mcx)?;
+        // SAFETY: `copied` lives in `portalContext` (real owned heap, freed by
+        // its own `PgBox`/`PgVec` `Drop`). The `stmts` field is dropped before
+        // `portalContext` (PortalData::drop + PortalDrop ordering), so the copy
+        // never outlives the arena it deallocates through. The `'static` is the
+        // portal-context-lived marker, like `tupDesc`.
+        out.push(unsafe {
+            core::mem::transmute::<PlannedStmt<'_>, PlannedStmt<'static>>(copied)
+        });
+    }
+    Ok(out)
+}
+
+/// `portal_define_query_select` seam body — the cursor (`DECLARE CURSOR`) case:
+/// copy the single working-context `plan` and `source_text` into the portal's
+/// own context and define the query (always SELECT, no prepStmtName, no
+/// CachedPlan). C: `plan = copyObject(plan); queryString = pstrdup(sourceText);
+/// PortalDefineQuery(portal, NULL, queryString, CMDTAG_SELECT, list_make1(plan),
+/// NULL);`.
+fn portal_define_query_select(
+    portal: &Portal,
+    source_text: &str,
+    plan: PlannedStmt<'_>,
+) -> PgResult<()> {
+    let stmts = copy_stmts_into_portal_context(portal, core::slice::from_ref(&plan))?;
+    PortalDefineQuery(
+        portal,
+        None,
+        source_text.to_owned(),
+        CMDTAG_SELECT,
+        Some(stmts),
+        CachedPlanHandle::NULL,
+    );
+    Ok(())
+}
+
+/// `portal_define_query_list` seam body — the general `PortalDefineQuery` bridge
+/// for an arbitrary planned-statement list and command tag
+/// (`exec_simple_query`/`exec_bind_message`). Copies `stmts` and `source_text`
+/// into the portal's own context when the plans are not owned by a cached plan
+/// (`cplan` NULL); when `cplan` is non-NULL the plans are owned by the cached
+/// plan and the list is interned into the portal context the same way (C does
+/// the `copyObject` into the portal context regardless; the cached plan keeps
+/// its own copy alive via the refcount, recorded by `cplan`).
+fn portal_define_query_list(
+    portal: &Portal,
+    prep_stmt_name: Option<&str>,
+    source_text: &str,
+    command_tag: CommandTag,
+    stmts: &[PlannedStmt<'_>],
+    cplan: CachedPlanHandle,
+) -> PgResult<()> {
+    let copied = copy_stmts_into_portal_context(portal, stmts)?;
+    PortalDefineQuery(
+        portal,
+        prep_stmt_name.map(str::to_owned),
+        source_text.to_owned(),
+        command_tag,
+        Some(copied),
+        cplan,
+    );
+    Ok(())
+}
+
+/// `params = copyParamList(params)` after switching to the portal context
+/// (`copy_param_list_into_portal` seam body). The portal-facing
+/// `ParamListInfo` payload (`types_nodes::portalcmds::ParamListInfoData`) is an
+/// `Rc`-shared, not-yet-modeled opaque value; copying it into the portal
+/// context is modeled by cloning the refcounted handle (the payload is owned
+/// behind the `Rc`, not arena-bound). `None` in → `None` out (the C NULL).
+fn copy_param_list_into_portal(
+    _portal: &Portal,
+    params: types_nodes::portalcmds::ParamListInfo,
+) -> PgResult<types_nodes::portalcmds::ParamListInfo> {
+    Ok(params)
+}
+
+/// `oldcxt = MemoryContextSwitchTo(portal->holdContext);
+/// portal->tupDesc = CreateTupleDescCopy(portal->tupDesc);
+/// MemoryContextSwitchTo(oldcxt);` (`copy_tup_desc_into_hold_context` seam
+/// body) — re-copy the portal's existing result descriptor (currently in
+/// executor/portal memory) into its `holdContext` so it survives the executor
+/// shutdown, storing the copy back on the portal.
+fn copy_tup_desc_into_hold_context(portal: &Portal) -> PgResult<()> {
+    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = {
+        let p = portal.borrow();
+        match &p.tupDesc {
+            None => None,
+            Some(td) => {
+                let ctx = p.holdContext.as_ref().ok_or_else(|| {
+                    ereport(ERROR)
+                        .errmsg_internal(
+                            "copy_tup_desc_into_hold_context: portal has no holdContext",
+                        )
+                        .into_error()
+                })?;
+                let copied = td.clone_in(ctx.mcx())?;
+                // SAFETY: `copied` lives in `holdContext` (real owned heap,
+                // freed by its own `Drop`); the `tupDesc` field is dropped
+                // before `holdContext` (PortalData::drop ordering), so it never
+                // outlives that arena. `'static` is the hold-context-lived
+                // marker, like `holdStore`.
+                Some(unsafe {
+                    core::mem::transmute::<
+                        types_tuple::heaptuple::TupleDescData<'_>,
+                        types_tuple::heaptuple::TupleDescData<'static>,
+                    >(copied)
+                })
+            }
+        }
+    };
+    portal.borrow_mut().tupDesc = copy;
+    Ok(())
 }
 
 /// `PortalReleaseCachedPlan` — release a portal's cached-plan reference, if any
@@ -810,6 +951,11 @@ pub fn PortalDrop(portal: &Portal, isTopCommit: bool) -> PgResult<()> {
         portal.borrow_mut().holdStore = None;
     }
 
+    // The result tuple descriptor lives in either portalContext or
+    // holdContext (CreateTupleDescCopy / copy_tup_desc_into_hold_context); drop
+    // it before either context so the copy is freed through a still-live arena.
+    portal.borrow_mut().tupDesc = None;
+
     // delete tuplestore storage, if any (drop the owned holdContext arena)
     portal.borrow_mut().holdContext = None;
 
@@ -820,6 +966,15 @@ pub fn PortalDrop(portal: &Portal, isTopCommit: bool) -> PgResult<()> {
                 "PortalDrop: portal has no portalContext (CreatePortal always assigns one)",
             )
             .into_error());
+    }
+    // The interned plan list and copied parameter list live in portalContext;
+    // drop them before the context so they are freed through a live arena (C:
+    // MemoryContextDelete(portalContext) frees them and nothing reads them
+    // again).
+    {
+        let mut p = portal.borrow_mut();
+        p.stmts = None;
+        p.portalParams = None;
     }
     portal.borrow_mut().portalContext = None;
 

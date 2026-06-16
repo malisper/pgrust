@@ -339,6 +339,34 @@ pub struct PortalData {
     pub visible: bool,
 }
 
+impl Drop for PortalData {
+    /// Enforce that the arena-allocated payloads (`stmts`, `tupDesc`,
+    /// `holdStore`) are released **before** the `MemoryContext`s they were
+    /// interned into (`portalContext`, `holdContext`).
+    ///
+    /// Those payloads carry their own arena lifetime as a `'static` *marker*
+    /// (the data is real `Global`-heap memory owned by the inner
+    /// `PgBox`/`PgVec`, freed by their own `Drop`, which deallocates through an
+    /// `Mcx` reference into the owning `MemoryContext`). The struct's default
+    /// field-drop order would drop `portalContext` first (it is declared before
+    /// `stmts`/`tupDesc`), invalidating the `Mcx` reference those payloads
+    /// deallocate through. Dropping the payloads first makes both this implicit
+    /// drop and `PortalDrop`'s teardown sound, mirroring C where
+    /// `MemoryContextDelete(portalContext)` frees the plans and nothing touches
+    /// them afterward.
+    fn drop(&mut self) {
+        // Release tuplestore before the hold context.
+        self.holdStore = None;
+        // Release interned plans / result descriptor / params before the
+        // portal context they live in.
+        self.stmts = None;
+        self.tupDesc = None;
+        self.portalParams = None;
+        // Contexts (portalContext, holdContext) drop last, via the default
+        // field drop, after the payloads above are gone.
+    }
+}
+
 /// `typedef struct PortalData *Portal` (`utils/portal.h`). Shared,
 /// interior-mutable open handle: the whole portal subsystem aliases the same
 /// `PortalData` through a raw pointer, so the Rust alias is

@@ -7,12 +7,16 @@
 //! `AtSubCommit`/`AtSubAbort` threads a default (NULL) owner; the reparent seam
 //! is a no-op until the resowner side lands.
 //!
-//! The three deep-copy-into-portal-context seams (`portal_define_query_select`,
-//! `copy_param_list_into_portal`, `copy_tup_desc_into_hold_context`) are left
-//! seam-and-panic: they require copying foreign objects into the portal's
-//! `'static`-lifetime owned arenas, infrastructure that lands with the
-//! tuplestore/tupdesc copy owners. They panic loudly until then (matching the
-//! pre-port `todo` state), rather than being wrongly stubbed.
+//! The deep-copy-into-portal-context seams (`portal_define_query_select`,
+//! `portal_define_query_list`, `copy_param_list_into_portal`,
+//! `copy_tup_desc_into_hold_context`) intern foreign objects into the portal's
+//! own owned `MemoryContext` arenas (`portalContext`/`holdContext`). The arena
+//! lifetime crosses as a `'static` marker on the portal fields; the copied
+//! value is real `Global`-heap memory owned by its inner `PgBox`/`PgVec`, freed
+//! by its own `Drop`. `PortalData::drop` and `PortalDrop` release those payload
+//! fields before the contexts they deallocate through, so the marker is sound
+//! (the same idiom `portal_set_tup_desc`/`set_result_tup_desc_with` already use
+//! for `tupDesc`). No `'static` global arena or token registry is involved.
 
 use types_core::SubTransactionId;
 use types_error::PgResult;
@@ -42,6 +46,30 @@ pub fn init_seams() {
         crate::memory_context_delete_children(portal)
     });
     seams::with_portal_globals::set(|portal, f| crate::with_portal_globals(portal, f));
+
+    // Deep-copy-into-portal-context seams (intern foreign objects into the
+    // portal's own owned arenas; sound `'static` marker, see module docs).
+    seams::portal_define_query_select::set(|portal, source_text, plan| {
+        crate::portal_define_query_select(portal, source_text, plan)
+    });
+    seams::portal_define_query_list::set(
+        |portal, prep_stmt_name, source_text, command_tag, stmts, cplan| {
+            crate::portal_define_query_list(
+                portal,
+                prep_stmt_name,
+                source_text,
+                command_tag,
+                stmts,
+                cplan,
+            )
+        },
+    );
+    seams::copy_param_list_into_portal::set(|portal, params| {
+        crate::copy_param_list_into_portal(portal, params)
+    });
+    seams::copy_tup_desc_into_hold_context::set(|portal| {
+        crate::copy_tup_desc_into_hold_context(portal)
+    });
 
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     seams::enable_portal_manager::set(crate::EnablePortalManager);

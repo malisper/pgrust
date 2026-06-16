@@ -102,6 +102,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `oldContext = MemoryContextSwitchTo(portal->portalContext);
+    /// stmts = copyObject(stmts); queryString = pstrdup(sourceText);
+    /// PortalDefineQuery(portal, prepStmtName, queryString, commandTag,
+    /// stmts, cplan); MemoryContextSwitchTo(oldContext);` (portalmem.c) — the
+    /// general `PortalDefineQuery` bridge for an arbitrary planned-statement
+    /// list and command tag (`exec_simple_query` / `exec_bind_message`), not
+    /// just the single-SELECT cursor case. portalmem owns
+    /// `portal->portalContext`, so it does the `copyObject`/`pstrdup` of the
+    /// working-context `stmts`/`source_text` into the portal context. `cplan`
+    /// is `CachedPlanHandle::NULL` for the non-cached path (plans are then
+    /// owned by the portal context); a non-NULL handle records that the plans
+    /// belong to a cached plan instead. Fallible: copying allocates.
+    pub fn portal_define_query_list(
+        portal: &types_portal::Portal,
+        prep_stmt_name: Option<&str>,
+        source_text: &str,
+        command_tag: types_portal::CommandTag,
+        stmts: &[types_nodes::nodeindexscan::PlannedStmt<'_>],
+        cplan: types_portal::CachedPlanHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `params = copyParamList(params)` after
     /// `MemoryContextSwitchTo(portal->portalContext)` (portalcmds.c) — copy the
     /// outer parameter list into the portal's own context (owned by portalmem).
