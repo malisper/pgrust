@@ -9413,6 +9413,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-init-subselect"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-init-subselect-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-init-subselect-seams"
 version = "0.0.0"
 dependencies = [
@@ -17714,6 +17753,7 @@ dependencies = [
  "backend-optimizer-path-small",
  "backend-optimizer-plan-analyzejoins",
  "backend-optimizer-plan-createplan",
+ "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
