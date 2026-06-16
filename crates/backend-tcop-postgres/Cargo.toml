@@ -56,6 +56,17 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-portal = { path = "../types-portal" }
 types-snapshot = { path = "../types-snapshot" }
 
+# F0a: the main-loop drivers' owner callees (acyclic — none deps this owner).
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
+backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+
 # Seam crates (leaf; never create cycles).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
