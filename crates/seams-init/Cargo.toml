@@ -117,6 +117,7 @@ backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }
 backend-executor-execScan = { path = "../backend-executor-execScan" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-executor-execGrouping = { path = "../backend-executor-execGrouping" }
 backend-executor-spi = { path = "../backend-executor-spi" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }

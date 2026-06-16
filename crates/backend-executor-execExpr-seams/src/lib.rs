@@ -855,3 +855,48 @@ seam_core::seam!(
         keep_nulls: bool,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `ExecBuildHash32FromAttrs(desc, ops, hashfunctions, collations, numCols,
+    /// keyColIdx, parent, init_value)` (execExpr.c:4143): compile an `ExprState`
+    /// that hashes `num_cols` inner-tuple attributes (named by `key_col_idx`,
+    /// 1-based) with the per-column `hashfunctions`, combining the results and
+    /// optionally seeding with `init_value`. Built by `BuildTupleHashTable` for
+    /// the table's `tab_hash_expr`. The `parent` is only used for JIT/slot
+    /// attribution (not modeled), so the owned model takes only `mcx` + the
+    /// node's result `desc`/`ops`. Allocated in `mcx`; fallible.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_build_hash32_from_attrs<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        ops: types_nodes::TupleSlotKind,
+        hashfunctions: &[types_core::fmgr::FmgrInfo],
+        collations: &[types_core::Oid],
+        num_cols: i32,
+        key_col_idx: &[types_core::primitive::AttrNumber],
+        init_value: u32,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `ExecBuildGroupingEqual(ldesc, rdesc, lops, rops, numCols, keyColIdx,
+    /// eqfunctions, collations, parent)` (execExpr.c:4467): compile an
+    /// `ExprState` (usable with `ExecQual`) returning true iff the inner/outer
+    /// tuples are NOT DISTINCT across `num_cols` columns. `num_cols == 0`
+    /// returns `None` (the C `NULL`, an always-true qual). Built by
+    /// `BuildTupleHashTable` for `tab_eq_func` and by `execTuplesMatchPrepare`.
+    /// `parent` (JIT/slot attribution) is not modeled. Allocated in `mcx`;
+    /// fallible.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_build_grouping_equal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        ldesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        rdesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        lops: types_nodes::TupleSlotKind,
+        rops: types_nodes::TupleSlotKind,
+        num_cols: i32,
+        key_col_idx: &[types_core::primitive::AttrNumber],
+        eqfunctions: &[types_core::Oid],
+        collations: &[types_core::Oid],
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
+);

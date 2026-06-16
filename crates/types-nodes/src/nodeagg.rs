@@ -25,7 +25,7 @@ use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
-use crate::execnodes::{EcxtId, Opaque, SlotId};
+use crate::execnodes::{EcxtId, SlotId};
 use crate::nodeindexscan::Plan;
 use crate::primnodes::{Expr, TargetEntry};
 
@@ -208,16 +208,67 @@ pub struct Agg<'mcx> {
 /// `firstTuple` (`TupleHashEntryGetAdditional`) is owned by the execGrouping
 /// hash table's `tablecxt`; the seam surfaces it as a `&mut [u8]` view rather
 /// than embedding it here, matching the C pointer-arithmetic layout.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TupleHashEntryData<'mcx> {
     /// `MinimalTuple firstTuple` — copy of first tuple in this group. Carried as
     /// the payload-bearing [`FormedMinimalTuple`] (header + user-data area);
     /// `None` is the C `NULL` (a freshly-inserted / find-only entry).
     pub firstTuple: Option<FormedMinimalTuple<'mcx>>,
+    /// The MAXALIGNed "additional" bytes C carves out immediately before
+    /// `firstTuple` in the same `tablecxt` allocation
+    /// (`TupleHashEntryGetAdditional`); zeroed on a fresh insert, then read and
+    /// written by the driving node (Agg's per-group transition values, SetOp's
+    /// per-group counts) which the execGrouping seam lends as a `&mut [u8]`
+    /// view. Empty for a `find`-only / not-yet-filled entry.
+    pub additional: PgVec<'mcx, u8>,
     /// `uint32 status` — simplehash slot status.
     pub status: u32,
     /// `uint32 hash` — cached hash value.
     pub hash: u32,
+}
+
+impl<'mcx> TupleHashEntryData<'mcx> {
+    /// A fresh empty bucket: `firstTuple = NULL`, no additional bytes, status
+    /// `EMPTY`. (`PgVec` has no allocator-free `Default`, so empty buckets are
+    /// built through this `mcx`-bound constructor.)
+    pub fn empty(mcx: mcx::Mcx<'mcx>) -> Self {
+        Self {
+            firstTuple: None,
+            additional: PgVec::new_in(mcx),
+            status: TUPLEHASH_STATUS_EMPTY,
+            hash: 0,
+        }
+    }
+}
+
+/// `tuplehash` simplehash slot status: empty bucket (`SH_STATUS_EMPTY`).
+pub const TUPLEHASH_STATUS_EMPTY: u32 = 0x00;
+/// `tuplehash` simplehash slot status: occupied bucket (`SH_STATUS_IN_USE`).
+pub const TUPLEHASH_STATUS_IN_USE: u32 = 0x01;
+
+/// `tuplehash_hash` (the `lib/simplehash.h` instantiation `execGrouping.c`
+/// generates with `SH_PREFIX tuplehash`, also declared in execnodes.h so the
+/// types are externally visible) — the open-addressing (Robin Hood) bucket
+/// array backing a [`TupleHashTable`].
+///
+/// Opacity-inherited: `execnodes.h` exposes the generated `tuplehash_hash`
+/// struct type, so this is a real struct (not a handle). The bucket array is a
+/// `PgVec<TupleHashEntryData>` charged to the table's memory context; the
+/// control fields mirror the simplehash header. `ctx`/`private_data` are not
+/// carried — the owned execGrouping driver reaches the hash/equality callbacks
+/// through its own parameters rather than the C `tb->private_data` aliasing.
+#[derive(Debug)]
+pub struct TuplehashHash<'mcx> {
+    /// `uint64 size` — current number of buckets (a power of two).
+    pub size: u64,
+    /// `uint32 members` — number of occupied buckets.
+    pub members: u32,
+    /// `uint32 sizemask` — `size - 1`, for masking hashes to bucket indices.
+    pub sizemask: u32,
+    /// `uint32 grow_threshold` — `members` at which the table grows.
+    pub grow_threshold: u32,
+    /// `SH_ELEMENT_TYPE *data` — the bucket array.
+    pub data: PgVec<'mcx, TupleHashEntryData<'mcx>>,
 }
 
 /// `TupleHashTableData` (executor/execnodes.h) — the all-in-memory tuple hash
@@ -226,15 +277,12 @@ pub struct TupleHashEntryData<'mcx> {
 /// The real C struct, faithfully mirrored. `TupleHashTable` in C is
 /// `TupleHashTableData *`; in the owned model the table is carried by value
 /// (in a `Box`/owning field) and threaded through the execGrouping seams as
-/// `&mut TupleHashTable`. The genuinely execGrouping-internal simplehash bucket
-/// array (`tuplehash_hash *hashtab`) stays opaque — its concrete shape belongs
-/// to the still-unported execGrouping owner — while every field C exposes by
-/// type is mirrored concretely.
+/// `&mut TupleHashTable`.
 #[derive(Debug, Default)]
 pub struct TupleHashTable<'mcx> {
-    /// `tuplehash_hash *hashtab` — the underlying simplehash; execGrouping
-    /// owner-internal, so opaque until that unit lands.
-    pub hashtab: Opaque,
+    /// `tuplehash_hash *hashtab` — the underlying simplehash bucket array,
+    /// built and owned by the execGrouping driver.
+    pub hashtab: Option<PgBox<'mcx, TuplehashHash<'mcx>>>,
     /// `int numCols` — number of columns in the lookup key.
     pub numCols: i32,
     /// `AttrNumber *keyColIdx` — attr numbers of key columns.
@@ -263,15 +311,36 @@ pub struct TupleHashTable<'mcx> {
     pub cur_eq_func: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprContext *exprcontext` — expression context for the evaluations.
     pub exprcontext: Option<EcxtId>,
+
+    // ------------------------------------------------------------------
+    // Deferred-materialization holders (owned-model bridge)
+    //
+    // C's `BuildTupleHashTable` creates the standalone `tableslot`
+    // (`MakeSingleTupleTableSlot`) and `exprcontext`
+    // (`CreateStandaloneExprContext`) eagerly, with the parent EState in
+    // scope. The execGrouping build seam carries no EState (the table is
+    // returned to the caller before any search), so those standalone values
+    // are stashed here and registered into the EState's slot/exprcontext
+    // pools (yielding `tableslot`/`exprcontext` ids above) on the first
+    // search call, which does thread the EState. Once registered the holders
+    // are emptied. `inputslot` is allocated entirely lazily the same way.
+    /// Standalone `ExprContext` from build, awaiting arena registration.
+    pub pending_exprcontext: Option<crate::execnodes::ExprContext<'mcx>>,
+    /// Standalone table slot from build, awaiting arena registration.
+    pub pending_tableslot: Option<crate::tuptable::SlotData<'mcx>>,
 }
 
 /// `TupleHashIterator` (executor/execnodes.h) — iteration cursor over a
-/// `TupleHashTable`. C is `tuplehash_iterator`; trimmed to the opaque cursor
-/// word the iterate seams round-trip.
+/// `TupleHashTable`. The real `tuplehash_iterator` (`lib/simplehash.h`
+/// `SH_ITERATOR`) triple: the current/end bucket indices and the done flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TupleHashIterator {
-    /// The opaque `tuplehash_iterator` cursor word.
-    pub cur: usize,
+    /// `uint32 cur` — current bucket index.
+    pub cur: u32,
+    /// `uint32 end` — bucket index at which iteration completes.
+    pub end: u32,
+    /// `bool done` — iteration has wrapped back to `end`.
+    pub done: bool,
 }
 
 

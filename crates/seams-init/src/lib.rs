@@ -114,6 +114,7 @@ pub fn init_all() {
     backend_executor_execScan::init_seams();
     backend_executor_execTuples::init_seams();
     backend_executor_execUtils::init_seams();
+    backend_executor_execGrouping::init_seams();
     backend_executor_spi::init_seams();
     backend_executor_instrument::init_seams();
     backend_executor_nodeAgg::init_seams();
