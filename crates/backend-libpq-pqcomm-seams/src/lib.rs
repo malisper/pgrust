@@ -97,3 +97,39 @@ seam_core::seam!(
     /// buffered (unconsumed) in the receive buffer. Infallible.
     pub fn pq_buffer_remaining_data() -> i64
 );
+
+seam_core::seam!(
+    /// `pq_is_send_pending()` (`PqCommMethods`) — is there unsent buffered
+    /// output to the client?
+    pub fn pq_is_send_pending() -> bool
+);
+
+seam_core::seam!(
+    /// `pq_flush_if_writable()` (`PqCommMethods`) — flush buffered output only
+    /// if the socket is writable without blocking. Returns 0 on success,
+    /// nonzero (EOF) on a broken connection (the walsender then shuts down).
+    pub fn pq_flush_if_writable() -> i32
+);
+
+seam_core::seam!(
+    /// `pq_putmessage_noblock(msgtype, body)` — buffer one protocol message for
+    /// non-blocking send, growing the output buffer as needed. Used by the
+    /// walsender keepalive / WAL-data / CopyDone paths. Infallible (it only
+    /// buffers).
+    pub fn pq_putmessage_noblock(msgtype: u8, body: &[u8])
+);
+
+seam_core::seam!(
+    /// `ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, events, NULL)` —
+    /// update the FE/BE wait set's interest in socket readability/writability
+    /// before a `WaitEventSetWait`.
+    pub fn modify_fe_be_wait_set_socket(events: u32)
+);
+
+seam_core::seam!(
+    /// `WaitEventSetWait(FeBeWaitSet, timeout, &event, 1, wait_event_info)` —
+    /// the walsender's combined latch/socket/postmaster-death sleep. Returns
+    /// `(nevents, events)`: the count of fired events and the OR of their
+    /// wakeup bits (the walsender only inspects `WL_POSTMASTER_DEATH`).
+    pub fn wait_event_set_wait_fe_be(timeout: i64, wait_event_info: u32) -> (i32, u32)
+);

@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 /* ======================================================================
@@ -57,13 +58,17 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `generate_base_implied_equalities(root)` (equivclass.c:1188).
-    pub fn generate_base_implied_equalities(root: &mut PlannerInfo) -> PgResult<()>
+    pub fn generate_base_implied_equalities<'mcx>(
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+    ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `generate_join_implied_equalities(...)` (equivclass.c:1550) — returns the
     /// derived join [`RinfoId`]s.
-    pub fn generate_join_implied_equalities(
+    pub fn generate_join_implied_equalities<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         join_relids: Relids,
         outer_relids: Relids,
         inner_rel: RelId,
@@ -72,8 +77,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `generate_join_implied_equalities_for_ecs(...)` (equivclass.c:1650).
-    pub fn generate_join_implied_equalities_for_ecs(
+    pub fn generate_join_implied_equalities_for_ecs<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         eclasses: Vec<EcId>,
         join_relids: Relids,
         outer_relids: Relids,
@@ -91,7 +97,10 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `reconsider_outer_join_clauses(root)` (equivclass.c:2135).
-    pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()>
+    pub fn reconsider_outer_join_clauses<'mcx>(
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+    ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `rebuild_eclass_attr_needed(root)` (equivclass.c:2574).

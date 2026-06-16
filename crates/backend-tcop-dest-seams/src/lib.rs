@@ -84,3 +84,10 @@ seam_core::seam!(
     /// tests it against `DestNone`. A plain field read; infallible.
     pub fn dest_get_mydest(dest: DestReceiverHandle) -> CommandDest
 );
+
+seam_core::seam!(
+    /// `EndReplicationCommand(const char *commandTag)` (tcop/dest.c) — send the
+    /// CommandComplete ('C') message ending a replication command. Can
+    /// `ereport` on a send error.
+    pub fn end_replication_command(command_tag: String) -> types_error::PgResult<()>
+);

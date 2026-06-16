@@ -1704,6 +1704,8 @@ pub fn init_seams() {
     seams::set_xact_read_only::set(SetXactReadOnly);
     seams::xact_read_only::set(XactReadOnly);
     seams::xact_iso_level::set(XactIsoLevel);
+    // `int synchronous_commit` (xact.c GUC) — read by walsender's SyncRepRequested.
+    seams::synchronous_commit::set(synchronous_commit);
 }
 
 #[cfg(test)]

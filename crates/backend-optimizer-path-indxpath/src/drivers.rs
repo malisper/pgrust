@@ -31,7 +31,12 @@ use crate::util::{relids_add_members, relids_copy, relids_is_subset, relids_unio
 
 /// `create_index_paths(root, rel)` (indxpath.c:241) — generate all index paths
 /// (plain + bitmap) for the relation and submit them to the rel's pathlist.
-pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> Result<(), PgError> {
+pub fn create_index_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    rel: RelId,
+) -> Result<(), PgError> {
     // Skip the whole mess if no indexes.
     if root.rel(rel).indexlist.is_empty() {
         return Ok(());
@@ -57,7 +62,7 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
         match_restriction_clauses_to_index(mcx, root, &index, &mut rclauseset)?;
 
         // Build index paths from the restriction clauses (non-parameterized).
-        get_index_paths(mcx, root, rel, &index, &rclauseset, &mut bitindexpaths)?;
+        get_index_paths(mcx, root, run, rel, &index, &rclauseset, &mut bitindexpaths)?;
 
         // Identify the join clauses that can match the index; collect join OR
         // clauses for later.
@@ -73,7 +78,7 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
 
         // Look for EquivalenceClasses that can generate joinclauses matching it.
         let mut eclauseset = IndexClauseSet::new(index.nkeycolumns as usize);
-        match_eclass_clauses_to_index(mcx, root, &index, &mut eclauseset)?;
+        match_eclass_clauses_to_index(mcx, root, run, &index, &mut eclauseset)?;
 
         // If we found any plain or eclass join clauses, build parameterized
         // index paths using them.
@@ -81,6 +86,7 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
             consider_index_join_clauses(
                 mcx,
                 root,
+                run,
                 rel,
                 &index,
                 &rclauseset,
@@ -94,7 +100,7 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
     // Generate BitmapOrPaths for suitable OR-clauses in the restriction list.
     {
         let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
-        let indexpaths = generate_bitmap_or_paths(mcx, root, rel, &baserestrictinfo, &[])?;
+        let indexpaths = generate_bitmap_or_paths(mcx, root, run, rel, &baserestrictinfo, &[])?;
         bitindexpaths.extend(indexpaths);
     }
 
@@ -102,23 +108,23 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
     {
         let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
         let indexpaths =
-            generate_bitmap_or_paths(mcx, root, rel, &joinorclauses, &baserestrictinfo)?;
+            generate_bitmap_or_paths(mcx, root, run, rel, &joinorclauses, &baserestrictinfo)?;
         bitjoinpaths.extend(indexpaths);
     }
 
     // If we found anything usable, generate a BitmapHeapPath for the most
     // promising combination of restriction bitmap index paths.
     if !bitindexpaths.is_empty() {
-        let bitmapqual = choose_bitmap_and(mcx, root, rel, bitindexpaths.clone())?;
+        let bitmapqual = choose_bitmap_and(mcx, root, run, rel, bitindexpaths.clone())?;
         let lateral_relids = relids_copy(&root.rel(rel).lateral_relids);
         let bpath =
-            pathnode::create_bitmap_heap_path::call(root, rel, bitmapqual, &lateral_relids, 1.0, 0)?;
+            pathnode::create_bitmap_heap_path::call(root, run, rel, bitmapqual, &lateral_relids, 1.0, 0)?;
         pathnode::add_path::call(root, rel, bpath)?;
 
         // Create a partial bitmap heap path.
         if root.rel(rel).consider_parallel && root.rel(rel).lateral_relids.is_none() {
             backend_optimizer_path_costsize_seams::create_partial_bitmap_paths::call(
-                root, rel, bitmapqual,
+                root, run, rel, bitmapqual,
             )?;
         }
     }
@@ -152,12 +158,13 @@ pub fn create_index_paths(mcx: Mcx<'_>, root: &mut PlannerInfo, rel: RelId) -> R
             this_path_set.extend(bitindexpaths.iter().copied());
 
             // Select best AND combination for this parameterization.
-            let bitmapqual = choose_bitmap_and(mcx, root, rel, this_path_set)?;
+            let bitmapqual = choose_bitmap_and(mcx, root, run, rel, this_path_set)?;
             let required_outer = path_req_outer(root, bitmapqual);
             let relid = root.rel(rel).relid;
             let loop_count = get_loop_count(root, relid, &required_outer);
             let bpath = pathnode::create_bitmap_heap_path::call(
                 root,
+                run,
                 rel,
                 bitmapqual,
                 &required_outer,
@@ -188,9 +195,10 @@ fn path_req_outer(root: &PlannerInfo, path: PathId) -> Relids {
 
 /// `consider_index_join_clauses(...)` (indxpath.c:437) — decide which
 /// parameterized index paths to build from the index's join clauses.
-pub fn consider_index_join_clauses(
-    mcx: Mcx<'_>,
+pub fn consider_index_join_clauses<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -209,6 +217,7 @@ pub fn consider_index_join_clauses(
         consider_index_join_outer_rels(
             mcx,
             root,
+            run,
             rel,
             index,
             rclauseset,
@@ -225,6 +234,7 @@ pub fn consider_index_join_clauses(
         consider_index_join_outer_rels(
             mcx,
             root,
+            run,
             rel,
             index,
             rclauseset,
@@ -241,9 +251,10 @@ pub fn consider_index_join_clauses(
 
 /// `consider_index_join_outer_rels(...)` (indxpath.c:503) — generate
 /// parameterized paths based on clause relids in the clause list.
-pub fn consider_index_join_outer_rels(
-    mcx: Mcx<'_>,
+pub fn consider_index_join_outer_rels<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -297,6 +308,7 @@ pub fn consider_index_join_outer_rels(
             get_join_index_paths(
                 mcx,
                 root,
+                run,
                 rel,
                 index,
                 rclauseset,
@@ -312,6 +324,7 @@ pub fn consider_index_join_outer_rels(
         get_join_index_paths(
             mcx,
             root,
+            run,
             rel,
             index,
             rclauseset,
@@ -328,9 +341,10 @@ pub fn consider_index_join_outer_rels(
 /// `get_join_index_paths(...)` (indxpath.c:606) — generate index paths using
 /// clauses from the specified outer relations; record `relids` in
 /// `considered_relids`.
-pub fn get_join_index_paths(
-    mcx: Mcx<'_>,
+pub fn get_join_index_paths<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -383,7 +397,7 @@ pub fn get_join_index_paths(
     debug_assert!(clauseset.nonempty);
 
     // Build index path(s) using the collected set of clauses.
-    get_index_paths(mcx, root, rel, index, &clauseset, bitindexpaths)?;
+    get_index_paths(mcx, root, run, rel, index, &clauseset, bitindexpaths)?;
 
     // Remember we considered paths for this set of relids.
     considered_relids.push(relids);
@@ -419,9 +433,10 @@ pub fn eclass_already_used(
 /// (indxpath.c:717) — construct IndexPaths from the clauses, sending plain ones
 /// to `add_path` and bitmap-capable ones to `bitindexpaths`. Handles the
 /// SAOP-native vs. non-native split.
-pub fn get_index_paths(
-    mcx: Mcx<'_>,
+pub fn get_index_paths<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     clauses: &IndexClauseSet,
@@ -433,6 +448,7 @@ pub fn get_index_paths(
     let indexpaths = build_index_paths(
         mcx,
         root,
+        run,
         rel,
         index,
         clauses,
@@ -469,6 +485,7 @@ pub fn get_index_paths(
         let indexpaths = build_index_paths(
             mcx,
             root,
+            run,
             rel,
             index,
             clauses,
@@ -486,9 +503,10 @@ pub fn get_index_paths(
 /// skip_nonnative_saop)` (indxpath.c:811) — construct zero or more IndexPaths
 /// (and partial IndexPaths) for the index and clause set. Returns the candidate
 /// `IndexPath` handles (NOT yet added to the rel).
-pub fn build_index_paths(
-    mcx: Mcx<'_>,
+pub fn build_index_paths<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     clauses: &IndexClauseSet,
@@ -594,6 +612,7 @@ pub fn build_index_paths(
     {
         let ipath = pathnode::create_index_path::call(
             root,
+            run,
             alloc::boxed::Box::new(index.clone()),
             index_clauses.clone(),
             orderbyclauses.clone(),
@@ -615,6 +634,7 @@ pub fn build_index_paths(
         {
             let ipath = pathnode::create_index_path::call(
                 root,
+                run,
                 alloc::boxed::Box::new(index.clone()),
                 index_clauses.clone(),
                 orderbyclauses.clone(),
@@ -640,6 +660,7 @@ pub fn build_index_paths(
         if !useful_pathkeys.is_empty() {
             let ipath = pathnode::create_index_path::call(
                 root,
+                run,
                 alloc::boxed::Box::new(index.clone()),
                 index_clauses.clone(),
                 Vec::new(),
@@ -661,6 +682,7 @@ pub fn build_index_paths(
             {
                 let ipath = pathnode::create_index_path::call(
                     root,
+                    run,
                     alloc::boxed::Box::new(index.clone()),
                     index_clauses.clone(),
                     Vec::new(),

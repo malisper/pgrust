@@ -7,6 +7,7 @@ use crate::{Chromosome, Gene, GeqoPrivateData};
 use alloc::vec;
 use alloc::vec::Vec;
 use types_pathnodes::PlannerInfo;
+use types_pathnodes::planner_run::PlannerRun;
 use types_core::primitive::Cost;
 
 /// `DBL_MAX` (`<float.h>`) — the sentinel `geqo_eval` returns for an invalid
@@ -45,7 +46,7 @@ pub fn alloc_pool(pool_size: i32, string_length: i32) -> Pool {
 /// `random_init_pool(root, pool)` — initialize the genetic pool, discarding
 /// invalid individuals (those whose [`geqo_eval`] returns `DBL_MAX`). Gives up
 /// after 10000 consecutive invalid tries with no valid individual yet.
-pub fn random_init_pool(root: &mut PlannerInfo, private: &mut GeqoPrivateData, pool: &mut Pool) {
+pub fn random_init_pool<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>, private: &mut GeqoPrivateData, pool: &mut Pool) {
     let string_length = pool.string_length;
     let mut i = 0i32;
     let mut bad = 0i32;
@@ -53,7 +54,7 @@ pub fn random_init_pool(root: &mut PlannerInfo, private: &mut GeqoPrivateData, p
     while i < pool.size {
         let idx = i as usize;
         init_tour(private, &mut pool.data[idx].string, string_length);
-        let worth = geqo_eval(root, private, &pool.data[idx].string, string_length);
+        let worth = geqo_eval(root, run, private, &pool.data[idx].string, string_length);
         pool.data[idx].worth = worth;
         if pool.data[idx].worth < DBL_MAX {
             i += 1;

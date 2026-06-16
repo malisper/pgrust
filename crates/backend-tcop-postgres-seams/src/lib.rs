@@ -240,3 +240,17 @@ seam_core::seam!(
     /// `elog(INFO)`. Pure read of the postgres.c-owned per-backend global.
     pub fn where_to_send_output() -> types_dest::dest::CommandDest
 );
+
+seam_core::seam!(
+    /// `whereToSendOutput = DestNone` (postgres.c) — reset the output
+    /// destination so a subsequent `ereport` does not try to message the
+    /// standby (used by `WalSndShutdown`).
+    pub fn set_where_to_send_output_none()
+);
+
+seam_core::seam!(
+    /// `StatementCancelHandler(SIGNAL_ARGS)` (postgres.c) — the SIGINT handler:
+    /// set `QueryCancelPending` / `InterruptPending` and `SetLatch(MyLatch)`.
+    /// Installed by walsender via `pqsignal(SIGINT, ...)`.
+    pub fn statement_cancel_handler(postgres_signal_arg: i32)
+);

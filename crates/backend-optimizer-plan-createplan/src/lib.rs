@@ -728,7 +728,7 @@ fn create_scan_plan<'mcx>(
             }
             tlist
         } else {
-            let phys: Vec<NodeId> = build_physical_tlist(root, rel_id)?;
+            let phys: Vec<NodeId> = build_physical_tlist(run, root, rel_id)?;
             if phys.is_empty() {
                 // Failed because of dropped cols, so use regular method.
                 build_path_tlist(mcx, root, best_path)?

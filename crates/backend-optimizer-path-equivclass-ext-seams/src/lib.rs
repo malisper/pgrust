@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 
@@ -154,7 +155,8 @@ seam_core::seam!(
     /// `build_implied_join_equality(root, opno, collation, item1, item2,
     /// qualscope, security_level)` (initsplan.c:3455) — build a derived
     /// mergejoinable equality RestrictInfo, returning its arena handle.
-    pub fn build_implied_join_equality(
+    pub fn build_implied_join_equality<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         opno: Oid,
         collation: Oid,
@@ -169,7 +171,8 @@ seam_core::seam!(
     /// qualscope, security_level, both_const)` (initsplan.c) — build and
     /// distribute a derived equality; returns the new RestrictInfo handle, or
     /// `None` if the clause degenerated to a constant.
-    pub fn process_implied_equality(
+    pub fn process_implied_equality<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         opno: Oid,
         collation: Oid,
@@ -182,7 +185,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `distribute_restrictinfo_to_rels(root, restrictinfo)` (initsplan.c).
-    pub fn distribute_restrictinfo_to_rels(
+    pub fn distribute_restrictinfo_to_rels<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         restrictinfo: RinfoId,
     ) -> PgResult<()>

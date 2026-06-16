@@ -82,6 +82,7 @@ pub fn init_all() {
     backend_catalog_objectaddress::init_seams();
     backend_catalog_indexing::init_seams();
     backend_catalog_heap::init_seams();
+    backend_catalog_index::init_seams();
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
@@ -191,6 +192,8 @@ pub fn init_all() {
     backend_lib_dshash::init_seams();
     backend_main_main::init_seams();
     backend_libpq_auth::init_seams();
+    backend_libpq_auth_scram::init_seams();
+    backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
@@ -203,6 +206,7 @@ pub fn init_all() {
     backend_access_hashfunc::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_rte_seams::init_seams();
     backend_optimizer_path_allpaths::init_seams();
     backend_optimizer_path_indxpath::init_seams();
     backend_optimizer_path_joinrels::init_seams();
@@ -269,6 +273,7 @@ pub fn init_all() {
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
+    backend_replication_walsender::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_rewrite_core::init_seams();
     backend_storage_file_buffile::init_seams();

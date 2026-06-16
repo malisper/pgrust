@@ -208,11 +208,12 @@ pub fn bitmap_scan_cost_est(root: &mut PlannerInfo, rel: RelId, ipath: PathId) -
 /// Mirrors C: build a real `BitmapAndPath` via the pathnode constructor (it is
 /// installed in the arena and gets a `PathId`), then route it through
 /// `bitmap_scan_cost_est`. `paths` are the component bitmapqual handles.
-pub fn bitmap_and_cost_est(
+pub fn bitmap_and_cost_est<'mcx>(
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     paths: alloc::vec::Vec<PathId>,
 ) -> Result<Cost, types_error::PgError> {
-    let apath_id = pathnode::create_bitmap_and_path::call(root, rel, paths)?;
+    let apath_id = pathnode::create_bitmap_and_path::call(root, run, rel, paths)?;
     Ok(bitmap_scan_cost_est(root, rel, apath_id))
 }

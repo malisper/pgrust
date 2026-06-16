@@ -13,8 +13,9 @@ use crate::{compute_parallel_worker, max_parallel_workers_per_gather};
 ///
 /// `compute_bitmap_pages` lives in the costsize crate; we call it through the
 /// costsize-seams (it is the `cost_bitmap_*` family the indxpath driver also uses).
-pub fn create_partial_bitmap_paths(
+pub fn create_partial_bitmap_paths<'mcx>(
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     bitmapqual: PathId,
 ) -> PgResult<()> {
@@ -33,6 +34,7 @@ pub fn create_partial_bitmap_paths(
     let lateral = bms::relids_copy::call(&root.rel(rel).lateral_relids);
     let path = pathnode::create_bitmap_heap_path::call(
         root,
+        run,
         rel,
         bitmapqual,
         &lateral,

@@ -150,7 +150,7 @@ pub fn deconstruct_jointree(
     if !root.join_info_list.is_empty() {
         for &jti in &order {
             if !item_list[jti].oj_joinclauses.is_empty() {
-                deconstruct_distribute_oj_quals(root, &mut item_list, jti)?;
+                deconstruct_distribute_oj_quals(root, run, &mut item_list, jti)?;
             }
         }
     }
@@ -620,12 +620,12 @@ fn deconstruct_distribute(
             // children.
             let lateral = core::mem::take(&mut item_list[jti].lateral_clauses);
             distribute_quals_to_rels(
-                root, &lateral, item_list, jti, None, root.qual_security_level, &qualscope,
+                root, run, &lateral, item_list, jti, None, root.qual_security_level, &qualscope,
                 &None, &None, &None, true, false, false, None,
             );
             // Now process the top-level quals.
             distribute_quals_to_rels(
-                root, &quals, item_list, jti, None, root.qual_security_level, &qualscope,
+                root, run, &quals, item_list, jti, None, root.qual_security_level, &qualscope,
                 &None, &None, &None, true, false, false, None,
             );
         }
@@ -697,6 +697,7 @@ fn deconstruct_distribute(
             // Process the JOIN's qual clauses.
             distribute_quals_to_rels(
                 root,
+                run,
                 &my_quals,
                 item_list,
                 jti,
@@ -752,6 +753,7 @@ fn process_security_barrier_quals(
         // qual to be evaluated at the rel rather than pushed up to top of tree.
         distribute_quals_to_rels(
             root,
+            run,
             qualset,
             item_list,
             jti,
@@ -781,6 +783,7 @@ fn process_security_barrier_quals(
 /// correct join level.
 fn deconstruct_distribute_oj_quals(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
@@ -885,6 +888,7 @@ fn deconstruct_distribute_oj_quals(
             let incompat_copy = bms::relids_copy::call(&incompatible_joins);
             distribute_quals_to_rels(
                 root,
+                run,
                 &quals,
                 item_list,
                 otherjti,
@@ -918,6 +922,7 @@ fn deconstruct_distribute_oj_quals(
         let quals = core::mem::take(&mut item_list[jti].oj_joinclauses);
         distribute_quals_to_rels(
             root,
+            run,
             &quals,
             item_list,
             jti,
@@ -977,6 +982,7 @@ fn add_nulling_relids_exprs(quals: &[Expr], target: &Relids, added: &Relids) -> 
 #[allow(clippy::too_many_arguments)]
 pub fn distribute_quals_to_rels(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     clauses: &[Expr],
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
@@ -994,6 +1000,7 @@ pub fn distribute_quals_to_rels(
     for clause in clauses {
         crate::quals::distribute_qual_to_rels(
             root,
+            run,
             clause,
             item_list,
             jti,

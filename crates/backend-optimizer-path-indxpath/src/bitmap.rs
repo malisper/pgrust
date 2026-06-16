@@ -33,9 +33,10 @@ use crate::util::{
 /// `build_paths_for_OR(root, rel, clauses, other_clauses)` (indxpath.c:1093) —
 /// construct all matching IndexPaths for the relation from one arm of an OR
 /// clause. Returns the candidate `IndexPath` handles.
-pub fn build_paths_for_OR(
-    mcx: Mcx<'_>,
+pub fn build_paths_for_OR<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
@@ -95,6 +96,7 @@ pub fn build_paths_for_OR(
         let indexpaths = crate::drivers::build_index_paths(
             mcx,
             root,
+            run,
             rel,
             &index,
             &clauseset,
@@ -386,9 +388,10 @@ fn node_uses_relid(
 /// (indxpath.c:1549) — generate bitmap paths for a group of similar OR-clause
 /// arguments, considering both the whole-group and one-by-one matchings and
 /// returning the cheaper.
-pub fn make_bitmap_paths_for_or_group(
-    mcx: Mcx<'_>,
+pub fn make_bitmap_paths_for_or_group<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     ri: RinfoId,
     other_clauses: &[RinfoId],
@@ -409,9 +412,9 @@ pub fn make_bitmap_paths_for_or_group(
 
     // First, try to match the whole group to one index.
     let orargs = [ri];
-    let indlist = build_paths_for_OR(mcx, root, rel, &orargs, other_clauses)?;
+    let indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, other_clauses)?;
     if !indlist.is_empty() {
-        let bitmapqual = choose_bitmap_and(mcx, root, rel, indlist)?;
+        let bitmapqual = choose_bitmap_and(mcx, root, run, rel, indlist)?;
         jointcost = root.path(bitmapqual).base().total_cost;
         jointlist = vec![bitmapqual];
     }
@@ -428,12 +431,12 @@ pub fn make_bitmap_paths_for_or_group(
         let arg_id = root.alloc_node(arg.clone());
         let arg_ri = restrictinfo::make_simple_restrictinfo::call(root, arg_id);
         let orargs = [arg_ri];
-        let indlist = build_paths_for_OR(mcx, root, rel, &orargs, other_clauses)?;
+        let indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, other_clauses)?;
         if indlist.is_empty() {
             split_ok = false;
             break;
         }
-        let bitmapqual = choose_bitmap_and(mcx, root, rel, indlist)?;
+        let bitmapqual = choose_bitmap_and(mcx, root, run, rel, indlist)?;
         splitcost += root.path(bitmapqual).base().total_cost;
         splitlist.push(bitmapqual);
     }
@@ -456,9 +459,10 @@ pub fn make_bitmap_paths_for_or_group(
 /// `generate_bitmap_or_paths(root, rel, clauses, other_clauses)`
 /// (indxpath.c:1630) — find usable OR clauses and generate a `BitmapOrPath` for
 /// each. Returns the generated `BitmapOrPath` handles.
-pub fn generate_bitmap_or_paths(
-    mcx: Mcx<'_>,
+pub fn generate_bitmap_or_paths<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
@@ -506,10 +510,10 @@ pub fn generate_bitmap_or_paths(
                     let aid = root.alloc_node(a.clone());
                     andargs.push(restrictinfo::make_simple_restrictinfo::call(root, aid));
                 }
-                let mut il = build_paths_for_OR(mcx, root, rel, &andargs, &all_clauses)?;
+                let mut il = build_paths_for_OR(mcx, root, run, rel, &andargs, &all_clauses)?;
                 // Recurse in case there are sub-ORs.
                 let mut sub =
-                    generate_bitmap_or_paths(mcx, root, rel, &andargs, &all_clauses)?;
+                    generate_bitmap_or_paths(mcx, root, run, rel, &andargs, &all_clauses)?;
                 il.append(&mut sub);
                 indlist = il;
             } else if orarg_is_or_clause(root, orarg) {
@@ -519,6 +523,7 @@ pub fn generate_bitmap_or_paths(
                 let il = make_bitmap_paths_for_or_group(
                     mcx,
                     root,
+                    run,
                     rel,
                     ri,
                     &inner_other_clauses,
@@ -535,7 +540,7 @@ pub fn generate_bitmap_or_paths(
                 let arg_id = root.alloc_node(orarg.clone());
                 let ri = restrictinfo::make_simple_restrictinfo::call(root, arg_id);
                 let orargs = [ri];
-                indlist = build_paths_for_OR(mcx, root, rel, &orargs, &all_clauses)?;
+                indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, &all_clauses)?;
             }
 
             // If nothing matched this arm, we can't use this OR clause.
@@ -546,13 +551,13 @@ pub fn generate_bitmap_or_paths(
             }
 
             // Pick the most promising AND combination, add to pathlist.
-            let bitmapqual = choose_bitmap_and(mcx, root, rel, indlist)?;
+            let bitmapqual = choose_bitmap_and(mcx, root, run, rel, indlist)?;
             pathlist.push(bitmapqual);
         }
 
         // If we have a match for every arm, turn them into a BitmapOrPath.
         if pathlist_ok && !pathlist.is_empty() {
-            let bitmapqual = pathnode::create_bitmap_or_path::call(root, rel, pathlist)?;
+            let bitmapqual = pathnode::create_bitmap_or_path::call(root, run, rel, pathlist)?;
             result.push(bitmapqual);
         }
     }
@@ -597,9 +602,10 @@ pub struct PathClauseUsage {
 
 /// `choose_bitmap_and(root, rel, paths)` (indxpath.c:1786) — AND a nonempty list
 /// of bitmap paths into one path, trading selectivity vs. bitmap cost.
-pub fn choose_bitmap_and(
-    _mcx: Mcx<'_>,
+pub fn choose_bitmap_and<'mcx>(
+    _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     paths: Vec<PathId>,
 ) -> Result<PathId, types_error::PgError> {
@@ -690,7 +696,7 @@ pub fn choose_bitmap_and(
             }
             // Tentatively add new path, estimate cost.
             paths_set.push(pathinfoarray[j].path);
-            let newcost = bitmap_and_cost_est(root, rel, paths_set.clone())?;
+            let newcost = bitmap_and_cost_est(root, run, rel, paths_set.clone())?;
             if newcost < costsofar {
                 // Keep new path; update subsidiary variables.
                 costsofar = newcost;
@@ -714,7 +720,7 @@ pub fn choose_bitmap_and(
     if bestpaths.len() == 1 {
         return Ok(bestpaths[0]); // no need for AND
     }
-    pathnode::create_bitmap_and_path::call(root, rel, bestpaths)
+    pathnode::create_bitmap_and_path::call(root, run, rel, bestpaths)
 }
 
 /// `classify_index_clause_usage(path, clauselist)` (indxpath.c:2087) —
