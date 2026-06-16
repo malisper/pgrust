@@ -7025,6 +7025,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-tsearchcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-parser-func",
+ "backend-parser-parse-func-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-tsearchcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -19529,6 +19559,7 @@ dependencies = [
  "backend-commands-statscmds",
  "backend-commands-tablespace",
  "backend-commands-trigger",
+ "backend-commands-tsearchcmds",
  "backend-commands-typecmds",
  "backend-commands-vacuum",
  "backend-commands-variable",
