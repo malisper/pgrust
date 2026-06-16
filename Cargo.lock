@@ -3551,6 +3551,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-basebackup-target"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-server",
+ "backend-backup-sink",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-copy"
 version = "0.0.0"
 dependencies = [
@@ -3573,6 +3584,33 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-backup-manifest"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline",
+ "backend-access-transam-xlog-seams",
+ "backend-backup-sink",
+ "backend-storage-file-buffile",
+ "backend-timezone-localtime",
+ "backend-timezone-strftime",
+ "backend-utils-adt-encode",
+ "backend-utils-adt-json",
+ "backend-utils-error",
+ "common-checksum-helper",
+ "common-cryptohash-seams",
+ "common-sha2",
+ "common-wchar",
+ "mcx",
+ "types-core",
+ "types-crypto",
+ "types-error",
+ "types-nodes",
+ "types-pgtime",
+ "types-storage",
+ "types-wchar",
 ]
 
 [[package]]
@@ -3603,6 +3641,19 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-backup-sink-support"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "backend-utils-activity-small",
+ "backend-utils-activity-status-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -18619,9 +18670,11 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-archive-shell-archive",
+ "backend-backup-basebackup-target",
  "backend-backup-copy",
  "backend-backup-server",
  "backend-backup-sink",
+ "backend-backup-sink-support",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
