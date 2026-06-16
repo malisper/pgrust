@@ -302,6 +302,7 @@ backend-postmaster-walwriter = { path = "../backend-postmaster-walwriter" }
 backend-regex-core = { path = "../backend-regex-core" }
 backend-replication-logical-applyparallelworker = { path = "../backend-replication-logical-applyparallelworker" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
+backend-replication-logical-decode = { path = "../backend-replication-logical-decode" }
 backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }

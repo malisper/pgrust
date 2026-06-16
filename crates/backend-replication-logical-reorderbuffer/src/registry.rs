@@ -316,6 +316,17 @@ fn seam_queue_change(
     panic!("ReorderBufferQueueChange: change-replay family not yet ported");
 }
 
+fn seam_queue_truncate(
+    _rb: ReorderBufferHandle,
+    _xid: TransactionId,
+    _lsn: XLogRecPtr,
+    _cascade: bool,
+    _restart_seqs: bool,
+    _relids: alloc::vec::Vec<types_core::Oid>,
+) {
+    panic!("ReorderBufferQueueTruncate: change-replay family not yet ported");
+}
+
 fn seam_queue_message(
     _rb: ReorderBufferHandle,
     _xid: TransactionId,
@@ -554,6 +565,7 @@ pub fn init_seams() {
     // families land; see above).
     s::ReorderBufferProcessXid::set(seam_process_xid);
     s::ReorderBufferQueueChange::set(seam_queue_change);
+    s::ReorderBufferQueueTruncate::set(seam_queue_truncate);
     s::ReorderBufferQueueMessage::set(seam_queue_message);
     s::ReorderBufferForget::set(seam_forget);
     s::ReorderBufferAbort::set(seam_abort);

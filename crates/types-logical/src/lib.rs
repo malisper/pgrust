@@ -344,8 +344,10 @@ pub enum OutputPluginCallbackArgs {
         message_size: Size,
         message: MessageHandle,
     },
-    /// `filter_prepare_cb(ctx, xid, gid)` — returns a bool.
-    FilterPrepare { xid: TransactionId, gid: GidHandle },
+    /// `filter_prepare_cb(ctx, xid, gid)` — returns a bool. The C `const char
+    /// *gid` is the real (NUL-stripped) gid bytes decode.c parsed out of the
+    /// 2PC record and forwards verbatim to the plugin.
+    FilterPrepare { xid: TransactionId, gid: Vec<u8> },
     /// `filter_by_origin_cb(ctx, origin_id)` — returns a bool.
     FilterByOrigin { origin_id: RepOriginId },
     /// `stream_start_cb(ctx, txn)`.

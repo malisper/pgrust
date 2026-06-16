@@ -1103,7 +1103,7 @@ fn truncate_cb_wrapper(
 pub fn filter_prepare_cb_wrapper(
     ctx: &mut LogicalDecodingContext,
     xid: TransactionId,
-    gid: GidHandle,
+    gid: Vec<u8>,
 ) -> PgResult<bool> {
     debug_assert!(!ctx.fast_forward);
 
@@ -2218,6 +2218,16 @@ pub fn init_seams() {
     backend_replication_logical_logical_seams::logical_increase_restart_decoding_for_slot::set(
         LogicalIncreaseRestartDecodingForSlot,
     );
+    // decode.c-facing output-plugin filter wrappers + stats reporter.
+    backend_replication_logical_logical_seams::filter_prepare_cb_wrapper::set(
+        filter_prepare_cb_wrapper,
+    );
+    backend_replication_logical_logical_seams::filter_by_origin_cb_wrapper::set(
+        filter_by_origin_cb_wrapper,
+    );
+    backend_replication_logical_logical_seams::UpdateDecodingStats::set(|ctx| {
+        UpdateDecodingStats(ctx)
+    });
 }
 
 /// Seam thunk: the inward seam carries only the callback; the reorderbuffer
