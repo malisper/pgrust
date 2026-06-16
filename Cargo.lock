@@ -13655,6 +13655,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-logicalfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-message",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-replication-logical-message"
 version = "0.0.0"
 dependencies = [
