@@ -11,8 +11,7 @@
 //! The colormap *allocators* these functions call -- `maxcolor`, `pseudocolor`,
 //! `newcolor`, `freecolor` -- are owned by the [`crate::regex_foundation`]
 //! family (`regc_color.c`'s colormap engine), so calls to them are routed to
-//! that owner; until that family lands its stub bodies panic loudly,
-//! exactly as the per-owner seam contract requires.
+//! that owner's landed bodies.
 //!
 //! # Colormap / parent
 //!

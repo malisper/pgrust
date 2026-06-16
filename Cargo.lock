@@ -9727,6 +9727,7 @@ version = "0.0.0"
 dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -13988,17 +13989,21 @@ dependencies = [
 name = "backend-rewrite-rewritehandler"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation-seams",
  "backend-access-common-tupdesc",
  "backend-access-table-table",
  "backend-catalog-pg-depend",
  "backend-commands-view-seams",
+ "backend-foreign-foreign-seams",
  "backend-nodes-core",
  "backend-parser-coerce",
  "backend-parser-relation",
  "backend-rewrite-core",
  "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-format-type",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
  "mcx",
  "types-acl",
  "types-core",

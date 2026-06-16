@@ -4,14 +4,27 @@
 //! `array_out` / `array_recv` / `array_send`), comparison / hashing /
 //! containment operators, iterators, and the SQL-facing functions.
 //!
-//! # SCAFFOLD STAGE
+//! # Status
 //!
-//! This is the scaffold for the `backend-utils-adt-arrayfuncs` unit. The
-//! prerequisite ABI types live in [`types_array`] (authored field-for-field
-//! against `array.h` / `c.h`); the seam crate declarations (inward + outward)
-//! are wired; and one module per *family* exposes the function signatures with
-//! stub bodies so the crate compiles. Logic lands family-by-family on
-//! follow-up branches.
+//! The standard varlena-array machinery is ported: the `ARR_*` byte accessors,
+//! construct/deconstruct + `ArrayBuildState*` accumulators, element/slice
+//! get/set, I/O, comparison/hashing/containment, and the SQL-facing functions
+//! all have real bodies. The prerequisite ABI types live in [`types_array`]
+//! (authored field-for-field against `array.h` / `c.h`), and the inward/outward
+//! seam declarations are wired.
+//!
+//! A few entry points are deliberately deferred (they mirror the C entry point
+//! and panic loudly, per Mirror-PG-and-panic, until their owner lands):
+//!
+//!  * the **expanded-array** subsystem (`array_expanded.c`) is not ported, so
+//!    `array_get_element_expanded`, `array_set_element_expanded`, and
+//!    `construct_empty_expanded_array` panic;
+//!  * `array_map` needs the `ExprState`/`ExprContext` arguments and the
+//!    executor `ExecEvalExpr` seam (executor boundary);
+//!  * `array_unnest_support` needs the planner support-request vocabulary
+//!    (`SupportRequestRows`, `estimate_*`);
+//!  * `arraysubs::value_word` does not yet handle Cstring/Composite/Expanded/
+//!    Internal canonical replacement values.
 //!
 //! An array value is represented as the same contiguous byte buffer the C
 //! `ArrayType *` points at (`&[u8]` / `PgVec<'mcx, u8>`); the `ARR_*` accessors

@@ -55,9 +55,7 @@ pub use seams::init_seams;
 
 /// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h). Consumed by the
 /// view-column-set family (`view_cols_are_auto_updatable` /
-/// `adjust_view_column_set`), whose only callers (`relation_is_updatable` /
-/// `rewriteTargetView`) land with the rule engine in the next STEP-2 slice.
-#[allow(dead_code)]
+/// `adjust_view_column_set`), used by `relation_is_updatable`.
 pub(crate) const FirstLowInvalidHeapAttributeNumber: i32 = -8;
 
 /// `ATTRIBUTE_GENERATED_VIRTUAL` (catalog/pg_attribute.h).
@@ -393,10 +391,7 @@ pub fn view_query_is_auto_updatable(
 /// reason. Optionally fills the set of updatable columns and the name of the
 /// first offending non-updatable required column.
 ///
-/// Callers (`relation_is_updatable` / `rewriteTargetView`) land with the rule
-/// engine in the next STEP-2 slice; ported here as part of the complete
-/// view-updatability family.
-#[allow(dead_code)]
+/// Caller `relation_is_updatable` (and the next-slice `rewriteTargetView`).
 fn view_cols_are_auto_updatable<'mcx>(
     mcx: Mcx<'mcx>,
     viewquery: &Query<'mcx>,
@@ -444,9 +439,7 @@ fn view_cols_are_auto_updatable<'mcx>(
 /// numbers onto the matching base-relation columns (the tlist entries are plain
 /// Vars of the base relation, as verified by view_query_is_auto_updatable).
 ///
-/// Callers (`relation_is_updatable` / `rewriteTargetView`) land with the rule
-/// engine in the next STEP-2 slice.
-#[allow(dead_code)]
+/// Caller `relation_is_updatable` (and the next-slice `rewriteTargetView`).
 fn adjust_view_column_set<'mcx>(
     mcx: Mcx<'mcx>,
     cols: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
@@ -593,6 +586,212 @@ pub fn error_view_not_updatable(
         }
         other => PgError::new(ERROR, format!("unrecognized CmdType: {}", other as i32)),
     }
+}
+
+// ===========================================================================
+// get_view_query (rewriteHandler.c:2483)
+// ===========================================================================
+
+/// `get_view_query(view)` — the `Query` from a view's `_RETURN` (ON SELECT)
+/// rule. The caller must have verified the relation is a view. The C returns a
+/// read-only pointer into the relcache's `rd_rules`; we return the canonical
+/// owned [`Query`] image re-projected into `mcx` by the `relation_rules` reader.
+pub fn get_view_query<'mcx>(mcx: Mcx<'mcx>, view: &Relation<'mcx>) -> PgResult<Query<'mcx>> {
+    debug_assert_eq!(view.rd_rel.relkind, types_tuple::access::RELKIND_VIEW);
+
+    let rulelocks = backend_utils_cache_relcache_seams::relation_rules::call(mcx, view.rd_id)?;
+    if let Some(rulelocks) = rulelocks {
+        for rule in rulelocks.rules.iter() {
+            if rule.event == CmdType::CMD_SELECT {
+                // A _RETURN rule should have only one action.
+                if rule.actions.len() != 1 {
+                    return Err(PgError::new(
+                        ERROR,
+                        "invalid _RETURN rule action specification".to_string(),
+                    ));
+                }
+                return rule.actions[0].clone_in(mcx);
+            }
+        }
+    }
+
+    Err(PgError::new(
+        ERROR,
+        "failed to find _RETURN rule for view".to_string(),
+    ))
+}
+
+// ===========================================================================
+// relation_is_updatable (rewriteHandler.c:2865)
+// ===========================================================================
+
+/// `ALL_EVENTS` (rewriteHandler.c) — `(1<<CMD_INSERT)|(1<<CMD_UPDATE)|(1<<CMD_DELETE)`.
+const ALL_EVENTS: i32 =
+    (1 << CmdType::CMD_INSERT as i32) | (1 << CmdType::CMD_UPDATE as i32) | (1 << CmdType::CMD_DELETE as i32);
+
+/// `relation_is_updatable(reloid, outer_reloids, include_triggers, include_cols)`
+/// — the bitmask of `CMD_*` events `reloid` supports for auto-updatable-view
+/// purposes. The seam entry passes `include_col` as a single column number (the
+/// C `bms_make_singleton(col)`), or `None` for the relation-level probe; the
+/// `outer_reloids` recursion guard starts empty.
+pub fn relation_is_updatable(
+    reloid: types_core::Oid,
+    include_triggers: bool,
+    include_col: Option<i32>,
+) -> PgResult<i32> {
+    let ctx = mcx::MemoryContext::new("relation_is_updatable");
+    let mcx = ctx.mcx();
+    let include_cols = match include_col {
+        Some(col) => Some(backend_nodes_core::bitmapset::bms_make_singleton(mcx, col)?),
+        None => None,
+    };
+    let mut outer_reloids: Vec<types_core::Oid> = Vec::new();
+    relation_is_updatable_internal(mcx, reloid, &mut outer_reloids, include_triggers, include_cols.as_deref())
+}
+
+fn relation_is_updatable_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    reloid: types_core::Oid,
+    outer_reloids: &mut Vec<types_core::Oid>,
+    include_triggers: bool,
+    include_cols: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
+) -> PgResult<i32> {
+    use backend_nodes_core::bitmapset::{bms_int_members, bms_is_empty};
+
+    let mut events = 0;
+
+    // Since this function recurses, it could be driven to stack overflow.
+    backend_tcop_postgres_seams::check_stack_depth::call()?;
+
+    let rel = backend_access_common_relation_seams::try_relation_open::call(
+        mcx,
+        reloid,
+        types_storage::lock::AccessShareLock,
+    )?;
+
+    // If the relation doesn't exist, return zero rather than throwing an error.
+    let Some(rel) = rel else {
+        return Ok(0);
+    };
+
+    let close = |rel: Relation<'mcx>| -> PgResult<()> {
+        rel.close(types_storage::lock::AccessShareLock)
+    };
+
+    // If we detect a recursive view, report that it is not updatable.
+    if outer_reloids.contains(&rel.rd_id) {
+        close(rel)?;
+        return Ok(0);
+    }
+
+    // If the relation is a table, it is always updatable.
+    if rel.rd_rel.relkind == types_tuple::access::RELKIND_RELATION
+        || rel.rd_rel.relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE
+    {
+        close(rel)?;
+        return Ok(ALL_EVENTS);
+    }
+
+    // Look for unconditional DO INSTEAD rules, and note supported events.
+    let rulelocks = backend_utils_cache_relcache_seams::relation_rules::call(mcx, rel.rd_id)?;
+    if let Some(rulelocks) = &rulelocks {
+        for rule in rulelocks.rules.iter() {
+            if rule.isInstead && rule.qual.is_none() {
+                events |= (1 << rule.event as i32) & ALL_EVENTS;
+            }
+        }
+        if events == ALL_EVENTS {
+            close(rel)?;
+            return Ok(events);
+        }
+    }
+
+    // Similarly look for INSTEAD OF triggers, if they are to be included.
+    if include_triggers {
+        if let Some(trig) = rel.rd_trigdesc.as_deref() {
+            if trig.trig_insert_instead_row {
+                events |= 1 << CmdType::CMD_INSERT as i32;
+            }
+            if trig.trig_update_instead_row {
+                events |= 1 << CmdType::CMD_UPDATE as i32;
+            }
+            if trig.trig_delete_instead_row {
+                events |= 1 << CmdType::CMD_DELETE as i32;
+            }
+            if events == ALL_EVENTS {
+                close(rel)?;
+                return Ok(events);
+            }
+        }
+    }
+
+    // If this is a foreign table, check which update events it supports. The
+    // repo's FdwRoutine carrier does not model the modify callbacks, so this
+    // leg is computed by the foreign owner behind a seam (see the seam doc).
+    if rel.rd_rel.relkind == types_tuple::access::RELKIND_FOREIGN_TABLE {
+        events |= backend_foreign_foreign_seams::foreign_rel_updatable_events::call(rel.rd_id)?;
+        close(rel)?;
+        return Ok(events);
+    }
+
+    // Check if this is an automatically updatable view.
+    if rel.rd_rel.relkind == types_tuple::access::RELKIND_VIEW {
+        let viewquery = get_view_query(mcx, &rel)?;
+
+        if view_query_is_auto_updatable(&viewquery, false)?.is_none() {
+            // Determine which of the view's columns are updatable.
+            let mut updatable_cols: Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> =
+                None;
+            view_cols_are_auto_updatable(
+                mcx,
+                &viewquery,
+                None,
+                Some(&mut updatable_cols),
+                &mut None,
+            )?;
+
+            if let Some(inc) = include_cols {
+                updatable_cols = bms_int_members(updatable_cols, Some(inc));
+            }
+
+            let mut auto_events = if bms_is_empty(updatable_cols.as_deref()) {
+                1 << CmdType::CMD_DELETE as i32 // May support DELETE
+            } else {
+                ALL_EVENTS // May support all events
+            };
+
+            // The base relation must also support these update commands.
+            let jt = viewquery
+                .jointree
+                .as_ref()
+                .expect("auto-updatable view has a jointree");
+            let rtr = match &*jt.fromlist[0] {
+                Node::RangeTblRef(rtr) => rtr,
+                _ => panic!("auto-updatable view fromlist[0] is not a RangeTblRef"),
+            };
+            let base_rte = rt_fetch(&viewquery.rtable, rtr.rtindex);
+            debug_assert_eq!(base_rte.rtekind, RTEKind::RTE_RELATION);
+
+            if base_rte.relkind != RELKIND_RELATION && base_rte.relkind != RELKIND_PARTITIONED_TABLE {
+                let baseoid = base_rte.relid;
+                outer_reloids.push(rel.rd_id);
+                let new_include_cols =
+                    adjust_view_column_set(mcx, updatable_cols.as_deref(), &viewquery.targetList)?;
+                auto_events &= relation_is_updatable_internal(
+                    mcx,
+                    baseoid,
+                    outer_reloids,
+                    include_triggers,
+                    new_include_cols.as_deref(),
+                )?;
+                outer_reloids.pop();
+            }
+            events |= auto_events;
+        }
+    }
+
+    close(rel)?;
+    Ok(events)
 }
 
 // ===========================================================================

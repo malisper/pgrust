@@ -101,6 +101,32 @@ seam_core::seam!(
     pub fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid>
 );
 
+seam_core::seam!(
+    /// The `relation_is_updatable` (rewriteHandler.c:2952) foreign-table leg:
+    /// the bitmask of `CMD_*` events the foreign relation `relid` supports.
+    ///
+    /// ```c
+    /// FdwRoutine *fdwroutine = GetFdwRoutineForRelation(rel, false);
+    /// if (fdwroutine->IsForeignRelUpdatable != NULL)
+    ///     events |= fdwroutine->IsForeignRelUpdatable(rel);
+    /// else {
+    ///     if (fdwroutine->ExecForeignInsert != NULL) events |= (1 << CMD_INSERT);
+    ///     if (fdwroutine->ExecForeignUpdate != NULL) events |= (1 << CMD_UPDATE);
+    ///     if (fdwroutine->ExecForeignDelete != NULL) events |= (1 << CMD_DELETE);
+    /// }
+    /// ```
+    ///
+    /// This computation is homed in the foreign owner because the repo's
+    /// [`types_nodes::FdwRoutine`] carrier is trimmed to the scan/parallel/async
+    /// callback-presence flags and does NOT model `IsForeignRelUpdatable` /
+    /// `ExecForeignInsert` / `ExecForeignUpdate` / `ExecForeignDelete` — so the
+    /// rewriteHandler caller cannot read them off the routine. The owning unit
+    /// (`backend-foreign-foreign`, which holds `GetFdwRoutineForRelation` and the
+    /// full FDW routine) installs this when the modify-callback carrier lands;
+    /// until then a call panics loudly (mirror-PG seam-and-panic).
+    pub fn foreign_rel_updatable_events(relid: Oid) -> PgResult<i32>
+);
+
 /* ---- FDW options validation + IMPORT (foreign.c / fdwapi.c) ---- */
 
 seam_core::seam!(

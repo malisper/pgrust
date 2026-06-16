@@ -18,14 +18,13 @@
 //! `&mut ColorMap` argument and the parent as a `has_parent: bool` flag, exactly
 //! as the proven idiomatic port does; the colorchain bookkeeping runs when
 //! `COLORED(a) && !has_parent` (C: `COLORED(a) && nfa->parent == NULL`). These
-//! arguments are absent from the scaffold's draft signatures but are required to
-//! mirror `regc_nfa.c`/`regc_color.c` faithfully.
+//! explicit arguments mirror `regc_nfa.c`/`regc_color.c` faithfully.
 //!
 //! # Routing to unported neighbors
 //!
 //! The colormap *allocators* (`maxcolor`/`pseudocolor`/`freecolor`) are owned by
-//! the [`crate::regex_foundation`] family; calls route to that owner (its bodies
-//! panic loudly until it lands). `getcolor` re-exports
+//! the [`crate::regex_foundation`] family; calls route to that owner's landed
+//! bodies. `getcolor` re-exports
 //! [`crate::regex_foundation::pg_reg_getcolor`].
 //!
 //! # Recursion guards

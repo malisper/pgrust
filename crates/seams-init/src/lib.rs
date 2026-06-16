@@ -853,6 +853,18 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
+        // DESIGN_DEBT (TD-FDWROUTINE-UPDATABLE): rewriteHandler.c's
+        // `relation_is_updatable` foreign-table leg reads the FDW routine's modify
+        // callbacks (`IsForeignRelUpdatable`/`ExecForeignInsert`/`...Update`/
+        // `...Delete`) to compute the supported-events mask. The repo's
+        // `types_nodes::FdwRoutine` carrier is trimmed to the scan/parallel/async
+        // callback-presence flags and does NOT model the modify callbacks, so the
+        // computation is homed behind `foreign_rel_updatable_events` on the foreign
+        // owner (`backend-foreign-foreign`, which holds `GetFdwRoutineForRelation`).
+        // The owner is COMPLETE but cannot install this until the FdwRoutine carrier
+        // grows the modify-callback fields. Loud-panics (mirror-PG) until then;
+        // DELETE this entry when the FdwRoutine modify-callback carrier lands.
+        ("backend_foreign_foreign", "foreign_rel_updatable_events"),
         // DESIGN_DEBT (TD-DEPENDENCY-REMOVEFUNC): dependency.c's `doDeletion` calls
         // `remove_function_tuple` (the pg_proc `RemoveFunctionById` catalog delete)
         // for OCLASS_PROC. functioncmds.c is a CONSUMER of this seam (it also calls
