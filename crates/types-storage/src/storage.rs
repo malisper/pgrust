@@ -396,6 +396,11 @@ pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
 /// updating `pg_internal.init`.
 pub const REL_CACHE_INIT_LOCK: usize = 16;
 
+/// `SyncRepLock` (`lwlocklist.h`, `PG_LWLOCK(32, SyncRep)`): offset of the
+/// built-in lock in `MainLWLockArray` guarding the synchronous-replication
+/// wait queue and the released-LSN array in `WalSndCtl`.
+pub const SYNC_REP_LOCK: usize = 32;
+
 /// Possible values for `huge_pages` and `huge_pages_status`
 /// (`storage/pg_shmem.h`).
 #[repr(i32)]
@@ -923,7 +928,10 @@ pub struct PGPROC {
     /// `int syncRepState` — wait state for sync rep.
     pub syncRepState: i32,
     /// `dlist_node syncRepLinks` — list link if process is in syncrep queue.
-    pub syncRepLinks: dlist_node,
+    /// Modeled, like the LWLock/CV wait-list links, as a `proclist_node` of
+    /// pgprocno indexes (the shmem-safe intrusive representation): a detached
+    /// node has `next == prev == INVALID_PROC_NUMBER`.
+    pub syncRepLinks: proclist_node,
 
     /// `dlist_head myProcLocks[NUM_LOCK_PARTITIONS]` — PROCLOCK lists, one per
     /// lock partition.
@@ -1160,7 +1168,9 @@ impl PGPROC {
             statusFlags: 0,
             waitLSN: 0,
             syncRepState: 0,
-            syncRepLinks: dlist_node::new(),
+            // Not in any sync-rep queue: the `{0,0}` "detached" marker, matching
+            // the LWLock/CV wait-list `proclist_node` zero-init convention.
+            syncRepLinks: proclist_node { next: 0, prev: 0 },
             myProcLocks: core::array::from_fn(|_| dlist_head::new()),
             subxidStatus: XidCacheStatus {
                 count: 0,

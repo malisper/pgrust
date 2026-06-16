@@ -302,6 +302,7 @@ backend-replication-logical-reorderbuffer = { path = "../backend-replication-log
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
+backend-replication-syncrep = { path = "../backend-replication-syncrep" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }

@@ -13108,12 +13108,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-slotfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-logical-logical",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-slot",
+ "backend-replication-walsender",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-logical",
+ "types-nodes",
+ "types-replication-slot",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-replication-snapbuild-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-replication-syncrep"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-syncrep-gram",
+ "backend-replication-syncrep-scanner-seams",
+ "backend-replication-syncrep-seams",
+ "backend-replication-walsender",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-ps-status-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-replication",
+ "types-storage",
 ]
 
 [[package]]
@@ -19573,6 +19627,7 @@ dependencies = [
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
  "backend-replication-slot",
+ "backend-replication-syncrep",
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",

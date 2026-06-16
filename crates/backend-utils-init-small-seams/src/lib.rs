@@ -145,13 +145,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ProcDiePending` (globals.c) — whether a die interrupt is pending.
+    pub fn proc_die_pending() -> bool
+);
+
+seam_core::seam!(
     /// `QueryCancelPending = value` (globals.c).
     pub fn set_query_cancel_pending(value: bool)
 );
 
 seam_core::seam!(
+    /// `QueryCancelPending` (globals.c) — whether a query-cancel is pending.
+    pub fn query_cancel_pending() -> bool
+);
+
+seam_core::seam!(
     /// `InterruptHoldoffCount = value` (globals.c).
     pub fn set_interrupt_holdoff_count(value: u32)
+);
+
+seam_core::seam!(
+    /// `InterruptHoldoffCount` (globals.c) — the interrupt-holdoff nesting
+    /// depth (read in `SyncRepWaitForLSN`'s `Assert(InterruptHoldoffCount > 0)`).
+    pub fn interrupt_holdoff_count() -> u32
 );
 
 seam_core::seam!(

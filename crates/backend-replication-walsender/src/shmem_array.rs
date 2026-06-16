@@ -13,12 +13,17 @@ use crate::core::{
     ReplicationKind, WalSnd, WalSndState, XLogRecPtr,
 };
 
-/// `&WalSndCtl->walsnds[MyWalSnd]` — the current backend's reserved slot.
+/// `&WalSndCtl->walsnds[MyWalSnd]` — the current backend's reserved slot index.
 #[inline]
-fn my_slot_index() -> i32 {
+pub fn my_walsnd_index() -> i32 {
     let idx = proc_get(|p| p.my_walsnd);
     assert!(idx >= 0, "MyWalSnd accessed before InitWalSenderSlot");
     idx
+}
+
+#[inline]
+fn my_slot_index() -> i32 {
+    my_walsnd_index()
 }
 
 /// Whether this backend has reserved a `WalSnd` slot (`MyWalSnd != NULL`).
