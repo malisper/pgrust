@@ -60,6 +60,7 @@ extern crate alloc;
 pub(crate) mod out_expr_family;
 pub(crate) mod out_parse_family;
 pub(crate) mod out_plan_family;
+pub(crate) mod out_ddl_family;
 
 use alloc::string::String;
 
@@ -578,11 +579,17 @@ pub(crate) fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
         Expr::NullIfExpr(o) => out_opexpr(buf, "NULLIFEXPR", o, write_loc),
         Expr::FuncExpr(f) => out_funcexpr(buf, f, write_loc),
         Expr::BoolExpr(b) => out_boolexpr(buf, b, write_loc),
-        other => panic!(
-            "outNode: no _out<Type> writer ported for Expr variant {:?} \
-             (common primitive-expression families Var/Const/Param/Op/Func/Bool serialize so far)",
-            core::mem::discriminant(other)
-        ),
+        other => {
+            // The remaining post-analysis `Expr` arms are written by the expr
+            // family's body writer (label + fields, no framing — the `{`/`}` is
+            // ours). A variant no family claims `mirror-pg-and-panic`s.
+            if !out_expr_family::out_expr_body(buf, other, write_loc) {
+                panic!(
+                    "outNode: no _out<Type> writer ported for Expr variant {:?}",
+                    core::mem::discriminant(other)
+                );
+            }
+        }
     }
     buf.push('}');
 }
@@ -636,6 +643,8 @@ pub(crate) fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) 
         // nodeTag, framed by `{`...`}`. The common primitive-expression family
         // (carried as `Node::Expr`) and `TargetEntry` are ported field-for-field.
         Node::Expr(e) => out_expr(buf, e, write_loc),
+        // `_outTargetEntry` (lib-owned writer; the parse family does not claim it).
+        Node::TargetEntry(te) => framed(buf, |b| out_targetentry(b, te, write_loc)),
         // The remaining framed `{LABEL ...}` node tags are dispatched through
         // the per-family `try_out` chain (each opens `{`, runs the per-node
         // `_out<Type>`, closes `}`). A tag no family claims `mirror-pg-and-panic`s
@@ -645,6 +654,7 @@ pub(crate) fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) 
             if out_expr_family::try_out(buf, other, write_loc)
                 || out_parse_family::try_out(buf, other, write_loc)
                 || out_plan_family::try_out(buf, other, write_loc)
+                || out_ddl_family::try_out(buf, other, write_loc)
             {
                 return;
             }

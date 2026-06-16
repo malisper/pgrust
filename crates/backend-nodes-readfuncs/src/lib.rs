@@ -64,6 +64,7 @@ extern crate alloc;
 pub(crate) mod read_expr_family;
 pub(crate) mod read_parse_family;
 pub(crate) mod read_plan_family;
+pub(crate) mod read_ddl_family;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -754,6 +755,8 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
                 res?
             } else if let Some(res) = read_plan_family::try_read(mcx, other) {
                 res?
+            } else if let Some(res) = read_ddl_family::try_read(mcx, other) {
+                res?
             } else {
                 let n = core::cmp::min(other.len(), 32);
                 let preview = String::from_utf8_lossy(&other[..n]).into_owned();
@@ -777,6 +780,18 @@ pub fn init_seams() {
 
 #[cfg(test)]
 extern crate std;
+
+/// Install `parse_node_string` exactly ONCE across the whole crate's test
+/// binary (the seam's `OnceLock` panics on a second `set`). Every test module
+/// — the lib `tests` and each `read_*_family::tests` — routes through this one
+/// global `Once`, so the seam is set at most once regardless of which module's
+/// test runs first.
+#[cfg(test)]
+pub(crate) fn ensure_seams_for_tests() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(init_seams);
+}
 
 #[cfg(test)]
 mod tests {
@@ -889,13 +904,7 @@ mod tests {
         Var, VarReturningType,
     };
 
-    /// Install `parse_node_string` exactly once across all tests (the seam's
-    /// `OnceLock` panics on a second `set`).
-    fn ensure_seams() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(init_seams);
-    }
+    use super::ensure_seams_for_tests as ensure_seams;
 
     /// OUT a framed node, READ it back, and assert byte-stable re-serialization.
     /// `parse_node_string` is the installed seam `string_to_node` recurses
