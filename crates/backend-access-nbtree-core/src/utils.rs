@@ -511,24 +511,32 @@ fn index_getprocinfo(_rel: &Relation, _attno: AttrNumber, _procnum: i16) -> u64 
 }
 
 /// `datumCopy(value, attbyval, attlen)` (utils/datum.c). For by-value datums
-/// this is a plain copy; for by-ref datums it allocates and copies the bytes.
-/// No by-ref index-datum copy primitive exists in this repo's canonical
-/// `Datum` (the pointer lane is unmodelled), so the by-ref path panics.
-fn datum_copy<'mcx>(value: &Datum<'mcx>, attbyval: bool, _attlen: i16) -> Datum<'mcx> {
-    if attbyval {
-        value.clone()
-    } else {
-        panic!("nbtutils: datumCopy of a by-ref skip-array datum not yet ported")
-    }
+/// this is a plain word copy; for by-ref datums it allocates a fresh copy of the
+/// bytes in `mcx` (here the index relation's scan-lifetime allocator, the same
+/// `Mcx` `index_getattr` threads for materialised by-ref tuple datums). The
+/// canonical `Datum::clone_in` is exactly `datumCopy`: it word-copies `ByVal`,
+/// deep-copies `ByRef` into `mcx`, and flattens an `Expanded` datum into its
+/// `ByRef` varlena image (C: `EOH_flatten_into`). `attbyval`/`attlen` are
+/// encoded in the arm itself, so the explicit flags are unused (the C signature
+/// is preserved for fidelity). `clone_in` propagates the `ereport(ERROR)`
+/// (out-of-memory) surface that C's `palloc` would raise.
+fn datum_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &Datum<'mcx>,
+    _attbyval: bool,
+    _attlen: i16,
+) -> PgResult<Datum<'mcx>> {
+    value.clone_in(mcx)
 }
 
 /// `pfree(DatumGetPointer(sk_argument))` of a by-ref skip-array `sk_argument`.
-/// The canonical `Datum` has no pointer lane to free, so this is a no-op for the
-/// by-value case and an honest panic for the by-ref case.
-fn pfree_datum_if_byref(skey: &ScanKeyData, attbyval: bool) {
-    if !attbyval && skey.sk_argument.as_usize() != 0 {
-        panic!("nbtutils: pfree of a by-ref skip-array sk_argument not yet ported");
-    }
+/// In the arena model the by-reference bytes are owned by the scan-lifetime
+/// `Mcx`; replacing `sk_argument` drops the old value and the arena reclaims it
+/// when the context is reset/deleted, so the explicit `pfree` is a behaviour-
+/// preserving no-op (C frees eagerly; the arena frees in bulk). No pointer lane
+/// to free by hand.
+fn pfree_datum_if_byref(_skey: &ScanKeyData, _attbyval: bool) {
+    // No-op: arena-owned by-ref bytes are reclaimed with the memory context.
 }
 
 /// `array->sksup->decrement(rel, sk_argument, &underflow)` — opclass skip
@@ -967,7 +975,7 @@ fn bt_skiparray_set_element<'mcx>(
     set_elem_result: i32,
     tupdatum: &Datum<'mcx>,
     tupnull: bool,
-) {
+) -> PgResult<()> {
     debug_assert!((skey.sk_flags & SK_BT_SKIP) != 0);
     debug_assert!((skey.sk_flags & SK_SEARCHARRAY) != 0);
 
@@ -975,13 +983,13 @@ fn bt_skiparray_set_element<'mcx>(
         // tupdatum/tupnull is out of the range of the skip array.
         debug_assert!(!array.null_elem);
         bt_array_set_low_or_high(rel, skey, array, set_elem_result < 0);
-        return;
+        return Ok(());
     }
 
     // Advance skip array to tupdatum (or tupnull) value.
     if tupnull {
         bt_skiparray_set_isnull(rel, skey, array);
-        return;
+        return Ok(());
     }
 
     // Free memory previously allocated for sk_argument if needed.
@@ -994,7 +1002,13 @@ fn bt_skiparray_set_element<'mcx>(
         | SK_BT_MAXVAL
         | SK_BT_NEXT
         | SK_BT_PRIOR);
-    skey.sk_argument = datum_copy(tupdatum, array.attbyval, array.attlen);
+    skey.sk_argument = datum_copy(
+        *rel.rd_opcintype.allocator(),
+        tupdatum,
+        array.attbyval,
+        array.attlen,
+    )?;
+    Ok(())
 }
 
 /// `_bt_skiparray_set_isnull()` — set skip array scan key to NULL.
@@ -1177,7 +1191,12 @@ fn bt_array_decrement<'mcx>(
         // "Decrement" from NULL to the high_elem value (skip support).
         skey.sk_flags &= !(SK_SEARCHNULL | SK_ISNULL);
         let high_elem = &array.sksup_data.as_ref().unwrap().high_elem;
-        skey.sk_argument = datum_copy(high_elem, array.attbyval, array.attlen);
+        skey.sk_argument = datum_copy(
+            *rel.rd_opcintype.allocator(),
+            high_elem,
+            array.attbyval,
+            array.attlen,
+        )?;
         return Ok(true);
     }
 
@@ -1261,7 +1280,12 @@ fn bt_array_increment<'mcx>(
         // "Increment" from NULL to the low_elem value (skip support).
         skey.sk_flags &= !(SK_SEARCHNULL | SK_ISNULL);
         let low_elem = &array.sksup_data.as_ref().unwrap().low_elem;
-        skey.sk_argument = datum_copy(low_elem, array.attbyval, array.attlen);
+        skey.sk_argument = datum_copy(
+            *rel.rd_opcintype.allocator(),
+            low_elem,
+            array.attbyval,
+            array.attlen,
+        )?;
         return Ok(true);
     }
 
@@ -1758,7 +1782,7 @@ fn bt_advance_array_keys<'mcx>(
                     result,
                     &tupdatum,
                     tupnull,
-                );
+                )?;
                 // If it became a valid datum, sync cur_elem via set_low_or_high
                 // path is not needed (skip arrays don't track cur_elem index).
                 skip_array_advanced = true;
@@ -3247,12 +3271,16 @@ fn bt_keep_natts_fast_inner<'mcx>(
     Ok(keepnatts)
 }
 
-/// `datum_image_eq(datum1, datum2, attbyval, attlen)` (utils/datum.c). There is
-/// no producer for image-equality of *index-tuple* datums in this repo (the
-/// `datum_image_eq` seam takes bare `Datum` words; an index attribute's by-ref
-/// bytes have no pointer lane in the canonical `Datum`). Genuine gap.
-fn datum_image_eq(_d1: &Datum, _d2: &Datum, _attbyval: bool, _attlen: i16) -> PgResult<bool> {
-    panic!("_bt_keep_natts_fast: datum_image_eq over index-tuple datums not yet ported")
+/// `datum_image_eq(datum1, datum2, attbyval, attlen)` (utils/datum.c) — whether
+/// the in-memory images of two index-tuple datums are bit-for-bit equal.
+/// Delegates to datum.c's owner through the value-model `datum_image_eq_v` seam,
+/// which operates directly on the canonical `Datum` enum: by-value word
+/// equality (`ByVal`), `attlen`-byte `memcmp` for fixed-length by-ref, logical
+/// varlena-payload compare for `attlen == -1`, and `strlen + 1` compare for a
+/// cstring (`attlen == -2`). The `index_getattr` above already detoasts into the
+/// `ByRef` byte image the seam reads.
+fn datum_image_eq(d1: &Datum, d2: &Datum, attbyval: bool, attlen: i16) -> PgResult<bool> {
+    backend_utils_adt_datum_seams::datum_image_eq_v::call(d1, d2, attbyval, attlen)
 }
 
 // ===========================================================================

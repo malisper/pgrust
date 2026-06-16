@@ -92,12 +92,29 @@ pub struct FormData_pg_class<'mcx> {
 /// consume (the `rd_index` payload of an index's relcache entry).
 #[derive(Clone, Copy, Debug)]
 pub struct FormData_pg_index {
+    /// `int16 indnatts` — total number of columns in the index (key + INCLUDE;
+    /// `IndexRelationGetNumberOfAttributes`). `0` for a non-index relation's
+    /// absent `rd_index`. Read by `BuildIndexInfo` (`catalog/index.c`) to size
+    /// `ii_IndexAttrNumbers` and copy `indkey.values[0..indnatts]`.
+    pub indnatts: i16,
     /// `int16 indnkeyatts` — number of key columns in the index (excludes
     /// INCLUDE columns; `IndexRelationGetNumberOfKeyAttributes`). `0` for a
     /// non-index relation's absent `rd_index`.
     pub indnkeyatts: i16,
     /// `bool indisunique` — is this a unique index?
     pub indisunique: bool,
+    /// `bool indisprimary` — is this index for a primary key? Read by
+    /// `BuildIndexInfo` (it does not consume this directly, but the relcache
+    /// projection exposes it so `index_create`'s callers/`BuildIndexInfo`-side
+    /// readers see the full flag set; mirrors `indexStruct->indisprimary`).
+    pub indisprimary: bool,
+    /// `bool indisexclusion` — is this index for an exclusion constraint?
+    /// `BuildIndexInfo` passes `indisexclusion && indisunique` as `makeIndexInfo`'s
+    /// `concurrent` argument and gates `RelationGetExclusionInfo` on it.
+    pub indisexclusion: bool,
+    /// `bool indisready` — is this index ready for inserts? Read by
+    /// `BuildIndexInfo` (`indexStruct->indisready`) for `makeIndexInfo`.
+    pub indisready: bool,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
     /// `bool indnullsnotdistinct` — for a unique index, do NULL key values

@@ -1970,6 +1970,7 @@ dependencies = [
  "backend-storage-smgr-bulkwrite-seams",
  "backend-storage-smgr-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-datum-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
@@ -3881,6 +3882,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-array",
  "types-cluster",
  "types-core",
  "types-error",
