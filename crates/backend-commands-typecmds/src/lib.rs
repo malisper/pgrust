@@ -1172,8 +1172,8 @@ pub fn DefineRange<'mcx>(
                 return Err(error_conflicting_def_elem(defel));
             }
             /* we can look up the subtype name immediately */
-            let (ns, name) =
-                QualifiedNameGetCreationNamespace(mcx, &as_namelist(&defGetQualifiedName(defel)?))?;
+            let mrng_nl = as_namelist(&defGetQualifiedName(defel)?);
+            let (ns, name) = QualifiedNameGetCreationNamespace(mcx, &mrng_nl)?;
             multirangeNamespace = ns;
             multirangeTypeName = Some(name.to_string());
         } else {
@@ -2102,7 +2102,7 @@ pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
 /// `ColumnDef` nodes (the `(...)` after AS).
 pub fn DefineCompositeType<'mcx>(
     mcx: Mcx<'mcx>,
-    typevar: &types_parsenodes::RangeVar,
+    typevar: &types_nodes::rawnodes::RangeVar<'mcx>,
     coldeflist: &[Node],
 ) -> PgResult<ObjectAddress> {
     /*
@@ -2113,10 +2113,10 @@ pub fn DefineCompositeType<'mcx>(
      */
     let typeNamespace = RangeVarGetAndCheckCreationNamespace(mcx, typevar, NoLock, None)?;
     RangeVarAdjustRelationPersistence(mcx, typevar, typeNamespace)?;
-    let relname = typevar
+    let relname: String = typevar
         .relname
-        .as_deref()
-        .map(|s| s.to_string())
+        .as_ref()
+        .map(|s| s.as_str().to_string())
         .unwrap_or_default();
     let old_type_oid = get_type_oid::call(&relname, typeNamespace)?;
     if OidIsValid(old_type_oid) {
@@ -2138,9 +2138,9 @@ pub fn DefineCompositeType<'mcx>(
      * NIL/NIL/NIL/ONCOMMIT_NOOP/NULL/false. Seam panics until tablecmds lands.
      */
     let carrier = TypeCmdsRangeVar {
-        catalogname: typevar.catalogname.as_deref().map(|s| s.to_string()),
-        schemaname: typevar.schemaname.as_deref().map(|s| s.to_string()),
-        relname: typevar.relname.as_deref().map(|s| s.to_string()),
+        catalogname: typevar.catalogname.as_ref().map(|s| s.as_str().to_string()),
+        schemaname: typevar.schemaname.as_ref().map(|s| s.as_str().to_string()),
+        relname: typevar.relname.as_ref().map(|s| s.as_str().to_string()),
         inh: typevar.inh,
         relpersistence: typevar.relpersistence,
         location: typevar.location,
