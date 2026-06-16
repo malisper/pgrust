@@ -79,12 +79,14 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_indexing::init_seams();
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();
     backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
@@ -105,6 +107,7 @@ pub fn init_all() {
     backend_commands_opclasscmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
+    backend_commands_seclabel::init_seams();
     backend_commands_trigger::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
@@ -273,6 +276,7 @@ pub fn init_all() {
     backend_tcop_backend_startup::init_seams();
     backend_tcop_dest::init_seams();
     backend_tcop_fastpath::init_seams();
+    backend_tcop_pquery::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
     backend_timezone_strftime::init_seams();
@@ -716,6 +720,22 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
+        // DESIGN_DEBT (TD-DEPENDENCY-REMOVEFUNC): dependency.c's `doDeletion` calls
+        // `remove_function_tuple` (the pg_proc `RemoveFunctionById` catalog delete)
+        // for OCLASS_PROC. functioncmds.c is a CONSUMER of this seam (it also calls
+        // it at ddl_core.rs:1163); the real owner is pg_proc.c's RemoveFunctionById,
+        // which is unported, so nobody installs it. Loud-panics until pg_proc lands.
+        ("backend_commands_functioncmds", "remove_function_tuple"),
+        // NOTE (TD-SYSCACHE-DYNAMIC-TID): dependency.c's generic `DropObjectById`
+        // calls `backend_utils_cache_syscache::search_syscache1_tid` — a new
+        // generic `SearchSysCache1(cacheId, ...)` primitive for a DYNAMIC cacheId,
+        // returning the matched tuple's t_self for CatalogTupleDelete. Its owner
+        // dir `backend-utils-cache-syscache` is NOT a complete CATALOG unit
+        // (syscache.c is owned by backend-utils-cache-small), so the
+        // `every_declared_seam_is_installed_by_its_owner` guard already exempts it
+        // (the owner isn't `complete`) — no allowlist entry is needed here (adding
+        // one is flagged stale). The debt is recorded in DESIGN_DEBT.md; install
+        // when the dynamic-cacheId SearchSysCache1 primitive lands.
         // DESIGN_DEBT (TD-SRF-INLINE-QUERY): `inline_set_returning_function` is the
         // full SET-returning-function inliner (clauses.c:5134) that
         // `preprocess_function_rtes` (prepjointree.c:931) calls to turn a FUNCTION

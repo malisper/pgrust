@@ -325,12 +325,18 @@ fn dest_rshutdown_impl(dest: DestReceiverHandle) -> PgResult<()> {
     (r.vtable.rShutdown)(r.state)
 }
 
+/// `dest->mydest` (tcop/dest.h) — return the receiver's `CommandDest` tag.
+fn dest_get_mydest_impl(dest: DestReceiverHandle) -> CommandDest {
+    lookup(dest).mydest
+}
+
 /// Install this crate's inward seams. Wired into `seams-init`.
 pub fn init_seams() {
     backend_tcop_dest_seams::dest_rstartup::set(dest_rstartup_impl);
     backend_tcop_dest_seams::dest_receive_slot::set(dest_receive_slot_impl);
     backend_tcop_dest_seams::dest_rshutdown::set(dest_rshutdown_impl);
     backend_tcop_dest_seams::create_dest_receiver::set(CreateDestReceiver);
+    backend_tcop_dest_seams::dest_get_mydest::set(dest_get_mydest_impl);
 }
 
 #[cfg(test)]

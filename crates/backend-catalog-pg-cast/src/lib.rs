@@ -147,7 +147,7 @@ pub fn CastCreate(
         castcontext,
         castmethod,
     };
-    let castid: Oid = indexing_seams::catalog_tuple_insert_pg_cast::call(&relation, &row)?;
+    let castid: Oid = indexing_seams::catalog_tuple_insert_pg_cast::call(cast_ctx.mcx(), &relation, &row)?;
 
     // addrs = new_object_addresses();
     let addrs = dependency_seams::new_object_addresses::call()?;

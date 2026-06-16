@@ -26,3 +26,11 @@ seam_core::seam!(
     /// `nextval` re-reads from the sequence relation. May `ereport(ERROR)`.
     pub fn reset_sequence_caches() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `DeleteSequenceTuple(seqid)` (commands/sequence.c): the per-class
+    /// `OCLASS_CLASS` sequence-drop handler dependency.c's `doDeletion` invokes
+    /// for a sequence relation. Removes its `pg_sequence` row. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn DeleteSequenceTuple(seqid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);

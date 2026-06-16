@@ -440,7 +440,9 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
 /// (nothing calls *into* it across a dependency cycle — its callers,
 /// dependency.c / ruleutils.c, are downstream), so there is nothing to install.
 /// Present and wired into `seams-init::init_all()` for the registry invariant.
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_commands_comment_seams::DeleteComments::set(DeleteComments);
+}
 
 #[cfg(test)]
 mod tests;

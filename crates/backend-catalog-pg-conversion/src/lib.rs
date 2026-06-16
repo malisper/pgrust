@@ -176,7 +176,7 @@ pub fn ConversionCreate(
     };
 
     /* insert a new tuple */
-    let oid = indexing_seams::catalog_tuple_insert_pg_conversion::call(&rel, &row)?;
+    let oid = indexing_seams::catalog_tuple_insert_pg_conversion::call(mcx, &rel, &row)?;
 
     // myself.classId = ConversionRelationId; myself.objectId = oid;
     let myself = ObjectAddress {

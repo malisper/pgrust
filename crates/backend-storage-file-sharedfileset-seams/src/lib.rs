@@ -19,8 +19,12 @@ seam_core::seam!(
     /// PID + a per-PID counter, registering an on-detach cleanup callback on
     /// `seg` (or, when `seg` is the implicit-NULL session-lifetime case, an
     /// on-proc-exit callback). The leader calls this once before launching
-    /// workers.
-    pub fn SharedFileSetInit(fileset: &mut SharedFileSet, seg: DsmSegmentHandle)
+    /// workers. Fallible: the nested `FileSetInit` (`PrepareTempTablespaces`)
+    /// and the `on_dsm_detach` callback registration both allocate / `ereport`.
+    pub fn SharedFileSetInit(
+        fileset: &mut SharedFileSet,
+        seg: DsmSegmentHandle,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -28,13 +32,18 @@ seam_core::seam!(
     /// (sharedfileset.c) — attach to a `SharedFileSet` created by
     /// `SharedFileSetInit`, bumping the reference count under the fileset's
     /// spinlock and registering the matching on-detach cleanup callback. Each
-    /// worker calls this.
-    pub fn SharedFileSetAttach(fileset: &mut SharedFileSet, seg: DsmSegmentHandle)
+    /// worker calls this. Fallible: explicit `ereport(ERROR)` when the set is
+    /// already destroyed, plus the `on_dsm_detach` callback registration OOM.
+    pub fn SharedFileSetAttach(
+        fileset: &mut SharedFileSet,
+        seg: DsmSegmentHandle,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `void SharedFileSetDeleteAll(SharedFileSet *fileset)` (sharedfileset.c) —
     /// delete all the temporary directories (and the files they contain) created
-    /// for `fileset` across its tablespaces.
-    pub fn SharedFileSetDeleteAll(fileset: &mut SharedFileSet)
+    /// for `fileset` across its tablespaces. Fallible: the nested
+    /// `FileSetDeleteAll` deletes temp dirs (IO can fail).
+    pub fn SharedFileSetDeleteAll(fileset: &mut SharedFileSet) -> types_error::PgResult<()>
 );

@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use types_core::Oid;
 use types_error::PgResult;
 
@@ -26,4 +28,12 @@ seam_core::seam!(
         policy_name: &str,
         missing_ok: bool,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RemovePolicyById(policy_id)` (commands/policy.c): the per-class
+    /// `OCLASS_POLICY` drop handler dependency.c's `doDeletion` invokes for a
+    /// `pg_policy` object. Removes the row-security policy's catalog row. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn RemovePolicyById(policy_id: Oid) -> PgResult<()>
 );

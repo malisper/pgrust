@@ -221,6 +221,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (tuptable.h / execTuples.c)
+    /// over the payload-bearing [`SlotData`] held directly (no `EState`/`SlotId`
+    /// pool) — the form `pquery.c`'s `RunFromStore` / the standalone tuplestore
+    /// fetch needs. `mcx` is the slot's context. Fallible on OOM / wrong slot
+    /// kind.
+    pub fn exec_store_minimal_tuple_payload<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecCleanTypeFromTL(targetList)` (execTuples.c): build a result tuple
+    /// descriptor from `target_list`, omitting resjunk columns. `pquery.c`'s
+    /// `PortalStart` `PORTAL_ONE_RETURNING` / `PORTAL_ONE_MOD_WITH` legs use it.
+    /// Allocates the descriptor in `mcx`; fallible on OOM.
+    pub fn exec_clean_type_from_tl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        target_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecStoreBufferHeapTuple(tuple, slot, buffer)` (execTuples.c): store an
     /// on-disk heap tuple (still living in the pinned page `buffer`) into a
     /// `BufferHeapTupleTableSlot`, taking a pin on `buffer` (releasing any pin

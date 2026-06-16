@@ -1296,15 +1296,17 @@ fn ParseComplexProjection<'mcx>(
     }
 
     // Else use get_expr_result_tupdesc(); a RECORD Var needs expandRecordVariable.
+    // get_expr_result_tupdesc takes Option<&Node> (C: (Node *) first_arg).
+    let first_arg_node = Node::Expr(first_arg.clone());
     let tupdesc = if let Expr::Var(var) = &first_arg {
         if var.vartype == RECORDOID {
             let var = var.clone();
             expand_record_variable::call(mcx, pstate, &var, 0)?
         } else {
-            get_expr_result_tupdesc::call(mcx, &first_arg, true)?
+            get_expr_result_tupdesc::call(mcx, Some(&first_arg_node), true)?
         }
     } else {
-        get_expr_result_tupdesc::call(mcx, &first_arg, true)?
+        get_expr_result_tupdesc::call(mcx, Some(&first_arg_node), true)?
     };
     let tupdesc = match tupdesc {
         Some(td) => td,

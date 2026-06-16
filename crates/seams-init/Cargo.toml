@@ -82,12 +82,14 @@ backend-catalog-storage = { path = "../backend-catalog-storage" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
@@ -108,6 +110,7 @@ backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
 backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
+backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }
@@ -277,6 +280,7 @@ backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
+backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }

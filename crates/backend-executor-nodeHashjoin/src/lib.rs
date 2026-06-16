@@ -1794,9 +1794,8 @@ pub fn ExecHashJoinEstimate(
 /// typed-shared-DSM-object primitive ([`shared_dsm_object::place_and_init_mut`]),
 /// so every worker that `shm_toc_lookup`s/attaches sees the SAME cross-process
 /// object — its `lock`/`build_barrier`/`grow_*_barrier`/`distributor`/`fileset`
-/// are the real shared primitives. `BarrierInit`/`LWLockInitialize` go through
-/// their owners' seams; `SharedFileSetInit` is seam-and-panic into the
-/// not-yet-ported `sharedfileset.c`.
+/// are the real shared primitives. `BarrierInit`/`LWLockInitialize`/
+/// `SharedFileSetInit` go through their owners' seams.
 pub fn ExecHashJoinInitializeDSM(
     node: &mut HashJoinState<'_>,
     pcxt: types_execparallel::ParallelContextHandle,
@@ -1827,6 +1826,12 @@ pub fn ExecHashJoinInitializeDSM(
     // Placement-init the shared ParallelHashJoinState in the DSM chunk; the
     // leader is the sole writer until the launch barrier releases. No `unsafe`
     // in this crate — the keystone hands us a plain `&mut`.
+    //
+    // `SharedFileSetInit` is fallible (its `FileSetInit`/`on_dsm_detach` paths
+    // allocate); the `place_and_init_mut` init closure is infallible, so capture
+    // its result in `init_result` and propagate it after the closure returns
+    // (the closure runs synchronously to completion before then).
+    let mut init_result: PgResult<()> = Ok(());
     shared_dsm_object::place_and_init_mut::<ParallelHashJoinState>(
         seg,
         chunk,
@@ -1865,9 +1870,10 @@ pub fn ExecHashJoinInitializeDSM(
             barrier::BarrierInit::call(&mut pstate.grow_buckets_barrier, 0);
             // Set up the space we'll use for shared temporary files.
             //   SharedFileSetInit(&pstate->fileset, pcxt->seg);
-            sharedfileset::SharedFileSetInit::call(&mut pstate.fileset, seg);
+            init_result = sharedfileset::SharedFileSetInit::call(&mut pstate.fileset, seg);
         },
     );
+    init_result?;
 
     // shm_toc_insert(pcxt->toc, plan_node_id, pstate);
     parallel_sup::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
@@ -1929,13 +1935,12 @@ pub fn ExecHashJoinReInitializeDSM(
     shared_dsm_object::with_mut::<ParallelHashJoinState, _>(seg, chunk, |pstate| {
         // Clear any shared batch files.
         //   SharedFileSetDeleteAll(&pstate->fileset);
-        // Seam-and-panic into the not-yet-ported sharedfileset.c.
-        sharedfileset::SharedFileSetDeleteAll::call(&mut pstate.fileset);
+        sharedfileset::SharedFileSetDeleteAll::call(&mut pstate.fileset)?;
         // Reset build_barrier to PHJ_BUILD_ELECT so we can go around again.
         //   BarrierInit(&pstate->build_barrier, 0);
         barrier::BarrierInit::call(&mut pstate.build_barrier, 0);
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 /// `ExecHashJoinInitializeWorker(state, pwcxt)` — attach a worker to the shared
@@ -1965,10 +1970,10 @@ pub fn ExecHashJoinInitializeWorker(
     // The worker is attaching pre-launch, so a unique `&mut` over the
     // looked-up object is sound (it is the sole accessor in this window); this
     // is exactly the C `&pstate->fileset` pointer-arg shape. `SharedFileSetAttach`
-    // is seam-and-panic into the not-yet-ported sharedfileset.c.
+    // goes through its owner's seam (`backend-storage-file-fileset`).
     shared_dsm_object::with_mut::<ParallelHashJoinState, _>(seg, chunk, |pstate| {
-        sharedfileset::SharedFileSetAttach::call(&mut pstate.fileset, seg);
-    });
+        sharedfileset::SharedFileSetAttach::call(&mut pstate.fileset, seg)
+    })?;
 
     // Attach to the shared state in the hash node.
     //   hashNode = (HashState *) innerPlanState(state);

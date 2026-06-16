@@ -108,3 +108,19 @@ seam_core::seam!(
     /// `RelationClearMissing(rel)` (heap.c).
     pub fn relation_clear_missing(rel: &Relation<'_>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RemoveAttributeById(relid, attnum)` (catalog/heap.c): the per-class
+    /// `OCLASS_CLASS` column-drop handler dependency.c's `doDeletion` invokes
+    /// for a `pg_attribute` (table-column) object. Marks the column dropped.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveAttributeById(relid: Oid, attnum: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_drop_with_catalog(relid)` (catalog/heap.c): the per-class
+    /// `OCLASS_CLASS` relation-drop handler dependency.c's `doDeletion` invokes
+    /// for an ordinary table/relation object. Removes the relation and its
+    /// catalog rows. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn heap_drop_with_catalog(relid: Oid) -> PgResult<()>
+);

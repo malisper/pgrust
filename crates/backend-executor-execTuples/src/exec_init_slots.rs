@@ -450,6 +450,29 @@ fn seam_exec_clear_tuple_payload<'mcx>(
     crate::slot_store_fetch::ExecClearTuple(slot)
 }
 
+/// Seam `exec_store_minimal_tuple_payload` — `ExecStoreMinimalTuple(mtup, slot,
+/// shouldFree)` over the payload-bearing `&mut SlotData` held directly (the
+/// standalone tuplestore fetch / `RunFromStore` path, no EState pool).
+fn seam_exec_store_minimal_tuple_payload<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    mtup: types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+    should_free: bool,
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecStoreMinimalTuple(mcx, mtup, slot, should_free)
+}
+
+/// Seam `exec_clean_type_from_tl` — `ExecCleanTypeFromTL(targetList)`
+/// (execTuples.c): build a result tuple descriptor from `target_list`, omitting
+/// resjunk columns. `pquery.c`'s `PortalStart` `PORTAL_ONE_RETURNING` /
+/// `PORTAL_ONE_MOD_WITH` legs use it.
+fn seam_exec_clean_type_from_tl<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    target_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    crate::exectype_tupoutput::ExecCleanTypeFromTL(mcx, target_list)
+}
+
 /// Seam `exec_fetch_slot_heap_tuple` — `ExecFetchSlotHeapTuple(slot,
 /// materialize, &shouldFree)` over the payload-bearing `&mut SlotData` the
 /// table-AM DML vtable callbacks hold directly. Forwards to the owner body,
@@ -857,6 +880,8 @@ pub fn init_seams() {
     seams::exec_store_buffer_heap_tuple::set(seam_exec_store_buffer_heap_tuple);
     seams::exec_store_pinned_buffer_heap_tuple::set(seam_exec_store_pinned_buffer_heap_tuple);
     seams::exec_clear_tuple_payload::set(seam_exec_clear_tuple_payload);
+    seams::exec_store_minimal_tuple_payload::set(seam_exec_store_minimal_tuple_payload);
+    seams::exec_clean_type_from_tl::set(seam_exec_clean_type_from_tl);
     seams::exec_fetch_slot_heap_tuple::set(seam_exec_fetch_slot_heap_tuple);
     seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
     seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
