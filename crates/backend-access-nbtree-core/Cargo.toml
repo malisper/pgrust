@@ -33,6 +33,8 @@ backend-utils-error = { path = "../backend-utils-error" }
 
 # This crate owns these seams (installs them in init_seams()).
 backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+# This crate also owns the nbtsort.c build-helper seams (nbtutils.c bodies).
+backend-access-nbtree-build-seams = { path = "../backend-access-nbtree-build-seams" }
 
 # Outward seam crates (callees in not-yet-ported owners).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
