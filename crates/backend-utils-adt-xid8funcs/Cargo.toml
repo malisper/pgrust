@@ -1,0 +1,32 @@
+[package]
+name = "backend-utils-adt-xid8funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_xid8funcs"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-snapshot = { path = "../types-snapshot" }
+
+# ReadNextFullTransactionId / TransamVariables->oldestClogXid (varsup.c owner).
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+# GetTopFullTransactionId / GetTopFullTransactionIdIfAny (xact.c owner).
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+# TransactionIdDidCommit (transam.c owner).
+backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
+# TransactionIdIsInProgress (procarray.c owner).
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+# GetActiveSnapshot (snapmgr.c owner).
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+# TransactionXmin global, threaded into TransactionIdDidCommit (snapmgr.c owner).
+backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
+# PreventCommandDuringRecovery (utility.c owner).
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+# LWLockAcquire(XactTruncationLock, LW_SHARED) (lwlock.c owner).
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }

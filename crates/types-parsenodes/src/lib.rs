@@ -140,6 +140,19 @@ pub struct ObjectWithArgs {
 }
 
 // ---------------------------------------------------------------------------
+// AlterOperatorStmt (nodes/parsenodes.h)
+// ---------------------------------------------------------------------------
+
+/// `typedef struct AlterOperatorStmt` (`nodes/parsenodes.h`) — ALTER OPERATOR.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AlterOperatorStmt {
+    /// `ObjectWithArgs *opername` — operator name + argument types.
+    pub opername: Option<ObjectWithArgs>,
+    /// `List *options` — list of `DefElem` nodes.
+    pub options: Vec<Node>,
+}
+
+// ---------------------------------------------------------------------------
 // FunctionParameter (nodes/parsenodes.h)
 // ---------------------------------------------------------------------------
 

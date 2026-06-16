@@ -1,0 +1,16 @@
+[package]
+name = "backend-utils-adt-ascii"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_ascii"
+path = "src/lib.rs"
+
+[dependencies]
+types-error = { path = "../types-error" }
+types-wchar = { path = "../types-wchar" }
+types-fmgr = { path = "../types-fmgr" }
+common-encnames-seams = { path = "../common-encnames-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }

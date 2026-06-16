@@ -25,6 +25,7 @@ pub const RECORDARRAYOID: Oid = 2287;
 /// `VOIDOID` — `void` pseudo-type (`pg_type_d.h:228`).
 pub const VOIDOID: Oid = 2278;
 pub const BOOLOID: Oid = 16;
+pub const BYTEAOID: Oid = 17;
 pub const NAMEOID: Oid = 19;
 pub const INT8OID: Oid = 20;
 pub const INT2OID: Oid = 21;
@@ -768,6 +769,22 @@ pub fn HeapTupleHeaderGetRawXmin(tup: &HeapTupleHeaderData) -> TransactionId {
         HeapTupleHeaderChoice::TDatum(_) => {
             panic!("HeapTupleHeaderGetRawXmin: header is a composite Datum")
         }
+    }
+}
+
+/// `HeapTupleHeaderXminFrozen(tup)` (`htup_details.h`) — is the tuple's xmin
+/// frozen (`(t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN`).
+pub const fn HeapTupleHeaderXminFrozen(tup: &HeapTupleHeaderData) -> bool {
+    (tup.t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN
+}
+
+/// `HeapTupleHeaderGetXmin(tup)` (`htup_details.h`) — the effective xmin:
+/// `FrozenTransactionId` if the tuple is frozen, else the raw xmin.
+pub fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData) -> TransactionId {
+    if HeapTupleHeaderXminFrozen(tup) {
+        types_core::xact::FrozenTransactionId
+    } else {
+        HeapTupleHeaderGetRawXmin(tup)
     }
 }
 

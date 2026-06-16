@@ -618,9 +618,9 @@ pub fn int64_div_fast_to_numeric<'mcx>(
 }
 
 /// `int128_to_numericvar(val, var)` (numeric.c:8407): convert a 128-bit integer
-/// to a [`NumericVar`]. This is the unit's own helper (no sibling family exposes
-/// it); only reached by [`int64_div_fast_to_numeric`]'s overflow path.
-fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<NumericVar<'mcx>> {
+/// to a [`NumericVar`]. Reached by [`int64_div_fast_to_numeric`]'s overflow path
+/// and by the date/time EXTRACT cores' fast-scaling helper.
+pub fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<NumericVar<'mcx>> {
     // int128 can require at most 39 decimal digits; add one for safety.
     let cap = (40 / DEC_DIGITS) as usize;
     let mut buf = crate::alloc_digits(mcx, cap)?;

@@ -15,3 +15,12 @@ seam_core::seam!(
     /// `Err` carries the scan/catalog-open `ereport(ERROR)` surface.
     pub fn there_is_at_least_one_role(mcx: Mcx<'_>) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` +
+    /// `((Form_pg_authid) GETSTRUCT(utup))->rolcreatedb` (dbcommands.c
+    /// `have_createdb_privilege`): read the role's `rolcreatedb` flag from the
+    /// `pg_authid` syscache. `None` when the role is not found (C's
+    /// `!HeapTupleIsValid`). The locale/tuple decode is catalog-read-owned.
+    pub fn user_rolcreatedb<'mcx>(mcx: Mcx<'mcx>, roleid: types_core::Oid) -> PgResult<Option<bool>>
+);

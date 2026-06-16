@@ -101,6 +101,7 @@ pub fn init_all() {
     backend_commands_cluster::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
+    backend_commands_dbcommands::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
@@ -114,6 +115,7 @@ pub fn init_all() {
     backend_commands_schemacmds::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_commands_seclabel::init_seams();
+    backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_typecmds::init_seams();
     backend_executor_execAmi::init_seams();
@@ -294,15 +296,18 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
     backend_utils_adt_acl::init_seams();
+    backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
     backend_utils_adt_float::init_seams();
     backend_utils_adt_format_type::init_seams();
+    backend_utils_adt_xml::init_seams();
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
+    backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();
@@ -311,6 +316,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_pseudotypes::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
     backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();
@@ -1412,6 +1418,18 @@ mod recurrence_guard {
         ("backend_utils_sort_tuplesort", "tuplesort_begin_index_gist"),
         ("backend_utils_sort_tuplesort", "tuplesort_putindextuplevalues"),
         ("backend_utils_sort_tuplesort", "tuplesort_getindextuple"),
+        // DESIGN_DEBT (TD-BUFMGR-DBASE-BUFFERS): dbcommands.c's `dbase_redo`
+        // (XLOG_DBASE_CREATE_FILE_COPY / XLOG_DBASE_DROP) calls
+        // `FlushDatabaseBuffers(dbid)` and `DropDatabaseBuffers(dbid)` — two
+        // bufmgr.c per-database shared-buffer operations. The bufmgr owner is a
+        // complete CATALOG unit but its F-decomp did not port these two
+        // whole-database buffer sweeps (they scan NBuffers for matching
+        // RelFileLocator.dbOid). The seams are declared on the owner so the
+        // landed dbase_redo consumer can call them; they loud-panic until
+        // bufmgr ports DropDatabaseBuffers/FlushDatabaseBuffers. Recorded in
+        // DESIGN_DEBT.md. DELETE when bufmgr installs them.
+        ("backend_storage_buffer_bufmgr", "drop_database_buffers"),
+        ("backend_storage_buffer_bufmgr", "flush_database_buffers"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

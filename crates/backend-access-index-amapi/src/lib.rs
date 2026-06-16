@@ -41,7 +41,10 @@ use types_tableam::amapi::{
 };
 
 use backend_access_index_amapi_seams as sx;
+use backend_utils_adt_amutils_seams as amutils_sx;
 use backend_utils_cache_syscache_seams as syscache;
+
+use mcx::Mcx;
 
 /// `BTREE_AM_OID` (catalog/pg_am.dat) — the built-in btree access method.
 const BTREE_AM_OID: Oid = 403;
@@ -91,6 +94,15 @@ pub fn init_seams() {
     sx::index_am_canorder::set(index_am_canorder);
     sx::index_am_searcharray::set(index_am_searcharray);
     sx::index_am_has_gettuple::set(index_am_has_gettuple);
+
+    // amutils.c SQL-level property reporting: the AM-routine projection, the
+    // per-AM `amproperty` / `ambuildphasename` callbacks (which the unified
+    // `IndexAmRoutine` vtable does not carry — dispatched by AM OID by name,
+    // as `amvalidate` is), and the generic `index_can_return` fallback.
+    amutils_sx::am_routine::set(amutils_am_routine);
+    amutils_sx::am_property::set(amutils_am_property);
+    amutils_sx::index_can_return::set(amutils_index_can_return);
+    amutils_sx::am_buildphasename::set(amutils_am_buildphasename);
 }
 
 // ===========================================================================
@@ -419,4 +431,169 @@ fn index_am_searcharray(amoid: Oid) -> PgResult<bool> {
 /// `GetIndexAmRoutineByAmId(amoid, false)->amgettuple != NULL`.
 fn index_am_has_gettuple(amoid: Oid) -> PgResult<bool> {
     Ok(GetIndexAmRoutineByAmId(amoid)?.amgettuple.is_some())
+}
+
+// ===========================================================================
+// Seam implementations: amutils.c (SQL-level index AM property reporting)
+// ===========================================================================
+
+/// `GetIndexAmRoutineByAmId(amoid, noerror = true)` — the `noerror` variant
+/// amutils.c uses. Returns `Ok(None)` for the C `routine == NULL` cases (the
+/// AM's `pg_am` row or handler is missing); `GetIndexAmRoutineByAmId(amoid,
+/// false)` would instead raise the `cache lookup failed` / `does not have a
+/// handler` errors.
+fn get_index_am_routine_by_am_id_noerror(amoid: Oid) -> PgResult<Option<IndexAmRoutine>> {
+    // tuple = SearchSysCache1(AMOID, ObjectIdGetDatum(amoid));
+    // if (!HeapTupleIsValid(tuple)) { if (noerror) return NULL; ... }
+    let amhandler = match syscache::search_am_handler::call(amoid)? {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+
+    // if (!RegProcedureIsValid(amhandler)) { if (noerror) return NULL; ... }
+    if amhandler == types_core::primitive::InvalidOid {
+        return Ok(None);
+    }
+
+    // return GetIndexAmRoutine(amhandler);
+    Ok(Some(GetIndexAmRoutine(amhandler)?))
+}
+
+/// amutils.c: `GetIndexAmRoutineByAmId(amoid, true)` projected to the scalar
+/// capability flags + `routine->amX != NULL` "callback present" booleans the
+/// `indexam_property` decision tree reads. `Ok(None)` for the missing-AM
+/// path. The `has_amproperty` / `has_ambuildphasename` booleans are derived
+/// from the AM (the unified vtable does not carry those callbacks — they are
+/// dispatched by AM OID by name, mirroring `amvalidate` / `amadjustmembers`):
+/// btree defines both `btproperty` and `btbuildphasename`; gist/spgist define
+/// `gistproperty` / `spgproperty` (no `*buildphasename`); gin defines
+/// `ginbuildphasename` (no `*property`); brin/hash define neither — exactly the
+/// C `bthandler` / `gisthandler` / `spghandler` / `ginhandler` / `brinhandler`
+/// / `hashhandler` assignments.
+fn amutils_am_routine(amoid: Oid) -> PgResult<Option<amutils_sx::IndexAmRoutineFlags>> {
+    let routine = match get_index_am_routine_by_am_id_noerror(amoid)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    // routine->amproperty != NULL / routine->ambuildphasename != NULL: derived
+    // from the AM, since the unified vtable does not carry those callbacks.
+    let (has_amproperty, has_ambuildphasename) = match amoid {
+        BTREE_AM_OID => (true, true),
+        GIST_AM_OID => (true, false),
+        SPGIST_AM_OID => (true, false),
+        GIN_AM_OID => (false, true),
+        BRIN_AM_OID => (false, false),
+        HASH_AM_OID => (false, false),
+        // A future extension AM would carry the flags in its own vtable.
+        _ => (false, false),
+    };
+
+    Ok(Some(amutils_sx::IndexAmRoutineFlags {
+        amcanorder: routine.amcanorder,
+        amcanorderbyop: routine.amcanorderbyop,
+        amcanbackward: routine.amcanbackward,
+        amcanunique: routine.amcanunique,
+        amcanmulticol: routine.amcanmulticol,
+        amsearcharray: routine.amsearcharray,
+        amsearchnulls: routine.amsearchnulls,
+        amclusterable: routine.amclusterable,
+        amcaninclude: routine.amcaninclude,
+        has_amproperty,
+        has_amcanreturn: routine.amcanreturn.is_some(),
+        has_amgettuple: routine.amgettuple.is_some(),
+        has_amgetbitmap: routine.amgetbitmap.is_some(),
+        has_ambuildphasename,
+    }))
+}
+
+/// amutils.c: `routine->amproperty(index_oid, attno, prop, propname, &res,
+/// &isnull)` — the AM's optional property callback, dispatched by AM OID by
+/// name. Returns `Ok(None)` for the C `false` (not handled — fall through to
+/// the generic logic) and `Ok(Some((res, isnull)))` for the C `true`.
+///
+/// Only the AMs that assign a non-NULL `amproperty` in C reach a real callback:
+/// btree (`btproperty`), gist (`gistproperty`), spgist (`spgproperty`). The
+/// caller (`indexam_property`) only invokes this seam when `has_amproperty` is
+/// true, so the other AMs are unreachable here; they map to "not handled".
+fn amutils_am_property(
+    mcx: Mcx<'_>,
+    req: amutils_sx::AmPropertyRequest,
+) -> PgResult<Option<(bool, bool)>> {
+    match req.amoid {
+        BTREE_AM_OID => {
+            // btproperty handles only AMPROP_RETURNABLE; everything else punts.
+            use backend_access_nbtree_core::utils::IndexAMProperty as BtProp;
+            let bt_prop = match req.prop {
+                amutils_sx::IndexAmProperty::Returnable => BtProp::AmpropReturnable,
+                _ => BtProp::Other,
+            };
+            let mut res = false;
+            let mut isnull = false;
+            let handled = backend_access_nbtree_core::utils::btproperty(
+                req.index_oid,
+                req.attno,
+                bt_prop,
+                &req.propname,
+                &mut res,
+                &mut isnull,
+            );
+            Ok(if handled { Some((res, isnull)) } else { None })
+        }
+        GIST_AM_OID => {
+            use backend_access_gist_core::gistutil::IndexAMProperty as GiProp;
+            let gi_prop = match req.prop {
+                amutils_sx::IndexAmProperty::DistanceOrderable => GiProp::DistanceOrderable,
+                amutils_sx::IndexAmProperty::Returnable => GiProp::Returnable,
+                _ => GiProp::Other,
+            };
+            let (handled, res, isnull) =
+                backend_access_gist_core::gistutil::gistproperty(req.index_oid, req.attno, gi_prop)?;
+            Ok(if handled { Some((res, isnull)) } else { None })
+        }
+        SPGIST_AM_OID => {
+            use backend_access_spgist_core::IndexAMProperty as SpProp;
+            let sp_prop = match req.prop {
+                amutils_sx::IndexAmProperty::DistanceOrderable => SpProp::DistanceOrderable,
+                _ => SpProp::Other,
+            };
+            let (handled, res, isnull) =
+                backend_access_spgist_core::spgproperty(mcx, req.index_oid, req.attno, sp_prop)?;
+            Ok(if handled { Some((res, isnull)) } else { None })
+        }
+        // An AM that assigns amproperty = NULL in C never reaches here (the
+        // caller gates on has_amproperty), and a future extension AM's callback
+        // would be reached through the (unported) dynamic-fmgr dispatch.
+        _ => Ok(None),
+    }
+}
+
+/// amutils.c: the generic `AMPROP_RETURNABLE` fallback —
+/// `indexrel = index_open(index_oid, AccessShareLock);`
+/// `res = index_can_return(indexrel, attno);`
+/// `index_close(indexrel, AccessShareLock);`
+fn amutils_index_can_return(mcx: Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool> {
+    use backend_access_index_indexam as indexam;
+    use types_storage::lock::AccessShareLock;
+
+    let indexrel = indexam::index_open(mcx, index_oid, AccessShareLock)?;
+    let res = indexam::index_can_return(&indexrel, attno)?;
+    indexam::index_close(indexrel, AccessShareLock)?;
+    Ok(res)
+}
+
+/// amutils.c: `name = routine->ambuildphasename(phasenum);` then
+/// `CStringGetTextDatum(name)` (or NULL). Dispatched by AM OID by name (the
+/// unified vtable does not carry `ambuildphasename`). The caller only invokes
+/// this when `has_ambuildphasename` is true. Only btree (`btbuildphasename`)
+/// and gin (`ginbuildphasename`) assign a non-NULL `ambuildphasename` in C.
+fn amutils_am_buildphasename(amoid: Oid, phasenum: i64) -> PgResult<Option<String>> {
+    let name: Option<&'static str> = match amoid {
+        BTREE_AM_OID => backend_access_nbtree_core::utils::btbuildphasename(phasenum),
+        GIN_AM_OID => backend_access_gin_ginutil::ginbuildphasename(phasenum),
+        // No other built-in AM assigns ambuildphasename; the caller gates on
+        // has_ambuildphasename so this is unreachable for them.
+        _ => None,
+    };
+    Ok(name.map(String::from))
 }

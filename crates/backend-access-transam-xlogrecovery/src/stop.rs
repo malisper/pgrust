@@ -19,30 +19,48 @@ use crate::core::{RecordRef, RecoveryPauseState, XLogRecoveryState};
 
 /// `static bool recoveryStopsBefore(XLogReaderState *record)` (xlogrecovery.c)
 pub(crate) fn recovery_stops_before(_st: &mut XLogRecoveryState, _record: RecordRef) -> bool {
-    panic!("decomp: xlogrecovery::stop::recovery_stops_before not yet filled")
+    panic!(
+        "blocked: xlogrecovery::stop::recovery_stops_before — recovery-target comparison depends on \
+         replay::get_record_timestamp (xact record decode); pending stop+replay family fill"
+    )
 }
 
 /// `static bool recoveryStopsAfter(XLogReaderState *record)` (xlogrecovery.c)
 pub(crate) fn recovery_stops_after(_st: &mut XLogRecoveryState, _record: RecordRef) -> bool {
-    panic!("decomp: xlogrecovery::stop::recovery_stops_after not yet filled")
+    panic!(
+        "blocked: xlogrecovery::stop::recovery_stops_after — recovery-target comparison depends on \
+         replay::get_record_timestamp + xl_restore_point name decode; pending stop+replay family fill"
+    )
 }
 
 /// `static const char *getRecoveryStopReason(void)` (xlogrecovery.c) — the
 /// human-readable end-of-recovery reason string.
 pub(crate) fn get_recovery_stop_reason(_st: &XLogRecoveryState) -> String {
-    panic!("decomp: xlogrecovery::stop::get_recovery_stop_reason not yet filled")
+    panic!(
+        "blocked: xlogrecovery::stop::get_recovery_stop_reason — reason string built from the \
+         recovery_stop_* fields set by recovery_stops_before/after (timestamptz_to_str seam); \
+         pending stop-family fill"
+    )
 }
 
 /// `static void recoveryPausesHere(bool endOfRecovery)` (xlogrecovery.c) — block
 /// here while the recovery pause state is set.
 pub(crate) fn recovery_pauses_here(_st: &mut XLogRecoveryState, _end_of_recovery: bool) {
-    panic!("decomp: xlogrecovery::stop::recovery_pauses_here not yet filled")
+    panic!(
+        "blocked: xlogrecovery::stop::recovery_pauses_here — pause loop needs \
+         ProcessStartupProcInterrupts + recovery-pause CV timed sleep + CheckForStandbyTrigger \
+         (unported startup-proc/promote owners); pending stop-family fill"
+    )
 }
 
 /// `static bool recoveryApplyDelay(XLogReaderState *record)` (xlogrecovery.c) —
 /// honor `recovery_min_apply_delay` for a commit record.
 pub(crate) fn recovery_apply_delay(_st: &mut XLogRecoveryState, _record: RecordRef) -> bool {
-    panic!("decomp: xlogrecovery::stop::recovery_apply_delay not yet filled")
+    panic!(
+        "blocked: xlogrecovery::stop::recovery_apply_delay — recovery_min_apply_delay wait loop \
+         needs replay::get_record_timestamp + recovery-wakeup latch wait + \
+         ProcessStartupProcInterrupts; pending stop+replay family fill"
+    )
 }
 
 /// `RecoveryPauseState GetRecoveryPauseState(void)` (xlogrecovery.c:3091) — the

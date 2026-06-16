@@ -236,6 +236,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetTopFullTransactionId()` (xact.c): the top-level transaction's
+    /// `FullTransactionId`, assigning one if none has been assigned yet.
+    /// Assignment can `ereport(ERROR)` (e.g. xid exhaustion / parallel worker).
+    pub fn get_top_full_transaction_id() -> PgResult<types_core::FullTransactionId>
+);
+
+seam_core::seam!(
+    /// `GetTopFullTransactionIdIfAny()` (xact.c): the top transaction's
+    /// `FullTransactionId`, or `InvalidFullTransactionId` if none assigned.
+    /// Pure read of backend-local state.
+    pub fn get_top_full_transaction_id_if_any() -> types_core::FullTransactionId
+);
+
+seam_core::seam!(
     /// `GetCurrentTransactionIdIfAny()` (xact.c): the current (sub)transaction's
     /// xid, or `InvalidTransactionId` if none has been assigned. Pure read of
     /// backend-local state. Read by `XLogRecordAssemble` to set `xl_xid`.
