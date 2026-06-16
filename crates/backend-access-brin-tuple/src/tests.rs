@@ -124,6 +124,7 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
         rd_indoption: mcx::PgVec::new_in(mcx),
         rd_indcollation: mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
+        pgstat_enabled: false,
     };
     types_rel::Relation::open(rd, None)
 }

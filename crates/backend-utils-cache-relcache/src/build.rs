@@ -166,6 +166,9 @@ fn project_entry<'mcx>(
         // entry's presence flag rd_has_trigdesc tracks whether the relation has
         // triggers at all.
         rd_trigdesc: None,
+        // Mirror of the entry's `pgstat_enabled`; the pgstat count seams read
+        // it off this trimmed handle to replicate the C count macros' gate.
+        pgstat_enabled: r.pgstat_enabled,
     })
 }
 
