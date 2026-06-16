@@ -26,7 +26,11 @@ backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 common-hashfn = { path = "../common-hashfn" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
+backend-utils-adt-isoweek-seams = { path = "../backend-utils-adt-isoweek-seams" }
 backend-timezone-strftime-seams = { path = "../backend-timezone-strftime-seams" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 [dev-dependencies]
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }

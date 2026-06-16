@@ -103,6 +103,11 @@ pub mod hash;
 mod seam_impls;
 pub use seam_impls::init_seams;
 
+// fmgr builtin layer: the `Datum xxx(PG_FUNCTION_ARGS)` shims for every
+// SQL-callable function in date.c / timestamp.c / datetime.c. Registered into
+// the fmgr-core builtin table from init_seams().
+mod fmgr_builtins;
+
 // ---------------------------------------------------------------------------
 // Re-exports of the shared ABI vocabulary (owned by `types::datetime`).
 // ---------------------------------------------------------------------------
@@ -151,7 +156,8 @@ pub use tz_resolver::{set_timezone_resolver, TimezoneResolver, TzAbbrev};
 // The date/time decode engine.
 pub use decode::{
     datebsearch, DecodeDateTime, DecodeISO8601Interval, DecodeInterval, DecodeSpecial,
-    DecodeTimeOnly, DecodeTimezone, DecodeTimezoneAbbrev, DecodeTimezoneName,
+    DecodeTimeOnly, DecodeTimezone, DecodeTimezoneAbbrev, DecodeTimezoneAbbrevPrefix,
+    DecodeTimezoneName,
     DecodeTimezoneNameToTz, DecodeUnits, DetermineTimeZoneAbbrevOffset,
     DetermineTimeZoneAbbrevOffsetTS, DetermineTimeZoneOffset, ParseDateTime, ValidateDate,
 };

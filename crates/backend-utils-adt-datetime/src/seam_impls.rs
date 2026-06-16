@@ -296,6 +296,194 @@ pub fn convert_time_zone_abbrevs(
     crate::tables::convert_time_zone_abbrevs(abbrevs)
 }
 
+// ===========================================================================
+// datetime.c / timestamp.c / date.c / isoweek.c seam adapters.
+//
+// Thin marshal-and-delegate fns between the owner-installed seam signatures and
+// the value cores. They are the cross-cycle entry points formatting.c (DCH)
+// reaches the calendar / tz-resolution / tm-conversion cores through.
+// ===========================================================================
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use types_datetime::{
+    pg_itm, Interval, Timestamp2TmResult, TzAbbrevMatch, TzHandle, YmdDate,
+};
+use types_pgtime::pg_tz;
+use state_pgtz::session_timezone;
+
+// --- datetime.c calendar / validate / tz-offset adapters ------------------
+
+/// `date2j(y, m, d)` (datetime.c): Julian day number.
+fn seam_date2j(year: i32, month: i32, day: i32) -> i32 {
+    crate::calendar::date2j(year, month, day)
+}
+
+/// `j2date(jd, &y, &m, &d)` (datetime.c): the core returns the triple; the seam
+/// packages it as a `YmdDate`.
+fn seam_j2date(jd: i32) -> YmdDate {
+    let (year, mon, mday) = crate::calendar::j2date(jd);
+    YmdDate { year, mon, mday }
+}
+
+/// `ValidateDate(fmask, isjulian, is2digits, bc, tm)` (datetime.c). The
+/// formatting.c consumer never decodes a Julian field (it has no `J`/julian
+/// token path), so `isjulian` is always false at this seam — pass `false`.
+fn seam_validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
+    crate::decode::ValidateDate(fmask, false, is2digits, bc, tm)
+}
+
+/// `DetermineTimeZoneOffset(tm, tzp)` (datetime.c): resolve under the session
+/// timezone (the seam carries no tzp, mirroring the C call sites that pass
+/// `session_timezone`).
+fn seam_determine_time_zone_offset(tm: &mut pg_tm) -> i32 {
+    crate::decode::DetermineTimeZoneOffset(tm, &session_timezone())
+}
+
+// --- TzHandle interning registry (datetime.c DYNTZ resolution) ------------
+//
+// `DecodeTimezoneAbbrevPrefix` may return a `pg_tz *` for a dynamic
+// abbreviation, which the DCH caller passes back later to
+// `DetermineTimeZoneAbbrevOffset`. The owned surface names that pointer with an
+// opaque `TzHandle(u32)`; we intern the `Rc<pg_tz>` in a per-backend registry
+// and hand back its id, mirroring the thread-local style of `tz_resolver`.
+thread_local! {
+    static TZ_HANDLE_REGISTRY: RefCell<Vec<Rc<pg_tz>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Intern a resolved zone, returning its stable `TzHandle`. Identical zones
+/// (same `Rc` allocation) re-use the same handle.
+fn intern_tz(tz: Rc<pg_tz>) -> TzHandle {
+    TZ_HANDLE_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        if let Some(idx) = reg.iter().position(|z| Rc::ptr_eq(z, &tz)) {
+            return TzHandle(idx as u32);
+        }
+        let idx = reg.len();
+        reg.push(tz);
+        TzHandle(idx as u32)
+    })
+}
+
+/// Resolve a `TzHandle` back to its interned zone (panics on an unknown handle,
+/// a wiring bug — C would dereference a stale pointer).
+fn resolve_tz(handle: TzHandle) -> Rc<pg_tz> {
+    TZ_HANDLE_REGISTRY.with(|reg| {
+        reg.borrow()
+            .get(handle.0 as usize)
+            .cloned()
+            .unwrap_or_else(|| panic!("TzHandle({}) not interned", handle.0))
+    })
+}
+
+/// `DecodeTimezoneAbbrevPrefix(str, &offset, &tz)` (datetime.c:3371): owned
+/// output shape. On a dynamic match the resolved zone is interned and its handle
+/// returned in `tzp`.
+fn seam_decode_timezone_abbrev_prefix(s: &[u8]) -> TzAbbrevMatch {
+    let (tzlen, gmtoffset, tz) = crate::decode::DecodeTimezoneAbbrevPrefix(s);
+    TzAbbrevMatch {
+        tzlen,
+        gmtoffset,
+        tzp: tz.map(intern_tz),
+    }
+}
+
+/// `DetermineTimeZoneAbbrevOffset(tm, abbr, tzp)` (datetime.c:1765): resolve the
+/// dynamic abbreviation's offset under the zone named by `tzp`.
+fn seam_determine_time_zone_abbrev_offset(tm: &mut pg_tm, abbr: &str, tzp: TzHandle) -> i32 {
+    let zone = resolve_tz(tzp);
+    crate::decode::DetermineTimeZoneAbbrevOffset(tm, abbr, &zone)
+}
+
+// --- timestamp.c / date.c tm-conversion adapters --------------------------
+
+/// `timestamp2tm(dt, &tzp, tm, &fsec, &tzn, attimezone)` (timestamp.c): the seam
+/// always uses the session timezone (`attimezone = NULL`); `want_tz` selects
+/// whether zone fields (`tz`/`tzn`) are resolved. `Err(())` is the C `-1`.
+fn seam_timestamp2tm(dt: Timestamp, want_tz: bool) -> Result<Timestamp2TmResult, ()> {
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tz: i32 = 0;
+    let mut tzn: Option<String> = None;
+    if want_tz {
+        timestamp2tm(dt, Some(&mut tz), &mut tm, &mut fsec, Some(&mut tzn), None)?;
+    } else {
+        timestamp2tm(dt, None, &mut tm, &mut fsec, None, None)?;
+    }
+    Ok(Timestamp2TmResult { tm, fsec, tz, tzn })
+}
+
+/// `tm2timestamp(tm, fsec, tzp, &result)` (timestamp.c).
+fn seam_tm2timestamp(tm: &pg_tm, fsec: fsec_t, tz: Option<i32>) -> Result<Timestamp, ()> {
+    let mut result: Timestamp = 0;
+    crate::timestamp::tm2timestamp(tm, fsec, tz, &mut result)?;
+    Ok(result)
+}
+
+/// `interval2itm(span, itm)` (timestamp.c).
+fn seam_interval2itm(span: Interval) -> pg_itm {
+    let mut itm = pg_itm::default();
+    crate::interval::interval2itm(span, &mut itm);
+    itm
+}
+
+/// `tm2time(tm, fsec, &result)` (date.c).
+fn seam_tm2time(tm: &pg_tm, fsec: fsec_t) -> TimeADT {
+    crate::time::tm2time(tm, fsec)
+}
+
+/// `tm2timetz(tm, fsec, tz, &result)` (date.c).
+fn seam_tm2timetz(tm: &pg_tm, fsec: fsec_t, tz: i32) -> TimeTzADT {
+    crate::timetz::tm2timetz(tm, fsec, tz)
+}
+
+/// `AdjustTimestampForTypmod(&time, typmod, NULL)` (timestamp.c). `Err` carries
+/// the C `ereport(ERROR, "timestamp out of range")`.
+fn seam_adjust_timestamp_for_typmod(
+    value: Timestamp,
+    typmod: i32,
+) -> types_error::PgResult<Timestamp> {
+    let mut t = value;
+    crate::timestamp::AdjustTimestampForTypmod(&mut t, typmod)?;
+    Ok(t)
+}
+
+/// `AdjustTimeForTypmod(&time, typmod)` (date.c): infallible in C.
+fn seam_adjust_time_for_typmod(time: TimeADT, typmod: i32) -> TimeADT {
+    let mut t = time;
+    crate::time::AdjustTimeForTypmod(&mut t, typmod);
+    t
+}
+
+// --- isoweek.c adapters ----------------------------------------------------
+
+fn seam_date2isoweek(year: i32, mon: i32, mday: i32) -> i32 {
+    crate::isoweek::date2isoweek(year, mon, mday)
+}
+fn seam_date2isoyear(year: i32, mon: i32, mday: i32) -> i32 {
+    crate::isoweek::date2isoyear(year, mon, mday)
+}
+fn seam_date2isoyearday(year: i32, mon: i32, mday: i32) -> i32 {
+    crate::isoweek::date2isoyearday(year, mon, mday)
+}
+fn seam_isoweek2date(woy: i32, year: i32) -> YmdDate {
+    let mut y = year;
+    let mut mon = 0;
+    let mut mday = 0;
+    crate::isoweek::isoweek2date(woy, &mut y, &mut mon, &mut mday);
+    YmdDate { year: y, mon, mday }
+}
+fn seam_isoweekdate2date(isoweek: i32, wday: i32, year: i32) -> YmdDate {
+    let mut y = year;
+    let mut mon = 0;
+    let mut mday = 0;
+    crate::isoweek::isoweekdate2date(isoweek, wday, &mut y, &mut mon, &mut mday);
+    YmdDate { year: y, mon, mday }
+}
+fn seam_isoweek2j(year: i32, week: i32) -> i32 {
+    crate::isoweek::isoweek2j(year, week)
+}
+
 // ---------------------------------------------------------------------------
 // Install every inward seam this unit owns.
 // ---------------------------------------------------------------------------
@@ -310,6 +498,32 @@ pub fn init_seams() {
     ts::timestamp_difference_exceeds_seconds::set(timestamp_difference_exceeds_seconds);
     ts::timestamp_difference_milliseconds::set(timestamp_difference_milliseconds);
     ts::json_encode_datetime::set(json_encode_datetime);
+    ts::timestamp2tm::set(seam_timestamp2tm);
+    ts::tm2timestamp::set(seam_tm2timestamp);
+    ts::interval2itm::set(seam_interval2itm);
+    ts::tm2time::set(seam_tm2time);
+    ts::tm2timetz::set(seam_tm2timetz);
+    ts::adjust_timestamp_for_typmod::set(seam_adjust_timestamp_for_typmod);
+    ts::adjust_time_for_typmod::set(seam_adjust_time_for_typmod);
 
-    backend_utils_adt_datetime_seams::convert_time_zone_abbrevs::set(convert_time_zone_abbrevs);
+    use backend_utils_adt_datetime_seams as dt;
+    dt::convert_time_zone_abbrevs::set(convert_time_zone_abbrevs);
+    dt::date2j::set(seam_date2j);
+    dt::j2date::set(seam_j2date);
+    dt::validate_date::set(seam_validate_date);
+    dt::determine_time_zone_offset::set(seam_determine_time_zone_offset);
+    dt::determine_time_zone_abbrev_offset::set(seam_determine_time_zone_abbrev_offset);
+    dt::decode_timezone_abbrev_prefix::set(seam_decode_timezone_abbrev_prefix);
+
+    use backend_utils_adt_isoweek_seams as iw;
+    iw::date2isoweek::set(seam_date2isoweek);
+    iw::date2isoyear::set(seam_date2isoyear);
+    iw::date2isoyearday::set(seam_date2isoyearday);
+    iw::isoweek2date::set(seam_isoweek2date);
+    iw::isoweekdate2date::set(seam_isoweekdate2date);
+    iw::isoweek2j::set(seam_isoweek2j);
+
+    // The fmgr builtin layer (date.c / timestamp.c / datetime.c PG_FUNCTION_ARGS
+    // shims) is registered alongside the seams.
+    crate::fmgr_builtins::register_datetime_builtins();
 }

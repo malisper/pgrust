@@ -841,7 +841,7 @@ pub fn DecodeTimezone(str: &str, tzp: &mut i32) -> i32 {
 /// `TimeZoneAbbrevIsKnown()` -- does `session_timezone` know `abbr`?  On a hit,
 /// fills `(isfixed, offset, isdst)` with the *flipped-sign* offset to agree
 /// with `DetermineTimeZoneOffset()`.  (`utils/adt/datetime.c`)
-fn TimeZoneAbbrevIsKnown(
+pub(crate) fn TimeZoneAbbrevIsKnown(
     abbr: &str,
     tzp: &pg_tz,
     isfixed: &mut bool,
@@ -942,6 +942,83 @@ pub fn DecodeTimezoneAbbrev(
             0
         }
     }
+}
+
+/// `DecodeTimezoneAbbrevPrefix(str, &offset, &tz)` (datetime.c:3371).
+///
+/// Interpret the prefix of `s` as a timezone abbreviation, if possible.  Like
+/// [`DecodeTimezoneAbbrev`] but adapted to formatting.c's needs: it matches the
+/// longest possible prefix of the given string rather than requiring a complete
+/// match, and downcasing is applied here.
+///
+/// Returns `(len, offset, tz)` where `len` is the length of the matched
+/// abbreviation (`-1` if not recognized).  On success either `offset` holds the
+/// GMT offset (fixed-offset abbreviation) or `tz` holds the underlying zone (a
+/// dynamic abbreviation whose current meaning the caller must resolve).
+pub fn DecodeTimezoneAbbrevPrefix(s: &[u8]) -> (i32, i32, Option<Rc<pg_tz>>) {
+    let mut offset: i32 = 0; // avoid uninitialized vars on failure
+    let mut tz: Option<Rc<pg_tz>> = None;
+
+    // Downcase as much of the string as we could need.
+    let mut lowtoken: Vec<u8> = Vec::with_capacity(TOKMAXLEN as usize);
+    let mut len = 0usize;
+    let mut sp = s.iter();
+    while len < TOKMAXLEN as usize {
+        match sp.clone().next() {
+            Some(&c) if c != b'\0' && is_alpha(c) => {
+                lowtoken.push(to_lower(c));
+                sp.next();
+                len += 1;
+            }
+            _ => break,
+        }
+    }
+
+    // Search with successively truncated strings (C avoids duplicating
+    // datebsearch and just re-searches shorter prefixes).
+    while len > 0 {
+        let lowstr = core::str::from_utf8(&lowtoken[..len]).unwrap_or("");
+
+        // See if the current session_timezone recognizes it.
+        let stz = session_timezone();
+        let mut isfixed = false;
+        let mut isdst = 0;
+        if TimeZoneAbbrevIsKnown(lowstr, &stz, &mut isfixed, &mut offset, &mut isdst) {
+            if isfixed {
+                // flip sign to agree with the convention in zoneabbrevtbl
+                offset = -offset;
+            } else {
+                // Caller must resolve the abbrev's current meaning.
+                tz = Some(stz);
+            }
+            return (len as i32, offset, tz);
+        }
+
+        // Known in zoneabbrevtbl (reached through the resolver hook; with no
+        // resolver installed this is the C `zoneabbrevtbl == NULL` path).
+        if let Some(abbrev) =
+            crate::tz_resolver::timezone_resolver().and_then(|r| r.resolve_abbrev(lowstr))
+        {
+            if abbrev.ftype == DYNTZ {
+                // FetchDynamicTimeZone: a load failure leaves *tz NULL (C just
+                // falls through to try a shorter prefix).
+                if let Some(z) = abbrev.tz {
+                    tz = Some(z);
+                    return (len as i32, offset, tz);
+                }
+            } else {
+                // Fixed-offset zone abbrev, so it's easy.
+                offset = abbrev.gmtoff;
+                return (len as i32, offset, tz);
+            }
+        }
+
+        // Nope, try the next shorter string.
+        len -= 1;
+    }
+
+    // Did not find a match.
+    (-1, 0, None)
 }
 
 // ---------------------------------------------------------------------------
