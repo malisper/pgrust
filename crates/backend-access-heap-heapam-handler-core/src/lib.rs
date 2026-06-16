@@ -41,6 +41,7 @@ use types_tableam::tableam::{
 };
 use types_tuple::heaptuple::ItemPointerData;
 
+pub mod analyze_scan;
 pub mod build_scan;
 
 use backend_access_heap_heapam as heapam;
@@ -603,6 +604,9 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         tuple_lock: heapam_tuple_lock,
 
         relation_set_new_filelocator: heapam_relation_set_new_filelocator,
+
+        scan_analyze_next_block: analyze_scan::heapam_scan_analyze_next_block,
+        scan_analyze_next_tuple: analyze_scan::heapam_scan_analyze_next_tuple,
     }
 }
 
