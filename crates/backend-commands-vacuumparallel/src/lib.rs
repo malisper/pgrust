@@ -1,0 +1,1366 @@
+#![no_std]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_range_loop)]
+
+//! Faithful port of `backend/commands/vacuumparallel.c` — parallel-vacuum
+//! coordination (PostgreSQL 18.3).
+//!
+//! In a parallel vacuum we perform both index bulk deletion and index cleanup
+//! with parallel worker processes. Individual indexes are processed by one
+//! vacuum process. `ParallelVacuumState` holds shared information plus the
+//! memory space for dead items in the DSA area. Workers are launched at the
+//! start of each parallel index bulk-deletion / cleanup pass; once all indexes
+//! are processed the workers exit. Each pass re-initializes the parallel
+//! context so the same DSM can be reused.
+//!
+//! ## Repo handle model
+//!
+//! At the vacuum layer this repo addresses substrate-owned objects by opaque
+//! `Copy` handles: relations are [`Oid`], the dead-items store is a
+//! [`TidStore`], the buffer-access ring is a [`StrategyHandle`], the parallel
+//! context is a [`ParallelContextHandle`], and the lazy-vacuum driver addresses
+//! *this* state by an opaque [`ParallelVacuumStateHandle`]. The owned
+//! `ParallelVacuumState`/`PVShared`/`PVIndStats` live PRIVATELY in a process-
+//! global registry keyed by that handle's id — they never cross a seam by
+//! value.
+//!
+//! ## DSM leader→worker handoff
+//!
+//! `vacuumparallel.c` keeps the leader/worker shared state in a DSM segment
+//! addressed by `shm_toc` keys:
+//!
+//! - `PARALLEL_VACUUM_KEY_SHARED      = 1` — the `PVShared` snapshot.
+//! - `PARALLEL_VACUUM_KEY_QUERY_TEXT  = 2` — `debug_query_string`.
+//! - `PARALLEL_VACUUM_KEY_BUFFER_USAGE= 3` — per-worker `BufferUsage`.
+//! - `PARALLEL_VACUUM_KEY_WAL_USAGE   = 4` — per-worker `WalUsage`.
+//! - `PARALLEL_VACUUM_KEY_INDEX_STATS = 5` — the `PVIndStats` array.
+//!
+//! The actual `shm_toc_estimate_*` sizing calls are mirrored exactly through
+//! the parallel-infra seams, but the *typed* data the worker reads back can't
+//! be carried through the (untyped) `shm_toc_lookup` helpers the parallel crate
+//! exposes. So this crate keeps a process-global "current DSM" side table
+//! (`DSM`) holding the owned snapshots, written by the leader in
+//! `parallel_vacuum_init`/`process_all_indexes` and read by
+//! [`parallel_vacuum_main`]. This is in-process only (the same model as the
+//! src-idiomatic register_*/lookup_* seams), so it is implemented as crate-
+//! private functions over a thread_local, not as seams.
+
+extern crate alloc;
+// The leader/worker registry + DSM side table use process-global thread-local
+// state (`std::thread_local!` + `std::collections::BTreeMap`), the same model
+// the seam machinery itself uses; pull in std for them.
+extern crate std;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+
+use std::collections::BTreeMap;
+use std::thread_local;
+
+use backend_utils_error::ereport;
+use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR};
+
+use types_core::instrument::{BufferUsage, WalUsage};
+use types_core::Oid;
+use types_dsa::{DsaHandle, DsaPointer};
+use types_execparallel::ParallelContextHandle;
+use types_storage::lock::{RowExclusiveLock, ShareUpdateExclusiveLock};
+use types_storage::storage::LWTRANCHE_PARALLEL_VACUUM_DSA;
+use types_vacuum::vacuumlazy::{
+    ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, StrategyHandle, TidStore,
+};
+use types_vacuum::vacuumparallel::{
+    BufferAccessStrategyHandle, IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo,
+};
+
+use backend_commands_vacuum_seams as vac;
+use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_transam_parallel_seams as p;
+use backend_access_transam_parallel_rt_seams as prt;
+
+// =======================================================================
+// vacuumparallel.c constants.
+// =======================================================================
+
+/// `BLCKSZ` (`pg_config.h`).
+const BLCKSZ: i32 = 8192;
+
+/// `DEBUG2` as `ivinfo.message_level` (`utils/elog.h`).
+const MESSAGE_LEVEL_DEBUG2: i32 = DEBUG2.0;
+
+/// `PROGRESS_VACUUM_INDEXES_PROCESSED` (`commands/progress.h`).
+const PROGRESS_VACUUM_INDEXES_PROCESSED: i32 = 11;
+/// `PROGRESS_VACUUM_DELAY_TIME` (`commands/progress.h`).
+const PROGRESS_VACUUM_DELAY_TIME: i32 = 12;
+
+/// `amparallelvacuumoptions` flag bits (`access/vacuum.h`).
+const VACUUM_OPTION_NO_PARALLEL: u8 = 0;
+const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 0;
+const VACUUM_OPTION_PARALLEL_COND_CLEANUP: u8 = 1 << 1;
+const VACUUM_OPTION_PARALLEL_CLEANUP: u8 = 1 << 2;
+const VACUUM_OPTION_MAX_VALID_VALUE: u8 =
+    VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP | VACUUM_OPTION_PARALLEL_CLEANUP;
+
+/// `ErrorLocation` for `ereport(...).finish(...)` in this module.
+fn here(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("../src/backend/commands/vacuumparallel.c", 0, funcname)
+}
+
+// =======================================================================
+// Private owned state (never crosses a seam by value).
+// =======================================================================
+
+/// `PVIndVacStatus` — status used during parallel index vacuum or cleanup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+enum PVIndVacStatus {
+    Initial = 0,
+    NeedBulkdelete,
+    NeedCleanup,
+    Completed,
+}
+
+/// `PVShared` — shared information among parallel workers (DSM-resident in C).
+///
+/// Holds atomics (`cost_balance`/`active_nworkers`/`idx`) so it is neither
+/// `Copy` nor `Clone`; it lives in the registry behind `&mut`.
+struct PVShared {
+    relid: Oid,
+    elevel: i32,
+    queryid: i64,
+    reltuples: f64,
+    estimated_count: bool,
+    maintenance_work_mem_worker: i32,
+    ring_nbuffers: i32,
+    cost_balance: core::sync::atomic::AtomicU32,
+    active_nworkers: core::sync::atomic::AtomicU32,
+    idx: core::sync::atomic::AtomicU32,
+    dead_items_dsa_handle: DsaHandle,
+    dead_items_handle: DsaPointer,
+    dead_items_info: VacDeadItemsInfo,
+}
+
+impl Default for PVShared {
+    fn default() -> Self {
+        PVShared {
+            relid: Oid::from(0u32),
+            elevel: 0,
+            queryid: 0,
+            reltuples: 0.0,
+            estimated_count: false,
+            maintenance_work_mem_worker: 0,
+            ring_nbuffers: 0,
+            cost_balance: core::sync::atomic::AtomicU32::new(0),
+            active_nworkers: core::sync::atomic::AtomicU32::new(0),
+            idx: core::sync::atomic::AtomicU32::new(0),
+            dead_items_dsa_handle: 0,
+            dead_items_handle: 0,
+            dead_items_info: VacDeadItemsInfo::default(),
+        }
+    }
+}
+
+/// `PVIndStats` — per-index status + bulk-deletion stats.
+#[derive(Clone, Copy)]
+struct PVIndStats {
+    status: PVIndVacStatus,
+    parallel_workers_can_process: bool,
+    istat_updated: bool,
+    istat: IndexBulkDeleteResult,
+}
+
+impl Default for PVIndStats {
+    fn default() -> Self {
+        PVIndStats {
+            status: PVIndVacStatus::Initial,
+            parallel_workers_can_process: false,
+            istat_updated: false,
+            istat: IndexBulkDeleteResult::default(),
+        }
+    }
+}
+
+/// `ParallelVacuumState` — the owned per-vacuum coordination state.
+struct ParallelVacuumState {
+    /// `NULL` for worker processes.
+    pcxt: Option<ParallelContextHandle>,
+    heaprel: Oid,
+    indrels: Vec<Oid>,
+    nindexes: i32,
+    shared: PVShared,
+    indstats: Vec<PVIndStats>,
+    dead_items: TidStore,
+    buffer_usage: Vec<BufferUsage>,
+    wal_usage: Vec<WalUsage>,
+    will_parallel_vacuum: Vec<bool>,
+    nindexes_parallel_bulkdel: i32,
+    nindexes_parallel_cleanup: i32,
+    nindexes_parallel_condcleanup: i32,
+    bstrategy: StrategyHandle,
+    relnamespace: Option<String>,
+    relname: Option<String>,
+    indname: Option<String>,
+    status: PVIndVacStatus,
+}
+
+impl Default for ParallelVacuumState {
+    fn default() -> Self {
+        ParallelVacuumState {
+            pcxt: None,
+            heaprel: Oid::from(0u32),
+            indrels: Vec::new(),
+            nindexes: 0,
+            shared: PVShared::default(),
+            indstats: Vec::new(),
+            dead_items: TidStore::none(),
+            buffer_usage: Vec::new(),
+            wal_usage: Vec::new(),
+            will_parallel_vacuum: Vec::new(),
+            nindexes_parallel_bulkdel: 0,
+            nindexes_parallel_cleanup: 0,
+            nindexes_parallel_condcleanup: 0,
+            bstrategy: StrategyHandle::none(),
+            relnamespace: None,
+            relname: None,
+            indname: None,
+            status: PVIndVacStatus::Initial,
+        }
+    }
+}
+
+// =======================================================================
+// Registry: handle id -> owned ParallelVacuumState.
+// =======================================================================
+
+thread_local! {
+    static REGISTRY: RefCell<BTreeMap<u64, ParallelVacuumState>> = RefCell::new(BTreeMap::new());
+    /// Monotonic id counter; id 0 == none (the C `NULL`).
+    static NEXT_ID: RefCell<u64> = const { RefCell::new(1) };
+}
+
+fn registry_insert(state: ParallelVacuumState) -> ParallelVacuumStateHandle {
+    let id = NEXT_ID.with(|n| {
+        let mut n = n.borrow_mut();
+        let id = *n;
+        *n += 1;
+        id
+    });
+    REGISTRY.with(|r| r.borrow_mut().insert(id, state));
+    ParallelVacuumStateHandle::new(id)
+}
+
+/// Run `f` against the registry entry for `pvs`, propagating its result.
+fn with_state<R>(
+    pvs: ParallelVacuumStateHandle,
+    f: impl FnOnce(&mut ParallelVacuumState) -> PgResult<R>,
+) -> PgResult<R> {
+    REGISTRY.with(|r| {
+        let mut map = r.borrow_mut();
+        match map.get_mut(&pvs.id) {
+            Some(state) => f(state),
+            None => ereport(ERROR)
+                .errmsg("parallel vacuum state handle is not registered")
+                .finish(here("with_state"))
+                .map(|()| unreachable!("ereport(ERROR) does not return")),
+        }
+    })
+}
+
+// =======================================================================
+// DSM leader->worker handoff side table (PARALLEL_VACUUM_KEY_* analogue).
+// =======================================================================
+
+/// Snapshot of the worker-visible fields of `PVShared`
+/// (`PARALLEL_VACUUM_KEY_SHARED`). The atomics are snapshotted by value here;
+/// the worker re-installs `VacuumSharedCostBalance`/`VacuumActiveNWorkers`
+/// pointing at the leader-shared atomics via the cost-balance enable seams.
+#[derive(Clone, Copy, Default)]
+struct SharedSnapshot {
+    relid: Oid,
+    elevel: i32,
+    queryid: i64,
+    maintenance_work_mem_worker: i32,
+    ring_nbuffers: i32,
+    cost_balance: u32,
+    active_nworkers: u32,
+    dead_items_dsa_handle: DsaHandle,
+    dead_items_handle: DsaPointer,
+}
+
+#[derive(Default)]
+struct DsmContents {
+    /// `PARALLEL_VACUUM_KEY_SHARED`.
+    shared: SharedSnapshot,
+    /// `PARALLEL_VACUUM_KEY_INDEX_STATS`.
+    indstats: Vec<PVIndStats>,
+    /// `PARALLEL_VACUUM_KEY_QUERY_TEXT` (`None` == no `debug_query_string`).
+    query_text: Option<String>,
+}
+
+thread_local! {
+    static DSM: RefCell<DsmContents> = RefCell::new(DsmContents::default());
+}
+
+fn dsm_store_shared(s: SharedSnapshot) {
+    DSM.with(|d| d.borrow_mut().shared = s);
+}
+fn dsm_store_indstats(stats: &[PVIndStats]) {
+    DSM.with(|d| d.borrow_mut().indstats = stats.to_vec());
+}
+fn dsm_store_one_indstats(idx: usize, snapshot: PVIndStats) {
+    DSM.with(|d| {
+        let mut d = d.borrow_mut();
+        if idx < d.indstats.len() {
+            d.indstats[idx] = snapshot;
+        }
+    });
+}
+fn dsm_store_query_text(q: Option<String>) {
+    DSM.with(|d| d.borrow_mut().query_text = q);
+}
+fn dsm_lookup_shared() -> SharedSnapshot {
+    DSM.with(|d| d.borrow().shared)
+}
+fn dsm_lookup_indstats() -> Vec<PVIndStats> {
+    DSM.with(|d| d.borrow().indstats.clone())
+}
+fn dsm_lookup_query_text() -> Option<String> {
+    DSM.with(|d| d.borrow().query_text.clone())
+}
+
+// =======================================================================
+// Conversions between the two strategy-handle newtypes.
+// =======================================================================
+
+#[inline]
+fn strategy_to_buffer_access(s: StrategyHandle) -> BufferAccessStrategyHandle {
+    BufferAccessStrategyHandle(s.id)
+}
+
+// =======================================================================
+// Public seam entrypoints (registry borrow happens here).
+// =======================================================================
+
+/// `parallel_vacuum_init(rel, indrels, nindexes, nrequested_workers,
+/// vac_work_mem, elevel, bstrategy)` (vacuumparallel.c:242). On success returns
+/// the handle plus the dead-items store and its sizing info; on the "can't go
+/// parallel" path returns a `none()` handle (the C `NULL`).
+fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuumInit> {
+    let ParallelVacuumInitArgs {
+        rel,
+        indrels,
+        nindexes,
+        nrequested,
+        vac_work_mem,
+        elevel,
+        bstrategy,
+    } = args;
+
+    /*
+     * A parallel vacuum must be requested and there must be indexes on the
+     * relation.
+     */
+    debug_assert!(nrequested >= 0);
+    debug_assert!(nindexes > 0);
+
+    /*
+     * Compute the number of parallel vacuum workers to launch.
+     */
+    let mut will_parallel_vacuum = alloc::vec![false; nindexes as usize];
+    let parallel_workers =
+        parallel_vacuum_compute_workers(&indrels, nrequested, &mut will_parallel_vacuum)?;
+    if parallel_workers <= 0 {
+        /* Can't perform vacuum in parallel -- return NULL */
+        return Ok(ParallelVacuumInit {
+            pvs: ParallelVacuumStateHandle::none(),
+            dead_items: TidStore::none(),
+            dead_items_info: VacDeadItemsInfo::default(),
+        });
+    }
+
+    let mut pvs = ParallelVacuumState {
+        indrels: indrels.clone(),
+        nindexes,
+        will_parallel_vacuum,
+        bstrategy,
+        heaprel: rel,
+        ..Default::default()
+    };
+
+    prt::enter_parallel_mode::call()?;
+
+    // The C `CreateParallelContext` allocates the worker array + DSM bookkeeping
+    // in TopTransactionContext; the parallel-infra seams need an Mcx. There is
+    // no Mcx in the inward `parallel_vacuum_init` contract, so use a crate-owned
+    // context for the duration of the calls (mirrors the src-idiomatic
+    // `MemoryContext::new` idiom for the same calls).
+    let ctx = mcx::MemoryContext::new("parallel_vacuum_init");
+    let mcx = ctx.mcx();
+
+    let pcxt = p::create_parallel_context::call(
+        mcx,
+        String::from("postgres"),
+        String::from("parallel_vacuum_main"),
+        parallel_workers,
+    )?;
+    debug_assert!(p::pcxt_nworkers::call(pcxt) > 0);
+    pvs.pcxt = Some(pcxt);
+    let pcxt_nworkers = p::pcxt_nworkers::call(pcxt);
+
+    let estimator = p::pcxt_estimator::call(pcxt);
+
+    /* Estimate size for index vacuum stats -- PARALLEL_VACUUM_KEY_INDEX_STATS */
+    let est_indstats_len = mul_size(core::mem::size_of::<PVIndStats>(), nindexes as usize);
+    p::shm_toc_estimate_chunk::call(estimator, est_indstats_len);
+    p::shm_toc_estimate_keys::call(estimator, 1);
+
+    /* Estimate size for shared information -- PARALLEL_VACUUM_KEY_SHARED */
+    let est_shared_len = core::mem::size_of::<PVShared>();
+    p::shm_toc_estimate_chunk::call(estimator, est_shared_len);
+    p::shm_toc_estimate_keys::call(estimator, 1);
+
+    /*
+     * Estimate space for BufferUsage and WalUsage --
+     * PARALLEL_VACUUM_KEY_BUFFER_USAGE and PARALLEL_VACUUM_KEY_WAL_USAGE.
+     */
+    p::shm_toc_estimate_chunk::call(
+        estimator,
+        mul_size(core::mem::size_of::<BufferUsage>(), pcxt_nworkers as usize),
+    );
+    p::shm_toc_estimate_keys::call(estimator, 1);
+    p::shm_toc_estimate_chunk::call(
+        estimator,
+        mul_size(core::mem::size_of::<WalUsage>(), pcxt_nworkers as usize),
+    );
+    p::shm_toc_estimate_keys::call(estimator, 1);
+
+    /* Finally, estimate PARALLEL_VACUUM_KEY_QUERY_TEXT space */
+    let debug_query = vac::debug_query_string_pv::call()?;
+    let querylen = match &debug_query {
+        Some(q) => {
+            let querylen = q.len();
+            p::shm_toc_estimate_chunk::call(estimator, querylen + 1);
+            p::shm_toc_estimate_keys::call(estimator, 1);
+            querylen
+        }
+        None => 0, /* keep compiler quiet */
+    };
+    let _ = querylen;
+
+    p::initialize_parallel_dsm::call(mcx, pcxt)?;
+
+    /* Prepare index vacuum stats */
+    let mut indstats: Vec<PVIndStats> = alloc::vec![PVIndStats::default(); nindexes as usize];
+    let mut nindexes_mwm = 0;
+    for i in 0..nindexes as usize {
+        let indrel = pvs.indrels[i];
+        let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+
+        /*
+         * Cleanup option should be either disabled, always performing in
+         * parallel or conditionally performing in parallel.
+         */
+        debug_assert!(
+            (vacoptions & VACUUM_OPTION_PARALLEL_CLEANUP) == 0
+                || (vacoptions & VACUUM_OPTION_PARALLEL_COND_CLEANUP) == 0
+        );
+        debug_assert!(vacoptions <= VACUUM_OPTION_MAX_VALID_VALUE);
+
+        if !pvs.will_parallel_vacuum[i] {
+            continue;
+        }
+
+        if vac::am_use_maintenance_work_mem::call(indrel)? {
+            nindexes_mwm += 1;
+        }
+
+        /*
+         * Remember the number of indexes that support parallel operation for
+         * each phase.
+         */
+        if (vacoptions & VACUUM_OPTION_PARALLEL_BULKDEL) != 0 {
+            pvs.nindexes_parallel_bulkdel += 1;
+        }
+        if (vacoptions & VACUUM_OPTION_PARALLEL_CLEANUP) != 0 {
+            pvs.nindexes_parallel_cleanup += 1;
+        }
+        if (vacoptions & VACUUM_OPTION_PARALLEL_COND_CLEANUP) != 0 {
+            pvs.nindexes_parallel_condcleanup += 1;
+        }
+    }
+    /* shm_toc_insert(toc, PARALLEL_VACUUM_KEY_INDEX_STATS, indstats) */
+    dsm_store_indstats(&indstats);
+    pvs.indstats = core::mem::take(&mut indstats);
+
+    /* Prepare shared information */
+    let mut shared = PVShared {
+        relid: rel,
+        elevel,
+        queryid: vac::pgstat_get_my_query_id::call()?,
+        ..Default::default()
+    };
+    let mwm = vac::pv_maintenance_work_mem::call()?;
+    shared.maintenance_work_mem_worker = if nindexes_mwm > 0 {
+        mwm / core::cmp::min(parallel_workers, nindexes_mwm)
+    } else {
+        mwm
+    };
+    shared.dead_items_info.max_bytes = vac_work_mem as usize * 1024;
+
+    /* Prepare DSA space for dead items */
+    let dead_items = vac::tid_store_create_shared_pv::call(
+        shared.dead_items_info.max_bytes,
+        LWTRANCHE_PARALLEL_VACUUM_DSA,
+    )?;
+    pvs.dead_items = dead_items;
+    shared.dead_items_handle = vac::tid_store_get_handle_pv::call(dead_items)?;
+    shared.dead_items_dsa_handle = vac::tid_store_get_dsa_handle_pv::call(dead_items)?;
+
+    /* Use the same buffer size for all workers */
+    shared.ring_nbuffers = vac::get_access_strategy_buffer_count::call(bstrategy)?;
+
+    shared.cost_balance.store(0, core::sync::atomic::Ordering::Relaxed);
+    shared.active_nworkers.store(0, core::sync::atomic::Ordering::Relaxed);
+    shared.idx.store(0, core::sync::atomic::Ordering::Relaxed);
+
+    /* shm_toc_insert(toc, PARALLEL_VACUUM_KEY_SHARED, shared) */
+    dsm_store_shared(shared_snapshot(&shared));
+    pvs.shared = shared;
+
+    /*
+     * Allocate space for each worker's BufferUsage and WalUsage; no need to
+     * initialize.
+     */
+    pvs.buffer_usage = alloc::vec![BufferUsage::default(); pcxt_nworkers as usize];
+    pvs.wal_usage = alloc::vec![WalUsage::default(); pcxt_nworkers as usize];
+
+    /* Store query string for workers */
+    dsm_store_query_text(debug_query);
+
+    let dead_items_info = pvs.shared.dead_items_info;
+    let dead_items = pvs.dead_items;
+
+    /* Success -- register the state and return its handle. */
+    let handle = registry_insert(pvs);
+
+    Ok(ParallelVacuumInit {
+        pvs: handle,
+        dead_items,
+        dead_items_info,
+    })
+}
+
+/// `parallel_vacuum_end(pvs, istats)` (vacuumparallel.c:435) — destroy the
+/// parallel context and end parallel mode.
+///
+/// In C this copies the per-index stats into the caller's `istats[]` first.
+/// The repo contract returns `()` and the caller already has its authoritative
+/// stats via this crate's `parallel_vacuum_get_dead_items`/per-pass reads, so
+/// the passed-in `_indstats` is the consumer's own copy and is unused here.
+/// The teardown order matches C: destroy tidstore, destroy parallel context,
+/// then exit parallel mode (see the C comment about ExitParallelMode), and only
+/// then drop the owned state (the `pfree(pvs)` analogue).
+fn parallel_vacuum_end(
+    pvs: ParallelVacuumStateHandle,
+    _indstats: Vec<Option<IndexBulkDeleteResult>>,
+) -> PgResult<()> {
+    debug_assert!(!vac::is_parallel_worker::call()?);
+
+    // Remove the entry up front so the borrow is released before we call the
+    // teardown seams (which may re-enter the registry on the error path).
+    let state = REGISTRY.with(|r| r.borrow_mut().remove(&pvs.id));
+    let state = match state {
+        Some(s) => s,
+        None => {
+            return ereport(ERROR)
+                .errmsg("parallel vacuum state handle is not registered")
+                .finish(here("parallel_vacuum_end"))
+                .map(|()| ());
+        }
+    };
+
+    /*
+     * The C copies the updated statistics out of DSM into `istats[]` here; in
+     * this repo the consumer reads them elsewhere, so nothing is copied out.
+     */
+
+    if !state.dead_items.is_none() {
+        vac::tid_store_destroy_pv::call(state.dead_items)?;
+    }
+
+    if let Some(pcxt) = state.pcxt {
+        p::destroy_parallel_context::call(pcxt)?;
+    }
+    prt::exit_parallel_mode::call()?;
+
+    /* `state` is dropped here — the `pfree(pvs->will_parallel_vacuum)` +
+     * `pfree(pvs)` analogue. */
+    drop(state);
+
+    Ok(())
+}
+
+/// `parallel_vacuum_get_dead_items(pvs, &dead_items_info)`
+/// (vacuumparallel.c:466).
+fn parallel_vacuum_get_dead_items(
+    pvs: ParallelVacuumStateHandle,
+) -> PgResult<(TidStore, VacDeadItemsInfo)> {
+    with_state(pvs, |state| {
+        Ok((state.dead_items, state.shared.dead_items_info))
+    })
+}
+
+/// `parallel_vacuum_reset_dead_items(pvs)` (vacuumparallel.c:474).
+fn parallel_vacuum_reset_dead_items(pvs: ParallelVacuumStateHandle) -> PgResult<()> {
+    with_state(pvs, |state| {
+        let max_bytes = state.shared.dead_items_info.max_bytes;
+
+        /*
+         * Free the current tidstore and return allocated DSA segments to the OS.
+         * Then recreate the tidstore with the same max_bytes limitation.
+         */
+        if !state.dead_items.is_none() {
+            vac::tid_store_destroy_pv::call(state.dead_items)?;
+        }
+        let dead_items =
+            vac::tid_store_create_shared_pv::call(max_bytes, LWTRANCHE_PARALLEL_VACUUM_DSA)?;
+        state.dead_items = dead_items;
+
+        /* Update the DSA pointer for dead_items to the new one */
+        state.shared.dead_items_dsa_handle = vac::tid_store_get_dsa_handle_pv::call(dead_items)?;
+        state.shared.dead_items_handle = vac::tid_store_get_handle_pv::call(dead_items)?;
+
+        /* Reset the counter */
+        state.shared.dead_items_info.num_items = 0;
+
+        /* keep the DSM snapshot consistent with the new handle */
+        dsm_store_shared(shared_snapshot(&state.shared));
+
+        Ok(())
+    })
+}
+
+/// `parallel_vacuum_bulkdel_all_indexes(pvs, num_table_tuples, num_index_scans)`
+/// (vacuumparallel.c:499).
+fn parallel_vacuum_bulkdel_all_indexes(
+    pvs: ParallelVacuumStateHandle,
+    num_table_tuples: f64,
+    num_index_scans: i32,
+) -> PgResult<()> {
+    with_state(pvs, |state| {
+        debug_assert!(!vac::is_parallel_worker::call()?);
+
+        /*
+         * We can only provide an approximate value of num_heap_tuples, at least
+         * for now.
+         */
+        state.shared.reltuples = num_table_tuples;
+        state.shared.estimated_count = true;
+
+        parallel_vacuum_process_all_indexes(state, num_index_scans, true)
+    })
+}
+
+/// `parallel_vacuum_cleanup_all_indexes(pvs, num_table_tuples, num_index_scans,
+/// estimated_count)` (vacuumparallel.c:518).
+fn parallel_vacuum_cleanup_all_indexes(
+    pvs: ParallelVacuumStateHandle,
+    num_table_tuples: f64,
+    num_index_scans: i32,
+    estimated_count: bool,
+) -> PgResult<()> {
+    with_state(pvs, |state| {
+        debug_assert!(!vac::is_parallel_worker::call()?);
+
+        /*
+         * We can provide a better estimate of total number of surviving tuples
+         * (we assume indexes are more interested in that than in the number of
+         * nominally live tuples).
+         */
+        state.shared.reltuples = num_table_tuples;
+        state.shared.estimated_count = estimated_count;
+
+        parallel_vacuum_process_all_indexes(state, num_index_scans, false)
+    })
+}
+
+// =======================================================================
+// Internal functions (operate on &mut ParallelVacuumState).
+// =======================================================================
+
+/// `mul_size(s1, s2)` — the C aborts on overflow; the result is only ever a byte
+/// count handed to the estimator, so saturate.
+#[inline]
+fn mul_size(s1: usize, s2: usize) -> usize {
+    s1.saturating_mul(s2)
+}
+
+/// Build a worker-visible snapshot of `PVShared`.
+fn shared_snapshot(shared: &PVShared) -> SharedSnapshot {
+    SharedSnapshot {
+        relid: shared.relid,
+        elevel: shared.elevel,
+        queryid: shared.queryid,
+        maintenance_work_mem_worker: shared.maintenance_work_mem_worker,
+        ring_nbuffers: shared.ring_nbuffers,
+        cost_balance: shared.cost_balance.load(core::sync::atomic::Ordering::Relaxed),
+        active_nworkers: shared
+            .active_nworkers
+            .load(core::sync::atomic::Ordering::Relaxed),
+        dead_items_dsa_handle: shared.dead_items_dsa_handle,
+        dead_items_handle: shared.dead_items_handle,
+    }
+}
+
+/// `parallel_vacuum_compute_workers(indrels, nindexes, nrequested,
+/// will_parallel_vacuum)` (vacuumparallel.c:548).
+fn parallel_vacuum_compute_workers(
+    indrels: &[Oid],
+    nrequested: i32,
+    will_parallel_vacuum: &mut [bool],
+) -> PgResult<i32> {
+    let nindexes = indrels.len();
+    let mut nindexes_parallel_bulkdel = 0;
+    let mut nindexes_parallel_cleanup = 0;
+
+    /*
+     * We don't allow performing parallel operation in standalone backend or
+     * when parallelism is disabled.
+     */
+    if !vac::is_under_postmaster_pv::call()? || vac::max_parallel_maintenance_workers::call()? == 0 {
+        return Ok(0);
+    }
+
+    /*
+     * Compute the number of indexes that can participate in parallel vacuum.
+     */
+    for i in 0..nindexes {
+        let indrel = indrels[i];
+        let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+
+        /* Skip index that is not a suitable target for parallel index vacuum */
+        if vacoptions == VACUUM_OPTION_NO_PARALLEL
+            || vac::relation_get_number_of_blocks_pv::call(indrel)?
+                < vac::min_parallel_index_scan_size::call()? as u32
+        {
+            continue;
+        }
+
+        will_parallel_vacuum[i] = true;
+
+        if (vacoptions & VACUUM_OPTION_PARALLEL_BULKDEL) != 0 {
+            nindexes_parallel_bulkdel += 1;
+        }
+        if ((vacoptions & VACUUM_OPTION_PARALLEL_CLEANUP) != 0)
+            || ((vacoptions & VACUUM_OPTION_PARALLEL_COND_CLEANUP) != 0)
+        {
+            nindexes_parallel_cleanup += 1;
+        }
+    }
+
+    let mut nindexes_parallel =
+        core::cmp::max(nindexes_parallel_bulkdel, nindexes_parallel_cleanup);
+
+    /* The leader process takes one index */
+    nindexes_parallel -= 1;
+
+    /* No index supports parallel vacuum */
+    if nindexes_parallel <= 0 {
+        return Ok(0);
+    }
+
+    /* Compute the parallel degree */
+    let mut parallel_workers = if nrequested > 0 {
+        core::cmp::min(nrequested, nindexes_parallel)
+    } else {
+        nindexes_parallel
+    };
+
+    /* Cap by max_parallel_maintenance_workers */
+    parallel_workers =
+        core::cmp::min(parallel_workers, vac::max_parallel_maintenance_workers::call()?);
+
+    Ok(parallel_workers)
+}
+
+/// `parallel_vacuum_process_all_indexes(pvs, num_index_scans, vacuum)`
+/// (vacuumparallel.c:610) — leader-process only.
+fn parallel_vacuum_process_all_indexes(
+    pvs: &mut ParallelVacuumState,
+    num_index_scans: i32,
+    vacuum: bool,
+) -> PgResult<()> {
+    debug_assert!(!vac::is_parallel_worker::call()?);
+
+    let new_status;
+    let mut nworkers;
+
+    if vacuum {
+        new_status = PVIndVacStatus::NeedBulkdelete;
+        /* Determine the number of parallel workers to launch */
+        nworkers = pvs.nindexes_parallel_bulkdel;
+    } else {
+        new_status = PVIndVacStatus::NeedCleanup;
+        /* Determine the number of parallel workers to launch */
+        nworkers = pvs.nindexes_parallel_cleanup;
+
+        /* Add conditionally parallel-aware indexes if in the first time call */
+        if num_index_scans == 0 {
+            nworkers += pvs.nindexes_parallel_condcleanup;
+        }
+    }
+
+    /* The leader process will participate */
+    nworkers -= 1;
+
+    /*
+     * It is possible that parallel context is initialized with fewer workers
+     * than the number of indexes that need a separate worker in the current
+     * phase, so we need to consider it.
+     */
+    let pcxt = pvs
+        .pcxt
+        .ok_or_else(|| PgError::error("leader must hold a parallel context"))?;
+    nworkers = core::cmp::min(nworkers, p::pcxt_nworkers::call(pcxt));
+
+    /*
+     * Set index vacuum status and mark whether parallel vacuum worker can
+     * process it.
+     */
+    for i in 0..pvs.nindexes as usize {
+        debug_assert!(pvs.indstats[i].status == PVIndVacStatus::Initial);
+        let new_can_process = pvs.will_parallel_vacuum[i]
+            && parallel_vacuum_index_is_parallel_safe(pvs.indrels[i], num_index_scans, vacuum)?;
+        let indstats = &mut pvs.indstats[i];
+        indstats.status = new_status;
+        indstats.parallel_workers_can_process = new_can_process;
+        let snapshot = *indstats;
+        dsm_store_one_indstats(i, snapshot);
+    }
+
+    /* Reset the parallel index processing and progress counters */
+    pvs.shared.idx.store(0, core::sync::atomic::Ordering::Relaxed);
+
+    /* Setup the shared cost-based vacuum delay and launch workers */
+    if nworkers > 0 {
+        /* Reinitialize parallel context to relaunch parallel workers */
+        if num_index_scans > 0 {
+            p::reinitialize_parallel_dsm::call(pcxt)?;
+        }
+
+        /*
+         * Set up shared cost balance and the number of active workers for
+         * vacuum delay.  We need to do this before launching workers as
+         * otherwise, they might not see the updated values for these
+         * parameters.
+         */
+        pvs.shared.cost_balance.store(
+            vac::vacuum_cost_balance::call()? as u32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        pvs.shared
+            .active_nworkers
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+
+        /* Keep the worker-visible snapshot consistent. */
+        dsm_store_shared(shared_snapshot(&pvs.shared));
+
+        /*
+         * The number of workers can vary between bulkdelete and cleanup phase.
+         */
+        p::reinitialize_parallel_workers::call(pcxt, nworkers);
+
+        p::launch_parallel_workers::call(pcxt)?;
+
+        if p::pcxt_nworkers_launched::call(pcxt) > 0 {
+            /*
+             * Reset the local cost values for leader backend as we have
+             * already accumulated the remaining balance of heap.
+             */
+            vac::set_vacuum_cost_balance::call(0)?;
+            vac::set_vacuum_cost_balance_local::call(0)?;
+
+            /* Enable shared cost balance for leader backend */
+            vac::set_vacuum_shared_cost_balance_enable::call(
+                true,
+                pvs.shared.cost_balance.load(core::sync::atomic::Ordering::Relaxed),
+            )?;
+            vac::set_vacuum_active_nworkers_enable::call(
+                true,
+                pvs.shared
+                    .active_nworkers
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            )?;
+        }
+
+        let nworkers_launched = p::pcxt_nworkers_launched::call(pcxt);
+        if vacuum {
+            ereport(ErrorLevel(pvs.shared.elevel))
+                .errmsg(ngettext_workers_vacuuming(nworkers_launched, nworkers))
+                .finish(here("parallel_vacuum_process_all_indexes"))?;
+        } else {
+            ereport(ErrorLevel(pvs.shared.elevel))
+                .errmsg(ngettext_workers_cleanup(nworkers_launched, nworkers))
+                .finish(here("parallel_vacuum_process_all_indexes"))?;
+        }
+    }
+
+    /* Vacuum the indexes that can be processed by only leader process */
+    parallel_vacuum_process_unsafe_indexes(pvs)?;
+
+    /*
+     * Join as a parallel worker.  The leader vacuums alone processes all
+     * parallel-safe indexes in the case where no workers are launched.
+     */
+    parallel_vacuum_process_safe_indexes(pvs)?;
+
+    /*
+     * Next, accumulate buffer and WAL usage.  (This must wait for the workers
+     * to finish, or we might get incomplete data.)
+     */
+    if nworkers > 0 {
+        /* Wait for all vacuum workers to finish */
+        p::wait_for_parallel_workers_to_finish::call(pcxt)?;
+
+        for i in 0..p::pcxt_nworkers_launched::call(pcxt) {
+            vac::instr_accum_parallel_query_pv::call(i)?;
+        }
+    }
+
+    /*
+     * Reset all index status back to initial (while checking that we have
+     * vacuumed all indexes).
+     */
+    for i in 0..pvs.nindexes as usize {
+        if pvs.indstats[i].status != PVIndVacStatus::Completed {
+            let indname = vac::relation_get_relation_name::call(pvs.indrels[i])?;
+            return ereport(ERROR)
+                .errmsg(alloc::format!(
+                    "parallel index vacuum on index \"{}\" is not completed",
+                    indname
+                ))
+                .finish(here("parallel_vacuum_process_all_indexes"))
+                .map(|()| ());
+        }
+
+        pvs.indstats[i].status = PVIndVacStatus::Initial;
+    }
+
+    /*
+     * Carry the shared balance value to heap scan and disable shared costing.
+     */
+    if vac::vacuum_shared_cost_balance_is_set::call()? {
+        vac::set_vacuum_cost_balance::call(vac::vacuum_shared_cost_balance_read::call()? as i32)?;
+        vac::set_vacuum_shared_cost_balance_enable::call(false, 0)?;
+        vac::set_vacuum_active_nworkers_enable::call(false, 0)?;
+    }
+
+    Ok(())
+}
+
+/// `parallel_vacuum_process_safe_indexes(pvs)` (vacuumparallel.c:773) — index
+/// vacuum/cleanup loop run by both the leader and worker processes.
+fn parallel_vacuum_process_safe_indexes(pvs: &mut ParallelVacuumState) -> PgResult<()> {
+    /*
+     * Increment the active worker count if we are able to launch any worker.
+     */
+    if vac::vacuum_active_nworkers_is_set::call()? {
+        vac::vacuum_active_nworkers_add::call(1)?;
+    }
+
+    /* Loop until all indexes are vacuumed */
+    loop {
+        /* Get an index number to process */
+        let idx = pvs
+            .shared
+            .idx
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        /* Done for all indexes? */
+        if idx >= pvs.nindexes as u32 {
+            break;
+        }
+
+        /*
+         * Skip vacuuming index that is unsafe for workers or has an unsuitable
+         * target for parallel index vacuum (this is vacuumed in
+         * parallel_vacuum_process_unsafe_indexes() by the leader).
+         */
+        if !pvs.indstats[idx as usize].parallel_workers_can_process {
+            continue;
+        }
+
+        /* Do vacuum or cleanup of the index */
+        let indrel = pvs.indrels[idx as usize];
+        parallel_vacuum_process_one_index(pvs, indrel, idx as usize)?;
+    }
+
+    /*
+     * We have completed the index vacuum so decrement the active worker count.
+     */
+    if vac::vacuum_active_nworkers_is_set::call()? {
+        vac::vacuum_active_nworkers_sub::call(1)?;
+    }
+
+    Ok(())
+}
+
+/// `parallel_vacuum_process_unsafe_indexes(pvs)` (vacuumparallel.c:827) —
+/// leader-only vacuuming of indexes that are not parallel safe.
+fn parallel_vacuum_process_unsafe_indexes(pvs: &mut ParallelVacuumState) -> PgResult<()> {
+    debug_assert!(!vac::is_parallel_worker::call()?);
+
+    /*
+     * Increment the active worker count if we are able to launch any worker.
+     */
+    if vac::vacuum_active_nworkers_is_set::call()? {
+        vac::vacuum_active_nworkers_add::call(1)?;
+    }
+
+    for i in 0..pvs.nindexes as usize {
+        /* Skip, indexes that are safe for workers */
+        if pvs.indstats[i].parallel_workers_can_process {
+            continue;
+        }
+
+        /* Do vacuum or cleanup of the index */
+        let indrel = pvs.indrels[i];
+        parallel_vacuum_process_one_index(pvs, indrel, i)?;
+    }
+
+    /*
+     * We have completed the index vacuum so decrement the active worker count.
+     */
+    if vac::vacuum_active_nworkers_is_set::call()? {
+        vac::vacuum_active_nworkers_sub::call(1)?;
+    }
+
+    Ok(())
+}
+
+/// `parallel_vacuum_process_one_index(pvs, indrel, indstats)`
+/// (vacuumparallel.c:864). `idx` is the index's slot in `pvs.indstats`.
+fn parallel_vacuum_process_one_index(
+    pvs: &mut ParallelVacuumState,
+    indrel: Oid,
+    idx: usize,
+) -> PgResult<()> {
+    /*
+     * Update the pointer to the corresponding bulk-deletion result if someone
+     * has already updated it.
+     */
+    let istat: Option<IndexBulkDeleteResult> = if pvs.indstats[idx].istat_updated {
+        Some(pvs.indstats[idx].istat)
+    } else {
+        None
+    };
+
+    let ivinfo = IndexVacuumInfo {
+        index: indrel,
+        heaprel: pvs.heaprel,
+        analyze_only: false,
+        report_progress: false,
+        estimated_count: pvs.shared.estimated_count,
+        message_level: MESSAGE_LEVEL_DEBUG2,
+        num_heap_tuples: pvs.shared.reltuples,
+        strategy: strategy_to_buffer_access(pvs.bstrategy),
+    };
+    debug_assert_eq!(ivinfo.message_level, DEBUG2.0);
+
+    /* Update error traceback information */
+    pvs.indname = Some(vac::relation_get_relation_name::call(indrel)?);
+    pvs.status = pvs.indstats[idx].status;
+
+    let istat_res = match pvs.indstats[idx].status {
+        PVIndVacStatus::NeedBulkdelete => Some(vac::vac_bulkdel_one_index::call(
+            ivinfo,
+            istat,
+            pvs.dead_items,
+            pvs.shared.dead_items_info,
+        )?),
+        PVIndVacStatus::NeedCleanup => vac::vac_cleanup_one_index::call(ivinfo, istat)?,
+        _ => {
+            let indname = vac::relation_get_relation_name::call(indrel)?;
+            return ereport(ERROR)
+                .errmsg(alloc::format!(
+                    "unexpected parallel vacuum index status {} for index \"{}\"",
+                    pvs.indstats[idx].status as i32,
+                    indname
+                ))
+                .finish(here("parallel_vacuum_process_one_index"))
+                .map(|()| ());
+        }
+    };
+
+    /*
+     * Copy the index bulk-deletion result returned from ambulkdelete and
+     * amvacuumcleanup to the shared array if it's the first cycle ...
+     */
+    if !pvs.indstats[idx].istat_updated {
+        if let Some(res) = istat_res {
+            pvs.indstats[idx].istat = res;
+            pvs.indstats[idx].istat_updated = true;
+            /* The seam returns an owned value, so there is no locally-allocated
+             * result to `pfree`. */
+        }
+    }
+
+    /*
+     * Update the status to completed.  No need to lock here since each worker
+     * touches different indexes.
+     */
+    pvs.indstats[idx].status = PVIndVacStatus::Completed;
+
+    /* Publish the updated slot back to the shared array. */
+    let snapshot = pvs.indstats[idx];
+    dsm_store_one_indstats(idx, snapshot);
+
+    /* Reset error traceback information */
+    pvs.status = PVIndVacStatus::Completed;
+    pvs.indname = None;
+
+    /*
+     * Call the parallel variant of pgstat_progress_incr_param so workers can
+     * report progress of index vacuum to the leader.
+     */
+    vac::pgstat_progress_parallel_incr_param::call(PROGRESS_VACUUM_INDEXES_PROCESSED, 1)?;
+
+    Ok(())
+}
+
+/// `parallel_vacuum_index_is_parallel_safe(indrel, num_index_scans, vacuum)`
+/// (vacuumparallel.c:950).
+fn parallel_vacuum_index_is_parallel_safe(
+    indrel: Oid,
+    num_index_scans: i32,
+    vacuum: bool,
+) -> PgResult<bool> {
+    let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+
+    /* In parallel vacuum case, check if it supports parallel bulk-deletion */
+    if vacuum {
+        return Ok((vacoptions & VACUUM_OPTION_PARALLEL_BULKDEL) != 0);
+    }
+
+    /* Not safe, if the index does not support parallel cleanup */
+    if ((vacoptions & VACUUM_OPTION_PARALLEL_CLEANUP) == 0)
+        && ((vacoptions & VACUUM_OPTION_PARALLEL_COND_CLEANUP) == 0)
+    {
+        return Ok(false);
+    }
+
+    /*
+     * Not safe, if the index supports parallel cleanup conditionally, but we
+     * have already processed the index (for bulkdelete).
+     */
+    if num_index_scans > 0 && ((vacoptions & VACUUM_OPTION_PARALLEL_COND_CLEANUP) != 0) {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+/// `parallel_vacuum_main(seg, toc)` (vacuumparallel.c:988) — the parallel-worker
+/// entry point. Attaches to the shared state, opens table+indexes, runs the
+/// safe-index processing loop, reports usage, then detaches.
+pub fn parallel_vacuum_main() -> PgResult<()> {
+    /*
+     * A parallel vacuum worker must have only PROC_IN_VACUUM flag since we
+     * don't support parallel vacuum for autovacuum as of now.
+     */
+    debug_assert!(vac::my_proc_in_vacuum_only::call()?);
+
+    ereport(DEBUG1)
+        .errmsg("starting parallel vacuum worker")
+        .finish(here("parallel_vacuum_main"))?;
+
+    let shared = dsm_lookup_shared();
+
+    /* Set debug_query_string for individual workers */
+    let sharedquery = dsm_lookup_query_text();
+    vac::set_debug_query_string_pv::call(sharedquery.clone())?;
+    vac::pgstat_report_activity_running_pv::call(sharedquery.unwrap_or_default())?;
+
+    /* Track query ID */
+    vac::pgstat_report_query_id_pv::call(shared.queryid, false)?;
+
+    /*
+     * Open table.  The lock mode is the same as the leader process.
+     */
+    let rel = vac::table_open_lock::call(shared.relid, ShareUpdateExclusiveLock)?;
+
+    /*
+     * Open all indexes. indrels are sorted in order by OID, matching the
+     * leader's.
+     */
+    let indrels = vac::vac_open_indexes_lock::call(rel, RowExclusiveLock)?;
+    let nindexes = indrels.len() as i32;
+    debug_assert!(nindexes > 0);
+
+    /*
+     * Apply the desired value of maintenance_work_mem within this process.
+     */
+    if shared.maintenance_work_mem_worker > 0 {
+        vac::set_pv_maintenance_work_mem::call(shared.maintenance_work_mem_worker)?;
+    }
+
+    /* Set index statistics */
+    let indstats = dsm_lookup_indstats();
+
+    /* Find dead_items in shared memory */
+    let dead_items =
+        vac::tid_store_attach_pv::call(shared.dead_items_dsa_handle, shared.dead_items_handle)?;
+
+    /* Set cost-based vacuum delay */
+    vac::vacuum_update_costs::call()?;
+    vac::set_vacuum_cost_balance::call(0)?;
+    vac::set_vacuum_cost_balance_local::call(0)?;
+    vac::set_vacuum_shared_cost_balance_enable::call(true, shared.cost_balance)?;
+    vac::set_vacuum_active_nworkers_enable::call(true, shared.active_nworkers)?;
+
+    /* Set parallel vacuum state */
+    let relnamespace = vac::relation_get_namespace_name_pv::call(rel)?;
+    let relname = vac::relation_get_relation_name::call(rel)?;
+    let mut pvs = ParallelVacuumState {
+        indrels,
+        nindexes,
+        indstats,
+        shared: PVShared {
+            relid: shared.relid,
+            elevel: shared.elevel,
+            queryid: shared.queryid,
+            reltuples: 0.0,
+            estimated_count: false,
+            maintenance_work_mem_worker: shared.maintenance_work_mem_worker,
+            ring_nbuffers: shared.ring_nbuffers,
+            cost_balance: core::sync::atomic::AtomicU32::new(shared.cost_balance),
+            active_nworkers: core::sync::atomic::AtomicU32::new(shared.active_nworkers),
+            idx: core::sync::atomic::AtomicU32::new(0),
+            dead_items_dsa_handle: shared.dead_items_dsa_handle,
+            dead_items_handle: shared.dead_items_handle,
+            dead_items_info: VacDeadItemsInfo::default(),
+        },
+        dead_items,
+        relnamespace: Some(relnamespace),
+        relname: Some(relname),
+        heaprel: rel,
+        /* These fields will be filled during index vacuum or cleanup */
+        indname: None,
+        status: PVIndVacStatus::Initial,
+        ..Default::default()
+    };
+
+    /* Each parallel VACUUM worker gets its own access strategy. */
+    let bstrategy =
+        vac::get_access_strategy_with_size_basvac::call(pvs.shared.ring_nbuffers * (BLCKSZ / 1024))?;
+    pvs.bstrategy = bstrategy;
+
+    /* Setup error traceback support for ereport() */
+    vac::push_parallel_vacuum_error_context::call()?;
+
+    /* Prepare to track buffer usage during parallel execution */
+    vac::instr_start_parallel_query_pv::call()?;
+
+    /* Process indexes to perform vacuum/cleanup */
+    parallel_vacuum_process_safe_indexes(&mut pvs)?;
+
+    /* Report buffer/WAL usage during parallel execution */
+    let pwn = p::parallel_worker_number::call();
+    vac::instr_end_parallel_query_pv::call(pwn)?;
+
+    /* Report any remaining cost-based vacuum delay time */
+    if vac::track_cost_delay_timing::call()? {
+        vac::pgstat_progress_parallel_incr_param::call(
+            PROGRESS_VACUUM_DELAY_TIME,
+            vac::parallel_vacuum_worker_delay_ns::call()?,
+        )?;
+    }
+
+    vac::tid_store_detach_pv::call(dead_items)?;
+
+    /* Pop the error context stack */
+    vac::pop_parallel_vacuum_error_context::call()?;
+
+    vac::vac_close_indexes_lock::call(pvs.indrels.clone(), RowExclusiveLock)?;
+    vac::table_close_lock::call(rel, ShareUpdateExclusiveLock)?;
+    vac::free_access_strategy_pv::call(bstrategy)?;
+
+    Ok(())
+}
+
+/// `parallel_vacuum_error_callback(arg)` (vacuumparallel.c:1118) — error context
+/// callback for errors during parallel index vacuum. Returns the `errcontext`
+/// message to append, or `None` for the initial/completed states.
+fn parallel_vacuum_error_callback(errinfo: &ParallelVacuumState) -> Option<String> {
+    let indname = errinfo.indname.as_deref().unwrap_or("");
+    let relnamespace = errinfo.relnamespace.as_deref().unwrap_or("");
+    let relname = errinfo.relname.as_deref().unwrap_or("");
+
+    match errinfo.status {
+        PVIndVacStatus::NeedBulkdelete => Some(alloc::format!(
+            "while vacuuming index \"{indname}\" of relation \"{relnamespace}.{relname}\""
+        )),
+        PVIndVacStatus::NeedCleanup => Some(alloc::format!(
+            "while cleaning up index \"{indname}\" of relation \"{relnamespace}.{relname}\""
+        )),
+        PVIndVacStatus::Initial | PVIndVacStatus::Completed => None,
+    }
+}
+
+// =======================================================================
+// small helpers
+// =======================================================================
+
+/// `ngettext("launched %d parallel vacuum worker for index vacuuming (planned:
+/// %d)", "...workers...", n)` — singular/plural chosen on `nworkers_launched`,
+/// exactly as the C `ngettext` call does.
+fn ngettext_workers_vacuuming(nworkers_launched: i32, planned: i32) -> String {
+    if nworkers_launched == 1 {
+        alloc::format!(
+            "launched {nworkers_launched} parallel vacuum worker for index vacuuming (planned: {planned})"
+        )
+    } else {
+        alloc::format!(
+            "launched {nworkers_launched} parallel vacuum workers for index vacuuming (planned: {planned})"
+        )
+    }
+}
+
+/// As [`ngettext_workers_vacuuming`] but for the index-cleanup phase.
+fn ngettext_workers_cleanup(nworkers_launched: i32, planned: i32) -> String {
+    if nworkers_launched == 1 {
+        alloc::format!(
+            "launched {nworkers_launched} parallel vacuum worker for index cleanup (planned: {planned})"
+        )
+    } else {
+        alloc::format!(
+            "launched {nworkers_launched} parallel vacuum workers for index cleanup (planned: {planned})"
+        )
+    }
+}
+
+// =======================================================================
+// Seam wiring.
+// =======================================================================
+
+/// Install this crate's inward consumer-contract seams (declared in
+/// `backend-access-heap-vacuumlazy-seams`). The worker entry point
+/// [`parallel_vacuum_main`] is a plain public fn (the parallel-infra bgworker
+/// dispatch will reach it directly), and `parallel_vacuum_error_callback` is
+/// reached through the error-context machinery the worker pushes.
+pub fn init_seams() {
+    vl::parallel_vacuum_init::set(parallel_vacuum_init);
+    vl::parallel_vacuum_end::set(parallel_vacuum_end);
+    vl::parallel_vacuum_get_dead_items::set(parallel_vacuum_get_dead_items);
+    vl::parallel_vacuum_reset_dead_items::set(parallel_vacuum_reset_dead_items);
+    vl::parallel_vacuum_bulkdel_all_indexes::set(parallel_vacuum_bulkdel_all_indexes);
+    vl::parallel_vacuum_cleanup_all_indexes::set(parallel_vacuum_cleanup_all_indexes);
+
+    // `parallel_vacuum_error_callback` is referenced by the error-context path;
+    // keep it live for the linker until that wiring lands.
+    let _ = parallel_vacuum_error_callback as fn(&ParallelVacuumState) -> Option<String>;
+}

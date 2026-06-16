@@ -85,6 +85,8 @@ seam_core::seam!(pub fn create_parallel_context<'mcx>(
 seam_core::seam!(pub fn initialize_parallel_dsm<'mcx>(mcx: mcx::Mcx<'mcx>, pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `ReinitializeParallelDSM(pcxt)`.
 seam_core::seam!(pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()>);
+/// `ReinitializeParallelWorkers(pcxt, nworkers_to_launch)`.
+seam_core::seam!(pub fn reinitialize_parallel_workers(pcxt: ParallelContextHandle, nworkers_to_launch: i32));
 /// `WaitForParallelWorkersToFinish(pcxt)`.
 seam_core::seam!(pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `DestroyParallelContext(pcxt)`.

@@ -129,6 +129,7 @@ backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }
+backend-commands-vacuumparallel = { path = "../backend-commands-vacuumparallel" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
