@@ -333,6 +333,7 @@ backend-storage-smgr-smgr = { path = "../backend-storage-smgr-smgr" }
 backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
+backend-executor-tstoreReceiver = { path = "../backend-executor-tstoreReceiver" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-tcop-utility = { path = "../backend-tcop-utility" }

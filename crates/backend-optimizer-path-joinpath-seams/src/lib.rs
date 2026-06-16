@@ -34,6 +34,7 @@ use types_nodes::nodes::NodeTag;
 use types_pathnodes::optimizer_plan::{
     CostSelector, JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors,
 };
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     JoinType, NodeId, PathId, PathKey, PhInfoId, PlannerInfo, RelId, Relids, RinfoId,
     SpecialJoinInfo,
@@ -346,8 +347,14 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `innerrel_is_unique(...)`.
-    pub fn innerrel_is_unique(
+    ///
+    /// Threads the planner-run resolver (`run`): for a subquery innerrel the
+    /// distinctness proof resolves the subquery `Query` from its RTE
+    /// (`simple_rte_array[relid]` → `RangeTblEntryId` → `&RangeTblEntry`) and
+    /// reads its `distinctClause`/`groupClause`/… via `&PlannerRun`.
+    pub fn innerrel_is_unique<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         joinrelids: &Relids,
         outerrelids: &Relids,
         innerrel: RelId,

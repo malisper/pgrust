@@ -9278,6 +9278,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-tstoreReceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-tstorereceiver-seams",
+ "backend-tcop-dest",
+ "backend-tcop-dest-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-tstorereceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -10391,13 +10411,18 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
  "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-joininfo-ext-seams",
  "backend-optimizer-util-relnode",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",
@@ -19067,6 +19092,7 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-spi",
  "backend-executor-tqueue",
+ "backend-executor-tstoreReceiver",
  "backend-foreign-foreign",
  "backend-geqo-all",
  "backend-jit-jit",

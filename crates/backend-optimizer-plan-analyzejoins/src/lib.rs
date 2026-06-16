@@ -15,31 +15,41 @@
 //! the arena handle model (see its docs), and [`types_pathnodes::UniqueRelInfo`]
 //! is the carrier the uniqueness cache (`RelOptInfo::unique_for_rels`) needs.
 //!
-//! # What is built vs seam-and-panic in this pass
+//! # What is built vs seam-and-panic in this pass (#294)
 //!
 //! Built end to end and installed as seams:
 //! * `reduce_unique_semijoins` and its support chain (`innerrel_is_unique[_ext]`,
 //!   `is_innerrel_unique_for`, `rel_is_distinct_for`, `rel_supports_distinctness`)
-//!   for the `RTE_RELATION` case (proof via unique indexes), plus
-//!   `innerrel_is_unique` (the joinpath-seams entry the join enumerator calls).
+//!   for **both** the `RTE_RELATION` case (proof via unique indexes) **and** the
+//!   `RTE_SUBQUERY` case. The subquery distinctness legs
+//!   (`query_supports_distinctness` / `query_is_distinct_for` /
+//!   `distinct_col_search`, in [`query_distinct`]) are now ported: the
+//!   distinctness chain threads `&PlannerRun` and resolves the sub-`Query` off
+//!   the rel's RTE (`simple_rte_array[relid]` → `RangeTblEntryId` →
+//!   `RangeTblEntry::subquery`).
+//! * `innerrel_is_unique` (the joinpath-seams entry the join enumerator calls),
+//!   re-signed to carry `&PlannerRun` so the subquery proof is reachable from the
+//!   join-search path too.
+//! * `remove_useless_joins` (left-join removal, [`remove_joins`]) and its
+//!   surgery: `join_is_removable`, `remove_leftjoinrel_from_query`,
+//!   `remove_rel_from_query` (the `subst == -1`, `sjinfo != NULL` specialization),
+//!   `remove_rel_from_restrictinfo`, `remove_rel_from_eclass`,
+//!   `remove_rel_from_joinlist`. The left-join path never walks `root->parse`, so
+//!   it is fully portable over the arena handle model.
 //!
-//! Still seam-and-panic (left as the precise follow-up decomp — see the crate's
-//! task report):
-//! * `remove_useless_joins` / `remove_useless_self_joins` — the heavy in-place
-//!   PlannerInfo surgery legs (PHV array / commute sets / EC fixup / joinlist
-//!   rebuild + the two absent initsplan `rebuild_{joinclause,lateral}_attr_needed`
-//!   seams). These remain uninstalled in `backend-optimizer-plan-init-subselect-seams`
-//!   and panic loudly until filled — mirror-pg-and-panic.
-//! * The `RTE_SUBQUERY` distinctness legs (`query_supports_distinctness` /
-//!   `query_is_distinct_for`) — the planner `Query` carrier
-//!   (`types_nodes::copy_query::Query<'mcx>`) now carries every field these need
-//!   (`distinctClause`/`groupClause`/`groupingSets`/`havingQual`/
-//!   `setOperations`/`targetList`/`sortClause`/`limitOffset`/`limitCount`/
-//!   `windowClause`), resolvable from a subquery RTE's `QueryId` via
-//!   `types_pathnodes::planner_run::PlannerRun::resolve`. The legs still panic via
-//!   [`subquery_distinctness_unported`] only because porting them (and threading
-//!   `&PlannerRun` into `rel_supports_distinctness` / `rel_is_distinct_for`) is
-//!   the follow-up (#294) — the carrier itself is no longer the blocker.
+//! Still seam-and-panic (genuine carrier gap):
+//! * `remove_useless_self_joins` and its self-join surgery
+//!   (`remove_self_join_rel` etc.) — these run
+//!   `ChangeVarNodesExtended((Node *) root->parse, …)` plus the `subst > 0`
+//!   relid-substitution path, which needs a `Query`-tree relid walker the planner
+//!   model does not yet carry (the [`change_relids`] walker only handles arena
+//!   `Expr` / `RestrictInfo` / `EquivalenceMember` handles). Left at its
+//!   panicking default in `backend-optimizer-plan-init-subselect-seams`.
+//! * `rebuild_joinclause_attr_needed` (initsplan.c:3559) — owned by
+//!   `backend-optimizer-plan-init-subselect`, not yet ported there. Declared as a
+//!   `backend-optimizer-plan-small-seams` seam and called from
+//!   `remove_leftjoinrel_from_query`; panics via its default until initsplan lands
+//!   it. (`rebuild_lateral_attr_needed` *is* ported and installed.)
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -49,10 +59,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
-    JoinType, PlannerInfo, RelId, Relids, RinfoId, JOIN_ANTI, JOIN_FULL, JOIN_LEFT, JOIN_RIGHT,
-    JOIN_RIGHT_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
+    JoinType, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
+    JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
 };
 
 use backend_optimizer_util_relnode as relnode;
@@ -60,7 +71,9 @@ use backend_optimizer_path_equivclass as equivclass;
 use backend_nodes_core::list as pg_list;
 
 pub mod change_relids;
+pub mod query_distinct;
 pub mod relids;
+pub mod remove_joins;
 
 #[cfg(test)]
 mod tests;
@@ -80,25 +93,159 @@ fn is_outer_join(jointype: JoinType) -> bool {
 /// `RINFO_IS_PUSHED_DOWN(rinfo, joinrelids)` (restrictinfo.h): the clause is
 /// "pushed down" relative to a join if it is not a join clause for that join.
 #[inline]
-fn rinfo_is_pushed_down(root: &PlannerInfo, rinfo: RinfoId, joinrelids: &Relids) -> bool {
+pub(crate) fn rinfo_is_pushed_down(
+    root: &PlannerInfo,
+    rinfo: RinfoId,
+    joinrelids: &Relids,
+) -> bool {
     let r = root.rinfo(rinfo);
     r.is_pushed_down || !relids::is_subset(&r.required_relids, joinrelids)
 }
 
-/// Diverging panic for the still-unported `RTE_SUBQUERY` distinctness legs
-/// (`query_supports_distinctness` / `query_is_distinct_for`). The planner `Query`
-/// carrier now models every clause these read (resolvable from the subquery
-/// RTE's `QueryId` via `PlannerRun::resolve`); what remains is porting the legs
-/// themselves and threading `&PlannerRun` into the distinctness chain (#294).
-/// This mirror-pg-and-panic marks the exact boundary rather than silently
-/// returning a wrong answer.
-fn subquery_distinctness_unported() -> ! {
-    panic!(
-        "analyzejoins: RTE_SUBQUERY distinctness (query_supports_distinctness / \
-         query_is_distinct_for) is not yet ported (#294); the planner Query carrier \
-         already models distinctClause/groupClause/groupingSets/havingQual/\
-         setOperations/targetList — thread &PlannerRun and port the legs"
-    )
+/* ======================================================================
+ * join_is_removable
+ * ==================================================================== */
+
+/// `join_is_removable(root, sjinfo)` (analyzejoins.c:154) — can we skip this
+/// special join because it just duplicates its left input?
+///
+/// True for a LEFT join whose condition cannot match more than one inner-side
+/// row, provided the inner side produces no variable needed above the join.
+pub fn join_is_removable<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    sjinfo: &SpecialJoinInfo,
+) -> PgResult<bool> {
+    /* Must be a left join to a single baserel. */
+    if sjinfo.jointype != JOIN_LEFT {
+        return Ok(false);
+    }
+    let innerrelid = match relids::get_singleton_member(&sjinfo.min_righthand) {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+
+    /*
+     * Never try to eliminate a left join to the query result rel. (MERGE builds
+     * such a join tree.)
+     */
+    let result_relation = run.resolve(root.parse).resultRelation;
+    if innerrelid == result_relation {
+        return Ok(false);
+    }
+
+    let innerrel = relnode::find_base_rel(root, innerrelid);
+
+    /*
+     * Quick check to eliminate cases where we surely can't prove uniqueness of
+     * the innerrel.
+     */
+    if !rel_supports_distinctness(root, run, innerrel) {
+        return Ok(false);
+    }
+
+    /* Compute the relid set for the join we are considering. */
+    let inputrelids = relids::union(&sjinfo.min_lefthand, &sjinfo.min_righthand);
+    debug_assert!(sjinfo.ojrelid != 0);
+    let mut joinrelids = relids::copy(&inputrelids);
+    joinrelids = relids::add_member(joinrelids, sjinfo.ojrelid as i32);
+
+    /*
+     * We can't remove the join if any inner-rel attributes are used above the
+     * join (compare to inputrelids, not joinrelids). Count down from max_attr.
+     */
+    let (min_attr, max_attr) = {
+        let r = root.rel(innerrel);
+        (r.min_attr, r.max_attr)
+    };
+    let mut attroff = (max_attr - min_attr) as i32;
+    while attroff >= 0 {
+        let needed = relids::copy(&root.rel(innerrel).attr_needed[attroff as usize]);
+        if !relids::is_subset(&needed, &inputrelids) {
+            return Ok(false);
+        }
+        attroff -= 1;
+    }
+
+    /*
+     * Similarly check that the inner rel isn't needed by any PlaceHolderVars
+     * used above the join.
+     */
+    let innerrel_relids = relids::copy(&root.rel(innerrel).relids);
+    let ph_ids: Vec<types_pathnodes::PhInfoId> = root.placeholder_list.clone();
+    for ph_id in ph_ids {
+        let (ph_lateral, ph_eval_at, ph_needed) = {
+            let phinfo = root.phinfo(ph_id);
+            (
+                relids::copy(&phinfo.ph_lateral),
+                relids::copy(&phinfo.ph_eval_at),
+                relids::copy(&phinfo.ph_needed),
+            )
+        };
+
+        if relids::overlap(&ph_lateral, &innerrel_relids) {
+            return Ok(false); /* references innerrel laterally */
+        }
+        if !relids::overlap(&ph_eval_at, &innerrel_relids) {
+            continue; /* definitely doesn't reference innerrel */
+        }
+        if relids::is_subset(&ph_needed, &inputrelids) {
+            continue; /* PHV is not used above the join */
+        }
+        if !relids::is_member(sjinfo.ojrelid as i32, &ph_eval_at) {
+            return Ok(false); /* has to be evaluated below the join */
+        }
+
+        /* There must still be a place to evaluate the PHV if we remove the join. */
+        if !relids::overlap(&sjinfo.min_lefthand, &ph_eval_at) {
+            return Ok(false); /* no other place to eval the PHV */
+        }
+        /* Check the contained expression last (a bit expensive). */
+        let phexpr_id = root.phinfo(ph_id).ph_var_phexpr;
+        let phexpr = root.node(phexpr_id).clone();
+        let varnos = backend_optimizer_util_joininfo_ext_seams::pull_varnos_expr::call(root, &phexpr);
+        if relids::overlap(&varnos, &innerrel_relids) {
+            return Ok(false); /* contained expression references innerrel */
+        }
+    }
+
+    /*
+     * Search for mergejoinable clauses that constrain the inner rel against the
+     * outer rel or a pseudoconstant.
+     */
+    let mut clause_list: Vec<RinfoId> = Vec::new();
+    let joininfo: Vec<RinfoId> = root.rel(innerrel).joininfo.clone();
+    let min_lefthand = relids::copy(&sjinfo.min_lefthand);
+    for restrictinfo in joininfo {
+        /* Consider only the has_clone form of cloned clauses. */
+        if root.rinfo(restrictinfo).is_clone {
+            continue;
+        }
+        /* If it's not a join clause for this outer join, we can't use it. */
+        if rinfo_is_pushed_down(root, restrictinfo, &joinrelids) {
+            continue;
+        }
+        /* Ignore if it's not a mergejoinable clause. */
+        {
+            let r = root.rinfo(restrictinfo);
+            if !r.can_join || r.mergeopfamilies.is_empty() {
+                continue;
+            }
+        }
+        /* Check "outer op inner" / "inner op outer", marking which side is inner. */
+        if !backend_optimizer_path_joinpath_seams::clause_sides_match_join::call(
+            root,
+            restrictinfo,
+            &min_lefthand,
+            &innerrel_relids,
+        ) {
+            continue;
+        }
+        clause_list.push(restrictinfo);
+    }
+
+    /* Try to prove the innerrel distinct for the relevant equality clauses. */
+    Ok(rel_is_distinct_for(root, run, innerrel, &clause_list, None))
 }
 
 /* ======================================================================
@@ -108,7 +255,15 @@ fn subquery_distinctness_unported() -> ! {
 /// `rel_supports_distinctness(root, rel)` (analyzejoins.c:919) — could the
 /// relation possibly be proven distinct on some set of columns? A cheap
 /// pre-check for [`rel_is_distinct_for`].
-pub fn rel_supports_distinctness(root: &PlannerInfo, rel: RelId) -> bool {
+///
+/// Threads `&PlannerRun` (#294) so the `RTE_SUBQUERY` leg can resolve the
+/// sub-`Query` off the rel's RTE and call
+/// [`query_distinct::query_supports_distinctness`].
+pub fn rel_supports_distinctness<'mcx>(
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> bool {
     let r = root.rel(rel);
     /* We only know about baserels ... */
     if r.reloptkind != RELOPT_BASEREL {
@@ -127,8 +282,18 @@ pub fn rel_supports_distinctness(root: &PlannerInfo, rel: RelId) -> bool {
             }
         }
     } else if r.rtekind == RTE_SUBQUERY {
-        /* query_supports_distinctness(subquery) — carrier-blocked. */
-        subquery_distinctness_unported();
+        /*
+         * `Query *subquery = root->simple_rte_array[rel->relid]->subquery;`
+         * The sub-Query is carried inline on the RTE; resolve the RTE handle
+         * through the planner-run store.
+         */
+        let rte_id = root.simple_rte_array[r.relid as usize];
+        let rte = run.resolve_rte(rte_id);
+        if let Some(subquery) = rte.subquery.as_deref() {
+            if query_distinct::query_supports_distinctness(subquery) {
+                return true;
+            }
+        }
     }
     /* We have no proof rules for any other rtekinds. */
     false
@@ -141,15 +306,18 @@ pub fn rel_supports_distinctness(root: &PlannerInfo, rel: RelId) -> bool {
 /// has already verified each is an equality with an expression in this rel on one
 /// side). `extra_clauses` (when `Some`) is set to the baserestrictinfo clauses
 /// used to prove uniqueness (used by the self-join checker).
-pub fn rel_is_distinct_for(
+///
+/// Threads `&PlannerRun` (#294) for the `RTE_SUBQUERY` leg.
+pub fn rel_is_distinct_for<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     clause_list: &[RinfoId],
     extra_clauses: Option<&mut Vec<RinfoId>>,
 ) -> bool {
-    let (reloptkind, rtekind) = {
+    let (reloptkind, rtekind, relid) = {
         let r = root.rel(rel);
-        (r.reloptkind, r.rtekind)
+        (r.reloptkind, r.rtekind, r.relid)
     };
     if reloptkind != RELOPT_BASEREL {
         return false;
@@ -169,8 +337,68 @@ pub fn rel_is_distinct_for(
             extra_clauses,
         )
     } else if rtekind == RTE_SUBQUERY {
-        /* query_is_distinct_for(subquery, colnos, opids) — carrier-blocked. */
-        subquery_distinctness_unported();
+        /*
+         * Build the argument lists for query_is_distinct_for: the output column
+         * numbers the query must be distinct over and the equality operators.
+         * (XXX we are not considering restriction clauses attached to the
+         * subquery.)
+         */
+        let mut colnos: Vec<i32> = Vec::new();
+        let mut opids: Vec<types_core::primitive::Oid> = Vec::new();
+
+        for &ri in clause_list {
+            let r = root.rinfo(ri);
+            /*
+             * Get the equality operator we need uniqueness according to. The
+             * caller's mergejoinability test should have selected only OpExprs.
+             */
+            let clause_expr = root.node(r.clause).clone();
+            let op = match &clause_expr {
+                Expr::OpExpr(op) => op.opno,
+                other => panic!("rel_is_distinct_for: clause is not an OpExpr: {other:?}"),
+            };
+
+            /* caller identified the inner side for us */
+            let outer_is_left = r.outer_is_left;
+            let var = match &clause_expr {
+                Expr::OpExpr(op) => {
+                    if outer_is_left {
+                        op.args.get(1).cloned() /* get_rightop */
+                    } else {
+                        op.args.first().cloned() /* get_leftop */
+                    }
+                }
+                _ => None,
+            };
+
+            /*
+             * We may ignore any RelabelType node above the operand (there won't
+             * be more than one after eval_const_expressions).
+             */
+            let var = match var {
+                Some(Expr::RelabelType(rt)) => rt.arg.map(|b| *b),
+                other => other,
+            };
+
+            /*
+             * If inner side isn't a Var referencing a subquery output column,
+             * this clause doesn't help us.
+             */
+            match var {
+                Some(Expr::Var(v)) if v.varno == relid as i32 && v.varlevelsup == 0 => {
+                    colnos.push(v.varattno as i32);
+                    opids.push(op);
+                }
+                _ => continue,
+            }
+        }
+
+        let rte_id = root.simple_rte_array[relid as usize];
+        let rte = run.resolve_rte(rte_id);
+        match rte.subquery.as_deref() {
+            Some(subquery) => query_distinct::query_is_distinct_for(subquery, &colnos, &opids),
+            None => false,
+        }
     } else {
         false
     }
@@ -184,8 +412,9 @@ pub fn rel_is_distinct_for(
 /// restrictlist, extra_clauses)` (analyzejoins.c:1457) — the actual uniqueness
 /// proof. Selects mergejoinable clauses constraining the inner rel against the
 /// outer rel, then defers to [`rel_is_distinct_for`].
-fn is_innerrel_unique_for(
+fn is_innerrel_unique_for<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrelids: &Relids,
     outerrelids: &Relids,
     innerrel: RelId,
@@ -234,7 +463,7 @@ fn is_innerrel_unique_for(
     }
 
     /* Let rel_is_distinct_for() do the hard work */
-    rel_is_distinct_for(root, innerrel, &clause_list, extra_clauses)
+    rel_is_distinct_for(root, run, innerrel, &clause_list, extra_clauses)
 }
 
 /// `innerrel_is_unique_ext(...)` (analyzejoins.c:1328). Caches answers in
@@ -243,8 +472,9 @@ fn is_innerrel_unique_for(
 /// `self_join` is `extra_clauses.is_some()` in C; here it is passed explicitly
 /// alongside the out-param to keep the borrow shape clean. When `self_join` is
 /// true the returned proof clauses are written into `out_extra_clauses`.
-pub fn innerrel_is_unique_ext(
+pub fn innerrel_is_unique_ext<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrelids: &Relids,
     outerrelids: &Relids,
     innerrel: RelId,
@@ -263,7 +493,7 @@ pub fn innerrel_is_unique_ext(
      * Make a quick check to eliminate cases in which we will surely be unable to
      * prove uniqueness of the innerrel.
      */
-    if !rel_supports_distinctness(root, innerrel) {
+    if !rel_supports_distinctness(root, run, innerrel) {
         return false;
     }
 
@@ -294,6 +524,7 @@ pub fn innerrel_is_unique_ext(
     let mut outer_exprs: Vec<RinfoId> = Vec::new();
     let proved = is_innerrel_unique_for(
         root,
+        run,
         joinrelids,
         outerrelids,
         innerrel,
@@ -346,8 +577,9 @@ fn join_search_private_is_set(_root: &PlannerInfo) -> bool {
 
 /// `innerrel_is_unique(...)` (analyzejoins.c:1306) — the cached-frontend the join
 /// enumerator (joinpath.c) calls. Installed as the `innerrel_is_unique` seam.
-pub fn innerrel_is_unique(
+pub fn innerrel_is_unique<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrelids: &Relids,
     outerrelids: &Relids,
     innerrel: RelId,
@@ -357,6 +589,7 @@ pub fn innerrel_is_unique(
 ) -> bool {
     innerrel_is_unique_ext(
         root,
+        run,
         joinrelids,
         outerrelids,
         innerrel,
@@ -413,7 +646,7 @@ pub fn reduce_unique_semijoins<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'m
          * check to eliminate cases in which we will surely be unable to prove
          * uniqueness of the innerrel.
          */
-        if !rel_supports_distinctness(root, innerrel) {
+        if !rel_supports_distinctness(root, run, innerrel) {
             continue;
         }
 
@@ -439,6 +672,7 @@ pub fn reduce_unique_semijoins<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'m
         /* Test whether the innerrel is unique for those clauses. */
         if !innerrel_is_unique(
             root,
+            run,
             &joinrelids,
             &min_lefthand,
             innerrel,
@@ -469,13 +703,13 @@ use pg_list as _pg_list_doc;
  * Seam installation (inward seams owned by analyzejoins.c)
  * ==================================================================== */
 
-/// Install the analyzejoins seams this crate currently backs. Wired into
+/// Install the analyzejoins seams this crate backs. Wired into
 /// `seams-init::init_all()`.
 ///
-/// Installed: `reduce_unique_semijoins` (planmain.c upcall) and
-/// `innerrel_is_unique` (joinpath.c upcall). NOT installed here:
-/// `remove_useless_joins` / `remove_useless_self_joins` — still seam-and-panic
-/// pending the heavy in-place-surgery follow-up (see crate docs).
+/// Installed: `reduce_unique_semijoins` + `remove_useless_joins` (planmain.c
+/// upcalls) and `innerrel_is_unique` (joinpath.c upcall). NOT installed here:
+/// `remove_useless_self_joins` — genuinely carrier-blocked on a `root->parse`
+/// Query-tree relid walker (see crate docs); left at its panicking default.
 pub fn init_seams() {
     backend_optimizer_plan_init_subselect_seams::reduce_unique_semijoins::set(
         |root, run| {
@@ -486,10 +720,18 @@ pub fn init_seams() {
         },
     );
 
+    backend_optimizer_plan_init_subselect_seams::remove_useless_joins::set(
+        |root, run, joinlist| {
+            remove_joins::remove_useless_joins(root, run, joinlist)
+                .expect("remove_useless_joins")
+        },
+    );
+
     backend_optimizer_path_joinpath_seams::innerrel_is_unique::set(
-        |root, joinrelids, outerrelids, innerrel, jointype, restrictlist, force_cache| {
+        |root, run, joinrelids, outerrelids, innerrel, jointype, restrictlist, force_cache| {
             innerrel_is_unique(
                 root,
+                run,
                 joinrelids,
                 outerrelids,
                 innerrel,
