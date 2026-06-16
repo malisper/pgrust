@@ -16180,6 +16180,7 @@ name = "probe-adt-scalar-bool"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqformat",
+ "backend-utils-adt-scalar-seams",
  "backend-utils-adt-varlena-seams",
  "common-hashfn",
  "mcx",
