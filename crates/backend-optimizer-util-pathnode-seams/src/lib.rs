@@ -128,8 +128,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `create_seqscan_path(root, rel, required_outer, parallel_workers)`.
-    pub fn create_seqscan_path(
+    pub fn create_seqscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
         parallel_workers: i32,
@@ -137,16 +138,18 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_samplescan_path(root, rel, required_outer)`.
-    pub fn create_samplescan_path(
+    pub fn create_samplescan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_index_path(...)` (pathnode.c:1051).
-    pub fn create_index_path(
+    pub fn create_index_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         index: Box<IndexOptInfo>,
         indexclauses: Vec<IndexClause>,
         indexorderbys: Vec<NodeId>,
@@ -161,8 +164,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_bitmap_heap_path(...)` (pathnode.c:1100).
-    pub fn create_bitmap_heap_path(
+    pub fn create_bitmap_heap_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapqual: PathId,
         required_outer: &Relids,
@@ -172,24 +176,27 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_bitmap_and_path(root, rel, bitmapquals)` (pathnode.c:1133).
-    pub fn create_bitmap_and_path(
+    pub fn create_bitmap_and_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapquals: Vec<PathId>,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_bitmap_or_path(root, rel, bitmapquals)` (pathnode.c:1185).
-    pub fn create_bitmap_or_path(
+    pub fn create_bitmap_or_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapquals: Vec<PathId>,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_tidscan_path(root, rel, tidquals, required_outer)`.
-    pub fn create_tidscan_path(
+    pub fn create_tidscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         tidquals: Vec<NodeId>,
         required_outer: &Relids,
@@ -197,8 +204,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_tidrangescan_path(root, rel, tidrangequals, required_outer)`.
-    pub fn create_tidrangescan_path(
+    pub fn create_tidrangescan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         tidrangequals: Vec<NodeId>,
         required_outer: &Relids,
@@ -206,8 +214,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_subqueryscan_path(...)` (pathnode.c:2223).
-    pub fn create_subqueryscan_path(
+    pub fn create_subqueryscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         trivial_pathtarget: bool,
@@ -217,8 +226,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_functionscan_path(root, rel, pathkeys, required_outer)`.
-    pub fn create_functionscan_path(
+    pub fn create_functionscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         pathkeys: Vec<PathKey>,
         required_outer: &Relids,
@@ -226,24 +236,27 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_tablefuncscan_path(root, rel, required_outer)`.
-    pub fn create_tablefuncscan_path(
+    pub fn create_tablefuncscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_valuesscan_path(root, rel, required_outer)`.
-    pub fn create_valuesscan_path(
+    pub fn create_valuesscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_ctescan_path(root, rel, pathkeys, required_outer)`.
-    pub fn create_ctescan_path(
+    pub fn create_ctescan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         pathkeys: Vec<PathKey>,
         required_outer: &Relids,
@@ -251,24 +264,27 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_namedtuplestorescan_path(root, rel, required_outer)`.
-    pub fn create_namedtuplestorescan_path(
+    pub fn create_namedtuplestorescan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_resultscan_path(root, rel, required_outer)`.
-    pub fn create_resultscan_path(
+    pub fn create_resultscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_worktablescan_path(root, rel, required_outer)`.
-    pub fn create_worktablescan_path(
+    pub fn create_worktablescan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -281,8 +297,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `create_append_path(...)` (pathnode.c:1302). `have_root=false` is the C
     /// `root == NULL` dummy-path case; `rows < 0` means "compute from subpaths".
-    pub fn create_append_path(
+    pub fn create_append_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         have_root: bool,
         rel: RelId,
         subpaths: Vec<PathId>,
@@ -341,8 +358,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_gather_merge_path(...)` (pathnode.c:2097).
-    pub fn create_gather_merge_path(
+    pub fn create_gather_merge_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         target: Option<Box<PathTarget>>,
@@ -353,8 +371,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_gather_path(...)` (pathnode.c:2179).
-    pub fn create_gather_path(
+    pub fn create_gather_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         target: Option<Box<PathTarget>>,
@@ -369,8 +388,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `create_foreignscan_path(...)` (pathnode.c:2442).
-    pub fn create_foreignscan_path(
+    pub fn create_foreignscan_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         target: Option<Box<PathTarget>>,
         rows: f64,
@@ -756,8 +776,9 @@ seam_core::seam!(
 /* --- relnode.c (param_info construction) -------------------------------- */
 seam_core::seam!(
     /// `get_baserel_parampathinfo(root, baserel, required_outer)`.
-    pub fn get_baserel_parampathinfo(
+    pub fn get_baserel_parampathinfo<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         baserel: RelId,
         required_outer: &Relids,
     ) -> Option<Box<types_pathnodes::ParamPathInfo>>
@@ -774,8 +795,9 @@ seam_core::seam!(
     /// `get_joinrel_parampathinfo(root, joinrel, outer_path, inner_path, sjinfo,
     /// required_outer, *restrict_clauses)` — returns the param_info plus the
     /// (possibly trimmed) restrict-clause list.
-    pub fn get_joinrel_parampathinfo(
+    pub fn get_joinrel_parampathinfo<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         outer_path: PathId,
         inner_path: PathId,
@@ -1068,5 +1090,9 @@ seam_core::seam!(
     /// rel's paths, set `rows = 0`, install a childless dummy `create_append_path`
     /// in the rel's own memory context, and `set_cheapest`. Owned by pathnode.c
     /// because it `create_append_path`/`add_path`/`set_cheapest`s.
-    pub fn install_dummy_append_path(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+    pub fn install_dummy_append_path<'mcx>(
+        root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        rel: RelId,
+    ) -> PgResult<()>
 );

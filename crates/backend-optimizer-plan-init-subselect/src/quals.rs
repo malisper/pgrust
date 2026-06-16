@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     OuterJoinClauseInfo, PlannerInfo, Relids, RestrictInfo, RinfoId, SpecialJoinInfo, JOIN_ANTI,
     JOIN_FULL,
@@ -66,8 +67,9 @@ const PVC_JOINCLAUSE_FLAGS: i32 = 0x0002 | 0x0008 | 0x0010;
 /// may instead be postponed (lateral references or non-degenerate outer-join
 /// clauses with a `postponed_to` sink).
 #[allow(clippy::too_many_arguments)]
-pub fn distribute_qual_to_rels(
+pub fn distribute_qual_to_rels<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     clause: &Expr,
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
@@ -265,7 +267,8 @@ pub fn distribute_qual_to_rels(
     }
 
     // No EC special case applies, so push it into the clause lists.
-    distribute_restrictinfo_to_rels(root, restrictinfo).expect("distribute_restrictinfo_to_rels");
+    distribute_restrictinfo_to_rels(run, root, restrictinfo)
+        .expect("distribute_restrictinfo_to_rels");
 }
 
 /// `process_equivalence(root, &restrictinfo, jdomain)` (equivclass.c) via the
@@ -639,7 +642,8 @@ fn restriction_is_or_clause(root: &PlannerInfo, ri: &RestrictInfo) -> bool {
 ///
 /// Push a completed [`RestrictInfo`] into the proper restriction or join clause
 /// list(s).
-pub fn distribute_restrictinfo_to_rels(
+pub fn distribute_restrictinfo_to_rels<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     restrictinfo: RinfoId,
 ) -> PgResult<()> {
@@ -658,7 +662,12 @@ pub fn distribute_restrictinfo_to_rels(
             // Likewise, check suitability for a Memoize node.
             crate::mergehash::check_memoizable(root, restrictinfo);
             // Add clause to the join lists of all the relevant relations.
-            backend_optimizer_util_joininfo::add_join_clause_to_rels(root, restrictinfo, &relids)?;
+            backend_optimizer_util_joininfo::add_join_clause_to_rels(
+                run,
+                root,
+                restrictinfo,
+                &relids,
+            )?;
         }
     } else {
         // clause references no rels: shouldn't get here if callers are working.
@@ -673,7 +682,8 @@ pub fn distribute_restrictinfo_to_rels(
 /// appropriate lists. Returns the generated RestrictInfo, or `None` if
 /// `both_const` and the clause reduced to constant TRUE.
 #[allow(clippy::too_many_arguments)]
-pub fn process_implied_equality(
+pub fn process_implied_equality<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     opno: Oid,
     collation: Oid,
@@ -747,7 +757,7 @@ pub fn process_implied_equality(
 
     // We don't do initialize_mergeclause_eclasses(); the caller handles that.
     // It's okay to call distribute_restrictinfo_to_rels() before that happens.
-    distribute_restrictinfo_to_rels(root, restrictinfo)?;
+    distribute_restrictinfo_to_rels(run, root, restrictinfo)?;
 
     Ok(Some(restrictinfo))
 }
@@ -758,7 +768,8 @@ pub fn process_implied_equality(
 /// [`process_implied_equality`] but must not push the RestrictInfo into the
 /// joininfo tree.
 #[allow(clippy::too_many_arguments)]
-pub fn build_implied_join_equality(
+pub fn build_implied_join_equality<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     opno: Oid,
     collation: Oid,
@@ -767,6 +778,7 @@ pub fn build_implied_join_equality(
     qualscope: &Relids,
     security_level: Index,
 ) -> PgResult<RinfoId> {
+    let _ = run;
     // Build the new clause. Copy to ensure no shared substructure.
     let clause = make_opclause(
         opno,

@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PathnodesMemoryContext, PlannerInfo, RelId};
 
 seam_core::seam!(
@@ -27,8 +28,9 @@ seam_core::seam!(
     /// `generate_useful_gather_paths`, and `set_cheapest` — the body of
     /// `geqo_eval.c:merge_clump`. Returns the new joinrel's arena handle, or
     /// `None` if the join order is invalid.
-    pub fn build_and_cost_join_rel(
+    pub fn build_and_cost_join_rel<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         rel1: RelId,
         rel2: RelId,
     ) -> Option<RelId>

@@ -15,6 +15,7 @@
 use crate::{Gene, GeqoPrivateData};
 use alloc::vec::Vec;
 use backend_geqo_all_seams as geqo_seams;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId};
 use types_core::primitive::Cost;
 
@@ -40,6 +41,7 @@ struct Clump {
 /// fresh local hash is built and the outer one is untouched.
 pub fn geqo_eval(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     private: &mut GeqoPrivateData,
     tour: &[Gene],
     num_gene: i32,
@@ -66,7 +68,7 @@ pub fn geqo_eval(
     // root->join_rel_hash = NULL;  (done by the take above)
 
     /* construct the best path for the given combination of relations */
-    let joinrel = gimme_tree(root, private, tour, num_gene);
+    let joinrel = gimme_tree(root, run, private, tour, num_gene);
 
     /*
      * compute fitness, if we found a valid join
@@ -110,6 +112,7 @@ pub fn geqo_eval(
 /// legal order; failure to reach a single clump means failure.
 pub fn gimme_tree(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     private: &mut GeqoPrivateData,
     tour: &[Gene],
     num_gene: i32,
@@ -128,14 +131,14 @@ pub fn gimme_tree(
         };
 
         /* Merge it into the clumps list, using only desirable joins */
-        clumps = merge_clump(root, private, clumps, cur_clump, num_gene, false);
+        clumps = merge_clump(root, run, private, clumps, cur_clump, num_gene, false);
     }
 
     if clumps.len() > 1 {
         /* Force-join the remaining clumps in some legal order */
         let mut fclumps: Vec<Clump> = Vec::new();
         for clump in clumps.into_iter() {
-            fclumps = merge_clump(root, private, fclumps, clump, num_gene, true);
+            fclumps = merge_clump(root, run, private, fclumps, clump, num_gene, true);
         }
         clumps = fclumps;
     }
@@ -155,6 +158,7 @@ pub fn gimme_tree(
 /// "desirable" joins.
 fn merge_clump(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     private: &mut GeqoPrivateData,
     mut clumps: Vec<Clump>,
     new_clump: Clump,
@@ -175,6 +179,7 @@ fn merge_clump(
              */
             let joinrel = geqo_seams::build_and_cost_join_rel::call(
                 root,
+                run,
                 old_joinrel,
                 new_clump.joinrel,
             );
@@ -190,7 +195,7 @@ fn merge_clump(
                  * Recursively try to merge the enlarged old_clump with others.
                  * When no further merge is possible, we'll reinsert it.
                  */
-                return merge_clump(root, private, clumps, old_clump, num_gene, force);
+                return merge_clump(root, run, private, clumps, old_clump, num_gene, force);
             }
         }
 

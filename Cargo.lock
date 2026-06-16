@@ -9892,6 +9892,7 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-pathnodes",
@@ -18198,6 +18199,7 @@ dependencies = [
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
+ "backend-optimizer-rte-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",

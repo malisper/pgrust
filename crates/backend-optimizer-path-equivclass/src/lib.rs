@@ -84,14 +84,14 @@ pub fn init_seams() {
     );
     ec_seam::generate_base_implied_equalities::set(generate_base_implied_equalities);
     ec_seam::generate_join_implied_equalities::set(
-        |root, join_relids, outer_relids, inner_rel, sjinfo| {
-            generate_join_implied_equalities(root, join_relids, outer_relids, inner_rel, sjinfo)
+        |root, run, join_relids, outer_relids, inner_rel, sjinfo| {
+            generate_join_implied_equalities(root, run, join_relids, outer_relids, inner_rel, sjinfo)
         },
     );
     ec_seam::generate_join_implied_equalities_for_ecs::set(
-        |root, eclasses, join_relids, outer_relids, inner_rel| {
+        |root, run, eclasses, join_relids, outer_relids, inner_rel| {
             generate_join_implied_equalities_for_ecs(
-                root, eclasses, join_relids, outer_relids, inner_rel,
+                root, run, eclasses, join_relids, outer_relids, inner_rel,
             )
         },
     );

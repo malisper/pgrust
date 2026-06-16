@@ -1,6 +1,7 @@
 //! `set_dummy_rel_pathlist` (allpaths.c:2215).
 
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId};
 
 use backend_optimizer_util_pathnode_seams as pathnode;
@@ -12,7 +13,7 @@ use backend_optimizer_util_relnode_seams as bms;
 /// Represented as a childless `AppendPath` (see `IS_DUMMY_APPEND`/`IS_DUMMY_REL`).
 /// The C `create_append_path(NULL, ...)` passes `root == NULL`; here that is the
 /// `have_root = false` flag on the seam.
-pub fn set_dummy_rel_pathlist(root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+pub fn set_dummy_rel_pathlist<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     // Dummy size estimates (leave attr_widths[] as zeroes).
     root.rel_mut(rel).rows = 0.0;
     if let Some(t) = root.rel_mut(rel).reltarget.as_mut() {
@@ -27,6 +28,7 @@ pub fn set_dummy_rel_pathlist(root: &mut PlannerInfo, rel: RelId) -> PgResult<()
     let lateral = bms::relids_copy::call(&root.rel(rel).lateral_relids);
     let path = pathnode::create_append_path::call(
         root,
+        run,
         /* have_root = */ false,
         rel,
         /* subpaths */ alloc::vec::Vec::new(),

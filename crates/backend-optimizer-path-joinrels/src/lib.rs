@@ -48,6 +48,7 @@ use types_pathnodes::{
 };
 
 use mcx::Mcx;
+use types_pathnodes::planner_run::PlannerRun;
 
 use backend_geqo_all_seams as geqo;
 use backend_optimizer_path_joinpath::{add_paths_to_joinrel, JoinEnableFlags};
@@ -231,13 +232,17 @@ pub fn is_dummy_rel(root: &PlannerInfo, rel: RelId) -> bool {
 /// `MemoryContextSwitchTo(GetMemoryChunkContext(rel))` dance) is a pathnode-crate
 /// operation over the arena rel, bundled behind the `install_dummy_append_path`
 /// seam. The already-marked early-out is ported in-crate.
-pub fn mark_dummy_rel(root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+pub fn mark_dummy_rel<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<()> {
     // Already marked?
     if is_dummy_rel(root, rel) {
         return Ok(());
     }
     // No, so install the dummy childless-Append path (in the rel's own context).
-    pathnode::install_dummy_append_path::call(root, rel)
+    pathnode::install_dummy_append_path::call(root, run, rel)
 }
 
 /* ==========================================================================
@@ -294,7 +299,7 @@ fn restriction_is_constant_false(
 
 /// `join_search_one_level` (joinrels.c:72) — consider all ways to produce join
 /// relations containing exactly `level` jointree items.
-pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, level: i32) -> PgResult<()> {
+pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, run: &PlannerRun<'mcx>, level: i32) -> PgResult<()> {
     debug_assert!(root.join_rel_level[level as usize].is_empty());
 
     // Set join_cur_level so that new joinrels are added to the proper list.
@@ -316,12 +321,12 @@ pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, level
                 0
             };
             let level1 = root.join_rel_level[1].clone();
-            make_rels_by_clause_joins(mcx, root, old_rel, &level1, first_rel)?;
+            make_rels_by_clause_joins(mcx, root, run, old_rel, &level1, first_rel)?;
         } else {
             // A relation not joined to any other relation directly or by
             // join-order restrictions. Cartesian product time.
             let level1 = root.join_rel_level[1].clone();
-            make_rels_by_clauseless_joins(mcx, root, old_rel, &level1)?;
+            make_rels_by_clauseless_joins(mcx, root, run, old_rel, &level1)?;
         }
     }
 
@@ -361,7 +366,7 @@ pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, level
                     if geqo::have_relevant_joinclause::call(root, old_rel, new_rel)
                         || have_join_order_restriction(root, old_rel, new_rel)
                     {
-                        make_join_rel(mcx, root, old_rel, new_rel)?;
+                        make_join_rel(mcx, root, run, old_rel, new_rel)?;
                     }
                 }
             }
@@ -377,7 +382,7 @@ pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, level
         let prev_level = root.join_rel_level[(level - 1) as usize].clone();
         for &old_rel in &prev_level {
             let level1 = root.join_rel_level[1].clone();
-            make_rels_by_clauseless_joins(mcx, root, old_rel, &level1)?;
+            make_rels_by_clauseless_joins(mcx, root, run, old_rel, &level1)?;
         }
 
         // When special joins are involved there may be no legal N-way join for
@@ -406,6 +411,7 @@ pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, level
 fn make_rels_by_clause_joins<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     old_rel: RelId,
     other_rels: &[RelId],
     first_rel_idx: i32,
@@ -415,7 +421,7 @@ fn make_rels_by_clause_joins<'mcx>(
             && (geqo::have_relevant_joinclause::call(root, old_rel, other_rel)
                 || have_join_order_restriction(root, old_rel, other_rel))
         {
-            make_join_rel(mcx, root, old_rel, other_rel)?;
+            make_join_rel(mcx, root, run, old_rel, other_rel)?;
         }
     }
     Ok(())
@@ -430,12 +436,13 @@ fn make_rels_by_clause_joins<'mcx>(
 fn make_rels_by_clauseless_joins<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     old_rel: RelId,
     other_rels: &[RelId],
 ) -> PgResult<()> {
     for &other_rel in other_rels {
         if !bms::relids_overlap::call(&root.rel(other_rel).relids, &root.rel(old_rel).relids) {
-            make_join_rel(mcx, root, old_rel, other_rel)?;
+            make_join_rel(mcx, root, run, old_rel, other_rel)?;
         }
     }
     Ok(())
@@ -668,6 +675,7 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
 pub fn make_join_rel<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     mut rel1: RelId,
     mut rel2: RelId,
 ) -> PgResult<Option<RelId>> {
@@ -709,7 +717,7 @@ pub fn make_join_rel<'mcx>(
 
     // Find or build the join RelOptInfo, and compute the restrictlist.
     let (joinrel, restrictlist) =
-        bms::build_join_rel::call(root, &joinrelids, rel1, rel2, &sjinfo, &pushed_down_joins)?;
+        bms::build_join_rel::call(root, run, &joinrelids, rel1, rel2, &sjinfo, &pushed_down_joins)?;
 
     // If we've already proven this join is empty, we needn't consider more paths.
     if is_dummy_rel(root, joinrel) {
@@ -717,7 +725,7 @@ pub fn make_join_rel<'mcx>(
     }
 
     // Add paths to the join relation.
-    populate_joinrel_with_paths(mcx, root, rel1, rel2, joinrel, &sjinfo, &restrictlist)?;
+    populate_joinrel_with_paths(mcx, root, run, rel1, rel2, joinrel, &sjinfo, &restrictlist)?;
 
     Ok(Some(joinrel))
 }
@@ -815,6 +823,7 @@ fn add_outer_joins_to_relids(
 fn populate_joinrel_with_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
     joinrel: RelId,
@@ -833,35 +842,35 @@ fn populate_joinrel_with_paths<'mcx>(
                 || is_dummy_rel(root, rel2)
                 || restriction_is_constant_false(root, restrictlist, joinrel, false)
             {
-                mark_dummy_rel(root, joinrel)?;
+                mark_dummy_rel(root, run, joinrel)?;
             } else {
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_INNER, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_INNER, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_INNER, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_INNER, sjinfo, restrictlist, enable)?;
             }
         }
         JOIN_LEFT => {
             if is_dummy_rel(root, rel1)
                 || restriction_is_constant_false(root, restrictlist, joinrel, true)
             {
-                mark_dummy_rel(root, joinrel)?;
+                mark_dummy_rel(root, run, joinrel)?;
             } else {
                 if restriction_is_constant_false(root, restrictlist, joinrel, false)
                     && bms::relids_is_subset::call(&root.rel(rel2).relids, &sjinfo.syn_righthand)
                 {
-                    mark_dummy_rel(root, rel2)?;
+                    mark_dummy_rel(root, run, rel2)?;
                 }
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_LEFT, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_RIGHT, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_LEFT, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_RIGHT, sjinfo, restrictlist, enable)?;
             }
         }
         JOIN_FULL => {
             if (is_dummy_rel(root, rel1) && is_dummy_rel(root, rel2))
                 || restriction_is_constant_false(root, restrictlist, joinrel, true)
             {
-                mark_dummy_rel(root, joinrel)?;
+                mark_dummy_rel(root, run, joinrel)?;
             } else {
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_FULL, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_FULL, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_FULL, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_FULL, sjinfo, restrictlist, enable)?;
 
                 // If there are join quals that aren't mergeable or hashable, we
                 // may not be able to build any valid plan.
@@ -884,13 +893,13 @@ fn populate_joinrel_with_paths<'mcx>(
                     || is_dummy_rel(root, rel2)
                     || restriction_is_constant_false(root, restrictlist, joinrel, false)
                 {
-                    mark_dummy_rel(root, joinrel)?;
+                    mark_dummy_rel(root, run, joinrel)?;
                     // C `break`s out of the switch case after mark_dummy_rel.
-                    try_partitionwise_join(mcx, root, rel1, rel2, joinrel, sjinfo, restrictlist)?;
+                    try_partitionwise_join(mcx, root, run, rel1, rel2, joinrel, sjinfo, restrictlist)?;
                     return Ok(());
                 }
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_SEMI, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_RIGHT_SEMI, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_SEMI, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_RIGHT_SEMI, sjinfo, restrictlist, enable)?;
             }
 
             // If we know how to unique-ify the RHS and one input rel is exactly
@@ -902,27 +911,27 @@ fn populate_joinrel_with_paths<'mcx>(
                     || is_dummy_rel(root, rel2)
                     || restriction_is_constant_false(root, restrictlist, joinrel, false)
                 {
-                    mark_dummy_rel(root, joinrel)?;
-                    try_partitionwise_join(mcx, root, rel1, rel2, joinrel, sjinfo, restrictlist)?;
+                    mark_dummy_rel(root, run, joinrel)?;
+                    try_partitionwise_join(mcx, root, run, rel1, rel2, joinrel, sjinfo, restrictlist)?;
                     return Ok(());
                 }
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_UNIQUE_INNER, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_UNIQUE_OUTER, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_UNIQUE_INNER, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_UNIQUE_OUTER, sjinfo, restrictlist, enable)?;
             }
         }
         JOIN_ANTI => {
             if is_dummy_rel(root, rel1)
                 || restriction_is_constant_false(root, restrictlist, joinrel, true)
             {
-                mark_dummy_rel(root, joinrel)?;
+                mark_dummy_rel(root, run, joinrel)?;
             } else {
                 if restriction_is_constant_false(root, restrictlist, joinrel, false)
                     && bms::relids_is_subset::call(&root.rel(rel2).relids, &sjinfo.syn_righthand)
                 {
-                    mark_dummy_rel(root, rel2)?;
+                    mark_dummy_rel(root, run, rel2)?;
                 }
-                add_paths_to_joinrel(mcx, root, joinrel, rel1, rel2, JOIN_ANTI, sjinfo, restrictlist, enable)?;
-                add_paths_to_joinrel(mcx, root, joinrel, rel2, rel1, JOIN_RIGHT_ANTI, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel1, rel2, JOIN_ANTI, sjinfo, restrictlist, enable)?;
+                add_paths_to_joinrel(mcx, root, run, joinrel, rel2, rel1, JOIN_RIGHT_ANTI, sjinfo, restrictlist, enable)?;
             }
         }
         other => {
@@ -932,7 +941,7 @@ fn populate_joinrel_with_paths<'mcx>(
     }
 
     // Apply partitionwise join technique, if possible.
-    try_partitionwise_join(mcx, root, rel1, rel2, joinrel, sjinfo, restrictlist)?;
+    try_partitionwise_join(mcx, root, run, rel1, rel2, joinrel, sjinfo, restrictlist)?;
     Ok(())
 }
 
@@ -1115,6 +1124,7 @@ fn scheme_partnatts(rel: &types_pathnodes::RelOptInfo) -> i16 {
 fn try_partitionwise_join<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
     joinrel: RelId,
@@ -1297,6 +1307,7 @@ fn try_partitionwise_join<'mcx>(
         populate_joinrel_with_paths(
             mcx,
             root,
+            run,
             child_rel1,
             child_rel2,
             child_joinrel,
