@@ -278,6 +278,7 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
     backend_utils_adt_acl::init_seams();
+    backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();

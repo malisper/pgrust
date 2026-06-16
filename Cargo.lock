@@ -12522,6 +12522,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-datetime"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-xact",
+ "backend-timezone-localtime",
+ "backend-timezone-pgtz",
+ "backend-timezone-strftime-seams",
+ "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numutils",
+ "backend-utils-adt-timestamp-seams",
+ "common-hashfn",
+ "mcx",
+ "state-pgtz",
+ "types-core",
+ "types-datetime",
+ "types-error",
+ "types-misc-more2",
+ "types-numeric",
+ "types-pgtime",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-datetime-seams"
 version = "0.0.0"
 dependencies = [
@@ -15700,6 +15725,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-datetime",
  "backend-utils-adt-format-type",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
@@ -15945,6 +15971,13 @@ version = "0.0.0"
 [[package]]
 name = "types-crypto"
 version = "0.0.0"
+
+[[package]]
+name = "types-datetime"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-datum"
