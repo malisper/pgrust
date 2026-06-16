@@ -17685,6 +17685,15 @@ name = "common-ryu"
 version = "0.0.0"
 
 [[package]]
+name = "common-scram-common"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-auth-scram-seams",
+ "common-prng-base64",
+ "common-sha2",
+]
+
+[[package]]
 name = "common-sha2"
 version = "0.0.0"
 
@@ -18435,6 +18444,7 @@ dependencies = [
  "common-ip",
  "common-pglz",
  "common-prng-base64",
+ "common-scram-common",
  "common-string",
  "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-legacy-pqsignal",
