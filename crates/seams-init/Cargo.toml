@@ -195,6 +195,7 @@ backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
+backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
