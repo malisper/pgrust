@@ -3551,6 +3551,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-basebackup-target"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-server",
+ "backend-backup-sink",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-server"
 version = "0.0.0"
 dependencies = [
@@ -18535,6 +18546,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-archive-shell-archive",
+ "backend-backup-basebackup-target",
  "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
