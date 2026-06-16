@@ -14924,6 +14924,8 @@ dependencies = [
 name = "backend-utils-sort-tuplesort"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-storage-file-buffile-seams",
  "backend-utils-sort-sortsupport-seams",
  "backend-utils-sort-storage",
  "backend-utils-sort-storage-seams",
@@ -14936,6 +14938,7 @@ dependencies = [
  "types-rel",
  "types-slot",
  "types-sortsupport",
+ "types-storage",
  "types-tuple",
 ]
 
