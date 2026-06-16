@@ -2294,6 +2294,53 @@ pub fn init_seams() {
     seams::get_relation_constraint_oid::set(get_relation_constraint_oid);
     seams::get_domain_constraint_oid::set(get_domain_constraint_oid);
     seams::RemoveConstraintById::set(RemoveConstraintById);
+
+    // index_create / index_constraint_create (catalog/index.c) constraint legs.
+    seams::constraint_name_is_used::set(|mcx, con_cat, obj_id, conname| {
+        ConstraintNameIsUsed(mcx, con_cat, obj_id, conname)
+    });
+    seams::create_constraint_entry::set(|mcx, args| {
+        // The full CreateConstraintEntry takes the ~30-parameter list; the
+        // index-constraint call site supplies only the PK/UNIQUE/EXCLUDE subset
+        // (no foreign key, no CHECK expression, no domain), and isEnforced /
+        // isValidated are both true. Fill the remaining C constants here.
+        CreateConstraintEntry(
+            mcx,
+            args.constraint_name,
+            args.constraint_namespace,
+            args.constraint_type,
+            args.is_deferrable,
+            args.is_deferred,
+            true,  /* isEnforced */
+            true,  /* isValidated */
+            args.parent_constr_id,
+            args.rel_id,
+            args.constraint_key,
+            args.constraint_key.len() as i32, /* constraintNKeys */
+            args.constraint_n_total_keys,
+            InvalidOid, /* domainId — no domain */
+            args.index_rel_id,
+            InvalidOid, /* foreignRelId — no FK */
+            &[],        /* foreignKey */
+            &[],        /* pfEqOp */
+            &[],        /* ppEqOp */
+            &[],        /* ffEqOp */
+            0,          /* foreignNKeys */
+            b' ' as i8, /* foreignUpdateType */
+            b' ' as i8, /* foreignDeleteType */
+            &[],        /* fkDeleteSetCols */
+            0,          /* numFkDeleteSetCols */
+            b' ' as i8, /* foreignMatchType */
+            args.excl_op,
+            None, /* conExpr — no CHECK */
+            None, /* conBin */
+            args.con_is_local,
+            args.con_inh_count,
+            args.con_no_inherit,
+            args.con_period,
+            args.is_internal,
+        )
+    });
 }
 
 /* ===========================================================================

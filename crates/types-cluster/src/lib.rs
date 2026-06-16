@@ -205,15 +205,34 @@ pub const PROGRESS_COMMAND_CLUSTER: i32 = 3;
  * Cross-seam helper records owned by this consumer's vocabulary
  * ---------------------------------------------------------------- */
 
-/// The writable `pg_index` row copy `mark_index_clustered` mutates (the
-/// `SearchSysCacheCopy1(INDEXRELID)` tuple's `GETSTRUCT` view), trimmed to the
-/// columns the cluster mark reads/writes.
+/// The writable `pg_index` row copy `SearchSysCacheCopy1(INDEXRELID)` yields
+/// (the tuple's `GETSTRUCT` view), trimmed to the boolean flag columns the
+/// in-place `pg_index` row mutators read/write. `mark_index_clustered`
+/// (cluster.c) reads/writes `indisclustered`/`indisvalid`;
+/// `index_set_state_flags` and `index_constraint_create`'s
+/// `INDEX_CONSTR_CREATE_UPDATE_INDEX` leg (catalog/index.c) read/write the
+/// remaining `indis*`/`indimmediate`/`indcheckxmin` flags. (The variable-length
+/// `indkey`/`indcollation`/… columns are never mutated by these paths, so they
+/// are not carried; the consumer re-reads the whole tuple by `t_self` and only
+/// `heap_modify_tuple`s the changed columns.)
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PgIndexForm {
-    /// `bool indisclustered`.
+    /// `bool indisprimary` (`Anum_pg_index_indisprimary` = 7).
+    pub indisprimary: bool,
+    /// `bool indimmediate` (`Anum_pg_index_indimmediate` = 9).
+    pub indimmediate: bool,
+    /// `bool indisclustered` (`Anum_pg_index_indisclustered` = 10).
     pub indisclustered: bool,
-    /// `bool indisvalid`.
+    /// `bool indisvalid` (`Anum_pg_index_indisvalid` = 11).
     pub indisvalid: bool,
+    /// `bool indcheckxmin` (`Anum_pg_index_indcheckxmin` = 12).
+    pub indcheckxmin: bool,
+    /// `bool indisready` (`Anum_pg_index_indisready` = 13).
+    pub indisready: bool,
+    /// `bool indislive` (`Anum_pg_index_indislive` = 14).
+    pub indislive: bool,
+    /// `bool indisreplident` (`Anum_pg_index_indisreplident` = 15).
+    pub indisreplident: bool,
 }
 
 /// The out-params of `table_relation_copy_for_cluster` (`access/tableam.h`):
