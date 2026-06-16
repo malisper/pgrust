@@ -17,6 +17,7 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
+types-tableam = { path = "../types-tableam" }
 
 backend-storage-page = { path = "../backend-storage-page" }
 
@@ -26,6 +27,12 @@ backend-access-nbtree-build-seams = { path = "../backend-access-nbtree-build-sea
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+# The serial heap build scan (`table_index_build_scan`, the closure-carrying
+# build seam; provider = heap AM, installed concurrently by wf-buildscan), the
+# index-fork block-count check, and `maintenance_work_mem` for sizing the sort.
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 
 [dev-dependencies]
 types-storage = { path = "../types-storage" }

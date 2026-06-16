@@ -248,27 +248,24 @@ fn domain_check(
     backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
-/// `detoast_external_attr(attr)` (access/common/detoast.c). Owner not yet ported
-/// (task #76: backend-access-common-toast-internals). Returns the detoasted
-/// (inline) bytes of an external varlena.
-fn detoast_external_attr<'mcx>(_mcx: Mcx<'mcx>, _attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "expandedrecord: detoast_external_attr: unported owner \
-         (backend-access-common-toast-internals)"
-    )
+/// `detoast_external_attr(attr)` (access/common/detoast.c). Returns the
+/// detoasted (inline) bytes of an external varlena. Routed to the real
+/// detoast owner via its seam (signature-identical).
+fn detoast_external_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_access_common_detoast_seams::detoast_external_attr::call(mcx, attr)
 }
 
-/// `toast_flatten_tuple(tup, tupdesc)` (access/heap/tuptoaster path). Owner not
-/// yet ported (task #76). Returns a tuple with all out-of-line values inlined.
+/// `toast_flatten_tuple(tup, tupdesc)` (access/heap/heaptoast.c). Returns a
+/// tuple with all out-of-line values inlined. Routed to the real heaptoast
+/// owner via its seam: C `toast_flatten_tuple` returns a `HeapTuple` (the
+/// reconfigured tuple), which the owned model carries as `FormedTuple`, so the
+/// seam return is signature-identical — no adapter needed.
 fn toast_flatten_tuple<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _tup: &FormedTuple<'_>,
-    _tupdesc: &TupleDescData<'_>,
+    mcx: Mcx<'mcx>,
+    tup: &FormedTuple<'_>,
+    tupdesc: &TupleDescData<'_>,
 ) -> PgResult<FormedTuple<'mcx>> {
-    panic!(
-        "expandedrecord: toast_flatten_tuple: unported owner \
-         (backend-access-common-toast-internals)"
-    )
+    backend_access_heap_heaptoast_seams::toast_flatten_tuple::call(mcx, tup, tupdesc)
 }
 
 /// `datumCopy(value, typByVal, typLen)` (utils/adt/datum.c). Owner not yet

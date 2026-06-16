@@ -1,0 +1,30 @@
+[package]
+name = "backend-optimizer-plan-analyzejoins"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_plan_analyzejoins"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
+backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
+backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
+
+# Seam crates we INSTALL into (inward seams owned by analyzejoins.c):
+backend-optimizer-plan-init-subselect-seams = { path = "../backend-optimizer-plan-init-subselect-seams" }
+backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
+
+# Seam crates we CALL (outward deps, real owner elsewhere):
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

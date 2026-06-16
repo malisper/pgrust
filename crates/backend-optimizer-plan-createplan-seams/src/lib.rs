@@ -43,9 +43,12 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+
 use types_nodes::nodes::Node;
+use types_nodes::primnodes::TargetEntry;
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{PathId, PlannerInfo};
+use types_pathnodes::{NodeId, PathId, PlannerInfo, RinfoId};
 
 // ---------------------------------------------------------------------------
 // Secondary dispatchers (createplan.c create_scan_plan / create_join_plan).
@@ -78,6 +81,226 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         run: &PlannerRun<'mcx>,
         best_path: PathId,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+// ---------------------------------------------------------------------------
+// Per-scan-type converters reached from `create_scan_plan`'s second switch
+// (createplan.c:677). `create_scan_plan` (now installed by F2b) computes the
+// `tlist` (physical-vs-path) and resolved `scan_clauses` and routes to one of
+// these `create_*scan_plan` converters; each is filled by the F2c scan-converter
+// family and loud-panics until then (the seam-and-panic contract).
+//
+// In the C the converter takes the typed up-cast `(XxxPath *) best_path`; here
+// it takes `best_path: PathId` (the owner recovers the [`PathNode`] subtype),
+// plus the already-decided `tlist` (`Vec<TargetEntry<'mcx>>`, empty = the C
+// `NIL`) and the relation's `scan_clauses` (`Vec<RinfoId>` — the RestrictInfo
+// list, exactly as C passes `scan_clauses`; each converter does its own
+// `order_qual_clauses` / `extract_actual_clauses` / `replace_nestloop_params`).
+// `IndexScan` / `IndexOnlyScan` share `create_indexscan_plan`
+// (the C `indexonly` bool); the dispatch routes both `pathtype`s here with the
+// flag. `T_Result` (a `RTE_RESULT` base relation Path) routes to
+// `create_resultscan_plan`.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `create_seqscan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_seqscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_samplescan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_samplescan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_indexscan_plan(root, (IndexPath *) best_path, tlist,
+    /// scan_clauses, indexonly)` — covers both `T_IndexScan` (`indexonly =
+    /// false`) and `T_IndexOnlyScan` (`indexonly = true`).
+    pub fn create_indexscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+        indexonly: bool,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_bitmap_scan_plan(root, (BitmapHeapPath *) best_path, tlist,
+    /// scan_clauses)`.
+    pub fn create_bitmap_scan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_tidscan_plan(root, (TidPath *) best_path, tlist, scan_clauses)`.
+    pub fn create_tidscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_tidrangescan_plan(root, (TidRangePath *) best_path, tlist,
+    /// scan_clauses)`.
+    pub fn create_tidrangescan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_subqueryscan_plan(root, (SubqueryScanPath *) best_path, tlist,
+    /// scan_clauses)`.
+    pub fn create_subqueryscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_functionscan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_functionscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_tablefuncscan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_tablefuncscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_valuesscan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_valuesscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_ctescan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_ctescan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_namedtuplestorescan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_namedtuplestorescan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_resultscan_plan(root, best_path, tlist, scan_clauses)` — the
+    /// `RTE_RESULT` base-relation `T_Result` arm of `create_scan_plan`.
+    pub fn create_resultscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_worktablescan_plan(root, best_path, tlist, scan_clauses)`.
+    pub fn create_worktablescan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_foreignscan_plan(root, (ForeignPath *) best_path, tlist,
+    /// scan_clauses)`.
+    pub fn create_foreignscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_customscan_plan(root, (CustomPath *) best_path, tlist,
+    /// scan_clauses)`.
+    pub fn create_customscan_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+        tlist: Vec<TargetEntry<'mcx>>,
+        scan_clauses: Vec<RinfoId>,
     ) -> types_error::PgResult<Node<'mcx>>
 );
 
@@ -314,6 +537,26 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         run: &PlannerRun<'mcx>,
         best_path: PathId,
+    ) -> types_error::PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
+    /// `create_gating_plan(root, path, plan, gating_quals)` (createplan.c:1022) —
+    /// stack a gating `Result` node carrying the pseudoconstant
+    /// `gating_quals` atop the already-built `plan`. `create_scan_plan` (and the
+    /// join family) routes here; the body builds the `Result` via `make_result`
+    /// over `build_path_tlist(root, path)`, which lives in the F2c
+    /// scan-converter / `make_*` plan-node family. Declared here so
+    /// `create_scan_plan` compiles before that family lands. `path` is the
+    /// [`PathId`] (the C `Path *path`); `plan` is the built subplan node;
+    /// `gating_quals` is the resolved pseudoconstant clause list (arena
+    /// [`NodeId`]s).
+    pub fn create_gating_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        path: PathId,
+        plan: Node<'mcx>,
+        gating_quals: Vec<NodeId>,
     ) -> types_error::PgResult<Node<'mcx>>
 );
 
