@@ -533,6 +533,16 @@ pub const PREDICATELOCK_MANAGER_LWLOCK_OFFSET: i32 =
 pub const NUM_FIXED_LWLOCKS: i32 =
     PREDICATELOCK_MANAGER_LWLOCK_OFFSET + NUM_PREDICATELOCK_PARTITIONS;
 
+// Named individual-lock offsets used by predicate.c (SSI), from lwlocklist.h.
+/// `SerializableXactHashLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_XACT_HASH_LOCK: i32 = 28;
+/// `SerializableFinishedListLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_FINISHED_LIST_LOCK: i32 = 29;
+/// `SerializablePredicateListLock` (lwlocklist.h offset).
+pub const SERIALIZABLE_PREDICATE_LIST_LOCK: i32 = 30;
+/// `SerialControlLock` (lwlocklist.h offset).
+pub const SERIAL_CONTROL_LOCK: i32 = 52;
+
 // `BuiltinTrancheIds` (`storage/lwlock.h`) — the full chain from
 // `LWTRANCHE_XACT_BUFFER = NUM_INDIVIDUAL_LWLOCKS` to
 // `LWTRANCHE_FIRST_USER_DEFINED`.

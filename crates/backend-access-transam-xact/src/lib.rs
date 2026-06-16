@@ -1717,6 +1717,7 @@ pub fn init_seams() {
     seams::set_xact_iso_level_repeatable_read::set(seam_set_xact_iso_level_repeatable_read);
     seams::set_xact_read_only::set(SetXactReadOnly);
     seams::xact_read_only::set(XactReadOnly);
+    seams::xact_deferrable::set(XactDeferrable);
     seams::xact_iso_level::set(XactIsoLevel);
     // `int synchronous_commit` (xact.c GUC) — read by walsender's SyncRepRequested.
     seams::synchronous_commit::set(synchronous_commit);
