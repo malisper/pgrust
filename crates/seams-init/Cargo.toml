@@ -20,6 +20,7 @@ backend-access-common-reloptions = { path = "../backend-access-common-reloptions
 backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
+backend-access-gin-ginfast = { path = "../backend-access-gin-ginfast" }
 backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
 backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
@@ -199,6 +200,8 @@ backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" 
 backend-optimizer-prep-prepjointree = { path = "../backend-optimizer-prep-prepjointree" }
 backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
 backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
+backend-optimizer-plan-analyzejoins = { path = "../backend-optimizer-plan-analyzejoins" }
+backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createplan" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }

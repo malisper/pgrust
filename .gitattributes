@@ -4,6 +4,13 @@
 #
 # NOT for files with in-place edits (e.g. CATALOG.tsv has per-row status
 # edits that union would duplicate) — only genuinely append-only files.
-crates/seams-init/src/lib.rs   merge=union
-crates/seams-init/Cargo.toml   merge=union
+#
+# seams-init is NOT append-only: installing a seam DELETES its
+# CONTRACT_RECONCILE_PENDING allowlist entry (and may add/remove init_all
+# lines), so `merge=union` silently DROPS the deletions of whichever side it
+# does not keep — repeatedly reddening main on the recurrence guards. Both
+# crates/seams-init/src/lib.rs and crates/seams-init/Cargo.toml therefore use
+# the NORMAL 3-way merge driver: divergence becomes a LOUD conflict that forces
+# explicit union-of-init_all + union-of-allowlist resolution by hand.
+# DESIGN_DEBT.md IS genuinely append-only and keeps merge=union.
 DESIGN_DEBT.md                 merge=union

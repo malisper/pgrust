@@ -17,6 +17,7 @@ pub fn init_all() {
     backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
+    backend_access_gin_ginfast::init_seams();
     backend_access_gin_ginget::init_seams();
     backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
@@ -196,6 +197,8 @@ pub fn init_all() {
     backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
+    backend_optimizer_plan_analyzejoins::init_seams();
+    backend_optimizer_plan_createplan::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_coerce::init_seams();
@@ -765,6 +768,42 @@ mod recurrence_guard {
         // is genuinely uninstalled / loud-panic (mirror-pg-and-panic) until the
         // fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_compare_partial"),
+        // DESIGN_DEBT (TD-GIN-RELOPTIONS-KEYSTONE): `gin_get_use_fast_update`
+        // (GinGetUseFastUpdate, gin_private.h:34) and `gin_get_pending_list_cleanup_size`
+        // (GinGetPendingListCleanupSize, gin_private.h:38) read the index's
+        // GIN-specific `GinOptions` bytea out of `rd_options`, which the trimmed
+        // relcache does not yet carry. The ginutil owner (audited, the GinOptions
+        // owner) therefore has no body to install on these ginutil-seams decls —
+        // they panic loudly until the relcache GinOptions keystone lands. (ginfast
+        // installs a separate gininsert-seams copy of `gin_get_use_fast_update`
+        // over an Oid lookup, a duplicate decl; these ginutil-seams copies remain
+        // genuinely uninstalled for the relcache-keystone reason.) DELETE when the
+        // relcache GinOptions keystone lands.
+        ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
+        ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
+        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): five heapam-seams whose real
+        // bodies are NOT in the merged heap-AM slice yet — sanctioned
+        // mirror-pg-and-panic on a complete owner. Each is `::call`ed in a live
+        // consumer but the owner has no contract-matching body:
+        //   * insert_one_tuple — bootstrap.c `InsertOneTuple` (form tuple from
+        //     attrtypes/values/nulls + simple_heap_insert). The owner's
+        //     init_seams() explicitly documents this as out-of-slice-scope
+        //     (heap-INSERT family's job); only `simple_heap_insert` exists.
+        //   * read_pg_type — bootstrap.c pg_type catalog-scan driver
+        //     (populate_typ_list); scan substrate exists, the driver is unwritten.
+        //   * scan_indisclustered — cluster.c `get_tables_to_cluster` pg_index
+        //     `indisclustered` systable scan; driver unwritten.
+        //   * log_heap_visible — XLOG_HEAP2_VISIBLE WAL emission; owner has
+        //     log_heap_new_cid/log_heap_update but not this one.
+        //   * index_compute_xid_horizon_for_tuples — the full index-buffer
+        //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
+        //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
+        // DELETE each entry when its driver lands in the heap-AM port.
+        ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
+        ("backend_access_heap_heapam", "insert_one_tuple"),
+        ("backend_access_heap_heapam", "log_heap_visible"),
+        ("backend_access_heap_heapam", "read_pg_type"),
+        ("backend_access_heap_heapam", "scan_indisclustered"),
         // DESIGN_DEBT (TD-PATHNODE-CAN-CREATE-UNIQUE): pathnode.c's
         // `can_create_unique_path` is the `create_unique_path(...) != NULL` test.
         // Its body (`create_unique_path`, pathnode.c:1730) is itself genuinely
@@ -1015,6 +1054,27 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
+        // DESIGN_DEBT (TD-BUFMGR-SHMEM-AIO): four bufmgr-seams `::call`ed in live
+        // consumers (ipc shmem startup; backend-storage-aio-read-stream) whose real
+        // bodies are not in the merged bufmgr slice:
+        //   * buffer_manager_shmem_size — bufmgr.c `BufferManagerShmemSize`: the
+        //     add_size accumulator over BufferDescriptors/BufferBlocks/lookup table.
+        //     The owner has no ShmemSize accumulator (in-process buffer arrays, not
+        //     the shmem-resident layout) — needs the shmem allocator keystone.
+        //   * buffer_manager_shmem_init — bufmgr.c `BufferManagerShmemInit`: the
+        //     ShmemInitStruct allocate-or-attach over those shmem arrays. The
+        //     owner's `BufferManager::BufferManagerShmemInit(nbuffers)->Self`
+        //     diverges (wrong args, returns Self not PgResult<()>, in-process not
+        //     shmem). Contract-divergent; needs the shmem allocator keystone.
+        //   * maintenance_io_concurrency — the `maintenance_io_concurrency` GUC
+        //     value; no backing GUC variable exists in the owner (only a doc note).
+        //   * io_method_sync — the `io_method == IOMETHOD_SYNC` test; the `io_method`
+        //     GUC/enum lives in the unported aio.c, not this owner.
+        // DELETE each entry as the shmem allocator + aio GUC source land.
+        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_init"),
+        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
+        ("backend_storage_buffer_bufmgr", "io_method_sync"),
+        ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
         // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
         // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
         // The latch<->proc handle spaces were unified: a `LatchHandle` is a
@@ -1151,58 +1211,84 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
-        // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
-        // WAL page-read driver solely through the prefetcher read-record seams,
-        // and inspects the decoded record through the `RecordRef`-keyed
-        // `xlog_rec_*` accessors. These five seams are declared but NOT installed:
-        //   * prefetcher_begin_read / prefetcher_read_record — declared in
-        //     backend-access-transam-xlogprefetcher-seams with the explicit note
-        //     "NOT installed: the page-read driver is not yet ported." The
-        //     "merged" xlogprefetcher unit ported only the prefetch-STATS shmem
-        //     (XLogPrefetchShmemSize/Init); the recovery read-record entry points
-        //     wrap the genuinely-unported hard-core WAL file I/O (XLogPageRead /
-        //     WaitForWALToBecomeAvailable / XLogFileRead{,AnyTLI} + restore_command
-        //     fetching), so they stay seam-and-panic until that driver lands.
-        //   * xlog_rec_rmid / xlog_rec_info / xlog_rec_total_len — declared in
-        //     xlogreader-seams keyed by the opaque `RecordRef(u64)` handle, but the
-        //     merged xlogreader models the record as a borrowed `&XLogReaderState`,
-        //     not a handle registry. The handle->reader mapping is owned by that
-        //     same unported page-read driver, so xlogreader cannot install them
-        //     without a forbidden token registry / a contract redesign.
-        // All five become real installs when the page-read driver (xlogprefetcher
-        // recovery leg) lands. See DESIGN_DEBT.md.
-        ("backend_access_transam_xlogprefetcher", "prefetcher_begin_read"),
-        ("backend_access_transam_xlogprefetcher", "prefetcher_read_record"),
-        ("backend_access_transam_xlogreader", "xlog_rec_info"),
-        ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
-        ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
+        // RETIRED (drain re-sweep): the WAL page-read driver
+        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable + the prefetcher
+        // recovery read-record leg) has LANDED in backend-access-transam-xlogrecovery
+        // (walreaderholder). xlogrecovery's init_seams() now cross-installs all five
+        // formerly-blocked seams — prefetcher_begin_read / prefetcher_read_record
+        // (the read-record entry points) and xlog_rec_info / xlog_rec_rmid /
+        // xlog_rec_total_len (the decoded-record accessors, now keyed off the held
+        // reader). readrecord.rs's ReadRecord retry loop calls them against the
+        // installed bodies. Allowlist entries removed.
+        // RETIRED (drain re-sweep): `prefetcher_compute_stats`
+        // (XLogPrefetcherComputeStats) is now installed by xlogrecovery's
+        // init_seams() alongside the rest of the page-read driver leg
+        // (walreaderholder) — the held prefetcher/reader is now allocated by the
+        // landed recovery driver, so the stats call has a real body.
+        //
         // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
-        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable, now ported
-        // into backend-access-transam-xlogrecovery::pageread) reaches these
-        // still-unported owners on its streaming-source and stats legs:
-        //   * prefetcher_compute_stats — XLogPrefetcherComputeStats(prefetcher)
-        //     operates on the LIVE prefetcher instance the startup process owns;
-        //     that instance + InitWalRecovery allocation is the page-read holder
-        //     keystone (not yet landed), so the merged xlogprefetcher (stats-shmem
-        //     only) cannot install it without the held reader/prefetcher. Reached
-        //     only on the XLOG_FROM_STREAM no-data sleep path.
-        //   * walreceiverfuncs streaming control (wal_rcv_streaming /
-        //     xlog_shutdown_wal_rcv / request_xlog_streaming /
-        //     set+reset_install_xlog_file_segment_active /
-        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is unported
-        //     (the merged walreceiver bundle covers only walreceiver.c); these are
-        //     the sanctioned walreceiver-fetch panic legs of the standby state
-        //     machine, reachable only once recovery actually streams.
-        // All become real installs when walreceiverfuncs.c lands and the
-        // reader/prefetcher holder keystone is built. See DESIGN_DEBT.md.
-        ("backend_access_transam_xlogprefetcher", "prefetcher_compute_stats"),
+        // (now ported into backend-access-transam-xlogrecovery) still reaches the
+        // walreceiverfuncs streaming-control owners on its standby legs:
+        //   * walreceiverfuncs (wal_rcv_streaming / xlog_shutdown_wal_rcv /
+        //     request_xlog_streaming / set+reset_install_xlog_file_segment_active /
+        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is now CATALOG
+        //     `audited`, so the old "unported" blocker is gone, but these 6 stay
+        //     uninstalled: set/reset_install_xlog_file_segment_active have no body
+        //     (the segment-active flag lives in xlog's ControlFileData),
+        //     request_xlog_streaming diverges (seam `&str` recptr vs owner
+        //     `Option<&[u8]>`), and all 6 are reached ONLY from the
+        //     xlogrecovery standby streaming legs — sanctioned walreceiver-fetch
+        //     panic legs of the standby state machine.
+        // All become real installs when the ControlFileData segment-active flag +
+        // the streaming-source contract land. See DESIGN_DEBT.md.
         ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
         ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
         ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),
         ("backend_replication_walreceiverfuncs", "set_install_xlog_file_segment_active"),
         ("backend_replication_walreceiverfuncs", "reset_install_xlog_file_segment_active"),
         ("backend_replication_walreceiverfuncs", "get_wal_rcv_flush_rec_ptr_full"),
+        // DESIGN_DEBT (TD-ANALYZE-PLANCACHE-HANDLE / #159 + TD-ANALYZE-REWRITE):
+        // 19 parser/analyze.c seams `::call`ed in live consumers (chiefly
+        // plancache, bootstrap) on the audited analyze owner, none installable:
+        //
+        //   * 16 plancache-facing (-pc-seams) seams are written against opaque
+        //     `types_plancache` handle newtypes (QueryHandle / RawStmtHandle /
+        //     AnalyzedQueryHandle / QueryListHandle / TargetListHandle /
+        //     UtilityStmtHandle / RteFields / ParserSetupHandle / QueryEnvHandle)
+        //     with no producer, while the owner's real bodies operate on owned
+        //     `Query<'mcx>` / `RawStmt<'mcx>` values (three even have real logic on
+        //     owned refs — stmt_requires_parse_analysis(&RawStmt),
+        //     analyze_requires_snapshot(&RawStmt), query_requires_rewrite_plan(&Query)
+        //     — but signature-diverge from the handle decl). Installing would forge
+        //     values from handles (forbidden token-registry) or migrate plancache
+        //     off opaque handles — the K1 plancache de-handle redesign (#159). The
+        //     owner's Cargo.toml does not even dep the -pc-seams crate. Same blocker
+        //     as the plancache pc-seam cluster above.
+        //   * 3 reach the unported QueryRewrite (rewriter) leg:
+        //     pg_analyze_and_rewrite_fixedparams (owner has analyze-only
+        //     parse_analyze_fixedparams, not the rewrite to PgVec<CopyQuery>),
+        //     analyze_and_rewrite_varparams (varparam analyze+rewrite absent),
+        //     run_post_parse_analyze_hook (hook is NULL by default, no body).
+        // DELETE these as #159 (de-handle) and the rewriter leg land.
+        ("backend_parser_analyze", "analyze_and_rewrite_fixedparams"),
+        ("backend_parser_analyze", "analyze_and_rewrite_varparams"),
+        ("backend_parser_analyze", "analyze_and_rewrite_withcb"),
+        ("backend_parser_analyze", "analyze_requires_snapshot"),
+        ("backend_parser_analyze", "pg_analyze_and_rewrite_fixedparams"),
+        ("backend_parser_analyze", "query_can_set_tag"),
+        ("backend_parser_analyze", "query_command_type_is_utility"),
+        ("backend_parser_analyze", "query_cte_queries"),
+        ("backend_parser_analyze", "query_has_cte_list"),
+        ("backend_parser_analyze", "query_has_rtable"),
+        ("backend_parser_analyze", "query_has_sublinks"),
+        ("backend_parser_analyze", "query_requires_rewrite_plan"),
+        ("backend_parser_analyze", "query_returning_list"),
+        ("backend_parser_analyze", "query_rtable_fields"),
+        ("backend_parser_analyze", "query_target_list"),
+        ("backend_parser_analyze", "query_utility_stmt"),
+        ("backend_parser_analyze", "run_post_parse_analyze_hook"),
+        ("backend_parser_analyze", "stmt_requires_parse_analysis"),
+        ("backend_parser_analyze", "walk_query_sublinks_for_locks"),
         // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
         // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
         // and extracts the single `TypeName` node. The owner of `raw_parser`
