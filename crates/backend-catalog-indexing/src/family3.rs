@@ -244,6 +244,124 @@ fn attribute_values<'mcx>(
     Ok((values, nulls))
 }
 
+/// The `ALTER TABLE` per-`Anum` `pg_attribute` field-modify path (the `ATExec*`
+/// pattern, commands/tablecmds.c): `heap_modify_tuple` over the
+/// selectively-replaced columns carried in [`cat::pg_attribute::PgAttributeUpdateRow`],
+/// then `CatalogTupleUpdate`. The caller holds the original scanned tuple (the C
+/// `SearchSysCacheCopy(ATTNUM, relid, attnum)` copy); the non-replaced columns
+/// are preserved by `heap_modify_tuple`, and the update is applied at
+/// `attr_tuple->t_self`.
+fn catalog_tuple_update_pg_attribute<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attr_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    row: &cat::pg_attribute::PgAttributeUpdateRow,
+) -> PgResult<()> {
+    use cat::pg_attribute as pa;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    for _ in 0..pa::Natts_pg_attribute {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    // Helper: mark a non-null fixed column for replacement and store its value.
+    // (Each corresponds to a C `replaces[Anum_xxx - 1] = true; values[..] = v`.)
+    macro_rules! set_col {
+        ($anum:ident, $field:expr, $datum:expr) => {
+            if let Some(v) = $field {
+                let i = pa::$anum as usize - 1;
+                replaces[i] = true;
+                values[i] = $datum(v);
+            }
+        };
+    }
+
+    if let Some(image) = &row.attname {
+        let i = pa::Anum_pg_attribute_attname as usize - 1;
+        replaces[i] = true;
+        values[i] = name_datum(mcx, image)?;
+    }
+    set_col!(Anum_pg_attribute_atttypid, row.atttypid, Datum::from_oid);
+    set_col!(Anum_pg_attribute_attlen, row.attlen, Datum::from_i16);
+    set_col!(Anum_pg_attribute_atttypmod, row.atttypmod, Datum::from_i32);
+    set_col!(Anum_pg_attribute_attndims, row.attndims, Datum::from_i16);
+    set_col!(Anum_pg_attribute_attbyval, row.attbyval, Datum::from_bool);
+    set_col!(Anum_pg_attribute_attalign, row.attalign, Datum::from_char);
+    set_col!(Anum_pg_attribute_attstorage, row.attstorage, Datum::from_char);
+    set_col!(
+        Anum_pg_attribute_attcompression,
+        row.attcompression,
+        Datum::from_char
+    );
+    set_col!(Anum_pg_attribute_attnotnull, row.attnotnull, Datum::from_bool);
+    set_col!(Anum_pg_attribute_atthasdef, row.atthasdef, Datum::from_bool);
+    set_col!(
+        Anum_pg_attribute_atthasmissing,
+        row.atthasmissing,
+        Datum::from_bool
+    );
+    set_col!(
+        Anum_pg_attribute_attidentity,
+        row.attidentity,
+        Datum::from_char
+    );
+    set_col!(
+        Anum_pg_attribute_attgenerated,
+        row.attgenerated,
+        Datum::from_char
+    );
+    set_col!(
+        Anum_pg_attribute_attisdropped,
+        row.attisdropped,
+        Datum::from_bool
+    );
+    set_col!(Anum_pg_attribute_attislocal, row.attislocal, Datum::from_bool);
+    set_col!(
+        Anum_pg_attribute_attinhcount,
+        row.attinhcount,
+        Datum::from_i16
+    );
+    set_col!(
+        Anum_pg_attribute_attcollation,
+        row.attcollation,
+        Datum::from_oid
+    );
+
+    // attstattarget — Some(None) stores SQL NULL (SET STATISTICS DEFAULT).
+    if let Some(stat) = &row.attstattarget {
+        let i = pa::Anum_pg_attribute_attstattarget as usize - 1;
+        replaces[i] = true;
+        match stat {
+            Some(v) => values[i] = Datum::from_i16(*v),
+            None => isnull[i] = true,
+        }
+    }
+    // attoptions — Some(None) stores SQL NULL (RESET).
+    if let Some(opts) = &row.attoptions {
+        let i = pa::Anum_pg_attribute_attoptions as usize - 1;
+        replaces[i] = true;
+        match opts {
+            Some(image) => values[i] = bytes_datum(mcx, image)?,
+            None => isnull[i] = true,
+        }
+    }
+
+    // new_tuple = heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
+    //                               values, isnull, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, attr_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    // CatalogTupleUpdate(pg_attribute_rel, &new_tuple->t_self, new_tuple);
+    crate::keystone::CatalogTupleUpdate(mcx, rel, attr_tuple.tuple.t_self, &mut new_tuple)
+}
+
 /* ======================================================================== *
  * pg_attrdef — StoreAttrDefault's insert (catalog/heap.c).
  * ======================================================================== */
@@ -621,6 +739,9 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_insert_pg_attribute_tuples::set(
         catalog_insert_pg_attribute_tuples,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_attribute::set(
+        catalog_tuple_update_pg_attribute,
     );
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_attrdef::set(
         catalog_tuple_insert_pg_attrdef,

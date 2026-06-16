@@ -109,3 +109,67 @@ pub struct PgAttributeInsertRow {
     /// `attoptions` — the built `text[]` varlena image, or `None` for SQL NULL.
     pub attoptions: Option<Vec<u8>>,
 }
+
+/* ==========================================================================
+ * UPDATE carrier (the ALTER TABLE per-`Anum` field-modify path).
+ * ======================================================================== */
+
+/// The selectively-replaced columns an `ALTER TABLE` subcommand writes back to
+/// an existing `pg_attribute` row (the `ATExec*` pattern:
+/// `SearchSysCacheCopy(ATTNUM, relid, attnum)` → modify the `Form_pg_attribute`
+/// field(s) → `CatalogTupleUpdate`).
+///
+/// Each field is wrapped in [`Option`]: `Some` means *replace this column*
+/// (mirroring the C `replaces[Anum_pg_attribute_xxx - 1] = true`), `None` means
+/// *leave the on-disk value untouched* (the column is carried over from the
+/// original scanned tuple by `heap_modify_tuple`). For the nullable columns the
+/// inner value is itself an `Option`: `Some(Some(v))` stores `v`, `Some(None)`
+/// stores SQL NULL, `None` leaves the column unchanged.
+///
+/// The columns cover the portable `ALTER TABLE` F2+ subcommand families:
+///
+/// * `attnotnull` — `SET`/`DROP NOT NULL` (`ATExecSetNotNull` /
+///   `ATExecDropNotNull`).
+/// * `atthasdef` — `SET`/`DROP DEFAULT` (`StoreAttrDefault` /
+///   `RemoveAttrDefault` clear the flag on the pg_attribute row).
+/// * `attstattarget` — `SET STATISTICS` (`ATExecSetStatistics`); `Some(None)`
+///   stores SQL NULL (reset to default).
+/// * `attstorage` — `SET STORAGE` (`ATExecSetStorage`).
+/// * `attoptions` — `SET`/`RESET (...)` per-column options
+///   (`ATExecSetOptions`); the built `text[]` varlena image, or SQL NULL.
+/// * `atttypid` / `atttypmod` / `attcollation` / `attndims` / `attlen` /
+///   `attbyval` / `attalign` / `attstorage` — `ALTER COLUMN TYPE`
+///   (`ATExecAlterColumnType` rewrites the type-layout columns).
+/// * `attisdropped` / `attgenerated` / `attinhcount` / `attislocal` — `DROP
+///   COLUMN` (`ATExecDropColumn`: set `attisdropped = true`, clear
+///   `attgenerated`/`atthasdef`/`attinhcount`, rename to `........pg.dropped.N`).
+/// * `attname` — `RENAME COLUMN` (`renameatt_internal`); a `namestrcpy`-padded
+///   64-byte image.
+#[derive(Clone, Debug, Default)]
+pub struct PgAttributeUpdateRow {
+    /// `attname` — `RENAME COLUMN` (a `namestrcpy`-normalized 64-byte image).
+    pub attname: Option<[u8; 64]>,
+    pub atttypid: Option<Oid>,
+    pub attlen: Option<i16>,
+    pub atttypmod: Option<i32>,
+    pub attndims: Option<i16>,
+    pub attbyval: Option<bool>,
+    pub attalign: Option<i8>,
+    pub attstorage: Option<i8>,
+    pub attcompression: Option<i8>,
+    pub attnotnull: Option<bool>,
+    pub atthasdef: Option<bool>,
+    pub atthasmissing: Option<bool>,
+    pub attidentity: Option<i8>,
+    pub attgenerated: Option<i8>,
+    pub attisdropped: Option<bool>,
+    pub attislocal: Option<bool>,
+    pub attinhcount: Option<i16>,
+    pub attcollation: Option<Oid>,
+    /// `attstattarget` — `Some(Some(v))` stores `v`, `Some(None)` stores SQL
+    /// NULL (`SET STATISTICS DEFAULT`), `None` leaves the column unchanged.
+    pub attstattarget: Option<Option<i16>>,
+    /// `attoptions` — `Some(Some(image))` stores the built `text[]` varlena,
+    /// `Some(None)` stores SQL NULL (`RESET`), `None` leaves it unchanged.
+    pub attoptions: Option<Option<Vec<u8>>>,
+}

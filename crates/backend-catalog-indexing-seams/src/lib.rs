@@ -1210,6 +1210,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `ALTER TABLE` per-`Anum` `pg_attribute` field-modify path (the
+    /// `ATExec*` pattern, commands/tablecmds.c): `SearchSysCacheCopy(ATTNUM,
+    /// relid, attnum)` → modify the `Form_pg_attribute` field(s) →
+    /// `heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
+    /// values, isnull, replaces)` → `CatalogTupleUpdate(pg_attribute_rel,
+    /// &new_tuple->t_self, new_tuple)`, over the selectively-replaced columns
+    /// carried in [`PgAttributeUpdateRow`]. `attr_tuple` is the original scanned
+    /// pg_attribute tuple (the C `heap_modify_tuple` starts from it so the
+    /// non-replaced columns are preserved); the update is applied at
+    /// `attr_tuple->t_self`. `rel` is the open pg_attribute relation. This is the
+    /// shared write leaf for the portable `ALTER TABLE` F2+ subcommand families
+    /// (`SET`/`DROP NOT NULL`, `SET`/`DROP DEFAULT`, `SET STATISTICS`,
+    /// `SET STORAGE`, `SET`/`RESET (...)` options, `ALTER COLUMN TYPE`,
+    /// `DROP COLUMN`, `RENAME COLUMN`). `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_attribute<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        attr_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_attribute::PgAttributeUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `StoreAttrDefault`'s pg_attrdef INSERT (catalog/heap.c): `attrdefOid =
     /// GetNewOidWithIndex(adrel, AttrDefaultOidIndexId, Anum_pg_attrdef_oid)` +
     /// `heap_form_tuple(RelationGetDescr(adrel), values, nulls)` +
