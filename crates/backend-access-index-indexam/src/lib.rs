@@ -37,7 +37,8 @@ use types_scan::sdir::ScanDirection;
 use types_scan::scankey::ScanKeyData;
 use types_snapshot::snapshot::{IsMVCCSnapshot, SnapshotData};
 use types_storage::lock::{LOCKMODE, NoLock};
-use types_tableam::amapi::{IndexAmRoutine, IndexInfo, IndexUniqueCheck, TIDBitmap};
+use types_tableam::amapi::{IndexAmRoutine, IndexUniqueCheck, TIDBitmap};
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{
     IndexBulkDeleteResult, IndexOrderByDistance, IndexScanInstrumentation, IndexVacuumInfo,
     SharedIndexScanInstrumentation,
@@ -435,7 +436,7 @@ pub fn index_insert<'mcx>(
     heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     relation_checks(index_relation)?;
     let am = indam(index_relation);
@@ -465,7 +466,7 @@ pub fn index_insert<'mcx>(
 pub fn index_insert_cleanup<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<()> {
     relation_checks(index_relation)?;
 

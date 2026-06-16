@@ -13,7 +13,13 @@
 pub use types_tableam::amapi::{
     AmCostEstimate, CompareType, Cost, IndexAMProperty, IndexAmRoutine,
     IndexAmTranslateCompareType, IndexAmTranslateStrategy, IndexAmValidate, IndexBuildResult,
-    IndexInfo, IndexPath, IndexUniqueCheck, OpFamilyMember, PlannerInfo, Selectivity, TIDBitmap,
+    IndexPath, IndexUniqueCheck, OpFamilyMember, PlannerInfo, Selectivity, TIDBitmap,
     T_IndexAmRoutine, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID,
     COMPARE_LE, COMPARE_LT, COMPARE_NE, COMPARE_OVERLAP,
+};
+/// The `'mcx`-safe `IndexInfo *` carrier (and its trait machinery) for the
+/// index-AM dispatch edge — re-exported so consumers keep the
+/// `types_amapi::…` path.
+pub use types_tableam::index_info_carrier::{
+    IndexInfoCarrier, IndexInfoLive, IndexInfoTagged, INDEX_INFO_TAG,
 };

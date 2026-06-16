@@ -51,7 +51,8 @@ use types_core::primitive::{BlockNumber, OffsetNumber};
 use types_gin::{GinNullCategory, GinState, GinStatsData, GinMaxItemSize, GIN_UNLOCK, GIN_EXCLUSIVE};
 use types_rel::Relation;
 use types_storage::storage::Buffer;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{IndexTupleData, ItemPointerData};
 
@@ -582,12 +583,13 @@ fn gininsert_with_state<'mcx>(
 /// unique-check result).
 ///
 /// C caches the per-command [`GinState`] in `indexInfo->ii_AmCache`, lazily
-/// building it via `initGinState` on the first call. Our `IndexInfo.payload`
-/// carrier is `Box<dyn Any + 'static>`, which cannot hold the `'mcx`-bound
-/// `GinState`, so we rebuild it on every call (behaviour-preserving — the cache
-/// is a pure per-statement performance hint and changes no on-disk state). This
-/// is the same approach BRIN's `brininsert` takes for its `BrinInsertState`
-/// cache.
+/// building it via `initGinState` on the first call. The carrier now hands us
+/// the real `IndexInfo<'mcx>` (#342), but `ii_AmCache` itself is the
+/// `'static`-erased `Opaque` (`Box<dyn Any>`), which cannot hold the
+/// `'mcx`-bound `GinState`, so we rebuild it on every call (behaviour-preserving
+/// — the cache is a pure per-statement performance hint and changes no on-disk
+/// state). This is the same approach BRIN's `brininsert` takes for its
+/// `BrinInsertState` cache.
 pub fn gininsert<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -597,7 +599,7 @@ pub fn gininsert<'mcx>(
     _heap_rel: &Relation<'mcx>,
     _check_unique: IndexUniqueCheck,
     _index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     let _ = index_info;
 

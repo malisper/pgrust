@@ -15,7 +15,8 @@
 use mcx::Mcx;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
@@ -27,7 +28,7 @@ seam_core::seam!(
     /// (`gistdoinsert`). GiST never reports a unique conflict (returns `false`).
     /// `Err` carries its `ereport(ERROR)` surface.
     #[allow(clippy::too_many_arguments)]
-    pub fn gistinsert<'mcx>(
+    pub fn gistinsert<'mcx, 'a>(
         mcx: Mcx<'mcx>,
         index_relation: &Relation<'mcx>,
         values: &[Datum<'mcx>],
@@ -36,7 +37,7 @@ seam_core::seam!(
         heap_relation: &Relation<'mcx>,
         check_unique: IndexUniqueCheck,
         index_unchanged: bool,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<bool>
 );
 

@@ -28,9 +28,10 @@ use types_amapi::{
 // / `IndexBulkDeleteResult` (from `types_nbtree`) are structurally identical to
 // the vtable's `types_tableam` ones but distinct types; the adapters convert.
 use types_tableam::amapi::{
-    AmCostEstimate, IndexAMProperty, IndexBuildResult, IndexInfo, IndexPath,
+    AmCostEstimate, IndexAMProperty, IndexBuildResult, IndexPath,
     IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember, PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::amopaque::{tags, AmOpaqueType};
 use types_tableam::genam::{
     IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
@@ -322,7 +323,7 @@ fn btinsert_am<'mcx>(
     heap_relation: &Relation<'mcx>,
     check_unique: AmIndexUniqueCheck,
     _index_unchanged: bool,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     btinsert(
         mcx,
@@ -477,25 +478,26 @@ fn btparallelrescan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>
 // ---------------------------------------------------------------------------
 // Build / options / plan-time vtable adapters (#340).
 //
-// The dispatch layer (index.c, #341) hands the build callbacks the type-erased
-// `IndexInfo` carrier; `btbuild`'s real body (nbtsort.c) needs the lifetime-
-// bound `types_nodes::execnodes::IndexInfo<'mcx>` which the `'static`
-// `Box<dyn Any>` carrier cannot supply, and `btbuild` lives in the
-// nbtree-nbtsort crate which sits ABOVE this one in the dep graph. Likewise
+// The dispatch layer (index.c, #341) hands the build callbacks the
+// `IndexInfoCarrier` (#342), which now carries the real
+// `types_nodes::execnodes::IndexInfo<'mcx>` type-erased and downcastable. But
+// `btbuild`'s real body lives in the nbtree-nbtsort crate which sits ABOVE this
+// one in the dep graph, so it is not reachable from here. Likewise
 // `btoptions`/`btproperty`/`btbuildphasename` (nbtree-core) and
 // `btcostestimate`/`btadjustmembers` (selfuncs/nbtvalidate) are not reachable
 // from here. Those slots are sanctioned panic legs — populated so the vtable
-// literal is complete, reached only once #341 lands the real index.c dispatch
-// (which carries the real `IndexInfo` and wires the cross-crate calls).
+// literal is complete, reached only once the index.c build dispatch (#334/#341)
+// lands and wires the cross-crate calls.
 // `btbuildempty`/`btgettreeheight` ARE this crate's own fns, wired directly.
 
 /// `ambuild` adapter — `btbuild` (nbtsort.c) is above this crate in the dep
-/// graph and needs the real `IndexInfo`; reached via the #341 index.c dispatch.
+/// graph; reached via the index.c build dispatch (#334/#341), which downcasts
+/// the `IndexInfoCarrier` back to the real `IndexInfo<'mcx>`.
 fn btbuild_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _heap_relation: &Relation<'mcx>,
     _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
     panic!(
         "btbuild: index.c build dispatch (#341) not yet ported — \

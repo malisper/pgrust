@@ -50,7 +50,8 @@ use types_gist::{
 use types_rel::Relation;
 use types_storage::buf::BufferIsValid;
 use types_storage::storage::Buffer;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
@@ -851,7 +852,7 @@ pub fn gistinsert<'mcx>(
     heap_rel: &Relation<'mcx>,
     _check_unique: IndexUniqueCheck,
     _index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     // See the function doc: the C ii_AmCache GISTSTATE cache cannot be expressed
     // over the 'static IndexInfo payload, so rebuild per call (behaviour-

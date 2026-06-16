@@ -21,7 +21,8 @@ use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
 use types_spgist::{SPGISTNProc, SPGIST_OPTIONS_PROC};
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck, TIDBitmap};
+use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -128,7 +129,7 @@ fn spgbuild_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _heap_relation: &Relation<'mcx>,
     _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
     panic!(
         "spgbuild: index.c build dispatch (#341) not yet ported — \
@@ -211,7 +212,7 @@ fn spginsert_am<'mcx>(
     heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     spginsert(
         mcx,

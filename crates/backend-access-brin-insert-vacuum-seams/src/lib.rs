@@ -17,7 +17,8 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
@@ -28,10 +29,10 @@ seam_core::seam!(
     /// summary of the page range that contains `heap_tid`, or leave the range
     /// un-summarized. Always returns `false` (BRIN never reports a unique
     /// conflict). The running `BrinInsertState` is cached in
-    /// `index_info.payload` (the C `indexInfo->ii_AmCache`). `Err` carries its
-    /// `ereport(ERROR)` surface.
+    /// the C `indexInfo->ii_AmCache` (the `Opaque` field of the carried
+    /// `IndexInfo`). `Err` carries its `ereport(ERROR)` surface.
     #[allow(clippy::too_many_arguments)]
-    pub fn brininsert<'mcx>(
+    pub fn brininsert<'mcx, 'a>(
         mcx: Mcx<'mcx>,
         index_relation: &Relation<'mcx>,
         values: &[Datum<'mcx>],
@@ -40,7 +41,7 @@ seam_core::seam!(
         heap_relation: &Relation<'mcx>,
         check_unique: IndexUniqueCheck,
         index_unchanged: bool,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -48,10 +49,10 @@ seam_core::seam!(
     /// `brininsertcleanup(index, indexInfo)` (brin.c): release the cached
     /// `BrinInsertState` (`indexInfo->ii_AmCache`) once all inserts in the
     /// command are done. `Err` carries its `ereport(ERROR)` surface.
-    pub fn brininsertcleanup<'mcx>(
+    pub fn brininsertcleanup<'mcx, 'a>(
         mcx: Mcx<'mcx>,
         index_relation: &Relation<'mcx>,
-        index_info: &mut IndexInfo,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
     ) -> PgResult<()>
 );
 

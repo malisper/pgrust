@@ -65,7 +65,8 @@ use types_storage::lock::AccessShareLock;
 use types_tableam::amapi::TIDBitmap as AmTIDBitmap;
 use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueType};
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
@@ -235,7 +236,7 @@ fn brinbuild_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _heap_relation: &Relation<'mcx>,
     _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
     panic!("brinbuild: BRIN index build (brin.c) not yet ported — reached via the index.c dispatch (#341)")
 }
@@ -332,7 +333,7 @@ fn brininsert_am<'mcx>(
     heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     backend_access_brin_insert_vacuum_seams::brininsert::call(
         mcx,
@@ -350,7 +351,7 @@ fn brininsert_am<'mcx>(
 fn brininsertcleanup_am<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<()> {
     backend_access_brin_insert_vacuum_seams::brininsertcleanup::call(
         mcx,

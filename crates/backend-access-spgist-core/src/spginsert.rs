@@ -28,7 +28,8 @@ use backend_utils_init_miscinit_seams as miscinit;
 use types_core::primitive::ForkNumber;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tableam::amapi::{IndexBuildResult, IndexInfo, IndexUniqueCheck};
+use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -224,7 +225,7 @@ pub fn spginsert<'mcx>(
     _heap_rel: &Relation<'mcx>,
     _check_unique: IndexUniqueCheck,
     _index_unchanged: bool,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     let mut spgstate = initSpGistState(mcx, index)?;
 

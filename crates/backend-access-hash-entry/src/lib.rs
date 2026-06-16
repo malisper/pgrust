@@ -29,9 +29,10 @@ use types_amapi::{
 };
 // Vtable-facing types (F2/F3): unified descriptor + erased AM-opaque carrier (A0).
 use types_tableam::amapi::{
-    AmCostEstimate, IndexInfo, IndexPath, IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember,
+    AmCostEstimate, IndexPath, IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember,
     PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{
     IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
 };
@@ -250,7 +251,7 @@ fn hashinsert_am<'mcx>(
     heap_relation: &types_rel::Relation<'mcx>,
     _check_unique: AmIndexUniqueCheck,
     _index_unchanged: bool,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     hashinsert(mcx, index_relation, values, isnull, *heap_tid, heap_relation)
 }
@@ -543,13 +544,14 @@ pub fn hashbuildempty(index: &types_rel::Relation) -> PgResult<()> {
 // `hashhandler` for why the `IndexInfo`-carrying / cross-crate slots are
 // sanctioned panic legs (reached via the #341 index.c dispatch).
 
-/// `ambuild` adapter — `hashbuild` needs the real `IndexInfo`, which the erased
-/// `IndexInfo` carrier cannot supply; reached via the #341 dispatch.
+/// `ambuild` adapter — `hashbuild` lives above this crate; reached via the
+/// index.c build dispatch (#334/#341), which downcasts the `IndexInfoCarrier`
+/// back to the real `IndexInfo<'mcx>`.
 fn hashbuild_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _heap_relation: &types_rel::Relation<'mcx>,
     _index_relation: &types_rel::Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
     panic!(
         "hashbuild: index.c build dispatch (#341) not yet ported — \

@@ -56,7 +56,8 @@ use types_error::error::ERROR;
 use types_rel::Relation;
 use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
 use types_storage::buf::BufferIsValid;
-use types_tableam::amapi::{IndexInfo, IndexUniqueCheck, TIDBitmap as AmTIDBitmap};
+use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap as AmTIDBitmap};
+use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::amopaque::AmOpaque;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexOrderByDistance, IndexVacuumInfo};
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
@@ -1263,7 +1264,7 @@ fn gistbuild_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _heap_relation: &Relation<'mcx>,
     _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfo,
+    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
     panic!(
         "gistbuild: index.c build dispatch (#341) not yet ported — \
@@ -1391,7 +1392,7 @@ fn gistinsert_am<'mcx>(
     heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<bool> {
     gistinsert::call(
         mcx,
