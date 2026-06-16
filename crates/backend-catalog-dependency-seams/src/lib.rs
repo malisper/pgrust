@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_catalog::catalog_dependency::ObjectAddress;
+use types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses};
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::DropBehavior;
@@ -22,20 +22,10 @@ pub const PERFORM_DELETION_SKIP_EXTENSIONS: i32 = 0x0010;
 /// `PERFORM_DELETION_CONCURRENT_LOCK` — normal drop with concurrent lock mode.
 pub const PERFORM_DELETION_CONCURRENT_LOCK: i32 = 0x0020;
 
-/// `ObjectAddresses *` — the opaque runtime accumulator
-/// (`new_object_addresses()` / `add_exact_object_address` /
-/// `object_address_present` / `record_object_address_dependencies` /
-/// `free_object_addresses`). Its payload (the growable `ObjectAddress` array
-/// with its hashtable) is owned by dependency.c; callers (pg_constraint.c) only
-/// thread the handle between these seams. Inherited opacity — a foreign runtime
-/// handle, not a modeled value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ObjectAddressesHandle(pub u64);
-
 seam_core::seam!(
     /// `new_object_addresses()` (dependency.c): allocate a fresh
-    /// `ObjectAddresses` accumulator and return its handle. `Err` carries OOM.
-    pub fn new_object_addresses() -> PgResult<ObjectAddressesHandle>
+    /// `ObjectAddresses` accumulator and return it by value. `Err` carries OOM.
+    pub fn new_object_addresses() -> PgResult<ObjectAddresses>
 );
 
 seam_core::seam!(
@@ -43,7 +33,7 @@ seam_core::seam!(
     /// `object` to the accumulator (growing it as needed). `Err` carries OOM.
     pub fn add_exact_object_address(
         object: ObjectAddress,
-        addrs: ObjectAddressesHandle,
+        addrs: &mut ObjectAddresses,
     ) -> PgResult<()>
 );
 
@@ -53,14 +43,14 @@ seam_core::seam!(
     /// the accumulator?
     pub fn object_address_present(
         object: ObjectAddress,
-        addrs: ObjectAddressesHandle,
+        addrs: &ObjectAddresses,
     ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `free_object_addresses(addrs)` (dependency.c): release the accumulator
-    /// and its hashtable.
-    pub fn free_object_addresses(addrs: ObjectAddressesHandle) -> PgResult<()>
+    /// and its hashtable. The owned value is consumed (dropped).
+    pub fn free_object_addresses(addrs: ObjectAddresses) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -124,7 +114,7 @@ seam_core::seam!(
     /// carries the pg_depend-insert `ereport(ERROR)`s.
     pub fn record_object_address_dependencies(
         depender: ObjectAddress,
-        refs: ObjectAddressesHandle,
+        refs: &mut ObjectAddresses,
         behavior: types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );

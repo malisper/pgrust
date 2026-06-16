@@ -1673,6 +1673,8 @@ pub fn init_seams() {
     seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
     seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
     seams::get_top_transaction_id::set(GetTopTransactionId);
+    seams::get_top_full_transaction_id::set(GetTopFullTransactionId);
+    seams::get_top_full_transaction_id_if_any::set(GetTopFullTransactionIdIfAny);
     seams::get_current_transaction_id_if_any::set(GetCurrentTransactionIdIfAny);
     seams::is_subxact_top_xid_log_pending::set(IsSubxactTopXidLogPending);
     seams::set_check_xid_alive::set(SetCheckXidAlive);
@@ -1700,6 +1702,8 @@ pub fn init_seams() {
     seams::set_xact_iso_level_read_committed::set(seam_set_xact_iso_level_read_committed);
     seams::set_xact_iso_level_repeatable_read::set(seam_set_xact_iso_level_repeatable_read);
     seams::set_xact_read_only::set(SetXactReadOnly);
+    seams::xact_read_only::set(XactReadOnly);
+    seams::xact_iso_level::set(XactIsoLevel);
 }
 
 #[cfg(test)]

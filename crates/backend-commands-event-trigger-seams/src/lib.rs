@@ -67,6 +67,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
+    /// (event_trigger.c): record a CREATE SCHEMA command before its component
+    /// subcommands are reported. `Err` carries any allocation failure of the
+    /// collected command.
+    pub fn event_trigger_collect_simple_command_create_schema(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        stmt: &types_nodes::ddlnodes::CreateSchemaStmt<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `trackDroppedObjectsNeeded()` (event_trigger.c): whether any
     /// `ddl_command_end`/`sql_drop` event trigger (or the affected-object
     /// statistics) is interested in dropped objects, so dependency.c knows

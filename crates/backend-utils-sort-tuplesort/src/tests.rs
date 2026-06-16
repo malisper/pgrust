@@ -463,3 +463,186 @@ fn carrier_round_trip() {
         assert_eq!(state.memtupsize, INITIAL_MEMTUPSIZE);
     });
 }
+
+// ===========================================================================
+// F3a: the heap + datum begin entry points + put/get impls + multi-key tiebreak.
+// ===========================================================================
+
+/// Install the sortsupport seams the begin entry points need (idempotent): a
+/// no-op `prepare_sort_support_from_ordering_op` that just installs the test
+/// integer comparator token (mirrors the catalog lookup), plus `get_typlenbyval`.
+fn install_begin_seams() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        install_test_comparator();
+        backend_utils_sort_sortsupport_seams::prepare_sort_support_from_ordering_op::set(
+            |_ordering_op: Oid, ssup: &mut SortSupportData<'_>| {
+                // Resolve the (test) comparator; no abbreviation, no reverse.
+                ssup.comparator = Some(SortComparatorId(0));
+                Ok(())
+            },
+        );
+        backend_utils_cache_lsyscache_seams::get_typlenbyval::set(
+            // int4: len 4, by-value.
+            |_typid: Oid| Ok((4i16, true)),
+        );
+    });
+}
+
+#[test]
+fn begin_datum_end_to_end() {
+    // Drive the real begin_datum_state + putdatum_impl + getdatum_impl through
+    // the carrier (the seam path), sorting pass-by-value int4s.
+    install_begin_seams();
+    let ctx = mcx::MemoryContext::new("test-root");
+    let mcx = ctx.mcx();
+
+    let owned = tuplesort_begin_datum_state(
+        23,    // int4
+        97,    // ordering op (ignored by the stub)
+        0,     // collation
+        false, // nulls last
+        4096,
+        TUPLESORT_NONE,
+    )
+    .unwrap();
+    let mut carrier = into_carrier(mcx, owned).unwrap();
+
+    // begin_datum: by-value type => base.tuples == false, onlyKey set.
+    with_sort_mut(&mut carrier, |s| {
+        assert_eq!(s.base.nKeys, 1);
+        assert!(!s.base.tuples);
+        assert_eq!(s.base.onlyKey, Some(0));
+    });
+
+    for v in [5i64, 1, 4, 2, 3] {
+        with_sort_mut(&mut carrier, |s| {
+            tuplesort_putdatum_impl(s, Datum::ByVal(v as usize), false).unwrap();
+        });
+    }
+    with_sort_mut(&mut carrier, |s| tuplesort_performsort(s).unwrap());
+
+    let mut out = Vec::new();
+    loop {
+        let got: Option<i64> = with_sort_mut(&mut carrier, |s| {
+            let (found, val, isnull) = tuplesort_getdatum_impl(s, true, false).unwrap();
+            if found && !isnull {
+                Some(val.as_usize() as i64)
+            } else {
+                None
+            }
+        });
+        match got {
+            None => break,
+            Some(v) => out.push(v),
+        }
+    }
+    assert_eq!(out, vec![1, 2, 3, 4, 5]);
+}
+
+/// A 2-column int4 `TupleDescData` for the heap tiebreak test.
+fn two_int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> TupleDescData<'mcx> {
+    let compact = CompactAttribute {
+        attcacheoff: -1,
+        attlen: 4,
+        attbyval: true,
+        attispackable: false,
+        atthasmissing: false,
+        attisdropped: false,
+        attgenerated: false,
+        attnullability: 0,
+        attalignby: 4,
+    };
+    let mut attr = FormData_pg_attribute::default();
+    attr.atttypid = 23;
+    attr.attlen = 4;
+    attr.attbyval = true;
+    attr.attalign = b'i' as i8;
+    attr.attstorage = b'p' as i8;
+    TupleDescData {
+        natts: 2,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: mcx::slice_in(mcx, &[compact, compact]).unwrap(),
+        attrs: mcx::slice_in(mcx, &[attr, attr]).unwrap(),
+    }
+}
+
+#[test]
+fn heap_multikey_tiebreak() {
+    // A 2-column heap sort: order by col1 then col2. The leading-key compares
+    // (comparetup_heap) tie on col1, so comparetup_heap_tiebreak deforms both
+    // MinimalTuples and breaks the tie on col2.
+    install_begin_seams();
+
+    let mut owned = begin_state(4096, TUPLESORT_NONE, SortVariantKind::Heap).unwrap();
+    owned.with_mut(|state| {
+        let mcx = state.mcx();
+        state.base.nKeys = 2;
+        state.base.haveDatum1 = true;
+        state.base.tuples = true;
+        state.base.arg = SortVariantArg::Heap {
+            tupDesc: two_int4_tupdesc(mcx),
+        };
+        // Two sort keys: col1 (attno 1), col2 (attno 2), both ascending.
+        let mut k0 = SortSupportData::new(mcx);
+        k0.comparator = Some(SortComparatorId(0));
+        k0.ssup_attno = 1;
+        let mut k1 = SortSupportData::new(mcx);
+        k1.comparator = Some(SortComparatorId(0));
+        k1.ssup_attno = 2;
+        state.base.sortKeys.push(k0);
+        state.base.sortKeys.push(k1);
+        // nKeys == 2 => onlyKey NOT set (tiebreak required).
+        state.base.onlyKey = None;
+    });
+
+    // Rows: (col1, col2). Sorting by (col1, col2) ascending.
+    let rows = [(2i64, 9i64), (1, 5), (2, 1), (1, 8), (2, 4)];
+    for (c1, c2) in rows {
+        owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc.clone_in(mcx).unwrap(),
+                _ => unreachable!(),
+            };
+            let values = [Datum::ByVal(c1 as usize), Datum::ByVal(c2 as usize)];
+            let isnull = [false, false];
+            let mtup = backend_access_common_heaptuple::heap_form_minimal_tuple(
+                mcx, &tupdesc, &values, &isnull, 0,
+            )
+            .unwrap();
+            let stup = SortTuple {
+                tuple: Some(TupleBody::Minimal(mtup)),
+                datum1: Datum::ByVal(c1 as usize),
+                isnull1: false,
+                srctape: 0,
+            };
+            tuplesort_puttuple_common(state, stup, false, 0).unwrap();
+        });
+    }
+
+    owned.with_mut(|state| tuplesort_performsort(state).unwrap());
+
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    loop {
+        let got: Option<(i64, i64)> = owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let st = tuplesort_gettuple_common(state, true).unwrap()?;
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc,
+                _ => unreachable!(),
+            };
+            let cols = heap_deform_sort_minimal(mcx, &st, tupdesc).unwrap();
+            Some((cols[0].0.as_usize() as i64, cols[1].0.as_usize() as i64))
+        });
+        match got {
+            None => break,
+            Some(p) => out.push(p),
+        }
+    }
+    assert_eq!(out, vec![(1, 5), (1, 8), (2, 1), (2, 4), (2, 9)]);
+}

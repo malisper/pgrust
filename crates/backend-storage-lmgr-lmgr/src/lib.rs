@@ -1245,6 +1245,9 @@ pub fn init_seams() {
     // Session-level apply-transaction locks (parallel-apply deadlock detection).
     inward::lock_apply_transaction_for_session::set(LockApplyTransactionForSession);
     inward::unlock_apply_transaction_for_session::set(UnlockApplyTransactionForSession);
+    // Session-level shared-object locks (dbase_redo hot-standby DROP path).
+    inward::lock_shared_object_for_session::set(LockSharedObjectForSession);
+    inward::unlock_shared_object_for_session::set(UnlockSharedObjectForSession);
     // plancache's slice of lmgr.c (the -pc-seams crate this unit also owns):
     // bare-OID LockRelationOid/UnlockRelationOid for revalidation locking.
     inward_pc::lock_relation_oid::set(LockRelationOid);

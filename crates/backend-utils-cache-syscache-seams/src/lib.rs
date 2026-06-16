@@ -18,7 +18,11 @@ use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassFo
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
-use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
+use types_cache::syscache::{
+    ClassOwnerAcl, ForeignDataWrapperFormRow, ForeignServerFormRow, NamespaceOwnerAcl,
+    ObjectOwnerAcl, TypeOwnerAcl,
+};
+use types_acl::AclItem;
 use types_catalog::pg_aggregate::AggRow;
 use types_nodes::nodes::NodePtr;
 use types_partition::PartrelTupleData;
@@ -83,6 +87,31 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         relid: Oid,
     ) -> PgResult<Option<PartrelTupleData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(ENUMOID, ObjectIdGetDatum(enumval))` projected to an
+    /// [`EnumTupleData`] (the `Form_pg_enum` columns `enum.c` reads plus the
+    /// header `xmin`/`xmin_committed` `check_safe_enum_use` needs). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`. Consumed by `enum_out`/`enum_send`/`enum_cmp_internal`
+    /// (utils/adt/enum.c).
+    pub fn lookup_enum_by_oid(
+        enumval: Oid,
+    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ENUMTYPOIDNAME, ObjectIdGetDatum(enumtypoid),
+    /// CStringGetDatum(name))` projected to an [`EnumTupleData`]. `name` is the
+    /// label text (the caller has already truncated at the first NUL, as
+    /// C `CStringGetDatum` does). `Ok(None)` on a cache miss; the installer
+    /// owns the `ReleaseSysCache`. Consumed by `enum_in`/`enum_recv`
+    /// (utils/adt/enum.c).
+    pub fn lookup_enum_by_typoid_name(
+        enumtypoid: Oid,
+        name: &str,
+    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
 );
 
 seam_core::seam!(
@@ -230,6 +259,31 @@ seam_core::seam!(
 seam_core::seam!(
     /// `GetSysCacheOid1(NAMESPACENAME, Anum_pg_namespace_oid, nspname)`.
     pub fn get_namespace_oid_cached(nspname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACENAME, CStringGetDatum(name))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner` reads. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`), so the caller raises the schema's own
+    /// "does not exist" error. The installer owns the `ReleaseSysCache`; `Err`
+    /// carries OOM from the name copy.
+    pub fn namespace_owner_row_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        name: &str,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(schemaoid))` +
+    /// `GETSTRUCT(Form_pg_namespace)` projected to `(oid, nspowner, nspname)`,
+    /// the fields `schemacmds.c`'s `AlterSchemaOwner_oid` reads. `Ok(None)` on a
+    /// cache miss, so the caller raises the `elog(ERROR, "cache lookup failed
+    /// for schema %u")`. The installer owns the `ReleaseSysCache`.
+    pub fn namespace_owner_row_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        schemaoid: Oid,
+    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
 );
 
 seam_core::seam!(
@@ -2198,4 +2252,123 @@ seam_core::seam!(
         cache_id: i32,
         key: Oid,
     ) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
+);
+
+/* ---------------------------------------------------------------------------
+ * ACL/owner catalog-row projections (the aclmask/aclcheck family in
+ * catalog/aclchk.c — the F0 keystone for the aclchk check-half). Each reads
+ * the object's owner + `aclitem[]` ACL off SearchSysCache1/2 + GETSTRUCT +
+ * SysCacheGetAttr, returning the owner OID plus the decoded `&[AclItem]`
+ * (`None` = SQL-null column, where aclchk builds the hardwired `acldefault`).
+ * `Ok(None)` on a cache miss (`!HeapTupleIsValid`) — the caller decides
+ * between its is_missing fast path and its `ereport`/`elog`, as in C.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `pg_class_aclmask_ext`'s catalog read (aclchk.c):
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(table_oid))` then `GETSTRUCT`
+    /// (`relowner`/`relkind`/`relnamespace`) + `SysCacheGetAttr(RELOID, tuple,
+    /// Anum_pg_class_relacl)`. The `relacl` column is detoasted
+    /// (`DatumGetAclP`) and decoded to its `aclitem[]` items. `Ok(None)` on a
+    /// cache miss. `relnamespace` is surfaced so the caller can compute
+    /// `IsSystemClass` (catalog.c). Can `ereport(ERROR)` (OOM on the copy),
+    /// carried on `Err`.
+    pub fn pg_class_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        table_oid: Oid,
+    ) -> PgResult<Option<ClassOwnerAcl<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `pg_attribute_aclmask_ext`'s catalog read (aclchk.c):
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(table_oid),
+    /// Int16GetDatum(attnum))` then `SysCacheGetAttr(ATTNUM, attTuple,
+    /// Anum_pg_attribute_attacl)`. Returns the decoded column ACL items, the
+    /// `attisdropped` flag, and `Ok(None)` on a cache miss (no such
+    /// pg_attribute row). The inner `Option<PgVec>` is `None` for a SQL-null
+    /// `attacl` (the very common case — aclchk hard-wires "no privileges"
+    /// there). The relation owner is fetched separately by the caller via
+    /// [`pg_class_owner_acl`], matching the C two-lookup structure. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn pg_attribute_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        table_oid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<(bool, Option<PgVec<'mcx, AclItem>>)>>
+);
+
+seam_core::seam!(
+    /// `pg_namespace_aclmask_ext`'s catalog read (aclchk.c):
+    /// `SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(nsp_oid))` then
+    /// `GETSTRUCT(nspowner)` + `SysCacheGetAttr(NAMESPACEOID, tuple,
+    /// Anum_pg_namespace_nspacl)`. `Ok(None)` on a cache miss. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn pg_namespace_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        nsp_oid: Oid,
+    ) -> PgResult<Option<NamespaceOwnerAcl<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `pg_type_aclmask_ext`'s catalog read (aclchk.c):
+    /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid))` then `GETSTRUCT`
+    /// (`typowner`/`typacl`), resolving the "true array type -> consult element
+    /// type" (`IsTrueArrayType`, via `typelem`/`typsubscript`) and "multirange
+    /// -> consult range type" (`typtype == TYPTYPE_MULTIRANGE`, via
+    /// `get_multirange_range`) redirects inside the projection so the caller
+    /// gets the *effective* type's `(owner, acl)`. A cache miss at any step is
+    /// `Ok(None)` (the caller distinguishes its is_missing path from `elog`).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn pg_type_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        type_oid: Oid,
+    ) -> PgResult<Option<TypeOwnerAcl<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `object_aclmask_ext`'s generic catalog read (aclchk.c):
+    /// `SearchSysCache1(cacheid, ObjectIdGetDatum(objectid))` then
+    /// `SysCacheGetAttrNotNull(cacheid, tuple, owner_attnum)` (the owner) +
+    /// `SysCacheGetAttr(cacheid, tuple, acl_attnum)` (the `aclitem[]` ACL,
+    /// decoded). The caller resolves `cacheid` (`get_object_catcache_oid`),
+    /// `owner_attnum` (`get_object_attnum_owner`) and `acl_attnum`
+    /// (`get_object_attnum_acl`) for its `classid` and passes them in, keeping
+    /// this a class-agnostic projection. `Ok(None)` on a cache miss. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn object_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        cacheid: i32,
+        objectid: Oid,
+        owner_attnum: i16,
+        acl_attnum: i16,
+    ) -> PgResult<Option<ObjectOwnerAcl<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `pg_parameter_aclmask`'s catalog read (aclchk.c):
+    /// `SearchSysCache1(PARAMETERACLNAME, PointerGetDatum(partext))` then
+    /// `SysCacheGetAttr(PARAMETERACLNAME, tuple, Anum_pg_parameter_acl_paracl)`.
+    /// `parname` is the already-canonicalized parameter name (the caller runs
+    /// `convert_GUC_name_for_parameter_acl` + `cstring_to_text`). Returns the
+    /// decoded `paracl` items, with the outer `Option` distinguishing a cache
+    /// miss (`None` -> the C `ACL_NO_RIGHTS` no-entry case) from a present row
+    /// whose `paracl` may itself be SQL-null (`Some(None)` -> build default).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn parameter_acl_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        parname: &str,
+    ) -> PgResult<Option<Option<PgVec<'mcx, AclItem>>>>
+);
+
+seam_core::seam!(
+    /// `pg_parameter_acl_aclmask`'s catalog read (aclchk.c):
+    /// `SearchSysCache1(PARAMETERACLOID, ObjectIdGetDatum(acl_oid))` then
+    /// `SysCacheGetAttr(PARAMETERACLOID, tuple, Anum_pg_parameter_acl_paracl)`.
+    /// `Ok(None)` on a cache miss (the caller raises "parameter ACL with OID %u
+    /// does not exist"); `Some(None)` for a present row with a SQL-null
+    /// `paracl` (build default). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn parameter_acl_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        acl_oid: Oid,
+    ) -> PgResult<Option<Option<PgVec<'mcx, AclItem>>>>
 );

@@ -1,0 +1,23 @@
+[package]
+name = "backend-utils-adt-jsonb-op"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_jsonb_op"
+path = "src/lib.rs"
+
+[dependencies]
+types-error = { path = "../types-error" }
+types-jsonb = { path = "../types-jsonb" }
+backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
+backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
+
+[dev-dependencies]
+mcx = { path = "../mcx" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }
+backend-utils-adt-tsvector-ext-seams = { path = "../backend-utils-adt-tsvector-ext-seams" }

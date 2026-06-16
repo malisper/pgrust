@@ -164,3 +164,12 @@ seam_core::seam!(
         relcache_init_file_inval: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `InHotStandby` (xlogutils.h: `standbyState >= STANDBY_SNAPSHOT_PENDING`)
+    /// — true when the startup process is replaying WAL in hot-standby mode.
+    /// `dbase_redo`'s `XLOG_DBASE_DROP` path consults it before taking the
+    /// session lock + resolving recovery conflicts. Owned by the standby
+    /// machinery.
+    pub fn in_hot_standby() -> bool
+);

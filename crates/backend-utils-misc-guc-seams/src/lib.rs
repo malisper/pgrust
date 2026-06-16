@@ -191,6 +191,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `set_config_option("search_path", value, PGC_USERSET, PGC_S_SESSION,
+    /// GUC_ACTION_SAVE, true, 0, false)` (schemacmds.c `CreateSchemaCommand`):
+    /// prepend the new schema to the session search_path for exactly the
+    /// duration of the CREATE SCHEMA (guc.c rolls it back via `AtEOXact_GUC`).
+    /// The fixed call-site arguments (USERSET/SESSION/ACTION_SAVE, changeVal,
+    /// elevel 0, is_reload false) are baked into the seam. `Err` carries the
+    /// option-set `ereport(ERROR)`.
+    pub fn set_search_path_save(value: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `cluster_name` (guc_tables.c GUC string): the configured cluster name,
     /// `""` when unset. Backend-local GUC state.
     pub fn cluster_name() -> String
