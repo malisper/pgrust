@@ -7,7 +7,7 @@
 //! and its subtransactions' in-memory change queues
 //! (`ReorderBufferIterTXNInit` / `Next` / `Finish`), the per-change action
 //! dispatch (`ReorderBufferProcessTXN`) including the now-landed historic
-//! tuplecid activation (`set_active_tuplecid_hash`), the apply callbacks
+//! snapshot setup (`SetupHistoricSnapshot`, snapmgr-owned), the apply callbacks
 //! (`ReorderBufferApplyChange` / `ApplyTruncate` / `ApplyMessage`), the local
 //! execution of accumulated invalidations
 //! (`ReorderBufferExecuteInvalidations`), the commit-time cleanup
@@ -349,9 +349,10 @@ impl ReorderBuffer {
     /// order.
     ///
     /// The historic tuplecid hash this builds is what activates the now-landed
-    /// `ResolveCminCmaxDuringDecoding` path:
-    /// [`crate::set_active_tuplecid_hash`] installs `txn->tuplecid_hash` as the
-    /// active `(relfilelocator, ctid) -> (cmin, cmax)` lookup, exactly as the C
+    /// `ResolveCminCmaxDuringDecoding` path: `SetupHistoricSnapshot` (snapmgr,
+    /// via [`ReorderBuffer::setup_historic_snapshot`]) installs both the
+    /// snapshot and `txn->tuplecid_hash` as the active `(relfilelocator, ctid)
+    /// -> (cmin, cmax)` lookup, exactly as the C
     /// `SetupHistoricSnapshot(snapshot_now, txn->tuplecid_hash)` does.
     ///
     /// The output-plugin callbacks, the transaction machinery, and the decoded
@@ -368,13 +369,10 @@ impl ReorderBuffer {
         // build data to be able to lookup the CommandIds of catalog tuples.
         self.build_tuple_cid_hash(txn_xid);
 
-        // setup the initial snapshot: activate the decoded tuplecid hash so the
-        // historic-MVCC resolver can see it (SetupHistoricSnapshot side that
-        // this crate owns). The snapshot value itself is handed to snapmgr's
-        // SetupHistoricSnapshot, whose owned-value model is not yet built.
-        let tuplecid_hash = self.with_txn_pub(txn_xid, |t| t.tuplecid_hash.clone());
-        crate::set_active_tuplecid_hash(tuplecid_hash);
-        let _ = (&snapshot_now, command_id, commit_lsn, streaming);
+        // setup the initial snapshot: hand the decoded snapshot and the built
+        // tuplecid hash to snapmgr's SetupHistoricSnapshot so the historic-MVCC
+        // resolver can see them (snapmgr owns the active `tuplecid_data`).
+        let _ = (command_id, commit_lsn, streaming);
         self.setup_historic_snapshot(&snapshot_now, txn_xid);
 
         // The transaction machinery (BeginInternalSubTransaction /

@@ -230,3 +230,29 @@ seam_core::seam!(
         snap_level: i32,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SetupHistoricSnapshot(historic_snapshot, tuplecids)` (snapmgr.c:1666):
+    /// install a historic (logical-decoding) catalog snapshot plus its
+    /// `(relfilelocator, ctid) -> (cmin, cmax)` lookup map. The map is the
+    /// owned value behind C's `static HTAB *tuplecid_data` (`None` == the C
+    /// `NULL`); reorderbuffer builds it via `ReorderBufferBuildTupleCidHash`
+    /// and hands it across. Cannot `ereport`.
+    pub fn setup_historic_snapshot(
+        historic_snapshot: types_snapshot::SnapshotData,
+        tuplecids: Option<types_logical::TupleCidHash>,
+    )
+);
+
+seam_core::seam!(
+    /// `TeardownHistoricSnapshot(is_error)` (snapmgr.c:1682): clear the
+    /// historic snapshot and its tuplecid map. Cannot `ereport`.
+    pub fn teardown_historic_snapshot(is_error: bool)
+);
+
+seam_core::seam!(
+    /// `HistoricSnapshotGetTupleCids()` (snapmgr.c:1695): the active
+    /// `(relfilelocator, ctid) -> (cmin, cmax)` map (`None` == C `NULL`),
+    /// read by `ResolveCminCmaxDuringDecoding`. Cannot `ereport`.
+    pub fn historic_snapshot_get_tuple_cids() -> Option<types_logical::TupleCidHash>
+);

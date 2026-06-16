@@ -26,6 +26,21 @@ use types_storage::LWLockMode;
 use crate::proc_lifecycle;
 use crate::proc_shmem;
 
+/// `MyProc->recoveryConflictPending = value` (proc.c / postgres.c) — set this
+/// backend's hot-standby recovery-conflict-pending flag.
+/// `ProcessRecoveryConflictInterrupt` (tcop/postgres.c) sets it when a
+/// buffer-pin conflict forces error handling.
+pub fn set_my_proc_recovery_conflict_pending(value: bool) {
+    proc_shmem::with_my_proc(|p| p.recoveryConflictPending = value);
+}
+
+/// `MyProc->recoveryConflictPending` (proc.c / postgres.c) — read this
+/// backend's recovery-conflict-pending flag. `errdetail_abort`
+/// (tcop/postgres.c) reads it to phrase the abort reason.
+pub fn my_proc_recovery_conflict_pending() -> bool {
+    proc_shmem::with_my_proc_ref(|p| p.recoveryConflictPending)
+}
+
 /// `LockHashPartitionLockByProc(proc)` (`storage/lock.h`): the
 /// `MainLWLockArray` offset of the lock-hash partition lock that guards
 /// `proc`'s lock-group fields. C:

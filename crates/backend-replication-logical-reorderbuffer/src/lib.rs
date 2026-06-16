@@ -55,8 +55,8 @@ mod registry;
 mod replay;
 mod snapshot;
 mod toast;
-pub use registry::{init_seams, set_active_tuplecid_hash, with_buffer, with_buffer_opt};
-pub use snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey};
+pub use registry::{init_seams, with_buffer, with_buffer_opt};
+pub use snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
 pub use toast::ReorderBufferToastEnt;
 
 /// `MAX_DISTR_INVAL_MSG_PER_TXN` — `(8 * 1024 * 1024) /
@@ -284,7 +284,7 @@ pub struct ReorderBufferTXN {
     /// `HTAB *tuplecid_hash` — `(relfilelocator, ctid) -> (cmin, cmax)` lookup
     /// built lazily by `ReorderBufferBuildTupleCidHash` for catalog-modifying
     /// txns; `None` == C NULL.
-    pub tuplecid_hash: Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>,
+    pub tuplecid_hash: Option<crate::snapshot::TupleCidHash>,
     /// `HTAB *toast_hash` — `chunk_id -> ReorderBufferToastEnt` reassembly hash
     /// built lazily by `ReorderBufferToastAppendChunk`; `None` == C NULL.
     pub toast_hash: Option<HashMap<types_core::Oid, crate::toast::ReorderBufferToastEnt>>,
@@ -1271,24 +1271,27 @@ impl ReorderBuffer {
         panic!("ReorderBuffer update_progress_txn callback: logical.c dispatch not yet modeled");
     }
 
-    /// `SetupHistoricSnapshot(snapshot_now, txn->tuplecid_hash)` — the snapmgr
-    /// half. The tuplecid-hash activation is owned here (already performed via
-    /// [`set_active_tuplecid_hash`] before this call); the snapshot value is
-    /// handed to snapmgr, whose owned-value `SetupHistoricSnapshot` signature is
-    /// not yet built (it still takes the C `Snapshot`/`*mut HTAB` ABI).
-    pub(crate) fn setup_historic_snapshot(
-        &mut self,
-        _snapshot: &SnapshotData,
-        _xid: TransactionId,
-    ) {
-        panic!(
-            "SetupHistoricSnapshot: snapmgr owned-value historic-snapshot \
-             signature not yet modeled (currently Snapshot/*mut HTAB ABI)"
-        );
+    /// `SetupHistoricSnapshot(snapshot_now, txn->tuplecid_hash)` — install the
+    /// historic snapshot and the txn's `(relfilelocator, ctid) -> (cmin, cmax)`
+    /// tuplecid map in snapmgr (the owner of the active `tuplecid_data`), via
+    /// the `setup_historic_snapshot` seam.
+    pub(crate) fn setup_historic_snapshot(&mut self, snapshot: &SnapshotData, xid: TransactionId) {
+        let tuplecids = self
+            .by_txn_get(xid)
+            .and_then(|t| t.tuplecid_hash.clone());
+        backend_utils_time_snapmgr_seams::setup_historic_snapshot::call(snapshot.clone(), tuplecids);
     }
 
     /// The INTERNAL_SNAPSHOT change branch of `ReorderBufferProcessTXN`
     /// (teardown/copy/setup of the historic snapshot).
+    ///
+    /// The snapmgr historic-snapshot ABI (`TeardownHistoricSnapshot` /
+    /// `SetupHistoricSnapshot`) is now modeled and reachable via the seams; the
+    /// remaining blocker is the change-replay local `snapshot_now`: this branch
+    /// reassigns it (`ReorderBufferFreeSnap` / `ReorderBufferCopySnap` of
+    /// `change->data.snapshot`) and the enclosing `process_txn` must thread that
+    /// mutable local through the change loop — part of the change-replay family
+    /// (#126 F2/F5), not this keystone. Seam-panic until that lands.
     pub(crate) fn handle_internal_snapshot(
         &mut self,
         _xid: TransactionId,
@@ -1296,12 +1299,18 @@ impl ReorderBuffer {
         _command_id: CommandId,
     ) {
         panic!(
-            "ReorderBuffer INTERNAL_SNAPSHOT replay: historic-snapshot \
-             teardown/setup ABI not yet modeled"
+            "ReorderBuffer INTERNAL_SNAPSHOT replay: change-replay snapshot_now \
+             threading (FreeSnap/CopySnap of change snapshot) not yet modeled \
+             (snapmgr Teardown/SetupHistoricSnapshot ABI is available)"
         );
     }
 
     /// The INTERNAL_COMMAND_ID change branch of `ReorderBufferProcessTXN`.
+    ///
+    /// As with INTERNAL_SNAPSHOT, the snapmgr Teardown/SetupHistoricSnapshot ABI
+    /// is now available; this branch still needs the change-replay local
+    /// `snapshot_now`/`command_id` threading (bump `command_id`, `CopySnap`,
+    /// set `curcid`) which lands with the change-replay family. Seam-panic.
     pub(crate) fn handle_internal_command_id(
         &mut self,
         _xid: TransactionId,
@@ -1309,8 +1318,9 @@ impl ReorderBuffer {
         _command_id: CommandId,
     ) {
         panic!(
-            "ReorderBuffer INTERNAL_COMMAND_ID replay: historic-snapshot \
-             teardown/setup ABI not yet modeled"
+            "ReorderBuffer INTERNAL_COMMAND_ID replay: change-replay \
+             snapshot_now/command_id threading not yet modeled (snapmgr \
+             Teardown/SetupHistoricSnapshot ABI is available)"
         );
     }
 

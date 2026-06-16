@@ -13,4 +13,7 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-rel = { path = "../types-rel" }
 types-cache = { path = "../types-cache" }
+types-fmgr = { path = "../types-fmgr" }
+types-nodes = { path = "../types-nodes" }
+types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }

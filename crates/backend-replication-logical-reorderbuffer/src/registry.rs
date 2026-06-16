@@ -12,8 +12,6 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use std::collections::HashMap;
-
 use types_core::primitive::{ForkNumber, TransactionId, XLogRecPtr};
 use types_core::xact::{CommandId, InvalidCommandId};
 use types_error::PgResult;
@@ -26,7 +24,7 @@ use types_storage::RelFileLocator;
 use types_tuple::heaptuple::HeapTupleData;
 use types_tuple::ItemPointerData;
 
-use crate::snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey};
+use crate::snapshot::ReorderBufferTupleCidKey;
 use crate::ReorderBuffer;
 
 ::std::thread_local! {
@@ -413,32 +411,23 @@ fn seam_invalidate(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecP
 }
 
 // ---------------------------------------------------------------------------
-// Active tuplecid hash (the `static HTAB *tuplecid_data` that
-// SetupHistoricSnapshot points at, owned here because reorderbuffer builds and
-// owns the per-txn `tuplecid_hash`). ReorderBufferProcessTXN (change-replay
-// family) sets this from `txn->tuplecid_hash` after building it; until that
-// family lands the active hash stays `None`, which is exactly the C
+// Active tuplecid hash.
+//
+// In C the `(relfilelocator, ctid) -> (cmin, cmax)` map is owned by snapmgr's
+// file-scope `static HTAB *tuplecid_data`: ReorderBufferProcessTXN builds the
+// per-txn `tuplecid_hash` and hands it to `SetupHistoricSnapshot`, then the
+// resolver fetches it back with `HistoricSnapshotGetTupleCids()`. We mirror
+// that exactly — snapmgr owns the active map (value-typed) and we go through
+// its `historic_snapshot_get_tuple_cids` seam. A `None` here is the C
 // `tuplecid_data == NULL` path that makes ResolveCminCmaxDuringDecoding return
 // false ("CID is from the future command").
 // ---------------------------------------------------------------------------
 
-::std::thread_local! {
-    static ACTIVE_TUPLECID: RefCell<Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>> =
-        const { RefCell::new(None) };
-}
-
-/// `SetupHistoricSnapshot(snapshot, tuplecid_hash)` side: make `hash` the
-/// active `(relfilelocator, ctid) -> (cmin, cmax)` lookup. Called by
-/// ReorderBufferProcessTXN once the change-replay family lands.
-pub fn set_active_tuplecid_hash(
-    hash: Option<HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>>,
-) {
-    ACTIVE_TUPLECID.with(|a| *a.borrow_mut() = hash);
-}
-
 /// `ResolveCminCmaxDuringDecoding(tuplecid_data, snapshot, htup, buffer, &cmin,
 /// &cmax)` — look up the actual cmin/cmax of a tuple seen by a historic
-/// (logical-decoding) MVCC snapshot.
+/// (logical-decoding) MVCC snapshot. The C caller passes
+/// `HistoricSnapshotGetTupleCids()`; here the resolver fetches the active map
+/// from snapmgr (its owner) via the same seam.
 fn seam_resolve_cmin_cmax_during_decoding(
     snapshot: SnapshotData,
     htup: HeapTupleData<'_>,
@@ -450,14 +439,17 @@ fn seam_resolve_cmin_cmax_during_decoding(
     // streaming in-progress transactions we may run into tuples with the CID
     // before actually decoding them (e.g. INSERT followed by TRUNCATE). So we
     // assume the CID is from the future command.
-    let active = ACTIVE_TUPLECID.with(|a| a.borrow().is_some());
-    if !active {
-        return Ok(ResolveCminCmaxResult {
-            resolved: false,
-            cmin,
-            cmax,
-        });
-    }
+    let tuplecid_data = backend_utils_time_snapmgr_seams::historic_snapshot_get_tuple_cids::call();
+    let tuplecid_data = match tuplecid_data {
+        Some(h) => h,
+        None => {
+            return Ok(ResolveCminCmaxResult {
+                resolved: false,
+                cmin,
+                cmax,
+            });
+        }
+    };
 
     // get relfilelocator from the buffer; no convenient way other than that.
     let (rlocator, forkno, blockno) =
@@ -474,7 +466,7 @@ fn seam_resolve_cmin_cmax_during_decoding(
 
     let mut updated_mapping = false;
     loop {
-        let found = ACTIVE_TUPLECID.with(|a| a.borrow().as_ref().and_then(|h| h.get(&key).copied()));
+        let found = tuplecid_data.get(&key).copied();
 
         match found {
             Some(ent) => {
@@ -515,6 +507,13 @@ fn seam_resolve_cmin_cmax_during_decoding(
 /// with the logical-rewrite-mapping family. Until then a rewritten catalog
 /// relation during decoding hits this loud panic (mirror-PG-and-panic) rather
 /// than silently mis-resolving a CID.
+///
+/// NOTE: when this lands it must mutate snapmgr's owned `tuplecid_data`
+/// (C `HASH_ENTER`s into it), so it needs to take `&mut TupleCidHash` and
+/// `seam_resolve_cmin_cmax_during_decoding` must re-fetch / write the map back
+/// through a mutating snapmgr seam rather than reading a clone (the current
+/// read-only fetch is faithful only because every non-panicking path performs a
+/// single lookup with no mapping update).
 fn update_logical_mappings(_relid: types_core::Oid, _snapshot: &SnapshotData) -> PgResult<()> {
     panic!(
         "UpdateLogicalMappings: logical-rewrite mapping-file replay not yet \

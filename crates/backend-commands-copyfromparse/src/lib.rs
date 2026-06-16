@@ -31,9 +31,10 @@
 use backend_utils_error::ereport;
 use types_copy::{
     AttrValue, CopyHeaderChoice, CopyLogVerbosityChoice, CopyOnErrorChoice, CopyParseState,
-    CopySource, EolType, ExprContextHandle, FieldRange, FmgrInfoSlot, BINARY_SIGNATURE,
-    INPUT_BUF_SIZE, MAX_CONVERSION_INPUT_LENGTH, RAW_BUF_SIZE,
+    CopySource, EolType, FieldRange, BINARY_SIGNATURE, INPUT_BUF_SIZE, MAX_CONVERSION_INPUT_LENGTH,
+    RAW_BUF_SIZE,
 };
+#[allow(unused_imports)]
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::{
@@ -116,7 +117,7 @@ fn input_byte(cstate: &CopyParseState, i: usize) -> u8 {
 /// the source to `COPY_FRONTEND`, allocate `fe_msgbuf`, and flush.
 pub fn ReceiveCopyBegin(cstate: &mut CopyParseState) -> PgResult<()> {
     // int natts = list_length(cstate->attnumlist);
-    let natts = s::list_length::call(cstate.attnumlist)?;
+    let natts = cstate.attnumlist.len() as i32;
     // int16 format = (cstate->opts.binary ? 1 : 0);
     let binary = cstate.opts.binary;
     s::receive_copy_begin::call(cstate, natts, binary)
@@ -495,7 +496,7 @@ fn NextCopyFromRawFieldsInternal(cstate: &mut CopyParseState, is_csv: bool) -> P
                 CopyReadAttributesText(cstate)?
             };
 
-            let attlen = s::list_length::call(cstate.attnumlist)?;
+            let attlen = cstate.attnumlist.len() as i32;
             if fldct != attlen {
                 return ereport(ERROR)
                     .errcode(ERRCODE_BAD_COPY_FILE_FORMAT)
@@ -506,7 +507,7 @@ fn NextCopyFromRawFieldsInternal(cstate: &mut CopyParseState, is_csv: bool) -> P
                     .map(|()| None);
             }
 
-            let attnums = s::attnumlist_ints::call(cstate.attnumlist)?;
+            let attnums: Vec<i32> = cstate.attnumlist.iter().map(|&a| a as i32).collect();
             let mut fldnum = 0i32;
             for &attnum in &attnums {
                 let attr = s::attr_info::call(&cstate.rel, attnum - 1)?;
@@ -572,10 +573,7 @@ fn NextCopyFromRawFieldsInternal(cstate: &mut CopyParseState, is_csv: bool) -> P
 /// `NextCopyFrom(cstate, econtext, values, nulls)` (copyfromparse.c:870) — read
 /// the next tuple from the source. Returns the per-physical-attribute
 /// `(Datum, isnull)` pairs on a successful read, or `None` if no more tuples.
-pub fn NextCopyFrom(
-    cstate: &mut CopyParseState,
-    econtext: ExprContextHandle,
-) -> PgResult<Option<Vec<AttrValue>>> {
+pub fn NextCopyFrom(cstate: &mut CopyParseState) -> PgResult<Option<Vec<AttrValue>>> {
     // tupDesc = RelationGetDescr(cstate->rel); num_phys_attrs = tupDesc->natts;
     let num_phys_attrs = s::relation_natts::call(&cstate.rel)?;
     let num_defaults = cstate.num_defaults;
@@ -594,7 +592,7 @@ pub fn NextCopyFrom(
     }
 
     /* Get one row from source */
-    if !copy_from_one_row(cstate, econtext, &mut values)? {
+    if !copy_from_one_row(cstate, &mut values)? {
         return Ok(None);
     }
 
@@ -602,53 +600,43 @@ pub fn NextCopyFrom(
      * provided by the input data. */
     for i in 0..num_defaults as usize {
         let m = cstate.defmap[i] as usize;
-        let defexpr = s::defexpr::call(cstate, m as i32)?.expect("defmap entry has a defexpr");
-        values[m] = s::exec_eval_expr::call(defexpr, econtext)?;
+        debug_assert!(cstate.defexprs[m].is_some(), "defmap entry has a defexpr");
+        // values[m] = ExecEvalExpr(defexprs[m], econtext, &nulls[m]);
+        values[m] = s::exec_eval_expr::call(cstate, m as i32)?;
     }
 
     Ok(Some(values))
 }
 
 /// Dispatch `cstate->routine->CopyFromOneRow` to the in-crate format workhorse.
-fn copy_from_one_row(
-    cstate: &mut CopyParseState,
-    econtext: ExprContextHandle,
-    values: &mut [AttrValue],
-) -> PgResult<bool> {
+fn copy_from_one_row(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
     if cstate.opts.binary {
         CopyFromBinaryOneRow(cstate, values)
     } else {
-        CopyFromTextLikeOneRow(cstate, econtext, values, cstate.opts.csv_mode)
+        CopyFromTextLikeOneRow(cstate, values, cstate.opts.csv_mode)
     }
 }
 
 /// `CopyFromTextOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:915).
-pub fn CopyFromTextOneRow(
-    cstate: &mut CopyParseState,
-    econtext: ExprContextHandle,
-    values: &mut [AttrValue],
-) -> PgResult<bool> {
-    CopyFromTextLikeOneRow(cstate, econtext, values, false)
+pub fn CopyFromTextOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+    CopyFromTextLikeOneRow(cstate, values, false)
 }
 
 /// `CopyFromCSVOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:923).
-pub fn CopyFromCSVOneRow(
-    cstate: &mut CopyParseState,
-    econtext: ExprContextHandle,
-    values: &mut [AttrValue],
-) -> PgResult<bool> {
-    CopyFromTextLikeOneRow(cstate, econtext, values, true)
+pub fn CopyFromCSVOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+    CopyFromTextLikeOneRow(cstate, values, true)
 }
 
 /// `CopyFromTextLikeOneRow(cstate, econtext, values, nulls, is_csv)`
-/// (copyfromparse.c:936) — the workhorse for text and CSV per-row reads.
+/// (copyfromparse.c:936) — the workhorse for text and CSV per-row reads. The C
+/// `econtext` argument is read from `cstate.econtext` by the `exec_eval_expr`
+/// seam.
 fn CopyFromTextLikeOneRow(
     cstate: &mut CopyParseState,
-    econtext: ExprContextHandle,
     values: &mut [AttrValue],
     is_csv: bool,
 ) -> PgResult<bool> {
-    let attr_count = s::list_length::call(cstate.attnumlist)?;
+    let attr_count = cstate.attnumlist.len() as i32;
 
     /* read raw fields in the next line */
     let fldct = match NextCopyFromRawFieldsInternal(cstate, is_csv)? {
@@ -668,7 +656,7 @@ fn CopyFromTextLikeOneRow(
     let mut fieldno = 0i32;
 
     /* Loop to read the user attributes on the line. */
-    let attnums = s::attnumlist_ints::call(cstate.attnumlist)?;
+    let attnums: Vec<i32> = cstate.attnumlist.iter().map(|&a| a as i32).collect();
     for &attnum in &attnums {
         let m = (attnum - 1) as usize;
         let att = s::attr_info::call(&cstate.rel, attnum - 1)?;
@@ -714,18 +702,13 @@ fn CopyFromTextLikeOneRow(
 
         if cstate.defaults[m] {
             // values[m] = ExecEvalExpr(defexprs[m], econtext, &nulls[m]);
-            let defexpr = s::defexpr::call(cstate, m as i32)?.expect("defaults[m] => defexpr set");
-            values[m] = s::exec_eval_expr::call(defexpr, econtext)?;
+            debug_assert!(cstate.defexprs[m].is_some(), "defaults[m] => defexpr set");
+            values[m] = s::exec_eval_expr::call(cstate, m as i32)?;
         } else {
-            let flinfo = s::in_function_slot::call(cstate, m as i32)?;
-            let typioparam = s::typioparam::call(cstate, m as i32)?;
-            let call_result = s::input_function_call_safe::call(
-                flinfo,
-                string.as_deref(),
-                typioparam,
-                att.atttypmod,
-                cstate.escontext,
-            )?;
+            // values[m] = InputFunctionCallSafe(&in_functions[m], string,
+            //                 typioparams[m], att->atttypmod, escontext, ...);
+            let call_result =
+                s::input_function_call_safe::call(cstate, m as i32, string.as_deref(), att.atttypmod)?;
             match call_result {
                 Some(datum) => {
                     values[m].datum = datum;
@@ -765,7 +748,7 @@ fn CopyFromTextLikeOneRow(
 
 /// `CopyFromBinaryOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:1085).
 pub fn CopyFromBinaryOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
-    let attr_count = s::list_length::call(cstate.attnumlist)?;
+    let attr_count = cstate.attnumlist.len() as i32;
 
     cstate.cur_lineno += 1;
 
@@ -799,15 +782,13 @@ pub fn CopyFromBinaryOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue
             .map(|()| false);
     }
 
-    let attnums = s::attnumlist_ints::call(cstate.attnumlist)?;
+    let attnums: Vec<i32> = cstate.attnumlist.iter().map(|&a| a as i32).collect();
     for &attnum in &attnums {
         let m = (attnum - 1) as usize;
         let att = s::attr_info::call(&cstate.rel, attnum - 1)?;
 
         cstate.cur_attname = Some(att.attname.clone());
-        let flinfo = s::in_function_slot::call(cstate, m as i32)?;
-        let typioparam = s::typioparam::call(cstate, m as i32)?;
-        let (datum, isnull) = CopyReadBinaryAttribute(cstate, flinfo, typioparam, att.atttypmod)?;
+        let (datum, isnull) = CopyReadBinaryAttribute(cstate, m as i32, att.atttypmod)?;
         values[m] = AttrValue { datum, isnull };
         cstate.cur_attname = None;
     }
@@ -1530,7 +1511,7 @@ fn matched_default_marker(
         None => return Ok(false),
         Some(dp) => dp,
     };
-    let attlen = s::list_length::call(cstate.attnumlist)?;
+    let attlen = cstate.attnumlist.len() as i32;
     Ok(fieldno < attlen
         && input_len == cstate.opts.default_print_len as usize
         && cstate.line_buf[start_ptr..start_ptr + input_len] == *dp.as_bytes())
@@ -1544,8 +1525,8 @@ fn handle_default_marker(
     func: &'static str,
 ) -> PgResult<()> {
     // int m = list_nth_int(cstate->attnumlist, fieldno) - 1;
-    let m = s::list_nth_int::call(cstate.attnumlist, fieldno)? - 1;
-    if s::defexpr::call(cstate, m)?.is_some() {
+    let m = cstate.attnumlist[fieldno as usize] as i32 - 1;
+    if cstate.defexprs[m as usize].is_some() {
         cstate.defaults[m as usize] = true;
         Ok(())
     } else {
@@ -1562,8 +1543,7 @@ fn handle_default_marker(
 /// (copyfromparse.c:2012) — read a binary attribute. Returns `(datum, isnull)`.
 fn CopyReadBinaryAttribute(
     cstate: &mut CopyParseState,
-    flinfo: FmgrInfoSlot,
-    typioparam: Oid,
+    m: i32,
     typmod: i32,
 ) -> PgResult<(Datum, bool)> {
     let mut fld_size = 0i32;
@@ -1576,7 +1556,7 @@ fn CopyReadBinaryAttribute(
     }
     // if (fld_size == -1) { *isnull = true; return ReceiveFunctionCall(flinfo, NULL, ...); }
     if fld_size == -1 {
-        let datum = s::receive_function_call::call(flinfo, None, typioparam, typmod)?;
+        let datum = s::receive_function_call::call(cstate, m, None, typmod)?;
         return Ok((datum, true));
     }
     if fld_size < 0 {
@@ -1604,7 +1584,7 @@ fn CopyReadBinaryAttribute(
     cstate.attribute_cursor = 0;
 
     /* Call the column type's binary input converter */
-    let datum = s::receive_function_call::call(flinfo, Some(&buf), typioparam, typmod)?;
+    let datum = s::receive_function_call::call(cstate, m, Some(&buf), typmod)?;
 
     /* Trouble if it didn't eat the whole buffer */
     if cstate.attribute_cursor != fld_size {

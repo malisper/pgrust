@@ -1,0 +1,67 @@
+[package]
+name = "backend-tcop-postgres"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_tcop_postgres"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-dest = { path = "../types-dest" }
+types-guc = { path = "../types-guc" }
+types-timeout = { path = "../types-timeout" }
+types-storage = { path = "../types-storage" }
+types-pgstat = { path = "../types-pgstat" }
+types-stringinfo = { path = "../types-stringinfo" }
+types-startup = { path = "../types-startup" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
+
+# Ported owner crates of cross-unit callees (acyclic: each depends only on
+# `backend-tcop-postgres-seams`, never on this owner crate).
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
+backend-replication-logical-applyparallelworker = { path = "../backend-replication-logical-applyparallelworker" }
+backend-commands-async = { path = "../backend-commands-async" }
+backend-storage-ipc-sinval = { path = "../backend-storage-ipc-sinval" }
+backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
+backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
+backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+pg-prng = { path = "../pg-prng" }
+
+# Seam crates (leaf; never create cycles).
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-main-main-seams = { path = "../backend-main-main-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
