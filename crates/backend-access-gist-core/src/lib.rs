@@ -35,8 +35,9 @@ pub mod gist_scan;
 pub mod gist_vacuum;
 pub mod gistsplit;
 pub mod gistutil;
+pub mod gistxlog;
 
-pub use gist_insert::{gistSplit, gistdoinsert, gistplacetopage, gistprunepage};
+pub use gist_insert::{gistSplit, gistdoinsert, gistinsert, gistplacetopage, gistprunepage};
 pub use gist_page::{
     gist_page_flags, gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage,
     gistfillbuffer, gistinitpage, set_gist_page_flags, set_gist_page_rightlink, GISTInitBuffer,
@@ -71,10 +72,45 @@ pub use gistutil::{
 /// insert / build layers; the `backend-access-gist-core-seams` WAL rmgr
 /// callbacks are installed by the gistxlog layer (F7) in a later stage.
 pub fn init_seams() {
+    // gist.c gistinsert — the live single-tuple `aminsert` AM callback. The
+    // GiST handler's `gistinsert_am` adapter dispatches through this seam; the
+    // whole insert spine (initGISTstate / gistFormTuple / gistdoinsert) is
+    // ported in this crate, so install the real body.
+    backend_access_gist_am_seams::gistinsert::set(
+        |mcx, r, values, isnull, ht_ctid, heap_rel, check_unique, index_unchanged, index_info| {
+            gistinsert(
+                mcx,
+                r,
+                values,
+                isnull,
+                ht_ctid,
+                heap_rel,
+                check_unique,
+                index_unchanged,
+                index_info,
+            )
+        },
+    );
+
     backend_access_gist_am_seams::gistbulkdelete::set(
         |mcx, info, stats, callback_state| gistbulkdelete(mcx, info, stats, callback_state),
     );
     backend_access_gist_am_seams::gistvacuumcleanup::set(
         |mcx, info, stats| gistvacuumcleanup(mcx, info, stats),
     );
+
+    // gistxlog.c rmgr-table callbacks (gist_redo / gist_xlog_startup /
+    // gist_xlog_cleanup / gist_mask) + the GiST WAL-write seams the insert
+    // spine reaches (gist_xlog_split / gist_xlog_update / gist_xlog_delete /
+    // gist_xlog_page_delete / gist_xlog_page_reuse / gist_get_fake_lsn).
+    backend_access_gist_core_seams::gist_redo::set(gistxlog::gist_redo);
+    backend_access_gist_core_seams::gist_xlog_startup::set(gistxlog::gist_xlog_startup);
+    backend_access_gist_core_seams::gist_xlog_cleanup::set(gistxlog::gist_xlog_cleanup);
+    backend_access_gist_core_seams::gist_mask::set(gistxlog::gist_mask);
+    backend_access_gist_core_seams::gist_xlog_split::set(gistxlog::gist_xlog_split);
+    backend_access_gist_core_seams::gist_xlog_update::set(gistxlog::gist_xlog_update);
+    backend_access_gist_core_seams::gist_xlog_delete::set(gistxlog::gist_xlog_delete);
+    backend_access_gist_core_seams::gist_xlog_page_delete::set(gistxlog::gist_xlog_page_delete);
+    backend_access_gist_core_seams::gist_xlog_page_reuse::set(gistxlog::gist_xlog_page_reuse);
+    backend_access_gist_core_seams::gist_get_fake_lsn::set(gistxlog::gist_get_fake_lsn);
 }

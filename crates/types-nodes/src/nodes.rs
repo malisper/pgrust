@@ -384,6 +384,12 @@ pub enum Node<'mcx> {
     Hash(crate::nodehashjoin::Hash<'mcx>),
     /// `T_TidRangeScan`.
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
+    /// `T_SampleScan`.
+    SampleScan(crate::nodesamplescan::SampleScan<'mcx>),
+    /// `T_TidScan`.
+    TidScan(crate::nodeindexscan::TidScan<'mcx>),
+    /// `T_WorkTableScan`.
+    WorkTableScan(crate::nodeworktablescan::WorkTableScan<'mcx>),
     /// `T_SeqScan`.
     SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
     /// `T_SubqueryScan`.
@@ -901,6 +907,9 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
+            Node::SampleScan(_) => crate::nodesamplescan::T_SampleScan,
+            Node::TidScan(_) => NodeTag(345),
+            Node::WorkTableScan(_) => T_WorkTableScan,
             Node::SeqScan(_) => T_SeqScan,
             Node::SubqueryScan(_) => T_SubqueryScan,
             Node::ForeignScan(_) => T_ForeignScan,
@@ -1152,6 +1161,9 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
+            Node::SampleScan(s) => &s.scan.plan,
+            Node::TidScan(t) => &t.scan.plan,
+            Node::WorkTableScan(w) => &w.scan.plan,
             Node::SeqScan(s) => &s.scan.plan,
             Node::SubqueryScan(s) => &s.scan.plan,
             Node::ForeignScan(f) => &f.scan.plan,
@@ -1211,6 +1223,9 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
+            Node::SampleScan(s) => Ok(Node::SampleScan(s.clone_in(mcx)?)),
+            Node::TidScan(t) => Ok(Node::TidScan(t.clone_in(mcx)?)),
+            Node::WorkTableScan(w) => Ok(Node::WorkTableScan(w.clone_in(mcx)?)),
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
             Node::SubqueryScan(s) => Ok(Node::SubqueryScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),

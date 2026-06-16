@@ -1242,7 +1242,6 @@ pub fn spgdoinsert<'mcx>(
             if !bufmgr::conditional_lock_buffer::call(current.buffer)? {
                 // Deadlock avoidance: drop both buffers, retry.
                 bufmgr::release_buffer::call(current.buffer);
-                bufmgr::lock_buffer::call(parent.buffer, BUFFER_LOCK_UNLOCK)?;
                 bufmgr::unlock_release_buffer::call(parent.buffer);
                 return Ok(false);
             }

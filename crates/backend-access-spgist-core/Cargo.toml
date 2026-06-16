@@ -128,5 +128,14 @@ backend-lib-pairingheap = { path = "../backend-lib-pairingheap" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 # tbm_add_tuples (tidbitmap.c).
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+# spghandler vtable (IndexAmRoutine) + F6 WAL redo (spgxlog.c).
+types-amapi = { path = "../types-amapi" }
+backend-access-spg-xlog-seams = { path = "../backend-access-spg-xlog-seams" }
+backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
+backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
+backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+backend-access-common-bufmask-seams = { path = "../backend-access-common-bufmask-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 
 [dev-dependencies]

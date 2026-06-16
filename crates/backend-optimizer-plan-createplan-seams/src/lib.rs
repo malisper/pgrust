@@ -590,3 +590,61 @@ seam_core::seam!(
         plan: &mut Node<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// SubPlan-init-plan / subroot-recursion resolution legs of the cte /
+// worktable / subquery scan converters (createplan.c create_ctescan_plan /
+// create_worktablescan_plan / create_subqueryscan_plan).
+//
+// These three legs dereference state built by subselect.c
+// (`SS_process_ctes` init SubPlans, recursive-CTE `wt_param_id`) or recurse
+// into a different planner context (`create_plan(rel->subroot, ...)`), all of
+// which the unported subselect / planner driver owns. The rest of each
+// converter (clause ordering / nestloop params / `make_*scan`) is ported in the
+// owning crate; these seams carry the genuinely-unported legs 1:1 and
+// loud-panic until subselect lands.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// The CTE-`SubPlan` resolution leg of `create_ctescan_plan`
+    /// (createplan.c:3884): walk `cteroot->parse->cteList` to find the
+    /// referenced CTE's index, read its `plan_id` from `cteroot->cte_plan_ids`,
+    /// locate the matching init `SubPlan` in `cteroot->init_plans`, and return
+    /// `(plan_id, cte_param_id)` where `cte_param_id = linitial_int(ctesplan->
+    /// setParam)`. Dereferences subselect.c's built init SubPlans; owned by the
+    /// subselect SubPlan-building unit. `scanrelid` is the CTE base rel's RT
+    /// index.
+    pub fn resolve_cte_subplan(
+        root: &PlannerInfo,
+        scanrelid: u32,
+    ) -> types_error::PgResult<(i32, i32)>
+);
+
+seam_core::seam!(
+    /// The work-table-`Param` resolution leg of `create_worktablescan_plan`
+    /// (createplan.c:4055): walk `parent_root` to the plan level processing the
+    /// recursive UNION (one below the CTE's level) and return its
+    /// `cteroot->wt_param_id`. The `wt_param_id` is assigned during subselect.c
+    /// recursive-CTE planning; owned by the subselect unit. `scanrelid` is the
+    /// work-table (self-reference CTE) base rel's RT index.
+    pub fn resolve_worktable_param(
+        root: &PlannerInfo,
+        scanrelid: u32,
+    ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// The subroot-recursion leg of `create_subqueryscan_plan`
+    /// (createplan.c:3695): `create_plan(rel->subroot, best_path->subpath)` —
+    /// build the subquery's child plan by recursing into `create_plan` with the
+    /// subquery's *own* `PlannerInfo` (`rel->subroot`) and its `PlannerRun`.
+    /// Entering a different planner context requires the subroot's range table,
+    /// owned by the planner driver; routed here 1:1. `best_path` is the
+    /// `SubqueryScanPath`'s [`PathId`].
+    pub fn create_subqueryscan_subplan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        best_path: PathId,
+    ) -> types_error::PgResult<Node<'mcx>>
+);

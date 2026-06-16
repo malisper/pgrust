@@ -19,6 +19,18 @@ use alloc::vec::Vec;
 use crate::bytes::{bool_at, i8_at, u16_at, u32_at};
 use types_core::{OffsetNumber, TransactionId};
 
+/// Read a [`spgxlogState`] from `rec` starting at byte `off` — `redirectXid`
+/// u32 @off, `isBuild` bool @off+4. WAL redo (`fillFakeState`) reads these via
+/// the per-record `stateSrc` offset constants below.
+impl spgxlogState {
+    pub fn from_bytes(rec: &[u8], off: usize) -> Self {
+        Self {
+            redirectXid: u32_at(rec, off),
+            isBuild: bool_at(rec, off + 4),
+        }
+    }
+}
+
 /// `spgxlogState {TransactionId redirectXid; bool isBuild;}` (spgxlog.h) — the
 /// few `SpGistState` fields redo needs, carried inside several records via the
 /// `STORE_STATE` macro. C layout: `redirectXid` (u32 @0), `isBuild` (bool @4),
@@ -130,6 +142,9 @@ impl spgxlogMoveLeafs {
 /// `SizeOfSpgxlogMoveLeafs` = `offsetof(spgxlogMoveLeafs, offsets)` — 20 bytes.
 pub const SIZE_OF_SPGXLOG_MOVE_LEAFS: usize = 20;
 
+/// Byte offset of `spgxlogMoveLeafs.stateSrc` (C `offsetof`).
+pub const SPGXLOG_MOVE_LEAFS_STATE_OFF: usize = 12;
+
 /// `spgxlogAddNode`: `{OffsetNumber offnum; OffsetNumber offnumNew;
 /// bool newPage; int8 parentBlk; OffsetNumber offnumParent; uint16 nodeI;
 /// spgxlogState stateSrc;}` — trimmed of `stateSrc`.
@@ -174,6 +189,9 @@ impl spgxlogAddNode {
 
 /// `sizeof(spgxlogAddNode)` — 20 bytes.
 pub const SIZE_OF_SPGXLOG_ADD_NODE: usize = 20;
+
+/// Byte offset of `spgxlogAddNode.stateSrc` (C `offsetof`).
+pub const SPGXLOG_ADD_NODE_STATE_OFF: usize = 12;
 
 /// `spgxlogSplitTuple`: `{OffsetNumber offnumPrefix;
 /// OffsetNumber offnumPostfix; bool newPage; bool postfixBlkSame;}`.
@@ -283,6 +301,9 @@ impl spgxlogPickSplit {
 /// `SizeOfSpgxlogPickSplit` = `offsetof(spgxlogPickSplit, offsets)` — 28 bytes.
 pub const SIZE_OF_SPGXLOG_PICK_SPLIT: usize = 28;
 
+/// Byte offset of `spgxlogPickSplit.stateSrc` (C `offsetof`).
+pub const SPGXLOG_PICK_SPLIT_STATE_OFF: usize = 20;
+
 /// `spgxlogVacuumLeaf`: `{uint16 nDead; uint16 nPlaceholder; uint16 nMove;
 /// uint16 nChain; spgxlogState stateSrc; OffsetNumber offsets[];}` — trimmed
 /// of `stateSrc` and the trailing offsets.
@@ -321,6 +342,9 @@ impl spgxlogVacuumLeaf {
 /// uint16 (8) + `spgxlogState` (8) = 16 bytes.
 pub const SIZE_OF_SPGXLOG_VACUUM_LEAF: usize = 16;
 
+/// Byte offset of `spgxlogVacuumLeaf.stateSrc` (C `offsetof`).
+pub const SPGXLOG_VACUUM_LEAF_STATE_OFF: usize = 8;
+
 /// `spgxlogVacuumRoot`: `{uint16 nDelete; spgxlogState stateSrc;
 /// OffsetNumber offsets[];}` — trimmed of `stateSrc` and the offsets.
 #[derive(Clone, Copy, Debug)]
@@ -347,6 +371,9 @@ impl spgxlogVacuumRoot {
 /// `SizeOfSpgxlogVacuumRoot` = `offsetof(spgxlogVacuumRoot, offsets)` — uint16
 /// (2) + 2 pad + `spgxlogState` (8) = 12 bytes.
 pub const SIZE_OF_SPGXLOG_VACUUM_ROOT: usize = 12;
+
+/// Byte offset of `spgxlogVacuumRoot.stateSrc` (C `offsetof`).
+pub const SPGXLOG_VACUUM_ROOT_STATE_OFF: usize = 4;
 
 /// `spgxlogVacuumRedirect`: `{uint16 nToPlaceholder;
 /// OffsetNumber firstPlaceholder; TransactionId snapshotConflictHorizon;
