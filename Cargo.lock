@@ -16394,11 +16394,21 @@ dependencies = [
 name = "backend-utils-activity-pgstat"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-dshash",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-shmem-seams",
  "backend-utils-activity-small",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-mmgr-dsa-seams",
  "types-core",
+ "types-dsa",
  "types-error",
  "types-pgstat",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

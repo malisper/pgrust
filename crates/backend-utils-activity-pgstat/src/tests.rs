@@ -131,7 +131,7 @@ fn init_seams_registers_three_fixed_kinds_proof_of_shape() {
     // Drive the real proof-of-shape registration, then read the building stage
     // back (without sealing, so the global OnceLock stays free for production).
     registry::reset_for_test();
-    crate::init_seams();
+    crate::register_fixed_kinds();
 
     // Re-run registration into a private table by inspecting the building stage.
     // We confirm via the public builder shape: each fixed kind has the three

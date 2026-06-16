@@ -37,7 +37,11 @@ extern crate alloc;
 
 pub mod entry_ref;
 pub mod kind_info;
+pub mod local;
+pub mod pgstat_core;
 pub mod registry;
+pub mod shmem;
+mod wire;
 
 use types_pgstat::activity_pgstat::{
     PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER,
@@ -88,6 +92,21 @@ fn fixed_kind_info(
 /// [`PgStat_Snapshot`](types_pgstat::pgstat_internal::PgStat_Snapshot) and call
 /// the typed `*_cb` in `backend-utils-activity-small`.
 pub fn init_seams() {
+    register_fixed_kinds();
+
+    // Seal the per-kind callback table now that every registered kind has been
+    // installed (the three fixed kinds, plus any per-kind crate that ran its own
+    // `register` before this point), then install the pgstat-core inward seams
+    // over the real DSA/dshash substrate.
+    registry::seal_kind_table();
+    wire::install_seams();
+}
+
+/// Register the three already-ported fixed kinds (bgwriter / archiver /
+/// checkpointer) into the per-kind callback table. Split out from
+/// [`init_seams`] so tests can drive registration without sealing the table or
+/// installing the production seams.
+fn register_fixed_kinds() {
     use backend_utils_activity_small::pgstat_archiver as archiver;
     use backend_utils_activity_small::pgstat_bgwriter as bgwriter;
     use backend_utils_activity_small::pgstat_checkpointer as checkpointer;

@@ -13,4 +13,14 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
+types-dsa = { path = "../types-dsa" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-shmem-seams = { path = "../backend-utils-activity-shmem-seams" }

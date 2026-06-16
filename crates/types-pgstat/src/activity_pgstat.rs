@@ -93,6 +93,7 @@ pub const fn pgstat_is_ioop_tracked_in_bytes(io_op: IOOp) -> bool {
 /// than a bare `u32` so kind ids cannot be confused with other counters; the
 /// full builtin id table lives below, values per `pgstat_kind.h`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(C)]
 pub struct PgStat_Kind(pub u32);
 
 /// `PGSTAT_KIND_MIN` — minimum ID allowed.

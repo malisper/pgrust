@@ -45,6 +45,7 @@ pub const SLRU_NAMES: [&str; SLRU_NUM_ELEMENTS] = [
 /// `PgStat_HashKey` (`utils/pgstat_internal.h`) — key of the shared statistics
 /// hash table.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(C)]
 pub struct PgStat_HashKey {
     /// statistics entry kind
     pub kind: PgStat_Kind,
