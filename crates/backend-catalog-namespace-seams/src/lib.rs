@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
@@ -288,6 +288,18 @@ seam_core::seam!(
     /// `LookupCreationNamespace(nspname)` (namespace.c): OID of the namespace
     /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
     pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `fetch_search_path(includeImplicit)` (namespace.c): the active search
+    /// path as a list of namespace OIDs, copied into `mcx` (C: `list_copy`).
+    /// The implicitly-prepended namespaces are included only when
+    /// `include_implicit` is true. An empty path is an empty list (C: `NIL`).
+    /// `Err` carries the `recomputeNamespacePath` / temp-namespace-creation
+    /// `ereport(ERROR)` surface and OOM.
+    pub fn fetch_search_path<'mcx>(
+        mcx: Mcx<'mcx>,
+        include_implicit: bool,
+    ) -> PgResult<PgVec<'mcx, Oid>>
 );
 // (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
 // function (guc.c:2246), not namespace.c's — and installed by the merged guc

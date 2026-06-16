@@ -30,7 +30,7 @@ use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
 use backend_utils_adt_amutils_seams as amutils_seams;
 use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_error::ereport;
-use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
+use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
 use types_core::primitive::OidIsValid;
 use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted};
@@ -44,6 +44,7 @@ use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use types_catalog::pg_aggregate::AggRow;
+use types_catalog::pg_language::FormData_pg_language;
 use types_nodes::nodes::{Node, NodePtr};
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
@@ -1434,16 +1435,13 @@ pub(crate) fn lookup_language<'mcx>(
     Ok(Some(info))
 }
 
-/// `get_language_oid(langname, missing_ok)` (proclang.c:411): the procedural
-/// language's OID via `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid,
-/// CStringGetDatum(langname))`. A miss with `missing_ok = false` raises
-/// `ERRCODE_UNDEFINED_OBJECT`; with `missing_ok = true` it returns `InvalidOid`.
-///
-/// proclang.c is unported, but its sole logic is this syscache OID lookup, so the
-/// merged syscache owner installs the `proclang-seams` seam (cross-crate install).
-pub(crate) fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid> {
+/// `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid, CStringGetDatum(langname))`
+/// (the syscache leg of `get_language_oid`, proclang.c): the language's OID by
+/// name, or `InvalidOid` on a cache miss. The `proclang` owner wraps this with
+/// the `missing_ok` error decision.
+pub(crate) fn language_oid_by_name(langname: &str) -> PgResult<Oid> {
     let scratch = MemoryContext::new("syscache language oid-by-name");
-    let oid = GetSysCacheOid(
+    GetSysCacheOid(
         scratch.mcx(),
         LANGNAME,
         Anum_pg_language_oid as i16,
@@ -1451,17 +1449,34 @@ pub(crate) fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
-    )?;
-    if !OidIsValid(oid) && !missing_ok {
-        ereport(ERROR)
-            .errcode(ERRCODE_UNDEFINED_OBJECT)
-            .errmsg(format!("language \"{}\" does not exist", langname))
-            .finish(ErrorLocation::new("commands/proclang.c", 0, "get_language_oid"))?;
-    }
-    Ok(oid)
+    )
+}
+
+/// `SearchSysCache1(LANGNAME, PointerGetDatum(languageName))` (proclang.c
+/// pre-existing-definition check): the writable `pg_language` tuple by name
+/// plus its `oid`/`lanowner`, or `None` if no such language exists.
+pub(crate) fn language_tuple_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    langname: &str,
+) -> PgResult<Option<(FormedTuple<'mcx>, FormData_pg_language)>> {
+    let tuple = SearchSysCache1(mcx, LANGNAME, SysCacheKey::Str(langname))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // Form_pg_language oldform = (Form_pg_language) GETSTRUCT(oldtup);
+    let form = FormData_pg_language {
+        oid: getattr_oid(mcx, LANGNAME, &tup, Anum_pg_language_oid)?,
+        lanowner: getattr_oid(mcx, LANGNAME, &tup, Anum_pg_language_lanowner)?,
+    };
+    // The caller (replace branch) keeps the tuple for heap_modify_tuple; the
+    // C `ReleaseSysCache(oldtup)` releases the catcache pin, but the repo's
+    // SearchSysCache1 already returns an owned (mcx-allocated) FormedTuple, so
+    // no pin is held past return.
+    Ok(Some((tup, form)))
 }
 
 const Anum_pg_language_oid: i32 = 1;
+const Anum_pg_language_lanowner: i32 = 3;
 
 /// `SearchSysCache1(INDEXRELID, index_oid)` then whether `indpred` is non-null
 /// (`!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)`).

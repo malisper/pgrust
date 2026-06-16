@@ -1183,6 +1183,72 @@ pub fn construct_array_builtin<'mcx>(
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `build_name_array` — `construct_array_builtin(names, n, NAMEOID)`
+/// (arrayfuncs.c) over `name`-typed elements, taking each element's
+/// `NAMEDATALEN`-byte `NameData` image directly (the canonical by-reference
+/// payload) rather than a pointer-word `Datum` that `datum_as_byte_window`
+/// would have to resolve. `NAMEOID` is fixed-length (`NAMEDATALEN`), pass-by-
+/// reference, char-aligned, and these arrays never contain NULLs (matching the
+/// `current_schemas` build). Mirrors `construct_array`/`construct_md_array`
+/// for the 1-D, no-null, fixed-length case.
+pub fn build_name_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&[u8]]) -> PgResult<PgVec<'mcx, u8>> {
+    let (elmlen, _elmbyval, elmalign) = construct_builtin_meta(foundation::NAMEOID)?;
+    let nelems = elems.len() as i32;
+
+    // nelems <= 0 -> construct_empty_array (matches construct_md_array).
+    if nelems <= 0 {
+        return construct_empty_array(mcx, foundation::NAMEOID);
+    }
+
+    // Compute total space exactly as construct_md_array: each fixed-length
+    // by-reference element contributes `elmlen` bytes, aligned to `elmalign`.
+    let mut nbytes: i32 = 0;
+    for &img in elems {
+        debug_assert_eq!(img.len(), elmlen as usize);
+        nbytes = nbytes
+            .checked_add(elmlen)
+            .filter(|n| alloc_size_is_valid(*n))
+            .ok_or_else(|| {
+                PgError::error(format!(
+                    "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            })?;
+        nbytes = foundation::att_align_nominal(nbytes as usize, elmalign) as i32;
+        if !alloc_size_is_valid(nbytes) {
+            return Err(PgError::error(format!(
+                "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+    }
+
+    // No nulls: dataoffset == 0, overhead is the non-null header.
+    let dataoffset = 0;
+    nbytes += foundation::arr_overhead_nonulls(1) as i32;
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0); // palloc0
+
+    let dims = [nelems];
+    let lbs = [1];
+    foundation::set_header(&mut result, total, 1, dataoffset, foundation::NAMEOID);
+    foundation::write_dims(&mut result, &dims);
+    foundation::write_lbounds(&mut result, 1, &lbs);
+
+    // CopyArrayEls for fixed-length by-reference, no nulls: memcpy each
+    // `elmlen`-byte image at the char-aligned data offset.
+    let mut p = foundation::arr_data_ptr_off(&result);
+    for &img in elems {
+        result[p..p + elmlen as usize].copy_from_slice(&img[..elmlen as usize]);
+        p += elmlen as usize;
+        p = foundation::att_align_nominal(p, elmalign);
+    }
+
+    Ok(result)
+}
+
 /// Seam `decode_text_array_to_strings` — the array half of evtcache.c's
 /// `DecodeTextArrayToBitmapset`: `DatumGetArrayTypeP` (detoast) + the
 /// `ARR_NDIM != 1 || ARR_HASNULL || ARR_ELEMTYPE != TEXTOID` validity check

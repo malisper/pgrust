@@ -99,12 +99,12 @@ pub fn CreateCast(stmt: &CreateCastStmt) -> PgResult<ObjectAddress> {
 
     let aclresult = seam::type_aclcheck::call(sourcetypeid, seam::get_user_id::call()?, ACL_USAGE)?;
     if aclresult != ACLCHECK_OK {
-        seam::aclcheck_error_type::call(aclresult, sourcetypeid)?;
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, sourcetypeid)?;
     }
 
     let aclresult = seam::type_aclcheck::call(targettypeid, seam::get_user_id::call()?, ACL_USAGE)?;
     if aclresult != ACLCHECK_OK {
-        seam::aclcheck_error_type::call(aclresult, targettypeid)?;
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, targettypeid)?;
     }
 
     /* Domains are allowed for historical reasons, but we warn */
@@ -396,12 +396,12 @@ pub fn CreateTransform(stmt: &CreateTransformStmt) -> PgResult<ObjectAddress> {
     }
 
     if !seam::type_ownercheck::call(typeid, seam::get_user_id::call()?)? {
-        seam::aclcheck_error_type::call(ACLCHECK_NOT_OWNER, typeid)?;
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(ACLCHECK_NOT_OWNER, typeid)?;
     }
 
     let aclresult = seam::type_aclcheck::call(typeid, seam::get_user_id::call()?, ACL_USAGE)?;
     if aclresult != ACLCHECK_OK {
-        seam::aclcheck_error_type::call(aclresult, typeid)?;
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, typeid)?;
     }
 
     /* Get the language */

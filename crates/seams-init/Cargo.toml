@@ -97,6 +97,7 @@ backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
 backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
+backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
@@ -104,6 +105,7 @@ backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
+backend-commands-proclang = { path = "../backend-commands-proclang" }
 backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
@@ -114,6 +116,7 @@ backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-lockcmds = { path = "../backend-commands-lockcmds" }
 backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
 backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
+backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
