@@ -353,7 +353,7 @@ pub fn shutdown_MultiFuncCall<'mcx>(funcctx: &mut FuncCallContext<'mcx>) -> PgRe
     // `FuncCallContext` directly. Both the `flinfo->fn_extra = NULL` unbind and
     // the `MemoryContextDelete(funcctx->multi_call_memory_ctx)` reach state the
     // trimmed shapes do not carry (`flinfo`, and `FuncCallContext` carries no
-    // `multi_call_memory_ctx` — the scaffold notes it is owned by the SRF
+    // `multi_call_memory_ctx` — it is owned by the SRF
     // plumbing seam). Mirror PG and panic at that boundary.
     let _ = funcctx;
     panic!(

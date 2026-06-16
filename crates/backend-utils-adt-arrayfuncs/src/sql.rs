@@ -1209,8 +1209,8 @@ pub fn array_free_iterator(iterator: ArrayIteratorData<'_>) {
 /// C (arrayfuncs.c:3200) iterates the input array, writes each element into the
 /// `ExprState`'s `innermost_caseval` / `innermost_casenull`, calls
 /// `ExecEvalExpr(exprstate, econtext, ...)` to transform it, and assembles the
-/// result. The transform is the heart of the function — but the scaffold
-/// signature dropped `exprstate` and `econtext` entirely (only `mcx`, the input
+/// result. The transform is the heart of the function — but this crate's
+/// signature omits `exprstate` and `econtext` entirely (only `mcx`, the input
 /// `array`, and `ret_type` remain), so there is no expression to apply. The
 /// executor `ExecEvalExpr` callee also has no seam wired into this crate.
 /// Implementing anything here would be inventing own logic; mirror the C entry
@@ -1222,8 +1222,8 @@ pub fn array_map<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let _ = (mcx, array, ret_type, MAX_ALLOC_SIZE);
     panic!(
-        "array_map: the per-element transform needs the ExprState/ExprContext arguments the \
-         scaffold signature dropped, and the executor ExecEvalExpr seam (not wired into this \
+        "array_map: the per-element transform needs the ExprState/ExprContext arguments this \
+         crate's signature omits, and the executor ExecEvalExpr seam (not wired into this \
          crate); lands with the executor boundary (mirror-and-panic per Mirror-PG-and-panic)"
     )
 }
