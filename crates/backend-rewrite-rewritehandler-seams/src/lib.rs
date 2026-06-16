@@ -10,10 +10,34 @@ seam_core::seam!(
     /// (already analyzed) query, returning the list of resulting `Query`s
     /// (allocated in `mcx`). For a `SELECT` this is exactly one element. Runs
     /// the rule rewriter; can `ereport(ERROR)`.
+    ///
+    /// This is the LEGACY shape over the **opaque** [`portalcmds::Query`] token
+    /// (its sole consumer is `backend-commands-portalcmds`'s `PerformCursorOpen`).
+    /// It is documented K1/planner debt (DESIGN_DEBT TD-REWRITEHANDLER-RULELOCK):
+    /// the opaque-token contract collapse onto the canonical
+    /// [`types_nodes::copy_query::Query`] lands with the parser/planner value
+    /// producers. New callers use [`query_rewrite_canonical`] below.
     pub fn query_rewrite<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         query: Query,
     ) -> PgResult<mcx::PgVec<'mcx, Query>>
+);
+
+seam_core::seam!(
+    /// `QueryRewrite(parsetree)` (rewriteHandler.c:4566) — the canonical top-level
+    /// rule-rewriter entry over the value-typed
+    /// [`types_nodes::copy_query::Query`]: apply all non-SELECT rules, then the
+    /// RIR (`ON SELECT`/view) rules, then assign the command tag, returning the
+    /// list of rewritten queries (each allocated in `mcx`). For a plain `SELECT`
+    /// with no rules this is exactly one element (the input). This is the
+    /// **additive** entry that the top-level callers (`tcop/postgres.c`
+    /// `pg_rewrite_query`, SPI, `plancache.c` `RevalidateCachedQuery`) call as the
+    /// parser/planner value-typed waves land; it is installed by the
+    /// rewriteHandler owner. Runs the rewriter engine; can `ereport(ERROR)`.
+    pub fn query_rewrite_canonical<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        parsetree: types_nodes::copy_query::Query<'mcx>,
+    ) -> PgResult<mcx::PgVec<'mcx, types_nodes::copy_query::Query<'mcx>>>
 );
 
 seam_core::seam!(

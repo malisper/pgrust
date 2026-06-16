@@ -93,3 +93,68 @@ pub fn getInsertSelectQuery<'a, 'mcx>(parsetree: &'a Query<'mcx>) -> PgResult<&'
     // elog(ERROR, "could not find rule placeholders");
     Err(PgError::error("could not find rule placeholders"))
 }
+
+/// The index-based rendering of the C `getInsertSelectQuery(parsetree,
+/// &subquery_ptr)` out-parameter form (rewriteManip.c:1090), as the DML rule
+/// engine's `rewriteRuleAction` needs it.
+///
+/// The C signature returns the sub-action `Query *` and, via `subquery_ptr`, the
+/// `Query **` slot through which the caller can re-bind the (possibly mutated)
+/// sub-action back into the INSERT...SELECT's rangetable. Over the owned value
+/// model a `Query **` into another query's RTE is an *index*: this returns
+/// `Ok(None)` when the sub-action IS the parsetree itself (the C `subquery_ptr ==
+/// NULL` case), or `Ok(Some(rtindex))` (1-based) of the `RTE_SUBQUERY` whose
+/// `.subquery` is the SELECT sub-action (the C non-NULL `subquery_ptr` case). The
+/// caller obtains the borrow with `&parsetree.rtable[rtindex - 1].subquery` and
+/// re-binds the mutated sub-action through that same slot. The validation logic
+/// is identical to [`getInsertSelectQuery`].
+pub fn getInsertSelectQueryIndex(parsetree: &Query<'_>) -> PgResult<Option<usize>> {
+    // if (parsetree->commandType != CMD_INSERT) { *subquery_ptr = NULL; return; }
+    if parsetree.commandType != CmdType::CMD_INSERT {
+        return Ok(None);
+    }
+
+    // OLD/NEW present at top level -> the action itself is the sub-action.
+    if parsetree.rtable.len() >= 2
+        && rt_alias_is(parsetree, PRS2_OLD_VARNO, "old")
+        && rt_alias_is(parsetree, PRS2_NEW_VARNO, "new")
+    {
+        return Ok(None);
+    }
+
+    let jointree = parsetree
+        .jointree
+        .as_ref()
+        .ok_or_else(|| PgError::error("expected to find SELECT subquery"))?;
+    if jointree.fromlist.len() != 1 {
+        return Err(PgError::error("expected to find SELECT subquery"));
+    }
+    let rtr = match &*jointree.fromlist[0] {
+        Node::RangeTblRef(rtr) => rtr,
+        _ => return Err(PgError::error("expected to find SELECT subquery")),
+    };
+    let rtindex = rtr.rtindex as usize;
+    let selectrte = parsetree
+        .rtable
+        .get(rtindex - 1)
+        .ok_or_else(|| PgError::error("expected to find SELECT subquery"))?;
+    if selectrte.rtekind != RTEKind::RTE_SUBQUERY {
+        return Err(PgError::error("expected to find SELECT subquery"));
+    }
+    let selectquery = selectrte
+        .subquery
+        .as_ref()
+        .ok_or_else(|| PgError::error("expected to find SELECT subquery"))?;
+    if selectquery.commandType != CmdType::CMD_SELECT {
+        return Err(PgError::error("expected to find SELECT subquery"));
+    }
+
+    if selectquery.rtable.len() >= 2
+        && rt_alias_is(selectquery, PRS2_OLD_VARNO, "old")
+        && rt_alias_is(selectquery, PRS2_NEW_VARNO, "new")
+    {
+        return Ok(Some(rtindex));
+    }
+
+    Err(PgError::error("could not find rule placeholders"))
+}

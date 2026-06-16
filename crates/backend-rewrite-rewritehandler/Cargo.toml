@@ -29,6 +29,13 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 types-storage = { path = "../types-storage" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-parser-analyze = { path = "../backend-parser-analyze" }
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-catalog = { path = "../types-catalog" }
+backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
 
 # Inward seam crates this unit owns / installs into.
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }

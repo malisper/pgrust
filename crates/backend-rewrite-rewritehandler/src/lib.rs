@@ -50,7 +50,12 @@ use backend_nodes_core::nodefuncs::{expr_collation, expr_type};
 use backend_rewrite_core::change::ChangeVarNodes;
 use backend_rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
 
+mod engine;
 mod seams;
+pub use engine::{
+    fireRIRrules, fireRules, matchLocks, rewriteRuleAction, rewriteTargetListIU, rewriteValuesRTE,
+    rewriteValuesRTEToNulls, AcquireRewriteLocks, QueryRewrite,
+};
 pub use seams::init_seams;
 
 /// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h). Consumed by the
