@@ -152,6 +152,7 @@ pub fn init_all() {
     backend_commands_sequence::init_seams();
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
+    backend_commands_tsearchcmds::init_seams();
     backend_commands_typecmds::init_seams();
     backend_conv_utf8_and_big5::init_seams();
     backend_conv_utf8_and_cyrillic::init_seams();
