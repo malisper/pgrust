@@ -17,3 +17,4 @@ types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 types-typcache = { path = "../types-typcache" }
 types-cache = { path = "../types-cache" }
+types-statistics = { path = "../types-statistics" }

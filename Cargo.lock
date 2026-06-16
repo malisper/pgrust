@@ -341,6 +341,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -5565,6 +5566,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-statistics",
  "types-vacuum",
 ]
 
@@ -15406,6 +15408,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-array-typanalyze"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-commands-analyze-seams",
+ "backend-commands-vacuum-seams",
+ "backend-utils-adt-array-typanalyze-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-selfuncs",
+ "types-statistics",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-array-typanalyze-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
 name = "backend-utils-adt-arrayfuncs"
 version = "0.0.0"
 dependencies = [
@@ -16522,6 +16553,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-rangetypes-typanalyze"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-vacuum-seams",
+ "backend-utils-adt-multirangetypes-seams",
+ "backend-utils-adt-rangetypes-seams",
+ "backend-utils-adt-rangetypes-typanalyze-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rangetypes",
+ "types-selfuncs",
+ "types-statistics",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-rangetypes-typanalyze-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
 name = "backend-utils-adt-regexp"
 version = "0.0.0"
 dependencies = [
@@ -17538,6 +17600,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-rel",
+ "types-statistics",
  "types-tuple",
  "types-typcache",
 ]
@@ -19606,6 +19669,7 @@ dependencies = [
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-array-selfuncs",
+ "backend-utils-adt-array-typanalyze",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
@@ -19630,6 +19694,7 @@ dependencies = [
  "backend-utils-adt-quote",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-rangetypes",
+ "backend-utils-adt-rangetypes-typanalyze",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-scalar-datum-core",
