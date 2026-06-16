@@ -820,6 +820,13 @@ fn set_parallel_message_pending(value: bool) {
     with_globals(|g| g.parallel_message_pending = value);
 }
 
+/// Read `ParallelMessagePending` (parallel.c) — set in
+/// `HandleParallelMessageInterrupt` and read by `ProcessInterrupts`
+/// (tcop/postgres.c) to gate the `ProcessParallelMessages()` call.
+pub fn parallel_message_pending() -> bool {
+    with_globals(|g| g.parallel_message_pending)
+}
+
 /// `HandleParallelMessageInterrupt()` (parallel.c:1043-1049). In C this runs in
 /// a signal handler: `InterruptPending = true; ParallelMessagePending = true;
 /// SetLatch(MyLatch);`. The interrupt-pending flip and latch set go through

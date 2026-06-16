@@ -561,3 +561,55 @@ pub enum ReorderBufferCallback {
         lsn: XLogRecPtr,
     },
 }
+
+// ---------------------------------------------------------------------------
+// Historic-snapshot tuplecid map (the `static HTAB *tuplecid_data` of
+// snapmgr.c).
+//
+// In C the `(relfilelocator, ctid) -> (cmin, cmax)` lookup hash is built by
+// `ReorderBufferBuildTupleCidHash` (reorderbuffer.c) into a per-txn `HTAB`,
+// then handed to `SetupHistoricSnapshot(snapshot, tuplecid_hash)` which stores
+// it in snapmgr's file-scope `tuplecid_data`; `HistoricSnapshotGetTupleCids()`
+// hands it back to `ResolveCminCmaxDuringDecoding` for catalog visibility
+// during logical decode. The key/entry structs are declared in reorderbuffer.c
+// but the *storage* lives in snapmgr.
+//
+// To let snapmgr own the map value-typed (rather than the opaque `*mut HTAB`)
+// without snapmgr depending on the reorderbuffer crate — the dependency runs
+// the other way — the key/entry types and the map alias live here in
+// `types-logical`, which both snapmgr (owner of the storage) and reorderbuffer
+// (builder/resolver) already depend on.
+
+use types_core::xact::CommandId;
+use types_storage::RelFileLocator;
+use types_tuple::ItemPointerData;
+
+/// `ReorderBufferTupleCidKey` (reorderbuffer.c) — `(relfilelocator, ctid)`.
+///
+/// The C struct is hashed with `HASH_BLOBS` over its raw bytes after a
+/// `memset(&key, 0, ...)`; the owned fields hash identically because the
+/// derived `Hash`/`Eq` consider exactly the same logical values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ReorderBufferTupleCidKey {
+    /// `RelFileLocator rlocator`.
+    pub rlocator: RelFileLocator,
+    /// `ItemPointerData tid`.
+    pub tid: ItemPointerData,
+}
+
+/// `ReorderBufferTupleCidEnt` (reorderbuffer.c) — the resolved cmin/cmax for a
+/// catalog tuple seen during decoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReorderBufferTupleCidEnt {
+    /// `CommandId cmin`.
+    pub cmin: CommandId,
+    /// `CommandId cmax`.
+    pub cmax: CommandId,
+    /// `CommandId combocid` — just for debugging.
+    pub combocid: CommandId,
+}
+
+/// The `(relfilelocator, ctid) -> (cmin, cmax)` lookup hash itself — the value
+/// behind snapmgr's `tuplecid_data` / C's `HTAB *`.
+pub type TupleCidHash =
+    std::collections::HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt>;

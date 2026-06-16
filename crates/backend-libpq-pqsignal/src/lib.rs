@@ -192,6 +192,18 @@ pub fn unblock_sig_add(signal: libc::c_int) {
     MASKS.set(masks);
 }
 
+/// `sigaddset(&BlockSig, signal)` — persistently add `signal` to the owned
+/// `BlockSig` snapshot (mutating the C global `BlockSig`, mirroring
+/// `quickdie`'s `sigaddset(&BlockSig, SIGQUIT)` which prevents nested SIGQUIT
+/// handler invocations).
+pub fn block_sig_add(signal: libc::c_int) {
+    let mut masks = MASKS.get();
+    // SAFETY: `block_sig` is a valid, initialized sigset_t.
+    let rc = unsafe { libc::sigaddset(&mut masks.block_sig as *mut libc::sigset_t, signal) };
+    debug_assert_eq!(rc, 0);
+    MASKS.set(masks);
+}
+
 fn empty_signal_set() -> libc::sigset_t {
     let mut set = MaybeUninit::<libc::sigset_t>::uninit();
     // SAFETY: `sigemptyset` initializes the whole set; we assume_init after.

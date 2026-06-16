@@ -19,6 +19,10 @@ mcx = { path = "../mcx" }
 
 # cross-crate seams the snapshot-management family consumes
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# SetupHistoricSnapshot/TeardownHistoricSnapshot/HistoricSnapshotGetTupleCids —
+# the snapmgr half of the historic (logical-decoding) snapshot. snapmgr owns the
+# active tuplecid map; reorderbuffer installs/reads it across these seams.
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 # change-replay family deps: the k-way merge binary heap + the inval seam that
 # ReorderBufferExecuteInvalidations applies decoded invalidations through.
