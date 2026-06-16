@@ -14911,6 +14911,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-lock"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-deadlock-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "common-hashfn-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-deadlock",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lock-seams"
 version = "0.0.0"
 dependencies = [
@@ -20148,6 +20170,7 @@ dependencies = [
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
+ "backend-storage-lmgr-lock",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc",
  "backend-storage-lmgr-s-lock",
