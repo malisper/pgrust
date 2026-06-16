@@ -326,7 +326,7 @@ pub(crate) fn out_range_tbl_function(
 // _outTableSampleClause
 // ===========================================================================
 
-fn out_table_sample_clause(buf: &mut String, n: &types_nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
+pub(crate) fn out_table_sample_clause(buf: &mut String, n: &types_nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
     buf.push_str("TABLESAMPLECLAUSE");
     write_oid_field(buf, "tsmhandler", n.tsmhandler);
     // args: Option<PgVec<Expr>>. C WRITE_NODE_FIELD of a List of Expr → bare

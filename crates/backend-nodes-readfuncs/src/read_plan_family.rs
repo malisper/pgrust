@@ -443,6 +443,32 @@ fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodeseqscan::SeqS
     })
 }
 
+/// `_readSampleScan` (readfuncs.funcs.c): `READ_SCAN_FIELDS()`, then
+/// `READ_NODE_FIELD(tablesample)` over the `TableSampleClause *` (read back via
+/// `node_read` → `Node::TableSampleClause`, unwrapped to the typed boxed
+/// carrier; a `NULL` field gives `None`). Reads in the exact order
+/// `_outSampleScan` wrote.
+fn read_samplescan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodesamplescan::SampleScan<'mcx>> {
+    let scan = read_scan_fields(mcx)?;
+    // READ_NODE_FIELD(tablesample): a framed TABLESAMPLECLAUSE, or `<>` → None.
+    let _label = next_tok()?;
+    let tablesample = match read::node_read(mcx, None)? {
+        None => None,
+        Some(n) => match PgBox::into_inner(n) {
+            Node::TableSampleClause(ts) => Some(alloc::boxed::Box::new(ts)),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "_readSampleScan: expected TableSampleClause for tablesample, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        },
+    };
+    Ok(types_nodes::nodesamplescan::SampleScan { scan, tablesample })
+}
+
 /// `_readFunctionScan` (readfuncs.funcs.c): `READ_SCAN_FIELDS()`, the
 /// `functions` node list (each cell a framed `RANGETBLFUNCTION`, read back via
 /// `node_read` → `Node::RangeTblFunction` and unwrapped into the typed Vec), and
@@ -1170,6 +1196,7 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"VALUESSCAN" => read_valuesscan(mcx).map(Node::ValuesScan),
         b"FOREIGNSCAN" => read_foreignscan(mcx).map(Node::ForeignScan),
         b"FUNCTIONSCAN" => read_functionscan(mcx).map(Node::FunctionScan),
+        b"SAMPLESCAN" => read_samplescan(mcx).map(Node::SampleScan),
         _ => return None,
     };
     Some(r)
