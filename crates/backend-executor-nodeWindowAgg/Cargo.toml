@@ -13,6 +13,7 @@ seam-core = { path = "../seam-core" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
