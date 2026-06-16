@@ -2074,6 +2074,40 @@ pub fn deconstruct_text_array<'mcx>(
     Ok(out)
 }
 
+/// Seam `deconstruct_text_array_nullable` —
+/// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, &elems,
+/// &nulls, &nelems)` (arrayfuncs.c), preserving per-element NULLs. Unlike
+/// [`deconstruct_text_array`] (which rejects NULLs), this returns the C
+/// `(elems[i], nulls[i])` pairs as `Option<PgString>` (`None` ⇒ the C
+/// `nulls[i] == true`), so a caller can apply its own object-specific
+/// null-error message (e.g. `textarray_to_strvaluelist`'s "name or argument
+/// lists may not contain nulls"). The on-disk array byte image is detoasted
+/// (`DatumGetArrayTypeP`), then walked element by element, each non-null
+/// `text` element projected to its UTF-8 string. Fallible on detoast /
+/// malformed array / invalid UTF-8.
+pub fn deconstruct_text_array_nullable<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
+    // arr = DatumGetArrayTypeP(array);
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
+    let pairs = deconstruct_array(mcx, &arr, foundation::TEXTOID, elmlen, elmbyval, elmalign)?;
+
+    let mut out = mcx::vec_with_capacity_in::<Option<PgString<'mcx>>>(mcx, pairs.len())?;
+    for (d, isnull) in pairs.iter() {
+        if *isnull {
+            out.push(None);
+            continue;
+        }
+        // Each element Datum is a text varlena pointer word; project it to its
+        // UTF-8 payload through the detoast/text owner.
+        let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
+        out.push(Some(text_to_pgstring(mcx, &bytes)?));
+    }
+    Ok(out)
+}
+
 /// Seam `deconstruct_tid_array` — `deconstruct_array_builtin(..., TIDOID)`.
 pub fn deconstruct_tid_array<'mcx>(
     mcx: Mcx<'mcx>,
