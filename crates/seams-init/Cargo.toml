@@ -78,6 +78,7 @@ backend-backup-server = { path = "../backend-backup-server" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-storage = { path = "../backend-catalog-storage" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }

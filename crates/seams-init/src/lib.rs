@@ -75,6 +75,7 @@ pub fn init_all() {
     backend_backup_sink::init_seams();
     backend_bootstrap_bootstrap::init_seams();
     backend_catalog_catalog::init_seams();
+    backend_catalog_storage::init_seams();
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();

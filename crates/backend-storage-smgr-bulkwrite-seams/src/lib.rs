@@ -74,6 +74,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `smgr_bulk_start_smgr(smgr, forknum, use_wal)` (bulk_write.c): start a
+    /// bulk write to a fork named by its `(RelFileLocator, ProcNumber)` smgr
+    /// key, without a relcache entry (the `RelationCopyStorage` path). The
+    /// caller supplies `use_wal` directly. Allocates in `mcx`; fallible on OOM.
+    pub fn smgr_bulk_start_smgr<'mcx>(
+        mcx: Mcx<'mcx>,
+        smgr_rlocator: types_storage::relfilelocator::RelFileLocatorBackend,
+        forknum: ForkNumber,
+        use_wal: bool,
+    ) -> PgResult<BulkWriteState<'mcx>>
+);
+
+seam_core::seam!(
     /// `smgr_bulk_get_buf(bulkstate)` (bulk_write.c): obtain a fresh, zeroed
     /// `BLCKSZ` page workspace for the next block. C hands back a pointer into
     /// writer-owned memory; the owned model returns an owned zeroed page the

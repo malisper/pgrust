@@ -19,6 +19,25 @@ use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
 };
 
 seam_core::seam!(
+    /// `pgstat_prepare_report_checksum_failure(dboid)` (pgstat_database.c):
+    /// ensure a pending per-database stats entry exists so a subsequent
+    /// checksum-failure increment can be recorded. Keyed by the database OID.
+    pub fn pgstat_prepare_report_checksum_failure(
+        dboid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_report_checksum_failures_in_db(dboid, failurecount)`
+    /// (pgstat_database.c): record `failurecount` data-checksum failures for the
+    /// given database in the pending per-database stats.
+    pub fn pgstat_report_checksum_failures_in_db(
+        dboid: types_core::primitive::Oid,
+        failurecount: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `pgstat_init_relation(rel)` (pgstat_relation.c): set the relcache
     /// entry's `pgstat_enabled` / `pgstat_info` according to whether the
     /// relation has storage (or is a partitioned table) and whether
