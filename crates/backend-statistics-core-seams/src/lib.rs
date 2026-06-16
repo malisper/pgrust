@@ -196,3 +196,48 @@ seam_core::seam!(
     /// SEAMED: the `byteaout` fmgr dispatch over the opaque `FunctionCallInfo`.
     pub fn pg_mcv_list_out(fcinfo_id: u64) -> types_error::PgResult<types_datum::Datum>
 );
+
+seam_core::seam!(
+    /// `ndistinct_for_combination(double totalrows, StatsBuildData *data, int k,
+    /// int *combination)` (mvdistinct.c:424-517) — the Duj1 n-distinct estimator
+    /// for one column combination.
+    ///
+    /// SEAMED, not in-crate: its body builds the per-row `values[]`/`isnull[]`
+    /// sort buffer from `data->values[combination[i]][j]` /
+    /// `data->nulls[combination[i]][j]`, sets up `multi_sort_init` /
+    /// `multi_sort_add_dimension` using each column's
+    /// `lookup_type_cache(colstat->attrtypid, TYPECACHE_LT_OPR)->lt_opr` (with
+    /// `colstat->attrcollid`), `qsort_interruptible`s it with `multi_sort_compare`,
+    /// and counts distinct combinations. All of `multi_sort_*` + the per-column
+    /// `VacAttrStats` matrix live inside the opaque `StatsBuildData`, owned by the
+    /// not-yet-ported `extended_stats.c` + multi-sort support. It can
+    /// `elog(ERROR, "cache lookup failed for ordering operator ...")`, so the
+    /// failure surface is carried on `Err`.
+    ///
+    /// `combination` is the array of `k` zero-based column indexes into the
+    /// statistics object (NOT yet translated to attnums).
+    pub fn ndistinct_for_combination(
+        totalrows: f64,
+        data: types_statistics::StatsBuildDataHandle,
+        k: i32,
+        combination: &[i32],
+    ) -> types_error::PgResult<f64>
+);
+
+seam_core::seam!(
+    /// The `pg_statistic_ext_data` syscache read of `statext_ndistinct_load`
+    /// (mvdistinct.c:147-172): `SearchSysCache2(STATEXTDATASTXOID, mvoid, inh)` +
+    /// `SysCacheGetAttr(..., Anum_pg_statistic_ext_data_stxdndistinct, &isnull)` +
+    /// `ReleaseSysCache`.
+    ///
+    /// SEAMED, not in-crate: the syscache lives in the not-yet-ported relcache /
+    /// syscache subsystem. The owner returns the detoasted `stxdndistinct` bytea
+    /// body (`DatumGetByteaPP`) as `Ok(Some(bytes))`, the is-null-attribute case
+    /// as `Ok(None)` (so the kind-not-built error text / behaviour stays in-crate),
+    /// and the missing-tuple `elog(ERROR, "cache lookup failed for statistics
+    /// object %u")` case as `Err`.
+    pub fn statext_ndistinct_load_bytea(
+        mvoid: types_core::Oid,
+        inh: bool,
+    ) -> types_error::PgResult<Option<std::vec::Vec<u8>>>
+);
