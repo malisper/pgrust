@@ -90,6 +90,7 @@ backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
 backend-catalog-pg-collation = { path = "../backend-catalog-pg-collation" }
+backend-catalog-pg-parameter-acl = { path = "../backend-catalog-pg-parameter-acl" }
 backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-operator = { path = "../backend-catalog-pg-operator" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
@@ -384,6 +385,9 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-cyrillic-and-mic = { path = "../backend-conv-cyrillic-and-mic" }
+backend-conv-latin-and-mic = { path = "../backend-conv-latin-and-mic" }
+backend-conv-latin2-and-win1250 = { path = "../backend-conv-latin2-and-win1250" }
 backend-conv-euc-cn-and-mic = { path = "../backend-conv-euc-cn-and-mic" }
 backend-conv-euc-jp-and-sjis = { path = "../backend-conv-euc-jp-and-sjis" }
 backend-conv-euc-kr-and-mic = { path = "../backend-conv-euc-kr-and-mic" }
@@ -397,6 +401,15 @@ backend-conv-utf8-and-euc-jp = { path = "../backend-conv-utf8-and-euc-jp" }
 backend-conv-utf8-and-euc-kr = { path = "../backend-conv-utf8-and-euc-kr" }
 backend-conv-utf8-and-euc-tw = { path = "../backend-conv-utf8-and-euc-tw" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+backend-conv-utf8-and-gb18030 = { path = "../backend-conv-utf8-and-gb18030" }
+backend-conv-utf8-and-gbk = { path = "../backend-conv-utf8-and-gbk" }
+backend-conv-utf8-and-iso8859-1 = { path = "../backend-conv-utf8-and-iso8859-1" }
+backend-conv-utf8-and-iso8859 = { path = "../backend-conv-utf8-and-iso8859" }
+backend-conv-utf8-and-johab = { path = "../backend-conv-utf8-and-johab" }
+backend-conv-utf8-and-sjis = { path = "../backend-conv-utf8-and-sjis" }
+backend-conv-utf8-and-sjis2004 = { path = "../backend-conv-utf8-and-sjis2004" }
+backend-conv-utf8-and-uhc = { path = "../backend-conv-utf8-and-uhc" }
+backend-conv-utf8-and-win = { path = "../backend-conv-utf8-and-win" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }

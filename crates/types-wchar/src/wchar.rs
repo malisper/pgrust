@@ -8,6 +8,26 @@ pub type pg_wchar = PgWChar;
 /// ISO-8859 Latin 1, used as the `lc` prefix in `latin2mic`/`mic2latin`.
 pub const LC_ISO8859_1: u8 = 0x81;
 
+/// `LC_ISO8859_2` (`mb/pg_wchar.h`): the mule-internal lead-charset byte for
+/// ISO-8859 Latin 2.
+pub const LC_ISO8859_2: u8 = 0x82;
+
+/// `LC_ISO8859_3` (`mb/pg_wchar.h`): the mule-internal lead-charset byte for
+/// ISO-8859 Latin 3.
+pub const LC_ISO8859_3: u8 = 0x83;
+
+/// `LC_ISO8859_4` (`mb/pg_wchar.h`): the mule-internal lead-charset byte for
+/// ISO-8859 Latin 4.
+pub const LC_ISO8859_4: u8 = 0x84;
+
+/// `LC_KOI8_R` (`mb/pg_wchar.h`): the mule-internal lead-charset byte for
+/// Cyrillic KOI8-R (also the mule-internal charset for Cyrillic).
+pub const LC_KOI8_R: u8 = 0x8b;
+
+/// `LC_ISO8859_5` (`mb/pg_wchar.h`): the mule-internal lead-charset byte for
+/// ISO-8859 Cyrillic.
+pub const LC_ISO8859_5: u8 = 0x8c;
+
 /// A range of Unicode code points (`struct mbinterval` in `wchar.c`), used by
 /// the display-width tables consulted by `mbbisearch`/`ucs_wcwidth`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
