@@ -10693,6 +10693,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqmq"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-rt-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqmq-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-shm-mq-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-mmgr-mcxt-seams",
+ "seam-core",
+ "types-applyparallel",
+ "types-core",
+ "types-datum",
+ "types-dest",
+ "types-error",
+ "types-execparallel",
+ "types-parallel",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-pqmq-seams"
 version = "0.0.0"
 dependencies = [
@@ -20896,6 +20923,7 @@ dependencies = [
  "backend-libpq-hba",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
+ "backend-libpq-pqmq",
  "backend-libpq-pqsignal",
  "backend-main-main",
  "backend-nodes-copyfuncs",
