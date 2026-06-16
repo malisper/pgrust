@@ -58,6 +58,9 @@ const GIN_AM_OID: Oid = 2742;
 /// `BRIN_AM_OID` (catalog/pg_am.dat) — the built-in BRIN access method.
 const BRIN_AM_OID: Oid = 3580;
 
+/// `SPGIST_AM_OID` (catalog/pg_am.dat) — the built-in SP-GiST access method.
+const SPGIST_AM_OID: Oid = 4000;
+
 /// `F_BTHANDLER` (pg_proc.dat oid 330) — the btree AM handler function.
 const F_BTHANDLER: Oid = 330;
 /// `F_HASHHANDLER` (pg_proc.dat oid 331) — the hash AM handler function.
@@ -287,9 +290,10 @@ pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         }
         BRIN_AM_OID => backend_access_brin_validate::brinvalidate(mcx, opclassoid)?,
         GIST_AM_OID => backend_access_gist_validate::gistvalidate(mcx, opclassoid)?,
-        // SP-GiST (4000) validator is not yet ported (no `spgvalidate`), so its
-        // handler's `amvalidate` is unreachable here; that maps to the C
-        // `function amvalidate is not defined for index access method %u` error.
+        SPGIST_AM_OID => backend_access_spg_validate::spgvalidate(mcx, opclassoid)?,
+        // A future extension AM whose validator is reached through the
+        // (unported) dynamic-fmgr dispatch maps to the C `function amvalidate
+        // is not defined for index access method %u` error.
         _ => {
             return Err(PgError::error(format!(
                 "function amvalidate is not defined for index access method \

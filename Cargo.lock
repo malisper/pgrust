@@ -1644,6 +1644,7 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-access-nbt-validate",
  "backend-access-nbtree-nbtree",
+ "backend-access-spg-validate",
  "backend-access-spgist-core",
  "backend-utils-cache-syscache-seams",
  "mcx",
@@ -1666,6 +1667,20 @@ dependencies = [
  "types-error",
  "types-opclass",
  "types-tableam",
+]
+
+[[package]]
+name = "backend-access-index-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-parser-coerce-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -15401,6 +15416,7 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-gin-ginfast",
  "backend-access-gin-ginget",
  "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
@@ -15421,6 +15437,7 @@ dependencies = [
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-amapi",
+ "backend-access-index-amvalidate",
  "backend-access-index-genam",
  "backend-access-index-indexam",
  "backend-access-nbt-compare",
@@ -15562,6 +15579,8 @@ dependencies = [
  "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",
+ "backend-optimizer-plan-analyzejoins",
+ "backend-optimizer-plan-createplan",
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",

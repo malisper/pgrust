@@ -33,6 +33,7 @@ pub fn init_all() {
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_amapi::init_seams();
+    backend_access_index_amvalidate::init_seams();
     backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
