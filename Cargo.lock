@@ -14815,6 +14815,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-tuplesort"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-sort-sortsupport-seams",
+ "backend-utils-sort-storage",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-slot",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-sort-tuplesort-seams"
 version = "0.0.0"
 dependencies = [
