@@ -793,6 +793,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(relid),
+    /// PointerGetDatum(rulename))` + `GETSTRUCT(Form_pg_rewrite)` projected to
+    /// `(oid, ev_class)` (rewriteSupport.c `get_rewrite_oid`). `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); the caller decides between
+    /// `InvalidOid` (missing_ok) and `ERRCODE_UNDEFINED_OBJECT`. `ev_class` is
+    /// returned so the caller can keep the C `Assert(relid == ev_class)`.
+    pub fn search_rewrite_oid(
+        relid: Oid,
+        rulename: &str,
+    ) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(AMNAME, Anum_pg_am_oid, CStringGetDatum(amname))`
     /// (syscache.c): the OID of the `pg_am` row named `amname`, or
     /// `InvalidOid` when no such access method exists. amcmds.c's

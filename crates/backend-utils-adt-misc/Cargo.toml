@@ -1,0 +1,42 @@
+[package]
+name = "backend-utils-adt-misc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_misc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+types-pgstat = { path = "../types-pgstat" }
+types-storage = { path = "../types-storage" }
+types-adt-misc = { path = "../types-adt-misc" }
+
+# Real owners reached directly (no cycle: nothing depends on this leaf adt crate).
+common-keywords = { path = "../common-keywords" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
+backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+
+# Cross-unit / unported owners reached through their seam crates (panic until
+# the owner lands).
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+
+# This unit's own SRF data-production seams (fd.c walk / system_fk_info table).
+backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }
+
+[dev-dependencies]
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }

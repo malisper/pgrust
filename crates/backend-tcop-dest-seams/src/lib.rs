@@ -11,6 +11,7 @@
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
 use types_dest::CommandDest;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::DestReceiverHandle;
@@ -30,10 +31,18 @@ seam_core::seam!(
     /// receiver a result set of `tupdesc` rows is about to be sent under the
     /// given command type (`begin_tup_output_tupdesc` passes `CMD_SELECT`).
     /// `Err` carries whatever the receiver's startup raises.
-    pub fn dest_rstartup(
+    ///
+    /// The leading `mcx: Mcx<'mcx>` is the per-query arena the receiver's
+    /// startup works in (the DestReceiver mcx-vtable keystone): a receiver such
+    /// as `intorel` opens its target relation and allocates its `BulkInsertState`
+    /// here. Stateless/byte-stream receivers (`donothingDR`, COPY-TO) ignore it.
+    /// The caller recovers `mcx` from `estate.es_query_cxt` (execMain) or its
+    /// output-context (execTuples / pquery).
+    pub fn dest_rstartup<'mcx>(
+        mcx: Mcx<'mcx>,
         dest: DestReceiverHandle,
         operation: CmdType,
-        tupdesc: &TupleDescData<'_>,
+        tupdesc: &TupleDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -41,8 +50,16 @@ seam_core::seam!(
     /// `dest->receiveSlot(slot, dest)` (tcop/dest.h): send one tuple (held in
     /// `slot`) to the receiver, returning the receiver's bool result (C casts
     /// it to `(void)`). `Err` carries whatever the receiver raises.
-    pub fn dest_receive_slot(
-        slot: &mut SlotData<'_>,
+    ///
+    /// The leading `mcx: Mcx<'mcx>` (the keystone change) is what lets a
+    /// `'mcx`-requiring receiver express its sink: `intorel_receive` calls
+    /// `table_tuple_insert(mcx, &rel, slot, …)` — which needs both an
+    /// `Mcx<'mcx>` and a `&mut SlotData<'mcx>` matching it — and COPY-FROM-style
+    /// real inserts likewise. The slot lifetime is now `'mcx`-bound to that
+    /// arena.
+    pub fn dest_receive_slot<'mcx>(
+        mcx: Mcx<'mcx>,
+        slot: &mut SlotData<'mcx>,
         dest: DestReceiverHandle,
     ) -> types_error::PgResult<bool>
 );
@@ -50,7 +67,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `dest->rShutdown(dest)` (tcop/dest.h): tell the receiver the result set
     /// is finished. `Err` carries whatever the receiver's shutdown raises.
-    pub fn dest_rshutdown(dest: DestReceiverHandle) -> types_error::PgResult<()>
+    ///
+    /// The leading `mcx: Mcx<'mcx>` lets a receiver finish `'mcx`-bound work at
+    /// shutdown (`intorel_shutdown` frees its `BulkInsertState` /
+    /// `table_finish_bulk_insert` and closes the relation in the query arena).
+    pub fn dest_rshutdown<'mcx>(
+        mcx: Mcx<'mcx>,
+        dest: DestReceiverHandle,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
