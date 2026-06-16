@@ -37,9 +37,12 @@ pub use types_nodes::nodesamplescan::{SampleScan, TableSampleClause};
 // owner that lands the registry fills them with real method functions.
 // ===========================================================================
 
-/// `SampleScanGetSampleSize_function` (access/tsmapi.h).
+/// `SampleScanGetSampleSize_function` (access/tsmapi.h). The C callback pointer
+/// is mcx-free (it takes no MemoryContext), so it is modelled as a higher-ranked
+/// `for<'mcx> fn(...)` — it works for a node of any context lifetime, mirroring
+/// the table-AM / index-AM vtable convention.
 pub type SampleScanGetSampleSizeFunction = Option<
-    fn(
+    for<'mcx> fn(
         root: Option<Box<PlannerInfo>>,
         baserel: Option<Box<RelOptInfo>>,
         paramexprs: Vec<types_nodes::nodes::Node<'static>>,
@@ -49,27 +52,29 @@ pub type SampleScanGetSampleSizeFunction = Option<
 >;
 
 /// `InitSampleScan_function` (access/tsmapi.h). Can be `None`.
-pub type InitSampleScanFunction = Option<fn(node: &mut SampleScanState<'static>, eflags: i32)>;
+pub type InitSampleScanFunction =
+    Option<for<'mcx> fn(node: &mut SampleScanState<'mcx>, eflags: i32)>;
 
 /// `BeginSampleScan_function` (access/tsmapi.h).
-pub type BeginSampleScanFunction =
-    Option<fn(node: &mut SampleScanState<'static>, params: &[Datum], nparams: i32, seed: uint32)>;
+pub type BeginSampleScanFunction = Option<
+    for<'mcx> fn(node: &mut SampleScanState<'mcx>, params: &[Datum], nparams: i32, seed: uint32),
+>;
 
 /// `NextSampleBlock_function` (access/tsmapi.h). Can be `None`.
 pub type NextSampleBlockFunction =
-    Option<fn(node: &mut SampleScanState<'static>, nblocks: BlockNumber) -> BlockNumber>;
+    Option<for<'mcx> fn(node: &mut SampleScanState<'mcx>, nblocks: BlockNumber) -> BlockNumber>;
 
 /// `NextSampleTuple_function` (access/tsmapi.h).
 pub type NextSampleTupleFunction = Option<
-    fn(
-        node: &mut SampleScanState<'static>,
+    for<'mcx> fn(
+        node: &mut SampleScanState<'mcx>,
         blockno: BlockNumber,
         maxoffset: OffsetNumber,
     ) -> uint16,
 >;
 
 /// `EndSampleScan_function` (access/tsmapi.h). Can be `None`.
-pub type EndSampleScanFunction = Option<fn(node: &mut SampleScanState<'static>)>;
+pub type EndSampleScanFunction = Option<for<'mcx> fn(node: &mut SampleScanState<'mcx>)>;
 
 /// `TsmRoutine` (access/tsmapi.h): the struct returned by a tablesample
 /// method's handler function.

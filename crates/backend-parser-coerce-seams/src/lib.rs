@@ -67,6 +67,33 @@ seam_core::seam!(
     ) -> PgResult<types_core::Oid>
 );
 
+seam_core::seam!(
+    /// `check_valid_polymorphic_signature(ret_type, declared_arg_types, nargs)`
+    /// (parse_coerce.c): if `ret_type` is polymorphic, verify the argument types
+    /// include a matching polymorphic input so the actual return type is
+    /// deducible. Returns `None` (C `NULL`) when the signature is valid, else
+    /// `Some(detail)` — the human-readable detail message the caller passes to
+    /// `errdetail_internal`. `AggregateCreate` consumes it for the transtype /
+    /// mtranstype / result-type validations.
+    pub fn check_valid_polymorphic_signature(
+        ret_type: types_core::Oid,
+        declared_arg_types: &[types_core::Oid],
+        nargs: i32,
+    ) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `check_valid_internal_signature(ret_type, declared_arg_types, nargs)`
+    /// (parse_coerce.c): verify that a function returning `internal` has at least
+    /// one `internal` argument. Returns `None` (C `NULL`) when valid, else
+    /// `Some(detail)`. `AggregateCreate` consumes it for the result-type check.
+    pub fn check_valid_internal_signature(
+        ret_type: types_core::Oid,
+        declared_arg_types: &[types_core::Oid],
+        nargs: i32,
+    ) -> PgResult<Option<String>>
+);
+
 // ---------------------------------------------------------------------------
 // High-level coercion entry points consumed by parse_expr.c. These are the
 // `parse_coerce.c` public surface (`coerce_to_boolean`, `coerce_to_specific_type`,

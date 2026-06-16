@@ -48,6 +48,33 @@ pub use io::{
 pub fn init_seams() {
     backend_utils_adt_float_seams::float8_mul::set(float8_mul);
     backend_utils_adt_float_seams::float8_div::set(float8_div);
+    backend_utils_adt_float_seams::float8_pl::set(float8_pl);
+    backend_utils_adt_float_seams::float8_mi::set(float8_mi);
+    backend_utils_adt_float_seams::float8_eq::set(float8_eq);
+    backend_utils_adt_float_seams::float8_lt::set(float8_lt);
+    backend_utils_adt_float_seams::float8_gt::set(float8_gt);
+    backend_utils_adt_float_seams::float8_min::set(float8_min);
+    backend_utils_adt_float_seams::float8_max::set(float8_max);
+    backend_utils_adt_float_seams::get_float8_infinity::set(get_float8_infinity);
+    backend_utils_adt_float_seams::get_float8_nan::set(get_float8_nan);
+    backend_utils_adt_float_seams::float_overflow_error::set(float_overflow_error);
+    backend_utils_adt_float_seams::float_underflow_error::set(float_underflow_error);
+    backend_utils_adt_float_seams::float8in_internal_endptr::set(float8in_internal_endptr_seam);
+    backend_utils_adt_float_seams::float8out_internal::set(float8out_internal);
+}
+
+/// Adapter for the `float8in_internal_endptr` seam: the seam carries owned
+/// `String`s and returns `(value, consumed)`, reporting the stopping point
+/// (`endptr_p != NULL` mode), as `geo_ops.c`'s `single_decode` needs.
+fn float8in_internal_endptr_seam(
+    num: String,
+    type_name: String,
+    orig_string: String,
+) -> PgResult<(f64, usize)> {
+    let mut consumed = 0usize;
+    let value =
+        io::float8in_internal(&num, Some(&mut consumed), &type_name, &orig_string)?;
+    Ok((value, consumed))
 }
 
 // ---------------------------------------------------------------------------

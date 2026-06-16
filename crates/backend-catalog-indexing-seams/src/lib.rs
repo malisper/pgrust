@@ -961,3 +961,39 @@ seam_core::seam!(
         row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `AggregateCreate`'s fresh-row path (pg_aggregate.c:730-731 +
+    /// catalog/indexing.c + heapam): `tup = heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)`. The `pg_aggregate` row has
+    /// no OID column — the key column `aggfnoid` is the pre-assigned `pg_proc` OID
+    /// carried in `row.form.aggfnoid`. The 20 fixed columns cross as
+    /// `row.form`; the two `CATALOG_VARLEN` `text` columns (`agginitval` /
+    /// `aggminitval`) are `row.agginitval` / `row.aggminitval`, each `None` ⇒
+    /// `nulls[Anum_pg_aggregate_* - 1] = true`. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_aggregate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AggregateCreate`'s REPLACE path (pg_aggregate.c:724-726 +
+    /// catalog/indexing.c + heapam): `tup = heap_modify_tuple(oldtup,
+    /// RelationGetDescr(rel), values, nulls, replaces)` + `CatalogTupleUpdate(rel,
+    /// &tup->t_self, tup)`. `oldtup` is the held `SearchSysCache1(AGGFNOID, procOid)`
+    /// tuple (supplying both the not-replaced columns and the `t_self` update
+    /// target); the replacement columns cross as `row`; `replaces` pins
+    /// `aggfnoid`/`aggkind`/`aggnumdirectargs` to the old tuple
+    /// (`replaces[..] = false`), every other column replaced. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_aggregate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
+        replaces: types_catalog::pg_aggregate::PgAggregateReplaces,
+    ) -> PgResult<()>
+);
