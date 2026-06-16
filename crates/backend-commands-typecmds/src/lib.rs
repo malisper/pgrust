@@ -3812,7 +3812,85 @@ fn get_namespace_name_seam(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>>
 /// (`make_range_constructors`, `make_multirange_constructors`,
 /// `define_relation_composite`) are installed by their real owners
 /// (`ProcedureCreate`/`DefineRelation`), not here.
+/// `castNode(List, stmt->object)` + `strVal` over each `String` child — the
+/// qualified type name as a `Vec<String>` (the `makeTypeNameFromNameList` input
+/// the F4 entry points consume). The generic ALTER dispatch (`commands/alter.c`)
+/// hands `stmt->object` as a `List *` `Node`; the F4 bodies want the namelist.
+fn names_from_list_node(object: &Node) -> PgResult<Vec<String>> {
+    let items = object.as_list().ok_or_else(|| {
+        PgError::error("typecmds: ALTER TYPE/DOMAIN object must be a List of String nodes")
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let s = it
+            .as_string()
+            .ok_or_else(|| PgError::error("strVal: String node expected"))?;
+        out.push(s.sval.as_deref().unwrap_or("").to_string());
+    }
+    Ok(out)
+}
+
+/// Inward-seam adapter for `RenameType(RenameStmt *stmt)` (the
+/// `commands/alter.c` `ExecRenameStmt` dispatch target): decode `stmt->object`
+/// (qualified name `List`) + `stmt->newname` + `stmt->renameType`, then run the
+/// ported `RenameType` body.
+fn rename_type_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_parsenodes::RenameStmt,
+) -> PgResult<ObjectAddress> {
+    let object = stmt.object.as_deref().ok_or_else(|| {
+        PgError::error("ExecRenameStmt: RENAME object must be set for DOMAIN/TYPE")
+    })?;
+    let names = names_from_list_node(object)?;
+    let new_type_name = stmt.newname.as_deref().unwrap_or("");
+    RenameType(mcx, &names, new_type_name, stmt.renameType)
+}
+
+/// Inward-seam adapter for `AlterTypeNamespace(names, newschema, objecttype,
+/// *oldschema)` — decode the `List` namelist and surface the old-schema OID on
+/// the tuple's second slot (the C `*oldschema` out-parameter).
+fn alter_type_namespace_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &Node,
+    newschema: &str,
+    objecttype: ObjectType,
+    want_oldschema: bool,
+) -> PgResult<(ObjectAddress, Oid)> {
+    let names = names_from_list_node(names)?;
+    let mut oldschema = InvalidOid;
+    let addr = AlterTypeNamespace(
+        mcx,
+        &names,
+        newschema,
+        objecttype,
+        if want_oldschema {
+            Some(&mut oldschema)
+        } else {
+            None
+        },
+    )?;
+    Ok((addr, oldschema))
+}
+
+/// Inward-seam adapter for `AlterTypeOwner(names, newOwnerId, objecttype)` —
+/// decode the `List` namelist and run the ported body.
+fn alter_type_owner_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &Node,
+    new_owner_id: Oid,
+    objecttype: ObjectType,
+) -> PgResult<ObjectAddress> {
+    let names = names_from_list_node(names)?;
+    AlterTypeOwner(mcx, &names, new_owner_id, objecttype)
+}
+
 pub fn init_seams() {
     me::RemoveTypeById::set(RemoveTypeById);
     me::alter_type_owner_oid::set(AlterTypeOwner_oid);
+    // Generic ALTER dispatch targets (commands/alter.c) — adapt the `List`
+    // namelist / `RenameStmt` the dispatcher passes onto the ported F4 bodies.
+    me::RenameType::set(rename_type_seam);
+    me::AlterTypeNamespace::set(alter_type_namespace_seam);
+    me::AlterTypeNamespace_oid::set(AlterTypeNamespace_oid);
+    me::AlterTypeOwner::set(alter_type_owner_seam);
 }

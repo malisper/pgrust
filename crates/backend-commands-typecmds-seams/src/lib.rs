@@ -223,3 +223,53 @@ seam_core::seam!(
         want_constr_addr: bool,
     ) -> PgResult<Option<ObjectAddress>>
 );
+
+// ---------------------------------------------------------------------------
+// Generic ALTER dispatch targets driven by commands/alter.c.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `RenameType(RenameStmt *stmt)` (typecmds.c) — ALTER TYPE/DOMAIN RENAME TO.
+    pub fn RenameType<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `AlterTypeNamespace(List *names, const char *newschema, ObjectType
+    /// objecttype, Oid *oldschema)` (typecmds.c) — ALTER TYPE/DOMAIN SET SCHEMA.
+    /// `names` is the qualified type-name `List *` node. When `want_oldschema`
+    /// is true the previous schema OID rides the tuple's second slot.
+    pub fn AlterTypeNamespace<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        names: &Node,
+        newschema: &str,
+        objecttype: types_nodes::parsenodes::ObjectType,
+        want_oldschema: bool,
+    ) -> PgResult<(ObjectAddress, Oid)>
+);
+
+seam_core::seam!(
+    /// `AlterTypeNamespace_oid(Oid typeOid, Oid nspOid, bool ignoreDependent,
+    /// ObjectAddresses *objsMoved)` (typecmds.c) — move a type to `nspOid` by
+    /// OID, used by ALTER EXTENSION SET SCHEMA. Returns the previous schema OID.
+    pub fn AlterTypeNamespace_oid(
+        type_oid: Oid,
+        nsp_oid: Oid,
+        ignore_dependent: bool,
+        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AlterTypeOwner(List *names, Oid newOwnerId, ObjectType objecttype)`
+    /// (typecmds.c) — ALTER TYPE/DOMAIN OWNER TO. `names` is the qualified
+    /// type-name `List *` node.
+    pub fn AlterTypeOwner<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        names: &Node,
+        new_owner_id: Oid,
+        objecttype: types_nodes::parsenodes::ObjectType,
+    ) -> PgResult<ObjectAddress>
+);
