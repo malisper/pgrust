@@ -817,6 +817,7 @@ pub fn init_seams() {
     backend_catalog_catalog_seams::is_toast_relation::set(IsToastRelation);
     backend_catalog_catalog_seams::is_shared_relation::set(IsSharedRelation);
     backend_catalog_catalog_seams::is_catalog_namespace::set(IsCatalogNamespace);
+    backend_catalog_catalog_seams::is_toast_namespace::set(IsToastNamespace);
     backend_catalog_catalog_seams::is_reserved_name::set(|name| Ok(IsReservedName(&name)));
     backend_catalog_catalog_seams::is_system_relation::set(is_system_relation_seam);
     backend_catalog_catalog_seams::is_system_class::set(is_system_class_seam);

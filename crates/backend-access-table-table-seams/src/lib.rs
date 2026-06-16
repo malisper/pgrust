@@ -21,6 +21,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `try_table_open(relationId, lockmode)` (table.c): like [`table_open`], but
+    /// returns `Ok(None)` (the C `NULL`) when the relation has disappeared rather
+    /// than raising. Used by the REINDEX MISSING_OK path.
+    pub fn try_table_open<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation_id: Oid,
+        lockmode: LOCKMODE,
+    ) -> PgResult<Option<Relation<'mcx>>>
+);
+
+seam_core::seam!(
     /// `relation_close(relid, lockmode)` (relation.c) for the cases where the
     /// owned-handle is no longer in scope (the C `goto out` early-exits close
     /// the same OID the caller still references). Refcount + optional lock.

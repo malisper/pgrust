@@ -28,6 +28,7 @@ use types_tuple::access::{
 /// Install this crate's seam implementations.
 pub fn init_seams() {
     backend_access_table_table_seams::table_open::set(table_open);
+    backend_access_table_table_seams::try_table_open::set(try_table_open);
     backend_access_table_table_seams::relation_close::set(relation_close);
 }
 

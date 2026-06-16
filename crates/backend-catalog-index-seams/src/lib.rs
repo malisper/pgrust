@@ -313,6 +313,58 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+/* ---------------------------------------------------------------------------
+ * The REINDEX-with-SET-TABLESPACE leg of `reindex_index`.
+ *
+ * These three producers (`CheckRelationTableSpaceMove` / `SetRelationTableSpace`
+ * from tablecmds.c, `RelationAssumeNewRelfilelocator` from relcache.c) are
+ * reached by `reindex_index` only when `params.tablespaceOid` is valid — a path
+ * no current caller exercises (`cluster` and `tablecmds`-TRUNCATE both pass a
+ * default `ReindexParams` with `tablespace_oid == InvalidOid`). Their owning
+ * units (commands/tablecmds.c, the relcache relfilelocator-mutation helper) are
+ * not yet ported, so these inward seams stay UNINSTALLED and a call panics
+ * loudly (mirror-PG-and-panic) until that lands. Declared here so `reindex_index`
+ * can express the leg faithfully rather than dropping it.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `CheckRelationTableSpaceMove(rel, newTableSpaceId)` (tablecmds.c): is a
+    /// move of `rel` to `newTableSpaceId` actually needed (and permitted)?
+    /// Returns `false` (no move needed) when the relation already lives in the
+    /// target tablespace or has no storage; raises on a disallowed move. Owner =
+    /// commands/tablecmds.c (unported). `Err` carries the `ereport(ERROR)`s.
+    pub fn check_relation_table_space_move(
+        rel: &types_rel::Relation<'_>,
+        new_tablespace_id: types_core::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SetRelationTableSpace(rel, newTableSpaceId, newRelFileNumber)`
+    /// (tablecmds.c): update `rel`'s `pg_class` row to the new tablespace (and,
+    /// if `newRelFileNumber` is valid, the new relfilenumber). Owner =
+    /// commands/tablecmds.c (unported). `Err` carries the catalog
+    /// `ereport(ERROR)`s.
+    pub fn set_relation_table_space(
+        rel: &types_rel::Relation<'_>,
+        new_tablespace_id: types_core::Oid,
+        new_rel_file_number: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationDropStorage(rel)` + `RelationAssumeNewRelfilelocator(rel)`
+    /// (catalog/storage.c + relcache.c): schedule unlinking of `rel`'s current
+    /// physical storage at commit and mark the relcache entry as assuming a new
+    /// relfilelocator. Bundled because `reindex_index`'s SET TABLESPACE leg
+    /// always performs them as a pair on the same open index relation. Owner =
+    /// catalog/storage.c + relcache.c (the Relation-keyed form is unported).
+    /// `Err` carries any `ereport(ERROR)`.
+    pub fn drop_storage_assume_new_relfilelocator(
+        rel: &types_rel::Relation<'_>,
+    ) -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `BuildSpeculativeIndexInfo(index, ii)` (catalog/index.c): add to a
     /// unique-index `IndexInfo` the extra information speculative insertion

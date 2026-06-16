@@ -15,6 +15,19 @@ use types_error::PgResult;
 use types_opclass::{AlterOpFamilyStmt, CreateOpClassStmt, CreateOpFamilyStmt, OpFamilyMember};
 
 seam_core::seam!(
+    /// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
+    /// (event_trigger.c) for a `ReindexStmt` — `reindex_index` records the REINDEX
+    /// command for interested event triggers when invoked from a REINDEX command
+    /// (`stmt != NULL`). `Err` carries any allocation failure of the collected
+    /// command.
+    pub fn event_trigger_collect_simple_command_reindex<'mcx>(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        stmt: &types_nodes::ddlnodes::ReindexStmt<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AlterEventTriggerOwner_oid(trigOid, newOwnerId)` (event_trigger.c):
     /// change an event trigger's owner during REASSIGN OWNED. Can
     /// `ereport(ERROR)`, carried on `Err`.

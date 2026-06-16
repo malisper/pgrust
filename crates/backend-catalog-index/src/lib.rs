@@ -842,6 +842,9 @@ use backend_utils_cache_inval_seams as inval;
 use backend_commands_tablecmds_seams as tablecmds;
 use backend_commands_tablespace_globals_seams as tablespace;
 use backend_bootstrap_bootstrap_seams as bootstrap;
+use backend_storage_lmgr_predicate_seams as predicate;
+use backend_commands_event_trigger_seams as event_trigger;
+use backend_utils_error_seams as error_seams;
 use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
@@ -2646,6 +2649,517 @@ unsafe fn restore_reindex_state(reindexstate: usize) {
 }
 
 /* ===========================================================================
+ * reindex_index / reindex_relation
+ * ========================================================================= */
+
+/// `RELKIND_PARTITIONED_TABLE` (pg_class.h).
+const RELKIND_PARTITIONED_TABLE: u8 = b'p';
+/// `RELPERSISTENCE_PERMANENT` (pg_class.h).
+const RELPERSISTENCE_PERMANENT_U8: u8 = b'p';
+/// `RELPERSISTENCE_UNLOGGED` as a `u8` (the `rd_rel.relpersistence` field type).
+const RELPERSISTENCE_UNLOGGED_U8: u8 = b'u';
+
+/* commands/index.h: REINDEXOPT_* (a `bits32` bitmask in ReindexParams.options). */
+/// `REINDEXOPT_VERBOSE` — print progress info.
+const REINDEXOPT_VERBOSE: i32 = 0x01;
+/// `REINDEXOPT_REPORT_PROGRESS` — report pgstat progress.
+const REINDEXOPT_REPORT_PROGRESS: i32 = 0x02;
+/// `REINDEXOPT_MISSING_OK` — skip missing relations.
+const REINDEXOPT_MISSING_OK: i32 = 0x04;
+
+/* commands/progress.h: CREATE INDEX progress-report parameter indexes + values
+ * reindex_index uses (duplicated, as elsewhere in the crate, since
+ * commands/progress.h has no owned crate). */
+/// `PROGRESS_CREATEIDX_COMMAND` parameter index.
+const PROGRESS_CREATEIDX_COMMAND: i32 = 0;
+/// `PROGRESS_CREATEIDX_INDEX_OID` parameter index.
+const PROGRESS_CREATEIDX_INDEX_OID: i32 = 6;
+/// `PROGRESS_CREATEIDX_ACCESS_METHOD_OID` parameter index.
+const PROGRESS_CREATEIDX_ACCESS_METHOD_OID: i32 = 8;
+/// `PROGRESS_CREATEIDX_COMMAND_REINDEX` value.
+const PROGRESS_CREATEIDX_COMMAND_REINDEX: i64 = 2;
+/// `PROGRESS_CLUSTER_INDEX_REBUILD_COUNT` parameter index.
+const PROGRESS_CLUSTER_INDEX_REBUILD_COUNT: i32 = 10;
+
+/// `ShareLock` (`storage/lockdefs.h`).
+const SHARE_LOCK: i32 = 5;
+
+/// `RELATION_IS_OTHER_TEMP(relation)` (utils/rel.h): a temporary relation
+/// belonging to some other session. `rel->rd_rel->relpersistence ==
+/// RELPERSISTENCE_TEMP && !rel->rd_islocaltemp`.
+fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
+    if rel.rd_rel.relpersistence != types_tuple::access::RELPERSISTENCE_TEMP {
+        return Ok(false);
+    }
+    Ok(!relcache::rd_islocaltemp::call(rel)?)
+}
+
+/// `reindex_index(stmt, indexId, skip_constraint_checks, persistence, params)`
+/// (catalog/index.c, file-static): rebuild one existing index in place — open +
+/// lock the parent heap and the index, transfer predicate locks, rebuild the
+/// physical relation with a fresh relfilenumber, and reset the `pg_index`
+/// validity flags. `stmt` is `Some` only when invoked from a REINDEX command
+/// (for event-trigger collection); `reindex_relation` and the other internal
+/// callers pass `None`.
+///
+/// Mirrors index.c verbatim; the C declares `iRel`/`heapRelation` as raw
+/// `Relation` and `goto`s through `table_close(..., NoLock)` early-exits — the
+/// owned model uses the RAII [`Relation`] handle (`drop` == the C
+/// `relation_close(rel, NoLock)`) and `.close(lockmode)` for the keep-lock
+/// closes, so the early-return paths drop the heap handle (NoLock) exactly as
+/// the C `table_close(heapRelation, NoLock)` does.
+#[allow(clippy::too_many_arguments)]
+fn reindex_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: Option<&types_nodes::ddlnodes::ReindexStmt<'mcx>>,
+    index_id: Oid,
+    skip_constraint_checks: bool,
+    persistence: i8,
+    params: &types_cluster::ReindexParams,
+) -> PgResult<()> {
+    let progress = (params.options & REINDEXOPT_REPORT_PROGRESS) != 0;
+    let mut set_tablespace = false;
+
+    /* pg_rusage_init(&ru0) — only feeds the VERBOSE INFO line below. */
+
+    /*
+     * Open and lock the parent heap relation.  ShareLock is sufficient since we
+     * only need to be sure no schema or data changes are going on.
+     */
+    let heap_id = IndexGetRelation(index_id, (params.options & REINDEXOPT_MISSING_OK) != 0)?;
+    /* if relation is missing, leave */
+    if !OidIsValid(heap_id) {
+        return Ok(());
+    }
+
+    let heap_relation = if (params.options & REINDEXOPT_MISSING_OK) != 0 {
+        match table_am::try_table_open::call(mcx, heap_id, SHARE_LOCK)? {
+            /* if relation is gone, leave */
+            None => return Ok(()),
+            Some(rel) => rel,
+        }
+    } else {
+        table_am::table_open::call(mcx, heap_id, SHARE_LOCK)?
+    };
+
+    /*
+     * Switch to the table owner's userid, so that any index functions are run
+     * as that user.  Also lock down security-restricted operations and arrange
+     * to make GUC variable changes local to this command.
+     */
+    let (save_userid, save_sec_context) = matview::get_user_id_and_sec_context::call()?;
+    rt::set_user_id_and_sec_context::call(
+        heap_relation.rd_rel.relowner,
+        save_sec_context | SECURITY_RESTRICTED_OPERATION,
+    )?;
+    let save_nestlevel = guc::new_guc_nest_level::call();
+    guc::restrict_search_path::call()?;
+
+    if progress {
+        let progress_cols = [PROGRESS_CREATEIDX_COMMAND, PROGRESS_CREATEIDX_INDEX_OID];
+        let progress_vals = [PROGRESS_CREATEIDX_COMMAND_REINDEX, index_id as i64];
+        progress::pgstat_progress_start_command::call(
+            types_pgstat::backend_progress::ProgressCommandType::CreateIndex,
+            heap_id,
+        );
+        progress::pgstat_progress_update_multi_param::call(&progress_cols, &progress_vals);
+    }
+
+    /*
+     * Open the target index relation and get an exclusive lock on it, to ensure
+     * that no one else is touching this particular index.
+     */
+    let i_rel = if (params.options & REINDEXOPT_MISSING_OK) != 0 {
+        match indexam::try_index_open::call(mcx, index_id, ACCESS_EXCLUSIVE_LOCK)? {
+            /* if index relation is gone, leave */
+            None => {
+                /* Roll back any GUC changes */
+                guc::at_eoxact_guc::call(false, save_nestlevel)?;
+                /* Restore userid and security context */
+                rt::set_user_id_and_sec_context::call(save_userid, save_sec_context)?;
+                /* Close parent heap relation, but keep locks */
+                heap_relation.close(NO_LOCK)?;
+                return Ok(());
+            }
+            Some(rel) => rel,
+        }
+    } else {
+        indexam::index_open::call(mcx, index_id, ACCESS_EXCLUSIVE_LOCK)?
+    };
+
+    if progress {
+        progress::pgstat_progress_update_param::call(
+            PROGRESS_CREATEIDX_ACCESS_METHOD_OID,
+            i_rel.rd_rel.relam as i64,
+        );
+    }
+
+    /*
+     * If a statement is available, telling that this comes from a REINDEX
+     * command, collect the index for event triggers.
+     */
+    if let Some(stmt) = stmt {
+        let mut address = types_catalog::catalog_dependency::InvalidObjectAddress;
+        object_address_set(&mut address, RELATION_RELATION_ID, index_id);
+        event_trigger::event_trigger_collect_simple_command_reindex::call(
+            address,
+            types_catalog::catalog_dependency::InvalidObjectAddress,
+            stmt,
+        )?;
+    }
+
+    /*
+     * Partitioned indexes should never get processed here, as they have no
+     * physical storage.
+     */
+    if i_rel.rd_rel.relkind == RELKIND_PARTITIONED_INDEX {
+        let nsp = lsyscache::get_namespace_name::call(mcx, i_rel.rd_rel.relnamespace)?;
+        return elog_error(alloc::format!(
+            "cannot reindex partitioned index \"{}.{}\"",
+            nsp.as_deref().unwrap_or(""),
+            i_rel.name()
+        ));
+    }
+
+    /*
+     * Don't allow reindex on temp tables of other backends ... their local
+     * buffer manager is not going to cope.
+     */
+    if relation_is_other_temp(&i_rel)? {
+        return Err(PgError::error(alloc::string::String::from(
+            "cannot reindex temporary tables of other sessions",
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    /*
+     * Don't allow reindex of an invalid index on TOAST table.  This is a
+     * leftover from a failed REINDEX CONCURRENTLY, and if rebuilt it would not
+     * be possible to drop it anymore.
+     */
+    if catalog::is_toast_namespace::call(i_rel.rd_rel.relnamespace)
+        && !tablecmds::get_index_isvalid::call(index_id)?.unwrap_or(false)
+    {
+        return Err(PgError::error(alloc::string::String::from(
+            "cannot reindex invalid index on TOAST table",
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    /*
+     * System relations cannot be moved even if allow_system_table_mods is
+     * enabled to keep things consistent with the concurrent case where all the
+     * indexes of a relation are processed in series, including indexes of toast
+     * relations.
+     */
+    if OidIsValid(params.tablespace_oid) && catalog::is_system_relation::call(&i_rel)? {
+        return Err(PgError::error(alloc::format!(
+            "cannot move system relation \"{}\"",
+            i_rel.name()
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    /* Check if the tablespace of this index needs to be changed */
+    if OidIsValid(params.tablespace_oid)
+        && index_seam::check_relation_table_space_move::call(&i_rel, params.tablespace_oid)?
+    {
+        set_tablespace = true;
+    }
+
+    /*
+     * Also check for active uses of the index in the current transaction; we
+     * don't want to reindex underneath an open indexscan.
+     */
+    matview::check_table_not_in_use::call(i_rel.rd_id, alloc::string::String::from("REINDEX INDEX"))?;
+
+    /* Set new tablespace, if requested */
+    if set_tablespace {
+        /* Update its pg_class row */
+        index_seam::set_relation_table_space::call(&i_rel, params.tablespace_oid, InvalidOid)?;
+
+        /*
+         * Schedule unlinking of the old index storage at transaction commit,
+         * and assume the new relfilelocator.
+         */
+        index_seam::drop_storage_assume_new_relfilelocator::call(&i_rel)?;
+
+        /* Make sure the reltablespace change is visible */
+        xact::command_counter_increment::call()?;
+    }
+
+    /*
+     * All predicate locks on the index are about to be made invalid. Promote
+     * them to relation locks on the heap.
+     */
+    predicate::transfer_predicate_locks_to_heap_relation::call(i_rel.rd_id)?;
+
+    /* Fetch info needed for index_build */
+    let mut index_info = BuildIndexInfo(mcx, &i_rel)?;
+
+    /* If requested, skip checking uniqueness/exclusion constraints */
+    let skipped_constraint = if skip_constraint_checks {
+        let skipped = index_info.ii_Unique || index_info.ii_ExclusionOps.is_some();
+        index_info.ii_Unique = false;
+        index_info.ii_ExclusionOps = None;
+        index_info.ii_ExclusionProcs = None;
+        index_info.ii_ExclusionStrats = None;
+        skipped
+    } else {
+        false
+    };
+
+    /* Suppress use of the target index while rebuilding it */
+    SetReindexProcessing(heap_id, index_id)?;
+
+    /* Create a new physical relation for the index */
+    relcache::relation_set_new_relfilenumber::call(i_rel.rd_id, persistence)?;
+
+    /* Initialize the index and rebuild */
+    /* Note: we do not need to re-establish pkey setting */
+    index_build(mcx, &heap_relation, &i_rel, &mut index_info)?;
+
+    /* Re-allow use of target index */
+    ResetReindexProcessing();
+
+    /*
+     * If the index is marked invalid/not-ready/dead (ie, it's from a failed
+     * CREATE INDEX CONCURRENTLY, or a DROP INDEX CONCURRENTLY failed midway),
+     * and we didn't skip a uniqueness check, we can now mark it valid.  This
+     * allows REINDEX to be used to clean up in such cases.
+     *
+     * We can also reset indcheckxmin, because we have now done a non-concurrent
+     * index build, *except* in the case where index_build found some
+     * still-broken HOT chains.  (See the long comment in index.c.)
+     */
+    if !skipped_constraint {
+        let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+        let Some((tid, mut index_form)) =
+            syscache::search_syscache_copy_pg_index::call(mcx, index_id)?
+        else {
+            return elog_error(alloc::format!("cache lookup failed for index {index_id}"));
+        };
+
+        let index_bad =
+            !index_form.indisvalid || !index_form.indisready || !index_form.indislive;
+        if index_bad || (index_form.indcheckxmin && !index_info.ii_BrokenHotChain) {
+            if !index_info.ii_BrokenHotChain {
+                index_form.indcheckxmin = false;
+            } else if index_bad {
+                index_form.indcheckxmin = true;
+            }
+            index_form.indisvalid = true;
+            index_form.indisready = true;
+            index_form.indislive = true;
+            indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &index_form)?;
+
+            /*
+             * Invalidate the relcache for the table, so that after we commit all
+             * sessions will refresh the table's index list.
+             */
+            inval::cache_invalidate_relcache::call(heap_relation.rd_id)?;
+        }
+
+        pg_index.close(ROW_EXCLUSIVE_LOCK)?;
+    }
+
+    /* Log what we did */
+    if (params.options & REINDEXOPT_VERBOSE) != 0 {
+        let name = lsyscache::get_rel_name::call(mcx, index_id)?;
+        error_seams::ereport::call(
+            PgError::new(
+                types_error::INFO,
+                alloc::format!(
+                    "index \"{}\" was reindexed",
+                    name.as_deref().unwrap_or("")
+                ),
+            ),
+        )?;
+    }
+
+    /* Roll back any GUC changes executed by index functions */
+    guc::at_eoxact_guc::call(false, save_nestlevel)?;
+
+    /* Restore userid and security context */
+    rt::set_user_id_and_sec_context::call(save_userid, save_sec_context)?;
+
+    /* Close rels, but keep locks */
+    i_rel.close(NO_LOCK)?;
+    heap_relation.close(NO_LOCK)?;
+
+    if progress {
+        progress::pgstat_progress_end_command::call();
+    }
+
+    Ok(())
+}
+
+/// `ObjectAddressSet(address, RelationRelationId, indexId)` (objectaddress.h).
+fn object_address_set(address: &mut ObjectAddress, class_id: Oid, object_id: Oid) {
+    address.classId = class_id;
+    address.objectId = object_id;
+    address.objectSubId = 0;
+}
+
+/// `reindex_relation(stmt, relid, flags, params)` (catalog/index.c): recreate
+/// all indexes of a relation (and optionally its toast relation too, if any).
+/// Returns `true` if any indexes were rebuilt. A `CommandCounterIncrement`
+/// occurs after each index rebuild.
+///
+/// The installed inward seam ([`backend_catalog_index_seams::reindex_relation`])
+/// drops the C `stmt` argument (every current caller passes `NULL`), so this
+/// body threads `stmt = None` into `reindex_index`; the recursion's
+/// event-trigger leg is therefore never taken on any live path.
+fn reindex_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    flags: i32,
+    params: &types_cluster::ReindexParams,
+) -> PgResult<bool> {
+    let mut result = false;
+
+    /*
+     * Open and lock the relation.  ShareLock is sufficient since we only need
+     * to prevent schema and data changes in it.
+     */
+    let rel = if (params.options & REINDEXOPT_MISSING_OK) != 0 {
+        match table_am::try_table_open::call(mcx, relid, SHARE_LOCK)? {
+            /* if relation is gone, leave */
+            None => return Ok(false),
+            Some(rel) => rel,
+        }
+    } else {
+        table_am::table_open::call(mcx, relid, SHARE_LOCK)?
+    };
+
+    /*
+     * Partitioned tables should never get processed here, as they have no
+     * physical storage.
+     */
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        let nsp = lsyscache::get_namespace_name::call(mcx, rel.rd_rel.relnamespace)?;
+        return elog_error(alloc::format!(
+            "cannot reindex partitioned table \"{}.{}\"",
+            nsp.as_deref().unwrap_or(""),
+            rel.name()
+        ));
+    }
+
+    let toast_relid = rel.rd_rel.reltoastrelid;
+
+    /*
+     * Get the list of index OIDs for this relation.  (We trust the relcache to
+     * get this with a sequential scan if ignoring system indexes.)
+     */
+    let index_ids = relcache::relation_get_index_list::call(mcx, &rel)?;
+
+    if (flags & types_cluster::REINDEX_REL_SUPPRESS_INDEX_USE) != 0 {
+        /* Suppress use of all the indexes until they are rebuilt */
+        SetReindexPending(&index_ids)?;
+
+        /*
+         * Make the new heap contents visible --- now things might be
+         * inconsistent!
+         */
+        xact::command_counter_increment::call()?;
+    }
+
+    /*
+     * Reindex the toast table, if any, before the main table.
+     */
+    if (flags & types_cluster::REINDEX_REL_PROCESS_TOAST) != 0 && OidIsValid(toast_relid) {
+        /*
+         * Note that this should fail if the toast relation is missing, so reset
+         * REINDEXOPT_MISSING_OK.  Even if a new tablespace is set for the parent
+         * relation, the indexes on its toast table are not moved.
+         */
+        let mut newparams = *params;
+        newparams.options &= !REINDEXOPT_MISSING_OK;
+        newparams.tablespace_oid = InvalidOid;
+        result |= reindex_relation(mcx, toast_relid, flags, &newparams)?;
+    }
+
+    /*
+     * Compute persistence of indexes: same as that of owning rel, unless caller
+     * specified otherwise.
+     */
+    let persistence: i8 = if (flags & types_cluster::REINDEX_REL_FORCE_INDEXES_UNLOGGED) != 0 {
+        RELPERSISTENCE_UNLOGGED_U8 as i8
+    } else if (flags & types_cluster::REINDEX_REL_FORCE_INDEXES_PERMANENT) != 0 {
+        RELPERSISTENCE_PERMANENT_U8 as i8
+    } else {
+        rel.rd_rel.relpersistence as i8
+    };
+
+    /* Reindex all the indexes. */
+    let mut i: i64 = 1;
+    for &index_oid in index_ids.iter() {
+        let index_namespace_id = lsyscache::get_rel_namespace::call(index_oid)?;
+
+        /*
+         * Skip any invalid indexes on a TOAST table.  These can only be
+         * duplicate leftovers from a failed REINDEX CONCURRENTLY, and if rebuilt
+         * it would not be possible to drop them anymore.
+         */
+        if catalog::is_toast_namespace::call(index_namespace_id)
+            && !tablecmds::get_index_isvalid::call(index_oid)?.unwrap_or(false)
+        {
+            let nsp = lsyscache::get_namespace_name::call(mcx, index_namespace_id)?;
+            let name = lsyscache::get_rel_name::call(mcx, index_oid)?;
+            error_seams::ereport::call(
+                PgError::new(
+                    types_error::WARNING,
+                    alloc::format!(
+                        "cannot reindex invalid index \"{}.{}\" on TOAST table, skipping",
+                        nsp.as_deref().unwrap_or(""),
+                        name.as_deref().unwrap_or("")
+                    ),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            )?;
+
+            /*
+             * Remove this invalid toast index from the reindex pending list, as
+             * it is skipped here due to the hard failure that would happen in
+             * reindex_index(), should we try to process it.
+             */
+            if (flags & types_cluster::REINDEX_REL_SUPPRESS_INDEX_USE) != 0 {
+                RemoveReindexPending(index_oid)?;
+            }
+            continue;
+        }
+
+        reindex_index(
+            mcx,
+            None,
+            index_oid,
+            (flags & types_cluster::REINDEX_REL_CHECK_CONSTRAINTS) == 0,
+            persistence,
+            params,
+        )?;
+
+        xact::command_counter_increment::call()?;
+
+        /* Index should no longer be in the pending list */
+        debug_assert!(!ReindexIsProcessingIndex(index_oid));
+
+        /* Set index rebuild count */
+        progress::pgstat_progress_update_param::call(PROGRESS_CLUSTER_INDEX_REBUILD_COUNT, i);
+        i += 1;
+    }
+
+    /*
+     * Close rel, but continue to hold the lock.
+     */
+    rel.close(NO_LOCK)?;
+
+    result |= !index_ids.is_empty();
+
+    Ok(result)
+}
+
+/* ===========================================================================
  * Seam installation
  * ========================================================================= */
 
@@ -2680,6 +3194,17 @@ pub fn init_seams() {
     // Reindexing-support state machine.
     index_seam::reindex_is_processing_index::set(ReindexIsProcessingIndex);
     index_seam::reset_reindex_state::set(ResetReindexState);
+
+    // reindex_index / reindex_relation — rebuild one / all indexes of a relation
+    // in place (CLUSTER, VACUUM FULL, TRUNCATE, REINDEX). The installed
+    // reindex_relation seam drops the C `stmt` arg (every current caller passes
+    // NULL), so its body threads `stmt = None` into reindex_index.
+    index_seam::reindex_index::set(|mcx, stmt, index_id, skip, persistence, params| {
+        reindex_index(mcx, Some(stmt), index_id, skip, persistence, &params)
+    });
+    index_seam::reindex_relation::set(|mcx, relid, flags, params| {
+        reindex_relation(mcx, relid, flags, &params).map(|_| ())
+    });
 
     // Parallel-worker transfer of the reindex state (owned by index.c, the
     // bodies installed here; the seam decls live in parallel-rt-seams).

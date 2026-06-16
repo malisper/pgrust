@@ -91,3 +91,14 @@ backend-commands-tablespace-globals-seams = { path = "../backend-commands-tables
 backend-bootstrap-bootstrap-seams = { path = "../backend-bootstrap-bootstrap-seams" }
 types-cluster = { path = "../types-cluster" }
 types-storage = { path = "../types-storage" }
+
+# reindex_index / reindex_relation: index/heap open+lock (index_open via indexam,
+# try_table_open via table.c), RelationSetNewRelfilenumber + RelationGetIndexList
+# (relcache), TransferPredicateLocksToHeapRelation (predicate), CheckTableNotInUse
+# (matview-deps), get_index_isvalid (tablecmds), CommandCounterIncrement (xact),
+# the toast-skip WARNING/INFO ereport channel, the EventTriggerCollectSimpleCommand
+# leg, and IsToastNamespace (catalog).
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
+backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+types-pgstat = { path = "../types-pgstat" }

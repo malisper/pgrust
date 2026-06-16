@@ -278,6 +278,17 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_rel::Relation<'mcx>>
 );
 
+seam_core::seam!(
+    /// `try_index_open(relationId, lockmode)` (indexam.c): like [`index_open`],
+    /// but returns `Ok(None)` (the C `NULL`) when the index has disappeared
+    /// rather than raising. Used by the REINDEX MISSING_OK path.
+    pub fn try_index_open<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation_id: types_core::Oid,
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> types_error::PgResult<Option<types_rel::Relation<'mcx>>>
+);
+
 // === parallel btree scan DSM pointer resolution ============================
 //
 // The `BTParallelScanDescData` lives in the DSM region the parallel

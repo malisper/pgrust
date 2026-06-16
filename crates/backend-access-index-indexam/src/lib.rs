@@ -61,6 +61,7 @@ use backend_utils_time_snapmgr_seams as snapmgr;
 pub fn init_seams() {
     use backend_access_index_indexam_seams as seams;
     seams::index_open::set(index_open);
+    seams::try_index_open::set(try_index_open);
     seams::index_getprocinfo::set(index_getprocinfo);
     seams::index_getprocid::set(index_getprocid);
     seams::index_opclass_options::set(index_opclass_options);

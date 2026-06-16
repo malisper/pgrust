@@ -57,6 +57,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsToastNamespace(namespaceId)` (catalog/catalog.c): true iff the
+    /// namespace is `pg_toast` (`namespaceId == PG_TOAST_NAMESPACE`) or my
+    /// temporary-toast-table namespace. No catalog access — infallible.
+    pub fn is_toast_namespace(namespace_id: Oid) -> bool
+);
+
+seam_core::seam!(
     /// `RelationInvalidatesSnapshotsOnly(relid)` (catalog/catalog.c): for the
     /// few catalogs whose tuples affect only saved snapshots (not catcache or
     /// relcache), this returns true so inval.c queues a snapshot inval instead.
