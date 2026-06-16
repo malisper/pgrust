@@ -65,6 +65,13 @@ pub fn init_seams() {
     });
 
     backend_storage_ipc_dsm_core_seams::proc_exit::set(ipc::proc_exit);
+    // `proc_exit(code)` (the C public signature, no explicit pid) — the
+    // canonical `ipc.c` seam. It delegates to the same `ipc::proc_exit` with
+    // `MyProcPid` (`getpid()` parity is then done inside), exactly as every
+    // call site that supplies `my_proc_pid::call()` explicitly does.
+    backend_storage_ipc_ipc_seams::proc_exit::set(|code| {
+        ipc::proc_exit(code, backend_utils_init_small_seams::my_proc_pid::call())
+    });
     backend_storage_ipc_dsm_core_seams::on_proc_exit::set(ipc::on_proc_exit);
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(ipc::on_shmem_exit);
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::set(ipc::before_shmem_exit);

@@ -15003,6 +15003,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-storage-file-seams",
  "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-ipc-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
  "backend-tcop-postgres-seams",
