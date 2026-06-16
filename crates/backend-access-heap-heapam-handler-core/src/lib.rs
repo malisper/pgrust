@@ -41,6 +41,8 @@ use types_tableam::tableam::{
 };
 use types_tuple::heaptuple::ItemPointerData;
 
+pub mod build_scan;
+
 use backend_access_heap_heapam as heapam;
 use backend_access_heap_heapam_handler_dml_seams as dml_seam;
 use backend_access_heap_pruneheap_seams as prune_seam;
@@ -663,4 +665,12 @@ pub fn init_seams() {
     sx::table_relation_toast_am::set(table_relation_toast_am);
     sx::table_relation_needs_toast_table::set(table_relation_needs_toast_table);
     sx::table_parallelscan_reinitialize::set(table_parallelscan_reinitialize);
+    // The canonical, fully-typed serial index-build heap scan
+    // (heapam_index_build_range_scan). brinsummarize reaches it with the real
+    // execnodes::IndexInfo + an explicit arena. (The whole-relation
+    // `table_index_build_scan` seam carries the opaque amapi::IndexInfo and no
+    // mcx — its consumers never receive the real IndexInfo — so it stays
+    // CONTRACT_RECONCILE_PENDING until the IndexInfo-through-ambuild-vtable
+    // keystone lands; see seams-init allowlist rationale.)
+    sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
 }

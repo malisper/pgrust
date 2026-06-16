@@ -39,3 +39,28 @@ backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-s
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 # DML callbacks delegate here (seam-and-panic until the dml stage lands).
 backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }
+# index_build_range_scan provider deps (heapam_index_build_range_scan +
+# table_index_build_range_scan install). All acyclic: this crate is the
+# table-AM provider one layer above the heap scan/visibility core.
+#   visibility   — HeapTupleSatisfiesVacuum + HOT header bit getters
+#   procarray    — GetOldestNonRemovableTransactionId
+#   snapmgr      — Register/Get/Unregister snapshot (serial-build snapshot)
+#   xact         — TransactionIdIsCurrentTransactionId
+#   lmgr         — XactLockTableWait (uniqueness recheck)
+#   catalog      — IsSystemRelation (seam)
+#   miscinit     — IsBootstrapProcessingMode
+#   execExpr     — CreateExecutorState/FreeExecutorState, ExecPrepareQual,
+#                  ExecQual, ExecEvalExprSwitchContext (FormIndexDatum eval)
+#   execUtils    — GetPerTupleExprContext / ResetExprContext
+#   activity     — pgstat_progress_update_param
+backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-utils-activity-small-seams = { path = "../backend-utils-activity-small-seams" }
+backend-utils-error = { path = "../backend-utils-error" }

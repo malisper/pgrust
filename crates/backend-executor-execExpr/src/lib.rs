@@ -79,6 +79,7 @@ pub fn init_seams() {
     seams::exec_init_expr::set(execExpr_core::exec_init_expr);
     seams::exec_init_expr_with_params::set(execExpr_core::exec_init_expr_with_params);
     seams::exec_init_qual::set(execExpr_core::exec_init_qual);
+    seams::exec_prepare_qual::set(execExpr_core::exec_prepare_qual);
     seams::exec_init_expr_list::set(execExpr_core::exec_init_expr_list);
     seams::exec_init_expr_list_no_parent::set(execExpr_core::exec_init_expr_list_no_parent);
     seams::exec_prepare_expr::set(execExpr_core::exec_prepare_expr);

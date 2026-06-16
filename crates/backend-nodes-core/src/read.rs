@@ -40,7 +40,7 @@
 
 use std::cell::Cell;
 
-use mcx::{Mcx, PgBox};
+use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodes::Node;
 
@@ -311,16 +311,16 @@ pub fn node_token_type(token: &[u8]) -> TokenType {
 /// `nodeRead(const char *token, int tok_len)` (read.c) — the higher-level
 /// reader that applies semantic knowledge on top of [`pg_strtok`].
 ///
-/// In the split plan-node model the seam-visible result is always a concrete
-/// `Node` reconstructed by `parseNodeString` (the `LEFT_BRACE` case). The other
-/// shapes C `nodeRead` recognises — `(i ...)`/`(o ...)`/`(x ...)` integer
-/// lists, `(b ...)` bitmapsets, bare value tokens, and node lists — appear only
-/// as *sub-fields* read by the (unported) readfuncs unit recursing through the
-/// shared cursor; they carry `List`/`Bitmapset`/value-node types outside the
-/// plan-node enum, so they are not produced at this seam's top level. A
-/// `nodeToString` of a real node is always `{...}`, so the top-level driver
-/// resolves `LEFT_BRACE` and rejects the other forms as a malformed top-level
-/// result, exactly as those callers never present them.
+/// The `LEFT_BRACE` case yields a `{LABEL ...}`-framed node via `parseNodeString`
+/// (readfuncs). The bare value-node tokens (`Integer`/`Float`/`Boolean`/`String`/
+/// `BitString`) and a `(node node ...)` node list ARE arms of the unified
+/// `types_nodes::nodes::Node` enum, so they are reconstructed here directly,
+/// faithfully mirroring C's `makeInteger`/`makeFloat`/.../`lappend` cases. The
+/// `(i ...)`/`(o ...)`/`(x ...)` scalar lists and the `(b ...)` Bitmapset carry
+/// `IntList`/`OidList`/`XidList`/`Bitmapset` types that the split enum does not
+/// model as top-level variants (reached only as typed sub-fields by the still-
+/// unported readfuncs recursion), so those discriminator arms error as C would
+/// treat an unreconstructable list at this level.
 ///
 /// `token`/`pre_read` mirror C's optional pre-scanned first token: pass `None`
 /// to read one (the external/top-level contract). `Ok(None)` is C's `NULL`
@@ -364,14 +364,71 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             Err(elog_error("unexpected right parenthesis"))
         }
         TokenType::LeftParen => {
-            // C: integer/OID/XID/bitmapset/node lists. These are sub-field
-            // shapes owned by the readfuncs recursion (List/Bitmapset/value
-            // carriers outside the split plan-node enum) and are never the
-            // top-level result of a nodeToString rendering. Reject as the C
-            // reader would treat a stray list where a node is expected.
-            Err(elog_error(
-                "unexpected list at top level of node string (list/value fields are read by readfuncs)",
-            ))
+            // C (read.c): a `(`-opened list. The discriminator is the next
+            // token: `i`/`o`/`x` are scalar Int/OID/XID lists, `b` is a
+            // Bitmapset, anything else opens a list of nodes.
+            //
+            // The scalar `(i ...)`/`(o ...)`/`(x ...)` lists and the `(b ...)`
+            // Bitmapset carry the `IntList`/`OidList`/`XidList`/`Bitmapset`
+            // types, which the split `types_nodes::nodes::Node` enum does not
+            // model as variants (they are reached only as typed sub-fields read
+            // by the readfuncs recursion, still unported) — so they cannot be
+            // reconstructed as a top-level `Node` here. A `(node node ...)` list,
+            // however, IS a `Node::List`, so it is reconstructed faithfully.
+            let disc = match pg_strtok() {
+                None => return Err(elog_error("unterminated List structure")),
+                Some(t) => t,
+            };
+            if disc.len() == 1
+                && (disc.bytes[0] == b'i' || disc.bytes[0] == b'o' || disc.bytes[0] == b'x')
+            {
+                // C: the scalar Int/OID/XID list arms (lappend_int/_oid/_xid).
+                Err(elog_error(
+                    "scalar list (i/o/x) is a typed sub-field read by readfuncs, \
+                     not modeled as a top-level Node",
+                ))
+            } else if disc.len() == 1 && disc.bytes[0] == b'b' {
+                // C: the `(b ...)` Bitmapset arm (see also _readBitmapset).
+                Err(elog_error(
+                    "bitmapset is a typed sub-field read by readfuncs, not modeled as a top-level Node",
+                ))
+            } else {
+                // C: "List of other node types". `disc` is already the first
+                // element's first token (C has "already scanned next token").
+                // Loop: while the current token is not ')', nodeRead it and
+                // append, then scan the next token.
+                let mut elements: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> =
+                    mcx::vec_with_capacity_in(mcx, 0)?;
+                let mut cur = disc;
+                loop {
+                    // C: if (token[0] == ')') break;  (the closing paren)
+                    if cur.len() == 1 && cur.bytes[0] == b')' {
+                        break;
+                    }
+                    // C: l = lappend(l, nodeRead(token, tok_len));
+                    let child = node_read(mcx, Some(cur))?;
+                    let boxed = match child {
+                        // A `<>` element is the C NULL list element. The owned
+                        // `List` cell type is a non-null `PgBox<Node>`; a NULL
+                        // element is not representable, so reject it (no live
+                        // `nodeToString` of a `Node::List` emits a NULL cell).
+                        None => {
+                            return Err(elog_error(
+                                "null element in node list is not representable",
+                            ))
+                        }
+                        Some(node) => node,
+                    };
+                    elements.push(boxed);
+                    // C: token = pg_strtok(&tok_len); if (token == NULL) error.
+                    cur = match pg_strtok() {
+                        None => return Err(elog_error("unterminated List structure")),
+                        Some(t) => t,
+                    };
+                }
+                let node = mcx::alloc_in(mcx, Node::List(elements))?;
+                Ok(Some(node))
+            }
         }
         TokenType::Other => {
             // C: in the OTHER_TOKEN arm, tok_len == 0 is the "<>" null pointer
@@ -380,18 +437,87 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let text = String::from_utf8_lossy(tok.bytes);
             Err(elog_error(format!("unrecognized token: \"{}\"", text)))
         }
-        TokenType::Integer
-        | TokenType::Float
-        | TokenType::Boolean
-        | TokenType::String
-        | TokenType::BitString => {
-            // Bare value nodes are likewise only produced as sub-fields by the
-            // readfuncs recursion (Integer/Float/Boolean/String/BitString carry
-            // value-node types outside the split plan-node enum) and never form
-            // the top-level result of stringToNode for a plan/expr default.
-            Err(elog_error(
-                "unexpected value token at top level of node string (value fields are read by readfuncs)",
-            ))
+        TokenType::Integer => {
+            // C: result = makeInteger(atoi(token));
+            // atoi stops at the first non-digit; the token is a clean integer
+            // literal here (nodeTokenType classified it as T_Integer). Match
+            // atoi's saturating/prefix behaviour by parsing the leading int.
+            let s = String::from_utf8_lossy(tok.bytes);
+            let ival = atoi_i32(&s);
+            let node = mcx::alloc_in(mcx, Node::Integer(types_nodes::value::Integer { ival }))?;
+            Ok(Some(node))
+        }
+        TokenType::Float => {
+            // C: fval = palloc(tok_len + 1); memcpy(token); makeFloat(fval).
+            // The numeric literal is kept verbatim as its source string.
+            let s = String::from_utf8_lossy(tok.bytes);
+            let fval = PgString::from_str_in(&s, mcx)?;
+            let node = mcx::alloc_in(mcx, Node::Float(types_nodes::value::Float { fval }))?;
+            Ok(Some(node))
+        }
+        TokenType::Boolean => {
+            // C: result = makeBoolean(token[0] == 't');
+            let boolval = tok.bytes[0] == b't';
+            let node =
+                mcx::alloc_in(mcx, Node::Boolean(types_nodes::value::Boolean { boolval }))?;
+            Ok(Some(node))
+        }
+        TokenType::String => {
+            // C: makeString(debackslash(token + 1, tok_len - 2)) — strip the
+            // surrounding quotes, then de-escape the inner content. The token is
+            // `"..."` with len >= 2 (nodeTokenType requires a leading + trailing
+            // quote with length > 1; the minimal `""` has len 2 -> empty inner).
+            let inner = &tok.bytes[1..tok.len() - 1];
+            let sval_s = debackslash(inner);
+            let sval = PgString::from_str_in(&sval_s, mcx)?;
+            let node =
+                mcx::alloc_in(mcx, Node::String(types_nodes::value::StringNode { sval }))?;
+            Ok(Some(node))
+        }
+        TokenType::BitString => {
+            // C: makeBitString(debackslash(token, tok_len)) — no quotes to strip
+            // (the leading 'b'/'x' is part of the value), just de-escape.
+            let bsval_s = debackslash(tok.bytes);
+            let bsval = PgString::from_str_in(&bsval_s, mcx)?;
+            let node =
+                mcx::alloc_in(mcx, Node::BitString(types_nodes::value::BitString { bsval }))?;
+            Ok(Some(node))
+        }
+    }
+}
+
+/// `atoi` over a `&str` (C `<stdlib.h>` `atoi`): parse the leading optional
+/// sign + digit run as an `i32`, stopping at the first non-digit, and clamp on
+/// overflow (C's `atoi` is undefined on overflow; a clean `nodeTokenType`
+/// T_Integer token is in range, so the saturating fallback is never hit on
+/// well-formed input). Returns 0 when there is no leading integer (atoi).
+fn atoi_i32(s: &str) -> i32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let n = bytes.len();
+    let neg = if i < n && (bytes[i] == b'+' || bytes[i] == b'-') {
+        let neg = bytes[i] == b'-';
+        i += 1;
+        neg
+    } else {
+        false
+    };
+    let start = i;
+    while i < n && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return 0;
+    }
+    let digits = &s[..i];
+    match digits.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => {
+            if neg {
+                i32::MIN
+            } else {
+                i32::MAX
+            }
         }
     }
 }

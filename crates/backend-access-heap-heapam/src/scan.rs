@@ -179,6 +179,19 @@ fn heap_scan<'a, 'mcx>(sscan: &'a mut TableScanDescData<'mcx>) -> &'a mut HeapSc
         .expect("heap scan: am_private is not a HeapScanDescData")
 }
 
+/// Provider-facing accessor for the heap-private scan tail (`(HeapScanDesc)
+/// scan` in C). The table-AM provider (heapam_handler.c
+/// `heapam_index_build_range_scan` / `heapam_scan_get_blocks_done`) needs the
+/// heap-private fields (`rs_cbuf`, `rs_cblock`, `rs_nblocks`, `rs_startblock`)
+/// of a scan it owns; this exposes them the same way the in-crate `heap_scan`
+/// helper does.
+#[inline]
+pub fn heap_scan_state<'a, 'mcx>(
+    sscan: &'a mut TableScanDescData<'mcx>,
+) -> &'a mut HeapScanDescData<'mcx> {
+    heap_scan(sscan)
+}
+
 // ===========================================================================
 // initscan - scan code common to heap_beginscan and heap_rescan.
 // ===========================================================================
