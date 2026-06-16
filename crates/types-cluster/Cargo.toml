@@ -12,4 +12,5 @@ path = "src/lib.rs"
 types-core = { path = "../types-core" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
 types-vacuum = { path = "../types-vacuum" }

@@ -4,6 +4,65 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+// ---------------------------------------------------------------------------
+// Extensions for the `backend-utils-adt-array-typanalyze` unit
+// (`utils/adt/array_typanalyze.c`).
+//
+// `array_typanalyze` calls `lookup_type_cache(element_typeid, TYPECACHE_EQ_OPR
+// | TYPECACHE_CMP_PROC_FINFO | TYPECACHE_HASH_PROC_FINFO)` and reads
+// `eq_opr`, `cmp_proc_finfo.fn_oid`, `hash_proc_finfo.fn_oid`, plus the element
+// type's `typbyval`/`typlen`/`typalign` — fields the trimmed
+// `lookup_type_cache` projection below does not carry. `compute_array_stats`
+// then invokes the element type's hash / compare support functions by OID
+// through `FunctionCall1Coll` / `FunctionCall2Coll`. All three cross into the
+// typcache owner. The owning unit installs them from its `init_seams()` when it
+// lands; until then a call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_typeid, TYPECACHE_EQ_OPR |
+    /// TYPECACHE_CMP_PROC_FINFO | TYPECACHE_HASH_PROC_FINFO)` then project the
+    /// element-type metadata `array_typanalyze` needs
+    /// (array_typanalyze.c:124-143): returns the populated
+    /// [`types_statistics::ArrayAnalyzeExtraData`] (with `coll_id` set to
+    /// `collid`), or `None` when one of the required equality / compare / hash
+    /// operators is missing (the C `OidIsValid` guard that takes the
+    /// standard-stats-only `PG_RETURN_BOOL(true)` path). `cmp` / `hash` carry
+    /// the support functions' proc OIDs. `Err` carries the catalog-lookup
+    /// `ereport(ERROR)` surface.
+    pub fn array_typanalyze_element_typcache(
+        element_typeid: types_core::primitive::Oid,
+        collid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_statistics::ArrayAnalyzeExtraData>>
+);
+
+seam_core::seam!(
+    /// `DatumGetUInt32(FunctionCall1Coll(hash, coll, value))`
+    /// (array_typanalyze.c:715, `element_hash`): invoke the element type's hash
+    /// support function (resolved from `hash_proc` by a fresh `FmgrInfo` in the
+    /// owner) with collation `coll` and return the 32-bit hash of `value`. `Err`
+    /// carries the support function's `ereport(ERROR)` surface.
+    pub fn array_element_hash<'mcx>(
+        hash_proc: types_core::primitive::Oid,
+        coll: types_core::primitive::Oid,
+        value: types_tuple::Datum<'mcx>,
+    ) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `DatumGetInt32(FunctionCall2Coll(cmp, coll, a, b))`
+    /// (array_typanalyze.c:746, `element_compare`): invoke the element type's
+    /// btree compare support function (resolved from `cmp_proc` by a fresh
+    /// `FmgrInfo` in the owner) with collation `coll`, returning the sign of
+    /// `a <=> b`. `Err` carries the support function's `ereport(ERROR)` surface.
+    pub fn array_element_compare<'mcx>(
+        cmp_proc: types_core::primitive::Oid,
+        coll: types_core::primitive::Oid,
+        a: types_tuple::Datum<'mcx>,
+        b: types_tuple::Datum<'mcx>,
+    ) -> types_error::PgResult<i32>
+);
+
 seam_core::seam!(
     /// `compare_values_of_enum(tcache, arg1, arg2)` (typcache.c): the
     /// enum-value comparison engine `enum_cmp_internal` (utils/adt/enum.c)

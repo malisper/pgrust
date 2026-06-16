@@ -217,6 +217,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype, elmlen,
+    /// elmbyval, elmalign, &elemsp, &nullsp, &nelemsp)` (arrayfuncs.c) over the
+    /// canonical unified value type: split a detoasted array `Datum` into its
+    /// per-element `(Datum<'mcx>, isnull)` pairs, in order, given the element
+    /// type's storage attributes. The `compute_array_stats` (array_typanalyze.c)
+    /// path needs the elements as `types_tuple::Datum<'mcx>` — they are tracked
+    /// in the Lossy-Counting table and ultimately datumCopy'd into the
+    /// `VacAttrStats` MCELEM slot, which is `Vec<Datum<'mcx>>`. The owner
+    /// detoasts internally (`DatumGetArrayTypeP`). C result arrays are palloc'd
+    /// in the current context; the owned model returns them in `mcx`. Fallible
+    /// on the `ereport(ERROR)` surface (malformed array).
+    pub fn deconstruct_array_v<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: DatumV<'mcx>,
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, (DatumV<'mcx>, bool)>>
+);
+
+seam_core::seam!(
     /// `DatumGetArrayTypeP(arraydatum)` (detoast) then project the `ArrayType`
     /// header (`ARR_NDIM` / `ARR_DIMS[0]` / `ARR_HASNULL` / `ARR_ELEMTYPE`) and
     /// read `ARR_DATA_PTR` as a C `Oid[]` (the funcapi `build_function_result_*`

@@ -816,3 +816,44 @@ seam_core::seam!(
     /// it is sleeping (`WalWriterMain`). Plain shmem write.
     pub fn set_walwriter_proc_to_self() -> types_error::PgResult<()>
 );
+
+// ---- sync-rep PGPROC fields (read/written by syncrep.c over the queue) ----
+//
+// `MyProc->syncRepState` / `waitLSN` and the `syncRepLinks` detached marker,
+// plus the by-procno forms `SyncRepWakeQueue` needs when walking the queue.
+// The `syncRepLinks` "detached" state mirrors `dlist_node_is_detached(
+// &proc->syncRepLinks)`: a node with NULL links is not on any queue.
+
+seam_core::seam!(
+    /// `MyProc->syncRepState`.
+    pub fn my_proc_sync_rep_state() -> i32
+);
+seam_core::seam!(
+    /// `MyProc->syncRepState = state`.
+    pub fn set_my_proc_sync_rep_state(state: i32)
+);
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->syncRepState = state`.
+    pub fn set_proc_sync_rep_state(procno: ProcNumber, state: i32)
+);
+seam_core::seam!(
+    /// `MyProc->waitLSN`.
+    pub fn my_proc_wait_lsn() -> types_core::primitive::XLogRecPtr
+);
+seam_core::seam!(
+    /// `MyProc->waitLSN = lsn`.
+    pub fn set_my_proc_wait_lsn(lsn: types_core::primitive::XLogRecPtr)
+);
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->waitLSN`.
+    pub fn proc_wait_lsn(procno: ProcNumber) -> types_core::primitive::XLogRecPtr
+);
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->syncRepLinks` — the intrusive sync-rep
+    /// queue link node (pgprocno-indexed, like `lwWaitLink`).
+    pub fn proc_sync_rep_links(procno: ProcNumber) -> proclist_node
+);
+seam_core::seam!(
+    /// Write `GetPGProcByNumber(procno)->syncRepLinks`.
+    pub fn set_proc_sync_rep_links(procno: ProcNumber, node: proclist_node)
+);

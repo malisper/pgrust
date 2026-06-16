@@ -1169,9 +1169,9 @@ fn swap_relation_files(
 
     /* Update the tuples in pg_class --- unless the target is pg_class itself. */
     if !target_is_pg_class {
-        let indstate = indexing::catalog_open_indexes::call(mcx, &relRelation)?;
-        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid1, &relform1, &indstate)?;
-        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid2, &relform2, &indstate)?;
+        let mut indstate = indexing::catalog_open_indexes::call(mcx, &relRelation)?;
+        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid1, &relform1, &mut indstate)?;
+        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid2, &relform2, &mut indstate)?;
         indexing::catalog_close_indexes::call(indstate)?;
     } else {
         /* no update ... but we do still need relcache inval */
