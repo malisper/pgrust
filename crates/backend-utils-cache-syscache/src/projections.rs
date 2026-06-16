@@ -25,6 +25,7 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
 use types_fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
+use backend_utils_adt_amutils_seams as amutils_seams;
 use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
@@ -795,9 +796,11 @@ const Anum_pg_collation_collname: i32 = 2;
 const Anum_pg_collation_collnamespace: i32 = 3;
 
 // `catalog/pg_index.h` attribute numbers.
+const Anum_pg_index_indexrelid: i32 = 1;
 const Anum_pg_index_indnatts: i32 = 3;
 const Anum_pg_index_indnkeyatts: i32 = 4;
 const Anum_pg_index_indclass: i32 = 18;
+const Anum_pg_index_indoption: i32 = 19;
 const Anum_pg_index_indpred: i32 = 21;
 
 // `catalog/pg_attribute.h` attribute numbers.
@@ -1623,6 +1626,74 @@ pub(crate) fn pg_index_indclass<'mcx>(
 
     ReleaseSysCache(tup);
     Ok(Some((indnatts, indnkeyatts, indclass)))
+}
+
+/// amutils.c `indexam_property`: `SearchSysCache1(RELOID,
+/// ObjectIdGetDatum(index_oid))` + `GETSTRUCT` projected to `(relkind, relam,
+/// relnatts)`. `Ok(None)` on a cache miss (the C `!HeapTupleIsValid` →
+/// `PG_RETURN_NULL`).
+pub(crate) fn amutils_index_relation(
+    index_oid: Oid,
+) -> PgResult<Option<amutils_seams::IndexRelationInfo>> {
+    // The fixed-width Form_pg_class fields amutils reads are scalar — a throwaway
+    // context suffices for the catcache marshal (the projected struct is Copy).
+    let ctx = mcx::MemoryContext::new("amutils_index_relation");
+    let mcx = ctx.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let info = amutils_seams::IndexRelationInfo {
+        relkind: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8,
+        relam: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?,
+        relnatts: getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relnatts)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(info))
+}
+
+/// amutils.c `indexam_property`: `SearchSysCache1(INDEXRELID,
+/// ObjectIdGetDatum(index_oid))` + `GETSTRUCT` + `SysCacheGetAttrNotNull(...
+/// Anum_pg_index_indoption)` projected to `(indexrelid, indnatts, indnkeyatts,
+/// indoption)`. `Ok(None)` on a cache miss.
+pub(crate) fn amutils_index_form(
+    index_oid: Oid,
+) -> PgResult<Option<amutils_seams::IndexFormInfo>> {
+    let ctx = mcx::MemoryContext::new("amutils_index_form");
+    let mcx = ctx.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let indexrelid = getattr_oid(mcx, INDEXRELID, &tup, Anum_pg_index_indexrelid)?;
+    let indnatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnatts)?;
+    let indnkeyatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnkeyatts)?;
+
+    // datum = SysCacheGetAttrNotNull(INDEXRELID, tuple, Anum_pg_index_indoption);
+    // indoption = ((int2vector *) DatumGetPointer(datum)); read ->values[..].
+    let indoption_datum =
+        SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indoption)?;
+    let bytes = match &indoption_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_) => {
+            return Err(PgError::error(
+                "syscache projection: indoption attribute is by-value",
+            ))
+        }
+    };
+    let indoption_vec = arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, bytes)?;
+    // The projected struct outlives the throwaway context, so copy out to a
+    // std Vec (the seam's IndexFormInfo carries an owning Vec, not an mcx slice).
+    let indoption = indoption_vec.iter().copied().collect();
+
+    ReleaseSysCache(tup);
+    Ok(Some(amutils_seams::IndexFormInfo {
+        indexrelid,
+        indnatts,
+        indnkeyatts,
+        indoption,
+    }))
 }
 
 /// `SearchSysCache1(COLLOID, collation)` then

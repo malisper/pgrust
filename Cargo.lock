@@ -1703,10 +1703,13 @@ dependencies = [
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
+ "backend-access-index-indexam",
  "backend-access-nbt-validate",
+ "backend-access-nbtree-core",
  "backend-access-nbtree-nbtree",
  "backend-access-spg-validate",
  "backend-access-spgist-core",
+ "backend-utils-adt-amutils-seams",
  "backend-utils-cache-syscache-seams",
  "mcx",
  "seam-core",
@@ -1715,6 +1718,7 @@ dependencies = [
  "types-nbtree",
  "types-opclass",
  "types-scan",
+ "types-storage",
  "types-tableam",
 ]
 
@@ -13023,6 +13027,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-amutils"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-amutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-amutils-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-array-more-seams"
 version = "0.0.0"
 dependencies = [
@@ -14551,6 +14575,7 @@ dependencies = [
  "backend-commands-proclang-seams",
  "backend-nodes-read-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-amutils-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",

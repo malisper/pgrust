@@ -974,4 +974,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::set(
         projections::search_constraint_tuple_by_oid,
     );
+
+    // amutils.c SQL-level property reporting: the pg_class / pg_index catalog
+    // projections `indexam_property` reads.
+    backend_utils_adt_amutils_seams::index_relation::set(projections::amutils_index_relation);
+    backend_utils_adt_amutils_seams::index_form::set(projections::amutils_index_form);
 }
