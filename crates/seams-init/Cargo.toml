@@ -109,6 +109,7 @@ backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
+backend-commands-vacuum = { path = "../backend-commands-vacuum" }
 backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
@@ -309,6 +310,7 @@ backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
+backend-tcop-utility = { path = "../backend-tcop-utility" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }

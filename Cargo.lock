@@ -1656,6 +1656,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-tuple",
  "types-vacuum",
 ]
 
@@ -5083,6 +5084,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-analyze-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-commands-async"
 version = "0.0.0"
 dependencies = [
@@ -6560,14 +6573,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-vacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-commands-analyze-seams",
+ "backend-commands-define-seams",
+ "backend-commands-vacuum-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-commands-vacuum-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
  "seam-core",
  "types-cluster",
+ "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
  "types-tuple",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -12119,6 +12160,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12144,6 +12186,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
@@ -13607,6 +13650,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-utility"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-utility-out-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-utility-fc-seams"
 version = "0.0.0"
 dependencies = [
@@ -13614,6 +13671,16 @@ dependencies = [
  "types-error",
  "types-foreigncmds",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-tcop-utility-out-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -17852,6 +17919,7 @@ dependencies = [
  "backend-commands-tablespace",
  "backend-commands-trigger",
  "backend-commands-typecmds",
+ "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
  "backend-executor-execAmi",
@@ -18017,6 +18085,7 @@ dependencies = [
  "backend-tcop-dest",
  "backend-tcop-fastpath",
  "backend-tcop-pquery",
+ "backend-tcop-utility",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",
