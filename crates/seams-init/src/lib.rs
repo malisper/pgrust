@@ -81,6 +81,7 @@ pub fn init_all() {
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
     backend_catalog_indexing::init_seams();
+    backend_catalog_heap::init_seams();
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();

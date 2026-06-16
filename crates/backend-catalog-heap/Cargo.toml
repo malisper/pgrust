@@ -15,8 +15,44 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
+types-catalog = { path = "../types-catalog" }
+types-array = { path = "../types-array" }
+types-nodes = { path = "../types-nodes" }
+types-scan = { path = "../types-scan" }
+
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+
+# Catalog-write producers + scan/syscache (real owners).
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
+backend-commands-typecmds = { path = "../backend-commands-typecmds" }
+backend-catalog-dependency = { path = "../backend-catalog-dependency" }
+backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
+backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+
+# Seam crates (owner unported / would-cycle).
+backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }

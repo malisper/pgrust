@@ -45,6 +45,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `register_on_commit_action(relid, action)` (tablecmds.c): record a
+    /// special ON COMMIT action (DELETE ROWS / DROP) for a temp relation in the
+    /// backend-local `on_commits` list (allocated in `CacheMemoryContext`).
+    /// Called by `heap_create_with_catalog` when `oncommit != ONCOMMIT_NOOP`.
+    pub fn register_on_commit_action(
+        relid: Oid,
+        action: types_nodes::primnodes::OnCommitAction,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `remove_on_commit_action(relid)` (tablecmds.c): drop the ON COMMIT
+    /// bookkeeping entry for `relid` from the backend-local `on_commits` list.
+    /// Called by `heap_drop_with_catalog`.
+    pub fn remove_on_commit_action(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ATExecChangeOwner(relationOid, newOwnerId, recursing, lockmode)`
     /// (tablecmds.c): change a relation's owner (and its dependent objects:
     /// indexes, owned sequences, toast tables). REASSIGN OWNED passes

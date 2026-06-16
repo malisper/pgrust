@@ -5,44 +5,65 @@
 #![allow(clippy::manual_range_contains)]
 // The shared `PgError` variant is large; matching the rest of the workspace.
 #![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
 
 //! Owned-tree port of `backend/catalog/heap.c` (PostgreSQL 18.3) — code to
 //! create and destroy POSTGRES heap relations.
 //!
 //! ## Scope landed in this pass
 //!
-//! heap.c is a ~4 100-line file. This pass lands the *validation +
-//! system-attribute* layer, which is fully buildable against the repo's
-//! already-ported foundation (lsyscache type lookups, format_type, the
-//! relcache `relation_open`/`relation_close`) and is a hard prerequisite for
-//! both `index.c` (`ConstructTupleDescriptor` calls `CheckAttributeType`) and
-//! `tablecmds`:
+//! The **relation-creation core** plus the validation/system-attribute spine:
 //!
 //!   * the hard-coded system-attribute table (`SysAtt`) plus
 //!     [`SystemAttributeDefinition`] / [`SystemAttributeByName`];
 //!   * the `RELKIND_HAS_*` predicate macros + `RelFileNumberIsValid`;
-//!   * [`CheckAttributeNamesTypes`] / [`CheckAttributeType`] — the recursive
-//!     attribute-name and datatype validation;
-//!   * the `CHKATYPE_*` flag bits (`catalog/heap.h`).
+//!   * [`CheckAttributeNamesTypes`] / [`CheckAttributeType`];
+//!   * [`heap_create`] — relcache local-relation build + physical-storage
+//!     orchestration;
+//!   * [`heap_create_with_catalog`] — the full cataloged-relation create:
+//!     OID allocation, rowtype + array pg_type creation (`AddNewRelationType` →
+//!     `TypeCreate`), the pg_class row (`AddNewRelationTuple` /
+//!     `InsertPgClassTuple` → `catalog_tuple_insert_pg_class`), the
+//!     pg_attribute rows (`AddNewAttributeTuples` / `InsertPgAttributeTuples` →
+//!     `catalog_insert_pg_attribute_tuples`), dependency recording, the
+//!     post-create hook, the (NIL) constraint store, and the ON COMMIT
+//!     registration;
+//!   * the catalog-row **delete** family `DeleteRelationTuple` /
+//!     `DeleteAttributeTuples` / `DeleteSystemAttributeTuples`;
+//!   * [`RemoveAttributeById`] — the ALTER TABLE DROP COLUMN guts.
 //!
-//! ## STOP — the catalog-WRITE families are keystone-blocked
+//! This builds on the K1/K2/K3 catalog-write carrier keystone: the full-row
+//! INSERT carriers (`PgClassInsertRow`, `PgAttributeInsertRow`) and their
+//! producers in `backend-catalog-indexing` form the heap tuples; the trimmed
+//! relcache `rd_rel` carries the read-side fields.
 //!
-//! `heap_create`, `heap_create_with_catalog`, `AddNewRelation{Tuple,Type}`,
-//! `InsertPg{Class,Attribute}Tuple(s)`, `AddNewAttributeTuples`, the
-//! `heap_drop_with_catalog` / `heap_truncate*` / `Delete*Tuples` /
-//! `RemoveAttributeById` families, the `Store*`/`AddRelationNewConstraints`
-//! constraint writers, and `RelationClearMissing`/`StoreAttrMissingVal`/
-//! `SetAttrMissing` are NOT landed here. They cannot be ported faithfully
-//! until the K1–K3 catalog-write carrier keystones land (see this crate's
-//! `audits/` note): the repo's `FormData_pg_class` carrier is trimmed to ~21
-//! of the catalog's ~33 columns and has no INSERT producer, `FormData_pg_attrdef`
-//! is absent, `RelationBuildLocalRelation` is a trimmed stub (drops the tupdesc
-//! and `relam`), and there are no `catalog_tuple_insert_pg_class` /
-//! `catalog_tuple_insert_pg_attribute` / `catalog_tuple_insert_pg_attrdef`
-//! producers in `catalog-indexing`. Widening `FormData_pg_class` to the full
-//! row ripples across ~66 reader crates + the relcache local-rel build and
-//! demands a constant-table audit on the widened Form; that is a coordinated
-//! keystone campaign, not a single-unit port.
+//! ## STOP — the constraint-cooker / partition / truncate-FK / full-drop
+//! families are deeper-keystone-blocked (not landed here)
+//!
+//! `StoreConstraints` is mirrored faithfully for its only live call surface
+//! (NIL `cooked_constraints` ⇒ no-op; the `heap_create_with_catalog` inward
+//! seam carries no cooked-constraint list). But the constraint *writers*
+//! themselves — `StoreAttrDefault` / `StoreRelCheck` / `AddRelationNewConstraints`
+//! / `AddRelationNotNullConstraints` / `cookDefault` / `SetRelationNumChecks`,
+//! plus `RelationClearMissing` / `StoreAttrMissingVal` / `SetAttrMissing` — need
+//! the cooked-constraint node model (`CookedConstraint` / `RawColumnDefault`),
+//! the parser default-cooker (`cookDefault`/`transformExpr`/`coerce_to_target_type`/
+//! `assign_expr_collations`), `nodeToString`, and `construct_array`-of-missingval,
+//! which the repo has not assembled into a callable cooker. The `StorePartitionKey`
+//! / `RemovePartitionKeyByRelId` / `StorePartitionBound` partition family needs
+//! the partition-key node + partcache owner. `heap_truncate` /
+//! `heap_truncate_one_rel` / `RelationTruncateIndexes` / `heap_truncate_check_FKs`
+//! / `heap_truncate_find_FKs` need the table-AM truncate + the FK-scan engine.
+//! `heap_drop_with_catalog` needs a cluster of collaborators with no owner crate
+//! yet (`get_partition_parent`/`get_default_partition_oid`, `RemoveSubscriptionRel`,
+//! `RelationDropStorage`-by-handle, `CheckTableForSerializableConflictIn`,
+//! `RemoveStatistics`-by-relid). Each is seam-and-panicked into its correct
+//! owner where a seam crate exists; the inward `heap_drop_with_catalog` /
+//! `RemoveAttributeById`'s `RemoveStatistics` call point into those owners.
+
+extern crate alloc;
+
+use alloc::vec::Vec;
 
 use backend_utils_cache_lsyscache::namespace_range_index_pubsub::{
     get_range_collation, get_range_subtype,
@@ -53,25 +74,28 @@ use backend_utils_cache_lsyscache::type_::{
 use backend_utils_error::ereport;
 use mcx::Mcx;
 use types_core::primitive::{
-    AttrNumber, InvalidRelFileNumber, Oid, OidIsValid, RelFileNumber, TransactionId,
+    AttrNumber, InvalidOid, InvalidRelFileNumber, Oid, OidIsValid, RelFileNumber, TransactionId,
 };
-use types_error::ERROR;
-use types_core::xact::CommandId;
+use types_core::xact::{CommandId, InvalidTransactionId};
 use types_core::{FirstUnpinnedObjectId, NAMEDATALEN};
+use types_error::ERROR;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_TOO_MANY_COLUMNS,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_TOO_MANY_COLUMNS,
 };
-use types_storage::lock::AccessShareLock;
+use types_storage::lock::{AccessShareLock, NoLock};
 use types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
 use types_tuple::heaptuple::{
-    FormData_pg_attribute, ItemPointerData, MaxHeapAttributeNumber, NameData, ANYARRAYOID, CIDOID,
-    OIDOID, RECORDARRAYOID, RECORDOID, TIDOID, XIDOID,
+    FormData_pg_attribute, ItemPointerData, MaxHeapAttributeNumber, NameData, TupleDescData,
+    ANYARRAYOID, CIDOID, OIDOID, RECORDARRAYOID, RECORDOID, TIDOID, XIDOID,
 };
+
+pub mod inward;
+pub use inward::init_seams;
 
 /* ----------------------------------------------------------------
  * `catalog/heap.h` flag bits for CheckAttributeType / CheckAttributeNamesTypes.
@@ -96,6 +120,37 @@ const TYPTYPE_RANGE: u8 = b'r';
 const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
 const TYPALIGN_INT: i8 = b'i' as i8;
 const TYPALIGN_SHORT: i8 = b's' as i8;
+const TYPALIGN_DOUBLE: i8 = b'd' as i8;
+const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
+
+/* pg_type typtype / category codes used by AddNewRelationType / TypeCreate. */
+const TYPTYPE_COMPOSITE_C: i8 = b'c' as i8;
+const TYPTYPE_BASE_C: i8 = b'b' as i8;
+const TYPCATEGORY_COMPOSITE: i8 = b'C' as i8;
+const TYPCATEGORY_ARRAY: i8 = b'A' as i8;
+const DEFAULT_TYPDELIM: i8 = b',' as i8;
+
+/* Built-in fmgr OIDs for the record / array I/O procs (utils/fmgroids.h). */
+const F_RECORD_IN: Oid = 2290;
+const F_RECORD_OUT: Oid = 2291;
+const F_RECORD_RECV: Oid = 2402;
+const F_RECORD_SEND: Oid = 2403;
+const F_ARRAY_IN: Oid = 750;
+const F_ARRAY_OUT: Oid = 751;
+const F_ARRAY_RECV: Oid = 2400;
+const F_ARRAY_SEND: Oid = 2401;
+const F_ARRAY_TYPANALYZE: Oid = 3816;
+const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+
+/* System-catalog OIDs (genbki). */
+const RelationRelationId: Oid = 1259;
+const AttributeRelationId: Oid = 1249;
+const TypeRelationId: Oid = 1247;
+const NamespaceRelationId: Oid = 2615;
+const CollationRelationId: Oid = 3456;
+const AccessMethodRelationId: Oid = 2601;
+const InheritsRelationId: Oid = 2611;
+const GLOBALTABLESPACE_OID: Oid = 1664;
 
 /* System-attribute numbers (access/sysattr.h). */
 const SelfItemPointerAttributeNumber: AttrNumber = -1;
@@ -120,6 +175,19 @@ fn name_data(s: &[u8]) -> NameData {
     debug_assert!(s.len() <= NAMEDATALEN as usize);
     data[..s.len()].copy_from_slice(s);
     NameData { data }
+}
+
+/// `namestrcpy(&name, s)` — copy `s` (truncated to `NAMEDATALEN - 1` bytes on a
+/// UTF-8 boundary) into a NUL-padded 64-byte `NameData` image.
+fn namestrcpy(s: &str) -> [u8; 64] {
+    let mut data = [0u8; NAMEDATALEN as usize];
+    let limit = (NAMEDATALEN - 1) as usize;
+    let mut end = limit.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    data[..end].copy_from_slice(&s.as_bytes()[..end]);
+    data
 }
 
 /// `SysAtt[]` — the system-attribute prototype `Form_pg_attribute`s, in the C's
@@ -504,7 +572,7 @@ pub fn CheckAttributeType<'mcx>(
             flags,
         )?;
     } else {
-        let att_typelem = get_element_type(atttypid)?.unwrap_or(types_core::primitive::InvalidOid);
+        let att_typelem = get_element_type(atttypid)?.unwrap_or(InvalidOid);
         if OidIsValid(att_typelem) {
             /*
              * Must recurse into array types, too, in case they are composite.
@@ -564,3 +632,213 @@ pub fn CheckAttributeType<'mcx>(
 
     Ok(())
 }
+
+/* ----------------------------------------------------------------
+ *		heap_create		- Create an uncataloged heap relation
+ * ---------------------------------------------------------------- */
+
+/// The frozen-xid / min-mxid `heap_create` writes through its
+/// `relfrozenxid` / `relminmxid` out-parameters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapCreateXids {
+    /// `*relfrozenxid`.
+    pub relfrozenxid: TransactionId,
+    /// `*relminmxid` (the underlying `uint32` `MultiXactId`).
+    pub relminmxid: u32,
+}
+
+/// The created relation plus the frozen-xid out-parameters `heap_create`
+/// computes (in C, `rel` is the return value and the xids are written through
+/// out-params).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapCreateResult {
+    /// The new relcache entry's OID (`heap_create`'s return `Relation`).
+    pub rel: Oid,
+    /// The frozen-xid / min-mxid out-parameters.
+    pub xids: HeapCreateXids,
+}
+
+/// `heap_create` — create an uncataloged heap relation.
+///
+/// Note API change: the caller must now always provide the OID to use for the
+/// relation. The relfilenumber may be (and in the simplest cases is) left
+/// unspecified. `create_storage` indicates whether or not to create the
+/// storage; however, even if `create_storage` is true, no storage will be
+/// created if the relkind is one that doesn't have storage. `rel->rd_rel` is
+/// initialized by `RelationBuildLocalRelation`, and is mostly zeroes at return.
+pub fn heap_create<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    relnamespace: Oid,
+    mut reltablespace: Oid,
+    relid: Oid,
+    mut relfilenumber: RelFileNumber,
+    accessmtd: Oid,
+    tup_desc: &TupleDescData<'_>,
+    relkind: u8,
+    relpersistence: u8,
+    shared_relation: bool,
+    mapped_relation: bool,
+    allow_system_table_mods: bool,
+    mut create_storage: bool,
+) -> PgResult<HeapCreateResult> {
+    // The caller must have provided an OID for the relation.
+    debug_assert!(OidIsValid(relid));
+
+    /*
+     * Don't allow creating relations in pg_catalog directly, even though it is
+     * allowed to move user defined relations there. Semantics with search
+     * paths including pg_catalog are too confusing for now.
+     *
+     * But allow creating indexes on relations in pg_catalog even if
+     * allow_system_table_mods = off, upper layers already guarantee it's on a
+     * user defined relation, not a system one.
+     */
+    if !allow_system_table_mods
+        && ((backend_catalog_catalog::IsCatalogNamespace(relnamespace) && relkind != RELKIND_INDEX)
+            || backend_catalog_catalog::IsToastNamespace(relnamespace))
+        && backend_utils_init_miscinit::IsNormalProcessingMode()
+    {
+        let nsp =
+            backend_utils_cache_lsyscache::namespace_range_index_pubsub::get_namespace_name(
+                mcx,
+                relnamespace,
+            )?
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!("permission denied to create \"{nsp}.{relname}\""))
+            .errdetail("System catalog modifications are currently disallowed.")
+            .into_error());
+    }
+
+    let mut xids = HeapCreateXids {
+        relfrozenxid: InvalidTransactionId,
+        relminmxid: 0, // InvalidMultiXactId
+    };
+
+    /*
+     * Force reltablespace to zero if the relation kind does not support
+     * tablespaces. This is mainly just for cleanliness' sake.
+     */
+    if !RELKIND_HAS_TABLESPACE(relkind) {
+        reltablespace = InvalidOid;
+    }
+
+    /* Don't create storage for relkinds without physical storage. */
+    if !RELKIND_HAS_STORAGE(relkind) {
+        create_storage = false;
+    } else {
+        /*
+         * If relfilenumber is unspecified by the caller then create storage
+         * with oid same as relid.
+         */
+        if !RelFileNumberIsValid(relfilenumber) {
+            relfilenumber = relid;
+        }
+    }
+
+    /*
+     * Never allow a pg_class entry to explicitly specify the database's default
+     * tablespace in reltablespace; force it to zero instead. This ensures that
+     * if the database is cloned with a different default tablespace, the
+     * pg_class entry will still match where CREATE DATABASE will put the
+     * physically copied relation.
+     *
+     * Yes, this is a bit of a hack.
+     */
+    if reltablespace == backend_commands_tablespace_globals_seams::MyDatabaseTableSpace::call()? {
+        reltablespace = InvalidOid;
+    }
+
+    /*
+     * build the relcache entry.
+     */
+    let rel = backend_utils_cache_relcache::initfile::RelationBuildLocalRelation(
+        relname,
+        relnamespace,
+        tup_desc,
+        relid,
+        accessmtd,
+        reltablespace,
+        shared_relation,
+        mapped_relation,
+        relpersistence as i8,
+        relkind as i8,
+        relfilenumber,
+    )?;
+
+    // Open the just-built relcache entry to read its `rd_rel`/`rd_locator` for
+    // the storage providers below (C: `new_rel_desc->rd_rel->relkind`, the
+    // `rd_locator` smgr uses). The entry is registry-owned; relation_open with
+    // NoLock just bumps the refcount (the AccessExclusiveLock is taken by the
+    // caller for the cataloged path; the uncataloged callers hold their own).
+    let rel_data = backend_access_common_relation::relation_open(mcx, rel, NoLock)?;
+
+    /*
+     * Have the storage manager create the relation's disk file, if needed.
+     *
+     * For tables, the AM callback creates both the main and the init fork. For
+     * others, only the main fork is created; the other forks will be created on
+     * demand.
+     */
+    if create_storage {
+        let rd_relkind = rel_data.rd_rel.relkind;
+        if RELKIND_HAS_TABLE_AM(rd_relkind) {
+            // table_relation_set_new_filelocator(rel, &rel->rd_locator,
+            //     relpersistence, &relfrozenxid, &relminmxid);
+            let (fx, mm) =
+                backend_access_table_tableam_seams::table_relation_set_new_filelocator::call(
+                    rel_data.rd_id,
+                    rel_data.rd_locator,
+                    relpersistence as i8,
+                )?;
+            xids.relfrozenxid = fx;
+            xids.relminmxid = mm;
+        } else if RELKIND_HAS_STORAGE(rd_relkind) {
+            // RelationCreateStorage(rel->rd_locator, relpersistence, true);
+            backend_catalog_storage_seams::relation_create_storage_main_fork::call(
+                rel_data.rd_locator,
+                relpersistence as i8,
+            )?;
+        } else {
+            debug_assert!(false);
+        }
+    }
+
+    /*
+     * If a tablespace is specified, removal of that tablespace is normally
+     * protected by the existence of a physical file; but for relations with no
+     * files, add a pg_shdepend entry to account for that.
+     */
+    if !create_storage && reltablespace != InvalidOid {
+        backend_catalog_pg_shdepend_seams::recordDependencyOnTablespace::call(
+            RelationRelationId,
+            relid,
+            reltablespace,
+        )?;
+    }
+
+    /* ensure that stats are dropped if transaction aborts */
+    backend_utils_activity_pgstat_seams::pgstat_create_relation::call(
+        rel_data.rd_id,
+        rel_data.rd_rel.relisshared,
+    )?;
+
+    rel_data.close(NoLock)?;
+
+    Ok(HeapCreateResult { rel, xids })
+}
+
+mod create;
+mod delete;
+
+pub use create::{
+    heap_create_with_catalog, AddNewAttributeTuples, AddNewRelationTuple, AddNewRelationType,
+    InsertPgAttributeTuples, InsertPgClassTuple,
+};
+pub use delete::{
+    DeleteAttributeTuples, DeleteRelationTuple, DeleteSystemAttributeTuples,
+    RelationRemoveInheritance,
+};
