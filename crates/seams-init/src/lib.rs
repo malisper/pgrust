@@ -295,6 +295,7 @@ pub fn init_all() {
     backend_postmaster_walsummarizer::init_seams();
     backend_postmaster_walwriter::init_seams();
     backend_regex_core::init_seams();
+    backend_replication_libpqwalreceiver::init_seams();
     backend_replication_logical_applyparallelworker::init_seams();
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_launcher::init_seams();

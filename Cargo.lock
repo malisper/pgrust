@@ -12648,6 +12648,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-utils-error",
+ "interfaces-libpq-fe-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+ "types-pgstat",
+ "types-walreceiver",
+]
+
+[[package]]
 name = "backend-replication-libpqwalreceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -19228,6 +19243,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interfaces-libpq-fe-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+]
+
+[[package]]
 name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -19753,6 +19778,7 @@ dependencies = [
  "backend-postmaster-walsummarizer",
  "backend-postmaster-walwriter",
  "backend-regex-core",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
  "backend-replication-logical-launcher",
@@ -20298,6 +20324,13 @@ version = "0.0.0"
 dependencies = [
  "types-datum",
  "types-jsonb",
+]
+
+[[package]]
+name = "types-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
