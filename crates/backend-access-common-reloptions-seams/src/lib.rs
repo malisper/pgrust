@@ -9,8 +9,30 @@
 //! fixed-size options struct by value (C: a freshly palloc'd `bytea *`).
 //! `Err` carries the C `ereport(ERROR)` surface of option validation.
 
+use types_core::Oid;
 use types_error::PgResult;
-use types_reloptions::{local_relopts, AttributeOpts, TableSpaceOpts};
+use types_reloptions::{local_relopts, AttributeOpts, StdRdOptions, TableSpaceOpts};
+
+seam_core::seam!(
+    /// `extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn)` (reloptions.c),
+    /// driven by `RelationParseRelOptions` (relcache.c): parse a relation's
+    /// `pg_class.reloptions` `text[]` into its parsed-options struct. `relkind`
+    /// and `reloptions` (the verbatim varlena array bytes, `None` for the C
+    /// `isnull`) come straight off the `pg_class` row; `amoptions` is the index
+    /// AM's option-parser handler OID (the relcache's `rd_indam->amoptions`),
+    /// `None` for non-index relkinds. Returns the parsed `StdRdOptions` (the
+    /// table/toast/matview/partitioned-table `RelOptStruct::Std` arm the relcache
+    /// `rd_options` carries), or `None` for the C NULL — including the relkinds
+    /// whose parsed options the trimmed `rd_options` does not model (view /
+    /// AM-defined index `bytea`). `Err` carries the validation `ereport(ERROR)`
+    /// surface; the index path additionally drives the (genuinely unported) AM
+    /// `am_reloptions` callback.
+    pub fn extract_rel_options(
+        relkind: u8,
+        reloptions: Option<&[u8]>,
+        amoptions: Option<Oid>,
+    ) -> PgResult<Option<StdRdOptions>>
+);
 
 seam_core::seam!(
     /// `attribute_reloptions(reloptions, validate)` (reloptions.c).

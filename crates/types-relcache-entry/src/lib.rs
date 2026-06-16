@@ -226,6 +226,14 @@ pub struct OwnedTupleConstr {
     /// `ConstrCheck *check` (+ `uint16 num_check`) — check constraints, sorted
     /// by name. Length is `num_check`.
     pub check: Vec<OwnedConstrCheck>,
+    /// `AttrMissing *missing` — per-column "missing" values (the `attmissingval`
+    /// defaults from fast-default `ALTER TABLE ... ADD COLUMN ... DEFAULT`),
+    /// indexed by attnum-1. Empty is the C NULL `constr->missing` (no column has
+    /// a missing value); when non-empty it is `relnatts` long, with each
+    /// [`OwnedAttrMissing`] present-or-not, exactly as
+    /// `RelationBuildTupleDesc` builds `attrmiss[]`. Lifetime-free (the value
+    /// image, not a `'mcx`-bound `Datum`), re-materialized at projection time.
+    pub missing: Vec<OwnedAttrMissing>,
     /// `bool has_not_null`.
     pub has_not_null: bool,
     /// `bool has_generated_stored`.
@@ -256,6 +264,21 @@ pub struct OwnedConstrCheck {
     pub ccvalid: bool,
     /// `bool ccnoinherit`.
     pub ccnoinherit: bool,
+}
+
+/// `struct AttrMissing` (`access/tupdesc.h`) — one column's fast-default
+/// "missing" value, the owned (lifetime-free) mirror of
+/// [`types_tuple::heaptuple::AttrMissing`]. C stores `am_value` as a `Datum`;
+/// the owned entry keeps the value's lifetime-free image (or `None` when
+/// `am_present` is false), re-materialized into a `Datum<'mcx>` when the entry's
+/// tuple descriptor is projected (`project_in`).
+#[derive(Clone, Debug, Default)]
+pub struct OwnedAttrMissing {
+    /// `bool am_present`.
+    pub am_present: bool,
+    /// `Datum am_value` — the value's lifetime-free image, or `None` when not
+    /// present.
+    pub am_value: Option<types_tuple::heaptuple::MissingValueImage>,
 }
 
 /// The genbki bootstrap schema for one nailed catalog: the hardcoded

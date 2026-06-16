@@ -73,6 +73,14 @@ pub struct ScannedPgClass {
     pub relrewrite: Oid,
     pub relfrozenxid: u32,
     pub relminmxid: u32,
+    /// `text[] reloptions` — the variable-length `pg_class.reloptions` column,
+    /// as its verbatim on-disk varlena bytes (the array image
+    /// `RelationParseRelOptions` feeds to `extractRelOptions`'s
+    /// `fastgetattr(Anum_pg_class_reloptions, ...)`), or `None` for the C
+    /// `isnull` (no options). Not part of the fixed-width `Form_pg_class` the
+    /// relcache caches in `rd_rel`; carried separately so
+    /// `RelationParseRelOptions` can parse it.
+    pub reloptions: Option<Vec<u8>>,
 }
 
 /// One decoded `pg_attribute` row as `RelationBuildTupleDesc` (relcache.c)
@@ -103,6 +111,16 @@ pub struct ScannedPgAttribute {
     pub attislocal: bool,
     pub attinhcount: i16,
     pub attcollation: Oid,
+    /// The column's "missing" value, lifetime-free, when `atthasmissing` is set
+    /// and the `attmissingval` array column is non-NULL. C's
+    /// `RelationBuildTupleDesc` does `heap_getattr(Anum_pg_attribute_attmissingval)`
+    /// then `array_get_element(missingval, 1, ...)` to pull the single element
+    /// (`Assert(!is_null)`); the genam decode performs that fetch + element
+    /// extraction and carries the resulting value's image so the relcache can
+    /// store it in `rd_att->constr->missing[attnum-1].am_value`. `None` when
+    /// `atthasmissing` is false or the `attmissingval` datum is NULL (the C
+    /// `missingNull` true: no missing value for this column).
+    pub attmissingval: Option<types_tuple::heaptuple::MissingValueImage>,
 }
 
 /// One decoded `pg_index` row as `RelationGetIndexList` consumes it: the

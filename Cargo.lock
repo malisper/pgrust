@@ -1872,6 +1872,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-catalog-index-seams",
  "backend-executor-execTuples-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
@@ -18858,6 +18859,7 @@ dependencies = [
 name = "backend-utils-cache-relcache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
