@@ -16878,10 +16878,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-jsonpath-scan",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numutils",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-jsonpath",
+ "types-regex",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonpath-gram-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-scan"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-fgram",
+ "backend-utils-mb-mbutils",
+ "mcx",
+ "port-pgstrcasecmp",
  "types-error",
  "types-jsonpath",
 ]
@@ -20661,6 +20692,7 @@ dependencies = [
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-jsonfuncs",
+ "backend-utils-adt-jsonpath-gram",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",

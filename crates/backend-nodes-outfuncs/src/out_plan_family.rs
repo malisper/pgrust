@@ -221,20 +221,25 @@ fn out_plan_fields(buf: &mut String, plan: &Plan<'_>, prefix: &str, write_loc: b
         None => buf.push_str("<>"),
         Some(n) => out_node_inner(buf, n, write_loc),
     }
-    // initPlan: `List *` of `SubPlan` (an Expr). The C `WRITE_NODE_FIELD`
-    // renders NIL as `<>`; a populated list recurses through `out_expr`, which
-    // panics for `SubPlan` until that Expr writer lands (mirror-pg-and-panic —
-    // initPlan is empty in the common case).
+    // initPlan: `List *` of `SubPlan`. The C `WRITE_NODE_FIELD(initPlan)` calls
+    // `outNode` on the List, rendering NIL as `<>` and a populated list as
+    // `({SUBPLAN ...} {SUBPLAN ...} ...)` (each element framed by `out_subplan`).
     let _ = write!(buf, " :{} ", p("initPlan"));
     match &plan.initPlan {
         None => buf.push_str("<>"),
         Some(list) if list.is_empty() => buf.push_str("<>"),
-        Some(_) => panic!(
-            "outPlan: initPlan carries SubPlan; the {{SUBPLAN ...}} Expr writer is \
-             not ported into this enum's serialization stage yet (out_expr panics on \
-             Expr::SubPlan). initPlan is empty in the common stored-plan case; a \
-             non-empty list is unmodeled here (mirror-pg-and-panic)"
-        ),
+        Some(list) => {
+            buf.push('(');
+            let mut first = true;
+            for sp in list.iter() {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                crate::framed(buf, |b| crate::out_expr_family::out_subplan(b, sp, write_loc));
+            }
+            buf.push(')');
+        }
     }
     write_bitmapset_opt_field(buf, &p("extParam"), plan.extParam.as_deref());
     write_bitmapset_opt_field(buf, &p("allParam"), plan.allParam.as_deref());
@@ -278,6 +283,22 @@ fn out_join_fields(buf: &mut String, join: &Join<'_>, prefix: &str, write_loc: b
 fn out_seqscan(buf: &mut String, n: &types_nodes::nodeseqscan::SeqScan<'_>, wl: bool) {
     buf.push_str("SEQSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
+}
+
+/// `_outSampleScan` (outfuncs.funcs.c) — `Scan scan` base then
+/// `WRITE_NODE_FIELD(tablesample)` over the `TableSampleClause *` (its framed
+/// `{TABLESAMPLECLAUSE ...}` writer lives in the parse family). A `NULL`
+/// `tablesample` renders `<>` (`outNode(NULL)`).
+fn out_samplescan(buf: &mut String, n: &types_nodes::nodesamplescan::SampleScan<'_>, wl: bool) {
+    buf.push_str("SAMPLESCAN");
+    out_scan_fields(buf, &n.scan, "scan.", wl);
+    buf.push_str(" :tablesample ");
+    match n.tablesample.as_deref() {
+        None => buf.push_str("<>"),
+        Some(ts) => {
+            crate::framed(buf, |b| crate::out_parse_family::out_table_sample_clause(b, ts, wl))
+        }
+    }
 }
 
 /// `WRITE_NODE_FIELD(functions)` over the `List *` of framed `RangeTblFunction`
@@ -822,10 +843,17 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
 
         // ---- mirror-pg-and-panic: field-type unmodeled in this family ----
         Node::ModifyTable(_) => panic!(
-            "_outModifyTable: not serialized — the node carries nested non-Node \
-             list-of-lists (updateColnosLists/withCheckOptionLists/returningLists/\
-             mergeActionLists/mergeJoinConditions) and MergeAction children, none \
-             of which are reachable through this family's outNode dispatch"
+            "_outModifyTable: not serialized — `rowMarks` is `List *` of \
+             `PlanRowMark` (C `WRITE_NODE_FIELD(rowMarks)`), but `PlanRowMark` is \
+             NOT a `Node` enum variant and has no `_outPlanRowMark`/`_readPlanRowMark` \
+             writer in this model (it exists only as a typed struct in \
+             `nodelockrows`), AND the carrier types it as `PgVec<PgBox<Node>>` which \
+             cannot hold one — so the field can neither be written nor round-tripped. \
+             Prereq keystone: promote `PlanRowMark` to a serializable `Node` variant \
+             (with its `_out`/`_read`) and re-type `ModifyTable.rowMarks` to a typed \
+             `PgVec<PlanRowMark>`; the remaining fields (incl. the \
+             updateColnosLists/withCheckOptionLists/returningLists/mergeActionLists/\
+             mergeJoinConditions list-of-lists) are all modeled and writable"
         ),
         Node::WindowAgg(_) => panic!(
             "_outWindowAgg: not serialized — the repo WindowAgg struct trims the \
@@ -838,11 +866,7 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
              node family (not reachable as a Node here)"
         ),
         Node::FunctionScan(n) => crate::framed(buf, |b| out_functionscan(b, n, wl)),
-        Node::SampleScan(_) => panic!(
-            "_outSampleScan: not serialized — `tablesample` is a bare \
-             TableSampleClause whose framed writer lives in another node family \
-             (not reachable as a Node here)"
-        ),
+        Node::SampleScan(n) => crate::framed(buf, |b| out_samplescan(b, n, wl)),
         Node::CustomScan(_) => panic!(
             "_outCustomScan: not serialized — `custom_private` and `methods` are \
              opaque provider pointers (the C `:methods` token reads \

@@ -263,7 +263,7 @@ fn coercion_form_from(c: i32) -> CoercionForm {
     }
 }
 
-fn sublink_type_from(c: i32) -> pn::SubLinkType {
+pub(crate) fn sublink_type_from(c: i32) -> pn::SubLinkType {
     match c {
         0 => pn::SubLinkType::Exists,
         1 => pn::SubLinkType::All,
@@ -1134,20 +1134,27 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
         let _label = next_token()?;
         next_token()? // value (the `<>`)
     };
-    // subselect — the embedded Query. The post-analysis SubLink carries it as a
-    // `PgBox<Query>`, which the readfuncs Query reader (parse family) is not
-    // wired to feed back into this Box here. A `<>` (NULL) reconstructs as None.
+    // subselect — the embedded Query. The core `node_read` reconstructs the
+    // framed `{QUERY ...}` child into an mcx-owned `Node::Query`; box it and
+    // re-erase the lifetime parameter to the lifetime-free `Expr` tree's
+    // 'static notional lifetime (the exact idiom SubLink::clone_in uses; cf.
+    // clone_sublink in types-nodes::primnodes). A `<>` (NULL) → None.
     let _label = next_token()?; // skip :subselect
     let sub = read::node_read(mcx, None)?;
     let subselect = match sub {
         None => None,
-        Some(_) => {
-            return Err(elog_error(
-                "_readSubLink: reconstructing the embedded subselect Query into \
-                 SubLink.subselect (PgBox<Query>) requires the parse-family Query \
-                 reader bridge; not modeled in the expr family",
-            ))
-        }
+        Some(boxed) => match PgBox::into_inner(boxed) {
+            Node::Query(q) => {
+                // Erase to the Expr tree's 'static notional lifetime via the
+                // types-nodes helper (this crate is `#![forbid(unsafe_code)]`).
+                Some(types_nodes::primnodes::query_box_into_static(q, mcx)?)
+            }
+            _ => {
+                return Err(elog_error(
+                    "_readSubLink: expected a QUERY node for SubLink.subselect",
+                ))
+            }
+        },
     };
     let location = read_location_field()?;
     Ok(types_nodes::primnodes::SubLink {
@@ -1349,6 +1356,43 @@ mod tests {
                 assert!(n.args.is_empty());
             }
             other => panic!("expected ScalarArrayOpExpr, got {:?}", other.node_tag()),
+        }
+    }
+
+    /// `_outSubLink`/`_readSubLink`: the embedded `subselect` Query round-trips
+    /// through the OUT framed-Query writer and the READ `'static`-erase bridge.
+    #[test]
+    fn sublink_with_subselect_round_trips() {
+        ensure_seams();
+        let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new(
+            "read-sublink-test",
+        )));
+        let mcx = ctx.mcx();
+
+        let q = types_nodes::copy_query::Query::new(mcx);
+        let subselect = Some(
+            types_nodes::primnodes::query_box_into_static(q, mcx).expect("erase"),
+        );
+        let sublink = Expr::SubLink(types_nodes::primnodes::SubLink {
+            subLinkType: types_nodes::primnodes::SubLinkType::Any,
+            subLinkId: 3,
+            testexpr: Some(std::boxed::Box::new(Expr::Var(mk_var()))),
+            subselect,
+            location: -1,
+        });
+        let node = Node::Expr(sublink);
+
+        let text = backend_nodes_outfuncs::nodeToString(mcx, &node).expect("out");
+        let parsed = string_to_node(mcx, text.as_str()).expect("read");
+        let text2 = backend_nodes_outfuncs::nodeToString(mcx, &parsed).expect("re-out");
+        assert_eq!(text.as_str(), text2.as_str(), "SubLink round-trip not stable");
+
+        match PgBox::into_inner(parsed) {
+            Node::Expr(Expr::SubLink(s)) => {
+                assert_eq!(s.subLinkId, 3);
+                assert!(s.subselect.is_some(), "subselect lost in round-trip");
+            }
+            other => panic!("expected SubLink, got {:?}", other.node_tag()),
         }
     }
 

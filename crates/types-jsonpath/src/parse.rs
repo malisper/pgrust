@@ -16,6 +16,28 @@ use crate::jsonpath::JsonPathItemType;
 /// on-disk varlena bytes (length header included).
 pub type JsonPathNumeric = Vec<u8>;
 
+/// The scanner's literal-text buffer / token semantic value
+/// (C: `struct JsonPathString { char *val; int len; int total; }`, declared in
+/// `jsonpath_internal.h`). The grammar/scanner seam names it in helper
+/// signatures (`makeItemString`, `makeItemKey`, ...), so it lives in this
+/// vocabulary crate. `val` carries the decoded bytes (the C buffer may include
+/// a trailing NUL written by `addchar(false,'\0')`); `len` is the meaningful
+/// length excluding any terminator; `total` is the allocated capacity flex
+/// tracks for the doubling `resizeString` strategy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JsonPathString {
+    pub val: Vec<u8>,
+    pub len: i32,
+    pub total: i32,
+}
+
+impl JsonPathString {
+    /// The meaningful bytes (C: `val[0 .. len]`), excluding any trailing NUL.
+    pub fn bytes(&self) -> &[u8] {
+        &self.val[..self.len as usize]
+    }
+}
+
 /// Parse-tree node (C: `struct JsonPathParseItem`). Produced by the
 /// grammar/scanner seam, flattened by `flattenJsonPathParseItem`.
 #[derive(Clone, Debug)]
