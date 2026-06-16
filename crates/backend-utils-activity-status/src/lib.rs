@@ -665,10 +665,10 @@ pub fn pgstat_bestart_final() -> PgResult<()> {
     }
 
     // Create the backend statistics entry.
-    if backend_utils_activity_pgstat_backend_seams::pgstat_tracks_backend_bktype::call(mybt) {
-        backend_utils_activity_pgstat_backend_seams::pgstat_create_backend::call(
+    if backend_utils_activity_pgstat_backend::pgstat_tracks_backend_bktype(mybt) {
+        backend_utils_activity_pgstat_backend::pgstat_create_backend(
             backend_utils_init_small::globals::MyProcNumber(),
-        );
+        )?;
     }
 
     // Update app name to the current GUC setting.

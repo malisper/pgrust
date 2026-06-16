@@ -392,6 +392,8 @@ pub fn init_all() {
     // backend_utils_activity_pgstat::init_seams() seals the kind table.
     backend_utils_activity_pgstat_io::init_seams();
     backend_utils_activity_pgstat_wal::init_seams();
+    backend_utils_activity_pgstat_slru::init_seams();
+    backend_utils_activity_pgstat_backend::init_seams();
     backend_utils_activity_pgstat::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();

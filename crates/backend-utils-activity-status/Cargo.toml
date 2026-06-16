@@ -23,6 +23,7 @@ backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
+backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
 
 # Inward seams (this crate installs them).
 backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
@@ -35,5 +36,4 @@ backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-s
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }
 backend-utils-activity-pgstat-database-seams = { path = "../backend-utils-activity-pgstat-database-seams" }
-backend-utils-activity-pgstat-backend-seams = { path = "../backend-utils-activity-pgstat-backend-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }

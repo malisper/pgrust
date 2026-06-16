@@ -134,7 +134,13 @@ pub struct PgStatShared_ReplSlot {
 }
 
 /// `PgStatShared_Backend` (`utils/pgstat_internal.h`).
+///
+/// `#[repr(C)]` so the leading `header` is guaranteed first: the pgstat core
+/// hands out the shared stats body as a `*mut PgStatShared_Common`, and the
+/// per-kind code recovers the full struct with `(shared_stats as *mut
+/// PgStatShared_Backend)` (C's `(PgStatShared_Backend *) entry_ref->shared_stats`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Backend {
     pub header: PgStatShared_Common,
     pub stats: crate::activity_pgstat::PgStat_Backend,
