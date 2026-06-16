@@ -344,6 +344,7 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lock = { path = "../backend-storage-lmgr-lock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+backend-storage-lmgr-predicate = { path = "../backend-storage-lmgr-predicate" }
 backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
