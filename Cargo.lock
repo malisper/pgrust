@@ -3693,6 +3693,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-indexing"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-index-indexam",
+ "backend-catalog-index-seams",
+ "backend-catalog-indexing-seams",
+ "backend-executor-execTuples",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-indexing-seams"
 version = "0.0.0"
 dependencies = [
