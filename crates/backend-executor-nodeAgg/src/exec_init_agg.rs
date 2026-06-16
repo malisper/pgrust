@@ -53,6 +53,26 @@ fn aggkind_is_ordered_set(aggkind: i8) -> bool {
     aggkind != b'n' as i8
 }
 
+/// Erase an owned `AggStateData` into the central `PlanStateNode::Agg` carrier
+/// (`PgBox<dyn AggStateLive>`). `AggStateData` lives ABOVE `types-nodes`, so the
+/// enum carries it type-erased; this is the same `into_raw`/`from_raw` unsize
+/// the AM-opaque carriers use (the `allocator_api2` `PgBox` does not auto-coerce
+/// unsized types on stable). The concrete type is recovered via the tag-checked
+/// `downcast_agg_state_*` helpers.
+pub fn erase_agg_state<'mcx>(
+    boxed: PgBox<'mcx, AggStateData<'mcx>>,
+) -> PgBox<'mcx, dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx> {
+    let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
+    // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
+    // attaches the `dyn AggStateLive` vtable (the established erase pattern).
+    unsafe {
+        PgBox::from_raw_in(
+            ptr as *mut (dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+            alloc,
+        )
+    }
+}
+
 /// `ExecInitAgg(node, estate, eflags)` — build the `AggState` from the Agg
 /// plan node: catalog reads for every aggregate, per-trans/per-agg setup,
 /// phase and grouping-set layout, hash-table and context creation.
@@ -73,12 +93,12 @@ pub fn ExecInitAgg<'mcx>(
     // create state structure
     let mut aggstate = alloc_in(mcx, AggStateData::new_in(mcx)?)?;
     aggstate.ss.ps.plan = None; // C: aggstate->ss.ps.plan = (Plan *) node — the
-                                // owned model has no Agg/AggState Node variant
-                                // yet; the back-link lands with the Node enum's
-                                // Agg arm.
-    aggstate.ss.ps.ExecProcNode = None; // C: ExecAgg — installed once the
-                                        // PlanStateNode gains an AggState arm so
-                                        // ExecProcNode can dispatch to it.
+                                // owned PlanStateData.plan back-link is a Plan
+                                // handle the executor sets elsewhere; the Agg
+                                // node is reached via the Node enum.
+    // C: aggstate->ss.ps.ExecProcNode = ExecAgg;
+    aggstate.ss.ps.ExecProcNode = Some(crate::node_lifecycle::exec_agg_node);
+    aggstate.ss.ps.ExecProcNodeReal = Some(crate::node_lifecycle::exec_agg_node);
 
     aggstate.aggs = None;
     aggstate.numaggs = 0;
@@ -151,33 +171,14 @@ pub fn ExecInitAgg<'mcx>(
     // Both are now EcxtId into the EState pool (P0 storage-model reconcile), so
     // the alias is a plain id copy, faithful to the C `ExprContext *` alias.
     aggstate.tmpcontext = aggstate.ss.ps.ps_ExprContext;
-    // The remaining ExecInitAgg steps depend on owners not yet ported (catalog
-    // reads, ExecInitNode, slot/projection setup, the per-phase ExecBuildAggTrans
-    // build, etc.); they run in the structurally-faithful block below once those
-    // land. Until then ExecInitAgg cannot complete — panic loudly.
-    panic!(
-        "backend-executor-nodeAgg::ExecInitAgg: the ExprContext storage model is \
-         reconciled (tmpcontext/aggcontexts/hashcontext are EcxtId pool ids, #165 \
-         P0), but the remainder still depends on unported owners — the \
-         per-grouping-set ExecAssignExprContext loop, hash_create_memory, the \
-         outer-plan init (ExecInitNode), source-slot setup \
-         (ExecGetResultSlotOps/ExecCreateScanSlotFromOuterPlan), the resort slot \
-         (ExecInitExtraTupleSlot), result slot+projection \
-         (ExecInitResultTupleSlotTL/ExecAssignProjectionInfo), qual init \
-         (ExecInitQual), the per-phase grouping-set/eqfunction build \
-         (execTuplesMatchPrepare), the per-Aggref catalog reads \
-         (SearchSysCache1 AGGFNOID/PROCOID, object_aclcheck, GetUserId, \
-         InvokeFunctionExecuteHook, get_aggregate_argtypes, ExecInitExprList, \
-         build_aggregate_finalfn_expr, fmgr_info, get_typlenbyval, SysCacheGetAttr, \
-         build_pertrans_for_aggref, IsBinaryCoercible, format_type_be), and the \
-         per-phase ExecBuildAggTrans build all depend on owners not yet ported"
-    );
-
-    // The remainder of ExecInitAgg follows the C structure below; it is kept
-    // (unreachable past the panic above) so the owned arithmetic lands verbatim
-    // once the ExprContext storage model and the missing executor/catalog seams
-    // are available. Each cross-subsystem step is annotated with its C call.
-    #[allow(unreachable_code)]
+    // The remainder of ExecInitAgg now runs against landed owners (the
+    // #324/#165 keystone): the PlanStateNode::Agg carrier + AggStateLive bridge,
+    // the AGGFNOID full projection (agg_form_by_oid), the parse_agg / fmgr /
+    // execExpr / execTuples / execGrouping / aclchk seams, and the
+    // exec_build_agg_trans seam (the AggState rides erased). The remaining
+    // runtime-only residual is the live-AggState back-reference through
+    // fcinfo->context (F4: AggCheckCallContext et al.) — built tag-only here and
+    // seam-panicked at invocation time.
     {
         for _i in 0..num_grouping_sets {
             // ExecAssignExprContext(estate, &aggstate->ss.ps);
@@ -266,11 +267,26 @@ pub fn ExecInitAgg<'mcx>(
             TupleSlotKind::Virtual,
         )?;
         // ExecAssignProjectionInfo(&aggstate->ss.ps, NULL);
+        // C builds the result projection with parent = (PlanState *) aggstate,
+        // so its targetlist Aggrefs are discovered into aggstate->aggs. In the
+        // owned model the projection's ExprState collects them on its
+        // `found_aggs` channel; drain it here (matching the C discovery point).
         backend_executor_execUtils_seams::exec_assign_projection_info::call(
             &mut aggstate.ss.ps,
             estate,
             None,
         )?;
+        if let Some(proj) = aggstate.ss.ps.ps_ProjInfo.as_mut() {
+            // Reborrow-free drain: pull the found list out of the projection
+            // state, then push into aggstate (disjoint fields, but the borrow
+            // checker needs the list moved out first).
+            let found = proj.pi_state.found_aggs.take();
+            if let Some(found) = found {
+                let mut tmp = types_nodes::execexpr::ExprState::default();
+                tmp.found_aggs = Some(found);
+                drain_found_aggs(&mut aggstate, &mut tmp, mcx)?;
+            }
+        }
 
         // initialize child expressions. execExpr.c finds Aggrefs for us and
         // adds them to aggstate->aggs. Aggrefs in the qual are found here.
@@ -326,13 +342,15 @@ pub fn ExecInitAgg<'mcx>(
         }
 
         // The per-phase loop (grouping-set arithmetic in-crate; the bms
-        // accumulation into all_grouped_cols and the execTuplesMatchPrepare
-        // eqfunction builds are bitmapset/execGrouping owned).
-        build_phases(&mut aggstate, node, mcx, estate)?;
+        // accumulation into all_grouped_cols + the execTuplesMatchPrepare
+        // eqfunction builds reach the bitmapset / execGrouping seams). The C
+        // local `Bitmapset *all_grouped_cols` is threaded explicitly here.
+        let mut all_grouped_cols: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+        build_phases(&mut aggstate, node, mcx, estate, &mut all_grouped_cols)?;
 
-        // Convert all_grouped_cols to a descending-order list — owned by the
-        // bitmapset unit (bms_next_member + lcons_int); lands with bitmapset.
-        convert_all_grouped_cols(&mut aggstate, mcx)?;
+        // Convert all_grouped_cols to a descending-order list (bms_next_member +
+        // lcons_int).
+        convert_all_grouped_cols(&mut aggstate, all_grouped_cols.as_deref(), mcx)?;
 
         // Set up aggregate-result storage in the output expr context, and
         // allocate per-agg working storage.
@@ -386,6 +404,7 @@ pub fn ExecInitAgg<'mcx>(
             node,
             num_grouping_sets,
             pergroup_offset,
+            mcx,
         )?;
 
         // Hashing can only appear in the initial phase.
@@ -513,32 +532,87 @@ fn outer_slot_ops(aggstate: &AggStateData<'_>) -> TupleSlotKind {
 /// trimmed `TupleTableSlot` carries no descriptor payload yet, so the read is
 /// execTuples-owned: panic until the slot payload model lands.
 fn scan_tuple_desc<'mcx>(
-    _aggstate: &AggStateData<'mcx>,
-    _estate: &EStateData<'mcx>,
+    aggstate: &AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
-    panic!(
-        "backend-executor-execTuples (slot payload): reading \
-         ss_ScanTupleSlot->tts_tupleDescriptor needs the descriptor the slot \
-         pool owns; not ported"
+    // scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor; — read
+    // through the installed execTuples seam (the slot pool owns the descriptor).
+    let mcx = estate.es_query_cxt;
+    backend_executor_execTuples_seams::exec_scan_slot_descriptor::call(
+        mcx,
+        &aggstate.ss,
+        estate,
     )
+}
+
+/// Drain the `found_aggs` channel an `ExprState` accumulated during compilation
+/// into `aggstate->aggs` (the executor satellite) and `aggstate->aggs_prim`
+/// (the expression-tree originals kept for the parse_agg helpers). C does
+/// `aggstate->aggs = lappend(aggstate->aggs, astate)` inside `ExecInitExprRec`;
+/// the owned model collects on the `ExprState` and drains here (the
+/// planner-set `aggno`/`aggtransno` make the order divergence inert). See
+/// [`types_nodes::execexpr::ExprState::found_aggs`].
+fn drain_found_aggs<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    state: &mut types_nodes::execexpr::ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    let found = match state.found_aggs.take() {
+        Some(f) if !f.is_empty() => f,
+        _ => return Ok(()),
+    };
+    if aggstate.aggs.is_none() {
+        aggstate.aggs = Some(vec_with_capacity_in(mcx, found.len())?);
+        aggstate.aggs_prim = Some(vec_with_capacity_in(mcx, found.len())?);
+    }
+    for prim in found.into_iter() {
+        let exec = types_nodes::nodeagg::Aggref::from_primnode(&prim, mcx)?;
+        aggstate
+            .aggs
+            .as_mut()
+            .expect("aggs initialized")
+            .push(alloc_in(mcx, exec)?);
+        aggstate
+            .aggs_prim
+            .as_mut()
+            .expect("aggs_prim initialized")
+            .push(prim);
+    }
+    Ok(())
 }
 
 /// C: `aggstate->ss.ps.qual = ExecInitQual(node->plan.qual, (PlanState *)aggstate);`
 /// — execExpr also pushes any Aggrefs found in the qual into `aggstate->aggs`.
-/// The Aggref collection into `aggstate->aggs` and the qual compile are execExpr
-/// owned (the `parent` is the AggState, which the owned model has no
-/// PlanStateNode arm for yet).
+/// The qual compile runs through the execExpr seam with the head-only parent;
+/// the discovered Aggrefs ride the ExprState's `found_aggs` channel and are
+/// drained into `aggstate->aggs` here.
 fn exec_init_qual_for_agg<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _node: &Agg<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    node: &Agg<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
-    panic!(
-        "backend-executor-execExpr::ExecInitQual: compiling the Agg qual and \
-         collecting its Aggrefs into aggstate->aggs needs the AggState parent \
-         (no PlanStateNode::AggState arm yet) and execExpr's Aggref discovery; \
-         not ported"
-    )
+    let mcx = estate.es_query_cxt;
+    // node->plan.qual is the implicitly-ANDed qual list.
+    let qual_slice: Option<PgVec<'mcx, types_nodes::primnodes::Expr>> =
+        match node.plan.qual.as_ref() {
+            Some(q) => {
+                let mut v = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    v.push(e.clone_in(mcx)?);
+                }
+                Some(v)
+            }
+            None => None,
+        };
+    let mut qual = backend_executor_execExpr_seams::exec_init_qual::call(
+        qual_slice.as_deref(),
+        &mut aggstate.ss.ps,
+        estate,
+    )?;
+    if let Some(state) = qual.as_mut() {
+        drain_found_aggs(aggstate, state, mcx)?;
+    }
+    Ok(qual)
 }
 
 /// The per-phase grouping-set / eqfunction build of `ExecInitAgg`
@@ -551,6 +625,7 @@ fn build_phases<'mcx>(
     node: &Agg<'mcx>,
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
     let chain_len = list_length(&node.chain) as i32;
 
@@ -606,7 +681,7 @@ fn build_phases<'mcx>(
 
             // grouped_cols[i] = bms of aggnode->grpColIdx[0..numCols];
             // all_grouped_cols = bms_add_members(all_grouped_cols, cols);
-            set_phase_grouped_cols_for_hash(aggstate, i, node, phaseidx, mcx)?;
+            set_phase_grouped_cols_for_hash(aggstate, i, node, phaseidx, mcx, all_grouped_cols)?;
             continue;
         } else {
             phase += 1;
@@ -629,7 +704,9 @@ fn build_phases<'mcx>(
                         vec_with_capacity_in(mcx, num_sets as usize)?;
                     phases[p].grouped_cols = Some(gc);
                 }
-                set_phase_grouped_cols_for_sets(aggstate, phase, node, phaseidx, mcx)?;
+                set_phase_grouped_cols_for_sets(
+                    aggstate, phase, node, phaseidx, mcx, all_grouped_cols,
+                )?;
             } else {
                 debug_assert!(phaseidx == 0);
                 let phases = aggstate.phases.as_mut().unwrap();
@@ -709,151 +786,302 @@ fn build_phases<'mcx>(
 /// stores the same `Agg *` pointer; the owned `AggStatePerPhaseData.aggnode`
 /// owns a `PgBox<Agg>`. A faithful copy is `Agg::clone_in`, which the types
 /// crate must provide — not yet available, so this is types-nodes-owned.
-fn clone_agg_shallow<'mcx>(_node: &Agg<'mcx>, _mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Agg<'mcx>>> {
-    panic!(
-        "types-nodes::Agg::clone_in: AggStatePerPhaseData.aggnode owns PgBox<Agg> \
-         where C aliases the shared Agg*; a deep copy needs Agg::clone_in (not yet \
-         provided by types-nodes)"
-    )
+fn clone_agg_shallow<'mcx>(node: &Agg<'mcx>, mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Agg<'mcx>>> {
+    // C aliases the shared `Agg *`; the owned `aggnode` field owns a deep copy.
+    alloc_in(mcx, node.clone_in(mcx)?)
 }
 
 /// The chained-Agg lookup `list_nth_node(Agg, node->chain, phaseidx-1)` (or
 /// `node` for phaseidx 0), cloned for the owned `aggnode` field.
 fn clone_phase_agg<'mcx>(
-    _node: &Agg<'mcx>,
-    _phaseidx: i32,
-    _mcx: Mcx<'mcx>,
+    node: &Agg<'mcx>,
+    phaseidx: i32,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<PgBox<'mcx, Agg<'mcx>>> {
-    panic!(
-        "types-nodes::Agg::clone_in: phases[..].aggnode / perhash[..].aggnode own \
-         PgBox<Agg> where C aliases the chain's Agg*; needs Agg::clone_in"
-    )
+    let aggnode: &Agg<'mcx> = if phaseidx > 0 {
+        &node.chain.as_ref().expect("chain present for phaseidx>0")[(phaseidx - 1) as usize]
+    } else {
+        node
+    };
+    alloc_in(mcx, aggnode.clone_in(mcx)?)
 }
 
 /// `castNode(Sort, outerPlan(aggnode))` for a chained Agg, cloned into the
-/// owned `sortnode` field. The `Sort` node lives under the Agg's outer plan;
-/// extracting it requires the Node enum's `Sort` arm (not present), so this is
-/// types-nodes-owned.
+/// owned `sortnode` field. The chained `aggnode`'s outer plan is a `Sort`.
 fn clone_phase_sortnode<'mcx>(
-    _node: &Agg<'mcx>,
-    _phaseidx: i32,
-    _mcx: Mcx<'mcx>,
+    node: &Agg<'mcx>,
+    phaseidx: i32,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<PgBox<'mcx, Sort<'mcx>>> {
-    panic!(
-        "types-nodes::Node::Sort: castNode(Sort, outerPlan(aggnode)) needs the \
-         Node enum's Sort arm to extract the chained Sort; not present"
-    )
+    debug_assert!(phaseidx > 0, "sortnode only for chained phases");
+    let aggnode = &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize];
+    // outerPlan(aggnode) is the chained Sort node.
+    let outer = aggnode
+        .plan
+        .lefttree
+        .as_ref()
+        .expect("chained Agg has an outer Sort plan");
+    let sort: &Sort<'mcx> = match &**outer {
+        types_nodes::nodes::Node::Sort(s) => s,
+        other => panic!("castNode(Sort, outerPlan(aggnode)) failed: {other:?}"),
+    };
+    alloc_in(mcx, sort.clone_in(mcx)?)
 }
 
-/// `grouped_cols[i] = bms of grpColIdx[0..numCols]; all_grouped_cols =
-/// bms_add_members(all_grouped_cols, cols)` for the hash phase. The Bitmapset
-/// construction and union are bitmapset-unit owned.
+/// Build a `Bitmapset` of `grpColIdx[0..numCols]` for an Agg node.
+fn grouped_cols_bms<'mcx>(
+    grp_col_idx: Option<&PgVec<'mcx, types_core::primitive::AttrNumber>>,
+    num_cols: i32,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    let mut cols: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+    if let Some(idx) = grp_col_idx {
+        for j in 0..num_cols as usize {
+            cols = Some(backend_nodes_core_seams::bms_add_member::call(
+                mcx,
+                cols,
+                idx[j] as i32,
+            )?);
+        }
+    }
+    Ok(cols)
+}
+
+/// `grouped_cols[i] = bms of aggnode->grpColIdx[0..numCols]; all_grouped_cols =
+/// bms_add_members(all_grouped_cols, cols)` for the hash phase.
 fn set_phase_grouped_cols_for_hash<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _i: i32,
-    _node: &Agg<'mcx>,
-    _phaseidx: i32,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    i: i32,
+    node: &Agg<'mcx>,
+    phaseidx: i32,
+    mcx: Mcx<'mcx>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-nodes-bitmapset (bms_add_member/bms_add_members): building \
-         grouped_cols for the hash phase and accumulating all_grouped_cols needs \
-         the Bitmapset add/union operations; not ported"
-    )
+    let aggnode: &Agg<'mcx> = if phaseidx > 0 {
+        &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize]
+    } else {
+        node
+    };
+    let cols = grouped_cols_bms(aggnode.grp_col_idx.as_ref(), aggnode.num_cols, mcx)?;
+    // all_grouped_cols = bms_add_members(all_grouped_cols, cols);
+    let merged = backend_nodes_core_seams::bms_add_members::call(
+        mcx,
+        all_grouped_cols.take(),
+        cols.as_deref(),
+    )?;
+    *all_grouped_cols = merged;
+    // phasedata->grouped_cols[i] = cols;  (only when non-empty)
+    if let Some(cols) = cols {
+        let phases = aggstate.phases.as_mut().unwrap();
+        if let Some(gc) = phases[0].grouped_cols.as_mut() {
+            // grouped_cols is parallel to the hash index `i`; extend then set.
+            while (gc.len() as i32) <= i {
+                gc.push(alloc_in(mcx, types_nodes::Bitmapset::empty(mcx)?)?);
+            }
+            gc[i as usize] = cols;
+        }
+    }
+    Ok(())
 }
 
 /// The per-grouping-set `grouped_cols` build for a sorted/plain phase
 /// (`for (j) cols = bms_add_member(cols, grpColIdx[j])`) plus the
 /// `all_grouped_cols = bms_add_members(.., grouped_cols[0])` accumulation.
 fn set_phase_grouped_cols_for_sets<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _phase: i32,
-    _node: &Agg<'mcx>,
-    _phaseidx: i32,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    phase: i32,
+    node: &Agg<'mcx>,
+    phaseidx: i32,
+    mcx: Mcx<'mcx>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-nodes-bitmapset (bms_add_member/bms_add_members): building \
-         per-grouping-set grouped_cols and accumulating all_grouped_cols needs \
-         the Bitmapset add/union operations; not ported"
-    )
+    let aggnode: &Agg<'mcx> = if phaseidx > 0 {
+        &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize]
+    } else {
+        node
+    };
+    let p = phase as usize;
+    // The C builds one grouped_cols bms per grouping set, sized by the set's
+    // gset_lengths[k]; the grpColIdx prefix of that length is the set's columns.
+    let numsets = aggstate.phases.as_ref().unwrap()[p].numsets;
+    let mut first_cols: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+    for k in 0..numsets as usize {
+        let length = aggstate.phases.as_ref().unwrap()[p]
+            .gset_lengths
+            .as_ref()
+            .map(|gl| gl[k])
+            .unwrap_or(0);
+        let cols = grouped_cols_bms(aggnode.grp_col_idx.as_ref(), length, mcx)?;
+        let cols = match cols { Some(c) => c, None => alloc_in(mcx, types_nodes::Bitmapset::empty(mcx)?)? };
+        if k == 0 {
+            // Snapshot grouped_cols[0] for the all_grouped_cols union below.
+            first_cols = Some(alloc_in(mcx, cols.clone_in(mcx)?)?);
+        }
+        let phases = aggstate.phases.as_mut().unwrap();
+        if let Some(gc) = phases[p].grouped_cols.as_mut() {
+            while gc.len() <= k {
+                gc.push(alloc_in(mcx, types_nodes::Bitmapset::empty(mcx)?)?);
+            }
+            gc[k] = cols;
+        }
+    }
+    // all_grouped_cols = bms_add_members(all_grouped_cols, grouped_cols[0]);
+    let merged = backend_nodes_core_seams::bms_add_members::call(
+        mcx,
+        all_grouped_cols.take(),
+        first_cols.as_deref(),
+    )?;
+    *all_grouped_cols = merged;
+    Ok(())
 }
 
 /// One AGG_SORTED phase's comparator build:
 /// `eqfunctions[length-1] = execTuplesMatchPrepare(scanDesc, length, grpColIdx,
-/// grpOperators, grpCollations, (PlanState *)aggstate)`. execGrouping owned;
-/// the scan descriptor and the AggState parent are not available yet.
+/// grpOperators, grpCollations, (PlanState *)aggstate)`.
 fn build_phase_eqfunction<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _phase: i32,
-    _length: i32,
-    _node: &Agg<'mcx>,
-    _phaseidx: i32,
-    _estate: &mut EStateData<'mcx>,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    phase: i32,
+    length: i32,
+    node: &Agg<'mcx>,
+    phaseidx: i32,
+    estate: &mut EStateData<'mcx>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-execGrouping::execTuplesMatchPrepare: building a \
-         grouping-set comparator needs the scan descriptor (execTuples slot \
-         payload) and the AggState parent (no PlanStateNode arm); not ported"
-    )
+    let aggnode: &Agg<'mcx> = if phaseidx > 0 {
+        &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize]
+    } else {
+        node
+    };
+    // scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor
+    let scan_desc = scan_tuple_desc(aggstate, estate)?;
+    let key_col_idx: PgVec<'mcx, types_core::primitive::AttrNumber> = {
+        let mut v = vec_with_capacity_in(mcx, length as usize)?;
+        if let Some(idx) = aggnode.grp_col_idx.as_ref() {
+            for j in 0..length as usize {
+                v.push(idx[j]);
+            }
+        }
+        v
+    };
+    let ops: PgVec<'mcx, Oid> = {
+        let mut v = vec_with_capacity_in(mcx, length as usize)?;
+        if let Some(o) = aggnode.grp_operators.as_ref() {
+            for j in 0..length as usize {
+                v.push(o[j]);
+            }
+        }
+        v
+    };
+    let colls: PgVec<'mcx, Oid> = {
+        let mut v = vec_with_capacity_in(mcx, length as usize)?;
+        if let Some(c) = aggnode.grp_collations.as_ref() {
+            for j in 0..length as usize {
+                v.push(c[j]);
+            }
+        }
+        v
+    };
+    let eqfn = backend_executor_execGrouping_seams::exec_tuples_match_prepare::call(
+        scan_desc,
+        length,
+        &key_col_idx,
+        &ops,
+        &colls,
+        &mut aggstate.ss.ps,
+        estate,
+    )?;
+    let phases = aggstate.phases.as_mut().unwrap();
+    if let Some(eqf) = phases[phase as usize].eqfunctions.as_mut() {
+        eqf[(length - 1) as usize] = eqfn;
+    }
+    Ok(())
 }
 
 /// `i = -1; while ((i = bms_next_member(all_grouped_cols, i)) >= 0)
 /// aggstate->all_grouped_cols = lcons_int(i, aggstate->all_grouped_cols);` —
-/// build the descending-order grouped-column list. bitmapset-unit owned
-/// (`bms_next_member`); the `lcons_int` prepend is in-crate but cannot run
-/// without the iteration.
+/// build the descending-order grouped-column list.
 fn convert_all_grouped_cols<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    all_grouped_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-nodes-bitmapset::bms_next_member: converting all_grouped_cols to \
-         a descending-order list needs the Bitmapset iteration; not ported"
-    )
+    // lcons_int prepends, so iterating ascending yields a descending-order list.
+    let mut list: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, 0)?;
+    let mut i = -1i32;
+    loop {
+        i = backend_nodes_core_seams::bms_next_member::call(all_grouped_cols, i);
+        if i < 0 {
+            break;
+        }
+        list.insert(0, i);
+    }
+    aggstate.all_grouped_cols = Some(list);
+    Ok(())
 }
 
 /// `econtext->ecxt_aggvalues = palloc0(sizeof(Datum) * numaggs);
 /// econtext->ecxt_aggnulls = palloc0(sizeof(bool) * numaggs);` on the
-/// per-output-tuple ExprContext (`aggstate->ss.ps.ps_ExprContext`). The
-/// ExprContext lives in the EState pool (EcxtId); sizing its agg arrays is
-/// execUtils-owned because the AggState/EState ExprContext storage models are
-/// not yet reconciled.
+/// per-output-tuple ExprContext (`aggstate->ss.ps.ps_ExprContext`).
 fn alloc_agg_result_storage<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _numaggs: i32,
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    numaggs: i32,
     _mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-execUtils (ExprContext storage): sizing \
-         ecxt_aggvalues/ecxt_aggnulls on the output ExprContext needs the \
-         EcxtId-pooled ExprContext the EState owns; ExprContext storage model \
-         not yet reconciled"
-    )
+    let ecxt_id = aggstate
+        .ss
+        .ps
+        .ps_ExprContext
+        .expect("alloc_agg_result_storage: ps_ExprContext not set");
+    let ecxt = estate.ecxt_mut(ecxt_id);
+    ecxt.ecxt_aggvalues.clear();
+    ecxt.ecxt_aggnulls.clear();
+    for _ in 0..numaggs {
+        ecxt.ecxt_aggvalues
+            .push(types_tuple::backend_access_common_heaptuple::Datum::null());
+        ecxt.ecxt_aggnulls.push(false);
+    }
+    Ok(())
 }
 
 /// Split the single `all_pergroups` buffer into the owned `pergroups` (the
 /// first `numGroupingSets` entries, when not AGG_HASHED) and `hash_pergroup`
-/// (the tail) regions, mirroring the C pointer aliasing
-/// (`aggstate->pergroups = pergroups; pergroups += numGroupingSets;
-/// aggstate->hash_pergroup = pergroups;`). The C keeps both as aliases into one
-/// array; the owned model stores `all_pergroups` and slices its views. Carrying
-/// three independent owned PgVecs that alias the same backing store is a
-/// types-nodes ownership decision; defer it to the owner.
+/// (the tail) regions, mirroring the C pointer aliasing. The owned model stores
+/// the whole buffer in `all_pergroups` and splits owned copies of the two
+/// regions into `pergroups` / `hash_pergroup`.
 fn assign_pergroup_regions<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>,
+    aggstate: &mut AggStateData<'mcx>,
+    mut all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>,
     _node: &Agg<'mcx>,
-    _num_grouping_sets: i32,
-    _pergroup_offset: usize,
+    num_grouping_sets: i32,
+    pergroup_offset: usize,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "types-nodes (AggStateData pergroup aliasing): aggstate->pergroups and \
-         aggstate->hash_pergroup alias regions of all_pergroups in C; the owned \
-         model needs an aliasing-or-split decision for the three owned PgVecs"
-    )
+    // The C aliases:  pergroups = all_pergroups (head of numGroupingSets, when
+    // not AGG_HASHED), hash_pergroup = all_pergroups + pergroup_offset.
+    // The owned model carries owned PgVecs for each region; move the buffer's
+    // entries into the two views (entries are Option<PgVec<..>> so they move).
+    let total = all_pergroups.len();
+    // Build hash_pergroup from the tail [pergroup_offset..].
+    let mut hash_pergroup: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>> =
+        vec_with_capacity_in(mcx, total - pergroup_offset)?;
+    for k in pergroup_offset..total {
+        hash_pergroup.push(all_pergroups[k].take());
+    }
+    // pergroups is the head [0..numGroupingSets] when not AGG_HASHED.
+    if pergroup_offset > 0 {
+        let mut pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>> =
+            vec_with_capacity_in(mcx, num_grouping_sets as usize)?;
+        for k in 0..num_grouping_sets as usize {
+            pergroups.push(all_pergroups[k].take());
+        }
+        aggstate.pergroups = Some(pergroups);
+    } else {
+        aggstate.pergroups = None;
+    }
+    aggstate.hash_pergroup = Some(hash_pergroup);
+    aggstate.all_pergroups = Some(all_pergroups);
+    Ok(())
 }
 
 /// The per-`Aggref` info-lookup loop of `ExecInitAgg`. The pg_aggregate /
@@ -908,11 +1136,11 @@ fn init_per_aggref<'mcx>(
 
         // aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggref->aggfnoid));
         // aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple);
-        let aggform = fetch_agg_form(aggfnoid)?;
+        let aggform = fetch_agg_form(mcx, aggfnoid)?;
 
         // object_aclcheck(ProcedureRelationId, aggfnoid, GetUserId(), ACL_EXECUTE);
         // InvokeFunctionExecuteHook(aggfnoid);
-        check_aggregate_acl(aggfnoid)?;
+        check_aggregate_acl(mcx, aggfnoid)?;
 
         debug_assert!(aggtranstype != INVALID_OID);
 
@@ -953,15 +1181,15 @@ fn init_per_aggref<'mcx>(
 
         // Check that aggregate owner has permission to call component fns.
         // procTuple = SearchSysCache1(PROCOID, ...); aggOwner = proowner.
-        let agg_owner = fetch_proc_owner(aggfnoid)?;
+        let agg_owner = fetch_proc_owner(mcx, aggfnoid)?;
         if finalfn_oid != INVALID_OID {
-            check_component_fn_acl(finalfn_oid, agg_owner)?;
+            check_component_fn_acl(mcx, finalfn_oid, agg_owner)?;
         }
         if serialfn_oid != INVALID_OID {
-            check_component_fn_acl(serialfn_oid, agg_owner)?;
+            check_component_fn_acl(mcx, serialfn_oid, agg_owner)?;
         }
         if deserialfn_oid != INVALID_OID {
-            check_component_fn_acl(deserialfn_oid, agg_owner)?;
+            check_component_fn_acl(mcx, deserialfn_oid, agg_owner)?;
         }
 
         // get_aggregate_argtypes(aggref, aggTransFnInputTypes)
@@ -1014,12 +1242,11 @@ fn init_per_aggref<'mcx>(
         if !pertrans_done {
             // textInitVal = SysCacheGetAttr(AGGFNOID, aggTuple,
             //   Anum_pg_aggregate_agginitval, &initValueIsNull);
-            let init_value_is_null = aggform.init_value_is_null;
-            let init_value = if init_value_is_null {
-                types_tuple::backend_access_common_heaptuple::Datum::null()
-            } else {
+            let init_value_is_null = aggform.agginitval.is_none();
+            let init_value = match aggform.agginitval.as_deref() {
+                None => types_tuple::backend_access_common_heaptuple::Datum::null(),
                 // GetAggInitVal(textInitVal, aggtranstype)
-                GetAggInitVal(aggform.text_init_val, aggtranstype)?
+                Some(s) => GetAggInitVal(mcx, s, aggtranstype)?,
             };
 
             if do_aggsplit_combine(aggsplit) {
@@ -1029,7 +1256,7 @@ fn init_per_aggref<'mcx>(
                         "combinefn not set for aggregate function",
                     ));
                 }
-                check_component_fn_acl(transfn_oid, agg_owner)?;
+                check_component_fn_acl(mcx, transfn_oid, agg_owner)?;
 
                 // combinefn: numTransInputs = 1; two args of aggtranstype.
                 let num_trans_inputs = 1;
@@ -1068,7 +1295,7 @@ fn init_per_aggref<'mcx>(
                 }
             } else {
                 let transfn_oid = aggform.aggtransfn;
-                check_component_fn_acl(transfn_oid, agg_owner)?;
+                check_component_fn_acl(mcx, transfn_oid, agg_owner)?;
 
                 let num_trans_inputs = if aggkind_is_ordered_set(aggform.aggkind) {
                     let aggs = aggstate.aggs.as_ref().unwrap();
@@ -1195,119 +1422,201 @@ fn build_phase_eval_trans<'mcx>(
 // land. (No silent stubs: AGENTS mirror-PG-and-panic.)
 // ---------------------------------------------------------------------------
 
-/// pg_aggregate row, projected to the fields ExecInitAgg reads. C:
-/// `aggTuple = SearchSysCache1(AGGFNOID, ...); aggform = GETSTRUCT(aggTuple)`
-/// plus `SysCacheGetAttr(.., Anum_pg_aggregate_agginitval, ..)`.
-struct AggForm<'mcx> {
-    aggfinalfn: Oid,
-    aggcombinefn: Oid,
-    aggtransfn: Oid,
-    aggserialfn: Oid,
-    aggdeserialfn: Oid,
-    aggfinalextra: bool,
-    aggkind: i8,
-    init_value_is_null: bool,
-    text_init_val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+/// C: `aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid));
+/// aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple)` plus the agginitval
+/// `SysCacheGetAttr`. The full pg_aggregate projection lands as the installed
+/// `agg_form_by_oid` syscache seam returning [`AggFormData`] (every support-fn
+/// Oid + the transition columns + `aggfinalextra`/`aggkind` + the already-read
+/// `agginitval`/`aggminitval` texts).
+fn fetch_agg_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+) -> PgResult<types_catalog::pg_aggregate::AggFormData> {
+    backend_utils_cache_syscache_seams::agg_form_by_oid::call(mcx, aggfnoid)?.ok_or_else(|| {
+        // C: elog(ERROR, "cache lookup failed for aggregate %u", aggref->aggfnoid)
+        types_error::PgError::error(alloc::format!(
+            "cache lookup failed for aggregate {aggfnoid}"
+        ))
+    })
 }
 
-/// C: `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid))` +
-/// `GETSTRUCT` + the agginitval `SysCacheGetAttr`. syscache (AGGFNOID, a
-/// pg_aggregate projection) is not declared in this scaffold's syscache seam.
-fn fetch_agg_form<'mcx>(_aggfnoid: Oid) -> PgResult<AggForm<'mcx>> {
-    panic!(
-        "backend-utils-cache-syscache (AGGFNOID): reading the pg_aggregate row \
-         (aggfinalfn/aggcombinefn/aggtransfn/aggserialfn/aggdeserialfn/\
-         aggfinalextra/aggkind + agginitval) needs an AGGFNOID syscache \
-         projection seam; not declared"
-    )
+/// C: `aclresult = object_aclcheck(ProcedureRelationId, aggref->aggfnoid,
+/// GetUserId(), ACL_EXECUTE); if (aclresult != ACLCHECK_OK)
+/// aclcheck_error(aclresult, OBJECT_AGGREGATE, get_func_name(aggref->aggfnoid));
+/// InvokeFunctionExecuteHook(aggref->aggfnoid);`
+fn check_aggregate_acl<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<()> {
+    let user = backend_utils_init_miscinit_seams::get_user_id::call();
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        aggfnoid,
+        user,
+        types_acl::acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::acl::AclResult::AclcheckOk {
+        let name = backend_utils_cache_lsyscache_seams::get_func_name::call(mcx, aggfnoid)?
+            .map(|s| s.as_str().into());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::Aggregate,
+            name,
+        )?;
+    }
+    backend_catalog_objectaccess_seams::invoke_function_execute_hook::call(aggfnoid)?;
+    Ok(())
 }
 
-/// C: `aclresult = object_aclcheck(ProcedureRelationId, aggfnoid, GetUserId(),
-/// ACL_EXECUTE); if (aclresult != OK) aclcheck_error(...);
-/// InvokeFunctionExecuteHook(aggfnoid);` — `GetUserId()` has no seam in this
-/// scaffold, so the current-user capability cannot be supplied yet.
-fn check_aggregate_acl(_aggfnoid: Oid) -> PgResult<()> {
-    panic!(
-        "backend-utils-init-miscinit::GetUserId: object_aclcheck on the aggregate \
-         needs the current user id (no GetUserId seam declared) and \
-         InvokeFunctionExecuteHook; not ported"
-    )
+/// C: `procTuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggref->aggfnoid));
+/// aggOwner = ((Form_pg_proc) GETSTRUCT(procTuple))->proowner;
+/// ReleaseSysCache(procTuple);` — read via the installed `lookup_proc` PROCOID
+/// projection (which carries `proowner`).
+fn fetch_proc_owner<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<Oid> {
+    let proc = backend_utils_cache_syscache_seams::lookup_proc::call(mcx, aggfnoid)?
+        .ok_or_else(|| {
+            types_error::PgError::error(alloc::format!(
+                "cache lookup failed for function {aggfnoid}"
+            ))
+        })?;
+    Ok(proc.proowner)
 }
 
-/// C: `procTuple = SearchSysCache1(PROCOID, ...); aggOwner = proowner;
-/// ReleaseSysCache(procTuple);`.
-fn fetch_proc_owner(_aggfnoid: Oid) -> PgResult<Oid> {
-    panic!(
-        "backend-utils-cache-syscache (PROCOID proowner): reading the aggregate \
-         function's owner needs a PROCOID->proowner syscache projection seam; not \
-         declared"
-    )
-}
-
-/// C: `object_aclcheck(ProcedureRelationId, fnoid, aggOwner, ACL_EXECUTE);
-/// if (!OK) aclcheck_error(.., get_func_name(fnoid));
-/// InvokeFunctionExecuteHook(fnoid);` for a component function. `object_aclcheck`
-/// / `aclcheck_error` take `types_acl` types (`AclMode`/`AclResult`) and an
-/// `ObjectType`; `types_acl` is not a direct dependency of this crate (and the
-/// aclchk seam does not re-export it), so the call cannot be marshaled here.
-fn check_component_fn_acl(_fnoid: Oid, _agg_owner: Oid) -> PgResult<()> {
-    panic!(
-        "backend-catalog-aclchk::object_aclcheck/aclcheck_error: checking a \
-         component function's ACL needs the types_acl AclMode/AclResult vocabulary \
-         (not a dependency here) and get_func_name; not reachable"
-    )
+/// C: `aclresult = object_aclcheck(ProcedureRelationId, fnoid, aggOwner,
+/// ACL_EXECUTE); if (aclresult != ACLCHECK_OK) aclcheck_error(aclresult,
+/// OBJECT_FUNCTION, get_func_name(fnoid)); InvokeFunctionExecuteHook(fnoid);`
+/// for a transition/serial/deserial/final component function.
+fn check_component_fn_acl<'mcx>(mcx: Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        fnoid,
+        agg_owner,
+        types_acl::acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::acl::AclResult::AclcheckOk {
+        let name = backend_utils_cache_lsyscache_seams::get_func_name::call(mcx, fnoid)?
+            .map(|s| s.as_str().into());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::Function,
+            name,
+        )?;
+    }
+    backend_catalog_objectaccess_seams::invoke_function_execute_hook::call(fnoid)?;
+    Ok(())
 }
 
 /// C: `get_aggregate_argtypes(aggref, aggTransFnInputTypes)` (parse_agg.c) —
-/// the actual (nominal) input datatypes, returning the count. parse_agg is not
-/// ported and has no seam in this scaffold.
+/// the actual (nominal) input datatypes, returning the count. Reached through
+/// the installed parse_agg seam; reads the expression-tree `primnodes::Aggref`
+/// kept in `aggstate.aggs_prim`.
 fn get_aggregate_argtypes<'mcx>(
-    _aggstate: &AggStateData<'mcx>,
-    _idx: usize,
-    _mcx: Mcx<'mcx>,
+    aggstate: &AggStateData<'mcx>,
+    idx: usize,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<(PgVec<'mcx, Oid>, i32)> {
-    panic!(
-        "backend-parser-parse-agg::get_aggregate_argtypes: resolving the nominal \
-         aggregate input datatypes needs parse_agg; not ported / no seam declared"
-    )
+    let prim = &aggstate
+        .aggs_prim
+        .as_ref()
+        .expect("get_aggregate_argtypes: aggs_prim is NULL")[idx];
+    let input_types = backend_parser_parse_agg_seams::get_aggregate_argtypes::call(mcx, prim)?;
+    let n = input_types.len() as i32;
+    Ok((input_types, n))
 }
 
 /// C: `peragg->aggdirectargs = ExecInitExprList(aggref->aggdirectargs, parent)`
-/// (execExpr.c). No ExecInitExprList seam is declared in this scaffold.
+/// (execExpr.c). The direct-argument exprs are compiled through the execExpr
+/// seam with the head-only parent; any Aggrefs they contain ride the
+/// `found_aggs` channel and are drained into `aggstate->aggs`.
 fn exec_init_direct_args<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _aggno: i32,
-    _idx: usize,
-    _estate: &mut EStateData<'mcx>,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    aggno: i32,
+    idx: usize,
+    estate: &mut EStateData<'mcx>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-execExpr::ExecInitExprList: compiling the aggregate's \
-         direct-argument expressions needs the AggState parent and an \
-         ExecInitExprList seam; not declared"
-    )
+    // ExecInitExprList(aggref->aggdirectargs, parent): clone the direct-arg
+    // exprs into owned Exprs first (so the `aggs_prim` borrow ends before the
+    // mutable `aggstate` calls below), then build the Option<&Expr> list.
+    let owned_args: PgVec<'mcx, types_nodes::primnodes::Expr> = {
+        let prim = &aggstate
+            .aggs_prim
+            .as_ref()
+            .expect("exec_init_direct_args: aggs_prim is NULL")[idx];
+        let mut v = vec_with_capacity_in(mcx, prim.aggdirectargs.len())?;
+        for e in prim.aggdirectargs.iter() {
+            v.push(e.clone_in(mcx)?);
+        }
+        v
+    };
+    let nodes: PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> = {
+        let mut v = vec_with_capacity_in(mcx, owned_args.len())?;
+        for e in owned_args.iter() {
+            v.push(Some(e));
+        }
+        v
+    };
+    let mut states = backend_executor_execExpr_seams::exec_init_expr_list::call(
+        &nodes,
+        &mut aggstate.ss.ps,
+        estate,
+    )?;
+    drop(nodes);
+    drop(owned_args);
+    // Drain any Aggrefs discovered in the direct-arg expressions, then store the
+    // compiled states on the peragg.
+    for st in states.iter_mut() {
+        if let Some(st) = st.as_mut() {
+            drain_found_aggs(aggstate, st, mcx)?;
+        }
+    }
+    // peragg->aggdirectargs = states;  (Option<&Expr> Nones can't occur here)
+    let mut boxed: PgVec<'mcx, PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>> =
+        vec_with_capacity_in(mcx, states.len())?;
+    for st in states.into_iter().flatten() {
+        boxed.push(alloc_in(mcx, st)?);
+    }
+    if let Some(p) = aggstate.peragg.as_mut() {
+        p[aggno as usize].aggdirectargs = Some(boxed);
+    }
+    Ok(())
 }
 
 /// C: `build_aggregate_finalfn_expr(...); fmgr_info(finalfn_oid, &finalfn);
 /// fmgr_info_set_expr((Node *)finalfnexpr, &finalfn);` — parse_agg (expr build)
-/// + fmgr (info, with expr). The expr build has no seam; fmgr_info_set_expr is
-/// not declared either.
+/// + fmgr (info, with expr), all installed seams.
 fn setup_peragg_finalfn<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _aggno: i32,
-    _idx: usize,
-    _finalfn_oid: Oid,
-    _num_final_args: i32,
-    _aggtranstype: Oid,
-    _input_types: &[Oid],
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    aggno: i32,
+    idx: usize,
+    finalfn_oid: Oid,
+    num_final_args: i32,
+    aggtranstype: Oid,
+    input_types: &[Oid],
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-parser-parse-agg::build_aggregate_finalfn_expr + \
-         backend-utils-fmgr-fmgr::fmgr_info/fmgr_info_set_expr: building the \
-         finalfn expression and its FmgrInfo needs parse_agg and the fmgr \
-         info-with-expr path; not ported / no seam declared"
-    )
+    let (agg_result_type, agg_input_collation) = {
+        let prim = &aggstate
+            .aggs_prim
+            .as_ref()
+            .expect("setup_peragg_finalfn: aggs_prim is NULL")[idx];
+        (prim.aggtype, prim.inputcollid)
+    };
+    // build_aggregate_finalfn_expr(input_types, num_final_args, aggtranstype,
+    //                              aggref->aggtype, aggref->inputcollid, finalfn_oid)
+    let finalfnexpr = backend_parser_parse_agg_seams::build_aggregate_finalfn_expr::call(
+        input_types,
+        num_final_args,
+        aggtranstype,
+        agg_result_type,
+        agg_input_collation,
+        finalfn_oid,
+    )?;
+    // fmgr_info(finalfn_oid, &peragg->finalfn);
+    // fmgr_info_set_expr((Node *) finalfnexpr, &peragg->finalfn);
+    let mut finfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, finalfn_oid)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut finfo, &finalfnexpr);
+    if let Some(p) = aggstate.peragg.as_mut() {
+        p[aggno as usize].finalfn = finfo;
+    }
+    Ok(())
 }
 
 /// C: `get_typlenbyval(aggref->aggtype, &resulttypeLen, &resulttypeByVal)`
@@ -1329,15 +1638,24 @@ fn set_peragg_result_typlenbyval(aggstate: &mut AggStateData<'_>, aggno: i32, ag
 /// where C aliases the shared Aggref*; a faithful copy needs `Aggref::clone_in`,
 /// not yet provided by types-nodes.
 fn set_peragg_aggref<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _aggno: i32,
-    _idx: usize,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    aggno: i32,
+    idx: usize,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "types-nodes::Aggref::clone_in: peragg->aggref owns PgBox<Aggref> where C \
-         aliases the shared Aggref*; needs Aggref::clone_in"
-    )
+    // peragg->aggref = aggref; — the owned model stores its own copy of the
+    // executor-side Aggref (built from the expression-tree original).
+    let copy = {
+        let prim = &aggstate
+            .aggs_prim
+            .as_ref()
+            .expect("set_peragg_aggref: aggs_prim is NULL")[idx];
+        types_nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
+    };
+    if let Some(p) = aggstate.peragg.as_mut() {
+        p[aggno as usize].aggref = Some(alloc_in(mcx, copy)?);
+    }
+    Ok(())
 }
 
 /// C: `build_pertrans_for_aggref(pertrans, aggstate, estate, aggref, ...)` —
@@ -1346,77 +1664,106 @@ fn set_peragg_aggref<'mcx>(
 /// without cloning the Aggref (types-nodes Aggref::clone_in, not yet provided).
 #[allow(clippy::too_many_arguments)]
 fn build_pertrans_call<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _transno: i32,
-    _idx: usize,
-    _transfn_oid: Oid,
-    _aggtranstype: Oid,
-    _serialfn_oid: Oid,
-    _deserialfn_oid: Oid,
-    _init_value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-    _init_value_is_null: bool,
-    _input_types: &[Oid],
-    _num_arguments: i32,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    transno: i32,
+    idx: usize,
+    transfn_oid: Oid,
+    aggtranstype: Oid,
+    serialfn_oid: Oid,
+    deserialfn_oid: Oid,
+    init_value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    init_value_is_null: bool,
+    input_types: &[Oid],
+    num_arguments: i32,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    // The in-crate build_pertrans_for_aggref takes &mut pertrans, &mut aggstate,
-    // and &aggref simultaneously; the owned model needs an Aggref copy
-    // (Aggref::clone_in) to break the aliasing borrow. Defer to types-nodes.
-    let _ = build_pertrans_for_aggref;
-    panic!(
-        "types-nodes::Aggref::clone_in: build_pertrans_for_aggref needs an Aggref \
-         copy to break the &mut aggstate / &aggref aliasing borrow; needs \
-         Aggref::clone_in"
-    )
+    // build_pertrans_for_aggref takes &mut pertrans, &mut aggstate and &aggref
+    // simultaneously. Break the aliasing borrow by (1) taking the pertrans slot
+    // out of aggstate, (2) building an owned executor-side Aggref copy from the
+    // expression-tree original, then (3) calling and putting the pertrans back.
+    let mut pertrans = {
+        let p = aggstate
+            .pertrans
+            .as_mut()
+            .expect("build_pertrans_call: pertrans is NULL");
+        core::mem::take(&mut p[transno as usize])
+    };
+    let aggref = {
+        let prim = &aggstate
+            .aggs_prim
+            .as_ref()
+            .expect("build_pertrans_call: aggs_prim is NULL")[idx];
+        types_nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
+    };
+    let result = build_pertrans_for_aggref(
+        &mut pertrans,
+        aggstate,
+        estate,
+        &aggref,
+        transfn_oid,
+        aggtranstype,
+        serialfn_oid,
+        deserialfn_oid,
+        init_value,
+        init_value_is_null,
+        input_types,
+        num_arguments,
+        mcx,
+    );
+    // Put the (now-filled) pertrans back regardless of result.
+    if let Some(p) = aggstate.pertrans.as_mut() {
+        p[transno as usize] = pertrans;
+    }
+    result
 }
 
 /// C: `pertrans->transfn.fn_strict` — the resolved transfn's strict flag, read
 /// from the FmgrInfo build_pertrans_for_aggref filled in. Unavailable until the
 /// per-trans build runs (which depends on the unported owners above).
-fn pertrans_transfn_strict(_aggstate: &AggStateData<'_>, _transno: i32) -> bool {
-    panic!(
-        "backend-utils-fmgr-fmgr (FmgrInfo.fn_strict): pertrans->transfn.fn_strict \
-         is set by build_pertrans_for_aggref's fmgr_info; unavailable until the \
-         per-trans build (and its fmgr owner) land"
-    )
+fn pertrans_transfn_strict(aggstate: &AggStateData<'_>, transno: i32) -> bool {
+    aggstate
+        .pertrans
+        .as_ref()
+        .map(|p| p[transno as usize].transfn.fn_strict)
+        .unwrap_or(false)
 }
 
 /// C: `format_type_be(aggtranstype)` (format_type.c) — the type's display name
 /// for the STRICT-combine error message.
-fn format_type_be(_typeoid: Oid) -> PgResult<alloc::string::String> {
-    panic!(
-        "backend-utils-adt-format-type::format_type_be: the STRICT-combine error \
-         needs the transition type's display name; no format_type_be seam reachable"
-    )
+fn format_type_be(typeoid: Oid) -> PgResult<alloc::string::String> {
+    // The STRICT-combine error message needs an owned String; format_type_be
+    // palloc's into a context. Use the owned-String convenience seam so the
+    // result outlives the call frame's transient context.
+    backend_utils_adt_format_type_seams::format_type_be_owned::call(typeoid)
 }
 
 /// C: `IsBinaryCoercible(input_type, aggtranstype)` (parse_coerce.c) — used by
 /// the strict-initval compatibility check.
-fn is_binary_coercible(_src: Oid, _target: Oid) -> PgResult<bool> {
-    panic!(
-        "backend-parser-parse-coerce::IsBinaryCoercible: the strict-initval \
-         compatibility check needs binary-coercibility; not ported / no seam"
-    )
+fn is_binary_coercible(src: Oid, target: Oid) -> PgResult<bool> {
+    backend_parser_coerce_seams::is_binary_coercible::call(src, target)
 }
 
 /// C: `phase->evaltrans = ExecBuildAggTrans(aggstate, phase, dosort, dohash,
 /// false); phase->evaltrans_cache[0][0] = phase->evaltrans;` (execExpr.c).
+/// Reaches the execExpr owner through the `exec_build_agg_trans` seam, passing
+/// the AggState as the erased `AggStateLive` carrier (the owner downcasts it).
 #[allow(clippy::too_many_arguments)]
 fn exec_build_agg_trans<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _phaseidx: i32,
-    _dosort: bool,
-    _dohash: bool,
-    _nullcheck: bool,
-    _estate: &mut EStateData<'mcx>,
-    _mcx: Mcx<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    phaseidx: i32,
+    dosort: bool,
+    dohash: bool,
+    nullcheck: bool,
+    estate: &mut EStateData<'mcx>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-execExpr::ExecBuildAggTrans: owner is ported \
-         (execExpr_domain_agg::exec_build_agg_trans) but unreachable from nodeAgg — it takes \
-         &mut AggStateData, which lives in this crate ABOVE types-nodes (cannot cross \
-         execExpr-seams), and PlanStateNode carries no Agg variant (T_Agg keystone) for the \
-         type-erased bridge. Blocked on the T_Agg/PlanStateNode::Agg carrier keystone"
-    )
+    let evaltrans = backend_executor_execExpr_seams::exec_build_agg_trans::call(
+        mcx, aggstate, phaseidx, dosort, dohash, nullcheck, estate,
+    )?;
+    // phase->evaltrans = evaltrans; phase->evaltrans_cache[0][0] = evaltrans;
+    if let Some(phases) = aggstate.phases.as_mut() {
+        phases[phaseidx as usize].evaltrans = Some(evaltrans);
+    }
+    Ok(())
 }
