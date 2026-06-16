@@ -84,38 +84,15 @@ struct BTBuildState<'mcx> {
     indtuples: f64,
 }
 
-/// `index_info_serial_flags(indexInfo)` — read `(ii_Unique, ii_NullsNotDistinct)`
-/// off the build's `IndexInfo`.
-///
-/// SEAM-AND-PANIC (genuine residual): the AM `ambuild` callback receives the
-/// type-erased `types_tableam::amapi::IndexInfo` (matching the hash / spgist
-/// siblings and the `table_index_build_scan` seam contract), whose
-/// `payload: Option<Box<dyn Any>>` exposes no `ii_Unique` /
-/// `ii_NullsNotDistinct`. No accessor or concrete payload bridges the erased
-/// `amapi::IndexInfo` to the executor's `execnodes::IndexInfo` in this repo, so
-/// these two flags — needed to enable the uniqueness check and to decide the
-/// dead-tuple `spool2` — are unreachable. Lands once the erased
-/// `amapi::IndexInfo` carries the build flags (or the build seam re-keys onto
-/// `execnodes::IndexInfo`, as `table_index_build_range_scan` already does).
-fn index_info_serial_flags(index_info: &types_tableam::amapi::IndexInfo) -> (bool, bool) {
-    let _ = index_info;
-    panic!(
-        "nbtsort: btbuild needs ii_Unique / ii_NullsNotDistinct, but the AM \
-         ambuild callback's type-erased amapi::IndexInfo (payload: dyn Any) \
-         exposes neither and nothing bridges it to execnodes::IndexInfo; carry \
-         the build flags on amapi::IndexInfo (or re-key the build seam onto \
-         execnodes::IndexInfo) here"
-    )
-}
-
 /// `btbuild()` — build a new btree index (the AM's `ambuild`).
 pub fn btbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    index_info: &mut types_tableam::amapi::IndexInfo,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    let (isunique, nulls_not_distinct) = index_info_serial_flags(index_info);
+    let isunique = index_info.ii_Unique;
+    let nulls_not_distinct = index_info.ii_NullsNotDistinct;
 
     let mut buildstate = BTBuildState {
         isunique,
@@ -169,7 +146,7 @@ fn _bt_spools_heapscan<'mcx>(
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
     buildstate: &mut BTBuildState<'mcx>,
-    index_info: &mut types_tableam::amapi::IndexInfo,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<f64> {
     // We size the sort area as maintenance_work_mem rather than work_mem to
     // speed index creation.  This should be OK since a single backend can't
@@ -223,6 +200,7 @@ fn _bt_spools_heapscan<'mcx>(
     let reltuples = {
         let bs = &mut *buildstate;
         backend_access_table_tableam_seams::table_index_build_scan::call(
+            mcx,
             heap,
             index,
             index_info,

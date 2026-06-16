@@ -214,7 +214,7 @@ fn _hash_readprev<'mcx>(scan: &mut HashScan<'mcx>, bufp: &mut Buffer) -> PgResul
 pub fn _hash_first<'mcx>(scan: &mut HashScan<'mcx>, dir: ScanDirection) -> PgResult<bool> {
     let rel = scan.indexRelation.alias();
 
-    pgstat::pgstat_count_index_scan::call(rel.rd_id);
+    pgstat::pgstat_count_index_scan::call(rel.rd_id, rel.pgstat_enabled);
     if scan.instrument {
         scan.nsearches += 1;
     }
