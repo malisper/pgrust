@@ -51,7 +51,7 @@ use types_error::{
 };
 
 use types_core::primitive::{BlockNumber, InvalidOid, Oid};
-use types_storage::buf::{Buffer, InvalidBuffer};
+use types_storage::buf::Buffer;
 use types_storage::lock::{
     AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
@@ -92,7 +92,7 @@ use backend_executor_execExpr_seams as expr_seam;
 use backend_executor_execTuples_seams as slot_seam;
 use backend_executor_execUtils_seams as exec_util_seam;
 
-use backend_utils_adt_arrayfuncs::construct::{construct_array, construct_array_builtin};
+use backend_utils_adt_arrayfuncs::construct::construct_array_values;
 use backend_utils_adt_scalar_datum_core::datum_copy_v;
 use backend_utils_cache_attoptcache::get_attribute_options;
 use backend_utils_cache_lsyscache::namespace_range_index_pubsub::get_namespace_name;
@@ -109,7 +109,7 @@ use backend_access_common_tupdesc_seams::equal_row_types;
 
 use backend_catalog_index_seams as index_seam;
 use backend_catalog_pg_inherits::find_all_inheritors;
-use backend_commands_tablecmds_seams::set_relation_has_subclass as SetRelationHasSubclass;
+use backend_commands_tablecmds_seams::set_relation_has_subclass::call as SetRelationHasSubclass;
 
 use backend_nodes_nodeFuncs_seams as nodefuncs;
 use backend_parser_relation::attnameAttNum;
@@ -1474,8 +1474,10 @@ fn update_attstats<'mcx>(
                     .collect();
                 // construct_array_builtin(numdatums, nnum, FLOAT4OID): build the
                 // float4[] and wrap its raw bytes as a by-reference value.
-                // FLOAT4 is pass-by-value, length 4, 'i' alignment.
-                let arry = construct_array(mcx, &numdatums[..], FLOAT4OID, 4, true, b'i')?;
+                // FLOAT4 is pass-by-value, length 4, 'i' alignment. The
+                // value-lane `construct_array_values` builds the ArrayType image
+                // from the canonical 6-arm Datum (float4 by-value here).
+                let arry = construct_array_values(mcx, &numdatums[..], FLOAT4OID, 4, true, b'i')?;
                 values[i] = Datum::ByRef(arry);
             } else {
                 nulls[i] = true;
@@ -1486,7 +1488,7 @@ fn update_attstats<'mcx>(
         i = Anum_pg_statistic_stavalues1 - 1;
         for k in 0..STATISTIC_NUM_SLOTS {
             if stats.numvalues[k] > 0 {
-                let arry = construct_array(
+                let arry = construct_array_values(
                     mcx,
                     &stats.stavalues[k][..],
                     stats.statypid[k],
@@ -1567,13 +1569,17 @@ fn std_fetch_func<'mcx>(stats: &VacAttrStats<'mcx>, rownum: i32, is_null: &mut b
         .t_data
         .as_deref()
         .expect("std_fetch_func: tuple has no t_data");
+    let tupdesc = stats
+        .tup_desc
+        .as_deref()
+        .expect("std_fetch_func: tup_desc set");
     let has_nulls = (header.t_infomask & HEAP_HASNULL) != 0;
-    if has_nulls && backend_access_common_heaptuple::heap_attisnull(&tuple.tuple, attnum, Some(&stats.tup_desc)) {
+    if has_nulls && backend_access_common_heaptuple::heap_attisnull(&tuple.tuple, attnum, Some(tupdesc)) {
         *is_null = true;
         return Datum::null();
     }
     *is_null = false;
-    nocachegetattr(mcx, &tuple.tuple, attnum, &stats.tup_desc, &tuple.data)
+    nocachegetattr(mcx, &tuple.tuple, attnum, tupdesc, &tuple.data)
         .expect("std_fetch_func: nocachegetattr")
 }
 
@@ -2646,7 +2652,7 @@ fn slot_copy_heap_tuple<'mcx>(
     slot: &mut types_nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<FormedTuple<'mcx>> {
     // ExecCopySlotHeapTuple over a standalone slot.
-    backend_executor_execTuples::ExecCopySlotHeapTuple(mcx, slot)
+    backend_executor_execTuples::slot_store_fetch::ExecCopySlotHeapTuple(mcx, slot)
 }
 
 fn pgvec_from<'mcx, T>(mcx: Mcx<'mcx>, v: Vec<T>) -> PgResult<Vec<T>> {

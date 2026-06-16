@@ -331,6 +331,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20665,6 +20666,7 @@ dependencies = [
  "backend-catalog-toasting",
  "backend-commands-alter",
  "backend-commands-amcmds",
+ "backend-commands-analyze",
  "backend-commands-async",
  "backend-commands-cluster",
  "backend-commands-comment",

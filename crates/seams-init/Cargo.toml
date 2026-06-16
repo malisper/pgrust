@@ -132,6 +132,7 @@ backend-commands-publicationcmds = { path = "../backend-commands-publicationcmds
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
+backend-commands-analyze = { path = "../backend-commands-analyze" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-tablecmds = { path = "../backend-commands-tablecmds" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }

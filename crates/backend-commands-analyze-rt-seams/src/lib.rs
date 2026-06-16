@@ -49,7 +49,7 @@ seam_core::seam!(
         inh: bool,
         totalrows: f64,
         numrows: i32,
-        rows: &[types_tuple::HeapTuple<'mcx>],
+        rows: &[types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>],
         natts: i32,
         vacattrstats: &[VacAttrStats<'mcx>],
     ) -> PgResult<()>

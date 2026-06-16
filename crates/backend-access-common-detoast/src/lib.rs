@@ -737,6 +737,17 @@ fn toast_datum_size_seam(mcx: Mcx<'_>, attr: &[u8]) -> PgResult<usize> {
     Ok(toast_datum_size(mcx, attr)? as usize)
 }
 
+/// Seam `toast_raw_datum_size` — `toast_raw_datum_size(value)` over the canonical
+/// 6-arm value lane. The seam carries the value as `types_tuple::Datum<'mcx>`
+/// (the executor/ADT value form); a varlena element keeps its bytes inline, so
+/// we forward the stored image to [`toast_raw_datum_size`].
+fn toast_raw_datum_size_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: types_tuple::Datum<'mcx>,
+) -> PgResult<i64> {
+    Ok(toast_raw_datum_size(mcx, value.as_ref_bytes())? as i64)
+}
+
 /// Seam `toast_chunk_id` — `pg_column_toast_chunk_id`'s
 /// `VARATT_IS_EXTERNAL_ONDISK(attr)` test + `VARATT_EXTERNAL_GET_POINTER`'s
 /// `va_valueid` extraction (varlena.c:5403-5408): the TOAST value OID of an
@@ -821,6 +832,7 @@ pub fn init_seams() {
     backend_access_common_detoast_seams::detoast_external_attr::set(detoast_external_attr);
     backend_access_common_detoast_seams::detoast_attr::set(detoast_attr);
     backend_access_common_detoast_seams::toast_datum_size::set(toast_datum_size_seam);
+    backend_access_common_detoast_seams::toast_raw_datum_size::set(toast_raw_datum_size_seam);
     backend_access_common_detoast_seams::toast_chunk_id::set(toast_chunk_id);
 }
 
