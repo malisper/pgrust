@@ -317,6 +317,7 @@ backend-replication-libpqwalreceiver = { path = "../backend-replication-libpqwal
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
+backend-replication-repl-scanner = { path = "../backend-replication-repl-scanner" }
 backend-replication-syncrep = { path = "../backend-replication-syncrep" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
@@ -324,6 +325,7 @@ backend-replication-walreceiverfuncs = { path = "../backend-replication-walrecei
 backend-replication-walsender = { path = "../backend-replication-walsender" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-rewrite-rewritehandler = { path = "../backend-rewrite-rewritehandler" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-file-fileset = { path = "../backend-storage-file-fileset" }
