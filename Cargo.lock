@@ -3870,6 +3870,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "mcx",
  "seam-core",
+ "types-array",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -4574,6 +4575,54 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-proc-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-functioncmds-seams",
+ "backend-parser-coerce",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-acl",
+ "types-array",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-catalog-pg-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -17454,6 +17503,7 @@ dependencies = [
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-operator",
+ "backend-catalog-pg-proc",
  "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
