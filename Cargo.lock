@@ -12708,6 +12708,7 @@ dependencies = [
 name = "backend-utils-adt-array-more-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-tsvector-ext-seams",
  "mcx",
  "seam-core",
  "types-error",
@@ -13543,10 +13544,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-tsvector-core"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-array-more-seams",
+ "backend-utils-adt-ts-small",
+ "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-adt-tsvector-ext-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-stringinfo",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-utils-adt-tsvector-core-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-tsvector-ext-seams"
+version = "0.0.0"
+dependencies = [
  "seam-core",
  "types-error",
  "types-tsearch",
@@ -16114,6 +16144,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
  "backend-utils-cache-attoptcache",
