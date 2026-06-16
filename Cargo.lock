@@ -6928,6 +6928,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-utf8-and-gb18030"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-gbk"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-iso8859"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-iso8859-1"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-johab"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-sjis"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-sjis2004"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-uhc"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-win"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -18440,6 +18541,15 @@ dependencies = [
  "backend-conv-utf8-and-euc-kr",
  "backend-conv-utf8-and-euc-tw",
  "backend-conv-utf8-and-euc2004",
+ "backend-conv-utf8-and-gb18030",
+ "backend-conv-utf8-and-gbk",
+ "backend-conv-utf8-and-iso8859",
+ "backend-conv-utf8-and-iso8859-1",
+ "backend-conv-utf8-and-johab",
+ "backend-conv-utf8-and-sjis",
+ "backend-conv-utf8-and-sjis2004",
+ "backend-conv-utf8-and-uhc",
+ "backend-conv-utf8-and-win",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",

@@ -17,5 +17,6 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 common-wchar = { path = "../common-wchar" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+common-encnames-seams = { path = "../common-encnames-seams" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
