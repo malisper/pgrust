@@ -15,5 +15,6 @@ types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-tableam = { path = "../types-tableam" }
+types-nodes = { path = "../types-nodes" }
 backend-lib-pairingheap = { path = "../backend-lib-pairingheap" }
 mcx = { path = "../mcx" }

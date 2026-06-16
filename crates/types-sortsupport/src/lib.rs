@@ -10,6 +10,14 @@
 //! null/reverse arithmetic reads only the data fields below
 //! (`ssup_collation`/`ssup_reverse`/`ssup_nulls_first`) and dispatches the
 //! non-null comparison through that token.
+//!
+//! The three abbreviated-key hooks (`abbrev_converter`, `abbrev_abort`,
+//! `abbrev_full_comparator`) follow the same token model: each is a distinct
+//! `Copy` token ([`AbbrevConverterId`] / [`AbbrevAbortId`], and a
+//! [`SortComparatorId`] for the full comparator since it has the same
+//! `int (*)(Datum, Datum, SortSupport)` signature as `comparator`) the
+//! sortsupport / tuplesort substrate hands back and interprets through its
+//! abbreviation seams. `None` is the C `NULL` (hook not installed).
 
 #![no_std]
 
@@ -48,12 +56,33 @@ pub const GIST_AM_OID: Oid = 783;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SortComparatorId(pub u32);
 
-/// `SortSupportData` (utils/sortsupport.h), trimmed.
+/// The resolved `abbrev_converter` function pointer in the owned model
+/// (C's `Datum (*)(Datum original, SortSupport ssup)`): a `Copy` token the
+/// abbreviation-providing unit (`varstr_abbrev_convert`, `numeric_abbrev_convert`,
+/// ...) hands back through its install seam and the sort substrate interprets
+/// when it converts an original Datum to its abbreviated key. `None` is the C
+/// `abbrev_converter == NULL` (no converter installed — abbreviation not in
+/// play).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AbbrevConverterId(pub u32);
+
+/// The resolved `abbrev_abort` function pointer in the owned model (C's
+/// `bool (*)(int memtupcount, SortSupport ssup)`): a `Copy` token the
+/// abbreviation-providing unit hands back through its install seam and the sort
+/// substrate interprets when it polls whether to abandon abbreviation. `None`
+/// is the C `abbrev_abort == NULL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AbbrevAbortId(pub u32);
+
+/// `SortSupportData` (utils/sortsupport.h).
 ///
-/// The `ssup_extra`, `abbrev_converter`, `abbrev_abort`, and
-/// `abbrev_full_comparator` fields are owned/filled by the comparator-providing
-/// unit; merge join never reads them, so they are not carried. The
-/// `comparator` is the [`SortComparatorId`] token described above.
+/// The `ssup_extra` workspace field is owned/filled by the comparator-providing
+/// unit and not carried (the owner keeps that scratch state keyed by the
+/// comparator/abbrev tokens). The `comparator` is the [`SortComparatorId`] token
+/// described above; the three abbreviated-key hooks are the
+/// [`AbbrevConverterId`] / [`AbbrevAbortId`] tokens plus a [`SortComparatorId`]
+/// for the full comparator (same signature as `comparator`), each `None` when
+/// the C field is `NULL`.
 #[derive(Clone, Copy, Debug)]
 pub struct SortSupportData<'mcx> {
     /// `MemoryContext ssup_cxt` — memory context holding any working state of
@@ -73,7 +102,27 @@ pub struct SortSupportData<'mcx> {
     pub abbreviate: bool,
     /// `int (*comparator)(...)` — the resolved comparison function, held as a
     /// `Copy` token the comparator owner interprets. `None` = C `NULL`.
+    ///
+    /// This may be either the authoritative comparator or the abbreviated
+    /// comparator (when abbreviation is in play, the sortsupport routine moves
+    /// the authoritative comparator to `abbrev_full_comparator` and installs the
+    /// cheap abbreviated comparator here).
     pub comparator: Option<SortComparatorId>,
+    /// `Datum (*abbrev_converter)(Datum original, SortSupport ssup)` — the
+    /// converter to abbreviated format, held as a `Copy` token. `None` = C
+    /// `NULL` (abbreviation not in play). Tested by core code to decide whether
+    /// abbreviation should proceed.
+    pub abbrev_converter: Option<AbbrevConverterId>,
+    /// `bool (*abbrev_abort)(int memtupcount, SortSupport ssup)` — the
+    /// abort-abbreviation cost-model callback, held as a `Copy` token. `None` =
+    /// C `NULL`.
+    pub abbrev_abort: Option<AbbrevAbortId>,
+    /// `int (*abbrev_full_comparator)(Datum x, Datum y, SortSupport ssup)` — the
+    /// full, authoritative comparator used when an abbreviated comparison was
+    /// inconclusive (or to replace `comparator` if core decides against
+    /// abbreviation). Same signature as `comparator`, so held as a
+    /// [`SortComparatorId`] token. `None` = C `NULL`.
+    pub abbrev_full_comparator: Option<SortComparatorId>,
 }
 
 impl<'mcx> SortSupportData<'mcx> {
@@ -88,6 +137,9 @@ impl<'mcx> SortSupportData<'mcx> {
             ssup_attno: 0,
             abbreviate: false,
             comparator: None,
+            abbrev_converter: None,
+            abbrev_abort: None,
+            abbrev_full_comparator: None,
         }
     }
 }

@@ -32,6 +32,12 @@ pub const C_CHAR_MAX: i8 = i8::MAX;
 /// *working snapshot* the seam hands back; it is NOT an on-disk / ABI struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CashLconv {
+    /// `decimal_point` — non-monetary radix character (read by the NUM
+    /// number-format engine in `formatting.c`).
+    pub decimal_point: String,
+    /// `thousands_sep` — non-monetary thousands separator (read by the NUM
+    /// number-format engine in `formatting.c`).
+    pub thousands_sep: String,
     /// `mon_decimal_point` — monetary radix character.
     pub mon_decimal_point: String,
     /// `mon_thousands_sep` — monetary thousands separator.
@@ -74,6 +80,8 @@ impl CashLconv {
     /// numeric member.
     pub fn c_locale() -> Self {
         CashLconv {
+            decimal_point: String::new(),
+            thousands_sep: String::new(),
             mon_decimal_point: String::new(),
             mon_thousands_sep: String::new(),
             mon_grouping: Vec::new(),

@@ -467,7 +467,7 @@ pub fn bringetbitmap<'mcx>(
     let idx_rel = scan.index_relation.alias();
     let number_of_keys = scan.number_of_keys;
 
-    pgstat_count_index_scan::call(idx_rel.rd_id);
+    pgstat_count_index_scan::call(idx_rel.rd_id, idx_rel.pgstat_enabled);
     if let Some(instr) = scan.instrument.as_mut() {
         instr.nsearches += 1;
     }

@@ -10,6 +10,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
+use types_rel::Relation;
 use types_sortsupport::SortSupportData;
 // Canonical value type (`Datum<'mcx>`: `ByVal` word / `ByRef` bytes). The
 // comparator-invocation operands of `apply_sort_comparator` carry this canonical
@@ -69,4 +70,71 @@ seam_core::seam!(
         ordering_op: Oid,
         ssup: &mut SortSupportData<'_>,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PrepareSortSupportFromIndexRel(indexRel, reverse, ssup)` (sortsupport.c):
+    /// fill in `ssup` from a btree (amcanorder) index relation and the
+    /// `ssup_attno` column already stored in `ssup`. Sets `ssup_reverse` from
+    /// `reverse` and resolves/installs the comparator from the index column's
+    /// opfamily/opcintype. Catalog lookups + comparator setup can
+    /// `ereport(ERROR)`, hence `PgResult`. `tuplesort` uses this for an
+    /// index-ordered btree sort.
+    pub fn prepare_sort_support_from_index_rel(
+        index_rel: &Relation<'_>,
+        reverse: bool,
+        ssup: &mut SortSupportData<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PrepareSortSupportFromGistIndexRel(indexRel, ssup)` (sortsupport.c): fill
+    /// in `ssup` from a GiST index relation and the `ssup_attno` column already
+    /// stored in `ssup`. Sets `ssup_reverse = false` and installs the type's
+    /// GiST sort-support comparator (no old-style btree shim fallback). Fallible
+    /// on catalog lookups / comparator setup.
+    pub fn prepare_sort_support_from_gist_index_rel(
+        index_rel: &Relation<'_>,
+        ssup: &mut SortSupportData<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ssup->abbrev_converter(original, ssup)` (sortsupport.h): invoke the
+    /// installed abbreviation converter (identified by the `AbbrevConverterId`
+    /// carried in `ssup.abbrev_converter`) on the original (NOT NULL,
+    /// pass-by-reference) datum, returning the pass-by-value abbreviated-key
+    /// `Datum`. The caller has verified `ssup.abbrev_converter.is_some()`. `Err`
+    /// carries the converter's `ereport(ERROR)`s.
+    pub fn apply_sort_abbrev_converter(
+        original: Datum<'_>,
+        ssup: &SortSupportData<'_>,
+    ) -> PgResult<Datum<'static>>
+);
+
+seam_core::seam!(
+    /// `ssup->abbrev_abort(memtupcount, ssup)` (sortsupport.h): poll the
+    /// installed abort-abbreviation cost-model callback (identified by the
+    /// `AbbrevAbortId` carried in `ssup.abbrev_abort`), returning whether the
+    /// sort should abandon abbreviation. The caller has verified
+    /// `ssup.abbrev_abort.is_some()`. `Err` carries any `ereport(ERROR)`.
+    pub fn apply_sort_abbrev_abort(
+        memtupcount: i32,
+        ssup: &mut SortSupportData<'_>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ssup->abbrev_full_comparator(x, y, ssup)` (sortsupport.h,
+    /// `ApplySortAbbrevFullComparator` non-null dispatch): invoke the full,
+    /// authoritative comparator (identified by the `SortComparatorId` carried in
+    /// `ssup.abbrev_full_comparator`) on two non-null full-representation datums,
+    /// used when an abbreviated comparison was inconclusive. The caller has
+    /// verified `ssup.abbrev_full_comparator.is_some()`. `Err` carries the
+    /// comparator's `ereport(ERROR)`s.
+    pub fn apply_sort_abbrev_full_comparator(
+        datum1: Datum<'_>,
+        datum2: Datum<'_>,
+        ssup: &SortSupportData<'_>,
+    ) -> PgResult<i32>
 );

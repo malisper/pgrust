@@ -11,3 +11,5 @@ path = "src/lib.rs"
 [dependencies]
 seam-core = { path = "../seam-core" }
 types-misc-more2 = { path = "../types-misc-more2" }
+types-datetime = { path = "../types-datetime" }
+types-pgtime = { path = "../types-pgtime" }

@@ -286,6 +286,14 @@ seam_core::seam!(
     pub fn set_delay_chkpt_start(on: bool)
 );
 
+seam_core::seam!(
+    /// `MyProc->delayChkptFlags |= DELAY_CHKPT_COMPLETE` (on=true) / `&=
+    /// ~DELAY_CHKPT_COMPLETE` (on=false) — the second checkpoint-delay bracket
+    /// `RelationTruncate` (storage.c) sets alongside `DELAY_CHKPT_START`. Plain
+    /// shared-memory field write.
+    pub fn set_delay_chkpt_complete(on: bool)
+);
+
 // --- PGPROC accessors used by proc.c's own wait-queue machinery -------------
 //
 // These read/write the `PGPROC` array entries and `MyProc` that the sibling
