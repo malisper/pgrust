@@ -125,7 +125,11 @@ fn composite_datum_bridge_round_trip() {
     let datum = HeapTupleGetDatum(mcx, &formed, &td).expect("HeapTupleGetDatum");
     let bytes = match &datum {
         Datum::ByRef(b) => b.clone(),
-        Datum::ByVal(_) => panic!("composite Datum must be ByRef"),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => panic!("composite Datum must be ByRef"),
     };
     // The leading varlena length word (datum_len_) equals the image length.
     let datum_len = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);

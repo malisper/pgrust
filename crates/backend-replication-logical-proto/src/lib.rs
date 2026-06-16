@@ -342,7 +342,11 @@ const Anum_pg_type_typsend: i32 = 19;
 fn pg_type_attr_oid(mcx: Mcx<'_>, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<Oid> {
     match SysCacheGetAttrNotNull(mcx, TYPEOID, tup, attnum)? {
         Datum::ByVal(d) => Ok(Datum::from_usize(d).as_oid()),
-        Datum::ByRef(_) => Err(elog_error(
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(elog_error(
             "proto: expected a by-value pg_type attribute".into(),
         )),
     }
@@ -359,7 +363,11 @@ fn pg_type_attr_name<'mcx>(
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             slice_in(mcx, &b[..len])
         }
-        Datum::ByVal(_) => Err(elog_error(
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(elog_error(
             "proto: pg_type name attribute is by-value".into(),
         )),
     }
@@ -375,7 +383,12 @@ const VARTAG_ONDISK: u8 = 18;
 fn varatt_is_external_ondisk(value: &Datum<'_>) -> bool {
     match value {
         Datum::ByRef(b) => b.len() >= 2 && b[0] == 0x01 && b[1] == VARTAG_ONDISK,
-        Datum::ByVal(_) => false,
+        // None of these is an on-disk external (TOAST) varlena pointer.
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => false,
     }
 }
 

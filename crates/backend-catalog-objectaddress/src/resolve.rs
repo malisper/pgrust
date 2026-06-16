@@ -64,7 +64,11 @@ fn oid_is_valid(oid: Oid) -> bool {
 fn tuplevalue_oid(val: &TupleDatum<'_>) -> Oid {
     match val {
         TupleDatum::ByVal(_) => val.as_oid(),
-        TupleDatum::ByRef(_) => 0,
+        TupleDatum::ByRef(_)
+        | TupleDatum::Cstring(_)
+        | TupleDatum::Composite(_)
+        | TupleDatum::Expanded(_)
+        | TupleDatum::Internal(_) => 0,
     }
 }
 

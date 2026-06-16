@@ -192,6 +192,7 @@ pub fn init_all() {
     backend_lib_dshash::init_seams();
     backend_main_main::init_seams();
     backend_libpq_auth::init_seams();
+    backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();

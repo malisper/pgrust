@@ -1868,6 +1868,9 @@ fn const_value_in<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'static>) -> PgResult<Datu
             }
             Ok(Datum::ByRef(v))
         }
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("const_value_in: Cstring/Composite/Expanded/Internal Const value not yet produced — wave 2")
+        }
     }
 }
 
