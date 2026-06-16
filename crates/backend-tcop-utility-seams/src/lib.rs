@@ -50,3 +50,11 @@ seam_core::seam!(
         stmt: &Node<'mcx>,
     ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `PreventCommandDuringRecovery(cmdname)` (utility.c) — `ereport(ERROR,
+    /// ERRCODE_READ_ONLY_SQL_TRANSACTION)` "cannot execute <cmdname> during
+    /// recovery" when `RecoveryInProgress()`. `pg_notify` calls it with
+    /// `"NOTIFY"`. Errors out on `Err`.
+    pub fn prevent_command_during_recovery(cmdname: &str) -> types_error::PgResult<()>
+);
