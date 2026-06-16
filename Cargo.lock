@@ -3551,6 +3551,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-copy"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-copy-seams",
+ "backend-backup-sink",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-backup-copy-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-backup-server"
 version = "0.0.0"
 dependencies = [
@@ -18594,6 +18619,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-archive-shell-archive",
+ "backend-backup-copy",
  "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
