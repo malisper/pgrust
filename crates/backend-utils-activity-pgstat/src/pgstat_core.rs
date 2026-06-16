@@ -18,13 +18,19 @@ use types_error::PgResult;
 use types_pgstat::activity_pgstat::{
     PgStat_FetchConsistency, PgStat_Kind, PGSTAT_KIND_BUILTIN_MAX, PGSTAT_KIND_BUILTIN_MIN,
 };
+use types_pgstat::pgstat_internal::{PgStat_HashKey, PgStatShared_Common, PgStatShared_HashEntry};
 
 use crate::entry_ref::PgStat_EntryRef;
 use crate::local;
 use crate::registry;
 use crate::shmem;
 
+use backend_lib_dshash as dshash;
+use backend_storage_lmgr_lwlock_seams as lwlock;
+use backend_storage_lmgr_proc_seams as proc_seams;
 use backend_utils_adt_timestamp_seams as timestamp;
+use backend_utils_mmgr_dsa_seams as dsa;
+use types_storage::LW_SHARED;
 
 /// `PGSTAT_MIN_INTERVAL` (`pgstat.c`) — minimum ms between stats reports.
 const PGSTAT_MIN_INTERVAL: i64 = 1000;
@@ -302,7 +308,24 @@ pub fn pgstat_have_pending(key: types_pgstat::pgstat_internal::PgStat_HashKey) -
 // Snapshot building (variable-numbered fetch + fixed snapshot).
 // ---------------------------------------------------------------------------
 
-/// `pgstat_clear_snapshot()` (`pgstat.c`) — discard any materialized snapshot.
+/// `stats_fetch_consistency` (the `pgstat_fetch_consistency` GUC) — the access
+/// consistency mode for stats reads. C reads the file-static `int
+/// pgstat_fetch_consistency`; the port reads the GUC's runtime storage through
+/// its installed variable accessors and maps it to the typed enum.
+fn fetch_consistency() -> PgStat_FetchConsistency {
+    match backend_utils_misc_guc_tables::vars::pgstat_fetch_consistency.read() {
+        0 => PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_NONE,
+        1 => PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_CACHE,
+        _ => PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT,
+    }
+}
+
+/// `pgstat_clear_snapshot()` (`pgstat.c`) — discard any materialized snapshot:
+/// reset the fixed/custom validity flags, drop the variable-numbered snapshot
+/// hash and its arena, and reset the snapshot mode. (C also forwards to
+/// `pgstat_clear_backend_activity_snapshot()` in `backend_status.c`; that
+/// backend-status snapshot is a separate, already-ported subsystem and is reset
+/// on its own clear path, so no forwarding is needed here.)
 pub fn pgstat_clear_snapshot() {
     local::with_local(|l| {
         let snap = &mut l.snapshot;
@@ -314,6 +337,13 @@ pub fn pgstat_clear_snapshot() {
             *v = false;
         }
         snap.snapshot_timestamp = 0;
+    });
+
+    // pgStatLocal.snapshot.stats = NULL; MemoryContextReset(context):
+    // tear down the variable-numbered snapshot hash + arena.
+    local::with_snapshot_stats(|s| {
+        s.prepared = false;
+        s.stats.clear();
     });
 }
 
@@ -383,6 +413,231 @@ pub fn pgstat_init_snapshot_fixed() -> PgResult<()> {
         kind += 1;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Variable-numbered snapshot / fetch (pgstat_fetch_entry & friends).
+// ---------------------------------------------------------------------------
+
+/// The byte slice of the kind-specific stats body within a shared entry: the
+/// `shared_data_len` bytes following the common [`PgStatShared_Common`] header.
+///
+/// This mirrors C's `pgstat_get_entry_data(kind, stats)` (which returns
+/// `(char *) stats + kind_info->shared_data_off`). The per-kind crates register
+/// `shared_data_off == 0` (the typed dispatch makes the C offset meaningless),
+/// so this port uses the only faithful offset: immediately after the header —
+/// the same convention `pgstat_reset_entry` uses to zero the stats body.
+///
+/// # Safety
+/// `shared_stats` must point at a live `PgStatShared_*` whose stats body is at
+/// least `len` bytes; the entry's content lock should be held by the caller.
+unsafe fn entry_data_bytes(shared_stats: *const PgStatShared_Common, len: usize) -> Box<[u8]> {
+    let data_off = core::mem::size_of::<PgStatShared_Common>();
+    let base = (shared_stats as *const u8).add(data_off);
+    let mut out = alloc::vec![0u8; len].into_boxed_slice();
+    core::ptr::copy_nonoverlapping(base, out.as_mut_ptr(), len);
+    out
+}
+
+/// `pgstat_prep_snapshot()` (`pgstat.c`) — ensure the variable-numbered snapshot
+/// hash + arena exist for the current snapshot lifetime. In C this lazily
+/// allocates `pgStatLocal.snapshot.context` / `.stats`; the idiomatic model owns
+/// both as one `HashMap`, so this only marks it prepared (and clears any stale
+/// residue from a not-cleared prior snapshot).
+fn pgstat_prep_snapshot() {
+    local::with_snapshot_stats(|s| {
+        if s.prepared {
+            return;
+        }
+        s.stats.clear();
+        s.prepared = true;
+    });
+}
+
+/// `pgstat_build_snapshot()` (`pgstat.c`) — materialize a full snapshot of every
+/// variable-numbered shared stats entry (and all fixed-numbered kinds), used in
+/// `PGSTAT_FETCH_CONSISTENCY_SNAPSHOT` mode.
+///
+/// Walks the shared dshash, and for each live (non-dropped) variable-numbered
+/// entry deep-copies its `shared_data_len` stats bytes into the snapshot hash
+/// under the entry's content lock, exactly as C does (acquiring the body's
+/// `LWLock` directly rather than through a `PgStat_EntryRef`).
+fn pgstat_build_snapshot() -> PgResult<()> {
+    // Snapshot already built for this lifetime.
+    let already = local::with_local(|l| {
+        l.snapshot.mode == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT
+    });
+    if already {
+        return Ok(());
+    }
+
+    pgstat_prep_snapshot();
+
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+
+    // dshash_seq_init(&hstat, pgStatLocal.shared_hash, false): walk all entries.
+    let mut hstat = dshash::dshash_seq_init(dsh, false);
+    loop {
+        let entry = dshash::dshash_seq_next(&mut hstat)?;
+        let p = match entry {
+            Some(e) => e as *mut PgStatShared_HashEntry,
+            None => break,
+        };
+
+        // SAFETY: dshash_seq_next returns a live, locked entry address.
+        let key = unsafe { (*p).key };
+        let dropped = unsafe { (*p).dropped };
+        let body = unsafe { (*p).body };
+
+        let kind_info = match registry::pgstat_get_kind_info(key.kind) {
+            Some(ki) => ki,
+            None => continue,
+        };
+        // Fixed-numbered kinds are handled by pgstat_build_snapshot_fixed below.
+        if kind_info.info.fixed_amount {
+            continue;
+        }
+        // Dropped entries aren't visible.
+        if dropped {
+            continue;
+        }
+
+        // stats_data = dsa_get_address(pgStatLocal.dsa, p->body).
+        let stats_data = dsa::dsa_get_address_ptr::call(area, body)? as usize
+            as *mut PgStatShared_Common;
+        if stats_data.is_null() {
+            continue;
+        }
+
+        let len = kind_info.info.shared_data_len as usize;
+
+        // Acquire the body's content lock directly (LW_SHARED), copy out the
+        // stats bytes, release.
+        // SAFETY: stats_data points at a live PgStatShared_Common header in the
+        // shared segment, with a valid LWLock.
+        let lock = unsafe { &(*stats_data).lock };
+        let guard =
+            lwlock::lwlock_acquire::call(lock, LW_SHARED, proc_seams::my_proc_number::call())?;
+        // SAFETY: lock held; stats body is at least `len` bytes after the header.
+        let data = unsafe { entry_data_bytes(stats_data, len) };
+        drop(guard);
+
+        // pgstat_snapshot_insert(stats, key): new entry, must not be found.
+        local::with_snapshot_stats(|s| {
+            s.stats.insert(key, Some(data));
+        });
+    }
+    // dshash_seq_term(&hstat).
+    dshash::dshash_seq_term(&mut hstat)?;
+
+    // Build snapshot of all fixed-numbered stats.
+    let mut kind = PGSTAT_KIND_BUILTIN_MIN.0;
+    while kind <= PGSTAT_KIND_BUILTIN_MAX.0 {
+        let k = PgStat_Kind(kind);
+        if let Some(ki) = registry::pgstat_get_kind_info(k) {
+            if ki.info.fixed_amount {
+                pgstat_build_snapshot_fixed(k)?;
+            }
+        }
+        kind += 1;
+    }
+
+    local::with_local(|l| {
+        l.snapshot.mode = PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT;
+    });
+    Ok(())
+}
+
+/// `pgstat_fetch_entry(kind, dboid, objid)` (`pgstat.c`) — return a copy of a
+/// variable-numbered entry's `shared_data_len` stats bytes, honoring
+/// `stats_fetch_consistency` (none / cache / snapshot), or `None` if no live
+/// entry exists.
+///
+/// * **NONE:** read straight from shared memory each call, no caching.
+/// * **CACHE:** cache each looked-up entry (including a negative `None` marker)
+///   in the snapshot hash, so repeated reads within a transaction are stable.
+/// * **SNAPSHOT:** build a full snapshot of every entry up front, then read only
+///   from it; a key absent from a full snapshot definitively does not exist.
+///
+/// The byte blob is the kind-specific stats struct (the per-kind owner decodes
+/// it), mirroring C's `(PgStat_Stat*Entry *) pgstat_fetch_entry(...)`.
+pub fn pgstat_fetch_entry(
+    kind: PgStat_Kind,
+    dboid: Oid,
+    objid: u64,
+) -> PgResult<Option<Box<[u8]>>> {
+    let kind_info = registry::pgstat_get_kind_info(kind);
+    // AssertArg(!kind_info->fixed_amount): fixed kinds use pgstat_snapshot_fixed.
+    debug_assert!(
+        kind_info.map(|ki| !ki.info.fixed_amount).unwrap_or(true),
+        "pgstat_fetch_entry called for a fixed-numbered kind"
+    );
+
+    pgstat_prep_snapshot();
+
+    let key = PgStat_HashKey { kind, dboid, objid };
+    let consistency = fetch_consistency();
+
+    // If a full snapshot is wanted, build it.
+    if consistency == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+        pgstat_build_snapshot()?;
+    }
+
+    // If caching is desired, look up in the snapshot/cache hash.
+    if consistency > PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_NONE {
+        let cached = local::with_snapshot_stats(|s| s.stats.get(&key).cloned());
+        if let Some(data) = cached {
+            // Found (possibly a negative `None` marker).
+            return Ok(data);
+        }
+        // In full-snapshot mode a missing key means the entry does not exist.
+        if consistency == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+            return Ok(None);
+        }
+    }
+
+    // Resolve the live shared entry without creating it.
+    let entry_ref = shmem::pgstat_get_entry_ref(kind, dboid, objid, false, None)?;
+    let dropped = entry_ref
+        .map(|er| {
+            // SAFETY: just-resolved live reference.
+            let e = unsafe { er.get() };
+            e.shared_entry.is_null() || unsafe { (*e.shared_entry).dropped }
+        })
+        .unwrap_or(true);
+
+    if entry_ref.is_none() || dropped {
+        // Negative-cache an empty entry under CACHE mode.
+        if consistency == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_CACHE {
+            local::with_snapshot_stats(|s| {
+                s.stats.insert(key, None);
+            });
+        }
+        return Ok(None);
+    }
+
+    let er = entry_ref.unwrap();
+    let len = kind_info
+        .map(|ki| ki.info.shared_data_len as usize)
+        .unwrap_or(0);
+
+    // Copy the stats body out under a shared content lock.
+    // SAFETY: just-resolved live reference still in pgStatEntryRefHash.
+    let e = unsafe { er.get() };
+    shmem::pgstat_lock_entry_shared(e, false)?;
+    // SAFETY: shared_stats points at a live PgStatShared_Common; lock held.
+    let data = unsafe { entry_data_bytes(e.shared_stats, len) };
+    shmem::pgstat_unlock_entry(e)?;
+
+    // Cache the copy for stable repeated reads (cache/snapshot modes).
+    if consistency > PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_NONE {
+        let cached = data.clone();
+        local::with_snapshot_stats(|s| {
+            s.stats.insert(key, Some(cached));
+        });
+    }
+
+    Ok(Some(data))
 }
 
 // ---------------------------------------------------------------------------

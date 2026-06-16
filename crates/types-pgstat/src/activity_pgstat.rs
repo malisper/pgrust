@@ -35,7 +35,11 @@ pub enum TrackFunctionsLevel {
 }
 
 /// `PgStat_FetchConsistency` (`pgstat.h`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// `PartialOrd`/`Ord` follow the C enum's ascending ordinal values
+/// (`NONE < CACHE < SNAPSHOT`); `pgstat_fetch_entry` compares them with `>`
+/// exactly as `pgstat.c` does (`pgstat_fetch_consistency > PGSTAT_FETCH_CONSISTENCY_NONE`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum PgStat_FetchConsistency {
     PGSTAT_FETCH_CONSISTENCY_NONE = 0,
     PGSTAT_FETCH_CONSISTENCY_CACHE = 1,
