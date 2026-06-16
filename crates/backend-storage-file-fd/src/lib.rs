@@ -66,6 +66,11 @@ pub fn init_seams() {
 
     // -- backend-storage-file-fd-seams --------------------------------------
 
+    // file_perm.c: SetDataDirectoryCreatePerm (owns the create-mode globals).
+    backend_storage_file_fileperm_seams::set_data_directory_create_perm::set(
+        vfd_core::set_data_directory_create_perm,
+    );
+
     // GUC / init / errno glue.
     fd_seams::make_pg_directory::set(vfd_core::seam_make_pg_directory);
     fd_seams::init_file_access::set(vfd_core::seam_init_file_access);

@@ -320,6 +320,37 @@ pub fn pg_dir_create_mode() -> u32 {
 pub fn set_pg_dir_create_mode(value: u32) {
     with_g(|g| g.pg_dir_create_mode = value);
 }
+/// `SetDataDirectoryCreatePerm(dataDirMode)` (`common/file_perm.c:33-50`).
+///
+/// If the data directory mode has group access, relax the create modes/mask to
+/// allow group read/execute; else use owner-only defaults. Sets the
+/// `pg_dir_create_mode` / `pg_file_create_mode` globals and returns
+/// `(pg_mode_mask, pg_dir_create_mode)` so the caller (miscinit's
+/// `checkDataDir`) can run its own `umask(pg_mode_mask)` and assign the
+/// `data_directory_mode` GUC.
+pub fn set_data_directory_create_perm(data_dir_mode: u32) -> (u32, u32) {
+    use libc::{S_IRGRP, S_IRUSR, S_IRWXG, S_IRWXO, S_IRWXU, S_IWGRP, S_IWUSR, S_IXGRP};
+    // file_perm.h constants.
+    let pg_dir_mode_owner = S_IRWXU as u32;
+    let pg_dir_mode_group = (S_IRWXU | S_IRGRP | S_IXGRP) as u32;
+    let pg_file_mode_owner = (S_IRUSR | S_IWUSR) as u32;
+    let pg_file_mode_group = (S_IRUSR | S_IWUSR | S_IRGRP) as u32;
+    let pg_mode_mask_owner = (S_IRWXG | S_IRWXO) as u32;
+    let pg_mode_mask_group = (S_IWGRP | S_IRWXO) as u32;
+
+    let (dir_mode, file_mode, mode_mask) =
+        if (pg_dir_mode_group & data_dir_mode) == pg_dir_mode_group {
+            (pg_dir_mode_group, pg_file_mode_group, pg_mode_mask_group)
+        } else {
+            (pg_dir_mode_owner, pg_file_mode_owner, pg_mode_mask_owner)
+        };
+    with_g(|g| {
+        g.pg_dir_create_mode = dir_mode;
+        g.pg_file_create_mode = file_mode;
+    });
+    (mode_mask, dir_mode)
+}
+
 pub fn temp_file_limit() -> i32 {
     with_g(|g| g.temp_file_limit)
 }

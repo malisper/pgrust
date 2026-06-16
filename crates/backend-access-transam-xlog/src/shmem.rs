@@ -923,6 +923,30 @@ pub fn WriteControlFile() -> PgResult<()> {
     fd::allocate_file_write::call(XLOG_CONTROL_FILE, &buffer)
 }
 
+/// `LocalProcessControlFile(reset)` (xlog.c:4908) — allocate the backend-local
+/// `ControlFile` image and read `global/pg_control` into it. Called before shmem
+/// exists (shmem sizing can depend on the control-file contents); `XLOGShmemInit`
+/// later copies it into shared memory.
+///
+/// C asserts `reset || ControlFile == NULL`, then unconditionally `palloc`s a
+/// fresh `ControlFileData` (in `reset` the old pointer is a dangling reference
+/// into freed shmem) and calls `ReadControlFile()`. We mirror that by dropping
+/// any prior backend-local image and re-allocating.
+pub fn LocalProcessControlFile(reset: bool) -> PgResult<()> {
+    debug_assert!(reset || control_file_ptr().is_null());
+    // palloc a fresh image: drop any prior local Box and null the cell so
+    // control_file_mut() (called inside ReadControlFile) allocates anew.
+    let prior = control_file_ptr();
+    if !prior.is_null() && !reset {
+        // Non-reset path: C still palloc's a fresh struct, leaking the old one
+        // into the (short-lived) startup context. Reclaim ours instead of leaking.
+        // SAFETY: prior is a live Box created by control_file_mut.
+        drop(unsafe { std::boxed::Box::from_raw(prior) });
+    }
+    CONTROL_FILE.with(|c| c.set(core::ptr::null_mut()));
+    ReadControlFile()
+}
+
 /// `ReadControlFile()` (xlog.c:4368) — read `global/pg_control`, verify the
 /// version + CRC + compatibility fields, and publish `wal_segment_size` and the
 /// derived checkpoint-segments.

@@ -662,8 +662,6 @@ xlog_driver_deferred! {
 
     /// `GetActiveWalLevelOnStandby()` — the wal_level a standby replays with.
     pub fn GetActiveWalLevelOnStandby() -> WalLevel;
-    /// `LocalProcessControlFile(reset)` — read+process `global/pg_control`.
-    pub fn LocalProcessControlFile(reset: bool);
     /// `InitializeWalConsistencyChecking()` — finalise the deferred GUC.
     pub fn InitializeWalConsistencyChecking();
 
@@ -725,6 +723,11 @@ pub fn CreateRestartPoint(flags: i32) -> bool {
 pub fn init_seams() {
     use backend_access_transam_xlog_seams as s;
     s::xlog_redo::set(redo::xlog_redo);
+
+    // LocalProcessControlFile(reset) (xlog.c:4908) — the single-user boot driver
+    // (backend-tcop-postgres) reads pg_control through this seam before shmem
+    // exists. Real body in [`crate::shmem`].
+    backend_tcop_postgres_seams::local_process_control_file::set(shmem::LocalProcessControlFile);
 
     // XLogCtl shmem position readers + control-file-backed predicates (xlog.c).
     s::get_redo_rec_ptr::set(shmem::GetRedoRecPtr);
