@@ -13462,6 +13462,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-utility"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-utility-out-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-utility-fc-seams"
 version = "0.0.0"
 dependencies = [
@@ -13469,6 +13483,16 @@ dependencies = [
  "types-error",
  "types-foreigncmds",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-tcop-utility-out-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -17869,6 +17893,7 @@ dependencies = [
  "backend-tcop-dest",
  "backend-tcop-fastpath",
  "backend-tcop-pquery",
+ "backend-tcop-utility",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",
