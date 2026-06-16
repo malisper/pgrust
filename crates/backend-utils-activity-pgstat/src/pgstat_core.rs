@@ -253,6 +253,52 @@ pub fn pgstat_prep_pending_entry(
 }
 
 // ---------------------------------------------------------------------------
+// pending-block access by key — the xact-driven relation hooks' reach into the
+// owner-private entry-ref hash.
+// ---------------------------------------------------------------------------
+
+/// Run `f` against the pending block of the entry keyed by `key`, downcast to
+/// the per-kind pending type `T`, if such an entry exists and currently carries
+/// pending data.
+///
+/// This is the seamless reconciliation of C's raw `PgStat_TableStatus *` walks
+/// (`AtEOXact_PgStat_Relations` / `AtEOSubXact_PgStat_Relations` /
+/// `pgstat_report_analyze`'s `trans` / `parent` pointer chases): in C the
+/// per-table `pending` block (`PgStat_TableStatus`) is reachable directly
+/// through the cached pointer, but in this model that block is the `void
+/// *pending` value living in `pgstat.c`'s owner-private entry-ref hash
+/// ([`crate::entry_ref::PgStat_EntryRef::pending`], a `Box<dyn Any>`). The
+/// xact-driven hooks hold only a [`PgStat_HashKey`] (from the level node's
+/// `first` list or a node's `parent`), so they reach the pending block by key
+/// and downcast it here.
+///
+/// Returns `None` when no entry-ref exists for `key`, when it has no pending
+/// data, or when the pending value is not a `T` (a kind/key mismatch — a bug at
+/// the call site, surfaced rather than mis-downcast).
+pub fn pgstat_with_pending_mut<T: 'static, R>(
+    key: types_pgstat::pgstat_internal::PgStat_HashKey,
+    f: impl FnOnce(&mut T) -> R,
+) -> Option<R> {
+    local::with_pending(|p| {
+        let entry = p.entry_ref_hash.get_mut(&key)?;
+        let pending = entry.entry_ref.pending.as_mut()?;
+        let typed = pending.downcast_mut::<T>()?;
+        Some(f(typed))
+    })
+}
+
+/// Whether the entry keyed by `key` currently carries pending data — C's
+/// implicit `pgstat_fetch_pending_entry(...) != NULL` test, used by the
+/// relation hooks before reaching for a pending block.
+pub fn pgstat_have_pending(key: types_pgstat::pgstat_internal::PgStat_HashKey) -> bool {
+    local::with_pending(|p| {
+        p.entry_ref_hash
+            .get(&key)
+            .is_some_and(|e| e.entry_ref.pending.is_some())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot building (variable-numbered fetch + fixed snapshot).
 // ---------------------------------------------------------------------------
 

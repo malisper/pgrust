@@ -369,6 +369,21 @@ pub fn exec_init_node<'mcx>(
         other => return Err(unrecognized_node_type(other)),
     };
 
+    // Set the `ExprState.parent` back-link on every expression this node owns.
+    //
+    // In C, `ExecInit*` builds its quals/projection with `ExecInitExpr(node,
+    // (PlanState *) state)` — `parent` is the address-stable `makeNode`'d state,
+    // available *during* the node's init. In the owned tree the concrete `*State`
+    // struct and its enclosing `PlanStateNode` enum are two separate allocations:
+    // the per-node `ExecInit*` (and the execExpr `ExecInitQual`/`ExecInitExpr`
+    // seams it drives) only sees the embedded head and leaves `parent` unset; the
+    // enum wrapper — whose address the `EEOP_GROUPING_FUNC` /
+    // `EEOP_MERGE_SUPPORT_FUNC` / SubPlan consumers need (those read
+    // `parent.as_agg_state()` / `as_modify_table_state()`, which are enum methods)
+    // — only becomes address-stable here, once `result` is boxed. So the back-link
+    // is stamped now, mirroring C's `(PlanState *) state` identity.
+    result.stamp_expr_parents();
+
     // ExecSetExecProcNode(result, result->ExecProcNode);
     //
     // The owning `ExecInit*` routine has already stored the node's real
