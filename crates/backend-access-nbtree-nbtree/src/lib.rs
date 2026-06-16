@@ -28,7 +28,8 @@ use types_amapi::{
 // / `IndexBulkDeleteResult` (from `types_nbtree`) are structurally identical to
 // the vtable's `types_tableam` ones but distinct types; the adapters convert.
 use types_tableam::amapi::{
-    IndexInfo, IndexUniqueCheck as AmIndexUniqueCheck, TIDBitmap as AmTIDBitmap,
+    AmCostEstimate, IndexAMProperty, IndexBuildResult, IndexInfo, IndexPath,
+    IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember, PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
 use types_tableam::amopaque::{tags, AmOpaqueType};
 use types_tableam::genam::{
@@ -263,6 +264,22 @@ pub fn bthandler() -> IndexAmRoutine {
         // be the raw `fn(Oid) -> bool` ABI pointer; it is reached by name.
         amvalidate: None,
 
+        // Build / options / plan-time callbacks (#340). `btbuildempty` /
+        // `btgettreeheight` are this crate's own fns (wired directly); the rest
+        // live in sibling crates above nbtree in the dep graph (`btbuild` in
+        // nbtsort, `btoptions`/`btproperty`/`btbuildphasename` in nbtree-core,
+        // `btcostestimate`/`btadjustmembers` in selfuncs/nbtvalidate) and are
+        // reached through the real index.c dispatch (#341); sanctioned panic
+        // legs until that lands.
+        ambuild: btbuild_am,
+        ambuildempty: btbuildempty_am,
+        amcostestimate: btcostestimate_am,
+        amgettreeheight: Some(btgettreeheight_am),
+        amoptions: btoptions_am,
+        amproperty: Some(btproperty_am),
+        ambuildphasename: Some(btbuildphasename_am),
+        amadjustmembers: Some(btadjustmembers_am),
+
         // Scan / insert / vacuum callbacks (F3): the thin adapters below
         // translate the unified descriptor <-> nbtree's `NbtScan` working state
         // (downcast from `scan.opaque`).
@@ -455,6 +472,98 @@ fn btestimateparallelscan_am(
 /// `amparallelrescan` adapter.
 fn btparallelrescan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
     btparallelrescan(nbt(scan))
+}
+
+// ---------------------------------------------------------------------------
+// Build / options / plan-time vtable adapters (#340).
+//
+// The dispatch layer (index.c, #341) hands the build callbacks the type-erased
+// `IndexInfo` carrier; `btbuild`'s real body (nbtsort.c) needs the lifetime-
+// bound `types_nodes::execnodes::IndexInfo<'mcx>` which the `'static`
+// `Box<dyn Any>` carrier cannot supply, and `btbuild` lives in the
+// nbtree-nbtsort crate which sits ABOVE this one in the dep graph. Likewise
+// `btoptions`/`btproperty`/`btbuildphasename` (nbtree-core) and
+// `btcostestimate`/`btadjustmembers` (selfuncs/nbtvalidate) are not reachable
+// from here. Those slots are sanctioned panic legs — populated so the vtable
+// literal is complete, reached only once #341 lands the real index.c dispatch
+// (which carries the real `IndexInfo` and wires the cross-crate calls).
+// `btbuildempty`/`btgettreeheight` ARE this crate's own fns, wired directly.
+
+/// `ambuild` adapter — `btbuild` (nbtsort.c) is above this crate in the dep
+/// graph and needs the real `IndexInfo`; reached via the #341 index.c dispatch.
+fn btbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &Relation<'mcx>,
+    _index_relation: &Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!(
+        "btbuild: index.c build dispatch (#341) not yet ported — \
+         btbuild lives in backend-access-nbtree-nbtsort and needs the real \
+         types_nodes::execnodes::IndexInfo"
+    )
+}
+
+/// `ambuildempty` adapter — wires this crate's `btbuildempty`.
+fn btbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()> {
+    btbuildempty(index_relation)
+}
+
+/// `amcostestimate` adapter — `btcostestimate` (selfuncs.c) is not reachable
+/// from this crate; reached via the #341 dispatch with the real planner nodes.
+fn btcostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("btcostestimate: index cost estimation (selfuncs.c) not yet reachable from nbtree (#341)")
+}
+
+/// `amgettreeheight` adapter — wires this crate's `btgettreeheight`.
+fn btgettreeheight_am<'mcx>(_mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<i32> {
+    btgettreeheight(rel)
+}
+
+/// `amoptions` adapter — `btoptions` (nbtree-core) is not reachable from this
+/// crate; reached via the #341 dispatch.
+fn btoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<std::vec::Vec<u8>>> {
+    panic!("btoptions: reloptions parse (nbtree-core::btoptions) not yet reachable from nbtree (#341)")
+}
+
+/// `amproperty` adapter — `btproperty` (nbtree-core) is not reachable from this
+/// crate; reached via the #341 dispatch.
+fn btproperty_am(
+    _index_oid: Oid,
+    _attno: i32,
+    _prop: IndexAMProperty,
+    _propname: &str,
+    _res: &mut bool,
+    _isnull: &mut bool,
+) -> PgResult<bool> {
+    panic!("btproperty: index property report (nbtree-core::btproperty) not yet reachable from nbtree (#341)")
+}
+
+/// `ambuildphasename` adapter — `btbuildphasename` (nbtree-core) is not
+/// reachable from this crate; reached via the #341 dispatch.
+fn btbuildphasename_am(_phasenum: i64) -> Option<std::string::String> {
+    panic!("btbuildphasename: build-phase name (nbtree-core::btbuildphasename) not yet reachable from nbtree (#341)")
+}
+
+/// `amadjustmembers` adapter — `btadjustmembers` (nbtvalidate.c) is not
+/// reachable from this crate; reached via the #341 dispatch.
+fn btadjustmembers_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _opfamilyoid: Oid,
+    _opclassoid: Oid,
+    _operators: &mut std::vec::Vec<OpFamilyMember>,
+    _functions: &mut std::vec::Vec<OpFamilyMember>,
+) -> PgResult<()> {
+    panic!("btadjustmembers: opclass member adjust (nbtvalidate.c) not yet reachable from nbtree (#341)")
 }
 
 /// Sync the descriptor's IN boundary fields into the `NbtScan` working state

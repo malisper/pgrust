@@ -46,7 +46,10 @@ use backend_utils_activity_pgstat_seams::pgstat_count_index_scan;
 use backend_utils_error::{ereport, PgResult};
 use mcx::{Mcx, PgBox};
 
-use types_amapi::{IndexAmRoutine, T_IndexAmRoutine};
+use types_amapi::{
+    AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
+    IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
+};
 use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, OidIsValid};
 use types_core::InvalidOid;
 use types_error::error::ERROR;
@@ -70,7 +73,8 @@ use crate::gist_page::{
 };
 use crate::gist_page::gistcheckpage;
 use crate::gistutil::{
-    gist_tuple_is_invalid, gistFetchTuple, gistdentryinit, index_getattr_pub, itup_heap_ptr,
+    gist_tuple_is_invalid, gistFetchTuple, gistdentryinit, gistproperty,
+    index_getattr_pub, itup_heap_ptr, IndexAMProperty as GistIndexAMProperty,
 };
 
 // Re-export the GiST opclass amproc support-number used by gistcanreturn.
@@ -1207,6 +1211,22 @@ pub fn gisthandler() -> IndexAmRoutine {
         // It is reached by name (backend-access-gist-core::gisttranslatecmptype).
         amtranslatecmptype: None,
 
+        // Build / options / plan-time callbacks (#340). `gistproperty` is this
+        // crate's own fn (wired directly, with the canonical-enum mapping).
+        // `gistbuild`/`gistbuildempty` (gist-build, above this crate),
+        // `gistoptions` (needs the reloptions Datum detoast the #341 dispatch
+        // does), `gistcostestimate` (selfuncs.c) and `gistadjustmembers`
+        // (gist-validate) are sanctioned panic legs reached via #341. GiST has
+        // no gettreeheight/buildphasename (NULL in C).
+        ambuild: gistbuild_am,
+        ambuildempty: gistbuildempty_am,
+        amcostestimate: gistcostestimate_am,
+        amgettreeheight: None,
+        amoptions: gistoptions_am,
+        amproperty: Some(gistproperty_am),
+        ambuildphasename: None,
+        amadjustmembers: Some(gistadjustmembers_am),
+
         // Insert / vacuum callbacks — NOT this F2-scan unit's logic. Reached by
         // name only through the vtable; the serial scan path never invokes
         // them. Adapters seam-and-panic into the GiST insert/vacuum lanes.
@@ -1230,6 +1250,85 @@ pub fn gisthandler() -> IndexAmRoutine {
         aminitparallelscan: None,
         amparallelrescan: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Build / options / plan-time vtable adapters (#340). See the doc comment in
+// `gisthandler` for why the build / cross-crate slots are sanctioned panic legs
+// (reached via the #341 index.c dispatch).
+
+/// `ambuild` adapter — `gistbuild` (gist-build, above this crate) needs the real
+/// `IndexInfo`; reached via the #341 dispatch.
+fn gistbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &Relation<'mcx>,
+    _index_relation: &Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!(
+        "gistbuild: index.c build dispatch (#341) not yet ported — \
+         gistbuild lives in backend-access-gist-build and needs the real IndexInfo"
+    )
+}
+
+/// `ambuildempty` adapter — `gistbuildempty` (gist-build) not reachable from
+/// this crate; reached via the #341 dispatch.
+fn gistbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
+    panic!("gistbuildempty: lives in backend-access-gist-build, not reachable from gist-core (#341)")
+}
+
+/// `amcostestimate` adapter — `gistcostestimate` (selfuncs.c) not reachable;
+/// reached via the #341 dispatch.
+fn gistcostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("gistcostestimate: index cost estimation (selfuncs.c) not yet reachable from gist (#341)")
+}
+
+/// `amoptions` adapter — `gistoptions` takes the parsed reloptions byte image,
+/// which requires the reloptions `Datum` detoast the #341 dispatch performs.
+fn gistoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    panic!("gistoptions: needs the reloptions Datum detoast done by the index.c dispatch (#341)")
+}
+
+/// `amproperty` adapter — wires this crate's `gistproperty`, mapping the
+/// canonical `IndexAMProperty` to GiST's local enum and writing the out-params.
+fn gistproperty_am(
+    index_oid: Oid,
+    attno: i32,
+    prop: AmIndexAMProperty,
+    _propname: &str,
+    res: &mut bool,
+    isnull: &mut bool,
+) -> PgResult<bool> {
+    let gprop = match prop {
+        AmIndexAMProperty::AMPROP_DISTANCE_ORDERABLE => GistIndexAMProperty::DistanceOrderable,
+        AmIndexAMProperty::AMPROP_RETURNABLE => GistIndexAMProperty::Returnable,
+        _ => GistIndexAMProperty::Other,
+    };
+    let (handled, r, n) = gistproperty(index_oid, attno, gprop)?;
+    *res = r;
+    *isnull = n;
+    Ok(handled)
+}
+
+/// `amadjustmembers` adapter — `gistadjustmembers` (gist-validate) not reachable
+/// from this crate; reached via the #341 dispatch.
+fn gistadjustmembers_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _opfamilyoid: Oid,
+    _opclassoid: Oid,
+    _operators: &mut Vec<OpFamilyMember>,
+    _functions: &mut Vec<OpFamilyMember>,
+) -> PgResult<()> {
+    panic!("gistadjustmembers: opclass member adjust (gist-validate) not yet reachable from gist-core (#341)")
 }
 
 /// `ambeginscan` adapter — build the unified descriptor with `opaque` holding a
