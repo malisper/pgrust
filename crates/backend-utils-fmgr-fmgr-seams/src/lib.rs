@@ -109,6 +109,48 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `OidFunctionCall6` invocation of an encoding-conversion procedure in
+    /// `pg_do_encoding_conversion` / `perform_default_encoding_conversion`
+    /// (mbutils.c):
+    /// `OidFunctionCall6(proc, Int32GetDatum(src_encoding),
+    /// Int32GetDatum(dest_encoding), CStringGetDatum(src),
+    /// CStringGetDatum(result), Int32GetDatum(len), BoolGetDatum(noError))`.
+    ///
+    /// In C the conversion function writes the NUL-terminated converted string
+    /// into the caller-allocated `result` buffer (sized
+    /// `len * MAX_CONVERSION_GROWTH + 1`); the fmgr owner synthesizes the two
+    /// pointer-shaped `cstring` `Datum`s (only fmgr can build them) and dispatches
+    /// the call. The seam returns the converted bytes (without the trailing NUL,
+    /// i.e. C's `strlen(result)` worth) allocated in `mcx`. `Err` carries any
+    /// `ereport(ERROR)` the conversion function raises (untranslatable character,
+    /// invalid byte sequence) and palloc out-of-memory.
+    pub fn convert_via_proc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        proc: Oid,
+        src_encoding: i32,
+        dest_encoding: i32,
+        src: &[u8],
+        no_error: bool,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// Like [`convert_via_proc`] but also returns the conversion function's
+    /// `int4` result — the number of source bytes it consumed
+    /// (`DatumGetInt32(OidFunctionCall6(...))`). `pg_unicode_to_server_noerror`
+    /// dispatches with `noError = true` and tests whether the whole input was
+    /// consumed. Returns `(consumed_src_bytes, converted_bytes)`.
+    pub fn convert_via_proc_counted<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        proc: Oid,
+        src_encoding: i32,
+        dest_encoding: i32,
+        src: &[u8],
+        no_error: bool,
+    ) -> PgResult<(i32, mcx::PgVec<'mcx, u8>)>
+);
+
+seam_core::seam!(
     /// `PG_GETARG_POINTER(n)` interpreted as the `cstring` an `unknown`-typed
     /// literal arrives as (fmgr.h / funcapi.c `extract_variadic_args`): read
     /// argument `n` as a NUL-terminated C string and return its text. Only the

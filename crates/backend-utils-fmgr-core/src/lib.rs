@@ -2523,6 +2523,71 @@ fn conversion_proc_empty_input_test_seam(
     Ok(funcresult.as_i32())
 }
 
+/// `convert_via_proc` (mbutils.c): the `OidFunctionCall6` invocation of an
+/// encoding-conversion procedure, dispatched with two pointer-shaped `cstring`
+/// `Datum`s (source bytes / destination buffer) only fmgr can synthesize. The
+/// conversion function NUL-terminates the converted string in the destination
+/// buffer; we return the converted bytes (no trailing NUL) allocated in `mcx`.
+fn convert_via_proc_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc: Oid,
+    src_encoding: i32,
+    dest_encoding: i32,
+    src: &[u8],
+    no_error: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    Ok(convert_via_proc_counted_seam(mcx, proc, src_encoding, dest_encoding, src, no_error)?.1)
+}
+
+fn convert_via_proc_counted_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    proc: Oid,
+    src_encoding: i32,
+    dest_encoding: i32,
+    src: &[u8],
+    no_error: bool,
+) -> PgResult<(i32, PgVec<'mcx, u8>)> {
+    let resolved = fmgr_info(mcx, proc)?;
+    // CStringGetDatum(src) / CStringGetDatum(result): the conversion function
+    // reads its source from the `src` cstring and writes the converted,
+    // NUL-terminated output into the `result` cstring referent. The destination
+    // referent starts empty; the callee overwrites it.
+    let args = vec![
+        NullableDatum::value(int32_get_datum(src_encoding)),
+        NullableDatum::value(int32_get_datum(dest_encoding)),
+        NullableDatum::value(Datum::null()),
+        NullableDatum::value(Datum::null()),
+        NullableDatum::value(int32_get_datum(src.len() as i32)),
+        NullableDatum::value(Datum::from_bool(no_error)),
+    ];
+    // C frames both buffers as `cstring` (`char *`). The owned model carries a
+    // `cstring` as `RefPayload::Cstring(String)`; an encoding-conversion source
+    // need not be valid UTF-8, so this byte->String framing is the fmgr cstring
+    // ABI's known limitation, not introduced here. This path is reachable only
+    // once conversion procedures are dispatchable by OID (registered as fmgr
+    // builtins) — until then `fmgr_info` errors above for an unregistered proc.
+    let src_str = String::from_utf8_lossy(src).into_owned();
+    let ref_args = vec![
+        None,
+        None,
+        Some(RefPayload::Cstring(src_str)),
+        Some(RefPayload::Cstring(String::new())),
+        None,
+        None,
+    ];
+    let oid = resolved.finfo.fn_oid;
+    let fn_expr = resolved.finfo.fn_expr.clone();
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo), InvalidOid, args);
+    fcinfo.ref_args = ref_args;
+    let result = invoke_flinfo(mcx, &resolved.resolution, &mut fcinfo, oid, fn_expr)?;
+    // Recover the destination buffer the conversion function wrote.
+    let converted = match fcinfo.ref_args.get(3).and_then(|r| r.as_ref()) {
+        Some(RefPayload::Cstring(s)) => s.as_bytes(),
+        _ => &[],
+    };
+    Ok((result.as_i32(), mcx::slice_in(mcx, converted)?))
+}
+
 /// Install every seam in `backend-utils-fmgr-fmgr-seams` whose implementation is
 /// `fmgr.c`'s own logic.
 ///
@@ -2560,4 +2625,6 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::conversion_proc_empty_input_test::set(
         conversion_proc_empty_input_test_seam,
     );
+    backend_utils_fmgr_fmgr_seams::convert_via_proc::set(convert_via_proc_seam);
+    backend_utils_fmgr_fmgr_seams::convert_via_proc_counted::set(convert_via_proc_counted_seam);
 }

@@ -17726,6 +17726,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mb-mbutils"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace",
+ "backend-utils-adt-name",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
+ "common-wchar",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-mb-mbutils-seams"
 version = "0.0.0"
 dependencies = [
@@ -19411,6 +19431,7 @@ dependencies = [
  "backend-utils-init-postinit",
  "backend-utils-init-small",
  "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-guc",

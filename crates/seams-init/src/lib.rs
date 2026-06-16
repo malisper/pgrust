@@ -423,6 +423,7 @@ pub fn init_all() {
     backend_conv_utf8_and_sjis2004::init_seams();
     backend_conv_utf8_and_uhc::init_seams();
     backend_conv_utf8_and_win::init_seams();
+    backend_utils_mb_mbutils::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_guc::init_seams();
@@ -1676,6 +1677,16 @@ mod recurrence_guard {
         // bare `::set` of the common body fits. Install + DELETE when the inval
         // owner adds the OID-keyed re-fetch wrapper.
         ("backend_utils_cache_inval", "cache_invalidate_heap_tuple"),
+        // DESIGN_DEBT (TD-ENCNAMES-ICU): `is_encoding_supported_by_icu` is declared
+        // in `backend-utils-mb-mbutils-seams` but its logic is `common/encnames.c`'s
+        // `pg_enc2icu_tbl` (encnames.c:461), NOT mbutils.c — mbutils.c never calls
+        // it. Its real owner is the encnames unit (unported in this model); the only
+        // consumer is `recomputeNamespacePath`'s ICU branch (namespace.c:2323).
+        // Wrong-homing the ICU name table in the mbutils owner would violate
+        // ownership-by-C-source, so the mbutils owner deliberately does NOT install
+        // it; it loud-panics until encnames lands. DELETE this entry when encnames is
+        // ported and installs the seam.
+        ("backend_utils_mb_mbutils", "is_encoding_supported_by_icu"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

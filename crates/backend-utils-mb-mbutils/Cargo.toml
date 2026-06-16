@@ -1,0 +1,38 @@
+[package]
+name = "backend-utils-mb-mbutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_mb_mbutils"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-wchar = { path = "../types-wchar" }
+types-tuple = { path = "../types-tuple" }
+
+common-wchar = { path = "../common-wchar" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# FindDefaultConversionProc owner (acyclic: namespace deps only seam crates).
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+# OidFunctionCall6 conversion-proc dispatch via the fmgr-owned seam.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+# namein, for the name-returning SQL entry points (acyclic: name deps only the seam crate).
+backend-utils-adt-name = { path = "../backend-utils-adt-name" }
+
+# inward seams this crate owns + installs
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+
+# outward seam crates (callees; panic until owners land)
+common-encnames-seams = { path = "../common-encnames-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+
+[dev-dependencies]

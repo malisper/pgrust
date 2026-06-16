@@ -427,6 +427,7 @@ backend-conv-utf8-and-sjis = { path = "../backend-conv-utf8-and-sjis" }
 backend-conv-utf8-and-sjis2004 = { path = "../backend-conv-utf8-and-sjis2004" }
 backend-conv-utf8-and-uhc = { path = "../backend-conv-utf8-and-uhc" }
 backend-conv-utf8-and-win = { path = "../backend-conv-utf8-and-win" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
