@@ -23,14 +23,18 @@
 //! # Family status
 //!
 //! F0 (recovery-shmem keystone, [`shmem`]) has landed: the shared region and
-//! its spinlock accessors are real and installed. This re-scaffold adds the
-//! backend-local model ([`core`]), the carrier types ([`core::XLogSource`],
-//! [`core::RecordRef`], [`core::ReadRecordResult`], [`core::XLogPageReadResult`])
-//! and the empty module skeletons ([`readrecord`], [`replay`], [`promote`],
-//! [`stop`], [`guc`], [`desc`], [`startupxlog`]) whose function bodies are honest
-//! `panic!("decomp: … not yet filled")` stubs. Later family-fill lanes
-//! (readrecord / replay / promote / startupxlog) fill those bodies against this
-//! model. The crate stays CATALOG `needs-decomp` until they land.
+//! its spinlock accessors are real and installed, as have the F1/F2 shmem/GUC/
+//! pause-promote accessors, the WAL-page-read driver ([`pageread`]) and the
+//! reader/prefetcher holder ([`walrecovery`]). The backend-local model
+//! ([`core`]) and carrier types are real.
+//!
+//! The **replay / stop / desc / startupxlog families are still scaffold**: their
+//! function bodies are honest `panic!("blocked: … pending <family> fill")` stubs
+//! that name the specific unported prerequisite (the replay redo loop + per-AM
+//! redo dispatch, `getRecordTimestamp` xact-record decode, the rmgr desc dispatch
+//! that needs `Mcx`/`PgString` re-signing, and the `StartupXLOG` process
+//! integration into the unported postmaster/startup owners). The crate is CATALOG
+//! `in-progress` until those families land; see `audits/`.
 //!
 //! Ported from `src/backend/access/transam/xlogrecovery.c`.
 
