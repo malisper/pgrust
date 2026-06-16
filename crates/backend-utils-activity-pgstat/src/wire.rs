@@ -53,6 +53,9 @@ pub fn install_seams() {
     // pgstat_reset(kind, dboid, objid).
     pgstat_seam::pgstat_reset::set(pgcore::pgstat_reset);
 
+    // pgstat_reset_entry(kind, dboid, objid, ts).
+    pgstat_seam::pgstat_reset_entry::set(pgcore::pgstat_reset_entry);
+
     // pgstat_get_kind_name(kind): the human-readable name from the kind table.
     pgstat_seam::pgstat_get_kind_name::set(|kind| {
         crate::registry::pgstat_get_kind_info(kind)
