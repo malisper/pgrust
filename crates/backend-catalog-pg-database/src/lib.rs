@@ -89,7 +89,11 @@ fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: AttrNumber, value: &str) -> PgResult<Sc
 fn name_to_string<'mcx>(mcx: Mcx<'mcx>, col: &DeformedColumn<'mcx>) -> PgResult<PgString<'mcx>> {
     let bytes: &[u8] = match &col.0 {
         Datum::ByRef(b) => b,
-        Datum::ByVal(_) => &[],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => &[],
     };
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let s = core::str::from_utf8(&bytes[..end]).map_err(|_| {
@@ -141,7 +145,11 @@ fn decode_form<'mcx>(
                 // An aclitem[] array is always pass-by-reference; a ByVal here
                 // is impossible for this column, but keep the bytes empty
                 // rather than fabricate.
-                Datum::ByVal(_) => Some(mcx::vec_with_capacity_in(mcx, 0)?),
+                Datum::ByVal(_)
+                | Datum::Cstring(_)
+                | Datum::Composite(_)
+                | Datum::Expanded(_)
+                | Datum::Internal(_) => Some(mcx::vec_with_capacity_in(mcx, 0)?),
             }
         }
     };

@@ -20,7 +20,7 @@ use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow
 use types_cache::AuthIdRow;
 use types_cache::syscache::{
     ClassOwnerAcl, ForeignDataWrapperFormRow, ForeignServerFormRow, NamespaceOwnerAcl,
-    ObjectOwnerAcl, TypeOwnerAcl,
+    ObjectOwnerAcl, RolePasswordLookup, TypeOwnerAcl,
 };
 use types_acl::AclItem;
 use types_catalog::pg_aggregate::AggRow;
@@ -69,6 +69,16 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         rolename: &str,
     ) -> PgResult<Option<AuthIdRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHNAME, PointerGetDatum(role))` for
+    /// `get_role_password` (`libpq/crypt.c`): projects `rolpassword`
+    /// (`TextDatumGetCString`) and `rolvaliduntil` (`DatumGetTimestampTz`),
+    /// distinguishing no-such-role / no-password / found via
+    /// [`RolePasswordLookup`]. The `ReleaseSysCache` is subsumed by returning
+    /// the data by value.
+    pub fn fetch_role_password(role: &str) -> PgResult<RolePasswordLookup>
 );
 
 seam_core::seam!(
@@ -1157,6 +1167,18 @@ seam_core::seam!(
     /// `elog(ERROR, "cache lookup failed for index %u")`; the installer owns
     /// the `ReleaseSysCache`.
     pub fn index_isclustered(index_oid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` projected to
+    /// `Form_pg_index.indrelid` (`catalog/index.c` `IndexGetRelation`). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`) so the caller decides between
+    /// `InvalidOid` (`missing_ok`) and the `elog(ERROR, "cache lookup failed for
+    /// index %u")`. The scalar `indrelid` is returned by value (no allocation),
+    /// mirroring the C that returns a bare `Oid`; the installer owns the
+    /// `ReleaseSysCache`. The C `Assert(index->indexrelid == indexId)` lives in
+    /// the installer.
+    pub fn index_get_relid(index_oid: Oid) -> PgResult<Option<Oid>>
 );
 
 seam_core::seam!(

@@ -183,7 +183,11 @@ pub fn get_attribute_options(attrelid: Oid, attnum: i32) -> PgResult<Option<Attr
                 } else {
                     let bytes = match &datum {
                         Datum::ByRef(b) => &b[..],
-                        Datum::ByVal(_) => {
+                        Datum::ByVal(_)
+                        | Datum::Cstring(_)
+                        | Datum::Composite(_)
+                        | Datum::Expanded(_)
+                        | Datum::Internal(_) => {
                             return Err(PgError::error("attoptions datum is not by-reference"))
                         }
                     };

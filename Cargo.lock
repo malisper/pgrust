@@ -3889,6 +3889,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-index"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-index-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-index-seams"
 version = "0.0.0"
 dependencies = [
@@ -8906,6 +8919,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-auth-scram"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth",
+ "backend-libpq-auth-scram-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqformat",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "common-cryptohash-seams",
+ "common-prng-base64",
+ "common-sha2",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "seam-core",
+ "types-authid",
+ "types-control",
+ "types-crypto",
+ "types-error",
+ "types-net",
+ "types-stringinfo",
+]
+
+[[package]]
+name = "backend-libpq-auth-scram-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-libpq-auth-seams"
 version = "0.0.0"
 dependencies = [
@@ -8932,6 +8978,32 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-net",
+]
+
+[[package]]
+name = "backend-libpq-crypt"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-crypt-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-authid",
+ "types-cache",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-libpq-crypt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -9924,6 +9996,7 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-pathnodes",
@@ -18091,6 +18164,7 @@ dependencies = [
  "backend-catalog-catalog",
  "backend-catalog-dependency",
  "backend-catalog-heap",
+ "backend-catalog-index",
  "backend-catalog-indexing",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
@@ -18204,6 +18278,8 @@ dependencies = [
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-libpq-auth",
+ "backend-libpq-auth-scram",
+ "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
@@ -18230,6 +18306,7 @@ dependencies = [
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
+ "backend-optimizer-rte-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",

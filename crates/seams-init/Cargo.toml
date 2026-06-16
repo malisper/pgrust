@@ -85,6 +85,7 @@ backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
+backend-catalog-index = { path = "../backend-catalog-index" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
@@ -196,6 +197,8 @@ backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-hba = { path = "../backend-libpq-hba" }
+backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
+backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
@@ -210,6 +213,7 @@ backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-commands-async = { path = "../backend-commands-async" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
 backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }

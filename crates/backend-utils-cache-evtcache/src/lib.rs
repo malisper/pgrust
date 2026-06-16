@@ -258,7 +258,11 @@ fn build_cache() -> PgResult<McxOwned<CacheTy>> {
             if !*evttags_isnull {
                 let bytes = match evttags {
                     Datum::ByRef(b) => &b[..],
-                    Datum::ByVal(_) => {
+                    Datum::ByVal(_)
+                    | Datum::Cstring(_)
+                    | Datum::Composite(_)
+                    | Datum::Expanded(_)
+                    | Datum::Internal(_) => {
                         return Err(PgError::error("evttags datum is not by-reference"));
                     }
                 };
@@ -365,7 +369,11 @@ fn InvalidateEventCacheCallback(_arg: types_datum::datum::Datum, _cacheid: i32, 
 fn byval_char(col: &(Datum<'_>, bool)) -> PgResult<i8> {
     match &col.0 {
         Datum::ByVal(_) => Ok(col.0.as_i32() as i8),
-        Datum::ByRef(_) => Err(PgError::error("pg_event_trigger char attr is by-reference")),
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("pg_event_trigger char attr is by-reference")),
     }
 }
 
@@ -373,7 +381,11 @@ fn byval_char(col: &(Datum<'_>, bool)) -> PgResult<i8> {
 fn byval_oid(col: &(Datum<'_>, bool)) -> PgResult<Oid> {
     match &col.0 {
         Datum::ByVal(_) => Ok(col.0.as_oid()),
-        Datum::ByRef(_) => Err(PgError::error("pg_event_trigger oid attr is by-reference")),
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("pg_event_trigger oid attr is by-reference")),
     }
 }
 
@@ -385,7 +397,11 @@ fn name_str(col: &(Datum<'_>, bool)) -> PgResult<String> {
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             Ok(String::from_utf8_lossy(&b[..len]).into_owned())
         }
-        Datum::ByVal(_) => Err(PgError::error("pg_event_trigger name attr is by-value")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("pg_event_trigger name attr is by-value")),
     }
 }
 

@@ -21,18 +21,11 @@
 // `types_datum::Datum` is no longer used by this crate's own code.
 use types_tuple::Datum;
 
-/// Mirror of PG's `ExpandedObjectMethods` vtable (`utils/expandeddatum.h`): the
-/// two method pointers every expanded (`VARATT_IS_EXPANDED`) object exposes.
-/// `: Any` enables the checked downcast (PG's `EA_MAGIC` identity check before a
-/// C cast). The flattened image `flatten_into` writes must be exactly
-/// `get_flat_size()` bytes (PG `allocated_size` cross-check).
-pub trait ExpandedObject: std::any::Any {
-    /// C: `EOM_get_flat_size_method` — bytes the flat varlena image needs.
-    fn get_flat_size(&self) -> usize;
-    /// C: `EOM_flatten_into_method` — serialize the flat varlena image into
-    /// `dst`, whose length is exactly a preceding `get_flat_size()`.
-    fn flatten_into(&self, dst: &mut [u8]);
-}
+// The `ExpandedObject` trait now lives in the lower `types-datum` crate so that
+// both `types-tuple` (the canonical `Datum::Expanded` arm) and this crate
+// (`RefPayload::Expanded`) can name the one trait without a layering cycle.
+// Re-exported here so existing `types_fmgr::ExpandedObject` paths keep working.
+pub use types_datum::ExpandedObject;
 
 /// The owned referent of a pass-by-reference `Datum`, carried by value at the
 /// fmgr boundary instead of behind a raw pointer.

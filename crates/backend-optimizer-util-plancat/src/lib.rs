@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, NullTest, Var};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     ForeignKeyOptInfo, IndexOptInfo, NodeId, PlannerInfo, RelId, Relids, StatisticExtInfo,
     TargetEntryNode, CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_UPDATE,
@@ -181,7 +182,8 @@ fn make_target_entry(
 
 /// `get_relation_info(root, relationObjectId, inhparent, rel)` (plancat.c) —
 /// retrieve catalog information for a given relation into the `RelOptInfo`.
-pub fn get_relation_info(
+pub fn get_relation_info<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relation_object_id: Oid,
     inhparent: bool,
@@ -485,7 +487,7 @@ pub fn get_relation_info(
     }
 
     // Collect info about relation's foreign keys, if relevant.
-    get_relation_foreign_keys(root, rel, relation_object_id, inhparent)?;
+    get_relation_foreign_keys(run, root, rel, relation_object_id, inhparent)?;
 
     // Collect info about functions implemented by the rel's table AM.
     if has_table_am && ext::table_has_tid_range::call(relation_object_id)? {
@@ -511,13 +513,14 @@ pub fn get_relation_info(
 
 /// `get_relation_foreign_keys(root, rel, relation, inhparent)` (plancat.c) —
 /// create `ForeignKeyOptInfo`s for relevant FKs and append to `root->fkey_list`.
-fn get_relation_foreign_keys(
+fn get_relation_foreign_keys<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     relation_object_id: Oid,
     inhparent: bool,
 ) -> PgResult<()> {
-    let rtable_len = rte::parse_rtable_len::call(root);
+    let rtable_len = rte::parse_rtable_len::call(run, root);
 
     // If it's not a baserel, we don't care about its FKs. Also skip if the query
     // references only a single relation.
@@ -547,13 +550,13 @@ fn get_relation_foreign_keys(
         // Scan to find other RTEs matching confrelid.
         for rti in 1..=rti_count {
             // Ignore if not the correct table.
-            if rte::rte_rtekind::call(root, rti) != RTE_RELATION
-                || rte::rte_relid::call(root, rti) != cachedfk.confrelid
+            if rte::rte_rtekind::call(run, root, rti) != RTE_RELATION
+                || rte::rte_relid::call(run, root, rti) != cachedfk.confrelid
             {
                 continue;
             }
             // Ignore if it's an inheritance parent.
-            if rte::rte_inh::call(root, rti) {
+            if rte::rte_inh::call(run, root, rti) {
                 continue;
             }
             // Ignore self-referential FKs.
@@ -588,7 +591,10 @@ fn get_relation_foreign_keys(
 
 /// `infer_arbiter_indexes(root)` (plancat.c) — determine the unique indexes used
 /// to arbitrate speculative insertion. Returns the matched index OIDs.
-pub fn infer_arbiter_indexes(root: &mut PlannerInfo) -> PgResult<Vec<Oid>> {
+pub fn infer_arbiter_indexes<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<Vec<Oid>> {
     // Iteration state.
     let mut index_oid_from_constraint: Oid = InvalidOid;
 
@@ -604,7 +610,7 @@ pub fn infer_arbiter_indexes(root: &mut PlannerInfo) -> PgResult<Vec<Oid>> {
     }
 
     let varno = ext::parse_result_relation::call(root) as Index;
-    let relid = rte::rte_relid::call(root, varno);
+    let relid = rte::rte_relid::call(run, root, varno);
     let rellockmode = ext::rte_rellockmode::call(root, varno);
 
     // Build normalized/BMS representation of plain indexed attributes plus a
@@ -988,7 +994,12 @@ fn get_relation_constraints(
 
 /// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c) — detect
 /// whether the relation need not be scanned.
-pub fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<bool> {
+pub fn relation_excluded_by_constraints<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<bool> {
     let mut include_partition = false;
 
     debug_assert!(is_simple_rel(root, rel));
@@ -1044,19 +1055,19 @@ pub fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti:
     }
 
     // Only plain relations have constraints.
-    if rte::rte_rtekind::call(root, rti) != RTE_RELATION {
+    if rte::rte_rtekind::call(run, root, rti) != RTE_RELATION {
         return Ok(false);
     }
 
-    let rte_inh = rte::rte_inh::call(root, rti);
-    let rte_relkind = rte::rte_relkind::call(root, rti) as u8;
+    let rte_inh = rte::rte_inh::call(run, root, rti);
+    let rte_relkind = rte::rte_relkind::call(run, root, rti) as u8;
 
     // NO INHERIT constraints only when scanning just this table.
     let include_noinherit = !rte_inh;
     // attnotnull constraints as NO INHERIT unless partitioned.
     let include_notnull = !rte_inh || rte_relkind == RELKIND_PARTITIONED_TABLE;
 
-    let relid = rte::rte_relid::call(root, rti);
+    let relid = rte::rte_relid::call(run, root, rti);
     let constraint_pred = get_relation_constraints(
         root,
         relid,
@@ -1095,14 +1106,18 @@ fn is_simple_rel(root: &PlannerInfo, rel: RelId) -> bool {
 /// `build_physical_tlist(root, rel)` (plancat.c) — a targetlist of exactly the
 /// relation's user attributes, in order, or NIL when there are dropped/missing
 /// columns.
-pub fn build_physical_tlist(root: &mut PlannerInfo, rel: RelId) -> PgResult<Vec<NodeId>> {
+pub fn build_physical_tlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+) -> PgResult<Vec<NodeId>> {
     let varno = root.rel(rel).relid;
-    let rtekind = rte::rte_rtekind::call(root, varno);
+    let rtekind = rte::rte_rtekind::call(run, root, varno);
 
     match rtekind {
         RTE_RELATION => {
             // Assume we already have adequate lock.
-            let relid = rte::rte_relid::call(root, varno);
+            let relid = rte::rte_relid::call(run, root, varno);
             let relcx = mcx::MemoryContext::new("build_physical_tlist relcache");
             let relation = backend_access_table_table::table_open(relcx.mcx(), relid, NoLock)?;
             let numattrs = relation.rd_att.natts;
@@ -1414,8 +1429,13 @@ pub fn has_unique_index(root: &PlannerInfo, rel: RelId, attno: AttrNumber) -> bo
 }
 
 /// `has_row_triggers(root, rti, event)` (plancat.c).
-pub fn has_row_triggers(root: &PlannerInfo, rti: Index, event: types_pathnodes::CmdType) -> PgResult<bool> {
-    let relid = rte::rte_relid::call(root, rti);
+pub fn has_row_triggers<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+    event: types_pathnodes::CmdType,
+) -> PgResult<bool> {
+    let relid = rte::rte_relid::call(run, root, rti);
     match event {
         CMD_INSERT | CMD_UPDATE | CMD_DELETE => ext::relation_has_row_triggers::call(relid, event),
         CMD_MERGE => Ok(false),
@@ -1427,17 +1447,18 @@ pub fn has_row_triggers(root: &PlannerInfo, rti: Index, event: types_pathnodes::
 }
 
 /// `has_transition_tables(root, rti, event)` (plancat.c).
-pub fn has_transition_tables(
+pub fn has_transition_tables<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rti: Index,
     event: types_pathnodes::CmdType,
 ) -> PgResult<bool> {
-    debug_assert_eq!(rte::rte_rtekind::call(root, rti), RTE_RELATION);
+    debug_assert_eq!(rte::rte_rtekind::call(run, root, rti), RTE_RELATION);
     // Foreign tables cannot have transition tables.
-    if rte::rte_relkind::call(root, rti) as u8 == RELKIND_FOREIGN_TABLE {
+    if rte::rte_relkind::call(run, root, rti) as u8 == RELKIND_FOREIGN_TABLE {
         return Ok(false);
     }
-    let relid = rte::rte_relid::call(root, rti);
+    let relid = rte::rte_relid::call(run, root, rti);
     match event {
         CMD_INSERT | CMD_UPDATE | CMD_DELETE => {
             ext::relation_has_transition_tables::call(relid, event)
@@ -1451,18 +1472,23 @@ pub fn has_transition_tables(
 }
 
 /// `has_stored_generated_columns(root, rti)` (plancat.c).
-pub fn has_stored_generated_columns(root: &PlannerInfo, rti: Index) -> PgResult<bool> {
-    let relid = rte::rte_relid::call(root, rti);
+pub fn has_stored_generated_columns<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> PgResult<bool> {
+    let relid = rte::rte_relid::call(run, root, rti);
     ext::relation_has_stored_generated_columns::call(relid)
 }
 
 /// `get_dependent_generated_columns(root, rti, target_cols)` (plancat.c).
-pub fn get_dependent_generated_columns(
+pub fn get_dependent_generated_columns<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rti: Index,
     target_cols: &Relids,
 ) -> PgResult<Relids> {
-    let relid = rte::rte_relid::call(root, rti);
+    let relid = rte::rte_relid::call(run, root, rti);
     let attnums = ext::dependent_generated_columns::call(relid, target_cols)?;
     let mut dependent: Relids = None;
     for a in attnums {
@@ -1511,17 +1537,23 @@ fn seam_get_rel_data_width(rel: Oid, attr_widths: Option<&mut [i32]>) -> PgResul
     Ok(result)
 }
 
-fn seam_get_relation_info(
+fn seam_get_relation_info<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relation_object_id: Oid,
     inhparent: bool,
     rel: RelId,
 ) -> PgResult<()> {
-    get_relation_info(root, relation_object_id, inhparent, rel)
+    get_relation_info(run, root, relation_object_id, inhparent, rel)
 }
 
-fn seam_relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> bool {
-    match relation_excluded_by_constraints(root, rel, rti) {
+fn seam_relation_excluded_by_constraints<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> bool {
+    match relation_excluded_by_constraints(run, root, rel, rti) {
         Ok(b) => b,
         Err(e) => panic!("relation_excluded_by_constraints: {e:?}"),
     }

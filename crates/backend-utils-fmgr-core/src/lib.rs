@@ -1477,7 +1477,11 @@ fn canon_byval(word: Datum) -> types_tuple::backend_access_common_heaptuple::Dat
 fn canon_word(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> Datum {
     match d {
         types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
-        types_tuple::backend_access_common_heaptuple::Datum::ByRef(_) => {
+        types_tuple::backend_access_common_heaptuple::Datum::ByRef(_)
+        | types_tuple::backend_access_common_heaptuple::Datum::Cstring(_)
+        | types_tuple::backend_access_common_heaptuple::Datum::Composite(_)
+        | types_tuple::backend_access_common_heaptuple::Datum::Expanded(_)
+        | types_tuple::backend_access_common_heaptuple::Datum::Internal(_) => {
             panic!("fmgr boundary ByVal arm carried a by-reference Datum")
         }
     }
@@ -2013,6 +2017,11 @@ fn tuple_value_to_arg(
             Datum::null(),
             Some(RefPayload::Varlena(b.as_slice().to_vec())),
         ),
+        // A cstring referent maps directly to the cstring boundary arm.
+        CanonDatum::Cstring(s) => (Datum::null(), Some(RefPayload::Cstring(s.clone()))),
+        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("tuple_value_to_arg: Composite/Expanded/Internal Datum not yet produced — wave 2")
+        }
     }
 }
 
@@ -2102,6 +2111,13 @@ fn datum_to_ref_arg(
             NullableDatum::value(Datum::null()),
             Some(RefPayload::Varlena(b.as_slice().to_vec())),
         ),
+        CanonDatum::Cstring(s) => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Cstring(s.clone())),
+        ),
+        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("datum_to_ref_arg: Composite/Expanded/Internal Datum not yet produced — wave 2")
+        }
     }
 }
 
@@ -2306,6 +2322,18 @@ fn oid_output_function_call_datum_seam<'mcx>(
                 resolved.finfo,
                 FmgrArg::Ref(&payload),
             )?
+        }
+        CanonDatum::Cstring(s2) => {
+            let payload = types_fmgr::boundary::RefPayload::Cstring(s2.clone());
+            output_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::Ref(&payload),
+            )?
+        }
+        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("output_function_call (datum) on Composite/Expanded/Internal Datum not yet produced — wave 2")
         }
     };
     PgString::from_str_in(&s, mcx)

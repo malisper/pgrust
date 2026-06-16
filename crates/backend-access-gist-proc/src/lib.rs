@@ -1347,6 +1347,9 @@ fn dispatch_compress<'mcx>(
                     Datum::ByRef(_) => Some(inet_struct::from_datum_bytes(entry.key.as_ref_bytes())),
                     // DatumGetPointer(entry->key) == NULL
                     Datum::ByVal(_) => None,
+                    Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+                        panic!("inet_gist_compress: non-ByVal/ByRef Datum key not yet produced — wave 2")
+                    }
                 };
                 let r = inet_gist::inet_gist_compress::call(in_);
                 let key = match r {

@@ -135,6 +135,11 @@ fn catalog_cache_compute_tuple_hash_value(
                      (name/text/oidvector) is hashed from its resolved payload \
                      bytes, never lifted into the scalar key word"
                 ),
+                Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
+                    "catcache::inval_support: a Cstring/Composite/Expanded/Internal key value \
+                     is hashed from its resolved payload, never lifted into the scalar key word \
+                     — not yet produced — wave 2"
+                ),
             };
         }
     });

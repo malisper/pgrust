@@ -64,8 +64,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `create_nestloop_path(...)` — allocate the nestloop `Path` into the arena.
-    pub fn create_nestloop_path(
+    pub fn create_nestloop_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,
@@ -79,8 +80,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_mergejoin_path(...)` — allocate the mergejoin `Path`.
-    pub fn create_mergejoin_path(
+    pub fn create_mergejoin_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,
@@ -98,8 +100,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_hashjoin_path(...)` — allocate the hashjoin `Path`.
-    pub fn create_hashjoin_path(
+    pub fn create_hashjoin_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,

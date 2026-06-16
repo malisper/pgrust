@@ -72,6 +72,13 @@ fn array_datum_bare_word(d: &types_tuple::Datum<'_>) -> types_datum::Datum {
              edge as a by-reference image (execTuples canonical-carrier follow-on \
              #113)"
         ),
+        types_tuple::Datum::Cstring(_)
+        | types_tuple::Datum::Composite(_)
+        | types_tuple::Datum::Expanded(_)
+        | types_tuple::Datum::Internal(_) => panic!(
+            "tid[] array value crossed the bare-word deconstruct_tid_array seam \
+             edge as a Cstring/Composite/Expanded/Internal image — not yet produced — wave 2"
+        ),
     }
 }
 

@@ -10,6 +10,7 @@
 // `Datum key1..key4` (`ObjectIdGetDatum`, `Int16GetDatum`, ...); it carries no
 // deformed value (by-reference keys travel as `Str`/`Bytes` here), so it stays
 // the audited bare word rather than the canonical `Datum<'mcx>` enum.
+use alloc::string::String;
 use types_datum::Datum as ScalarWord;
 use mcx::PgVec;
 use types_core::primitive::{AttrNumber, Oid as OidT};
@@ -105,6 +106,29 @@ pub struct AuthIdRow<'mcx> {
     pub rolbypassrls: bool,
     /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
     pub rolconnlimit: i32,
+}
+
+/// Result of the `get_role_password` `SearchSysCache1(AUTHNAME)` lookup
+/// (`libpq/crypt.c`). The fmgr/`Datum` value layer
+/// (`TextDatumGetCString(rolpassword)`, `DatumGetTimestampTz(rolvaliduntil)`)
+/// is resolved at the syscache seam boundary so the looked-up row crosses
+/// already converted. The three arms mirror crypt.c's three early returns:
+/// no such role, a role with no password, and a found row carrying the
+/// shadow password plus the optional `rolvaliduntil` expiry (`None` ⇔ the C
+/// `isnull` on that column).
+#[derive(Clone, Debug)]
+pub enum RolePasswordLookup {
+    /// `!HeapTupleIsValid(roleTup)` — no such user.
+    NoSuchRole,
+    /// `rolpassword` is null — user has no password assigned.
+    NoPassword,
+    /// Found a usable `rolpassword`, with the optional `rolvaliduntil`.
+    Found {
+        /// `TextDatumGetCString(rolpassword)` — the stored secret.
+        shadow_pass: String,
+        /// `DatumGetTimestampTz(rolvaliduntil)`; `None` when the column is null.
+        valid_until: Option<types_core::primitive::TimestampTz>,
+    },
 }
 
 /// Projection of one `pg_auth_members` row (`catalog/pg_auth_members.h`)

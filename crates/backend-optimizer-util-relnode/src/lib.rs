@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, ExprRelids};
 
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     AppendRelInfo, ParamPathInfo, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
     UpperRelationKind, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI, NodeId,
@@ -260,7 +261,8 @@ pub fn expand_planner_arrays(root: &mut PlannerInfo, add_size: i32) {
 
 /// `build_simple_rel(root, relid, parent)` (relnode.c) — construct a new
 /// `RelOptInfo` for a base relation or 'other' relation.
-pub fn build_simple_rel(
+pub fn build_simple_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relid: i32,
     parent: Option<RelId>,
@@ -272,7 +274,7 @@ pub fn build_simple_rel(
     }
 
     /* Fetch RTE for relation */
-    let rtekind = rte::rte_rtekind::call(root, relid as u32);
+    let rtekind = rte::rte_rtekind::call(run, root, relid as u32);
 
     let mut rel = types_pathnodes::RelOptInfo {
         reloptkind: if parent.is_some() {
@@ -393,9 +395,9 @@ pub fn build_simple_rel(
 
     /* For RTE_RELATION, retrieve statistics now that the rel is in the array. */
     if rtekind == RTE_RELATION {
-        let relation_object_id = rte::rte_relid::call(root, relid as u32);
-        let inh = rte::rte_inh::call(root, relid as u32);
-        ext::get_relation_info::call(root, relation_object_id, inh, id)?;
+        let relation_object_id = rte::rte_relid::call(run, root, relid as u32);
+        let inh = rte::rte_inh::call(run, root, relid as u32);
+        ext::get_relation_info::call(run, root, relation_object_id, inh, id)?;
     }
 
     /*
@@ -444,7 +446,11 @@ pub fn find_base_rel_noerr(root: &PlannerInfo, relid: i32) -> Option<RelId> {
 
 /// `find_base_rel_ignore_join(root, relid)` (relnode.c) — like `find_base_rel`,
 /// but returns `None` rather than erroring when `relid` references an outer join.
-pub fn find_base_rel_ignore_join(root: &PlannerInfo, relid: i32) -> Option<RelId> {
+pub fn find_base_rel_ignore_join<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    relid: i32,
+) -> Option<RelId> {
     if (relid as u32) < (root.simple_rel_array_size as u32) {
         let rel = root.simple_rel_array[relid as usize];
         if let Some(rel) = rel {
@@ -454,8 +460,8 @@ pub fn find_base_rel_ignore_join(root: &PlannerInfo, relid: i32) -> Option<RelId
         /*
          * For debugging, verify that the relid is an outer join and not weird.
          */
-        let rtekind = rte::rte_rtekind::call(root, relid as u32);
-        if rtekind == RTE_JOIN && rte::rte_jointype::call(root, relid as u32) != JOIN_INNER {
+        let rtekind = rte::rte_rtekind::call(run, root, relid as u32);
+        if rtekind == RTE_JOIN && rte::rte_jointype::call(run, root, relid as u32) != JOIN_INNER {
             return None;
         }
     }
@@ -548,8 +554,9 @@ fn add_join_rel(root: &mut PlannerInfo, joinrel: RelId) {
 /// `build_join_rel(root, joinrelids, outer_rel, inner_rel, sjinfo,
 /// pushed_down_joins, &restrictlist)` (relnode.c) — find or build the join
 /// `RelOptInfo`, returning it plus the restrictlist.
-pub fn build_join_rel(
+pub fn build_join_rel<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrelids: &Relids,
     outer_rel: RelId,
     inner_rel: RelId,
@@ -566,7 +573,7 @@ pub fn build_join_rel(
          * pair of component relations.
          */
         let restrictlist =
-            build_joinrel_restrictlist(root, joinrel, outer_rel, inner_rel, sjinfo)?;
+            build_joinrel_restrictlist(root, run, joinrel, outer_rel, inner_rel, sjinfo)?;
         return Ok((joinrel, restrictlist));
     }
 
@@ -644,7 +651,7 @@ pub fn build_join_rel(
     /*
      * Construct restrict and join clause lists for the new joinrel.
      */
-    let restrictlist = build_joinrel_restrictlist(root, joinrel, outer_rel, inner_rel, sjinfo)?;
+    let restrictlist = build_joinrel_restrictlist(root, run, joinrel, outer_rel, inner_rel, sjinfo)?;
     build_joinrel_joinlist(root, joinrel, outer_rel, inner_rel);
 
     /* Check whether the joinrel has any pending EquivalenceClass joins. */
@@ -994,8 +1001,9 @@ const ROWID_VAR: i32 = -2;
 
 /// `build_joinrel_restrictlist(root, joinrel, outer_rel, inner_rel, sjinfo)`
 /// (relnode.c).
-fn build_joinrel_restrictlist(
+fn build_joinrel_restrictlist<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_rel: RelId,
     inner_rel: RelId,
@@ -1018,6 +1026,7 @@ fn build_joinrel_restrictlist(
     let join_relids = bms::relids_copy::call(&root.rel(joinrel).relids);
     let eq = equivclass::generate_join_implied_equalities::call(
         root,
+        run,
         join_relids,
         outer_relids,
         inner_rel,
@@ -1185,8 +1194,9 @@ pub fn find_childrel_parents(root: &PlannerInfo, rel: RelId) -> Relids {
  * ======================================================================== */
 
 /// `get_baserel_parampathinfo(root, baserel, required_outer)` (relnode.c).
-pub fn get_baserel_parampathinfo(
+pub fn get_baserel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     baserel: RelId,
     required_outer: &Relids,
 ) -> PgResult<Option<alloc::boxed::Box<ParamPathInfo>>> {
@@ -1224,7 +1234,7 @@ pub fn get_baserel_parampathinfo(
     let required_outer_copy = bms::relids_copy::call(required_outer);
     let joinrelids_copy = bms::relids_copy::call(&joinrelids);
     let eqclauses =
-        equivclass::generate_join_implied_equalities::call(root, joinrelids_copy, required_outer_copy, baserel, None)?;
+        equivclass::generate_join_implied_equalities::call(root, run, joinrelids_copy, required_outer_copy, baserel, None)?;
 
     #[cfg(debug_assertions)]
     {
@@ -1275,8 +1285,9 @@ fn join_clause_is_movable_into_relids(
 
 /// `get_joinrel_parampathinfo(root, joinrel, outer_path, inner_path, sjinfo,
 /// required_outer, *restrict_clauses)` (relnode.c).
-pub fn get_joinrel_parampathinfo(
+pub fn get_joinrel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: types_pathnodes::PathId,
     inner_path: types_pathnodes::PathId,
@@ -1336,6 +1347,7 @@ pub fn get_joinrel_parampathinfo(
     let join_and_req_copy = bms::relids_copy::call(&join_and_req);
     let eclauses = equivclass::generate_join_implied_equalities::call(
         root,
+        run,
         join_and_req_copy,
         req_copy,
         joinrel,
@@ -1369,6 +1381,7 @@ pub fn get_joinrel_parampathinfo(
         let roar_copy = bms::relids_copy::call(&real_outer_and_req);
         let eclauses2 = equivclass::generate_join_implied_equalities_for_ecs::call(
             root,
+            run,
             dropped_ecs,
             roar_copy,
             req_copy,
@@ -2254,15 +2267,16 @@ fn seam_find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {
 fn seam_find_join_rel(root: &PlannerInfo, relids: &Relids) -> Option<RelId> {
     find_join_rel(root, relids)
 }
-fn seam_build_join_rel(
+fn seam_build_join_rel<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrelids: &Relids,
     outer_rel: RelId,
     inner_rel: RelId,
     sjinfo: &SpecialJoinInfo,
     pushed_down_joins: &[SpecialJoinInfo],
 ) -> PgResult<(RelId, Vec<RinfoId>)> {
-    build_join_rel(root, joinrelids, outer_rel, inner_rel, sjinfo, pushed_down_joins)
+    build_join_rel(root, run, joinrelids, outer_rel, inner_rel, sjinfo, pushed_down_joins)
 }
 fn seam_build_child_join_rel(
     root: &mut PlannerInfo,
@@ -2283,12 +2297,13 @@ fn seam_min_join_parameterization(
 ) -> Relids {
     min_join_parameterization(root, joinrelids, outer_rel, inner_rel)
 }
-fn seam_get_baserel_parampathinfo(
+fn seam_get_baserel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     baserel: RelId,
     required_outer: &Relids,
 ) -> Option<alloc::boxed::Box<ParamPathInfo>> {
-    get_baserel_parampathinfo(root, baserel, required_outer).expect("get_baserel_parampathinfo")
+    get_baserel_parampathinfo(root, run, baserel, required_outer).expect("get_baserel_parampathinfo")
 }
 fn seam_get_appendrel_parampathinfo(
     root: &mut PlannerInfo,
@@ -2298,8 +2313,9 @@ fn seam_get_appendrel_parampathinfo(
     get_appendrel_parampathinfo(root, appendrel, required_outer)
         .expect("get_appendrel_parampathinfo")
 }
-fn seam_get_joinrel_parampathinfo(
+fn seam_get_joinrel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     outer_path: types_pathnodes::PathId,
     inner_path: types_pathnodes::PathId,
@@ -2309,6 +2325,7 @@ fn seam_get_joinrel_parampathinfo(
 ) -> (Option<alloc::boxed::Box<ParamPathInfo>>, Vec<RinfoId>) {
     get_joinrel_parampathinfo(
         root,
+        run,
         joinrel,
         outer_path,
         inner_path,

@@ -30,7 +30,11 @@ seam_core::seam!(
     /// with `(Node *) parse->jointree`, which at the query top is always the
     /// `FromExpr`; the owner's recursion handles the nested `JoinExpr` /
     /// `RangeTblRef` arms internally.
-    pub fn add_base_rels_to_query<'mcx>(root: &mut PlannerInfo, jtnode: &FromExpr<'mcx>)
+    pub fn add_base_rels_to_query<'mcx>(
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        jtnode: &FromExpr<'mcx>,
+    )
 );
 
 seam_core::seam!(

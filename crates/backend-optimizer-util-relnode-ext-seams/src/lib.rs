@@ -17,6 +17,7 @@ extern crate alloc;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{AppendRelInfo, PathId, PathTarget, PlannerInfo, RelId, RinfoId};
 
 /* ---- plancat.c / parse_relation.c (base-rel construction) -------------- */
@@ -28,7 +29,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_relation_info(root, relationObjectId, inhparent, rel)` (plancat.c) —
     /// fills the base `RelOptInfo` (handle into `rel_arena`) with catalog stats.
-    pub fn get_relation_info(
+    ///
+    /// Threads the planner-run resolver (`run`): the body reaches
+    /// `get_relation_foreign_keys`, which reads RTE fields through the re-signed
+    /// `rte_*` seams that now take `&PlannerRun<'mcx>`.
+    pub fn get_relation_info<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         relation_object_id: Oid,
         inhparent: bool,

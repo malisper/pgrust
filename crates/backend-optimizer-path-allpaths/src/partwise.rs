@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL};
 
 use backend_optimizer_path_joinrels::{is_dummy_rel, mark_dummy_rel};
@@ -34,6 +35,7 @@ fn is_partitioned_rel(rel: &types_pathnodes::RelOptInfo) -> bool {
 pub fn generate_partitionwise_join_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
 ) -> PgResult<()> {
     // Handle only join relations here.
@@ -65,7 +67,7 @@ pub fn generate_partitionwise_join_paths<'mcx>(
         };
 
         // Make partitionwise join paths for this partitioned child-join.
-        generate_partitionwise_join_paths(mcx, root, child_rel)?;
+        generate_partitionwise_join_paths(mcx, root, run, child_rel)?;
 
         // If we failed to make any path for this child, we must give up.
         if root.rel(child_rel).pathlist.is_empty() {
@@ -87,12 +89,12 @@ pub fn generate_partitionwise_join_paths<'mcx>(
 
     // If all child-joins are dummy, the parent join is also dummy.
     if live_children.is_empty() {
-        mark_dummy_rel(root, rel)?;
+        mark_dummy_rel(root, run, rel)?;
         return Ok(());
     }
 
     // Build additional paths for this rel from the child-join paths.
-    add_paths_to_append_rel(mcx, root, rel, &live_children)?;
+    add_paths_to_append_rel(mcx, root, run, rel, &live_children)?;
     Ok(())
 }
 

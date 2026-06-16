@@ -5,11 +5,15 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+use alloc::string::String;
+
 use mcx::{alloc_in, slice_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 
 use crate::heaptuple::{HeapTupleData, MinimalTupleData};
 use types_core::{Oid, TransactionId};
+use types_datum::{flatten_expanded, ExpandedObject};
 
 // ---------------------------------------------------------------------------
 // The canonical value type (Datum unification — KEYSTONE / type-carrier root).
@@ -32,17 +36,34 @@ use types_core::{Oid, TransactionId};
 // ---------------------------------------------------------------------------
 
 /// The one canonical value type — the faithful idiomatic substitute for C's
-/// `Datum`. A by-value scalar (`att->attbyval`) or a detoasted by-reference
-/// image.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// `Datum`, spanning the full set of physical representations a value can take
+/// (mirrors the fmgr-boundary `RefPayload` arms plus the by-value word).
+///
+/// `Clone`/`Debug`/`PartialEq`/`Eq` are hand-implemented (not derived) because
+/// the [`Datum::Expanded`]/[`Datum::Internal`] trait-object arms are not
+/// `Clone`/`Eq`; the impls below mirror `RefPayload`'s flatten-on-clone and
+/// flatten-then-compare conventions and panic for `Internal` (no flat image).
 pub enum Datum<'mcx> {
     /// Pass-by-value scalar (`att->attbyval`); the machine word itself
     /// (C's `uintptr_t` Datum).
     ByVal(usize),
-    /// By-reference value (varlena `attlen == -1`, cstring `attlen == -2`, or
-    /// fixed-length pass-by-reference `attlen > 0`): the verbatim on-disk
-    /// bytes, already detoasted, including any varlena header.
+    /// Flat by-reference value (varlena `attlen == -1`, or fixed-length
+    /// pass-by-reference `attlen > 0`): the verbatim on-disk bytes, already
+    /// detoasted, including any varlena header. (The "Varlena" arm; named
+    /// `ByRef` historically — mirrors `RefPayload::Varlena`.)
     ByRef(PgVec<'mcx, u8>),
+    /// A C `cstring` (`typlen == -2`): owned text, no varlena header, no
+    /// terminating NUL stored. Mirrors `RefPayload::Cstring`.
+    Cstring(String),
+    /// A record / row-as-value (composite type): a fully-formed tuple carried
+    /// by value.
+    Composite(FormedTuple<'mcx>),
+    /// A live expanded object (PG `VARATT_IS_EXPANDED`). Mirrors
+    /// `RefPayload::Expanded`.
+    Expanded(Box<dyn ExpandedObject>),
+    /// The `internal` pseudo-type: an opaque object passed by reference between
+    /// functions within a single backend, never on disk.
+    Internal(Box<dyn core::any::Any>),
 }
 
 impl Default for Datum<'_> {
@@ -65,14 +86,33 @@ impl Datum<'_> {
             Datum::ByVal(_) => {
                 panic!("Datum::as_ref_bytes called on a by-value attribute")
             }
+            Datum::Cstring(s) => s.as_bytes(),
+            Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+                panic!("Datum::as_ref_bytes called on a non-flat value (Composite/Expanded/Internal); flatten first")
+            }
         }
     }
 
     /// Deep copy into `mcx` (C: `datumCopy` into the caller's context).
+    ///
+    /// The `Expanded` arm flattens into its varlena byte image (C: an expanded
+    /// datum copied into another context is `EOH_flatten_into`'d — there is no
+    /// in-place clone of the live object), landing as the `ByRef` arm. The
+    /// `Internal` arm has no copy semantics (C never `datumCopy`s an `internal`
+    /// value) and panics.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Datum<'b>> {
         Ok(match self {
             Datum::ByVal(d) => Datum::ByVal(*d),
             Datum::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
+            Datum::Cstring(s) => Datum::Cstring(s.clone()),
+            Datum::Composite(t) => Datum::Composite(t.clone_in(mcx)?),
+            Datum::Expanded(eo) => {
+                let flat = flatten_expanded(eo.as_ref());
+                Datum::ByRef(slice_in(mcx, &flat)?)
+            }
+            Datum::Internal(_) => {
+                panic!("Datum::Internal cannot be copied into another context (C: internal pseudo-type is never datumCopy'd)")
+            }
         })
     }
 
@@ -91,7 +131,13 @@ impl Datum<'_> {
     fn byval_word(&self) -> usize {
         match self {
             Datum::ByVal(d) => *d,
-            Datum::ByRef(_) => panic!("Datum: scalar accessor called on a by-reference value"),
+            Datum::ByRef(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
+                panic!("Datum: scalar accessor called on a by-reference value")
+            }
         }
     }
 
@@ -234,6 +280,140 @@ impl Datum<'_> {
     /// C: `DatumGetTransactionId(X)`.
     pub fn as_transaction_id(&self) -> TransactionId {
         self.byval_word() as TransactionId
+    }
+
+    // -----------------------------------------------------------------------
+    // Constructors / accessors for the by-reference physical-representation
+    // arms (mirror the `RefPayload` accessor family).
+    // -----------------------------------------------------------------------
+
+    /// C: `CStringGetDatum(X)` — a `cstring` (`typlen == -2`) value.
+    pub fn from_cstring(value: String) -> Self {
+        Datum::Cstring(value)
+    }
+    /// Borrow the `cstring` text, if this is a `Cstring`.
+    pub fn as_cstring(&self) -> Option<&str> {
+        match self {
+            Datum::Cstring(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the composite (record/row) tuple, if this is a `Composite`.
+    pub fn as_composite(&self) -> Option<&FormedTuple<'_>> {
+        match self {
+            Datum::Composite(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// PG `VARATT_IS_EXPANDED`: true iff this is a live expanded object.
+    pub fn is_expanded(&self) -> bool {
+        matches!(self, Datum::Expanded(_))
+    }
+    /// Borrow the expanded object read-only (PG `VARTAG_EXPANDED_RO`).
+    pub fn as_expanded(&self) -> Option<&dyn ExpandedObject> {
+        match self {
+            Datum::Expanded(eo) => Some(eo.as_ref()),
+            _ => None,
+        }
+    }
+    /// Borrow the expanded object read/write (PG `VARTAG_EXPANDED_RW`).
+    pub fn as_expanded_mut(&mut self) -> Option<&mut dyn ExpandedObject> {
+        match self {
+            Datum::Expanded(eo) => Some(eo.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the `internal` pseudo-type opaque object, if this is an `Internal`.
+    pub fn as_internal(&self) -> Option<&dyn core::any::Any> {
+        match self {
+            Datum::Internal(a) => Some(a.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl Clone for Datum<'_> {
+    /// In-context clone. `PgVec`/`String`/`FormedTuple` clone in their own
+    /// context. The `Expanded`/`Internal` trait-object arms have no `Clone`
+    /// (the latter has no copy semantics at all, the former needs an `Mcx` to
+    /// re-home its flattened image — use [`Datum::clone_in`] instead) and
+    /// panic. Both arms are unproduced until their respective producer waves,
+    /// so this is genuinely unreachable today (sanctioned mirror-and-panic).
+    fn clone(&self) -> Self {
+        match self {
+            Datum::ByVal(d) => Datum::ByVal(*d),
+            Datum::ByRef(b) => Datum::ByRef(b.clone()),
+            Datum::Cstring(s) => Datum::Cstring(s.clone()),
+            Datum::Composite(t) => Datum::Composite(t.clone()),
+            Datum::Expanded(_) => {
+                panic!("Datum::Expanded is not bare-Clone (no Mcx to re-home the flat image); use Datum::clone_in — not yet produced, wave 2")
+            }
+            Datum::Internal(_) => {
+                panic!("Datum::Internal is not Clone (C: internal pseudo-type has no copy) — not yet produced, wave 2")
+            }
+        }
+    }
+}
+
+impl core::fmt::Debug for Datum<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Datum::ByVal(d) => f.debug_tuple("ByVal").field(d).finish(),
+            Datum::ByRef(b) => f.debug_tuple("ByRef").field(b).finish(),
+            Datum::Cstring(s) => f.debug_tuple("Cstring").field(s).finish(),
+            Datum::Composite(t) => f.debug_tuple("Composite").field(t).finish(),
+            Datum::Expanded(eo) => f
+                .debug_struct("Expanded")
+                .field("flat_size", &eo.get_flat_size())
+                .finish(),
+            Datum::Internal(_) => f.debug_struct("Internal").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl PartialEq for Datum<'_> {
+    /// Mirrors `RefPayload`: by-value words and flat byte images compare
+    /// directly; an `Expanded` value compares by its flattened image; an
+    /// `Internal` value has no equality (C: `internal` is never compared) and
+    /// panics if compared.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Datum::ByVal(a), Datum::ByVal(b)) => a == b,
+            (Datum::ByRef(a), Datum::ByRef(b)) => a == b,
+            (Datum::Cstring(a), Datum::Cstring(b)) => a == b,
+            (Datum::Composite(a), Datum::Composite(b)) => {
+                a.data == b.data && a.tuple.t_len == b.tuple.t_len
+            }
+            (Datum::Internal(_), _) | (_, Datum::Internal(_)) => {
+                panic!("Datum::Internal is not comparable (C: internal pseudo-type has no equality)")
+            }
+            // Cross-arm or Expanded: fall back to flattened-byte comparison
+            // where both arms have a flat image; otherwise unequal.
+            (a, b) => match (a.flat_image(), b.flat_image()) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            },
+        }
+    }
+}
+
+impl Eq for Datum<'_> {}
+
+impl Datum<'_> {
+    /// The flat varlena/text byte image of a by-reference arm, used by the
+    /// `PartialEq` fallback (mirrors `RefPayload::clone_flat().flatten()`).
+    /// Returns `None` for arms that have no flat byte image (`ByVal`,
+    /// `Composite`, `Internal`).
+    fn flat_image(&self) -> Option<alloc::vec::Vec<u8>> {
+        match self {
+            Datum::ByRef(b) => Some(b.as_slice().to_vec()),
+            Datum::Cstring(s) => Some(s.as_bytes().to_vec()),
+            Datum::Expanded(eo) => Some(flatten_expanded(eo.as_ref())),
+            Datum::ByVal(_) | Datum::Composite(_) | Datum::Internal(_) => None,
+        }
     }
 }
 

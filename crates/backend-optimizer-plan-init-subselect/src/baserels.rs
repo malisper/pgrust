@@ -6,6 +6,7 @@ extern crate alloc;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::rawnodes::FromExpr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::PlannerInfo;
 use types_pathnodes::{RELOPT_BASEREL, RelOptKind};
 
@@ -18,31 +19,39 @@ use backend_optimizer_plan_init_subselect_ext_seams as initext;
 /// relations appearing in the jointree. The top call passes
 /// `(Node *) parse->jointree`, the `FromExpr`; the recursion handles the nested
 /// `JoinExpr` / `RangeTblRef` arms.
-pub fn add_base_rels_to_query(root: &mut PlannerInfo, jtnode: &FromExpr<'_>) -> PgResult<()> {
+pub fn add_base_rels_to_query<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    jtnode: &FromExpr<'_>,
+) -> PgResult<()> {
     for item in jtnode.fromlist.iter() {
-        add_base_rels_to_query_node(root, item)?;
+        add_base_rels_to_query_node(root, run, item)?;
     }
     Ok(())
 }
 
 /// The recursive `Node *` arm of `add_base_rels_to_query`.
-fn add_base_rels_to_query_node(root: &mut PlannerInfo, jtnode: &Node<'_>) -> PgResult<()> {
+fn add_base_rels_to_query_node<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    jtnode: &Node<'_>,
+) -> PgResult<()> {
     match jtnode {
         Node::RangeTblRef(rtr) => {
             let varno = rtr.rtindex;
-            build_simple_rel(root, varno, None)?;
+            build_simple_rel(run, root, varno, None)?;
         }
         Node::FromExpr(f) => {
             for item in f.fromlist.iter() {
-                add_base_rels_to_query_node(root, item)?;
+                add_base_rels_to_query_node(root, run, item)?;
             }
         }
         Node::JoinExpr(j) => {
             if let Some(larg) = j.larg.as_deref() {
-                add_base_rels_to_query_node(root, larg)?;
+                add_base_rels_to_query_node(root, run, larg)?;
             }
             if let Some(rarg) = j.rarg.as_deref() {
-                add_base_rels_to_query_node(root, rarg)?;
+                add_base_rels_to_query_node(root, run, rarg)?;
             }
         }
         other => {

@@ -9,6 +9,7 @@
 //! query ops return a scalar.
 
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 seam_core::seam!(
@@ -131,8 +132,9 @@ seam_core::seam!(
     /// pushed_down_joins, &restrictlist)` (relnode.c) — find or build the join
     /// `RelOptInfo` and compute its restrictlist; returns
     /// `(joinrel, restrictlist)`.
-    pub fn build_join_rel(
+    pub fn build_join_rel<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         joinrelids: &Relids,
         outer_rel: RelId,
         inner_rel: RelId,

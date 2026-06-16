@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PathId, PathKey, PlannerInfo, RelId};
 
 use backend_optimizer_util_pathnode_seams as pathnode;
@@ -16,8 +17,9 @@ use crate::enable_incremental_sort;
 ///
 /// Must not be called until all partial paths for the rel exist. `override_rows`
 /// overrides the rel's rowcount estimate (used for partially-grouped paths).
-pub fn generate_gather_paths(
+pub fn generate_gather_paths<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     override_rows: bool,
 ) -> PgResult<()> {
@@ -35,6 +37,7 @@ pub fn generate_gather_paths(
     let reltarget = root.rel(rel).reltarget.clone();
     let simple_gather_path = pathnode::create_gather_path::call(
         root,
+        run,
         rel,
         cheapest_partial_path,
         reltarget,
@@ -54,7 +57,7 @@ pub fn generate_gather_paths(
         let reltarget = root.rel(rel).reltarget.clone();
         let pk = root.path(subpath).base().pathkeys.clone();
         let path = pathnode::create_gather_merge_path::call(
-            root, rel, subpath, reltarget, pk, &None, rowsp,
+            root, run, rel, subpath, reltarget, pk, &None, rowsp,
         )?;
         pathnode::add_path::call(root, rel, path)?;
     }
@@ -107,8 +110,9 @@ fn get_useful_pathkeys_for_relation(
 /// `generate_useful_gather_paths` (allpaths.c:3235) — like `generate_gather_paths`
 /// but also considers useful orderings for nodes above the Gather Merge, adding
 /// a regular or incremental sort to provide them.
-pub fn generate_useful_gather_paths(
+pub fn generate_useful_gather_paths<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     override_rows: bool,
 ) -> PgResult<()> {
@@ -117,7 +121,7 @@ pub fn generate_useful_gather_paths(
     }
 
     // Generate the regular gather (merge) paths.
-    generate_gather_paths(root, rel, override_rows)?;
+    generate_gather_paths(root, run, rel, override_rows)?;
 
     // Consider incremental sort for interesting orderings.
     let useful_pathkeys_list = get_useful_pathkeys_for_relation(root, rel, true);
@@ -175,7 +179,7 @@ pub fn generate_useful_gather_paths(
             let reltarget = root.rel(rel).reltarget.clone();
             let pk = root.path(subpath).base().pathkeys.clone();
             let path = pathnode::create_gather_merge_path::call(
-                root, rel, subpath, reltarget, pk, &None, rowsp,
+                root, run, rel, subpath, reltarget, pk, &None, rowsp,
             )?;
             pathnode::add_path::call(root, rel, path)?;
         }
