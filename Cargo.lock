@@ -1848,9 +1848,12 @@ name = "backend-access-index-genam"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-heap-heapam-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam",
  "backend-access-table-tableam",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xact-seams",
  "backend-catalog-index-seams",
  "backend-executor-execTuples-seams",
  "backend-utils-cache-relcache-seams",
