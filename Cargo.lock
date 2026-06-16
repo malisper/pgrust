@@ -3632,6 +3632,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-throttle"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "backend-backup-throttle-seams",
+ "backend-storage-ipc-latch-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datetime",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-backup-throttle-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -18649,6 +18674,7 @@ dependencies = [
  "backend-backup-server",
  "backend-backup-sink",
  "backend-backup-sink-support",
+ "backend-backup-throttle",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
