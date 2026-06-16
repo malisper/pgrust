@@ -1167,6 +1167,62 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreatePolicy`'s pg_policy INSERT (commands/policy.c): `policy_id =
+    /// GetNewOidWithIndex(pg_policy_rel, PolicyOidIndexId, Anum_pg_policy_oid)` +
+    /// the 8-column row build (`oid`, `polname` via `namein`, `polrelid`,
+    /// `polcmd`, `polpermissive`, the `polroles` `oid[]` array via
+    /// `construct_array_builtin(.., OIDOID)`, and the `nodeToString`
+    /// `polqual`/`polwithcheck` `pg_node_tree` images — NULL when `None`) +
+    /// `heap_form_tuple(RelationGetDescr(pg_policy_rel), values, isnull)` +
+    /// `CatalogTupleInsert(pg_policy_rel, policy_tuple)`, returning the
+    /// freshly-allocated pg_policy OID. `rel` is the open pg_policy relation.
+    /// `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_policy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_policy::PgPolicyInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AlterPolicy` / `RemoveRoleFromObjectPolicy`'s pg_policy UPDATE
+    /// (commands/policy.c): `heap_modify_tuple(policy_tuple,
+    /// RelationGetDescr(pg_policy_rel), values, isnull, replaces)` +
+    /// `CatalogTupleUpdate(pg_policy_rel, &new_tuple->t_self, new_tuple)` over
+    /// the selectively-replaced columns carried in [`PgPolicyUpdateRow`]
+    /// (`polroles` `oid[]` array, `polqual`/`polwithcheck` `pg_node_tree`
+    /// text-or-NULL). The addressed tuple is located by `(polrelid, polname)`
+    /// (`PolicyPolrelidPolnameIndexId`) for the named-policy case or by OID
+    /// (`PolicyOidIndexId`) for the by-OID case. `policy_tuple` is the original
+    /// scanned tuple (the C `heap_modify_tuple` starts from it so the
+    /// non-replaced columns are preserved); the update is applied at
+    /// `policy_tuple->t_self`. `rel` is the open pg_policy relation. `Err`
+    /// carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_policy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        policy_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_policy::PgPolicyUpdateRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `rename_policy`'s pg_policy rename (commands/policy.c): `policy_tuple =
+    /// heap_copytuple(policy_tuple); namestrcpy(&((Form_pg_policy) GETSTRUCT(
+    /// policy_tuple))->polname, stmt->newname); CatalogTupleUpdate(pg_policy_rel,
+    /// &policy_tuple->t_self, policy_tuple)`. Rewrites only the `polname`
+    /// `NameData` column of the scanned tuple in place, then updates. `rel` is
+    /// the open pg_policy relation; `policy_tuple` is the original scanned
+    /// tuple. `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn rename_policy_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        policy_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        newname: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `UpdateIndexRelation`'s pg_index INSERT (catalog/index.c): build the full
     /// 21-column `pg_index` row from a typed [`PgIndexInsertRow`] (the
     /// `IndexInfo` scalars, the `buildint2vector`/`buildoidvector`-packed

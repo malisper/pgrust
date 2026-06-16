@@ -34,6 +34,7 @@ pub mod pg_collation;
 pub mod pg_database;
 pub mod pg_db_role_setting;
 pub mod pg_index;
+pub mod pg_policy;
 pub mod pg_publication;
 pub mod pg_parameter_acl;
 pub mod pg_subscription;

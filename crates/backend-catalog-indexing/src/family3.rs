@@ -422,9 +422,200 @@ fn catalog_tuple_insert_pg_index<'mcx>(
     CatalogTupleInsert(mcx, rel, &mut tup)
 }
 
+/* ======================================================================== *
+ * pg_policy — CreatePolicy / AlterPolicy inserts & updates (commands/policy.c).
+ * ======================================================================== */
+
+/// `construct_array_builtin(role_oids, nitems, OIDOID)` — a 1-D `Oid[]` array
+/// varlena (the `polroles` column). OID is pass-by-value.
+fn build_oid_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    oids: &[types_core::Oid],
+) -> PgResult<Datum<'mcx>> {
+    const OIDOID: types_core::Oid = 26;
+    let mut elems: mcx::PgVec<'mcx, types_datum::datum::Datum> =
+        mcx::vec_with_capacity_in(mcx, oids.len())?;
+    for &o in oids {
+        elems.push(types_datum::datum::Datum::from_oid(o));
+    }
+    // construct_array(.., OIDOID): elmlen=4, elmbyval=true, elmalign='i'.
+    let buf = backend_utils_adt_arrayfuncs::construct::construct_array(
+        mcx, &elems, OIDOID, 4, true, b'i',
+    )?;
+    Ok(Datum::ByRef(buf))
+}
+
+/// `DirectFunctionCall1(namein, CStringGetDatum(name))` — the `name` type is a
+/// fixed-length 64-byte `NameData`, NUL-padded. `namein` truncates input longer
+/// than `NAMEDATALEN - 1`.
+fn namein_datum<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<Datum<'mcx>> {
+    const NAMEDATALEN: usize = 64;
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(NAMEDATALEN - 1);
+    let mut image = [0u8; NAMEDATALEN];
+    image[..len].copy_from_slice(&bytes[..len]);
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+}
+
+/// `CreatePolicy`'s pg_policy INSERT (commands/policy.c): allocate the OID,
+/// form the 8-column row, `CatalogTupleInsert`, return the OID.
+fn catalog_tuple_insert_pg_policy<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_policy::PgPolicyInsertRow,
+) -> PgResult<types_core::Oid> {
+    use cat::pg_policy as pp;
+
+    // policy_id = GetNewOidWithIndex(pg_policy_rel, PolicyOidIndexId,
+    //                                Anum_pg_policy_oid);
+    let policy_id = GetNewOidWithIndex(rel, pp::PolicyOidIndexId, pp::Anum_pg_policy_oid)?;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    for _ in 0..pp::Natts_pg_policy {
+        values.push(Datum::null());
+        isnull.push(false);
+    }
+
+    // values[Anum_pg_policy_oid - 1]          = ObjectIdGetDatum(policy_id);
+    // values[Anum_pg_policy_polrelid - 1]     = ObjectIdGetDatum(table_id);
+    // values[Anum_pg_policy_polname - 1]      = DirectFunctionCall1(namein, ...);
+    // values[Anum_pg_policy_polcmd - 1]       = CharGetDatum(polcmd);
+    // values[Anum_pg_policy_polpermissive - 1]= BoolGetDatum(stmt->permissive);
+    // values[Anum_pg_policy_polroles - 1]     = PointerGetDatum(role_ids);
+    values[pp::Anum_pg_policy_oid as usize - 1] = Datum::from_oid(policy_id);
+    values[pp::Anum_pg_policy_polname as usize - 1] = namein_datum(mcx, &row.polname)?;
+    values[pp::Anum_pg_policy_polrelid as usize - 1] = Datum::from_oid(row.polrelid);
+    values[pp::Anum_pg_policy_polcmd as usize - 1] = Datum::from_char(row.polcmd);
+    values[pp::Anum_pg_policy_polpermissive as usize - 1] = Datum::from_bool(row.polpermissive);
+    values[pp::Anum_pg_policy_polroles as usize - 1] = build_oid_array(mcx, &row.polroles)?;
+
+    // Add qual / WITH CHECK qual if present, else isnull.
+    match &row.polqual {
+        Some(s) => {
+            values[pp::Anum_pg_policy_polqual as usize - 1] = cstring_to_text_datum(mcx, s)?;
+        }
+        None => isnull[pp::Anum_pg_policy_polqual as usize - 1] = true,
+    }
+    match &row.polwithcheck {
+        Some(s) => {
+            values[pp::Anum_pg_policy_polwithcheck as usize - 1] = cstring_to_text_datum(mcx, s)?;
+        }
+        None => isnull[pp::Anum_pg_policy_polwithcheck as usize - 1] = true,
+    }
+
+    // policy_tuple = heap_form_tuple(RelationGetDescr(pg_policy_rel), values, isnull);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &isnull)?;
+    // CatalogTupleInsert(pg_policy_rel, policy_tuple);
+    CatalogTupleInsert(mcx, rel, &mut tup)?;
+
+    Ok(policy_id)
+}
+
+/// `AlterPolicy` / `RemoveRoleFromObjectPolicy`'s pg_policy UPDATE
+/// (commands/policy.c): `heap_modify_tuple` over the selectively-replaced
+/// columns, then `CatalogTupleUpdate`.
+fn catalog_tuple_update_pg_policy<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    policy_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    row: &cat::pg_policy::PgPolicyUpdateRow,
+) -> PgResult<()> {
+    use cat::pg_policy as pp;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    for _ in 0..pp::Natts_pg_policy {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    // replaces[Anum_pg_policy_polroles - 1] = true; values[..] = PointerGetDatum(role_ids);
+    if let Some(role_oids) = &row.polroles {
+        replaces[pp::Anum_pg_policy_polroles as usize - 1] = true;
+        values[pp::Anum_pg_policy_polroles as usize - 1] = build_oid_array(mcx, role_oids)?;
+    }
+
+    // replaces[Anum_pg_policy_polqual - 1] = true; values[..] = CStringGetTextDatum(...) (or NULL).
+    if let Some(qual) = &row.polqual {
+        replaces[pp::Anum_pg_policy_polqual as usize - 1] = true;
+        match qual {
+            Some(s) => {
+                values[pp::Anum_pg_policy_polqual as usize - 1] = cstring_to_text_datum(mcx, s)?
+            }
+            None => isnull[pp::Anum_pg_policy_polqual as usize - 1] = true,
+        }
+    }
+
+    if let Some(wc) = &row.polwithcheck {
+        replaces[pp::Anum_pg_policy_polwithcheck as usize - 1] = true;
+        match wc {
+            Some(s) => {
+                values[pp::Anum_pg_policy_polwithcheck as usize - 1] =
+                    cstring_to_text_datum(mcx, s)?
+            }
+            None => isnull[pp::Anum_pg_policy_polwithcheck as usize - 1] = true,
+        }
+    }
+
+    // new_tuple = heap_modify_tuple(policy_tuple, RelationGetDescr(pg_policy_rel),
+    //                               values, isnull, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, policy_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    // CatalogTupleUpdate(pg_policy_rel, &new_tuple->t_self, new_tuple);
+    crate::keystone::CatalogTupleUpdate(mcx, rel, policy_tuple.tuple.t_self, &mut new_tuple)
+}
+
+/// `rename_policy`'s pg_policy rename (commands/policy.c): rewrite only the
+/// `polname` `NameData` column of the scanned tuple, then `CatalogTupleUpdate`.
+fn rename_policy_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    policy_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    newname: &str,
+) -> PgResult<()> {
+    use cat::pg_policy as pp;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    for _ in 0..pp::Natts_pg_policy {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    // namestrcpy(&GETSTRUCT(policy_tuple)->polname, stmt->newname);
+    replaces[pp::Anum_pg_policy_polname as usize - 1] = true;
+    values[pp::Anum_pg_policy_polname as usize - 1] = namein_datum(mcx, newname)?;
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, policy_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    crate::keystone::CatalogTupleUpdate(mcx, rel, policy_tuple.tuple.t_self, &mut new_tuple)
+}
+
 /// Install the F3 DDL-cluster catalog-write seams. Wired from
 /// [`crate::init_seams`].
 pub fn install() {
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_policy::set(
+        catalog_tuple_insert_pg_policy,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_policy::set(
+        catalog_tuple_update_pg_policy,
+    );
+    backend_catalog_indexing_seams::rename_policy_tuple::set(rename_policy_tuple);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_class::set(
         catalog_tuple_insert_pg_class,
     );

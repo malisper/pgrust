@@ -6420,6 +6420,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-policy"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-policy-seams",
+ "backend-nodes-core-seams",
+ "backend-nodes-read-seams",
+ "backend-parser-analyze-seams",
+ "backend-parser-clause",
+ "backend-parser-parse-collate",
+ "backend-parser-relation",
+ "backend-rewrite-core",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-cache-inval",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-policy-seams"
 version = "0.0.0"
 dependencies = [
@@ -19232,6 +19283,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-operatorcmds",
+ "backend-commands-policy",
  "backend-commands-portalcmds",
  "backend-commands-proclang",
  "backend-commands-publicationcmds",
