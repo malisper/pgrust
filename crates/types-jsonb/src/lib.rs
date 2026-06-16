@@ -20,3 +20,4 @@ pub use types_datum::VARHDRSZ;
 
 pub mod backend_utils_adt_jsonb_util;
 pub mod jsonb;
+pub mod jsonb_gin;

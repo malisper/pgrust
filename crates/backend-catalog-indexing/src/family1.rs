@@ -1056,6 +1056,132 @@ fn update_pg_proc<'mcx>(
     CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)
 }
 
+/* ======================================================================== *
+ * pg_aggregate — AggregateCreate (no OID column; the key column aggfnoid is
+ * the pre-assigned pg_proc OID). 20 fixed columns + 2 nullable text columns
+ * (agginitval, aggminitval).
+ * ======================================================================== */
+
+/// The `values[]` / `nulls[]` arrays `AggregateCreate` builds for one
+/// `pg_aggregate` row (pg_aggregate.c:653-687). Every fixed column is non-null;
+/// `agginitval` / `aggminitval` are NULL when absent.
+fn aggregate_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    row: &cat::pg_aggregate::PgAggregateInsertRow,
+) -> PgResult<(
+    [Datum<'mcx>; cat::pg_aggregate::Natts_pg_aggregate],
+    [bool; cat::pg_aggregate::Natts_pg_aggregate],
+)> {
+    let f = &row.form;
+    // The column value placeholder for a NULL text column (nulls[] set below).
+    let null_text = Datum::ByVal(0);
+    let agginitval: Datum<'mcx> = match &row.agginitval {
+        // values[Anum_pg_aggregate_agginitval - 1] = CStringGetTextDatum(agginitval);
+        Some(s) => cstring_to_text_datum(mcx, s)?,
+        None => null_text.clone(),
+    };
+    let aggminitval: Datum<'mcx> = match &row.aggminitval {
+        // values[Anum_pg_aggregate_aggminitval - 1] = CStringGetTextDatum(aggminitval);
+        Some(s) => cstring_to_text_datum(mcx, s)?,
+        None => null_text,
+    };
+
+    let values = [
+        // values[Anum_pg_aggregate_aggfnoid - 1] = ObjectIdGetDatum(procOid);
+        Datum::from_oid(f.aggfnoid),
+        // values[Anum_pg_aggregate_aggkind - 1] = CharGetDatum(aggKind);
+        Datum::from_char(f.aggkind),
+        // values[Anum_pg_aggregate_aggnumdirectargs - 1] = Int16GetDatum(numDirectArgs);
+        Datum::from_i16(f.aggnumdirectargs),
+        // values[Anum_pg_aggregate_aggtransfn - 1] = ObjectIdGetDatum(transfn);
+        Datum::from_oid(f.aggtransfn),
+        // values[Anum_pg_aggregate_aggfinalfn - 1] = ObjectIdGetDatum(finalfn);
+        Datum::from_oid(f.aggfinalfn),
+        // values[Anum_pg_aggregate_aggcombinefn - 1] = ObjectIdGetDatum(combinefn);
+        Datum::from_oid(f.aggcombinefn),
+        // values[Anum_pg_aggregate_aggserialfn - 1] = ObjectIdGetDatum(serialfn);
+        Datum::from_oid(f.aggserialfn),
+        // values[Anum_pg_aggregate_aggdeserialfn - 1] = ObjectIdGetDatum(deserialfn);
+        Datum::from_oid(f.aggdeserialfn),
+        // values[Anum_pg_aggregate_aggmtransfn - 1] = ObjectIdGetDatum(mtransfn);
+        Datum::from_oid(f.aggmtransfn),
+        // values[Anum_pg_aggregate_aggminvtransfn - 1] = ObjectIdGetDatum(minvtransfn);
+        Datum::from_oid(f.aggminvtransfn),
+        // values[Anum_pg_aggregate_aggmfinalfn - 1] = ObjectIdGetDatum(mfinalfn);
+        Datum::from_oid(f.aggmfinalfn),
+        // values[Anum_pg_aggregate_aggfinalextra - 1] = BoolGetDatum(finalfnExtraArgs);
+        Datum::from_bool(f.aggfinalextra),
+        // values[Anum_pg_aggregate_aggmfinalextra - 1] = BoolGetDatum(mfinalfnExtraArgs);
+        Datum::from_bool(f.aggmfinalextra),
+        // values[Anum_pg_aggregate_aggfinalmodify - 1] = CharGetDatum(finalfnModify);
+        Datum::from_char(f.aggfinalmodify),
+        // values[Anum_pg_aggregate_aggmfinalmodify - 1] = CharGetDatum(mfinalfnModify);
+        Datum::from_char(f.aggmfinalmodify),
+        // values[Anum_pg_aggregate_aggsortop - 1] = ObjectIdGetDatum(sortop);
+        Datum::from_oid(f.aggsortop),
+        // values[Anum_pg_aggregate_aggtranstype - 1] = ObjectIdGetDatum(aggTransType);
+        Datum::from_oid(f.aggtranstype),
+        // values[Anum_pg_aggregate_aggtransspace - 1] = Int32GetDatum(aggTransSpace);
+        Datum::from_i32(f.aggtransspace),
+        // values[Anum_pg_aggregate_aggmtranstype - 1] = ObjectIdGetDatum(aggmTransType);
+        Datum::from_oid(f.aggmtranstype),
+        // values[Anum_pg_aggregate_aggmtransspace - 1] = Int32GetDatum(aggmTransSpace);
+        Datum::from_i32(f.aggmtransspace),
+        // values[Anum_pg_aggregate_agginitval - 1] = CStringGetTextDatum(agginitval);
+        agginitval,
+        // values[Anum_pg_aggregate_aggminitval - 1] = CStringGetTextDatum(aggminitval);
+        aggminitval,
+    ];
+
+    // for (i = 0; i < Natts_pg_aggregate; i++) nulls[i] = false;
+    let mut nulls = [false; cat::pg_aggregate::Natts_pg_aggregate];
+    // if (agginitval) ... else nulls[Anum_pg_aggregate_agginitval - 1] = true;
+    if row.agginitval.is_none() {
+        nulls[cat::pg_aggregate::Anum_pg_aggregate_agginitval as usize - 1] = true;
+    }
+    // if (aggminitval) ... else nulls[Anum_pg_aggregate_aggminitval - 1] = true;
+    if row.aggminitval.is_none() {
+        nulls[cat::pg_aggregate::Anum_pg_aggregate_aggminitval as usize - 1] = true;
+    }
+    Ok((values, nulls))
+}
+
+fn insert_pg_aggregate<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_aggregate::PgAggregateInsertRow,
+) -> PgResult<()> {
+    let (values, nulls) = aggregate_values(mcx, row)?;
+    // tup = heap_form_tuple(tupDesc, values, nulls);
+    // CatalogTupleInsert(aggdesc, tup);
+    form_and_insert(mcx, rel, &values, &nulls)
+}
+
+fn update_pg_aggregate<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    row: &cat::pg_aggregate::PgAggregateInsertRow,
+    replaces: cat::pg_aggregate::PgAggregateReplaces,
+) -> PgResult<()> {
+    // replaces[] starts all-true (pg_aggregate.c:658); aggfnoid / aggkind /
+    // aggnumdirectargs are pinned to the old tuple (pg_aggregate.c:720-722), so
+    // heap_modify_tuple takes them from `oldtup`.
+    let mut repl = [true; cat::pg_aggregate::Natts_pg_aggregate];
+    repl[cat::pg_aggregate::Anum_pg_aggregate_aggfnoid as usize - 1] = replaces.aggfnoid;
+    repl[cat::pg_aggregate::Anum_pg_aggregate_aggkind as usize - 1] = replaces.aggkind;
+    repl[cat::pg_aggregate::Anum_pg_aggregate_aggnumdirectargs as usize - 1] =
+        replaces.aggnumdirectargs;
+
+    let (values, nulls) = aggregate_values(mcx, row)?;
+
+    // tup = heap_modify_tuple(oldtup, tupDesc, values, nulls, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_modify_tuple(mcx, oldtup, &tupdesc, &values, &nulls, &repl)?;
+    // CatalogTupleUpdate(aggdesc, &tup->t_self, tup);
+    CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)
+}
+
 /// Install the F1 per-catalog typed seams whose substrate is fully present
 /// (pure `heap_form_tuple` + engine, plus `GetNewOidWithIndex` for the
 /// OID-column catalogs). Wired from [`crate::init_seams`].
@@ -1086,4 +1212,6 @@ pub fn install() {
     backend_catalog_indexing_seams::get_new_oid_with_index_pg_proc::set(get_new_oid_pg_proc);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_proc::set(insert_pg_proc);
     backend_catalog_indexing_seams::catalog_tuple_update_pg_proc::set(update_pg_proc);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_aggregate::set(insert_pg_aggregate);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_aggregate::set(update_pg_aggregate);
 }

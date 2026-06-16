@@ -1,0 +1,25 @@
+[package]
+name = "backend-utils-adt-jsonb-gin"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_jsonb_gin"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-jsonb = { path = "../types-jsonb" }
+types-jsonpath = { path = "../types-jsonpath" }
+common-hashfn = { path = "../common-hashfn" }
+backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
+backend-utils-adt-jsonpath = { path = "../backend-utils-adt-jsonpath" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-utils-adt-jsonb-gin-seams = { path = "../backend-utils-adt-jsonb-gin-seams" }
+
+[dev-dependencies]
+common-hashfn-seams = { path = "../common-hashfn-seams" }

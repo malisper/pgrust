@@ -31,7 +31,7 @@ backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
-backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
