@@ -19,15 +19,21 @@
 //! These collapse onto the owners' real types when those units land. `None`
 //! collections are the C `NIL`/NULL array.
 
-use mcx::{MemoryContext, PgBox, PgVec};
+use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid};
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, SlotId};
 use crate::nodeindexscan::Plan;
+use crate::nodes::NodeTag;
 use crate::primnodes::{Expr, TargetEntry};
+
+/// `T_Agg` (nodes/nodetags.h, PostgreSQL 18.3 generated order: Group=364,
+/// Agg=365, WindowAgg=366).
+pub const T_Agg: NodeTag = NodeTag(365);
 
 // ---------------------------------------------------------------------------
 // AggStrategy / AggSplit (nodes/nodes.h)
@@ -184,6 +190,76 @@ pub struct Agg<'mcx> {
     pub grouping_sets: Option<PgVec<'mcx, PgVec<'mcx, i32>>>,
     /// `List *chain` — chained Agg/Sort nodes.
     pub chain: Option<PgVec<'mcx, PgBox<'mcx, Agg<'mcx>>>>,
+}
+
+impl Agg<'_> {
+    /// Deep copy of the `Agg` plan node (and its `Plan` subtree) into `mcx`
+    /// (C: `copyObject` shape). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Agg<'b>> {
+        let clone_oid_idx = |src: &Option<PgVec<'_, Oid>>| -> PgResult<Option<PgVec<'b, Oid>>> {
+            match src {
+                Some(v) => {
+                    let mut out = vec_with_capacity_in(mcx, v.len())?;
+                    for x in v.iter() {
+                        out.push(*x);
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let grp_col_idx = match &self.grp_col_idx {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let grouping_sets = match &self.grouping_sets {
+            Some(sets) => {
+                let mut out = vec_with_capacity_in(mcx, sets.len())?;
+                for set in sets.iter() {
+                    let mut inner = vec_with_capacity_in(mcx, set.len())?;
+                    for x in set.iter() {
+                        inner.push(*x);
+                    }
+                    out.push(inner);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let chain = match &self.chain {
+            Some(list) => {
+                let mut out = vec_with_capacity_in(mcx, list.len())?;
+                for a in list.iter() {
+                    out.push(alloc_in(mcx, a.clone_in(mcx)?)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(Agg {
+            plan: self.plan.clone_in(mcx)?,
+            aggstrategy: self.aggstrategy,
+            aggsplit: self.aggsplit,
+            num_cols: self.num_cols,
+            grp_col_idx,
+            grp_operators: clone_oid_idx(&self.grp_operators)?,
+            grp_collations: clone_oid_idx(&self.grp_collations)?,
+            num_groups: self.num_groups,
+            transition_space: self.transition_space,
+            agg_params: match &self.agg_params {
+                Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
+            grouping_sets,
+            chain,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

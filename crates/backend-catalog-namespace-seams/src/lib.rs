@@ -341,3 +341,12 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `CheckSetNamespace(oldNspOid, nspOid)` (catalog/namespace.c): the common
+    /// checks when moving an object between schemas — error if same schema, and
+    /// reject moving into/out of `pg_temp`/`pg_catalog`. Consumed by
+    /// `AlterTypeNamespaceInternal` (typecmds.c). Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn check_set_namespace(old_nsp_oid: Oid, nsp_oid: Oid) -> PgResult<()>
+);

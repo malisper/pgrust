@@ -192,3 +192,12 @@ seam_core::seam!(
         msg: &SharedInvalidationMessage,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CacheInvalidateHeapTuple(rel, tuple, NULL)` (inval.c) reduced to the
+    /// (classId, objectId) the typecmds ALTER DOMAIN paths need: send out an
+    /// sinval message for the catalog row so dependent plans get rebuilt, when
+    /// the command itself does not change the row. The owner re-fetches the
+    /// tuple by OID. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn cache_invalidate_heap_tuple(class_id: Oid, object_id: Oid) -> PgResult<()>
+);

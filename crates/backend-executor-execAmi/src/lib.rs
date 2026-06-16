@@ -56,6 +56,7 @@ use backend_executor_nodeSort as nodeSort;
 use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
 use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
 use backend_executor_nodeTidscan as nodeTidscan;
+use backend_executor_nodeWorktablescan as nodeWorktablescan;
 use backend_executor_nodeUnique as nodeUnique;
 use backend_executor_nodeValuesscan as nodeValuesscan;
 use backend_executor_nodeWindowAgg as nodeWindowAgg;
@@ -262,6 +263,10 @@ pub fn exec_re_scan<'mcx>(
             }
             // case T_TidScanState: ExecReScanTidScan((TidScanState *) node);
             PlanStateNode::TidScan(m) => nodeTidscan::ExecReScanTidScan(m, estate)?,
+            // case T_WorkTableScanState: ExecReScanWorkTableScan((WorkTableScanState *) node);
+            PlanStateNode::WorkTableScan(m) => {
+                nodeWorktablescan::ExecReScanWorkTableScan(m, estate)?
+            }
             // case T_SubqueryScanState: ExecReScanSubqueryScan((SubqueryScanState *) node);
             PlanStateNode::SubqueryScan(m) => {
                 nodeSubqueryscan::ExecReScanSubqueryScan(m, estate)?
@@ -309,8 +314,8 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
 
             // The remaining C arms (T_SampleScanState/T_TidRangeScanState/
-            // T_FunctionScanState/T_WorkTableScanState/T_IncrementalSortState/
-            // T_AggState/T_LockRowsState) operate on node-state variants not yet
+            // T_FunctionScanState/T_IncrementalSortState/T_AggState/
+            // T_LockRowsState) operate on node-state variants not yet
             // present in PlanStateNode, so their tags cannot occur. C default:
             //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
             other => return Err(unrecognized_node_type(other.tag())),

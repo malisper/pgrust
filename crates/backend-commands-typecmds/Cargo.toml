@@ -35,6 +35,16 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 
 # types crates
 types-core = { path = "../types-core" }
@@ -45,3 +55,4 @@ types-nodes = { path = "../types-nodes" }
 types-opclass = { path = "../types-opclass" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }

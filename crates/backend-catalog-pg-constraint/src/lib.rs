@@ -30,7 +30,8 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_confrelid, Anum_pg_constraint_confupdtype, Anum_pg_constraint_conindid,
     Anum_pg_constraint_coninhcount, Anum_pg_constraint_conislocal, Anum_pg_constraint_conname,
     Anum_pg_constraint_connamespace, Anum_pg_constraint_connoinherit, Anum_pg_constraint_conparentid,
-    Anum_pg_constraint_conperiod, Anum_pg_constraint_conrelid, Anum_pg_constraint_contype,
+    Anum_pg_constraint_conbin, Anum_pg_constraint_conperiod, Anum_pg_constraint_conrelid,
+    Anum_pg_constraint_contype,
     Anum_pg_constraint_contypid, Anum_pg_constraint_convalidated, Anum_pg_constraint_oid,
     ConKeyArray, ConstraintCategory, ConstraintFieldUpdate, FormData_pg_constraint, OidArray,
     PgConstraintInsertRow, ConstraintNameNspIndexId, ConstraintRelidTypidNameIndexId,
@@ -43,9 +44,10 @@ use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidI
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::bitmapset::Bitmapset;
+use types_nodes::parsenodes::DropBehavior;
 use types_nodes::nodes::{Node, NodePtr};
 use types_nodes::primnodes::Expr;
 use types_rel::RelationData;
@@ -67,6 +69,7 @@ use backend_catalog_pg_depend_seams as pg_depend_seams;
 use backend_commands_indexcmds_seams as indexcmds_seams;
 use backend_nodes_core::bitmapset::{bms_add_member, bms_is_subset};
 use backend_utils_adt_format_type_seams as format_type_seams;
+use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 
@@ -931,6 +934,7 @@ pub fn AdjustNotNullInheritance(
                 conislocal: conform.conislocal,
                 coninhcount: conform.coninhcount,
                 conparentid: conform.conparentid,
+                convalidated: conform.convalidated,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &pg_constraint,
@@ -1232,6 +1236,7 @@ pub fn RenameConstraintById(mcx: Mcx<'_>, conId: Oid, newname: &str) -> PgResult
         conislocal: conform.conislocal,
         coninhcount: conform.coninhcount,
         conparentid: conform.conparentid,
+        convalidated: conform.convalidated,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, con.tid, &fields)?;
 
@@ -1286,6 +1291,7 @@ pub fn AlterConstraintNamespaces(
                 conislocal: conform.conislocal,
                 coninhcount: conform.coninhcount,
                 conparentid: conform.conparentid,
+                convalidated: conform.convalidated,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&conRel, row.tid, &fields)?;
 
@@ -1362,6 +1368,7 @@ pub fn ConstraintSetParentConstraint(
             conislocal: constrForm.conislocal,
             coninhcount: constrForm.coninhcount,
             conparentid: constrForm.conparentid,
+            convalidated: constrForm.convalidated,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -1398,6 +1405,7 @@ pub fn ConstraintSetParentConstraint(
             conislocal: constrForm.conislocal,
             coninhcount: constrForm.coninhcount,
             conparentid: constrForm.conparentid,
+            convalidated: constrForm.convalidated,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -2068,9 +2076,215 @@ fn constraint_inval_callback_adapter(_cacheid: i32, hashvalue: u32) {
 }
 
 /// Install this crate's implementations into `backend-catalog-pg-constraint-seams`.
+/// `findDomainNotNullConstraint(typid)` reduced to the OID the typecmds caller
+/// reads (`((Form_pg_constraint) GETSTRUCT(conTup))->oid`): the domain's
+/// validated NOT NULL constraint OID, or `InvalidOid`. Consumed by
+/// `AlterDomainNotNull` (typecmds.c).
+fn find_domain_not_null_constraint_oid(mcx: Mcx<'_>, typid: Oid) -> PgResult<Oid> {
+    let mut conoid = InvalidOid;
+
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let pg_constraint = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let key = [oid_key(Anum_pg_constraint_contypid, typid)?];
+
+    systable_scan_foreach(&pg_constraint, ConstraintRelidTypidNameIndexId, &key, |row| {
+        /* We're looking for a NOTNULL constraint that's marked validated. */
+        if row.form.contype != CONSTRAINT_NOTNULL {
+            return Ok(true);
+        }
+        if !row.form.convalidated {
+            return Ok(true);
+        }
+        conoid = row.form.oid;
+        Ok(false)
+    })?;
+
+    pg_constraint.close(AccessShareLock)?;
+    let _ = mcx;
+    Ok(conoid)
+}
+
+/// The pg_constraint half of `AlterDomainDropConstraint` (typecmds.c:2860):
+/// `systable_beginscan(ConstraintRelidTypidNameIndexId, conrelid=Invalid,
+/// contypid=domainoid, conname=constrName)` finds the at-most-one matching row;
+/// for a `CONSTRAINT_NOTNULL` row the caller must clear `pg_type.typnotnull`
+/// (reported via the `was_notnull` flag), then `performDeletion(conobj,
+/// behavior, 0)`. Returns `(found, was_notnull)`. The caller renders the
+/// `missing_ok` NOTICE/ERROR (it owns the `TypeName`).
+fn drop_domain_constraint(
+    mcx: Mcx<'_>,
+    domainoid: Oid,
+    constr_name: String,
+    behavior: DropBehavior,
+) -> PgResult<(bool, bool)> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    let skey = [
+        oid_key(Anum_pg_constraint_conrelid, InvalidOid)?,
+        oid_key(Anum_pg_constraint_contypid, domainoid)?,
+        name_key(mcx, Anum_pg_constraint_conname, &constr_name)?,
+    ];
+
+    /* There can be at most one matching row. */
+    let mut target: Option<(Oid, bool)> = None;
+    systable_scan_foreach(&conrel, ConstraintRelidTypidNameIndexId, &skey, |row| {
+        target = Some((row.form.oid, row.form.contype == CONSTRAINT_NOTNULL));
+        Ok(false)
+    })?;
+
+    let (found, was_notnull) = match target {
+        Some((conoid, was_notnull)) => {
+            /* performDeletion(&conobj, behavior, 0). */
+            dependency_seams::perform_deletion::call(
+                CONSTRAINT_RELATION_ID,
+                conoid,
+                0,
+                behavior,
+                0,
+            )?;
+            (true, was_notnull)
+        }
+        None => (false, false),
+    };
+
+    conrel.close(RowExclusiveLock)?;
+
+    Ok((found, was_notnull))
+}
+
+/// The pg_constraint catalog half of `AlterDomainValidateConstraint`
+/// (typecmds.c:3031): locate the CHECK constraint of `domainoid` named
+/// `constr_name`, returning its OID and cooked `conbin` text for the executor
+/// VALIDATE pass. Errors if the constraint does not exist or is not a CHECK
+/// constraint.
+fn find_domain_check_constraint(
+    mcx: Mcx<'_>,
+    domainoid: Oid,
+    constr_name: String,
+) -> PgResult<(Oid, String)> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    let skey = [
+        oid_key(Anum_pg_constraint_conrelid, InvalidOid)?,
+        oid_key(Anum_pg_constraint_contypid, domainoid)?,
+        name_key(mcx, Anum_pg_constraint_conname, &constr_name)?,
+    ];
+
+    /*
+     * There can be at most one matching row. We re-implement the scan loop
+     * (rather than `systable_scan_foreach`) so the deformed `conbin` Datum
+     * survives long enough to detoast — the shared helper discards `values`.
+     */
+    let mut scan =
+        genam_seams::systable_beginscan::call(&conrel, ConstraintRelidTypidNameIndexId, true, None, &skey)?;
+    let scratch = MemoryContext::new("pg_constraint scan row");
+    let smcx = scratch.mcx();
+    let result = match genam_seams::systable_getnext::call(smcx, scan.desc_mut())? {
+        None => {
+            scan.end()?;
+            conrel.close(RowExclusiveLock)?;
+            return Err(PgError::new(
+                ERROR,
+                format!(
+                    "constraint \"{}\" of domain \"{}\" does not exist",
+                    constr_name,
+                    format_type_seams::format_type_be_str::call(domainoid)?
+                ),
+            )
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+        }
+        Some(tup) => {
+            let cols = heap_deform_tuple(smcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+            let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+            for (value, _null) in cols.iter() {
+                values.push(value.clone());
+            }
+            let form = form_pg_constraint(&values);
+
+            if form.contype != CONSTRAINT_CHECK {
+                scan.end()?;
+                conrel.close(RowExclusiveLock)?;
+                return Err(PgError::new(
+                    ERROR,
+                    format!(
+                        "constraint \"{}\" of domain \"{}\" is not a check constraint",
+                        constr_name,
+                        format_type_seams::format_type_be_str::call(domainoid)?
+                    ),
+                )
+                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE));
+            }
+
+            /* val = SysCacheGetAttrNotNull(CONSTROID, tuple, conbin);
+             * conbin = TextDatumGetCString(val); */
+            let conbin_datum = &values[Anum_pg_constraint_conbin as usize - 1];
+            let conbin = varlena_seams::text_to_cstring_v::call(mcx, conbin_datum)?
+                .as_str()
+                .to_string();
+            (form.oid, conbin)
+        }
+    };
+
+    scan.end()?;
+    conrel.close(RowExclusiveLock)?;
+
+    Ok(result)
+}
+
+/// `copy_con->convalidated = true; CatalogTupleUpdate` for the constraint OID
+/// (the catalog-write half of `AlterDomainValidateConstraint`,
+/// typecmds.c:3106). Reads the existing row by OID and re-stores it with
+/// `convalidated` flipped on.
+fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    let con = match syscache_seams::search_constraint_form_by_oid::call(con_oid)? {
+        Some(c) => c,
+        None => {
+            conrel.close(RowExclusiveLock)?;
+            return Err(PgError::error(format!(
+                "cache lookup failed for constraint {con_oid}"
+            )));
+        }
+    };
+    let conform = con.form;
+
+    let fields = ConstraintFieldUpdate {
+        conname: conform.conname,
+        connamespace: conform.connamespace,
+        conislocal: conform.conislocal,
+        coninhcount: conform.coninhcount,
+        conparentid: conform.conparentid,
+        convalidated: true,
+    };
+    indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
+
+    conrel.close(RowExclusiveLock)?;
+
+    Ok(())
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_constraint_seams as seams;
 
+    seams::find_domain_not_null_constraint_oid::set(|mcx, typid| {
+        find_domain_not_null_constraint_oid(mcx, typid)
+    });
+    seams::drop_domain_constraint::set(|mcx, domainoid, constr_name, behavior| {
+        drop_domain_constraint(mcx, domainoid, constr_name, behavior)
+    });
+    seams::find_domain_check_constraint::set(|mcx, domainoid, constr_name| {
+        find_domain_check_constraint(mcx, domainoid, constr_name)
+    });
+    seams::set_constraint_validated::set(set_constraint_validated);
+    seams::alter_constraint_namespaces::set(
+        |_mcx, owner_id, old_nsp, new_nsp, is_type, objs_moved| {
+            AlterConstraintNamespaces(owner_id, old_nsp, new_nsp, is_type, objs_moved)
+        },
+    );
     seams::register_constraint_inval_callback::set(register_constraint_inval_callback);
     seams::load_fk_constraint::set(load_fk_constraint);
     seams::constraint_hash_value::set(constraint_hash_value);

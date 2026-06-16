@@ -84,6 +84,7 @@ pub fn init_all() {
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
+    backend_catalog_pg_collation::init_seams();
     backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
@@ -1412,12 +1413,22 @@ mod recurrence_guard {
         ("backend_storage_buffer_bufmgr", "flush_database_buffers"),
         // DESIGN_DEBT (TD-INDEXING-PERCATALOG-OWNERS): backend-catalog-indexing's
         // per-catalog forming/mutation bodies have now been PORTED + installed in
-        // family2.rs (pg_type, pg_constraint, pg_depend/pg_shdepend, pg_sequence,
-        // pg_class/pg_index, pg_largeobject, pg_db_role_setting, namespace, the
-        // foreign-data catalogs, the cluster open/close/delete engine pass-throughs,
-        // get_catalog_object_by_oid, set_relation_rule_status, set_pg_class_*).
-        // Those allowlist entries were therefore DELETED — the seams are real
-        // installs now. The one remaining entry below is genuinely-still-uninstalled.
+        // family2.rs (pg_type insert/update/rename, pg_constraint, pg_depend/
+        // pg_shdepend, pg_sequence, pg_class/pg_index, pg_largeobject,
+        // pg_db_role_setting, namespace, the foreign-data catalogs, the cluster
+        // open/close/delete engine pass-throughs, get_catalog_object_by_oid,
+        // set_relation_rule_status, set_pg_class_*). Those allowlist entries were
+        // therefore DELETED — the seams are real installs now.
+        //
+        // The entries that REMAIN below are still genuinely uninstalled+called:
+        // the typecmds.c F3/F4 narrow single-column pg_type mutators (their
+        // owning typecmds arms are not yet ported) and the generic
+        // update_object_owner_tuple. DELETE each as its owner installs it.
+        ("backend_catalog_indexing", "catalog_tuple_update_typowner_typacl_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typnamespace_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typnotnull_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typdefault_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_attrs_pg_type"),
         // -- alter.c (AlterObjectOwner_internal, generic catalog) --
         // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
         // AlterObjectOwner_internal builds the modified owner tuple for an

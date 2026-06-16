@@ -58,6 +58,11 @@ backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
+backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
+# ExecInitSubPlan (nodeSubplan.c) — the ExecInitNode initPlan walk (#328) routes
+# each Plan.initPlan SubPlan to its ExecInitSubPlan. Acyclic: nodeSubplan depends
+# only on the seam crates, never on this dispatch crate.
+backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 # Per-owner seam crates for the unported neighbours this dispatch routes through
 # (loud panic until each owner wires its init_seams()).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

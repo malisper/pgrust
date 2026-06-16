@@ -6,10 +6,10 @@
 //! `ExecSetExecProcNode` (installs the `ExecProcNode` callback wrapper).
 
 use backend_utils_misc_stack_depth_seams as stack_depth;
-use mcx::{alloc_in, Mcx, PgBox};
+use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::Node;
-use types_nodes::{EStateData, ExecProcNodeMtd, PlanStateNode};
+use types_nodes::{EStateData, ExecProcNodeMtd, PlanStateNode, SubPlanState};
 
 use crate::execProcnode_run_end::exec_proc_node_first;
 
@@ -216,10 +216,16 @@ pub fn exec_init_node<'mcx>(
 
         // case T_WorkTableScan: ExecInitWorkTableScan(...) (nodeWorktablescan.c)
         //
-        // No `WorkTableScan` Plan variant on the trimmed central `Node` enum
-        // (central-node keystone, K1 follow-on). The owner
-        // `ExecInitWorkTableScan` is ported; WorkTableScan only appears inside
-        // a RecursiveUnion (WITH RECURSIVE).
+        // The `WorkTableScan` Plan variant and the `PlanStateNode::WorkTableScan`
+        // variant both exist (the state struct lives in `types-nodes`, no crate
+        // cycle), so this arm is fully wired. WorkTableScan only appears inside a
+        // RecursiveUnion (WITH RECURSIVE).
+        Node::WorkTableScan(wts) => {
+            let s = backend_executor_nodeWorktablescan::ExecInitWorkTableScan(
+                wts, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::WorkTableScan(alloc_in(mcx, s)?))?
+        }
 
         // case T_ForeignScan: ExecInitForeignScan((ForeignScan *) node, estate, eflags)
         Node::ForeignScan(_) => {
@@ -293,14 +299,21 @@ pub fn exec_init_node<'mcx>(
 
         // case T_Agg: ExecInitAgg(...) (nodeAgg.c)
         //
-        // No `Agg` Plan variant on the trimmed central `Node` enum, and no
-        // `Agg` `PlanStateNode` variant carrying the owner's `AggStateData`
-        // either — both require the central-node keystone (K1 follow-on).
-        // The owner `ExecInitAgg` is ported and ready; once the `Agg` Plan
-        // and `AggState` plan-state variants land, this arm becomes
-        // `ExecInitAgg(a, estate, eflags, mcx)` + `PlanStateNode::Agg`, and
-        // `PlanStateNode::as_agg_state` (read by `EEOP_GROUPING_FUNC`) starts
-        // returning the real `AggState`.
+        // The `Agg` Plan variant now exists on the central `Node` enum (#330),
+        // but the matching `PlanStateNode::Agg` variant does NOT: the owner's
+        // `AggStateData` lives in `backend-executor-nodeAgg`, which sits ABOVE
+        // `types-nodes`, so `PlanStateNode` cannot name it by value without a
+        // dependency cycle. Relocating `AggStateData` (the #200/#165 keystone)
+        // is the prerequisite; until then `ExecInitAgg` (which returns an
+        // `AggStateData`) has no `PlanStateNode` arm to land in. The owner
+        // `ExecInitAgg` is ported and ready; a query containing an aggregate
+        // reaches this loud panic (mirror PG and panic).
+        Node::Agg(_) => panic!(
+            "backend-executor-nodeAgg::ExecInitAgg: ExecInitNode T_Agg arm \
+             blocked on the AggStateData-relocation keystone (#200/#165) — \
+             PlanStateNode cannot carry nodeAgg's AggStateData (crate cycle); \
+             not wirable until that keystone lands"
+        ),
 
         // case T_WindowAgg: ExecInitWindowAgg((WindowAgg *) node, estate, eflags)
         Node::WindowAgg(_) => {
@@ -382,17 +395,25 @@ pub fn exec_init_node<'mcx>(
     //   }
     //   result->initPlan = subps;
     //
-    // The source `Plan.initPlan` list is not modeled on the trimmed `Plan`
-    // struct, and `ExecInitSubPlan` (nodeSubplan.c) is unported with no seam
-    // declared in this scaffold. Building this node's `SubPlanState`s routes
-    // through that owner — a loud panic when a node actually carries
-    // initplans. (A leaf node with no initplans is the C `NIL` walk, a no-op;
-    // the result node already defaults `initPlan = None`.)
-    if node_has_init_plan(node) {
-        panic!(
-            "backend-executor-nodeSubplan::ExecInitSubPlan: ExecInitNode initPlan walk \
-             (Plan.initPlan not modeled on the trimmed Plan struct); not ported / no seam declared"
-        );
+    // `Plan.initPlan` is now modeled on the central `Plan` struct, and
+    // `ExecInitSubPlan` (nodeSubplan.c) is ported. Each `SubPlan` is cloned into
+    // the per-query context (the C `node->initPlan` list lives in the plan tree;
+    // `ExecInitSubPlan` takes ownership of an owned `SubPlan`) and built into a
+    // `SubPlanState`, gathered into `result->initPlan`.
+    if let Some(init) = node.plan_head().initPlan.as_ref() {
+        if !init.is_empty() {
+            let mut subps: PgVec<'mcx, SubPlanState<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, init.len())?;
+            for subplan in init.iter() {
+                // Assert(IsA(subplan, SubPlan)); Assert(subplan->args == NIL);
+                debug_assert!(subplan.args.is_empty());
+                let owned: PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
+                    alloc_in(mcx, subplan.clone_in(mcx)?)?;
+                let sstate = backend_executor_nodeSubplan::ExecInitSubPlan(owned, estate)?;
+                subps.push(sstate);
+            }
+            result.ps_head_mut().initPlan = Some(subps);
+        }
     }
 
     // Set up instrumentation for this node if requested
@@ -426,17 +447,6 @@ pub fn exec_init_node<'mcx>(
 /// bare `elog(ERROR)` does.
 fn unrecognized_node_type(node: &Node<'_>) -> PgError {
     PgError::error(format!("unrecognized node type: {}", node.tag()))
-}
-
-/// `node->initPlan != NIL` — does this `Plan` node carry any initplans?
-///
-/// The trimmed `Plan` struct does not model the `List *initPlan` field, so
-/// there is no per-node init-plan list to walk yet. Until that field lands a
-/// `Plan` node is treated as carrying no initplans (the common C `NIL` case);
-/// the `ExecInitNode` initPlan walk only fires its unported-owner panic once
-/// the field exists and is non-empty.
-fn node_has_init_plan(_node: &Node<'_>) -> bool {
-    false
 }
 
 /// `ExecSetExecProcNode(node, function)` (execProcnode.c).

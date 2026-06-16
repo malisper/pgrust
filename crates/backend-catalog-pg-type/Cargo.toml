@@ -23,6 +23,7 @@ types-tuple = { path = "../types-tuple" }
 # Direct deps (acyclic — all sit below pg_type.c in the catalog layering).
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 types-scan = { path = "../types-scan" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }

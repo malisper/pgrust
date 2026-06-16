@@ -92,3 +92,64 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn RemoveConstraintById(conId: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `findDomainNotNullConstraint(typid)` (pg_constraint.c) reduced to the OID
+    /// the caller actually reads (`((Form_pg_constraint) GETSTRUCT(conTup))->oid`):
+    /// the OID of the domain's NOT NULL constraint, or `InvalidOid` if none.
+    /// Consumed by `AlterDomainNotNull` (typecmds.c). Can `ereport(ERROR)`.
+    pub fn find_domain_not_null_constraint_oid(mcx: Mcx<'_>, typid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// The pg_constraint half of `AlterDomainDropConstraint` (typecmds.c:2860):
+    /// the `systable_beginscan(ConstraintRelidTypidNameIndexId, conrelid=Invalid,
+    /// contypid=domainoid, conname=constrName)` scan + `performDeletion` of the
+    /// at-most-one matching row, returning `(found, was_notnull)` so the caller
+    /// can clear `pg_type.typnotnull` for a dropped NOT NULL constraint and apply
+    /// the `missing_ok` NOTICE/ERROR. `behavior` is the DROP behavior. Can
+    /// `ereport(ERROR)`.
+    pub fn drop_domain_constraint(
+        mcx: Mcx<'_>,
+        domainoid: Oid,
+        constr_name: String,
+        behavior: types_nodes::parsenodes::DropBehavior,
+    ) -> PgResult<(bool, bool)>
+);
+
+seam_core::seam!(
+    /// The pg_constraint catalog half of `AlterDomainValidateConstraint`
+    /// (typecmds.c:3031): locate the CHECK constraint of `domainoid` named
+    /// `constr_name`, return its cooked `conbin` text (for the executor VALIDATE)
+    /// and its OID; then `set_constraint_validated` flips `convalidated`. Errors
+    /// if the constraint does not exist or is not a CHECK constraint. Can
+    /// `ereport(ERROR)`.
+    pub fn find_domain_check_constraint(
+        mcx: Mcx<'_>,
+        domainoid: Oid,
+        constr_name: String,
+    ) -> PgResult<(Oid, String)>
+);
+
+seam_core::seam!(
+    /// `copy_con->convalidated = true; CatalogTupleUpdate` for the constraint OID
+    /// (the catalog-write half of `AlterDomainValidateConstraint`,
+    /// typecmds.c:3106). Can `ereport(ERROR)`.
+    pub fn set_constraint_validated(mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterConstraintNamespaces(ownerId, oldNspId, newNspId, isType, objsMoved)`
+    /// (pg_constraint.c): move every constraint of the object to the new schema,
+    /// recording each in `objsMoved`. Consumed by `AlterTypeNamespaceInternal`
+    /// (typecmds.c) for both the composite-rel and domain paths. Can
+    /// `ereport(ERROR)`.
+    pub fn alter_constraint_namespaces(
+        mcx: Mcx<'_>,
+        owner_id: Oid,
+        old_nsp_id: Oid,
+        new_nsp_id: Oid,
+        is_type: bool,
+        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    ) -> PgResult<()>
+);
