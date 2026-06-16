@@ -12774,6 +12774,7 @@ version = "0.0.0"
 dependencies = [
  "backend-commands-copyto-seams",
  "backend-tcop-dest-seams",
+ "mcx",
  "types-dest",
  "types-error",
  "types-nodes",
@@ -12784,6 +12785,7 @@ dependencies = [
 name = "backend-tcop-dest-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-dest",
  "types-error",

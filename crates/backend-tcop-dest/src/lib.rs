@@ -26,6 +26,25 @@
 //! that token back on every dispatch and use it to find their state — exactly
 //! the C `(DR_xxx *) self->field` indirection, just keyed instead of cast.
 //!
+//! # The mcx-vtable keystone
+//!
+//! Each vtable callback also takes a leading `mcx: Mcx<'mcx>` — the per-query
+//! arena, threaded in per-dispatch by the caller (execMain recovers it from
+//! `estate.es_query_cxt`; execTuples/pquery from their output context). This is
+//! the same mcx-vtable threading the tableam routine uses
+//! ([`types_tableam::tableam::TableAmRoutine`]): the callbacks are HRTB
+//! (`for<'mcx> fn(Mcx<'mcx>, …)`) so the vtable stays `Copy`/lifetime-free and
+//! lives in the `'static` registry, while a receiver that needs the arena gets
+//! it on every call. Without it a receiver could not express an `'mcx`-bound
+//! sink: `intorel_receive` (`createas`) must call
+//! `table_tuple_insert(mcx, &rel, slot, …)`, which requires both an `Mcx<'mcx>`
+//! and a `&mut SlotData<'mcx>`. With this contract, an `intorel`-style receiver
+//! opens its target relation + `BulkInsertState` in `rStartup` (binding a raw
+//! pointer to that `'mcx` state under its `state` token, the way `copyto` binds
+//! its `cstate` for the run), then in `receiveSlot` recovers that state and
+//! drives `table_tuple_insert` with the threaded `mcx` — the createas blocker is
+//! now expressible. (createas itself is not ported here.)
+//!
 //! The three dispatch seams declared in `backend-tcop-dest-seams`
 //! (`dest_rstartup` / `dest_receive_slot` / `dest_rshutdown`, called by
 //! `execTuples.c` tuple output) are installed here and route through that vtable,
@@ -57,6 +76,7 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
+use mcx::Mcx;
 use types_dest::CommandDest;
 use types_error::PgResult;
 use types_nodes::nodes::CmdType;
@@ -69,21 +89,35 @@ use types_tuple::heaptuple::TupleDescData;
 /// reached through the tuple-output dispatch seams; receiver teardown is the
 /// owner's concern via its own `*_destroy` path.)
 ///
-/// Each callback takes a leading `state: u64` argument — the owner-supplied
-/// token registered alongside the vtable (see [`register_dest_receiver`]). It is
-/// the owned-model stand-in for the C `(DR_xxx *) self` downcast: stateless
-/// receivers (the static `donothingDR`) ignore it; stateful receivers
-/// (`DR_copy`, …) use it to recover their per-receiver state. Modeled as plain
-/// `fn` pointers (the callbacks themselves are stateless code; all per-receiver
-/// state hangs off the token), so the vtable stays `Copy`.
+/// Each callback takes a leading `mcx: Mcx<'mcx>` (the per-query arena the
+/// receiver works in — the DestReceiver mcx-vtable keystone, mirroring
+/// [`types_tableam::tableam::TableAmRoutine`]) and a `state: u64` token — the
+/// owner-supplied key registered alongside the vtable (see
+/// [`register_dest_receiver`]). The token is the owned-model stand-in for the C
+/// `(DR_xxx *) self` downcast: stateless receivers (the static `donothingDR`)
+/// ignore both; stateful receivers (`DR_copy`, `DR_intorel`, …) use the token to
+/// recover their per-receiver state (a raw pointer bound around the run by their
+/// owner's driver, the way `copyto` binds its `cstate`) and the `mcx` to express
+/// `'mcx`-bound sinks (`intorel_receive`'s `table_tuple_insert(mcx, &rel, …)`).
+///
+/// The callbacks are HRTB (`for<'mcx> fn(Mcx<'mcx>, …)`) so the vtable stays
+/// `Copy`/lifetime-free and can live in the `'static` router registry, exactly
+/// like the tableam vtable: the `'mcx` flows in per-dispatch from the caller, it
+/// is not baked into the function-pointer type.
 #[derive(Clone, Copy)]
 pub struct ReceiverVtable {
     /// `void (*rStartup)(DestReceiver *self, int operation, TupleDesc typeinfo)`.
-    pub rStartup: fn(state: u64, operation: CmdType, tupdesc: &TupleDescData<'_>) -> PgResult<()>,
+    pub rStartup: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        state: u64,
+        operation: CmdType,
+        tupdesc: &TupleDescData<'mcx>,
+    ) -> PgResult<()>,
     /// `bool (*receiveSlot)(TupleTableSlot *slot, DestReceiver *self)`.
-    pub receiveSlot: fn(state: u64, slot: &mut SlotData<'_>) -> PgResult<bool>,
+    pub receiveSlot:
+        for<'mcx> fn(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) -> PgResult<bool>,
     /// `void (*rShutdown)(DestReceiver *self)`.
-    pub rShutdown: fn(state: u64) -> PgResult<()>,
+    pub rShutdown: for<'mcx> fn(mcx: Mcx<'mcx>, state: u64) -> PgResult<()>,
 }
 
 /// One registered receiver: its `mydest` tag, its vtable, and the owner-supplied
@@ -109,6 +143,7 @@ struct Receiver {
 /// `donothingStartup(DestReceiver *self, int operation, TupleDesc typeinfo)`
 /// (dest.c) — does nothing. Carries no state (the leading token is unused).
 fn donothing_startup(
+    _mcx: Mcx<'_>,
     _state: u64,
     _operation: CmdType,
     _tupdesc: &TupleDescData<'_>,
@@ -118,13 +153,13 @@ fn donothing_startup(
 
 /// `donothingReceive(TupleTableSlot *slot, DestReceiver *self)` (dest.c) —
 /// returns `true`.
-fn donothing_receive(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
+fn donothing_receive(_mcx: Mcx<'_>, _state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
     Ok(true)
 }
 
 /// `donothingCleanup(DestReceiver *self)` (dest.c) — used for both the shutdown
 /// and destroy methods; does nothing.
-fn donothing_cleanup(_state: u64) -> PgResult<()> {
+fn donothing_cleanup(_mcx: Mcx<'_>, _state: u64) -> PgResult<()> {
     Ok(())
 }
 
@@ -156,13 +191,18 @@ fn unwired(mydest: CommandDest) -> ! {
     )
 }
 
-fn unwired_startup_remote(_state: u64, _op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
+fn unwired_startup_remote(
+    _mcx: Mcx<'_>,
+    _state: u64,
+    _op: CmdType,
+    _td: &TupleDescData<'_>,
+) -> PgResult<()> {
     unwired(CommandDest::Remote)
 }
-fn unwired_receive_remote(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
+fn unwired_receive_remote(_mcx: Mcx<'_>, _state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
     unwired(CommandDest::Remote)
 }
-fn unwired_shutdown_remote(_state: u64) -> PgResult<()> {
+fn unwired_shutdown_remote(_mcx: Mcx<'_>, _state: u64) -> PgResult<()> {
     unwired(CommandDest::Remote)
 }
 
@@ -301,28 +341,33 @@ pub fn none_receiver() -> DestReceiverHandle {
 // ===========================================================================
 
 /// `dest->rStartup(dest, operation, tupdesc)` — route to the receiver's
-/// `rStartup` callback, threading its `state` token.
-fn dest_rstartup_impl(
+/// `rStartup` callback, threading the per-query `mcx` and its `state` token.
+fn dest_rstartup_impl<'mcx>(
+    mcx: Mcx<'mcx>,
     dest: DestReceiverHandle,
     operation: CmdType,
-    tupdesc: &TupleDescData<'_>,
+    tupdesc: &TupleDescData<'mcx>,
 ) -> PgResult<()> {
     let r = lookup(dest);
-    (r.vtable.rStartup)(r.state, operation, tupdesc)
+    (r.vtable.rStartup)(mcx, r.state, operation, tupdesc)
 }
 
 /// `dest->receiveSlot(slot, dest)` — route to the receiver's `receiveSlot`
-/// callback, threading its `state` token.
-fn dest_receive_slot_impl(slot: &mut SlotData<'_>, dest: DestReceiverHandle) -> PgResult<bool> {
+/// callback, threading the per-query `mcx` and its `state` token.
+fn dest_receive_slot_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    dest: DestReceiverHandle,
+) -> PgResult<bool> {
     let r = lookup(dest);
-    (r.vtable.receiveSlot)(r.state, slot)
+    (r.vtable.receiveSlot)(mcx, r.state, slot)
 }
 
 /// `dest->rShutdown(dest)` — route to the receiver's `rShutdown` callback,
-/// threading its `state` token.
-fn dest_rshutdown_impl(dest: DestReceiverHandle) -> PgResult<()> {
+/// threading the per-query `mcx` and its `state` token.
+fn dest_rshutdown_impl<'mcx>(mcx: Mcx<'mcx>, dest: DestReceiverHandle) -> PgResult<()> {
     let r = lookup(dest);
-    (r.vtable.rShutdown)(r.state)
+    (r.vtable.rShutdown)(mcx, r.state)
 }
 
 /// `dest->mydest` (tcop/dest.h) — return the receiver's `CommandDest` tag.
