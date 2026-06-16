@@ -78,6 +78,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetRelationRuleStatus` pg_class write (rewriteSupport.c): `tuple =
+    /// SearchSysCacheCopy1(RELOID, relationId)`; if found,
+    /// `classForm = (Form_pg_class) GETSTRUCT(tuple)`; when
+    /// `classForm->relhasrules != relHasRules`, set the field and
+    /// `CatalogTupleUpdate(class_rel, &tuple->t_self, tuple)`, otherwise
+    /// `CacheInvalidateRelcacheByTuple(tuple)` to force a relcache rebuild
+    /// anyway; finally `heap_freetuple(tuple)`. The compare/update-or-invalidate
+    /// lives in the owner because pg_class's `Form_pg_class` is a trimmed
+    /// projection that cannot losslessly reform the on-disk tuple (same
+    /// constraint as `set_pg_class_reltoastrelid`): the field write and the
+    /// invalidation must run against the owner's full syscache copy. The
+    /// returned `bool` is `HeapTupleIsValid(tuple)` — the caller raises the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` when it is `false`.
+    /// The open pg_class relation (opened RowExclusiveLock by the caller)
+    /// crosses by reference. `Err` carries the heap/index-mutation and
+    /// invalidation `ereport(ERROR)`s.
+    pub fn set_relation_rule_status(
+        class_rel: &RelationData<'_>,
+        relation_id: Oid,
+        rel_has_rules: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `systable_inplace_update_begin(class_rel, ClassOidIndexId, true, NULL,
     /// key[oid = rel_oid], &reltup, &state)`; if the tuple is found, write
     /// `((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid` and
@@ -893,4 +917,21 @@ seam_core::seam!(
         oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
         new_name: &str,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateStatistics`'s tuple build + insert (commands/statscmds.c +
+    /// catalog/indexing.c): `GetNewOidWithIndex(rel, StatisticExtOidIndexId,
+    /// Anum_pg_statistic_ext_oid)` + the `values[]`/`nulls[]` fill — including
+    /// `buildint2vector(stxkeys)`, `construct_array_builtin(stxkind, CHAROID)`,
+    /// and `CStringGetTextDatum(stxexprs)` for the variable-length columns,
+    /// `stxstattarget` left NULL — + `heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)`. Returns the
+    /// freshly-allocated statistics-object OID. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_statistic_ext<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
+    ) -> PgResult<Oid>
 );

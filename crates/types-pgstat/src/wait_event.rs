@@ -104,6 +104,13 @@ pub const WAIT_EVENT_MESSAGE_QUEUE_SEND: u32 = PG_WAIT_IPC | 36;
 /// here for ~10 ms before retrying a full checkpointer request queue.
 pub const WAIT_EVENT_REGISTER_SYNC_REQUEST: u32 = PG_WAIT_TIMEOUT | 5;
 
+/// `WAIT_EVENT_PG_SLEEP` — "Waiting due to a call to pg_sleep or a sibling
+/// function." 3rd entry (0-based 2) of the `WaitEventTimeout` section of
+/// `wait_event_names.txt` (BASE_BACKUP_THROTTLE=0, CHECKPOINT_WRITE_DELAY=1,
+/// PG_SLEEP=2), so the generated enum value is `PG_WAIT_TIMEOUT | 2`. `pg_sleep`
+/// (misc.c) waits on `MyLatch` with this wait event.
+pub const WAIT_EVENT_PG_SLEEP: u32 = PG_WAIT_TIMEOUT | 2;
+
 /// `WAIT_EVENT_SPIN_DELAY` — "Waiting while acquiring a contended spinlock."
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).

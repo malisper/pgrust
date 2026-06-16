@@ -372,6 +372,123 @@ fn update_pg_enum<'mcx>(
 }
 
 /* ======================================================================== *
+ * pg_statistic_ext — CreateStatistics (OID column + int2vector / char[] /
+ * text variable-length columns).
+ * ======================================================================== */
+
+/// `buildint2vector(int2s, n)` (utils/adt/int.c): the on-disk `int2vector`
+/// image — a varlena whose header (`vl_len_` via `SET_VARSIZE`, then `ndim=1`,
+/// `dataoffset=0`, `elemtype=INT2OID`, `dim1=n`, `lbound1=0`) is followed by the
+/// `n` `int16` values. `Int2VectorSize(n) = offsetof(int2vector, values) + n *
+/// sizeof(int16) = 24 + 2n`. Returned as the verbatim `Datum::ByRef` bytes
+/// (header included), exactly what `heap_form_tuple` reads via `VARSIZE_ANY`.
+fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<Datum<'mcx>> {
+    const INT2OID: Oid = 21;
+    // offsetof(int2vector, values): vl_len_(4) + ndim(4) + dataoffset(4) +
+    // elemtype(4) + dim1(4) + lbound1(4) = 24.
+    const HEADER: usize = 24;
+    let n = int2s.len();
+    let total = HEADER + n * core::mem::size_of::<i16>();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    // SET_VARSIZE(result, Int2VectorSize(n)): va_header = (uint32) total << 2.
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    // ndim = 1; dataoffset = 0; elemtype = INT2OID; dim1 = n; lbound1 = 0.
+    buf[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    buf[12..16].copy_from_slice(&INT2OID.to_ne_bytes());
+    buf[16..20].copy_from_slice(&(n as i32).to_ne_bytes());
+    buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    // memcpy(result->values, int2s, n * sizeof(int16));
+    for (i, v) in int2s.iter().enumerate() {
+        let off = HEADER + i * 2;
+        buf[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+    }
+    Ok(Datum::ByRef(buf))
+}
+
+/// `CStringGetTextDatum(s)` (postgres.h → `cstring_to_text`): a `text` varlena
+/// with the standard 4-byte header (`SET_VARSIZE(VARHDRSZ + len)`) followed by
+/// the payload bytes. Returned as the verbatim `Datum::ByRef` bytes (header
+/// included) — `heap_form_tuple` reads the stored length via `VARSIZE_ANY`.
+fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    const VARHDRSZ: usize = 4;
+    let payload = s.as_bytes();
+    let total = VARHDRSZ + payload.len();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    // SET_VARSIZE(result, total): va_header = (uint32) total << 2 (4B format).
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    buf[VARHDRSZ..].copy_from_slice(payload);
+    Ok(Datum::ByRef(buf))
+}
+
+fn insert_pg_statistic_ext<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_statistic_ext::PgStatisticExtInsertRow,
+) -> PgResult<Oid> {
+    use cat::pg_statistic_ext as se;
+
+    // statoid = GetNewOidWithIndex(statrel, StatisticExtOidIndexId,
+    //                              Anum_pg_statistic_ext_oid);
+    let statoid = GetNewOidWithIndex(rel, se::StatisticExtOidIndexId, se::Anum_pg_statistic_ext_oid)?;
+
+    // stxkeys = buildint2vector(attnums, nattnums);
+    let stxkeys = buildint2vector(mcx, &row.stxkeys)?;
+
+    // stxkind = construct_array_builtin(types, ntypes, CHAROID);
+    let mut kind_elems: mcx::PgVec<'mcx, types_datum::datum::Datum> =
+        mcx::vec_with_capacity_in(mcx, row.stxkind.len())?;
+    for &c in &row.stxkind {
+        kind_elems.push(types_datum::datum::Datum::from_char(c));
+    }
+    // construct_array(.., CHAROID): elmlen=1, elmbyval=true, elmalign='c'.
+    let stxkind_bytes = backend_utils_adt_arrayfuncs::construct::construct_array(
+        mcx,
+        &kind_elems,
+        backend_utils_adt_arrayfuncs::foundation::CHAROID,
+        1,
+        true,
+        b'c',
+    )?;
+
+    // memset(values, 0, ..); memset(nulls, false, ..);
+    // values[oid] = statoid; values[stxrelid] = relid; values[stxname] = name;
+    // values[stxnamespace] = nsp; values[stxowner] = owner;
+    // values[stxkeys] = stxkeys; nulls[stxstattarget] = true;
+    // values[stxkind] = stxkind; values[stxexprs] = exprsDatum / nulls if 0.
+    let exprs_value: Datum<'mcx> = match &row.stxexprs {
+        Some(s) => cstring_to_text_datum(mcx, s)?,
+        // The column value is NULL; the slot holds a placeholder (nulls[] set).
+        None => Datum::ByVal(0),
+    };
+
+    let values = [
+        Datum::from_oid(statoid),
+        Datum::from_oid(row.stxrelid),
+        name_datum(mcx, &row.stxname)?,
+        Datum::from_oid(row.stxnamespace),
+        Datum::from_oid(row.stxowner),
+        stxkeys,
+        // stxstattarget — left NULL on a fresh CREATE (placeholder by-value).
+        Datum::ByVal(0),
+        Datum::ByRef(stxkind_bytes),
+        exprs_value,
+    ];
+    let mut nulls = [false; se::Natts_pg_statistic_ext];
+    nulls[(se::Anum_pg_statistic_ext_stxstattarget - 1) as usize] = true;
+    if row.stxexprs.is_none() {
+        nulls[(se::Anum_pg_statistic_ext_stxexprs - 1) as usize] = true;
+    }
+
+    form_and_insert(mcx, rel, &values, &nulls)?;
+    Ok(statoid)
+}
+
+/* ======================================================================== *
  * pg_language — CreateProceduralLanguage (OID column + lanname NameData +
  * lanacl varlen, always NULL on the values we form).
  * ======================================================================== */
@@ -682,4 +799,7 @@ pub fn install() {
         update_pg_rewrite_enabled,
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_rewrite_name::set(update_pg_rewrite_name);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_statistic_ext::set(
+        insert_pg_statistic_ext,
+    );
 }

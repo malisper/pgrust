@@ -793,6 +793,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(relid),
+    /// PointerGetDatum(rulename))` + `GETSTRUCT(Form_pg_rewrite)` projected to
+    /// `(oid, ev_class)` (rewriteSupport.c `get_rewrite_oid`). `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); the caller decides between
+    /// `InvalidOid` (missing_ok) and `ERRCODE_UNDEFINED_OBJECT`. `ev_class` is
+    /// returned so the caller can keep the C `Assert(relid == ev_class)`.
+    pub fn search_rewrite_oid(
+        relid: Oid,
+        rulename: &str,
+    ) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(AMNAME, Anum_pg_am_oid, CStringGetDatum(amname))`
     /// (syscache.c): the OID of the `pg_am` row named `amname`, or
     /// `InvalidOid` when no such access method exists. amcmds.c's
@@ -1908,6 +1921,40 @@ seam_core::seam!(
     /// `GETSTRUCT(Form_pg_user_mapping)` projected to `(umuser, umserver)`
     /// (the user-mapping description arm). `Ok(None)` on a cache miss.
     pub fn user_mapping_user_server(umid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(STATEXTOID, statsOid)` + `GETSTRUCT(Form_pg_statistic_ext)`
+    /// projected to `stxrelid` (statscmds.c `RemoveStatisticsById` /
+    /// `StatisticsGetRelation`). `Ok(None)` on a cache miss (the caller then
+    /// reports `cache lookup failed for statistics object %u`). `Err` carries
+    /// the syscache lookup `ereport(ERROR)`s.
+    pub fn statext_get_relid(stats_oid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(STATEXTOID, statsOid)` returned as the owned
+    /// `FormedTuple` copy (statscmds.c `AlterStatistics` / `RemoveStatisticsById`
+    /// need the held tuple for `heap_modify_tuple` / `CatalogTupleDelete` of its
+    /// `t_self`). `Ok(None)` on a cache miss. `Err` carries the syscache lookup
+    /// `ereport(ERROR)`s.
+    pub fn statext_search_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        stats_oid: Oid,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(STATEXTDATASTXOID, statsOid, inh)` returned as the owned
+    /// `FormedTuple` copy, for `RemoveStatisticsDataById`'s
+    /// `CatalogTupleDelete(&tup->t_self)`. `Ok(None)` when no such data row
+    /// exists (the C "We don't know if the data row for inh value exists.").
+    /// `Err` carries the syscache lookup `ereport(ERROR)`s.
+    pub fn statext_data_search_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        stats_oid: Oid,
+        inh: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
 );
 
 seam_core::seam!(

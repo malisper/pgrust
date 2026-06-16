@@ -346,6 +346,7 @@ pub fn begin_tup_output_tupdesc<'mcx>(
     // tstate->dest->rStartup(tstate->dest, (int) CMD_SELECT, tupdesc);
     if let Some(td) = tupdesc.as_deref() {
         backend_tcop_dest_seams::dest_rstartup::call(
+            mcx,
             dest,
             types_nodes::nodes::CmdType::CMD_SELECT,
             td,
@@ -398,7 +399,8 @@ pub fn do_tup_output<'mcx>(
     crate::slot_store_fetch::ExecStoreVirtualTuple(&mut tstate.slot)?;
 
     // send the tuple to the receiver
-    let _ = backend_tcop_dest_seams::dest_receive_slot::call(&mut tstate.slot, tstate.dest)?;
+    let _ =
+        backend_tcop_dest_seams::dest_receive_slot::call(mcx, &mut tstate.slot, tstate.dest)?;
 
     // clean up
     crate::slot_store_fetch::ExecClearTuple(&mut tstate.slot)?;
@@ -437,9 +439,9 @@ pub fn do_text_output_multiline<'mcx>(
 
 /// `end_tup_output(tstate)` (execTuples.c): shut down the receiver and drop the
 /// output slot.
-pub fn end_tup_output<'mcx>(tstate: TupOutputState<'mcx>) -> PgResult<()> {
+pub fn end_tup_output<'mcx>(mcx: Mcx<'mcx>, tstate: TupOutputState<'mcx>) -> PgResult<()> {
     // tstate->dest->rShutdown(tstate->dest);
-    backend_tcop_dest_seams::dest_rshutdown::call(tstate.dest)?;
+    backend_tcop_dest_seams::dest_rshutdown::call(mcx, tstate.dest)?;
     // note that destroying the dest is not ours to do
     // ExecDropSingleTupleTableSlot(tstate->slot);
     crate::exec_init_slots::ExecDropSingleTupleTableSlot(tstate.slot)?;

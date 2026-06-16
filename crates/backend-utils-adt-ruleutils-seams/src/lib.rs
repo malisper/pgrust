@@ -156,3 +156,15 @@ seam_core::seam!(
         showimplicit: bool,
     ) -> PgResult<PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `generate_collation_name(collid)` (ruleutils.c): the schema-qualified,
+    /// quoted collation name for a collation OID, allocated in `mcx`. Reads
+    /// `pg_collation`/`pg_namespace`, so it can `ereport(ERROR)` (cache lookup
+    /// failure); `Err` also carries OOM. Owner unported, so this panics until
+    /// ruleutils lands.
+    pub fn generate_collation_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        collid: Oid,
+    ) -> PgResult<PgString<'mcx>>
+);

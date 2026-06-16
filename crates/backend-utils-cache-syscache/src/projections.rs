@@ -53,6 +53,10 @@ const Anum_pg_class_relam: i32 = 7;
 /// `Anum_pg_class_reloftype` (`catalog/pg_class.h`).
 const Anum_pg_class_reloftype: i32 = 5;
 
+// `catalog/pg_rewrite.h` attribute numbers.
+const Anum_pg_rewrite_oid: i32 = 1;
+const Anum_pg_rewrite_ev_class: i32 = 3;
+
 // `catalog/pg_cast.h` attribute numbers.
 const Anum_pg_cast_oid: i32 = 1;
 const Anum_pg_cast_castfunc: i32 = 4;
@@ -182,6 +186,29 @@ pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let relam = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?;
     ReleaseSysCache(tup);
     Ok(Some(relam))
+}
+
+/// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(relid),
+/// PointerGetDatum(rulename))` projected to the `Form_pg_rewrite`
+/// `(oid, ev_class)` fields (rewriteSupport.c `get_rewrite_oid`). `Ok(None)`
+/// on a cache miss (`!HeapTupleIsValid`); the caller keeps the missing_ok /
+/// `Assert(relid == ev_class)` logic.
+pub(crate) fn search_rewrite_oid(relid: Oid, rulename: &str) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache pg_rewrite oid projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        crate::RULERELNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Str(rulename),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let ruleoid = getattr_oid(mcx, crate::RULERELNAME, &tup, Anum_pg_rewrite_oid)?;
+    let ev_class = getattr_oid(mcx, crate::RULERELNAME, &tup, Anum_pg_rewrite_ev_class)?;
+    ReleaseSysCache(tup);
+    Ok(Some((ruleoid, ev_class)))
 }
 
 /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the

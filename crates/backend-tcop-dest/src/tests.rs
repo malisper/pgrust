@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// A throwaway per-query arena for exercising the mcx-threaded dispatch in
+/// tests (the `rShutdown` path never allocates from it).
+fn with_test_mcx<R>(f: impl for<'mcx> FnOnce(Mcx<'mcx>) -> R) -> R {
+    let scratch = mcx::MemoryContext::new_bump("dest-router-test");
+    f(scratch.mcx())
+}
+
 /// `init_seams()` installs all three dispatch seams.
 #[test]
 fn init_seams_installs_dispatch() {
@@ -19,14 +26,14 @@ fn init_seams_installs_dispatch() {
 fn donothing_shutdown_is_noop() {
     let h = CreateDestReceiver(CommandDest::None);
     assert!(h.0 >= 1, "handle must be a live, non-NULL id");
-    assert_eq!(dest_rshutdown_impl(h), Ok(()));
+    assert_eq!(with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h)), Ok(()));
 }
 
 /// `none_receiver()` is the `DestNone` shortcut; its shutdown is also a no-op.
 #[test]
 fn none_receiver_shutdown_is_noop() {
     let h = none_receiver();
-    assert_eq!(dest_rshutdown_impl(h), Ok(()));
+    assert_eq!(with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h)), Ok(()));
 }
 
 /// Each `CreateDestReceiver` mints a distinct registry id.
@@ -44,7 +51,7 @@ fn distinct_handles() {
 #[should_panic(expected = "not wired into the tcop-dest router")]
 fn unwired_kind_panics_on_dispatch() {
     let h = CreateDestReceiver(CommandDest::Remote);
-    let _ = dest_rshutdown_impl(h);
+    let _ = with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h));
 }
 
 /// `register_dest_receiver` parks an owner's real vtable in the *one* router
@@ -58,13 +65,18 @@ fn register_dest_receiver_threads_owner_state() {
     thread_local! {
         static SEEN_STATE: Cell<u64> = const { Cell::new(0) };
     }
-    fn capture_startup(_state: u64, _op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
+    fn capture_startup(
+        _mcx: Mcx<'_>,
+        _state: u64,
+        _op: CmdType,
+        _td: &TupleDescData<'_>,
+    ) -> PgResult<()> {
         Ok(())
     }
-    fn capture_receive(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
+    fn capture_receive(_mcx: Mcx<'_>, _state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
         Ok(true)
     }
-    fn capture_shutdown(state: u64) -> PgResult<()> {
+    fn capture_shutdown(_mcx: Mcx<'_>, state: u64) -> PgResult<()> {
         SEEN_STATE.with(|s| s.set(state));
         Ok(())
     }
@@ -76,7 +88,7 @@ fn register_dest_receiver_threads_owner_state() {
     };
     let h = register_dest_receiver(CommandDest::CopyOut, vtable, 0xABCD);
     assert!(h.0 >= 1);
-    assert_eq!(dest_rshutdown_impl(h), Ok(()));
+    assert_eq!(with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h)), Ok(()));
     assert_eq!(SEEN_STATE.with(Cell::get), 0xABCD);
 }
 
