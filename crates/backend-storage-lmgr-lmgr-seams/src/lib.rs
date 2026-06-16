@@ -362,3 +362,31 @@ seam_core::seam!(
         oper: types_storage::lock::XLTW_Oper,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LockSharedObjectForSession(classid, objid, objsubid, lockmode)`
+    /// (lmgr.c): take a *session-level* lock on a shared-catalog object, held
+    /// until explicitly released (not at transaction end). Used by
+    /// `dbase_redo`'s hot-standby `XLOG_DBASE_DROP` path to lock the database
+    /// while resolving recovery conflicts. Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn lock_shared_object_for_session(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockSharedObjectForSession(classid, objid, objsubid, lockmode)`
+    /// (lmgr.c): release the session-level shared-object lock taken by
+    /// [`lock_shared_object_for_session`]. Can `elog(WARNING/ERROR)` on a
+    /// lock-table inconsistency, carried on `Err`.
+    pub fn unlock_shared_object_for_session(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);

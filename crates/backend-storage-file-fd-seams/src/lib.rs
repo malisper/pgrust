@@ -537,3 +537,30 @@ seam_core::seam!(
     /// file, used only to build `%m` error messages. Infallible.
     pub fn file_path_name(file: File) -> String
 );
+
+seam_core::seam!(
+    /// `pg_mkdir_p(path, pg_dir_create_mode)` (`port/pgmkdirp.c`, reached via
+    /// fd.c's directory helpers) — create the directory `path` and any missing
+    /// parent directories. Returns `Ok(())` on success; on failure returns the
+    /// failing `errno` (the caller, `recovery_create_dbdir`, builds the
+    /// `ereport(PANIC)`).
+    pub fn pg_mkdir_p(path: &str) -> Result<(), i32>
+);
+
+seam_core::seam!(
+    /// `CreateDirAndVersionFile(dbpath, dbid, tsid, isRedo)` (dbcommands.c) on
+    /// the WAL-replay path (`isRedo = true`): `MakePGDirectory(dbpath)`
+    /// (tolerating `EEXIST`), then `OpenTransientFile(PG_VERSION, O_WRONLY |
+    /// O_CREAT | O_EXCL)` (re-opening `O_TRUNC` when it already exists in
+    /// replay), `write` of `PG_MAJORVERSION`, `pg_fsync` + `fsync_fname(dbpath)`
+    /// and `CloseTransientFile`. The whole fd-tracked dir+version-file write is
+    /// fd/storage-owned; the non-redo `XLogInsert` half stays in the deferred
+    /// dbcommands createdb family. `Err` carries the
+    /// `errcode_for_file_access` `ereport(ERROR)`s.
+    pub fn create_db_dir_and_version_file(
+        dbpath: &str,
+        dbid: types_core::Oid,
+        tsid: types_core::Oid,
+        is_redo: bool,
+    ) -> PgResult<()>
+);

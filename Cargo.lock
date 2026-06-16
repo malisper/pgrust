@@ -4023,6 +4023,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -5032,6 +5033,39 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-commands-dbcommands"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-access-transam-xlogutils",
+ "backend-catalog-pg-authid-seams",
+ "backend-catalog-pg-database-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-common-relpath",
+ "backend-replication-slot",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-copydir",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-smgr-md",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
 ]
 
 [[package]]
@@ -16317,6 +16351,7 @@ dependencies = [
  "backend-commands-comment",
  "backend-commands-conversioncmds",
  "backend-commands-copyto",
+ "backend-commands-dbcommands",
  "backend-commands-define",
  "backend-commands-dropcmds",
  "backend-commands-explain",
