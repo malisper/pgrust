@@ -1183,6 +1183,43 @@ pub fn construct_array_builtin<'mcx>(
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `construct_array_expr` — `ExecEvalArrayExpr`'s array fabrication
+/// (execExprInterp.c) over the 6-arm value lane. Dispatches to the scalar 1-D
+/// `construct_md_array_values` path or the nested multi-D
+/// `construct_md_array_nested` path. Returns the array varlena image; the caller
+/// (the interpreter) wraps it as a `Datum::ByRef`.
+pub fn construct_array_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    elemvalues: &[types_tuple::Datum<'mcx>],
+    elemnulls: &[bool],
+    elemtype: Oid,
+    elemlength: i16,
+    elembyval: bool,
+    elemalign: u8,
+    multidims: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if !multidims {
+        // 1-D array of the given length: ndims = 1; dims[0] = nelems; lbs[0] = 1.
+        let nelems = elemvalues.len() as i32;
+        let dims = [nelems];
+        let lbs = [1];
+        construct_md_array_values(
+            mcx,
+            elemvalues,
+            Some(elemnulls),
+            1,
+            &dims,
+            &lbs,
+            elemtype,
+            elemlength as i32,
+            elembyval,
+            elemalign,
+        )
+    } else {
+        construct_md_array_nested(mcx, elemvalues, elemnulls, elemtype)
+    }
+}
+
 /// Seam `build_name_array` — `construct_array_builtin(names, n, NAMEOID)`
 /// (arrayfuncs.c) over `name`-typed elements, taking each element's
 /// `NAMEDATALEN`-byte `NameData` image directly (the canonical by-reference
@@ -1324,6 +1361,567 @@ pub fn build_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<PgVec<
     }
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// 6-arm value-lane construct path (`types_tuple::Datum<'mcx>`).
+//
+// `construct_md_array` (above) takes the bare C word `types_datum::Datum`, which
+// at the fmgr/ADT ABI boundary carries a by-reference element as a *pointer
+// word* into a caller-owned varlena; the owned model has no global address
+// space, so that pointer cannot be resolved (`datum_payload_bytes` faults). The
+// executor, however, holds element values in the safe 6-arm
+// `types_tuple::Datum<'mcx>` lane, where a by-reference element carries its
+// bytes inline (`ByRef`/`Cstring`) and a composite/expanded element carries the
+// real object. This path mirrors `construct_md_array` byte-for-byte but sources
+// each element's stored image directly from the 6-arm value (detoasting a
+// varlena through the live `detoast_attr` seam), so the result is a faithful
+// `ArrayType` varlena image with no pointer-word resolution. Mirrors the
+// `build_name_array` / `build_text_array` variant style.
+// ---------------------------------------------------------------------------
+
+/// `construct_array(values, nelems, elmtype, elmlen, elmbyval, elmalign)`
+/// (arrayfuncs.c) over the 6-arm value lane: build a one-dimensional array from
+/// `types_tuple::Datum<'mcx>` element values.
+pub fn construct_array_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &[types_tuple::Datum<'mcx>],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let nelems = values.len() as i32;
+    let dims = [nelems];
+    let lbs = [1];
+    construct_md_array_values(
+        mcx, values, None, 1, &dims, &lbs, elmtype, elmlen, elmbyval, elmalign,
+    )
+}
+
+/// `construct_md_array(values, nulls, ndims, dims, lbs, elmtype, elmlen,
+/// elmbyval, elmalign)` (arrayfuncs.c) over the 6-arm value lane.
+///
+/// Identical control flow to [`construct_md_array`]: the same overflow checks,
+/// the same null-bitmap / dataoffset accounting, the same `set_header` /
+/// `write_dims` / `write_lbounds`, and the same `CopyArrayEls` element loop —
+/// only the per-element byte source differs (6-arm value, not pointer word).
+pub fn construct_md_array_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &[types_tuple::Datum<'mcx>],
+    nulls: Option<&[bool]>,
+    ndims: i32,
+    dims: &[i32],
+    lbs: &[i32],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if ndims < 0 {
+        return Err(PgError::error(format!(
+            "invalid number of dimensions: {ndims}"
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+    }
+    if ndims > MAXDIM {
+        return Err(PgError::error(format!(
+            "number of array dimensions ({ndims}) exceeds the maximum allowed ({MAXDIM})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+
+    let nelems = arrayutils_seam::array_get_n_items::call(ndims, dims)?;
+    arrayutils_seam::array_check_bounds::call(ndims, dims, lbs)?;
+
+    if nelems <= 0 {
+        return construct_empty_array(mcx, elmtype);
+    }
+
+    // First pass: detoast/prepare each non-null element's stored image bytes and
+    // sum the byte lengths (mirrors construct_md_array's PG_DETOAST_DATUM +
+    // att_addlength_datum + att_align_nominal accumulation).
+    let mut prepared: Vec<Option<PreparedElem<'mcx>>> = Vec::with_capacity(nelems as usize);
+    let mut nbytes: i32 = 0;
+    let mut hasnulls = false;
+    for i in 0..nelems as usize {
+        if nulls.map(|n| n[i]).unwrap_or(false) {
+            hasnulls = true;
+            prepared.push(None);
+            continue;
+        }
+        let pe = prepare_value_elem(mcx, &values[i], elmlen, elmbyval)?;
+        nbytes += pe.stored_len(elmlen) as i32;
+        nbytes = foundation::att_align_nominal(nbytes as usize, elmalign) as i32;
+        if !alloc_size_is_valid(nbytes) {
+            return Err(PgError::error(format!(
+                "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+        prepared.push(Some(pe));
+    }
+
+    let dataoffset: i32;
+    if hasnulls {
+        dataoffset = foundation::arr_overhead_withnulls(ndims, nelems) as i32;
+        nbytes += dataoffset;
+    } else {
+        dataoffset = 0;
+        nbytes += foundation::arr_overhead_nonulls(ndims) as i32;
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0);
+
+    foundation::set_header(&mut result, total, ndims, dataoffset, elmtype);
+    foundation::write_dims(&mut result, &dims[..ndims as usize]);
+    foundation::write_lbounds(&mut result, ndims, &lbs[..ndims as usize]);
+
+    // CopyArrayEls, sourcing each element image from the prepared 6-arm values.
+    copy_array_els_values(
+        &mut result, &prepared, nelems, elmlen, elmbyval, elmalign,
+    );
+
+    Ok(result)
+}
+
+/// A non-null element's stored image, resolved from a 6-arm value.
+enum PreparedElem<'mcx> {
+    /// By-value element: the bare word to `store_att_byval`.
+    ByVal(usize),
+    /// By-reference element: the verbatim stored bytes (varlena / cstring image
+    /// / fixed-length by-ref payload), already detoasted where applicable.
+    Bytes(PgVec<'mcx, u8>),
+}
+
+impl<'mcx> PreparedElem<'mcx> {
+    /// The number of bytes this element occupies in the array data area (before
+    /// the per-element alignment padding), mirroring `att_addlength_datum`.
+    fn stored_len(&self, attlen: i32) -> usize {
+        match self {
+            PreparedElem::ByVal(_) => attlen as usize,
+            PreparedElem::Bytes(b) => {
+                if attlen > 0 {
+                    attlen as usize
+                } else if attlen == -1 {
+                    foundation::varsize_any(b, 0)
+                } else {
+                    // attlen == -2: cstring, strlen + 1.
+                    cstring_len(b) + 1
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a 6-arm element value into its stored image (`PreparedElem`),
+/// mirroring `construct_md_array`'s `PG_DETOAST_DATUM` for varlena elements.
+fn prepare_value_elem<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &types_tuple::Datum<'mcx>,
+    elmlen: i32,
+    elmbyval: bool,
+) -> PgResult<PreparedElem<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    if elmbyval {
+        // By-value: take the bare word (store_att_byval reads `attlen` bytes).
+        let word = match v {
+            TDatum::ByVal(w) => *w,
+            other => panic!(
+                "construct_md_array_values: by-value element type but value is \
+                 not Datum::ByVal: {other:?}"
+            ),
+        };
+        return Ok(PreparedElem::ByVal(word));
+    }
+
+    // By-reference. The 6-arm value carries the bytes inline.
+    match v {
+        TDatum::ByRef(bytes) => {
+            if elmlen == -1 {
+                // Varlena: PG_DETOAST_DATUM — route the verbatim varlena bytes
+                // through the live detoast seam (identity for an already-flat
+                // value; fetches/decompresses a toasted one).
+                let detoasted = detoast_seam::detoast_attr::call(mcx, bytes)?;
+                Ok(PreparedElem::Bytes(detoasted))
+            } else {
+                // Fixed-length by-ref (e.g. NAMEDATALEN / tid): copy verbatim.
+                Ok(PreparedElem::Bytes(slice_to_pgvec(mcx, bytes)?))
+            }
+        }
+        TDatum::Cstring(s) => {
+            // cstring element image: payload bytes + the terminating NUL.
+            let payload = s.as_bytes();
+            let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, payload.len() + 1)?;
+            buf.extend_from_slice(payload);
+            buf.push(0);
+            Ok(PreparedElem::Bytes(buf))
+        }
+        TDatum::Expanded(eo) => {
+            // EOH_flatten_into: materialize the flat varlena image (flattened
+            // images are never toasted, so no further detoast is needed).
+            let flat = types_datum::flatten_expanded(eo.as_ref());
+            Ok(PreparedElem::Bytes(slice_to_pgvec(mcx, &flat)?))
+        }
+        TDatum::ByVal(_) => panic!(
+            "construct_md_array_values: by-reference element type but value is \
+             Datum::ByVal"
+        ),
+        TDatum::Composite(_) | TDatum::Internal(_) => panic!(
+            "construct_md_array_values: element value is Composite/Internal, \
+             which has no flat by-reference image (arrays of record/internal are \
+             not constructed through this path)"
+        ),
+    }
+}
+
+/// `CopyArrayEls` over prepared 6-arm element images.
+fn copy_array_els_values(
+    result: &mut PgVec<'_, u8>,
+    prepared: &[Option<PreparedElem<'_>>],
+    nitems: i32,
+    typlen: i32,
+    typbyval: bool,
+    typalign: u8,
+) {
+    let _ = typbyval;
+    let mut p = foundation::arr_data_ptr_off(result);
+    let bitmap_off = foundation::arr_nullbitmap_off(result);
+    let mut bitval: i32 = 0;
+    let mut bitmask: i32 = 1;
+    let mut bm_byte = bitmap_off;
+
+    for i in 0..nitems as usize {
+        match &prepared[i] {
+            None => {
+                // null element: data not written, bit left clear.
+            }
+            Some(pe) => {
+                p = store_prepared_elem(result, p, pe, typlen, typalign);
+                if bitmap_off.is_some() {
+                    bitval |= bitmask;
+                }
+            }
+        }
+        if let Some(b) = bm_byte {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                result[b] = bitval as u8;
+                bm_byte = Some(b + 1);
+                bitval = 0;
+                bitmask = 1;
+            }
+        }
+    }
+    if let Some(b) = bm_byte {
+        if bitmask != 1 {
+            result[b] = bitval as u8;
+        }
+    }
+}
+
+/// `ArrayCastAndSet` over a prepared 6-arm element image: store it and return
+/// the advanced (aligned) offset.
+fn store_prepared_elem(
+    result: &mut PgVec<'_, u8>,
+    mut dest: usize,
+    pe: &PreparedElem<'_>,
+    typlen: i32,
+    typalign: u8,
+) -> usize {
+    let inc: usize;
+    match pe {
+        PreparedElem::ByVal(word) => {
+            // store_att_byval(dest, src, typlen).
+            foundation::store_att_byval(result, dest, Datum::from_usize(*word), typlen);
+            inc = typlen as usize;
+        }
+        PreparedElem::Bytes(bytes) => {
+            if typlen > 0 {
+                // Fixed-length by-ref: memmove(dest, ptr, typlen).
+                result[dest..dest + typlen as usize].copy_from_slice(&bytes[..typlen as usize]);
+                inc = typlen as usize;
+            } else {
+                let len = if typlen == -1 {
+                    foundation::varsize_any(bytes, 0)
+                } else {
+                    cstring_len(bytes) + 1
+                };
+                result[dest..dest + len].copy_from_slice(&bytes[..len]);
+                inc = len;
+            }
+        }
+    }
+    let aligned = foundation::att_align_nominal(inc, typalign);
+    dest += aligned;
+    dest
+}
+
+/// Copy a byte slice into a fresh `mcx`-allocated `PgVec`.
+fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
+    buf.extend_from_slice(src);
+    Ok(buf)
+}
+
+/// `ExecEvalArrayExpr`'s multidims branch (execExprInterp.c): build a multi-D
+/// array by concatenating the data areas of the sub-array element values.
+///
+/// Each non-null element is itself an `ArrayType` image carried in the 6-arm
+/// `ByRef` lane (detoasted through the live seam). Mirrors the C branch
+/// byte-for-byte: validate matching element type and dimensionality, gather the
+/// sub-array data areas / null bitmaps, then palloc0 + SET_VARSIZE + header +
+/// per-sub-array memcpy + array_bitmap_copy. The all-empty case returns
+/// `construct_empty_array`.
+pub fn construct_md_array_nested<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &[types_tuple::Datum<'mcx>],
+    nulls: &[bool],
+    element_type: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let nelems = values.len();
+
+    // Gathered per-sub-array info (only for accepted, non-empty sub-arrays).
+    struct Sub<'mcx> {
+        arr: PgVec<'mcx, u8>,
+        data_off: usize,
+        nbytes: usize,
+        nitems: i32,
+        hasnull: bool,
+    }
+    let mut subs: Vec<Sub<'mcx>> = Vec::with_capacity(nelems);
+
+    let mut nbytes: i32 = 0;
+    let mut ndims: i32 = 0;
+    let mut elem_ndims: i32 = 0;
+    let mut elem_dims: Vec<i32> = Vec::new();
+    let mut elem_lbs: Vec<i32> = Vec::new();
+    let mut firstone = true;
+    let mut havenulls = false;
+    let mut haveempty = false;
+
+    for elemoff in 0..nelems {
+        // temporarily ignore null subarrays
+        if nulls[elemoff] {
+            haveempty = true;
+            continue;
+        }
+
+        // array = DatumGetArrayTypeP(arraydatum) — the sub-array, detoasted.
+        let array = detoast_value_to_array(mcx, &values[elemoff])?;
+
+        // run-time double-check on element type
+        let this_elemtype = foundation::arr_elemtype(&array);
+        if element_type != this_elemtype {
+            return Err(PgError::error("cannot merge incompatible arrays")
+                .with_detail(format!(
+                    "Array with element type {this_elemtype} cannot be included \
+                     in ARRAY construct with element type {element_type}."
+                ))
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+        }
+
+        let this_ndims = foundation::arr_ndim(&array);
+        // temporarily ignore zero-dimensional subarrays
+        if this_ndims <= 0 {
+            haveempty = true;
+            continue;
+        }
+
+        if firstone {
+            elem_ndims = this_ndims;
+            ndims = elem_ndims + 1;
+            if ndims <= 0 || ndims > MAXDIM {
+                return Err(PgError::error(format!(
+                    "number of array dimensions ({ndims}) exceeds the maximum allowed ({MAXDIM})"
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+            }
+            elem_dims = (0..elem_ndims as usize)
+                .map(|i| foundation::arr_dim(&array, i))
+                .collect();
+            elem_lbs = (0..elem_ndims as usize)
+                .map(|i| foundation::arr_lbound(&array, i))
+                .collect();
+            firstone = false;
+        } else {
+            // Check other sub-arrays are compatible.
+            let this_dims: Vec<i32> = (0..this_ndims as usize)
+                .map(|i| foundation::arr_dim(&array, i))
+                .collect();
+            let this_lbs: Vec<i32> = (0..this_ndims as usize)
+                .map(|i| foundation::arr_lbound(&array, i))
+                .collect();
+            if elem_ndims != this_ndims || elem_dims != this_dims || elem_lbs != this_lbs {
+                return Err(PgError::error(
+                    "multidimensional arrays must have array expressions with matching dimensions",
+                )
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+            }
+        }
+
+        let data_off = foundation::arr_data_ptr_off(&array);
+        let sub_nbytes = foundation::arr_size(&array) - foundation::arr_data_offset(&array);
+        nbytes += sub_nbytes as i32;
+        if !alloc_size_is_valid(nbytes) {
+            return Err(PgError::error(format!(
+                "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+        let sub_nitems = arrayutils_seam::array_get_n_items::call(
+            this_ndims,
+            &(0..this_ndims as usize)
+                .map(|i| foundation::arr_dim(&array, i))
+                .collect::<Vec<_>>(),
+        )?;
+        let sub_hasnull = foundation::arr_hasnull(&array);
+        havenulls |= sub_hasnull;
+
+        subs.push(Sub {
+            arr: array,
+            data_off,
+            nbytes: sub_nbytes,
+            nitems: sub_nitems,
+            hasnull: sub_hasnull,
+        });
+    }
+
+    let outer_nelems = subs.len() as i32;
+
+    // All-empty / mixed handling.
+    if haveempty {
+        if ndims == 0 {
+            // didn't find any nonempty array
+            return construct_empty_array(mcx, element_type);
+        }
+        return Err(PgError::error(
+            "multidimensional arrays must have array expressions with matching dimensions",
+        )
+        .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+    }
+
+    // setup for multi-D array
+    let mut dims = vec![0i32; ndims as usize];
+    let mut lbs = vec![0i32; ndims as usize];
+    dims[0] = outer_nelems;
+    lbs[0] = 1;
+    for i in 1..ndims as usize {
+        dims[i] = elem_dims[i - 1];
+        lbs[i] = elem_lbs[i - 1];
+    }
+
+    let nitems = arrayutils_seam::array_get_n_items::call(ndims, &dims)?;
+    arrayutils_seam::array_check_bounds::call(ndims, &dims, &lbs)?;
+
+    let dataoffset: i32;
+    if havenulls {
+        dataoffset = foundation::arr_overhead_withnulls(ndims, nitems) as i32;
+        nbytes += dataoffset;
+    } else {
+        dataoffset = 0;
+        nbytes += foundation::arr_overhead_nonulls(ndims) as i32;
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0);
+
+    foundation::set_header(&mut result, total, ndims, dataoffset, element_type);
+    foundation::write_dims(&mut result, &dims);
+    foundation::write_lbounds(&mut result, ndims, &lbs);
+
+    // dat = ARR_DATA_PTR(result); copy each sub-array's data + null bitmap.
+    let mut dat = foundation::arr_data_ptr_off(&result);
+    let mut iitem: i32 = 0;
+    for sub in &subs {
+        result[dat..dat + sub.nbytes]
+            .copy_from_slice(&sub.arr[sub.data_off..sub.data_off + sub.nbytes]);
+        dat += sub.nbytes;
+        if havenulls {
+            let dest_bm = foundation::arr_nullbitmap_off(&result).expect("withnulls layout");
+            let src_bm = foundation::arr_nullbitmap_off(&sub.arr);
+            copy_bitmap_from_array(&mut result, dest_bm, iitem, &sub.arr, src_bm, sub.nitems);
+        }
+        let _ = sub.hasnull;
+        iitem += sub.nitems;
+    }
+
+    Ok(result)
+}
+
+/// `array_bitmap_copy(ARR_NULLBITMAP(result), iitem, ARR_NULLBITMAP(arr), 0,
+/// nitems)` — copy a sub-array's null bits (or all-non-null when the sub-array
+/// has no bitmap) into the result's bitmap at bit offset `dest_offset`.
+fn copy_bitmap_from_array(
+    dest: &mut [u8],
+    dest_bitmap_off: usize,
+    dest_offset: i32,
+    src_arr: &[u8],
+    src_bitmap_off: Option<usize>,
+    nitems: i32,
+) {
+    let mut destbitmask: i32 = 1 << (dest_offset % 8);
+    let mut dest_byte = dest_bitmap_off + (dest_offset / 8) as usize;
+    let mut destbitval: i32 = dest[dest_byte] as i32;
+
+    let mut srcbitmask: i32 = 1;
+    let mut src_byte = src_bitmap_off;
+
+    for _ in 0..nitems {
+        let bit = match (src_bitmap_off, src_byte) {
+            (Some(_), Some(sb)) => (src_arr[sb] as i32 & srcbitmask) != 0,
+            _ => true, // NULL source => all non-null
+        };
+        if bit {
+            destbitval |= destbitmask;
+        } else {
+            destbitval &= !destbitmask;
+        }
+        destbitmask <<= 1;
+        if destbitmask == 0x100 {
+            dest[dest_byte] = destbitval as u8;
+            dest_byte += 1;
+            destbitmask = 1;
+            destbitval = if dest_byte < dest.len() {
+                dest[dest_byte] as i32
+            } else {
+                0
+            };
+        }
+        if src_bitmap_off.is_some() {
+            srcbitmask <<= 1;
+            if srcbitmask == 0x100 {
+                srcbitmask = 1;
+                src_byte = src_byte.map(|b| b + 1);
+            }
+        }
+    }
+    if destbitmask != 1 {
+        dest[dest_byte] = destbitval as u8;
+    }
+}
+
+/// `DatumGetArrayTypeP(arraydatum)` over a 6-arm value: the sub-array's verbatim
+/// varlena bytes, detoasted through the live seam.
+fn detoast_value_to_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &types_tuple::Datum<'mcx>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    match v {
+        TDatum::ByRef(bytes) => detoast_seam::detoast_attr::call(mcx, bytes),
+        TDatum::Expanded(eo) => {
+            let flat = types_datum::flatten_expanded(eo.as_ref());
+            slice_to_pgvec(mcx, &flat)
+        }
+        other => panic!(
+            "construct_md_array_nested: sub-array element value is not a \
+             by-reference array image: {other:?}"
+        ),
+    }
 }
 
 /// Seam `decode_text_array_to_strings` — the array half of evtcache.c's
@@ -1959,3 +2557,271 @@ fn datum_to_item_pointer<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<ItemPointer
 
 /// Re-export of the on-disk header type for build-state finalizers.
 pub type Header = ArrayType;
+
+// ---------------------------------------------------------------------------
+// Round-trip tests for the 6-arm value-lane construct path
+// (construct_array_values / construct_md_array_values / construct_md_array_nested
+// / construct_array_expr) against deconstruct_array.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod value_lane_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use std::sync::{Mutex, MutexGuard};
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    use backend_access_common_detoast_seams as detoast;
+    use backend_utils_adt_arrayutils_seams as arrayutils;
+
+    // The construct/deconstruct paths drive process-global seams; serialize the
+    // install->use window across parallel tests (see sql.rs iterator_tests).
+    static SEAM_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn lock() -> MutexGuard<'static, ()> {
+        SEAM_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn install_seams() {
+        if !arrayutils::array_get_n_items::is_installed() {
+            arrayutils::array_get_n_items::set(|ndim: i32, dims: &[i32]| {
+                let mut ret: i32 = 1;
+                for i in 0..ndim.max(0) as usize {
+                    ret = ret.checked_mul(dims[i]).expect("ArrayGetNItems overflow");
+                }
+                Ok(ret)
+            });
+        }
+        if !arrayutils::array_check_bounds::is_installed() {
+            // The fixtures here use lbound 1 and small dims, never overflowing.
+            arrayutils::array_check_bounds::set(|_ndim, _dims, _lb| Ok(()));
+        }
+        if !detoast::detoast_attr::is_installed() {
+            // Test elements are already flat varlenas; detoast is identity (copy
+            // the verbatim bytes into mcx), exactly as PG_DETOAST_DATUM is for a
+            // non-toasted value.
+            detoast::detoast_attr::set(|mcx: Mcx<'_>, attr: &[u8]| {
+                let mut v = mcx::vec_with_capacity_in::<u8>(mcx, attr.len())?;
+                v.extend_from_slice(attr);
+                Ok(v)
+            });
+        }
+    }
+
+    /// Build a flat `text` varlena image (4-byte header + payload).
+    fn text_varlena(s: &str) -> Vec<u8> {
+        let total = 4 + s.len();
+        let mut b = vec![0u8; total];
+        let word = (total as u32) << 2; // SET_VARSIZE (non-toasted, 4-byte header)
+        b[0..4].copy_from_slice(&word.to_ne_bytes());
+        b[4..].copy_from_slice(s.as_bytes());
+        b
+    }
+
+    #[test]
+    fn roundtrip_int4_1d_byval() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_int4");
+        let mcx = ctx.mcx();
+
+        let vals = [10i32, 20, 30, -7];
+        let elems: Vec<TDatum> = vals.iter().map(|&v| TDatum::from_i32(v)).collect();
+
+        // (elmlen=4, byval=true, align='i') for int4.
+        let img = construct_array_values(mcx, &elems, foundation::INT4OID, 4, true, TYPALIGN_INT)
+            .expect("construct");
+
+        assert_eq!(foundation::arr_ndim(&img), 1);
+        assert_eq!(foundation::arr_elemtype(&img), foundation::INT4OID);
+        assert!(!foundation::arr_hasnull(&img));
+
+        let out = deconstruct_array(mcx, &img, foundation::INT4OID, 4, true, TYPALIGN_INT)
+            .expect("deconstruct");
+        assert_eq!(out.len(), vals.len());
+        for (i, &v) in vals.iter().enumerate() {
+            assert!(!out[i].1);
+            assert_eq!(out[i].0.as_i32(), v);
+        }
+    }
+
+    #[test]
+    fn roundtrip_int4_1d_with_null() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_int4_null");
+        let mcx = ctx.mcx();
+
+        let elems = [TDatum::from_i32(1), TDatum::null(), TDatum::from_i32(3)];
+        let nulls = [false, true, false];
+
+        let img = construct_md_array_values(
+            mcx,
+            &elems,
+            Some(&nulls),
+            1,
+            &[3],
+            &[1],
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+        )
+        .expect("construct");
+
+        assert!(foundation::arr_hasnull(&img));
+        let out = deconstruct_array(mcx, &img, foundation::INT4OID, 4, true, TYPALIGN_INT)
+            .expect("deconstruct");
+        assert_eq!(out.len(), 3);
+        assert!(!out[0].1 && out[0].0.as_i32() == 1);
+        assert!(out[1].1);
+        assert!(!out[2].1 && out[2].0.as_i32() == 3);
+    }
+
+    #[test]
+    fn roundtrip_text_1d_byref() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_text");
+        let mcx = ctx.mcx();
+
+        let words = ["alpha", "", "gamma"];
+        let elems: Vec<TDatum> = words
+            .iter()
+            .map(|w| {
+                let mut v = mcx::PgVec::<u8>::new_in(mcx);
+                v.extend_from_slice(&text_varlena(w));
+                TDatum::ByRef(v)
+            })
+            .collect();
+
+        // (elmlen=-1, byval=false, align='i') for text.
+        let img = construct_array_values(mcx, &elems, foundation::TEXTOID, -1, false, TYPALIGN_INT)
+            .expect("construct");
+
+        assert_eq!(foundation::arr_ndim(&img), 1);
+        assert_eq!(foundation::arr_elemtype(&img), foundation::TEXTOID);
+
+        let out = deconstruct_array(mcx, &img, foundation::TEXTOID, -1, false, TYPALIGN_INT)
+            .expect("deconstruct");
+        assert_eq!(out.len(), 3);
+        for (i, w) in words.iter().enumerate() {
+            assert!(!out[i].1);
+            // out[i].0 is a pointer-word into the array image; read the varlena
+            // payload back out of the image at that offset.
+            let off = out[i].0.as_usize();
+            let total = foundation::varsize_any(&img, off);
+            let payload = &img[off + 4..off + total];
+            assert_eq!(payload, w.as_bytes());
+        }
+    }
+
+    #[test]
+    fn roundtrip_array_expr_scalar() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_expr_scalar");
+        let mcx = ctx.mcx();
+
+        // ARRAY[5, 6] of int4 (multidims=false).
+        let elems = [TDatum::from_i32(5), TDatum::from_i32(6)];
+        let nulls = [false, false];
+        let img = construct_array_expr(
+            mcx,
+            &elems,
+            &nulls,
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+            false,
+        )
+        .expect("construct_array_expr");
+
+        let out = deconstruct_array(mcx, &img, foundation::INT4OID, 4, true, TYPALIGN_INT)
+            .expect("deconstruct");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0.as_i32(), 5);
+        assert_eq!(out[1].0.as_i32(), 6);
+    }
+
+    #[test]
+    fn roundtrip_array_expr_nested() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_expr_nested");
+        let mcx = ctx.mcx();
+
+        // Build two 1-D int4 sub-arrays {1,2} and {3,4} as element values, then
+        // ARRAY[ {1,2}, {3,4} ] (multidims=true) => a 2x2 array {{1,2},{3,4}}.
+        let sub1 = construct_array_values(
+            mcx,
+            &[TDatum::from_i32(1), TDatum::from_i32(2)],
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+        )
+        .expect("sub1");
+        let sub2 = construct_array_values(
+            mcx,
+            &[TDatum::from_i32(3), TDatum::from_i32(4)],
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+        )
+        .expect("sub2");
+
+        let mut s1 = mcx::PgVec::<u8>::new_in(mcx);
+        s1.extend_from_slice(&sub1);
+        let mut s2 = mcx::PgVec::<u8>::new_in(mcx);
+        s2.extend_from_slice(&sub2);
+        let elems = [TDatum::ByRef(s1), TDatum::ByRef(s2)];
+        let nulls = [false, false];
+
+        let img = construct_array_expr(
+            mcx,
+            &elems,
+            &nulls,
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+            true,
+        )
+        .expect("construct_array_expr nested");
+
+        assert_eq!(foundation::arr_ndim(&img), 2);
+        assert_eq!(foundation::arr_dim(&img, 0), 2);
+        assert_eq!(foundation::arr_dim(&img, 1), 2);
+
+        let out = deconstruct_array(mcx, &img, foundation::INT4OID, 4, true, TYPALIGN_INT)
+            .expect("deconstruct");
+        let got: Vec<i32> = out.iter().map(|(d, _)| d.as_i32()).collect();
+        assert_eq!(got, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn array_expr_all_empty_returns_empty() {
+        let _g = lock();
+        install_seams();
+        let ctx = MemoryContext::new("rt_expr_empty");
+        let mcx = ctx.mcx();
+
+        // ARRAY[ NULL::int4[] ] (multidims) -> empty array (haveempty, ndims==0).
+        let elems = [TDatum::null()];
+        let nulls = [true];
+        let img = construct_array_expr(
+            mcx,
+            &elems,
+            &nulls,
+            foundation::INT4OID,
+            4,
+            true,
+            TYPALIGN_INT,
+            true,
+        )
+        .expect("construct_array_expr empty");
+        assert_eq!(foundation::arr_ndim(&img), 0);
+    }
+}

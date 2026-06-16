@@ -558,3 +558,28 @@ seam_core::seam!(
         refelemalign: u8,
     ) -> PgResult<(DatumV<'mcx>, bool)>
 );
+
+seam_core::seam!(
+    /// `ExecEvalArrayExpr`'s array fabrication (execExprInterp.c): build an
+    /// `ARRAY[...]` constructor result from the 6-arm element values the
+    /// interpreter evaluated into `op->d.arrayexpr.elemvalues[]` /
+    /// `elemnulls[]`. When `multidims` is false the elements are scalars and the
+    /// result is a 1-D `construct_md_array`; when true the elements are
+    /// sub-arrays concatenated into an (n+1)-D array (the C nested-subarray
+    /// branch, including the all-empty `construct_empty_array` short-circuit and
+    /// the "cannot merge incompatible arrays" / matching-dimensions checks).
+    ///
+    /// The result varlena image is allocated in `mcx`; the caller wraps it as a
+    /// `Datum::ByRef`. `Err` carries the C `ereport(ERROR)` surface (dimension
+    /// overflow, incompatible arrays, size limit).
+    pub fn construct_array_expr<'mcx>(
+        mcx: Mcx<'mcx>,
+        elemvalues: &[DatumV<'mcx>],
+        elemnulls: &[bool],
+        elemtype: Oid,
+        elemlength: i16,
+        elembyval: bool,
+        elemalign: u8,
+        multidims: bool,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);

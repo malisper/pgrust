@@ -25,10 +25,12 @@
 //! the resnull/resvalue default, and the NULL-array short-circuit) is rendered
 //! faithfully here.
 
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seam;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)` — build an array
 /// Datum from the per-element results of an ArrayExpr.
@@ -38,7 +40,8 @@ use types_nodes::EStateData;
 pub fn ExecEvalArrayExpr<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    _estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // Oid element_type = op->d.arrayexpr.elemtype;
     // int nelems = op->d.arrayexpr.nelems;
@@ -46,14 +49,47 @@ pub fn ExecEvalArrayExpr<'mcx>(
     let resnull_id = step.resnull;
     let resvalue_id = step.resvalue;
 
-    let (element_type, nelems, multidims) = match &step.d {
+    let (element_type, nelems, elemlength, elembyval, elemalign, multidims) = match &step.d {
         ExprEvalStepData::ArrayExpr {
             elemtype,
             nelems,
+            elemlength,
+            elembyval,
+            elemalign,
             multidims,
             ..
-        } => (*elemtype, *nelems, *multidims),
+        } => (
+            *elemtype,
+            *nelems,
+            *elemlength,
+            *elembyval,
+            *elemalign,
+            *multidims,
+        ),
         _ => unreachable!("ExecEvalArrayExpr: step is not EEOP_ARRAYEXPR"),
+    };
+
+    // Gather the per-element 6-arm values / nulls the compiler evaluated into
+    // op->d.arrayexpr.elemvalues[]/elemnulls[]. Clone them out so the immutable
+    // borrow of `state.steps` ends before we write the result cell.
+    let (elemvalues, elemnulls): (Vec<Datum<'mcx>>, Vec<bool>) = match &step.d {
+        ExprEvalStepData::ArrayExpr {
+            elemvalues,
+            elemnulls,
+            ..
+        } => {
+            let n = nelems as usize;
+            let vals = elemvalues.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+            let nulls = elemnulls.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+            let mut vv = Vec::with_capacity(n);
+            let mut nn = Vec::with_capacity(n);
+            for i in 0..n {
+                vv.push(vals.get(i).cloned().unwrap_or_else(Datum::null));
+                nn.push(nulls.get(i).copied().unwrap_or(false));
+            }
+            (vv, nn)
+        }
+        _ => unreachable!(),
     };
 
     // Set non-null as default.
@@ -61,61 +97,36 @@ pub fn ExecEvalArrayExpr<'mcx>(
     let mut cell = state.result_cells.get(resnull_id);
     cell.isnull = false;
     state.result_cells.set(resnull_id, cell);
-    let _ = resvalue_id;
 
-    if !multidims {
-        // Elements are presumably of scalar type.
-        //
-        // Datum *dvalues = op->d.arrayexpr.elemvalues;
-        // bool  *dnulls  = op->d.arrayexpr.elemnulls;
-        //
-        // setup for 1-D array of the given length:
-        //   ndims = 1; dims[0] = nelems; lbs[0] = 1;
-        //
-        // result = construct_md_array(dvalues, dnulls, ndims, dims, lbs,
-        //                             element_type,
-        //                             op->d.arrayexpr.elemlength,
-        //                             op->d.arrayexpr.elembyval,
-        //                             op->d.arrayexpr.elemalign);
-        //
-        // construct_md_array fabricates the varlena and is owned by the
-        // (unported) backend-utils-adt-arrayfuncs unit; the constructed array's
-        // pointer would become *op->resvalue. Panic at the owner boundary.
-        let _ = (element_type, nelems);
-        panic!(
-            "ExecEvalArrayExpr (1-D): construct_md_array is owned by the \
-             unported backend-utils-adt-arrayfuncs unit (it palloc's the \
-             ArrayType varlena whose pointer becomes the result Datum); not \
-             reachable as a seam from this crate yet (mirror-PG-and-panic)"
-        );
-    } else {
-        // Must be nested array expressions.
-        //
-        // The C loops over op->d.arrayexpr.elemvalues[]/elemnulls[], detoasts
-        // each subarray (DatumGetArrayTypeP), checks ARR_ELEMTYPE against
-        // element_type (error "cannot merge incompatible arrays", with
-        // format_type_be names), gathers ARR_DATA_PTR / ARR_NULLBITMAP /
-        // ARR_SIZE / ARR_DIMS / ARR_LBOUND of each, validates matching
-        // dimensions, then palloc0's the result, SET_VARSIZE's it, copies the
-        // sub-data with array_bitmap_copy, and stores PointerGetDatum(result).
-        // The empty/zero-D special case returns
-        // PointerGetDatum(construct_empty_array(element_type)).
-        //
-        // Every operation in that body reads/writes the ArrayType varlena
-        // through the array.h ARR_* macros / construct_empty_array, all owned
-        // by the (unported) backend-utils-adt-arrayfuncs unit, and mints the
-        // result Datum from a freshly palloc'd varlena. Panic at the owner
-        // boundary.
-        panic!(
-            "ExecEvalArrayExpr (multi-D): the nested-subarray byte surgery over \
-             the array.h ARR_* macros (DatumGetArrayTypeP, ARR_ELEMTYPE, \
-             ARR_NDIM/ARR_DIMS/ARR_LBOUND, ARR_DATA_PTR, ARR_NULLBITMAP, \
-             ArrayGetNItems, array_bitmap_copy) and construct_empty_array are \
-             owned by the unported backend-utils-adt-arrayfuncs unit and mint \
-             the result varlena's pointer Datum; not reachable as a seam from \
-             this crate yet (mirror-PG-and-panic)"
-        );
-    }
+    // C allocates the result varlena in CurrentMemoryContext (the per-tuple
+    // expression context during ExecInterpExpr); the owned model resolves that
+    // off the EState's per-query arena, which lives for 'mcx (behavior-preserving
+    // — a longer-lived allocation, exactly as eval_subscript does).
+    let mcx = estate.ecxt(econtext).ecxt_per_query_memory;
+
+    // result = construct_md_array(...) for the scalar 1-D case, or the
+    // nested-subarray fabrication for the multi-D case. Owned by arrayfuncs;
+    // reached through its value-lane seam. The returned varlena image becomes
+    // *op->resvalue as a by-reference Datum (PointerGetDatum(result)).
+    let image = arrayfuncs_seam::construct_array_expr::call(
+        mcx,
+        &elemvalues,
+        &elemnulls,
+        element_type,
+        elemlength,
+        elembyval,
+        elemalign,
+        multidims,
+    )?;
+
+    // *op->resvalue = PointerGetDatum(result): the 6-arm result cell carries the
+    // array varlena image inline as a ByRef value.
+    let mut cell = state.result_cells.get(resvalue_id);
+    cell.value = Datum::ByRef(image);
+    cell.isnull = false;
+    state.result_cells.set(resvalue_id, cell);
+
+    Ok(())
 }
 
 /// `ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op,

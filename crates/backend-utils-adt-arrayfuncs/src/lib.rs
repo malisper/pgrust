@@ -82,6 +82,7 @@ pub fn init_seams() {
     seams::make_array_result_any::set(construct::make_array_result_any);
     seams::pfree_array_datum::set(construct::pfree_array_datum);
     seams::construct_array_builtin::set(construct::construct_array_builtin);
+    seams::construct_array_expr::set(construct::construct_array_expr);
     seams::deconstruct_array::set(construct::deconstruct_array_seam);
     seams::deconstruct_text_array::set(construct::deconstruct_text_array);
     seams::decode_text_array_to_strings::set(construct::decode_text_array_to_strings);

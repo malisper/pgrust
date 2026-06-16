@@ -672,7 +672,7 @@ pub fn ExecInterpExpr<'mcx>(
 
             EEOP_ARRAYEXPR => {
                 // C: ExecEvalArrayExpr(state, op);
-                eval_array::ExecEvalArrayExpr(state, op, estate)?;
+                eval_array::ExecEvalArrayExpr(state, op, econtext, estate)?;
                 op += 1;
             }
 
