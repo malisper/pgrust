@@ -13455,11 +13455,15 @@ name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
  "backend-lib-binaryheap",
  "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-slot-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-time-snapmgr-seams",
+ "libc",
  "mcx",
  "types-core",
  "types-error",

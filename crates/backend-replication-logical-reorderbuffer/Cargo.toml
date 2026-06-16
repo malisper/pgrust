@@ -33,5 +33,14 @@ backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" 
 # / AbortCurrentTransaction / RollbackAndReleaseCurrentSubTransaction.
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 
+# spill-to-disk family deps: the slot directory + spill filename
+# (ReorderBufferSerializedPath reads MyReplicationSlot's name), the fd / VFD
+# layer the segment files are written/read through, and wal_segment_size for the
+# LSN -> segment mapping (XLByteToSeg / XLogSegNoOffsetToRecPtr).
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+libc = "0.2"
+
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
