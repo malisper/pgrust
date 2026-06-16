@@ -10821,6 +10821,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-checkpointer"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-syncrep-seams",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-storage-smgr-seams",
+ "backend-storage-sync-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-small",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "backend-utils-resowner-seams",
+ "port-pgsleep-seams",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-postmaster-checkpointer-seams"
 version = "0.0.0"
 dependencies = [
@@ -17811,6 +17856,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
+ "backend-postmaster-checkpointer",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
  "backend-postmaster-pgarch",
