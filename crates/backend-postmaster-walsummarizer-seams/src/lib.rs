@@ -21,3 +21,12 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn wal_summarizer_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `WaitForWalSummarization(lsn)` (`src/backend/postmaster/walsummarizer.c`)
+    /// — block until WAL summarization has reached `lsn`, throwing an error if
+    /// the summarizer appears to be stuck. If summarization is disabled while
+    /// waiting, returns immediately. `Err` carries the "stuck"
+    /// `ereport(ERROR)`.
+    pub fn wait_for_wal_summarization(lsn: types_core::XLogRecPtr) -> types_error::PgResult<()>
+);

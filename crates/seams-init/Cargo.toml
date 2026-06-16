@@ -79,6 +79,7 @@ backend-backup-copy = { path = "../backend-backup-copy" }
 backend-backup-gzip = { path = "../backend-backup-gzip" }
 backend-backup-lz4 = { path = "../backend-backup-lz4" }
 backend-backup-zstd = { path = "../backend-backup-zstd" }
+backend-backup-incremental = { path = "../backend-backup-incremental" }
 backend-backup-basebackup-target = { path = "../backend-backup-basebackup-target" }
 backend-backup-server = { path = "../backend-backup-server" }
 backend-backup-walsummary = { path = "../backend-backup-walsummary" }

@@ -1648,4 +1648,7 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     backend_postmaster_walsummarizer_seams::wal_summarizer_shmem_size::set(WalSummarizerShmemSize);
+    backend_postmaster_walsummarizer_seams::wait_for_wal_summarization::set(
+        WaitForWalSummarization,
+    );
 }

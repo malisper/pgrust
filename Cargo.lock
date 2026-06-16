@@ -3608,6 +3608,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-incremental"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-backup-walsummary",
+ "backend-backup-walsummary-seams",
+ "backend-common-relpath",
+ "backend-postmaster-walsummarizer-seams",
+ "backend-utils-error",
+ "common-blkreftable-seams",
+ "common-hashfn",
+ "common-parse-manifest-seams",
+ "mcx",
+ "types-blkreftable",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-parse-manifest",
+ "types-storage",
+ "types-wal",
+ "types-walsummarizer",
+]
+
+[[package]]
 name = "backend-backup-lz4"
 version = "0.0.0"
 dependencies = [
@@ -18294,6 +18319,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-parse-manifest-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-parse-manifest",
+]
+
+[[package]]
 name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
@@ -18792,6 +18826,7 @@ dependencies = [
  "backend-backup-basebackup-target",
  "backend-backup-copy",
  "backend-backup-gzip",
+ "backend-backup-incremental",
  "backend-backup-lz4",
  "backend-backup-server",
  "backend-backup-sink",
@@ -19655,6 +19690,13 @@ dependencies = [
  "types-bgworker",
  "types-core",
  "types-execparallel",
+]
+
+[[package]]
+name = "types-parse-manifest"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
