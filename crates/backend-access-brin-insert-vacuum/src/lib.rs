@@ -448,6 +448,20 @@ pub fn brinvacuumcleanup<'mcx>(
 }
 
 // ===========================================================================
+// brin_summarize_new_values (brin.c:1365) — SQL-callable
+// ===========================================================================
+
+/// `brin_summarize_new_values(relation)` (brin.c:1365): scan through an index
+/// and summarize all ranges that are not currently summarized.
+///
+/// In C this is `DirectFunctionCall2(brin_summarize_range, relation,
+/// Int64GetDatum((int64) BRIN_ALL_BLOCKRANGES))` — a thin wrapper that fixes the
+/// page-range argument to the all-ranges sentinel.
+pub fn brin_summarize_new_values<'mcx>(mcx: Mcx<'mcx>, relation: Oid) -> PgResult<i32> {
+    brin_summarize_range(mcx, relation, BRIN_ALL_BLOCKRANGES as i64)
+}
+
+// ===========================================================================
 // brin_summarize_range (brin.c:1381)  — SQL-callable
 // ===========================================================================
 
