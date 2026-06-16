@@ -400,3 +400,12 @@ seam_core::seam!(
         bool,
     )>
 );
+
+seam_core::seam!(
+    /// `lookup_type_cache(atttypid, 0)->typtype` (typcache.c): the `typtype`
+    /// classification byte (`TYPTYPE_RANGE` / `TYPTYPE_MULTIRANGE` / ...) of a
+    /// type, loading the cache entry by OID. Used by `ExecWithoutOverlapsNotEmpty`
+    /// (execIndexing.c) to dispatch a WITHOUT OVERLAPS key value to the range
+    /// vs. multirange emptiness check. `Err` carries the cache-load surface.
+    pub fn type_cache_typtype(atttypid: types_core::primitive::Oid) -> types_error::PgResult<i8>
+);

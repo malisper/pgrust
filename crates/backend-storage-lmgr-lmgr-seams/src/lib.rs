@@ -390,3 +390,13 @@ seam_core::seam!(
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SpeculativeInsertionWait(xid, token)` (lmgr.c): wait for the given
+    /// speculative insertion to be confirmed or aborted (a `ShareLock`
+    /// acquire+immediate-release on the speculative-insertion lock tag).
+    /// Reached from `check_exclusion_or_unique_constraint` (execIndexing.c)
+    /// when a conflicting in-progress speculative insertion is found. `Err`
+    /// carries the lock-manager `ereport(ERROR)` surface.
+    pub fn speculative_insertion_wait(xid: TransactionId, token: u32) -> PgResult<()>
+);

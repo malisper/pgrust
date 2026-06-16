@@ -96,6 +96,7 @@ pub fn init_seams() {
     seams::make_range::set(range_repr_serialize::make_range);
     seams::make_empty_range::set(range_repr_serialize::make_empty_range);
     seams::range_get_flags::set(range_repr_serialize::range_get_flags);
+    seams::range_is_empty::set(range_repr_serialize::range_is_empty_seam);
 
     // Bound comparison + `*_internal` predicate kernels (range_bounds_compare).
     // All but two match the seams exactly; range_adjacent_internal and

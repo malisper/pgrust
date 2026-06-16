@@ -7614,6 +7614,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execIndexing"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-tableam",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-index-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execIndexing-seams",
+ "backend-executor-execUtils",
+ "backend-nodes-core",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-multirangetypes-seams",
+ "backend-utils-adt-rangetypes-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execIndexing-seams"
 version = "0.0.0"
 dependencies = [
@@ -7622,6 +7659,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -19003,6 +19041,7 @@ dependencies = [
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execGrouping",
+ "backend-executor-execIndexing",
  "backend-executor-execJunk",
  "backend-executor-execMain",
  "backend-executor-execParallel",
