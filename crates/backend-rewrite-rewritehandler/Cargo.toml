@@ -36,3 +36,7 @@ backend-commands-view-seams = { path = "../backend-commands-view-seams" }
 
 # Cross-cycle externals consumed through owner -seams crates.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

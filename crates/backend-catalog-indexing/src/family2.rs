@@ -529,8 +529,24 @@ fn catalog_tuple_update_pg_index<'mcx>(
     let mut replaces = vec![false; values.len()];
     // pg_index field order: indexrelid(1) indrelid(2) indnatts(3) indnkeyatts(4)
     // indisunique(5) indnullsnotdistinct(6) indisprimary(7) indisexclusion(8)
-    // indimmediate(9) indisclustered(10) indisvalid(11) ...
+    // indimmediate(9) indisclustered(10) indisvalid(11) indcheckxmin(12)
+    // indisready(13) indislive(14) indisreplident(15) ...
+    //
+    // The carrier is the writable `GETSTRUCT(Form_pg_index)` copy the callers
+    // (`mark_index_clustered`, `index_set_state_flags`,
+    // `index_constraint_create`) mutate; here we write every flag column it
+    // carries back into the heap tuple (the C `CatalogTupleUpdate` of the whole
+    // modified tuple — the unchanged flag columns simply get rewritten with
+    // their re-read values, which is behaviour-identical to the C overwriting
+    // the single `GETSTRUCT` view in place).
+    set_col(&mut values, &mut nulls, &mut replaces, 7, Datum::from_bool(form.indisprimary));
+    set_col(&mut values, &mut nulls, &mut replaces, 9, Datum::from_bool(form.indimmediate));
     set_col(&mut values, &mut nulls, &mut replaces, 10, Datum::from_bool(form.indisclustered));
+    set_col(&mut values, &mut nulls, &mut replaces, 11, Datum::from_bool(form.indisvalid));
+    set_col(&mut values, &mut nulls, &mut replaces, 12, Datum::from_bool(form.indcheckxmin));
+    set_col(&mut values, &mut nulls, &mut replaces, 13, Datum::from_bool(form.indisready));
+    set_col(&mut values, &mut nulls, &mut replaces, 14, Datum::from_bool(form.indislive));
+    set_col(&mut values, &mut nulls, &mut replaces, 15, Datum::from_bool(form.indisreplident));
     modify_and_update_tid(mcx, &r, &oldtup, &values, &nulls, &replaces, tid)
 }
 

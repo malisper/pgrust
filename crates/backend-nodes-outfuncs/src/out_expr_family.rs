@@ -91,23 +91,84 @@ fn write_string_list_field(buf: &mut String, name: &str, list: &[String], _wl: b
 // Post-analysis `Expr` writers (outfuncs.funcs.c / outfuncs.c).
 // ---------------------------------------------------------------------------
 
-// NOTE: `_outAggref` writes `WRITE_NODE_FIELD(args)` (a List of `TargetEntry`),
-// `WRITE_NODE_FIELD(aggorder)` and `WRITE_NODE_FIELD(aggdistinct)` (Lists of
-// `SortGroupClause`). The `TargetEntry` and `SortGroupClause` framed writers are
-// owned by `lib.rs` / the parse family and are not exposed for by-reference
-// dispatch (this family only has `&Aggref`, and there is no by-ref Node-dispatch
-// hook for a borrowed non-Expr child). Faithfully emitting those three fields
-// therefore requires a writer this family cannot reach, so `_outAggref` is a
-// precise seam-panic rather than a partial dump. The READ side reconstructs
-// Aggref fully (the parse-family SORTGROUPCLAUSE/TARGETENTRY readers are reached
-// through `node_read`), so READ stays symmetric-capable.
-fn out_aggref(_buf: &mut String, _n: &types_nodes::primnodes::Aggref, _wl: bool) {
-    panic!(
-        "_outAggref: args (List of TargetEntry) + aggorder/aggdistinct (Lists of \
-         SortGroupClause) need the TARGETENTRY/SORTGROUPCLAUSE framed writers, \
-         which are owned by lib.rs / the parse family and not exposed for \
-         by-reference dispatch from the expr family"
-    );
+/// `WRITE_NODE_FIELD` over a `List *` of framed `TargetEntry` (C: `outNode` of
+/// the list → `({TARGETENTRY ...} {TARGETENTRY ...} ...)`). Each element is the
+/// `lib.rs`-owned `_outTargetEntry`, framed by `{`/`}` (the bare-list `(...)`
+/// opener/closer is `_outList`'s). An empty Vec serializes as `()`.
+fn write_targetentry_list_field(
+    buf: &mut String,
+    name: &str,
+    list: &[types_nodes::primnodes::TargetEntry<'_>],
+    wl: bool,
+) {
+    use core::fmt::Write as _;
+    let _ = write!(buf, " :{} ", name);
+    buf.push('(');
+    let mut first = true;
+    for te in list {
+        if !first {
+            buf.push(' ');
+        }
+        first = false;
+        crate::framed(buf, |b| crate::out_targetentry(b, te, wl));
+    }
+    buf.push(')');
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of framed `SortGroupClause` (C: `outNode`
+/// of the list → `({SORTGROUPCLAUSE ...} ...)`). Each element is the
+/// parse-family-owned `_outSortGroupClause`, framed by `{`/`}`. Empty Vec → `()`.
+fn write_sortgroupclause_list_field(
+    buf: &mut String,
+    name: &str,
+    list: &[types_nodes::rawnodes::SortGroupClause],
+    wl: bool,
+) {
+    use core::fmt::Write as _;
+    let _ = write!(buf, " :{} ", name);
+    buf.push('(');
+    let mut first = true;
+    for sgc in list {
+        if !first {
+            buf.push(' ');
+        }
+        first = false;
+        crate::framed(buf, |b| crate::out_parse_family::out_sort_group_clause(b, sgc, wl));
+    }
+    buf.push(')');
+}
+
+/// `_outAggref` (outfuncs.funcs.c). The `aggno`/`aggtransno`/`aggpresorted`
+/// fields carry `pg_node_attr(read_write_ignore)` in C and are NOT serialized;
+/// every other field is emitted in struct order. `args` is a List of
+/// `TargetEntry`, `aggorder`/`aggdistinct` Lists of `SortGroupClause`, reached
+/// through the framed list writers above (`lib.rs`'s `_outTargetEntry` and the
+/// parse family's `_outSortGroupClause`).
+///
+/// READ asymmetry: `_readAggref` is carrier-blocked — `Aggref.args` is
+/// `Vec<TargetEntry<'static>>`, so a reader cannot store the mcx-allocated
+/// children it reads off the cursor (same `'static`-carrier blocker as SUBPLAN).
+/// OUT therefore serializes faithfully (for plan-tree dump / debug) while READ
+/// stays a precise seam-panic until the carrier carries `'mcx`.
+fn out_aggref(buf: &mut String, n: &types_nodes::primnodes::Aggref, wl: bool) {
+    buf.push_str("AGGREF");
+    write_oid_field(buf, "aggfnoid", n.aggfnoid);
+    write_oid_field(buf, "aggtype", n.aggtype);
+    write_oid_field(buf, "aggcollid", n.aggcollid);
+    write_oid_field(buf, "inputcollid", n.inputcollid);
+    write_oid_field(buf, "aggtranstype", n.aggtranstype);
+    crate::write_oid_list_field(buf, "aggargtypes", Some(&n.aggargtypes));
+    write_expr_list_field(buf, "aggdirectargs", &n.aggdirectargs, wl);
+    write_targetentry_list_field(buf, "args", &n.args, wl);
+    write_sortgroupclause_list_field(buf, "aggorder", &n.aggorder, wl);
+    write_sortgroupclause_list_field(buf, "aggdistinct", &n.aggdistinct, wl);
+    write_opt_box_expr(buf, "aggfilter", &n.aggfilter, wl);
+    write_bool_field(buf, "aggstar", n.aggstar);
+    write_bool_field(buf, "aggvariadic", n.aggvariadic);
+    crate::write_char_field(buf, "aggkind", n.aggkind as u8);
+    write_uint_field(buf, "agglevelsup", n.agglevelsup);
+    write_enum_field(buf, "aggsplit", n.aggsplit);
+    write_location_field(buf, "location", n.location, wl);
 }
 
 fn out_grouping_func(buf: &mut String, n: &types_nodes::primnodes::GroupingFunc, wl: bool) {

@@ -67,3 +67,26 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # Seam crates for not-yet-ported (or cyclic) owners.
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+
+# index_create / index_constraint_create / index_set_state_flags:
+# heap_create + InsertPgClassTuple (creating the index relcache entry + pg_class
+# row), the dependency engine (column/collation/opclass/expression deps + the
+# constraint's internal dep), pg_constraint entry + name check, pg_inherits
+# (partition-index parent link), the deferrable-constraint recheck trigger, the
+# AccessExclusiveLock on the new index, relcache/object-access invalidation +
+# hooks, GetNewRelFileNumber / IsBinaryUpgrade / GLOBALTABLESPACE, the catalog
+# system-table checks, the partition parent's relhassubclass, and the
+# bootstrap-mode index_register / RelationInitIndexAccessInfo legs.
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
+backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
+backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-bootstrap-bootstrap-seams = { path = "../backend-bootstrap-bootstrap-seams" }
+types-cluster = { path = "../types-cluster" }
+types-storage = { path = "../types-storage" }

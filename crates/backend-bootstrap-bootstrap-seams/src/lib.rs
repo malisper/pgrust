@@ -34,3 +34,20 @@ seam_core::seam!(
     /// found ...")` / hard-wired-TypInfo miss paths.
     pub fn boot_get_type_io_data(typid: Oid) -> PgResult<BootTypeIoData>
 );
+
+seam_core::seam!(
+    /// `index_register(heap, ind, indexInfo)` (bootstrap.c): stash the index's
+    /// `IndexInfo` on the bootstrap "indexes to build later" list so
+    /// `build_indices` can fill it once bootstrapping is finishing. Reached only
+    /// from `index_create` (catalog/index.c) in bootstrap mode. The C copies the
+    /// `IndexInfo` into the process-lifetime no-gc bootstrap context; this seam
+    /// passes the live `IndexInfo<'mcx>` by reference and the owner deep-copies
+    /// it (`makeIndexInfo` + the attribute/expression/predicate copy) into its
+    /// own list. `Err` carries OOM on the copy.
+    pub fn index_register<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap: Oid,
+        ind: Oid,
+        index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+    ) -> PgResult<()>
+);

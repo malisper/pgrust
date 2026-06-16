@@ -4,10 +4,19 @@
 //!
 //! Truth source: `postgres-18.3/src/backend/utils/fmgr/funcapi.c`.
 //!
-//! SCAFFOLD STAGE. The C file (~3204 LOC) is split into the families below,
-//! re-derived from the C source. Each family module carries the faithful Rust
-//! signatures with stub bodies so the crate compiles; the per-pass agents
-//! fill the bodies 1:1 against the C.
+//! The C file (~3204 LOC) is split into the families below, re-derived from the
+//! C source. The result-type resolution, polymorphic pseudo-type resolution,
+//! `pg_proc`-row projection, and descriptor/VARIADIC families have real bodies
+//! ported 1:1 against the C, as does the materialize-mode SRF path
+//! (`InitMaterializedSRF`).
+//!
+//! The **multi-call (value-per-call) SRF protocol** is deferred: it needs the
+//! fmgr call frame to carry a typed `FuncCallContext` (a `FmgrInfo.fn_extra`
+//! slot) and the widened `FunctionCallInfoBaseData` / `ReturnSetInfo` carriers,
+//! which are not yet modeled. So `init_MultiFuncCall`, `per_MultiFuncCall`,
+//! `end_MultiFuncCall`, `shutdown_MultiFuncCall`, and the value-SRF entry
+//! mirror the C entry point and panic loudly (per Mirror-PG-and-panic) until
+//! that machinery lands.
 //!
 //! Families (one module per cluster of `funcapi.c`):
 //!
@@ -30,7 +39,7 @@
 //!
 //! This crate OWNS the inward `backend-utils-fmgr-funcapi-seams` crate (the SRF
 //! and `pg_proc`-projection entrypoints other ported crates call). [`init_seams`]
-//! installs every owned seam; until that lands a call panics loudly.
+//! installs every owned seam.
 
 // `clippy::result_large_err`: fallible functions return the shared
 // `backend_utils_error::PgResult` (== `Result<_, PgError>`); `PgError`'s size is

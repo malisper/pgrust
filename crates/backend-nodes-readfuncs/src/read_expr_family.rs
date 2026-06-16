@@ -1164,20 +1164,19 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let res: PgResult<Node<'mcx>> = match label {
         b"AGGREF" => {
-            // NOTE: `_readAggref` reads args (List of TargetEntry) +
-            // aggorder/aggdistinct (Lists of SortGroupClause). Those framed
-            // readers are owned by the parse family (TARGETENTRY/SORTGROUPCLAUSE)
-            // and reached through `node_read`, but the post-analysis `Aggref`
-            // carries `args: Vec<TargetEntry>` / `aggorder: Vec<SortGroupClause>`
-            // by value (not `Node` children), and there is no bridge from a
-            // read-back `Node::TargetEntry`/`Node::SortGroupClause` into those
-            // typed Vecs from this family. Reconstructing Aggref fully therefore
-            // needs the parse-family/lib.rs typed-list bridge — seam-panic for
-            // now (symmetric with the OUT-side seam-panic).
+            // NOTE: the OUT side (`_outAggref`) serializes faithfully through the
+            // expr family's framed TARGETENTRY/SORTGROUPCLAUSE list writers, but
+            // `_readAggref` is carrier-blocked: `Aggref.args` is
+            // `Vec<TargetEntry<'static>>`, so a reader cannot store the
+            // mcx-allocated `TargetEntry` children it reads off the cursor into the
+            // `'static` Vec (the same `'static`-carrier blocker as SUBPLAN /
+            // ALTERNATIVESUBPLAN). Reconstructing Aggref needs a `'mcx`-carrying
+            // `args` field (an Expr-model follow-on) — mirror-pg-and-panic on READ
+            // (the OUT side stays available for plan-tree serialization / debug).
             return Some(Err(elog_error(
-                "_readAggref: args (List of TargetEntry) + aggorder/aggdistinct \
-                 (Lists of SortGroupClause) need the TARGETENTRY/SORTGROUPCLAUSE \
-                 typed-list bridge owned by lib.rs / the parse family",
+                "_readAggref: Aggref.args is Vec<TargetEntry<'static>>; cannot store \
+                 mcx-allocated TargetEntry children — needs a lifetime-carrying \
+                 args carrier (same `'static`-carrier blocker as SUBPLAN)",
             )));
         }
         b"GROUPINGFUNC" => read_grouping_func(mcx).map(|n| Node::Expr(Expr::GroupingFunc(n))),

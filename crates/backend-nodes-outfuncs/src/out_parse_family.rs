@@ -307,7 +307,11 @@ fn out_rte_perm_info(buf: &mut String, n: &types_nodes::parsenodes::RTEPermissio
 // _outRangeTblFunction
 // ===========================================================================
 
-fn out_range_tbl_function(buf: &mut String, n: &types_nodes::rawnodes::RangeTblFunction<'_>, wl: bool) {
+pub(crate) fn out_range_tbl_function(
+    buf: &mut String,
+    n: &types_nodes::rawnodes::RangeTblFunction<'_>,
+    wl: bool,
+) {
     buf.push_str("RANGETBLFUNCTION");
     write_opt_node_field(buf, "funcexpr", &n.funcexpr, wl);
     write_int_field(buf, "funccolcount", n.funccolcount);
@@ -354,7 +358,11 @@ fn write_expr_list_tail(buf: &mut String, args: &[Expr], wl: bool) {
 // _outSortGroupClause
 // ===========================================================================
 
-fn out_sort_group_clause(buf: &mut String, n: &types_nodes::rawnodes::SortGroupClause, _wl: bool) {
+pub(crate) fn out_sort_group_clause(
+    buf: &mut String,
+    n: &types_nodes::rawnodes::SortGroupClause,
+    _wl: bool,
+) {
     buf.push_str("SORTGROUPCLAUSE");
     write_uint_field(buf, "tleSortGroupRef", n.tleSortGroupRef);
     write_oid_field(buf, "eqop", n.eqop);

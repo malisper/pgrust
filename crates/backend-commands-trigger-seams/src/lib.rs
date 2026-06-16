@@ -468,3 +468,24 @@ seam_core::seam!(
         stmt: &types_parsenodes::RenameStmt,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );
+
+seam_core::seam!(
+    /// The deferred-uniqueness-recheck `CreateTrigger` call that
+    /// `index_constraint_create` (catalog/index.c) makes for a *deferrable*
+    /// PRIMARY KEY / UNIQUE constraint. The C builds a fixed `CreateTrigStmt`
+    /// (`unique_key_recheck`, AFTER INSERT OR UPDATE, row-level, deferrable,
+    /// `initdeferred` per the constraint) and calls `CreateTrigger(stmt, NULL,
+    /// relOid, InvalidOid, constraintOid, indexOid, InvalidOid, InvalidOid,
+    /// NULL, is_internal=true, in_partition=false)`. This seam captures exactly
+    /// those varying inputs; the trigger manager (owner) materialises the
+    /// `CreateTrigStmt` and runs `CreateTrigger`. `is_primary` selects the
+    /// trigger name (`PK_ConstraintTrigger` vs `Unique_ConstraintTrigger`).
+    /// `Err` carries the trigger-creation `ereport(ERROR)`s.
+    pub fn create_unique_key_recheck_trigger(
+        rel_oid: Oid,
+        constraint_oid: Oid,
+        index_oid: Oid,
+        is_primary: bool,
+        initdeferred: bool,
+    ) -> PgResult<()>
+);

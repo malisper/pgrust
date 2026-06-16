@@ -156,7 +156,7 @@ pub fn internal_get_result_type<'mcx>(
 
     // C: tupdesc = build_function_result_tupdesc_t(tp);
     //    (this funcapi unit re-fetches the pg_proc row by OID rather than
-    //     threading the HeapTuple, per the scaffold's by-OID convention.)
+    //     threading the HeapTuple, per this crate's by-OID convention.)
     let mut tupdesc: TupleDesc<'mcx> = build_function_result_tupdesc_t(mcx, funcid)?;
 
     // C: if (tupdesc) { ... }  — has OUT parameters.
@@ -253,7 +253,7 @@ pub fn internal_get_result_type<'mcx>(
     Ok(out)
 }
 
-/// Adapt the scaffold's plan-`Node` call-expression carrier to the
+/// Adapt the plan-`Node` call-expression carrier to the
 /// `ExternalFnExpr` tag the nodeFuncs `expr_type` seam consumes. `None` is the
 /// C `NULL` call_expr, for which `exprType(NULL)` yields `InvalidOid`.
 fn node_to_external(call_expr: Option<&Node<'_>>) -> types_fmgr::ExternalFnExpr {
