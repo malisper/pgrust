@@ -29,6 +29,7 @@ pub fn init_all() {
     backend_access_heap_heapam_handler_core::init_seams();
     backend_access_heap_heapam_handler_dml::init_seams();
     backend_access_heap_heapam_visibility::init_seams();
+    backend_access_heap_heapam_xlog::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_pruneheap::init_seams();
     backend_access_heap_rewriteheap::init_seams();

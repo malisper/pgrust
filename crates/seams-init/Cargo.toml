@@ -32,6 +32,7 @@ backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-heap-heapam-handler-core = { path = "../backend-access-heap-heapam-handler-core" }
 backend-access-heap-heapam-handler-dml = { path = "../backend-access-heap-heapam-handler-dml" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
+backend-access-heap-heapam-xlog = { path = "../backend-access-heap-heapam-xlog" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
 backend-access-heap-rewriteheap = { path = "../backend-access-heap-rewriteheap" }

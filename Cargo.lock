@@ -1530,6 +1530,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-heapam-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-heap-heapam-xlog-seams",
+ "backend-access-heap-pruneheap-seams",
+ "backend-access-heap-rewriteheap-seams",
+ "backend-access-heap-visibilitymap",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils",
+ "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-heap-heapam-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -19883,6 +19914,7 @@ dependencies = [
  "backend-access-heap-heapam-handler-core",
  "backend-access-heap-heapam-handler-dml",
  "backend-access-heap-heapam-visibility",
+ "backend-access-heap-heapam-xlog",
  "backend-access-heap-heaptoast",
  "backend-access-heap-pruneheap",
  "backend-access-heap-rewriteheap",
