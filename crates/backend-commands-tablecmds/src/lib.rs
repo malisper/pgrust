@@ -29,6 +29,7 @@
 
 mod create;
 mod drop;
+mod f1_rename;
 mod helpers;
 mod oncommit;
 mod smallfns;
@@ -51,6 +52,11 @@ pub fn init_seams() {
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);
+
+    // F1 (RENAME / namespace / owner) — the subset buildable without the
+    // trimmed-`PgClassForm` carrier keystone (see `f1_rename`).
+    seam::range_var_callback_owns_relation::set(f1_rename::range_var_callback_owns_relation);
+    seam::define_sequence_relation::set(f1_rename::define_sequence_relation);
 
     seam::register_on_commit_action::set(oncommit::register_on_commit_action);
     seam::remove_on_commit_action::set(oncommit::remove_on_commit_action);

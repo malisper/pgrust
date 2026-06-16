@@ -7095,6 +7095,7 @@ dependencies = [
  "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-commands-tablespace-seams",
+ "backend-nodes-core",
  "backend-storage-lmgr-lmgr",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
