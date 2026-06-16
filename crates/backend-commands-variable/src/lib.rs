@@ -1170,14 +1170,22 @@ mod install {
     }
 
     pub fn own_seams() {
-        // -------- datetime.c (unported: todo) — mirror-pg-and-panic --------
-        own::date_style::set(|| panic!("DateStyle (datetime.c) not yet ported"));
-        own::date_order::set(|| panic!("DateOrder (datetime.c) not yet ported"));
-        own::assign_date_style::set(|_style, _order| {
-            panic!("assign_datestyle store (datetime.c DateStyle/DateOrder) not yet ported")
+        // -------- datetime.c globals (DateStyle / DateOrder) --------
+        // Real per-backend storage lives in backend-utils-adt-datetime::settings
+        // (the globals.c `int DateStyle`/`int DateOrder`); delegate the reads and
+        // the assign_datestyle store to it.
+        own::date_style::set(backend_utils_adt_datetime::settings::date_style);
+        own::date_order::set(backend_utils_adt_datetime::settings::date_order);
+        own::assign_date_style::set(|style, order| {
+            backend_utils_adt_datetime::settings::set_date_style(style);
+            backend_utils_adt_datetime::settings::set_date_order(order);
         });
         own::clear_time_zone_abbrev_cache::set(|| {
-            panic!("ClearTimeZoneAbbrevCache (datetime.c) not yet ported")
+            // ClearTimeZoneAbbrevCache() (datetime.c:3227) zeros the per-field
+            // `tzabbrevcache` lookup cache. That cache is a pure performance
+            // optimization that the Rust DecodeTimezoneAbbrev port omits
+            // (lookups always go through the timezone engine / resolver hook), so
+            // there is nothing to clear — a faithful no-op, not a stub.
         });
         own::load_and_install_tz_abbrevs::set(|filename| {
             // C: check_timezone_abbreviations -> load_tzoffsets(filename), then
