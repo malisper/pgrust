@@ -68,6 +68,7 @@ fn make_index<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         relreplident: b'n',
         relispartition: false,
         relfrozenxid: 0,
+        relminmxid: 0,
     };
     let data = RelationData {
         rd_id: IDX_OID,

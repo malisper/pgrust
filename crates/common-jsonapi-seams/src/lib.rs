@@ -7,8 +7,11 @@
 //! the parser through these. The owning unit installs them from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_error::PgResult;
-use types_json::{JsonParseErrorType, JsonTokenType};
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 seam_core::seam!(
     /// `makeJsonLexContext(&lex, json, false)` then
@@ -43,4 +46,58 @@ seam_core::seam!(
     /// swallows the error and returns `Ok(())`; otherwise it raises the hard
     /// error as `Err`.
     pub fn errsave_error(error: JsonParseErrorType, json: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `makeJsonLexContext(&lex, json, need_escapes)` then
+    /// `pg_parse_json(&lex, sem)` (common/jsonapi.c) — run the recursive-descent
+    /// JSON parser over `json` in `encoding`, invoking the caller-supplied
+    /// [`JsonSemAction`] callbacks (the SAX driver). Returns the first
+    /// non-success [`JsonParseErrorType`] (`JSON_SUCCESS` on a clean parse); a
+    /// callback that raises propagates as `Err`. The live `JsonLexContext` is
+    /// threaded to each callback as the parser advances. This is the parse
+    /// driver `jsonfuncs.c`'s json-text entry points (object_keys / each /
+    /// elements / get_worker / strip_nulls / populate / iterate / transform)
+    /// build their `sem` table for.
+    pub fn pg_parse_json<'a>(
+        json: &[u8],
+        encoding: i32,
+        need_escapes: bool,
+        sem: &mut JsonSemAction<'a>,
+    ) -> PgResult<JsonParseErrorType>
+);
+
+seam_core::seam!(
+    /// `json_lex(&lex)` over a freshly-`makeJsonLexContext`'d `json` — lex
+    /// exactly the first token and report `(result, JsonLexContext snapshot)`.
+    /// Drives `json_get_first_token`. The snapshot's `token_type` is meaningful
+    /// only when `result == JSON_SUCCESS`.
+    pub fn json_lex_first(json: &[u8], encoding: i32) -> PgResult<(JsonParseErrorType, JsonLexContext)>
+);
+
+seam_core::seam!(
+    /// `json_errdetail(error, lex)` (common/jsonapi.c) — the human-readable
+    /// detail string for a parse error, in server encoding. `lex` is provided
+    /// as the snapshot the error was detected at.
+    pub fn json_errdetail(error: JsonParseErrorType, lex: &JsonLexContext) -> PgResult<Vec<u8>>
+);
+
+seam_core::seam!(
+    /// `json_count_array_elements(&lex)` (common/jsonapi.c) — count the elements
+    /// of the top-level array `lex` is positioned at (a lookahead parse).
+    /// Drives `json_array_length`. `Err` carries the parse `ereport`.
+    pub fn json_count_array_elements(json: &[u8], encoding: i32) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `GetDatabaseEncoding()` (mb/mbutils.c) — the current database encoding,
+    /// passed to `makeJsonLexContext`. (Backend-global; read by the owner.)
+    pub fn get_database_encoding() -> i32
+);
+
+seam_core::seam!(
+    /// `pg_mblen(s)` (mb/mbutils.c) — the byte length of the multibyte
+    /// character starting `s`. Used by `report_json_context` to advance over
+    /// multibyte characters.
+    pub fn pg_mblen(s: &[u8]) -> usize
 );

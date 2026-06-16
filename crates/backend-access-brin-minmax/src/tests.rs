@@ -184,6 +184,7 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
             relreplident: b'n',
             relispartition: false,
             relfrozenxid: 0,
+            relminmxid: 0,
         },
         rd_att: index_tupdesc(mcx, natts),
         rd_options: None,

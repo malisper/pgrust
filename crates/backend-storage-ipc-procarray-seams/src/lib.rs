@@ -329,6 +329,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
+    /// TransactionId *catalog_xmin)` (procarray.c) — the aggregate
+    /// replication-slot xmin horizons currently published in the ProcArray.
+    /// Returns `(replication_slot_xmin, replication_slot_catalog_xmin)`; a NULL
+    /// out-parameter in C is simply an ignored tuple element here.
+    pub fn proc_array_get_replication_slot_xmin() -> (TransactionId, TransactionId)
+);
+
+seam_core::seam!(
     /// `IsBackendPid(pid)` (procarray.c) — is `pid` the PID of a live backend
     /// (`BackendPidGetProc(pid) != NULL`)? Shared-memory scan; cannot
     /// `ereport`.

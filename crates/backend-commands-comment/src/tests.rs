@@ -233,6 +233,7 @@ fn make_rel(mcx: Mcx<'_>, oid: Oid, relkind: u8) -> Relation<'_> {
             relreplident: b'd',
             relispartition: false,
             relfrozenxid: 0,
+            relminmxid: 0,
         },
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,

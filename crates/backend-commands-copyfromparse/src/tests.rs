@@ -73,6 +73,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             relreplident: b'd',
             relispartition: false,
             relfrozenxid: 0,
+            relminmxid: 0,
         },
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
