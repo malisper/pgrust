@@ -19299,6 +19299,7 @@ dependencies = [
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
@@ -19477,6 +19478,9 @@ name = "backend-utils-misc-guc-funcs"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
+ "backend-port-sysv-shmem-seams",
+ "backend-storage-ipc-ipci-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-funcs-seams",

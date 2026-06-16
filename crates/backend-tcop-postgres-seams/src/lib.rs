@@ -347,14 +347,10 @@ seam_core::seam!(
     pub fn local_process_control_file(reset: bool) -> types_error::PgResult<()>
 );
 
-seam_core::seam!(
-    /// `process_shared_preload_libraries()` (`utils/init/miscinit.c`) — load the
-    /// `shared_preload_libraries` GUC's modules so they can register hooks /
-    /// request shared memory before `CreateSharedMemoryAndSemaphores`. Owned by
-    /// the (unported) miscinit shared-library loader; `ereport(ERROR)` on a load
-    /// failure.
-    pub fn process_shared_preload_libraries() -> types_error::PgResult<()>
-);
+// `process_shared_preload_libraries()` (miscinit.c) is ported and lives in
+// `backend-utils-init-miscinit`; single-user boot calls it directly (the
+// established direct-call pattern, like `SetProcessingMode`), so no boot-driver
+// seam is needed for it.
 
 seam_core::seam!(
     /// `process_shmem_requests()` (`storage/ipc/ipci.c`) — run each preloaded
