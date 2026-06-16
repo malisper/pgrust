@@ -80,7 +80,9 @@ pub use insert::{XLogInsertAllowed, XLogInsertRecord};
 
 pub mod write;
 pub use write::{
-    issue_xlog_fsync, XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush,
+    issue_xlog_fsync, IsInstallXLogFileSegmentActive, ResetInstallXLogFileSegmentActive,
+    SetInstallXLogFileSegmentActive, XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush,
+    XLogShutdownWalRcv,
 };
 
 /// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
@@ -639,8 +641,6 @@ xlog_driver_deferred! {
     pub fn UpdateFullPageWrites();
     /// `CheckXLogRemoved(segno, tli)` — error if a needed segment was removed.
     pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID);
-    /// `XLogShutdownWalRcv()` — stop the walreceiver.
-    pub fn XLogShutdownWalRcv();
     /// `SetWalWriterSleeping(sleeping)` — publish the walwriter idle state.
     pub fn SetWalWriterSleeping(sleeping: bool);
 
@@ -775,6 +775,29 @@ pub fn init_seams() {
     s::issue_xlog_fsync::set(write::issue_xlog_fsync);
     s::enable_fsync::set(write::enable_fsync);
     s::wal_sync_method::set(write::wal_sync_method);
+
+    // `Is/Set/ResetInstallXLogFileSegmentActive` + `XLogShutdownWalRcv` live in
+    // xlog.c and touch the xlog-owned `XLogCtl->InstallXLogFileSegmentActive`
+    // flag under ControlFileLock. The recovery page-read driver reaches them
+    // through the walreceiverfuncs-seams crate (where the seams were declared),
+    // so install those entries here, in the real owner. The C return is void;
+    // the lwlock/condvar `ereport(ERROR)` unwinds (here: PgError -> panic at the
+    // void seam boundary, matching the longjmp).
+    s::is_install_xlog_file_segment_active::set(write::IsInstallXLogFileSegmentActive);
+    {
+        use backend_replication_walreceiverfuncs_seams as wf;
+        wf::set_install_xlog_file_segment_active::set(|| {
+            write::SetInstallXLogFileSegmentActive()
+                .expect("SetInstallXLogFileSegmentActive failed")
+        });
+        wf::reset_install_xlog_file_segment_active::set(|| {
+            write::ResetInstallXLogFileSegmentActive()
+                .expect("ResetInstallXLogFileSegmentActive failed")
+        });
+        wf::xlog_shutdown_wal_rcv::set(|| {
+            write::XLogShutdownWalRcv().expect("XLogShutdownWalRcv failed")
+        });
+    }
 }
 
 #[cfg(test)]

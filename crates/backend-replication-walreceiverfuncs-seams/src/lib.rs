@@ -91,9 +91,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `void XLogShutdownWalRcv(void)` — request the walreceiver to stop and
-    /// wait for it to do so (a shmem state-write protected by the walrcv
-    /// spinlock).
+    /// `void ShutdownWalRcv(void)` (walreceiverfuncs.c) — request the
+    /// walreceiver to stop and wait for it to do so (a shmem state-write
+    /// protected by the walrcv spinlock). This is the inner walreceiverfuncs.c
+    /// routine; the xlog.c `XLogShutdownWalRcv` wrapper (the
+    /// `xlog_shutdown_wal_rcv` seam, owned by xlog) calls this then resets the
+    /// segment-active flag. The C return is void; a condition-variable sleep
+    /// `ereport(ERROR)` in the wait loop unwinds via longjmp.
+    pub fn shutdown_wal_rcv()
+);
+
+seam_core::seam!(
+    /// `void XLogShutdownWalRcv(void)` (xlog.c) — the thin wrapper that calls
+    /// `ShutdownWalRcv()` then `ResetInstallXLogFileSegmentActive()`. Its real
+    /// owner is the xlog crate (it touches the xlog-owned `XLogCtl` flag), which
+    /// installs this seam.
     pub fn xlog_shutdown_wal_rcv()
 );
 

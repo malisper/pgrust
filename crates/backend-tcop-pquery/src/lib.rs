@@ -959,7 +959,7 @@ fn run_from_store(
         let td = tupdesc
             .as_deref()
             .expect("run_from_store: tupDesc present");
-        dest_seam::dest_rstartup::call(dest, CMD_SELECT, td)?;
+        dest_seam::dest_rstartup::call(mcx, dest, CMD_SELECT, td)?;
     }
 
     let mut slot = exectuples_seam::make_single_tuple_table_slot::call(
@@ -995,7 +995,7 @@ fn run_from_store(
              * If we are not able to send the tuple, we assume the destination
              * has closed and no more tuples can be sent. ...
              */
-            if !dest_seam::dest_receive_slot::call(&mut slot, dest)? {
+            if !dest_seam::dest_receive_slot::call(mcx, &mut slot, dest)? {
                 break;
             }
 
@@ -1013,7 +1013,7 @@ fn run_from_store(
         }
     }
 
-    dest_seam::dest_rshutdown::call(dest)?;
+    dest_seam::dest_rshutdown::call(mcx, dest)?;
 
     exectuples_seam::exec_drop_single_tuple_table_slot::call(slot)?;
 
