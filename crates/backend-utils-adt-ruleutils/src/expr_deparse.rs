@@ -121,6 +121,21 @@ fn str_(context: &mut DeparseContext<'_>, s: &str) -> PgResult<()> {
     Ok(())
 }
 
+/// Crate-internal re-export of [`str_`] for the F2 query-deparse module.
+pub(crate) fn str_pub(context: &mut DeparseContext<'_>, s: &str) -> PgResult<()> {
+    str_(context, s)
+}
+
+/// Crate-internal re-export of [`ch_`] for the F2 query-deparse module.
+pub(crate) fn ch_pub(context: &mut DeparseContext<'_>, c: u8) -> PgResult<()> {
+    ch_(context, c)
+}
+
+/// Crate-internal re-export of [`simple_quote_literal`] for the F2 module.
+pub(crate) fn simple_quote_literal_pub(context: &mut DeparseContext<'_>, val: &str) -> PgResult<()> {
+    simple_quote_literal(context, val)
+}
+
 /// `appendStringInfoChar(context->buf, c)` — append one ASCII byte.
 fn ch_(context: &mut DeparseContext<'_>, c: u8) -> PgResult<()> {
     let mcx = context.buf.allocator();
@@ -199,6 +214,33 @@ fn generate_collation_name<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<PgStri
 /// `quote_identifier(ident)` — ruleutils-owned seam.
 fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>> {
     backend_utils_adt_ruleutils_seams::quote_identifier::call(mcx, ident)
+}
+
+/// Clone a `Vec<TargetEntry<'static>>` (Aggref.args) into `mcx`, re-homing it at
+/// the live `'mcx` lifetime so the F2 ORDER-BY renderer can consult it.
+fn clone_tle_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &[types_nodes::primnodes::TargetEntry<'static>],
+) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut out = PgVec::new_in(mcx);
+    out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+    for t in v.iter() {
+        out.push(t.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
+/// Clone a `PgVec<TargetEntry<'mcx>>` (context.targetList) into a fresh `PgVec`.
+fn clone_tle_vec_mcx<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut out = PgVec::new_in(mcx);
+    out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+    for t in v.iter() {
+        out.push(t.clone_in(mcx)?);
+    }
+    Ok(out)
 }
 
 /// `OidIsValid(oid)`.
@@ -937,7 +979,8 @@ fn get_rule_expr_toplevel_expr(
     showimplicit: bool,
 ) -> PgResult<()> {
     if let Expr::Var(var) = expr {
-        get_variable(var, 0, true, context)
+        get_variable(var, 0, true, context)?;
+        Ok(())
     } else {
         get_rule_expr_e(expr, context, showimplicit)
     }
@@ -1262,11 +1305,8 @@ fn get_agg_expr_helper(
         get_rule_expr_list_exprs(&a.aggdirectargs, context, true)?;
         debug_assert!(!a.aggorder.is_empty());
         str_(context, ") WITHIN GROUP (ORDER BY ")?;
-        // get_rule_orderby(aggref->aggorder, aggref->args, false, context) — the
-        // F2 query deparser (statement-level ORDER BY rendering), not yet landed.
-        return Err(deferred(
-            "get_agg_expr WITHIN GROUP (get_rule_orderby; ruleutils F2 query deparser)",
-        ));
+        let args = clone_tle_vec(mcx, &a.args)?;
+        crate::get_rule_orderby(mcx, &a.aggorder, &args, false, context)?;
     } else {
         // aggstar can be set only in zero-argument aggregates
         if a.aggstar {
@@ -1301,10 +1341,8 @@ fn get_agg_expr_helper(
 
         if !a.aggorder.is_empty() {
             str_(context, " ORDER BY ")?;
-            // get_rule_orderby(aggref->aggorder, aggref->args, false, context).
-            return Err(deferred(
-                "get_agg_expr ORDER BY (get_rule_orderby; ruleutils F2 query deparser)",
-            ));
+            let args = clone_tle_vec(mcx, &a.args)?;
+            crate::get_rule_orderby(mcx, &a.aggorder, &args, false, context)?;
         }
     }
 
@@ -1423,12 +1461,13 @@ fn get_windowfunc_expr_helper(
                 break;
             }
         }
-        if anonymous_idx.is_some() {
-            // get_rule_windowspec(wc, context->targetList, context) — the F2
-            // query deparser's window-spec renderer, not yet landed.
-            return Err(deferred(
-                "get_windowfunc_expr OVER (get_rule_windowspec; ruleutils F2 query deparser)",
-            ));
+        if let Some(idx) = anonymous_idx {
+            // Anonymous window: render the full spec. Clone the WindowClause and
+            // the targetlist out of `context` so the recursive renderer can take
+            // `&mut context` (C reads them through the same context pointer).
+            let wc = context.windowClause[idx].clone_in(mcx)?;
+            let tlist = clone_tle_vec_mcx(mcx, &context.targetList)?;
+            crate::get_rule_windowspec(mcx, &wc, &tlist, context)?;
         }
         if !found {
             return Err(elog_error(format!(
@@ -1904,25 +1943,49 @@ pub fn get_sublink_expr(sublink: &Expr, context: &mut DeparseContext<'_>) -> PgR
     }
 
     // get_query_def(query, buf, context->namespaces, NULL, false, …) — the
-    // SELECT/INSERT/… query deparser (ruleutils F2). The embedded sub-SELECT
-    // recursion is seamed precisely: F2 is not yet landed, so the one recursion
-    // panics with a precise rationale (the SubLink decoration above is rendered
-    // in full; only the recursive get_query_def is blocked).
-    let _query = sl.subselect.as_ref().ok_or_else(|| missing_field("SubLink.subselect"))?;
-    Err(deferred(
-        "get_sublink_expr subquery (get_query_def; ruleutils F2 query deparser)",
-    ))?;
+    // SELECT/INSERT/… query deparser (ruleutils F2). The embedded sub-Query is
+    // carried at the `'static` notional lifetime (the Expr enum is lifetime-
+    // free), so re-home it into `mcx` before recursing.
+    let subq_static = sl.subselect.as_ref().ok_or_else(|| missing_field("SubLink.subselect"))?;
+    let subq = subq_static.clone_in(mcx)?;
+    recurse_subquery(mcx, &subq, context)?;
 
-    // (Unreachable until F2 lands; kept to mirror C's trailing decoration.)
-    #[allow(unreachable_code)]
-    {
-        if need_paren {
-            str_(context, "))")?;
-        } else {
-            ch_(context, b')')?;
-        }
-        Ok(())
+    if need_paren {
+        str_(context, "))")?;
+    } else {
+        ch_(context, b')')?;
     }
+    Ok(())
+}
+
+/// Recurse into a `SubLink`'s sub-Query via `get_query_def`, threading the
+/// current namespace stack as the parent namespaces and swapping the output
+/// buffer in/out of `context` (C passes `context->namespaces` and the same
+/// StringInfo). `colNamesVisible` is `false` and `resultDesc` is `NULL`.
+fn recurse_subquery<'mcx>(
+    mcx: Mcx<'mcx>,
+    subquery: &types_nodes::copy_query::Query<'mcx>,
+    context: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let buf = core::mem::replace(&mut context.buf, types_stringinfo::StringInfo::new_in(mcx));
+    let mut parent: PgVec<'mcx, crate::DeparseNamespace<'mcx>> = PgVec::new_in(mcx);
+    parent.try_reserve(context.namespaces.len()).map_err(|_| mcx.oom(0))?;
+    for ns in context.namespaces.iter() {
+        parent.push(crate::clone_namespace_pub(mcx, ns)?);
+    }
+    let out = crate::get_query_def(
+        mcx,
+        subquery,
+        buf,
+        &parent,
+        None,
+        false,
+        context.prettyFlags,
+        context.wrapColumn,
+        context.indentLevel,
+    )?;
+    context.buf = out;
+    Ok(())
 }
 
 /* -------------------------------------------------------------------------- *
@@ -1938,12 +2001,12 @@ pub fn get_sublink_expr(sublink: &Expr, context: &mut DeparseContext<'_>) -> PgR
 /// (`resolve_special_varno`), `appendparents` child→parent mapping, and the
 /// resjunk-subquery `inner_plan` drilldown — read a `Plan` tree the planner does
 /// not yet emit (#159), so they panic precisely.
-pub fn get_variable(
+pub fn get_variable<'mcx>(
     var: &Var,
     levelsup: i32,
     istoplevel: bool,
-    context: &mut DeparseContext<'_>,
-) -> PgResult<()> {
+    context: &mut DeparseContext<'mcx>,
+) -> PgResult<Option<PgString<'mcx>>> {
     let mcx = context.buf.allocator();
 
     // Find appropriate nesting depth.
@@ -2116,7 +2179,9 @@ pub fn get_variable(
         }
     }
 
-    Ok(())
+    // C returns the attname (or NULL) so callers (get_target_list,
+    // get_rule_sortgroupclause) can use it as the default output column name.
+    Ok(attname)
 }
 
 /// The C 7833-7859 ORDER-BY Var prefix loop: scan the SELECT targetlist for a

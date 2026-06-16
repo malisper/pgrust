@@ -71,6 +71,11 @@ pub use expr_deparse::{
     get_rule_list_toplevel, get_sublink_expr, get_variable, isSimpleNode,
 };
 
+mod query_deparse;
+pub use query_deparse::{
+    get_query_def, get_rule_orderby, get_rule_windowspec,
+};
+
 /// `AccessShareLock` (`storage/lockdefs.h`) — the lock `deparse_context_for`
 /// takes on its synthetic relation RTE.
 const AccessShareLock: i32 = 1;
@@ -271,6 +276,56 @@ pub struct DeparseColumns<'mcx> {
 }
 
 impl<'mcx> DeparseColumns<'mcx> {
+    /// Deep-clone the column info into `mcx` (F2 reads a colinfo by value while
+    /// mutating the context buffer; the owned model has no shared pointers).
+    pub(crate) fn clone_columns(&self, mcx: Mcx<'mcx>) -> PgResult<DeparseColumns<'mcx>> {
+        let opt_str_vec = |v: &PgVec<'mcx, Option<PgString<'mcx>>>| -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
+            let mut out = PgVec::new_in(mcx);
+            out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+            for s in v.iter() {
+                out.push(match s {
+                    Some(p) => Some(pstrdup(mcx, p.as_str())?),
+                    None => None,
+                });
+            }
+            Ok(out)
+        };
+        let str_vec = |v: &PgVec<'mcx, PgString<'mcx>>| -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+            clone_str_vec(mcx, v)
+        };
+        let i32_vec = |v: &PgVec<'mcx, i32>| -> PgResult<PgVec<'mcx, i32>> {
+            let mut out = PgVec::new_in(mcx);
+            out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+            for &x in v.iter() {
+                out.push(x);
+            }
+            Ok(out)
+        };
+        let bool_vec = |v: &PgVec<'mcx, bool>| -> PgResult<PgVec<'mcx, bool>> {
+            let mut out = PgVec::new_in(mcx);
+            out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+            for &x in v.iter() {
+                out.push(x);
+            }
+            Ok(out)
+        };
+        Ok(DeparseColumns {
+            num_cols: self.num_cols,
+            colnames: opt_str_vec(&self.colnames)?,
+            num_new_cols: self.num_new_cols,
+            new_colnames: opt_str_vec(&self.new_colnames)?,
+            is_new_col: bool_vec(&self.is_new_col)?,
+            printaliases: self.printaliases,
+            parentUsing: str_vec(&self.parentUsing)?,
+            leftrti: self.leftrti,
+            rightrti: self.rightrti,
+            leftattnos: i32_vec(&self.leftattnos)?,
+            rightattnos: i32_vec(&self.rightattnos)?,
+            usingNames: str_vec(&self.usingNames)?,
+            names_hash: self.names_hash.clone(),
+        })
+    }
+
     /// `palloc0(sizeof(deparse_columns))` — a zeroed `deparse_columns` (all
     /// arrays empty, all scalars zero, `names_hash` NULL).
     fn zeroed(mcx: Mcx<'mcx>) -> DeparseColumns<'mcx> {
@@ -329,6 +384,56 @@ pub struct NameHashEntry {
     pub name: alloc::string::String,
     /// `int counter` — largest addition used so far for this name.
     pub counter: i32,
+}
+
+/// `str_val(node)` — crate-internal access for the F2 query-deparse module.
+pub(crate) fn str_val_pub<'a>(node: &'a Node<'_>) -> PgResult<&'a str> {
+    str_val(node)
+}
+
+/// `get_rtable_name(rtindex, context)` — crate-internal access for F2.
+pub(crate) fn get_rtable_name_pub<'a, 'mcx>(
+    rtindex: i32,
+    context: &'a DeparseContext<'mcx>,
+) -> PgResult<Option<&'a str>> {
+    get_rtable_name(rtindex, context)
+}
+
+/// `get_rel_name(relid)` — crate-internal access for F2.
+pub(crate) fn get_rel_name_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    get_rel_name(mcx, relid)
+}
+
+/// Deep-clone a `DeparseNamespace` — crate-internal access for F2 (recursion
+/// threads the parent namespace stack by value, as C does `list_copy`).
+pub(crate) fn clone_namespace_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    dpns: &DeparseNamespace<'mcx>,
+) -> PgResult<DeparseNamespace<'mcx>> {
+    clone_namespace(mcx, dpns)
+}
+
+/// `format_type_with_typemod(type_oid, typemod)` — crate-internal access for F2.
+pub(crate) fn format_type_with_typemod_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    typemod: i32,
+) -> PgResult<PgString<'mcx>> {
+    match backend_utils_adt_format_type_seams::format_type_extended::call(mcx, type_oid, typemod, 0)? {
+        Some(s) => Ok(s),
+        None => Err(elog_error("format_type_with_typemod returned NULL".into())),
+    }
+}
+
+/// `simple_quote_literal(buf, str)` — crate-internal access for F2.
+pub(crate) fn simple_quote_literal_pub(
+    context: &mut DeparseContext<'_>,
+    val: &str,
+) -> PgResult<()> {
+    expr_deparse::simple_quote_literal_pub(context, val)
 }
 
 /// `deparse_columns_fetch(rangetable_index, dpns)` (`ruleutils.c` 315-317) —
@@ -1682,6 +1787,87 @@ pub fn pop_ancestor_plan<'mcx>(
 /* -------------------------------------------------------------------------- *
  * Local list/node-clone + bitmapset helpers.
  * -------------------------------------------------------------------------- */
+
+/// Deep-clone a whole `DeparseNamespace` into `mcx` (F2 threads the parent
+/// namespace stack by value through `get_query_def` recursion, as C does with
+/// `list_copy` / shared pointers).
+fn clone_namespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    dpns: &DeparseNamespace<'mcx>,
+) -> PgResult<DeparseNamespace<'mcx>> {
+    let opt_str_vec = |v: &PgVec<'mcx, Option<PgString<'mcx>>>| -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
+        let mut out = PgVec::new_in(mcx);
+        out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+        for s in v.iter() {
+            out.push(match s {
+                Some(p) => Some(pstrdup(mcx, p.as_str())?),
+                None => None,
+            });
+        }
+        Ok(out)
+    };
+    let opt_box_node_vec = |v: &PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>| -> PgResult<PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>> {
+        let mut out = PgVec::new_in(mcx);
+        out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
+        for n in v.iter() {
+            out.push(match n {
+                Some(b) => Some(Node_clone(mcx, b)?),
+                None => None,
+            });
+        }
+        Ok(out)
+    };
+    let mut rtable = PgVec::new_in(mcx);
+    rtable.try_reserve(dpns.rtable.len()).map_err(|_| mcx.oom(0))?;
+    for rte in dpns.rtable.iter() {
+        rtable.push(rte.clone_in(mcx)?);
+    }
+    let mut rtable_columns = PgVec::new_in(mcx);
+    rtable_columns.try_reserve(dpns.rtable_columns.len()).map_err(|_| mcx.oom(0))?;
+    for c in dpns.rtable_columns.iter() {
+        rtable_columns.push(c.clone_columns(mcx)?);
+    }
+    Ok(DeparseNamespace {
+        rtable,
+        rtable_names: opt_str_vec(&dpns.rtable_names)?,
+        rtable_columns,
+        subplans: clone_node_vec(mcx, &dpns.subplans)?,
+        ctes: clone_node_vec(mcx, &dpns.ctes)?,
+        appendrels: opt_box_node_vec(&dpns.appendrels)?,
+        ret_old_alias: match dpns.ret_old_alias.as_ref() {
+            Some(s) => Some(pstrdup(mcx, s.as_str())?),
+            None => None,
+        },
+        ret_new_alias: match dpns.ret_new_alias.as_ref() {
+            Some(s) => Some(pstrdup(mcx, s.as_str())?),
+            None => None,
+        },
+        unique_using: dpns.unique_using,
+        using_names: clone_str_vec(mcx, &dpns.using_names)?,
+        plan: match dpns.plan.as_ref() {
+            Some(b) => Some(Node_clone(mcx, b)?),
+            None => None,
+        },
+        ancestors: clone_node_vec(mcx, &dpns.ancestors)?,
+        outer_plan: match dpns.outer_plan.as_ref() {
+            Some(b) => Some(Node_clone(mcx, b)?),
+            None => None,
+        },
+        inner_plan: match dpns.inner_plan.as_ref() {
+            Some(b) => Some(Node_clone(mcx, b)?),
+            None => None,
+        },
+        outer_tlist: clone_node_vec(mcx, &dpns.outer_tlist)?,
+        inner_tlist: clone_node_vec(mcx, &dpns.inner_tlist)?,
+        index_tlist: clone_node_vec(mcx, &dpns.index_tlist)?,
+        funcname: match dpns.funcname.as_ref() {
+            Some(s) => Some(pstrdup(mcx, s.as_str())?),
+            None => None,
+        },
+        numargs: dpns.numargs,
+        argnames: opt_str_vec(&dpns.argnames)?,
+    })
+}
 
 /// Clone a `PgVec<PgString>` into `mcx`.
 fn clone_str_vec<'mcx>(

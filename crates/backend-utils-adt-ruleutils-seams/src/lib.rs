@@ -244,6 +244,81 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `generate_relation_name(relid, namespaces)` (ruleutils.c, static): the
+    /// possibly-schema-qualified, quoted relation name to display for `relid`.
+    /// The CTE-name-conflict scan over `namespaces->ctes` is done in-crate (the
+    /// deparse engine owns the namespace), so the seam carries only the
+    /// remaining catalog half: `force_qual` forces qualification (the in-crate
+    /// CTE check found a conflict), otherwise C qualifies iff
+    /// `!RelationIsVisible(relid)`. C body: `SearchSysCache1(RELOID)` →
+    /// `relname`/`relnamespace`, `RelationIsVisible`, `get_namespace_name_or_temp`,
+    /// `quote_qualified_identifier`. Reads the catalog, so it can
+    /// `ereport(ERROR)` (cache lookup failure); allocated in `mcx`. Owner: the
+    /// relcache/namespace substrate (`SearchSysCacheRELOID` + `RelationIsVisible`).
+    pub fn generate_relation_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        force_qual: bool,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `get_constraint_name(conoid)` (lsyscache.c): the name of a constraint by
+    /// OID, or `None` if the cache lookup fails (the C caller then
+    /// `elog(ERROR)`). Used by `get_insert_query_def`'s `ON CONFLICT ON
+    /// CONSTRAINT` rendering. Owner: lsyscache (unported for this entry).
+    pub fn get_constraint_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `AcquireRewriteLocks(query, false, false)` (rewriteHandler.c): before
+    /// deparsing a `Query`, take `AccessShareLock` on all referenced relations
+    /// and fix up deleted columns in JOIN RTEs (scribbling on the passed
+    /// querytree). `get_query_def` calls this first. The rewriter is unported
+    /// (rewriteHandler.c NEEDS_DECOMP), so this crosses an owner seam; it takes
+    /// `&mut Query` because C mutates the tree in place. Reads the catalog and
+    /// takes locks, so it can `ereport(ERROR)`. Owner: rewriteHandler.c.
+    pub fn acquire_rewrite_locks<'mcx>(
+        mcx: Mcx<'mcx>,
+        query: &mut types_nodes::copy_query::Query<'mcx>,
+        forexecute: bool,
+        forupdatepusheddown: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `flatten_group_exprs(NULL, query, node)` (optimizer/util/var.c): when a
+    /// query has a GROUP RTE (`query->hasGroupRTE`), replace any Vars in `node`
+    /// that reference GROUP outputs with the underlying grouping expressions, so
+    /// the deparsed targetlist/HAVING reads back as the original expressions.
+    /// `get_query_def` applies this to the targetlist and havingQual. The
+    /// optimizer var.c half is unported, so this crosses an owner seam. Reads
+    /// the query's grouping clauses; can `ereport(ERROR)`. Owner: optimizer var.c.
+    pub fn flatten_group_exprs<'mcx>(
+        mcx: Mcx<'mcx>,
+        query: &types_nodes::copy_query::Query<'mcx>,
+        node: &Node<'mcx>,
+    ) -> PgResult<PgBox<'mcx, Node<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(sortcoltype, TYPECACHE_LT_OPR | TYPECACHE_GT_OPR)`
+    /// (typcache.c) — the `(lt_opr, gt_opr)` pair for a type, as
+    /// `get_rule_orderby` uses to decide whether a SortGroupClause's `sortop`
+    /// is the default ASC (`lt_opr`) or DESC (`gt_opr`) operator. Returns
+    /// `(InvalidOid, InvalidOid)` when the type has no btree ordering. The
+    /// trimmed `TypeCacheEntry` returned by ordinary `lookup_type_cache` does
+    /// not carry both at once, so the deparser reaches them through this
+    /// dedicated accessor. `Err` carries the typcache lookup surface.
+    pub fn lookup_type_cache_lt_gt_opr(
+        type_id: Oid,
+    ) -> PgResult<(Oid, Oid)>
+);
+
+seam_core::seam!(
     /// `generate_collation_name(collid)` (ruleutils.c): the schema-qualified,
     /// quoted collation name for a collation OID, allocated in `mcx`. Reads
     /// `pg_collation`/`pg_namespace`, so it can `ereport(ERROR)` (cache lookup
