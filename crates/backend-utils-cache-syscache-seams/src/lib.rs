@@ -86,6 +86,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(ENUMOID, ObjectIdGetDatum(enumval))` projected to an
+    /// [`EnumTupleData`] (the `Form_pg_enum` columns `enum.c` reads plus the
+    /// header `xmin`/`xmin_committed` `check_safe_enum_use` needs). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`. Consumed by `enum_out`/`enum_send`/`enum_cmp_internal`
+    /// (utils/adt/enum.c).
+    pub fn lookup_enum_by_oid(
+        enumval: Oid,
+    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ENUMTYPOIDNAME, ObjectIdGetDatum(enumtypoid),
+    /// CStringGetDatum(name))` projected to an [`EnumTupleData`]. `name` is the
+    /// label text (the caller has already truncated at the first NUL, as
+    /// C `CStringGetDatum` does). `Ok(None)` on a cache miss; the installer
+    /// owns the `ReleaseSysCache`. Consumed by `enum_in`/`enum_recv`
+    /// (utils/adt/enum.c).
+    pub fn lookup_enum_by_typoid_name(
+        enumtypoid: Oid,
+        name: &str,
+    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
     /// `Form_pg_class.relam` field (the relation's access method). `Ok(None)`
     /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
