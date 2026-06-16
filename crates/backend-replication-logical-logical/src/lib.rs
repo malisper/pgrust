@@ -36,7 +36,7 @@ use types_core::primitive::{
 use types_core::xact::InvalidTransactionId;
 
 use types_logical::{
-    CallbackInvocation, ChangeHandle, GidHandle, MemoryContextHandle, MessageHandle,
+    CallbackInvocation, ChangeHandle, GidHandle, MessageHandle,
     OutputPluginCallbackArgs, OutputPluginOptionsHandle, PrefixHandle, RelationHandle,
     RelationsHandle, ReorderBufferCallback, ReorderBufferHandle, ResourceOwnerHandle,
     SnapBuildHandle, StringInfoHandle, TxnHandle, WalLevel, XLogReaderHandle,
@@ -78,138 +78,15 @@ pub const SNAPBUILD_CONSISTENT: SnapBuildState = 2;
  * Data structures (output_plugin.h, logical.h)
  * ========================================================================= */
 
-/// `OutputPluginOutputType` (`output_plugin.h`).
-pub type OutputPluginOutputType = i32;
-/// `OUTPUT_PLUGIN_BINARY_OUTPUT = 0`.
-pub const OUTPUT_PLUGIN_BINARY_OUTPUT: OutputPluginOutputType = 0;
-/// `OUTPUT_PLUGIN_TEXTUAL_OUTPUT = 1`.
-pub const OUTPUT_PLUGIN_TEXTUAL_OUTPUT: OutputPluginOutputType = 1;
-
-/// `OutputPluginOptions` (`output_plugin.h`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OutputPluginOptions {
-    /// `output_type`.
-    pub output_type: OutputPluginOutputType,
-    /// `receive_rewrites`.
-    pub receive_rewrites: bool,
-}
-
-/// `OutputPluginCallbacks` (`output_plugin.h`) — which plugin callbacks the
-/// loaded plugin registered. `logical.c` only tests these for NULL and invokes
-/// the corresponding pointer (via the dfmgr seam); presence is a bool. Field
-/// order matches the C struct.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OutputPluginCallbacks {
-    pub startup_cb: bool,
-    pub begin_cb: bool,
-    pub change_cb: bool,
-    pub truncate_cb: bool,
-    pub commit_cb: bool,
-    pub message_cb: bool,
-    pub filter_by_origin_cb: bool,
-    pub shutdown_cb: bool,
-    pub filter_prepare_cb: bool,
-    pub begin_prepare_cb: bool,
-    pub prepare_cb: bool,
-    pub commit_prepared_cb: bool,
-    pub rollback_prepared_cb: bool,
-    pub stream_start_cb: bool,
-    pub stream_stop_cb: bool,
-    pub stream_abort_cb: bool,
-    pub stream_prepare_cb: bool,
-    pub stream_commit_cb: bool,
-    pub stream_change_cb: bool,
-    pub stream_message_cb: bool,
-    pub stream_truncate_cb: bool,
-}
-
-impl OutputPluginCallbacks {
-    /// Decode the callback-presence bitmask `load_output_plugin` returns (one
-    /// bit per callback, C struct field order, LSB = `startup_cb`).
-    fn from_bits(bits: u32) -> Self {
-        OutputPluginCallbacks {
-            startup_cb: bits & (1 << 0) != 0,
-            begin_cb: bits & (1 << 1) != 0,
-            change_cb: bits & (1 << 2) != 0,
-            truncate_cb: bits & (1 << 3) != 0,
-            commit_cb: bits & (1 << 4) != 0,
-            message_cb: bits & (1 << 5) != 0,
-            filter_by_origin_cb: bits & (1 << 6) != 0,
-            shutdown_cb: bits & (1 << 7) != 0,
-            filter_prepare_cb: bits & (1 << 8) != 0,
-            begin_prepare_cb: bits & (1 << 9) != 0,
-            prepare_cb: bits & (1 << 10) != 0,
-            commit_prepared_cb: bits & (1 << 11) != 0,
-            rollback_prepared_cb: bits & (1 << 12) != 0,
-            stream_start_cb: bits & (1 << 13) != 0,
-            stream_stop_cb: bits & (1 << 14) != 0,
-            stream_abort_cb: bits & (1 << 15) != 0,
-            stream_prepare_cb: bits & (1 << 16) != 0,
-            stream_commit_cb: bits & (1 << 17) != 0,
-            stream_change_cb: bits & (1 << 18) != 0,
-            stream_message_cb: bits & (1 << 19) != 0,
-            stream_truncate_cb: bits & (1 << 20) != 0,
-        }
-    }
-}
-
-/// `LogicalDecodingContext` (`logical.h`). Fields in C struct order. The
-/// cross-subsystem handles (`reader`/`reorder`/`snapshot_builder`/`out`/
-/// `context`/`slot`) are opaque values the owners resolve; the bool/LSN/xid
-/// state fields are written directly by the in-crate wrappers.
-pub struct LogicalDecodingContext {
-    /// `MemoryContext context`.
-    pub context: MemoryContextHandle,
-    /// `ReplicationSlot *slot`. `logical.c` keeps `ctx->slot =
-    /// MyReplicationSlot`; the runtime always operates on `MyReplicationSlot`,
-    /// so this records that the slot is set.
-    pub slot: bool,
-    /// `XLogReaderState *reader`.
-    pub reader: XLogReaderHandle,
-    /// `ReorderBuffer *reorder`.
-    pub reorder: ReorderBufferHandle,
-    /// `SnapBuild *snapshot_builder`.
-    pub snapshot_builder: SnapBuildHandle,
-    /// `bool fast_forward`.
-    pub fast_forward: bool,
-    /// `OutputPluginCallbacks callbacks`.
-    pub callbacks: OutputPluginCallbacks,
-    /// `OutputPluginOptions options`.
-    pub options: OutputPluginOptions,
-    /// `List *output_plugin_options`.
-    pub output_plugin_options: OutputPluginOptionsHandle,
-    /// `prepare_write` callback presence.
-    pub prepare_write: bool,
-    /// `write` callback presence.
-    pub write: bool,
-    /// `update_progress` callback presence.
-    pub update_progress: bool,
-    /// `StringInfo out`.
-    pub out: StringInfoHandle,
-    /// `bool streaming`.
-    pub streaming: bool,
-    /// `bool twophase`.
-    pub twophase: bool,
-    /// `bool twophase_opt_given`.
-    pub twophase_opt_given: bool,
-    /// `bool accept_writes`.
-    pub accept_writes: bool,
-    /// `bool prepared_write`.
-    pub prepared_write: bool,
-    /// `XLogRecPtr write_location`.
-    pub write_location: XLogRecPtr,
-    /// `TransactionId write_xid`.
-    pub write_xid: TransactionId,
-    /// `bool end_xact`.
-    pub end_xact: bool,
-    /// `void *output_plugin_private` — opaque per-plugin state the loaded output
-    /// plugin stows in its `startup_cb` (e.g. pgoutput's `PGOutputData`) and
-    /// recovers in every later callback. The owned, value-typed replacement for
-    /// the C `void *`: any plugin's private struct, type-erased.
-    pub output_plugin_private: Option<Box<dyn core::any::Any>>,
-    /// `bool processing_required`.
-    pub processing_required: bool,
-}
+// The output-plugin descriptor structs and the canonical
+// `LogicalDecodingContext` now live in `types-logical` (the shared
+// seam-boundary types crate) so that `decode.c`'s rmgr handlers and
+// `types-wal`'s `RmDecode` callback type can name the *same* rich context as
+// this owner. Re-exported here to preserve `logical.c`'s public surface.
+pub use types_logical::{
+    LogicalDecodingContext, OutputPluginCallbacks, OutputPluginOptions, OutputPluginOutputType,
+    OUTPUT_PLUGIN_BINARY_OUTPUT, OUTPUT_PLUGIN_TEXTUAL_OUTPUT,
+};
 
 /// `LogicalErrorCallbackState` (logical.c:50) — data for the errcontext
 /// callback.
@@ -328,6 +205,7 @@ fn StartupDecodingContext(
     let mut ctx = Box::new(LogicalDecodingContext {
         context,
         slot: false,
+        slot_database: InvalidOid,
         reader: XLogReaderHandle::default(),
         reorder: ReorderBufferHandle::default(),
         snapshot_builder: SnapBuildHandle::default(),
@@ -378,6 +256,9 @@ fn StartupDecodingContext(
     }
 
     ctx.slot = true;
+    // `ctx->slot = MyReplicationSlot`; decode.c reads `ctx->slot->data.database`
+    // to filter changes to the slot's database, carried here as `slot_database`.
+    ctx.slot_database = slot::slot_database::call();
 
     ctx.reader = match xlogreader::XLogReaderAllocate::call(wal_segment_size, xl_routine) {
         Some(reader) => reader,
@@ -779,7 +660,7 @@ pub fn DecodingContextFindStartpoint(ctx: &mut LogicalDecodingContext) -> PgResu
         }
 
         let reader = ctx.reader;
-        decode::LogicalDecodingProcessRecord::call(reader)?;
+        decode::LogicalDecodingProcessRecord::call(ctx, reader)?;
 
         /* only continue till we found a consistent spot */
         if DecodingContextReady(ctx) {
@@ -1222,7 +1103,7 @@ fn truncate_cb_wrapper(
 pub fn filter_prepare_cb_wrapper(
     ctx: &mut LogicalDecodingContext,
     xid: TransactionId,
-    gid: GidHandle,
+    gid: Vec<u8>,
 ) -> PgResult<bool> {
     debug_assert!(!ctx.fast_forward);
 
@@ -1929,10 +1810,12 @@ pub fn LogicalReplicationSlotHasPendingWal(
 
             if read.record {
                 let reader = ctx.reader;
-                decode::LogicalDecodingProcessRecord::call(reader)?;
+                decode::LogicalDecodingProcessRecord::call(&mut ctx, reader)?;
             }
 
-            ctx.processing_required = decode::ctx_processing_required::call();
+            // `LogicalDecodingProcessRecord` sets `ctx->processing_required` as
+            // a side effect (e.g. a non-transactional message in fast_forward
+            // mode); the unified ctx is mutated in place.
             has_pending_wal = ctx.processing_required;
 
             tcop::check_for_interrupts::call()?;
@@ -2029,7 +1912,7 @@ pub fn LogicalSlotAdvanceAndCheckSnapState(
              */
             if read.record {
                 let reader = ctx.reader;
-                decode::LogicalDecodingProcessRecord::call(reader)?;
+                decode::LogicalDecodingProcessRecord::call(&mut ctx, reader)?;
             }
 
             tcop::check_for_interrupts::call()?;
@@ -2335,6 +2218,16 @@ pub fn init_seams() {
     backend_replication_logical_logical_seams::logical_increase_restart_decoding_for_slot::set(
         LogicalIncreaseRestartDecodingForSlot,
     );
+    // decode.c-facing output-plugin filter wrappers + stats reporter.
+    backend_replication_logical_logical_seams::filter_prepare_cb_wrapper::set(
+        filter_prepare_cb_wrapper,
+    );
+    backend_replication_logical_logical_seams::filter_by_origin_cb_wrapper::set(
+        filter_by_origin_cb_wrapper,
+    );
+    backend_replication_logical_logical_seams::UpdateDecodingStats::set(|ctx| {
+        UpdateDecodingStats(ctx)
+    });
 }
 
 /// Seam thunk: the inward seam carries only the callback; the reorderbuffer
