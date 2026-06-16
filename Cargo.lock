@@ -3566,6 +3566,7 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "backend-access-rmgrdesc-xactdesc",
  "backend-access-transam-rmgr",
  "backend-access-transam-timeline-seams",
  "backend-access-transam-varsup-seams",

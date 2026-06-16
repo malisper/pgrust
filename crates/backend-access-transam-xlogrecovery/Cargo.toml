@@ -61,6 +61,7 @@ backend-utils-adt-lsn-trigfuncs = { path = "../backend-utils-adt-lsn-trigfuncs" 
 # walsender wakeup, ipc proc_exit, variable-seams prefetch reconfigure,
 # tablespace allow_in_place GUC, pg_rusage timing).
 backend-access-transam-rmgr = { path = "../backend-access-transam-rmgr" }
+backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
 backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
 backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
