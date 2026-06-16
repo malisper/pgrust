@@ -16423,6 +16423,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-backend-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-database-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-io"
 version = "0.0.0"
 dependencies = [
@@ -16546,6 +16561,35 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-replication",
+]
+
+[[package]]
+name = "backend-utils-activity-status"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-libpq-be-secure-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem",
+ "backend-utils-activity-pgstat-backend-seams",
+ "backend-utils-activity-pgstat-database-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-ascii",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "backend-utils-mb-mbutils",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-net",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -21225,6 +21269,7 @@ dependencies = [
  "backend-utils-activity-pgstat-io",
  "backend-utils-activity-pgstat-wal",
  "backend-utils-activity-small",
+ "backend-utils-activity-status",
  "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",

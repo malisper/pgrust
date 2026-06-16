@@ -399,3 +399,14 @@ seam_core::seam!(
     /// `InitWalSender`'s assertion reads it; the procarray owner returns it.
     pub fn my_proc_xmin() -> TransactionId
 );
+
+seam_core::seam!(
+    /// `ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
+    /// TransactionId *xmin, int *nsubxid, bool *overflowed)` (procarray.c) — the
+    /// `(xid, xmin, nsubxid, overflowed)` advertised by that slot, used by
+    /// `backend_status.c`'s `pgstat_read_current_status` to annotate each local
+    /// snapshot entry. Takes `ProcArrayLock` shared; cannot `ereport`.
+    pub fn proc_number_get_transaction_ids(
+        proc_number: ProcNumber,
+    ) -> (TransactionId, TransactionId, i32, bool)
+);
