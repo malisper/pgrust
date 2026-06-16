@@ -86,6 +86,9 @@ pub struct FormData_pg_class<'mcx> {
     /// table (`InvalidTransactionId` for relations without storage). Read by
     /// `heap_abort_speculative` to pick a safe prune xid.
     pub relfrozenxid: types_core::primitive::TransactionId,
+    /// `MultiXactId relminmxid` — all multixacts before this are frozen in this
+    /// table. Read by `rewrite_heap_tuple`'s `heap_freeze_tuple` cutoff.
+    pub relminmxid: types_core::primitive::MultiXactId,
 }
 
 /// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
@@ -530,6 +533,7 @@ mod tests {
                 relreplident: b'd',
                 relispartition: false,
                 relfrozenxid: 0,
+                relminmxid: 0,
             },
             rd_att: mcx::alloc_in(mcx, td).unwrap(),
             rd_options: None,

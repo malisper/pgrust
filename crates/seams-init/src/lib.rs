@@ -31,6 +31,7 @@ pub fn init_all() {
     backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_pruneheap::init_seams();
+    backend_access_heap_rewriteheap::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_amapi::init_seams();

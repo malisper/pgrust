@@ -34,6 +34,7 @@ backend-access-heap-heapam-handler-dml = { path = "../backend-access-heap-heapam
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
+backend-access-heap-rewriteheap = { path = "../backend-access-heap-rewriteheap" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
