@@ -46,6 +46,53 @@ pub const WAIT_EVENT_ARCHIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 0;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+/// `WAIT_EVENT_BGWRITER_HIBERNATE` — "Waiting in background writer process,
+/// hibernating." 3rd entry (index 2) of the Activity section of
+/// `wait_event_names.txt` (ARCHIVER_MAIN=0, AUTOVACUUM_MAIN=1,
+/// BGWRITER_HIBERNATE=2, BGWRITER_MAIN=3, CHECKPOINTER_MAIN=4, ...), so
+/// `PG_WAIT_ACTIVITY + 2`.
+pub const WAIT_EVENT_BGWRITER_HIBERNATE: u32 = PG_WAIT_ACTIVITY + 2;
+
+/// `WAIT_EVENT_BGWRITER_MAIN` — "Waiting in main loop of background writer
+/// process." 4th entry (index 3) of the Activity section (see the list above),
+/// so `PG_WAIT_ACTIVITY + 3`.
+pub const WAIT_EVENT_BGWRITER_MAIN: u32 = PG_WAIT_ACTIVITY + 3;
+
+/// `WAIT_EVENT_CHECKPOINTER_MAIN` — "Waiting in main loop of checkpointer."
+/// 5th entry (index 4) of the Activity section (see the list above), so
+/// `PG_WAIT_ACTIVITY + 4` (= 0x05000004, matching c2rust's 83886084).
+pub const WAIT_EVENT_CHECKPOINTER_MAIN: u32 = PG_WAIT_ACTIVITY + 4;
+
+/// `WAIT_EVENT_CHECKPOINTER_SHUTDOWN` — "Waiting for checkpointer to shut
+/// down." 6th entry (index 5) of the Activity section, so
+/// `PG_WAIT_ACTIVITY + 5` (= 0x05000005, matching c2rust's 83886085).
+pub const WAIT_EVENT_CHECKPOINTER_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 5;
+
+/// `WAIT_EVENT_WAL_WRITER_MAIN` — "Waiting in main loop of WAL writer
+/// process." Last entry (0-based index 17) of the Activity section of
+/// `wait_event_names.txt` (ARCHIVER_MAIN=0, AUTOVACUUM_MAIN, BGWRITER_HIBERNATE,
+/// BGWRITER_MAIN, CHECKPOINTER_MAIN=4, CHECKPOINTER_SHUTDOWN, IO_WORKER_MAIN,
+/// LOGICAL_APPLY_MAIN, LOGICAL_LAUNCHER_MAIN, LOGICAL_PARALLEL_APPLY_MAIN,
+/// RECOVERY_WAL_STREAM, REPLICATION_SLOTSYNC_MAIN, REPLICATION_SLOTSYNC_SHUTDOWN,
+/// SYSLOGGER_MAIN=13, WAL_RECEIVER_MAIN, WAL_SENDER_MAIN, WAL_SUMMARIZER_WAL,
+/// WAL_WRITER_MAIN=17), so `PG_WAIT_ACTIVITY + 17`.
+pub const WAIT_EVENT_WAL_WRITER_MAIN: u32 = PG_WAIT_ACTIVITY + 17;
+
+/// `WAIT_EVENT_CHECKPOINT_DONE` — "Waiting for a checkpoint to complete." IPC
+/// section entry, `PG_WAIT_IPC + 11` (= 0x0800000B, matching c2rust's
+/// 134217739).
+pub const WAIT_EVENT_CHECKPOINT_DONE: u32 = PG_WAIT_IPC + 11;
+
+/// `WAIT_EVENT_CHECKPOINT_START` — "Waiting for a checkpoint to start." IPC
+/// section entry, `PG_WAIT_IPC + 12` (= 0x0800000C, matching c2rust's
+/// 134217740).
+pub const WAIT_EVENT_CHECKPOINT_START: u32 = PG_WAIT_IPC + 12;
+
+/// `WAIT_EVENT_CHECKPOINT_WRITE_DELAY` — "Waiting between writes while
+/// performing a checkpoint." Timeout section entry, `PG_WAIT_TIMEOUT + 1`
+/// (= 0x09000001, matching c2rust's 150994945).
+pub const WAIT_EVENT_CHECKPOINT_WRITE_DELAY: u32 = PG_WAIT_TIMEOUT + 1;
+
 /// `WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN` — "Waiting in main loop of slot sync
 /// worker." 12th entry (0-based 11) of the Activity section of
 /// `wait_event_names.txt`, so `PG_WAIT_ACTIVITY + 11`.

@@ -194,6 +194,8 @@ impl OwnedTupleDesc {
                 attbyval: a.attbyval,
                 attalign: a.attalign,
                 attnotnull: a.attnotnull,
+                attidentity: a.attidentity,
+                attgenerated: a.attgenerated,
                 attisdropped: a.attisdropped,
                 attcollation: a.attcollation,
                 ..types_tuple::heaptuple::FormData_pg_attribute::default()
@@ -267,6 +269,12 @@ pub struct OwnedAttr {
     pub attbyval: bool,
     pub attalign: i8,
     pub attnotnull: bool,
+    /// `char attidentity` — one of the `ATTRIBUTE_IDENTITY_*` constants, or
+    /// `'\0'`. Copied from the source descriptor by `RelationBuildLocalRelation`.
+    pub attidentity: i8,
+    /// `char attgenerated` — one of the `ATTRIBUTE_GENERATED_*` constants, or
+    /// `'\0'`. Copied from the source descriptor by `RelationBuildLocalRelation`.
+    pub attgenerated: i8,
     pub attisdropped: bool,
     pub attcollation: Oid,
     /// `CompactAttribute.attnullability` (`access/tupdesc.h`): one of

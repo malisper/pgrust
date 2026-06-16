@@ -57,6 +57,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateWorkExprContext(estate)` (execUtils.c): like [`create_expr_context`]
+    /// but sizes the per-tuple AllocSet block sizes in proportion to `work_mem`
+    /// so a single allocation cannot skip far past the budget. Returns the new
+    /// context's id into the EState pool. `work_mem_kb` is the `work_mem` GUC
+    /// (globals.c, in KB), passed explicitly. Allocates in the per-query context,
+    /// so fallible on OOM.
+    pub fn create_work_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        work_mem_kb: i32,
+    ) -> types_error::PgResult<types_nodes::EcxtId>
+);
+
+seam_core::seam!(
     /// `CreateStandaloneExprContext()` (execUtils.c): create a standalone
     /// `ExprContext` not tied to any `EState` — the throwaway context
     /// `BuildTupleHashTable` makes for the hash/equality evaluations. Returns

@@ -9,7 +9,10 @@
 
 pub mod catalog;
 pub mod catalog_dependency;
+pub mod pg_attrdef;
+pub mod pg_attribute;
 pub mod pg_cast;
+pub mod pg_class;
 pub mod pg_constraint;
 pub mod pg_conversion;
 pub mod pg_enum;

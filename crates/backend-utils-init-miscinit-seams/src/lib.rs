@@ -437,3 +437,37 @@ seam_core::seam!(
     /// backend to the given database so `walrcv_exec` catalog queries can run.
     pub fn init_postgres(dbname: &str) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MyBackendType = B_CHECKPOINTER` — set this backend's type to the
+    /// checkpointer (globals.c stores `MyBackendType`; the checkpointer sets it
+    /// before `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_checkpointer()
+);
+
+seam_core::seam!(
+    /// `MyBackendType = B_WAL_WRITER` — set this backend's type to the
+    /// walwriter (globals.c stores `MyBackendType`; the walwriter sets it
+    /// before `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_wal_writer()
+);
+
+seam_core::seam!(
+    /// `AmCheckpointerProcess()` (miscadmin.h): `MyBackendType ==
+    /// B_CHECKPOINTER`. Pure backend-local read.
+    pub fn am_checkpointer_process() -> bool
+);
+
+seam_core::seam!(
+    /// `MyBackendType = B_BG_WRITER` — set this backend's type to the background
+    /// writer (globals.c stores `MyBackendType`; the bgwriter sets it before
+    /// `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_bg_writer()
+);
+
+seam_core::seam!(
+    /// `CritSectionCount > 0` (miscadmin.h `START_CRIT_SECTION` counter) — true
+    /// when in a critical section. `CompactCheckpointerRequestQueue` checks this
+    /// to avoid allocating inside one. Pure backend-local read.
+    pub fn in_critical_section() -> bool
+);

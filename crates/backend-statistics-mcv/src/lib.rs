@@ -50,10 +50,12 @@ use core::mem::size_of;
 
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
-use types_datum::Datum;
+// The canonical `'mcx` byte-lane value type — MCV statistic values may be
+// pass-by-reference (text/numeric/varchar/…), so they live in this safe lane.
+use types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_statistics::{
-    DimensionInfo, MCVItem, MCVList, StatsBuildDataHandle, STATS_MAX_DIMENSIONS,
+    DimensionInfo, MCVItem, MCVList, StatsBuildData, STATS_MAX_DIMENSIONS,
     STATS_MCVLIST_MAX_ITEMS, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC,
 };
 
@@ -184,15 +186,16 @@ pub fn get_mincount_for_mcv_list(samplerows: i32, totalrows: f64) -> f64 {
 ///
 /// SEAMED, not in-crate: the build kernel needs `build_mss` /
 /// `build_sorted_items` / `build_distinct_groups` / `build_column_frequencies`
-/// over the opaque `StatsBuildData` (the `VacAttrStats` matrix and `Datum`/`bool`
-/// value matrices in the not-yet-ported extended-stats build framework, plus the
-/// multi-sort support). Mirrors how the dependencies sibling seamed
-/// `dependency_degree`. Returns `None` when nothing was built (C `NULL`).
-pub fn statext_mcv_build(
-    data: StatsBuildDataHandle,
+/// over the real `StatsBuildData` carrier (the `VacAttrStats` matrix and
+/// `Datum`/`bool` value matrices) plus the multi-sort support, all owned by the
+/// not-yet-ported extended-stats build framework. Mirrors how the dependencies
+/// sibling seamed `dependency_degree`. Returns `None` when nothing was built
+/// (C `NULL`).
+pub fn statext_mcv_build<'mcx>(
+    data: &StatsBuildData<'mcx>,
     totalrows: f64,
     stattarget: i32,
-) -> PgResult<Option<MCVList>> {
+) -> PgResult<Option<MCVList<'mcx>>> {
     core_seam::statext_mcv_build::call(data, totalrows, stattarget)
 }
 
@@ -204,7 +207,7 @@ pub fn statext_mcv_build(
 /// indicated `pg_statistic_ext_data` tuple. The syscache read crosses the seam
 /// (`mcv_load_bytea`, which `elog`s for a missing object or un-built MCV kind);
 /// the deserialization stays in-crate.
-pub fn statext_mcv_load<'mcx>(mcx: Mcx<'mcx>, mvoid: Oid, inh: bool) -> PgResult<Option<MCVList>> {
+pub fn statext_mcv_load<'mcx>(mcx: Mcx<'mcx>, mvoid: Oid, inh: bool) -> PgResult<Option<MCVList<'mcx>>> {
     let data = core_seam::mcv_load_bytea::call(mcx, mvoid, inh)?;
     statext_mcv_deserialize(mcx, Some(&data))
 }
@@ -230,9 +233,9 @@ pub struct McvDimStats {
 }
 
 /// `statext_mcv_serialize(mcvlist, stats)` (mcv.c:620).
-pub fn statext_mcv_serialize(
-    mcx: Mcx<'_>,
-    mcvlist: &MCVList,
+pub fn statext_mcv_serialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    mcvlist: &MCVList<'mcx>,
     stats: &[McvDimStats],
 ) -> PgResult<Vec<u8>> {
     let ndims = mcvlist.ndimensions as usize;
@@ -251,7 +254,7 @@ pub fn statext_mcv_serialize(
      * kept value (so we can both compute nbytes and emit them), and each
      * dimension's `(lt_opr, collation)` for the index bsearch.
      */
-    let mut values: Vec<Vec<Datum>> = Vec::new();
+    let mut values: Vec<Vec<Datum<'mcx>>> = Vec::new();
     values
         .try_reserve(ndims)
         .map_err(|_| mcx.oom(ndims * size_of::<usize>()))?;
@@ -283,7 +286,7 @@ pub fn statext_mcv_serialize(
         info[dim].typbyval = st.typbyval;
 
         /* allocate space for values in the attribute and collect them */
-        let mut coll: Vec<Datum> = Vec::new();
+        let mut coll: Vec<Datum<'mcx>> = Vec::new();
         coll.try_reserve(nitems)
             .map_err(|_| mcx.oom(nitems * size_of::<Datum>()))?;
         let mut i = 0usize;
@@ -291,7 +294,7 @@ pub fn statext_mcv_serialize(
             let item = &mcvlist.items[i];
             /* skip NULL values - we don't need to deduplicate those */
             if !item.isnull[dim] {
-                coll.push(item.values[dim]);
+                coll.push(item.values[dim].clone());
             }
             i += 1;
         }
@@ -306,7 +309,7 @@ pub fn statext_mcv_serialize(
         /* sort and deduplicate the data */
         let collation = st.attrcollid;
         coll.sort_by(|a, b| {
-            match core_seam::mcv_compare_scalars_simple::call(*a, *b, lt_opr, collation) {
+            match core_seam::mcv_compare_scalars_simple::call(a, b, lt_opr, collation) {
                 n if n < 0 => core::cmp::Ordering::Less,
                 0 => core::cmp::Ordering::Equal,
                 _ => core::cmp::Ordering::Greater,
@@ -323,19 +326,27 @@ pub fn statext_mcv_serialize(
         while i < coll.len() {
             /* expect sorted array */
             debug_assert!(
-                core_seam::mcv_compare_scalars_simple::call(coll[i - 1], coll[i], lt_opr, collation)
-                    <= 0
+                core_seam::mcv_compare_scalars_simple::call(
+                    &coll[i - 1],
+                    &coll[i],
+                    lt_opr,
+                    collation
+                ) <= 0
             );
 
             /* if the value is the same as the previous one, we can skip it */
-            if core_seam::mcv_compare_scalars_simple::call(coll[i - 1], coll[i], lt_opr, collation)
-                == 0
+            if core_seam::mcv_compare_scalars_simple::call(
+                &coll[i - 1],
+                &coll[i],
+                lt_opr,
+                collation,
+            ) == 0
             {
                 i += 1;
                 continue;
             }
 
-            coll[ndistinct] = coll[i];
+            coll[ndistinct] = coll[i].clone();
             ndistinct += 1;
             i += 1;
         }
@@ -365,7 +376,7 @@ pub fn statext_mcv_serialize(
         let mut i = 0usize;
         while i < ndistinct {
             let payload =
-                core_seam::mcv_value_to_serialized_bytes::call(mcx, coll[i], typlen as i16, typbyval)?;
+                core_seam::mcv_value_to_serialized_bytes::call(mcx, &coll[i], typlen as i16, typbyval)?;
 
             if typbyval {
                 /* by-value data types: typlen significant bytes */
@@ -548,7 +559,7 @@ pub fn statext_mcv_serialize(
                     if !mcvitem.isnull[d] {
                         let (lt_opr, collation) = dim_cmp[d]
                             .expect("non-NULL dimension must have a prepared comparator");
-                        match bsearch_index(mcvitem.values[d], &values[d], lt_opr, collation) {
+                        match bsearch_index(&mcvitem.values[d], &values[d], lt_opr, collation) {
                             Some(k) => {
                                 /* check the index is within expected bounds */
                                 debug_assert!((k as i32) < info[d].nvalues);
@@ -583,12 +594,13 @@ pub fn statext_mcv_serialize(
 
 /// `bsearch_arg(&value, values[dim], nvalues, compare_scalars_simple, &ssup)`
 /// returning the element index within the deduplicated array.
-fn bsearch_index(value: Datum, base: &[Datum], lt_opr: Oid, collation: Oid) -> Option<usize> {
+fn bsearch_index(value: &Datum, base: &[Datum], lt_opr: Oid, collation: Oid) -> Option<usize> {
     let mut lo: isize = 0;
     let mut hi: isize = base.len() as isize - 1;
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        let cmp = core_seam::mcv_compare_scalars_simple::call(value, base[mid as usize], lt_opr, collation);
+        let cmp =
+            core_seam::mcv_compare_scalars_simple::call(value, &base[mid as usize], lt_opr, collation);
         if cmp == 0 {
             return Some(mid as usize);
         } else if cmp < 0 {
@@ -607,7 +619,10 @@ fn bsearch_index(value: Datum, base: &[Datum], lt_opr: Oid, collation: Oid) -> O
 /// `statext_mcv_deserialize(data)` (mcv.c:995) — read a serialized MCV list (the
 /// `bytea`, modeled as a byte slice including the 4-byte varlena header) into an
 /// owned [`MCVList`]. `None` data yields `None` (the C `NULL` return).
-pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Option<MCVList>> {
+pub fn statext_mcv_deserialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    data: Option<&[u8]>,
+) -> PgResult<Option<MCVList<'mcx>>> {
     let data = match data {
         None => return Ok(None),
         Some(d) => d,
@@ -753,7 +768,7 @@ pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Op
      * value-reconstruction seam (the C makes a copy in the MCV list's single
      * chunk).
      */
-    let mut map: Vec<Vec<Datum>> = Vec::new();
+    let mut map: Vec<Vec<Datum<'mcx>>> = Vec::new();
     map.try_reserve(ndims)
         .map_err(|_| mcx.oom(ndims * size_of::<usize>()))?;
     {
@@ -763,7 +778,7 @@ pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Op
             let typlen = info[dim].typlen;
             let typbyval = info[dim].typbyval;
 
-            let mut mapdim: Vec<Datum> = Vec::new();
+            let mut mapdim: Vec<Datum<'mcx>> = Vec::new();
             mapdim
                 .try_reserve(nvalues)
                 .map_err(|_| mcx.oom(nvalues * size_of::<Datum>()))?;
@@ -854,7 +869,7 @@ pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Op
             let frequency = read_f64(body, &mut pos)?;
             let base_frequency = read_f64(body, &mut pos)?;
 
-            let mut values: Vec<Datum> = Vec::new();
+            let mut values: Vec<Datum<'mcx>> = Vec::new();
             values
                 .try_reserve(ndims)
                 .map_err(|_| mcx.oom(ndims * size_of::<Datum>()))?;
@@ -874,7 +889,7 @@ pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Op
                     if index >= map[d].len() {
                         return Err(PgError::error("MCV item index out of range in MCVList"));
                     }
-                    values[d] = map[d][index];
+                    values[d] = map[d][index].clone();
                     d += 1;
                 }
             }
@@ -905,7 +920,7 @@ pub fn statext_mcv_deserialize(mcx: Mcx<'_>, data: Option<&[u8]>) -> PgResult<Op
 /// `pg_stats_ext_mcvlist_items(fcinfo)` (mcv.c:1337) — the SRF returning the
 /// per-item details. SEAMED: pure SRF / fmgr / tupdesc / array-builder /
 /// type-output dispatch over the project-wide-deferred `Datum` fmgr surface.
-pub fn pg_stats_ext_mcvlist_items(fcinfo_id: u64) -> PgResult<Datum> {
+pub fn pg_stats_ext_mcvlist_items(fcinfo_id: u64) -> PgResult<types_datum::Datum> {
     core_seam::pg_stats_ext_mcvlist_items::call(fcinfo_id)
 }
 
@@ -924,7 +939,7 @@ pub fn pg_mcv_list_in() -> PgResult<()> {
 
 /// `pg_mcv_list_out(fcinfo)` (mcv.c:1497) — `return byteaout(fcinfo)`. SEAMED:
 /// the `byteaout` fmgr dispatch over the opaque `FunctionCallInfo`.
-pub fn pg_mcv_list_out(fcinfo_id: u64) -> PgResult<Datum> {
+pub fn pg_mcv_list_out(fcinfo_id: u64) -> PgResult<types_datum::Datum> {
     core_seam::pg_mcv_list_out::call(fcinfo_id)
 }
 
@@ -962,6 +977,7 @@ pub fn mcv_get_match_bitmap(
     mcvlist: &MCVList,
     is_or: bool,
 ) -> PgResult<Vec<bool>> {
+    // (elided-lifetime `&MCVList` binds a fresh `'mcx` for the borrow.)
     core_seam::mcv_get_match_bitmap::call(root_id, clauses_id, keys_id, exprs_id, mcvlist, is_or)
 }
 

@@ -46,7 +46,7 @@ use mcx::Mcx;
 use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_statistics::{
-    MVNDistinct, MVNDistinctItem, StatsBuildDataHandle, STATS_EXT_NDISTINCT,
+    MVNDistinct, MVNDistinctItem, StatsBuildData, STATS_EXT_NDISTINCT,
     STATS_MAX_DIMENSIONS, STATS_NDISTINCT_MAGIC, STATS_NDISTINCT_TYPE_BASIC,
 };
 
@@ -251,10 +251,10 @@ impl CombinationGenerator {
 /// the explicit `data_attnums` slice the owner supplies at call time, and the
 /// kernel's `data->values`/`stats`/`nulls` reads happen owner-side behind the
 /// seam).
-pub fn statext_ndistinct_build(
+pub fn statext_ndistinct_build<'mcx>(
     mcx: Mcx<'_>,
     totalrows: f64,
-    data: StatsBuildDataHandle,
+    data: &StatsBuildData<'mcx>,
     nattnums: i32,
     data_attnums: &[AttrNumber],
 ) -> PgResult<MVNDistinct> {

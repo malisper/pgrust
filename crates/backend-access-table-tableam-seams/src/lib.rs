@@ -204,6 +204,59 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `table_beginscan_analyze(rel)` (access/tableam.h, static inline) — the
+    /// alternative scan-begin `acquire_sample_rows` uses for ANALYZE: dispatch
+    /// the AM's `scan_begin` with `flags = SO_TYPE_ANALYZE` (no snapshot, no scan
+    /// keys, no parallel descriptor). Returns the AM-owned scan descriptor (the
+    /// C-faithful value `TableScanDesc`). `Err` carries the AM's
+    /// `ereport(ERROR)`.
+    pub fn table_beginscan_analyze<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+    ) -> PgResult<TableScanDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `table_scan_analyze_next_block(scan, stream)` (access/tableam.h, static
+    /// inline): `scan->rs_rd->rd_tableam->scan_analyze_next_block(scan, stream)`
+    /// — the outer ANALYZE-sampling loop callback. Pin + share-lock the next
+    /// block to be sampled, leaving it the scan's current page; returns `false`
+    /// when the read stream is exhausted.
+    ///
+    /// In C the stream argument is `ReadStream *`, and the heap AM's only use of
+    /// it is `read_stream_next_buffer(stream, NULL)`. The read stream lives in
+    /// `commands/analyze.c` (above this layer), so it crosses the seam as the
+    /// `next_buffer` closure the caller builds over its stream — the same
+    /// closure-across-layers technique the index-build callback uses. The
+    /// closure returns the next pinned `Buffer` (or `InvalidBuffer` at end of
+    /// stream). `Err` carries the AM's `ereport(ERROR)`.
+    pub fn table_scan_analyze_next_block<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        next_buffer: &mut dyn FnMut() -> PgResult<types_storage::buf::Buffer>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `table_scan_analyze_next_tuple(scan, OldestXmin, liverows, deadrows,
+    /// slot)` (access/tableam.h, static inline):
+    /// `scan->rs_rd->rd_tableam->scan_analyze_next_tuple(...)` — the inner
+    /// ANALYZE-sampling loop callback. Advance over the current block's tuples,
+    /// updating the live/dead counters, and store the next sampleable tuple into
+    /// `slot`, returning `true` (buffer left locked) or `false` at end of block
+    /// (buffer unlocked + released, slot cleared). `Err` carries the AM's
+    /// `ereport(ERROR)`.
+    pub fn table_scan_analyze_next_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        oldest_xmin: types_core::TransactionId,
+        liverows: &mut f64,
+        deadrows: &mut f64,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `table_endscan(scan)` (copyto.c:1099): close the scan and release its
     /// resources. Consumes the descriptor. `Err` carries the AM's
     /// `ereport(ERROR)`.

@@ -470,20 +470,16 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
 }
 
 /// `aggstate->tmpcontext` — the per-input temporary `ExprContext` id. The
-/// nodeAgg model carries `tmpcontext` as an owned `ExprContext` box rather than
-/// an [`EcxtId`] pool index, but the multi-DISTINCT equality and slot swaps run
-/// against the EState ExprContext pool the interpreter threads. Resolving the
-/// box to its pool id is nodeAgg's wiring (the box and the pool are the same
-/// context in C); panicked here until that linkage is exposed.
+/// nodeAgg model carries `tmpcontext` as an [`EcxtId`] pool index (#165 P0,
+/// mirroring `ps_ExprContext`), the same context the interpreter threads
+/// through the EState ExprContext pool, so the id is read directly.
 fn aggstate_tmpcontext<'mcx>(
-    _aggstate: &AggState<'mcx>,
+    aggstate: &AggState<'mcx>,
     _estate: &EStateData<'mcx>,
 ) -> types_nodes::execnodes::EcxtId {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: resolving aggstate->tmpcontext (a nodeAgg-\
-         owned ExprContext box) to its EState ExprContext-pool EcxtId is nodeAgg's wiring; not \
-         yet exposed in the shared vocabulary"
-    );
+    aggstate
+        .tmpcontext
+        .expect("eval_agg: aggstate->tmpcontext EcxtId not assigned by ExecInitAgg")
 }
 
 /// `ExecQual(pertrans->equalfnMulti, tmpcontext)` over the multi-column
@@ -720,17 +716,18 @@ fn datum_get_pointer(d: Datum) -> usize {
 
 /// `aggstate->curaggcontext = aggcontext` — store the current aggcontext. The
 /// nodeAgg model holds `curaggcontext` as an index into `aggstate->aggcontexts`
-/// (the per-grouping-set ExprContext array), whereas the step threads the
-/// aggcontext as an EState ExprContext-pool [`EcxtId`]. Mapping the pool id back
-/// to the `aggcontexts` index is nodeAgg's wiring (both name the same
-/// ExprContext in C); panicked until exposed.
+/// (the per-grouping-set ExprContext array, now [`EcxtId`]s, #165 P0), whereas
+/// the step threads the aggcontext as an EState ExprContext-pool [`EcxtId`].
+/// Both name the same ExprContext in C, so the index is the position of the id
+/// in `aggcontexts`.
 fn ecxt_id_to_aggcontext_index<'mcx>(
-    _aggstate: &AggState<'mcx>,
-    _aggcontext: types_nodes::execnodes::EcxtId,
+    aggstate: &AggState<'mcx>,
+    aggcontext: types_nodes::execnodes::EcxtId,
 ) -> i32 {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: storing aggstate->curaggcontext maps the \
-         step's EState ExprContext-pool EcxtId to an index into aggstate->aggcontexts; that \
-         linkage is nodeAgg's wiring, not yet exposed in the shared vocabulary"
-    );
+    aggstate
+        .aggcontexts
+        .as_ref()
+        .and_then(|a| a.iter().position(|id| *id == aggcontext))
+        .map(|i| i as i32)
+        .expect("eval_agg: aggcontext EcxtId not found in aggstate->aggcontexts")
 }

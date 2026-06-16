@@ -211,7 +211,10 @@ pub fn hashagg_recompile_expressions<'mcx>(
 
 /// `hash_create_memory(aggstate)` — create the `hash_metacxt` / `hash_tablecxt`
 /// memory contexts that hold the hash tables and their entries.
-pub fn hash_create_memory<'mcx>(aggstate: &mut AggStateData<'mcx>) -> PgResult<()> {
+pub fn hash_create_memory<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // C:
     //   aggstate->hashcontext = CreateWorkExprContext(es->state);
     //   aggstate->hash_metacxt = AllocSetContextCreate(es_query_cxt, "HashAgg meta context", ...);
@@ -220,20 +223,24 @@ pub fn hash_create_memory<'mcx>(aggstate: &mut AggStateData<'mcx>) -> PgResult<(
     //   maxBlockSize = Max(maxBlockSize, ALLOCSET_DEFAULT_INITSIZE);
     //   aggstate->hash_tablecxt = BumpContextCreate(es_query_cxt, "HashAgg table context", ...);
     //
-    // CreateWorkExprContext IS ported (execUtils::CreateWorkExprContext) and
-    // returns an `EcxtId` into the EState ExprContext pool. But AggStateData
-    // models `hashcontext` as `Option<PgBox<ExprContext>>` (an owned value), not
-    // an `EcxtId` — the SAME ExprContext storage-model carrier gap `ExecInitAgg`
-    // panics on (exec_init_agg.rs): the owned AggState facet carries owned
-    // ExprContext boxes while execUtils owns EcxtId-pooled contexts, and the
-    // hash_metacxt/hash_tablecxt AllocSet/Bump contexts have no owned-model
-    // bridge either. Reconciling the two ExprContext representations is the
-    // keystone here, not the (already ported) owner. Loud panic until it lands.
-    let _ = aggstate;
+    // aggstate->hashcontext = CreateWorkExprContext(es->state): the work-sized
+    // ExprContext is registered in the EState pool, and (#165 P0) hashcontext is
+    // now an EcxtId, so the assignment is the faithful id store.
+    let work_mem_kb = backend_utils_init_small_seams::work_mem::call();
+    aggstate.hashcontext = Some(
+        backend_executor_execUtils_seams::create_work_expr_context::call(estate, work_mem_kb)?,
+    );
+
+    // The hash_metacxt (AllocSet) / hash_tablecxt (Bump) context creation
+    // (AllocSetContextCreate / BumpContextCreate as children of es_query_cxt)
+    // is owned by the not-yet-ported mmgr context-factory surface (no
+    // owned-model bridge for child AllocSet/Bump contexts). Loud panic until it
+    // lands; the ExprContext assignment above is the #165 P0 deliverable.
     panic!(
-        "backend-executor-nodeAgg::hash_create_memory: CreateWorkExprContext is ported but its \
-         EcxtId result cannot fill AggState.hashcontext (PgBox<ExprContext>) — same ExprContext \
-         storage-model carrier gap as ExecInitAgg"
+        "backend-executor-nodeAgg::hash_create_memory: hashcontext (EcxtId) is assigned \
+         via CreateWorkExprContext (#165 P0), but the hash_metacxt/hash_tablecxt \
+         AllocSet/Bump child-context creation is owned by the not-yet-ported mmgr \
+         context-factory surface"
     );
 }
 
@@ -359,10 +366,10 @@ pub fn lookup_hash_entries<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // TupleTableSlot *outerslot = aggstate->tmpcontext->ecxt_outertuple;
-    let outerslot = aggstate
-        .tmpcontext
-        .as_ref()
-        .expect("tmpcontext")
+    // tmpcontext is an EcxtId; resolve it through the EState pool.
+    let tmpcontext = aggstate.tmpcontext.expect("tmpcontext");
+    let outerslot = estate
+        .ecxt(tmpcontext)
         .ecxt_outertuple
         .expect("ecxt_outertuple");
 
@@ -440,11 +447,8 @@ pub fn agg_fill_hash_table<'mcx>(
         };
 
         // tmpcontext->ecxt_outertuple = outerslot;
-        aggstate
-            .tmpcontext
-            .as_mut()
-            .expect("tmpcontext")
-            .ecxt_outertuple = Some(outerslot);
+        let tmpcontext = aggstate.tmpcontext.expect("tmpcontext");
+        estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(outerslot);
 
         // Find or build hashtable entries
         lookup_hash_entries(aggstate, estate)?;
@@ -453,11 +457,11 @@ pub fn agg_fill_hash_table<'mcx>(
         crate::transition::advance_aggregates(aggstate, estate)?;
 
         // ResetExprContext(aggstate->tmpcontext);
-        reset_tmpcontext(aggstate);
+        reset_tmpcontext(aggstate, estate)?;
     }
 
     // finalize spills, if any
-    crate::spill::hashagg_finish_initial_spills(aggstate, estate_mcx(estate))?;
+    crate::spill::hashagg_finish_initial_spills(aggstate, estate, estate_mcx(estate))?;
 
     aggstate.table_filled = true;
 
@@ -516,7 +520,7 @@ pub fn agg_refill_hash_table<'mcx>(
     }
 
     // ReScanExprContext(hashcontext); MemoryContextReset(hash_tablecxt);
-    rescan_hashcontext(aggstate);
+    rescan_hashcontext(aggstate, estate)?;
     if let Some(tablecxt) = aggstate.hash_tablecxt.as_mut() {
         tablecxt.reset();
     }
@@ -663,18 +667,28 @@ pub fn hash_agg_entry_size(num_trans: i32, tuple_width: usize, transition_space:
 
 /// `ResetExprContext(aggstate->tmpcontext)` — reset the per-input-tuple memory
 /// of the temp context.
-fn reset_tmpcontext(aggstate: &mut AggStateData<'_>) {
-    if let Some(tmp) = aggstate.tmpcontext.as_mut() {
-        tmp.ecxt_per_tuple_memory.reset();
+fn reset_tmpcontext<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // tmpcontext is an EcxtId into the EState pool; ResetExprContext resets its
+    // per-tuple memory.
+    if let Some(ecxt) = aggstate.tmpcontext {
+        backend_executor_execUtils_seams::reset_expr_context::call(estate, ecxt)?;
     }
+    Ok(())
 }
 
 /// `ReScanExprContext(aggstate->hashcontext)` — reset the hashcontext's
 /// per-tuple memory (the byref-transvalue arena).
-fn rescan_hashcontext(aggstate: &mut AggStateData<'_>) {
-    if let Some(hc) = aggstate.hashcontext.as_mut() {
-        hc.ecxt_per_tuple_memory.reset();
+fn rescan_hashcontext<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if let Some(ecxt) = aggstate.hashcontext {
+        backend_executor_execUtils_seams::re_scan_expr_context::call(estate, ecxt)?;
     }
+    Ok(())
 }
 
 /// The per-query context handle, target for transient allocations the
