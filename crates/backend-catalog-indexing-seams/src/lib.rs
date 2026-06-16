@@ -241,6 +241,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RenameSchema`'s tuple write (schemacmds.c): `table_open(NamespaceRelationId,
+    /// RowExclusiveLock)` + `SearchSysCacheCopy1(NAMESPACEOID, nspoid)`,
+    /// `namestrcpy(&nspform->nspname, newname)`, `CatalogTupleUpdate(rel,
+    /// &tup->t_self, tup)`, `table_close(rel, NoLock)`, `heap_freetuple(tup)`.
+    /// The caller has already verified `nspoid` exists and resolved the new
+    /// name; the cache-miss path is unreachable here. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn rename_namespace_tuple(nspoid: Oid, newname: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterSchemaOwner_internal`'s tuple write (schemacmds.c): `table_open(
+    /// NamespaceRelationId, RowExclusiveLock)` + `SearchSysCacheCopy1(
+    /// NAMESPACEOID, nspoid)`, set `repl_repl[nspowner] = true` /
+    /// `repl_val[nspowner] = new_owner`, and when `SysCacheGetAttr(nspacl)` is
+    /// non-NULL `aclnewowner(nspacl, old_owner, new_owner)` into
+    /// `repl_val[nspacl]`, then `heap_modify_tuple` + `CatalogTupleUpdate` +
+    /// `heap_freetuple` + `table_close(rel, RowExclusiveLock)`. `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn update_namespace_owner_tuple(
+        nspoid: Oid,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
     /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
     /// the metadata tuple from the already-chosen large-object OID, owner, and

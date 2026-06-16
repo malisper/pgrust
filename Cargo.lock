@@ -5003,6 +5003,7 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-opclass",
 ]
 
@@ -5384,6 +5385,40 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-schemacmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-namespace",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-event-trigger-seams",
+ "backend-commands-schemacmds-seams",
+ "backend-parser-parse-utilcmd-seams",
+ "backend-tcop-utility-fc-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
 ]
 
 [[package]]
@@ -9500,6 +9535,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-parse-utilcmd-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-parser-relation"
 version = "0.0.0"
 dependencies = [
@@ -12335,6 +12380,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-foreigncmds",
+ "types-nodes",
 ]
 
 [[package]]
@@ -15923,6 +15969,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-trigger",
  "backend-common-relpath",
