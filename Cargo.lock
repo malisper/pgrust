@@ -13008,7 +13008,10 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-logical",
+ "types-snapshot",
+ "types-xlog-records",
 ]
 
 [[package]]
