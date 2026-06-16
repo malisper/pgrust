@@ -4420,6 +4420,7 @@ name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -5492,6 +5493,33 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-operatorcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-operator-seams",
+ "backend-commands-define",
+ "backend-commands-functioncmds-seams",
+ "backend-parser-parse-oper",
+ "backend-parser-parse-oper-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-opclass",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -16629,6 +16657,7 @@ dependencies = [
  "backend-commands-lockcmds",
  "backend-commands-matview",
  "backend-commands-opclasscmds",
+ "backend-commands-operatorcmds",
  "backend-commands-portalcmds",
  "backend-commands-schemacmds",
  "backend-commands-seclabel",

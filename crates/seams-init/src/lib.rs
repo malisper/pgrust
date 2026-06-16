@@ -111,6 +111,7 @@ pub fn init_all() {
     backend_commands_lockcmds::init_seams();
     backend_commands_functioncmds::init_seams();
     backend_commands_opclasscmds::init_seams();
+    backend_commands_operatorcmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_schemacmds::init_seams();
     backend_commands_portalcmds::init_seams();

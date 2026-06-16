@@ -114,6 +114,7 @@ backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-lockcmds = { path = "../backend-commands-lockcmds" }
 backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
 backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
+backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }

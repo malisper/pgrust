@@ -18,6 +18,7 @@ pub mod pg_inherits;
 pub mod pg_range;
 pub mod object_access;
 pub mod pg_aggregate;
+pub mod pg_operator;
 pub mod catalog_shdepend;
 pub mod opclasscmds_catalog;
 pub mod pg_database;
