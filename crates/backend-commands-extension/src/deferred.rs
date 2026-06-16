@@ -25,35 +25,6 @@ macro_rules! deferred {
     };
 }
 
-/// `CreateExtensionInternal` (C 1784-2017): the CREATE EXTENSION driver
-/// (version/schema selection, CASCADE requires loop, script run, catalog insert).
-pub fn CreateExtensionInternal() -> ! {
-    deferred!(
-        "CreateExtensionInternal",
-        "the syscache/namespace/ACL lookups, the schema-create + extension-script \
-         execution pipeline, and the pg_extension catalog insert"
-    )
-}
-
-/// `get_required_extension` (C 2023-2088): CASCADE recursion + cyclic-dependency
-/// detection.
-pub fn get_required_extension() -> ! {
-    deferred!(
-        "get_required_extension",
-        "the CASCADE-recursive CreateExtensionInternal call (executor/catalog)"
-    )
-}
-
-/// `InsertExtensionTuple` (C 2192-2271): build + insert the pg_extension row and
-/// its owner/schema/required-extension dependencies.
-pub fn InsertExtensionTuple() -> ! {
-    deferred!(
-        "InsertExtensionTuple",
-        "the fmgr/Datum column assembly, the pg_extension catalog insert, and the \
-         pg_depend dependency records"
-    )
-}
-
 /// `ExecAlterExtensionStmt` (C 3408-3544) + `ApplyExtensionUpdates` (C 3555-3702):
 /// ALTER EXTENSION ... UPDATE.
 pub fn ExecAlterExtensionStmt() -> ! {
@@ -64,22 +35,33 @@ pub fn ExecAlterExtensionStmt() -> ! {
     )
 }
 
-/// `ExecAlterExtensionContentsStmt` (C 3713-3789) + `…Recurse` (C 3799-3929):
-/// ALTER EXTENSION ... ADD/DROP member object.
-pub fn ExecAlterExtensionContentsStmt() -> ! {
+/// `ApplyExtensionUpdates` (C 3555-3702): apply the chain of update scripts after
+/// an install. Calls `execute_extension_script` (C 3690), so it is gated on the
+/// same parser/analyzer/planner/executor/utility script-execution pipeline.
+pub fn ApplyExtensionUpdates() -> ! {
     deferred!(
-        "ExecAlterExtensionContentsStmt/…Recurse",
-        "get_object_address, the ObjectAddresses dependency bookkeeping, and the \
-         type->array/relation->rowtype recursion"
+        "ApplyExtensionUpdates",
+        "the per-version pg_extension tuple edit, the dependency delete/recreate, \
+         and the extension-script execution pipeline (execute_extension_script)"
     )
 }
 
-/// `AlterExtensionNamespace` (C 3193-3402): ALTER EXTENSION ... SET SCHEMA.
-pub fn AlterExtensionNamespace() -> ! {
+/// `ExecAlterExtensionContentsStmt` (C 3713-3789) + `…Recurse` (C 3799-3929):
+/// ALTER EXTENSION ... ADD/DROP member object.
+///
+/// Blocked: the recursion (`ExecAlterExtensionContentsRecurse`) calls
+/// `recordExtObjInitPriv` (ADD, C 3848) and `removeExtObjInitPriv` (DROP,
+/// C 3885) — aclchk.c's extension-membership initial-ACL helpers — which have
+/// no port and no declared seam anywhere in the workspace (only the unrelated
+/// `RemoveRoleFromInitPriv`/`ReplaceRoleInInitPriv` DROP/REASSIGN-OWNED helpers
+/// exist). Per mirror-pg-and-panic, the whole command stays deferred rather than
+/// silently dropping the initial-ACL recording; the DROP path additionally
+/// reaches the also-deferred `extension_config_remove`.
+pub fn ExecAlterExtensionContentsStmt() -> ! {
     deferred!(
-        "AlterExtensionNamespace",
-        "the namespace lookup/create, the pg_depend relocate scan, and the per-member \
-         AlterObjectNamespace_oid catalog updates"
+        "ExecAlterExtensionContentsStmt/…Recurse",
+        "recordExtObjInitPriv/removeExtObjInitPriv (aclchk.c extension-membership \
+         initial-ACL helpers), which have no port and no seam"
     )
 }
 
@@ -100,28 +82,6 @@ pub fn read_extension_script_file() -> ! {
         "read_extension_script_file",
         "read_whole_file filesystem IO and the pg_verify_mbstr/pg_any_to_server \
          encoding conversion"
-    )
-}
-
-/// `read_whole_file` (C 3939-4001): slurp a file into a string.
-pub fn read_whole_file() -> ! {
-    deferred!("read_whole_file", "AllocateFile/fread/ferror filesystem IO")
-}
-
-/// `extension_is_trusted` (C 1174-1186): the trusted + ACL_CREATE-on-database
-/// install policy.
-pub fn extension_is_trusted() -> ! {
-    deferred!(
-        "extension_is_trusted",
-        "the object_aclcheck(DatabaseRelationId, MyDatabaseId, …, ACL_CREATE) call"
-    )
-}
-
-/// `get_extension_schema` (C 232-246): OID -> namespace syscache lookup.
-pub fn get_extension_schema() -> ! {
-    deferred!(
-        "get_extension_schema",
-        "the SearchSysCache1(EXTENSIONOID, …) syscache lookup"
     )
 }
 
@@ -179,27 +139,21 @@ pub fn pg_extension_config_dump() -> ! {
 
 /// `extension_config_remove` (C 3028-3187): remove a table from the extension's
 /// extconfig/extcondition arrays.
+///
+/// Blocked: the extcondition leg (C 3160-3176) deconstructs a `text[]` array,
+/// squeezes out one element, and reconstructs it. The workspace's
+/// `deconstruct_array_builtin` returns the legacy word-typed `types_datum::Datum`
+/// (a bare `usize`), which cannot carry a by-reference `text` payload — there is
+/// no value-typed `deconstruct_array` returning real `Datum::ByRef` elements to
+/// feed back to `construct_array_values`. Reconstructing the text array would
+/// therefore lose the condition strings. (The extconfig OID leg is by-value and
+/// would be fine; only the text leg is blocked.) Reachable only from the also-
+/// deferred `ExecAlterExtensionContentsStmt` DROP path.
 pub fn extension_config_remove() -> ! {
     deferred!(
         "extension_config_remove",
-        "the fmgr/Datum array machinery and the pg_extension catalog update"
-    )
-}
-
-/// `convert_requires_to_datum` (C 2681-2700): build the name[] Datum.
-pub fn convert_requires_to_datum() -> ! {
-    deferred!(
-        "convert_requires_to_datum",
-        "the fmgr/Datum array construction"
-    )
-}
-
-/// `extension_file_exists` (C 2622-2675): does a control file for the extension
-/// exist anywhere on the control path?
-pub fn extension_file_exists() -> ! {
-    deferred!(
-        "extension_file_exists",
-        "the AllocateDir/ReadDir filesystem scan"
+        "a value-typed deconstruct_array for the by-reference text[] extcondition \
+         squeeze (the legacy word-Datum deconstruct cannot carry text payloads)"
     )
 }
 

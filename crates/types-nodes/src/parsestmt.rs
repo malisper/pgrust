@@ -302,23 +302,53 @@ impl Default for VarParamState {
     }
 }
 
+/// `FixedParamState` (`parser/parse_param.c`) — the fixed-parameter hook's
+/// reference state. In C this is `{ const Oid *paramTypes; int numParams; }`: a
+/// pointer aliasing the caller's *immutable* `const Oid *` type array (alive for
+/// the duration of analysis) and its element count.
+///
+/// Unlike [`VarParamState`], the fixed array is never mutated during analysis —
+/// `fixed_paramref_hook` only reads it. The owned model therefore keeps the
+/// types in an `Rc<Vec<Oid>>` (a cheap-to-clone shared snapshot of the caller's
+/// array, with the `Vec`'s length serving as C's `numParams`). The state lives
+/// in `pstate->p_ref_hook_state` for the whole walk, exactly as C's
+/// `setup_parse_fixed_parameters` installs it.
+#[derive(Clone)]
+pub struct FixedParamState {
+    /// `const Oid *paramTypes` / `int numParams` — the fixed parameter-type
+    /// array (with `numParams == param_types.len()`). An `InvalidOid` entry is
+    /// an unspecified parameter slot (rejected by the hook).
+    pub param_types: Rc<Vec<Oid>>,
+}
+
+impl FixedParamState {
+    /// Build a `FixedParamState` from the caller's fixed type array.
+    pub fn new(param_types: &[Oid]) -> FixedParamState {
+        FixedParamState {
+            param_types: Rc::new(param_types.to_vec()),
+        }
+    }
+}
+
 /// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
 /// for the parser hook functions above. Owned by the hook installer.
 ///
 /// The C field is a bare `void *` whose pointee is whatever the hook installer
-/// chose; in the core backend the concrete installer whose state must survive in
-/// `ParseState` for a later pass is `setup_parse_variable_parameters` (its
-/// [`VarParamState`] is read back by the post-analysis `check_variable_parameters`
-/// pass). The fixed-parameter installer's `FixedParamState` borrows the caller's
-/// `const Oid *` and is carried by the parser unit directly (it is consumed
-/// during, not after, the walk). Additional installers are modeled here as they
-/// land; no opaque stand-in is introduced.
+/// chose; in the core backend the two concrete installers are
+/// `setup_parse_variable_parameters` (its [`VarParamState`] is read back by the
+/// post-analysis `check_variable_parameters` pass) and
+/// `setup_parse_fixed_parameters` (its [`FixedParamState`], read during the
+/// walk). Both are modeled here as enum arms — no opaque stand-in is introduced.
+/// The active arm is also what selects the installed paramref hook, mirroring
+/// the C `pstate->p_paramref_hook = {fixed,variable}_paramref_hook` assignment.
 #[derive(Clone)]
 pub enum ParseRefHookState {
     /// C `NULL` — no ref-hook state installed.
     None,
     /// `setup_parse_variable_parameters`' shared, growable type array.
     VarParams(VarParamState),
+    /// `setup_parse_fixed_parameters`' fixed type array.
+    FixedParams(FixedParamState),
 }
 
 impl ParseRefHookState {
@@ -331,6 +361,14 @@ impl ParseRefHookState {
     pub fn as_var_params(&self) -> Option<&VarParamState> {
         match self {
             ParseRefHookState::VarParams(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The installed [`FixedParamState`], if this is the fixed-parameter case.
+    pub fn as_fixed_params(&self) -> Option<&FixedParamState> {
+        match self {
+            ParseRefHookState::FixedParams(f) => Some(f),
             _ => None,
         }
     }

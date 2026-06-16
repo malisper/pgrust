@@ -596,30 +596,32 @@ fn pg_strtoint64_safe(s: &str) -> Option<i64> {
 // parse_param.c (F2: fixed parameters + read-only post-analysis checks)
 // ===========================================================================
 
-/// `FixedParamState` (parse_param.c) — the fixed-parameter hook's reference
-/// state: a fixed list of parameter type OIDs.
-#[derive(Clone)]
-pub struct FixedParamState<'a> {
-    /// `const Oid *paramTypes` — array of parameter type OIDs.
-    pub param_types: &'a [Oid],
-}
+pub use types_nodes::parsestmt::FixedParamState;
 
 /// `setup_parse_fixed_parameters(pstate, paramTypes, numParams)` (parse_param.c)
 /// — set up to process a query referencing a fixed list of parameter types.
 ///
 /// C stores a `FixedParamState *` in `pstate->p_ref_hook_state` and installs
-/// `fixed_paramref_hook`. The owned model returns the carrier; the caller drives
-/// the hook with it (see [`fixed_paramref_hook`]) since the owned `ParseState`
-/// hook fields take a bare `fn` and the ref-hook state has no typed home.
-pub fn setup_parse_fixed_parameters(param_types: &[Oid]) -> FixedParamState<'_> {
-    FixedParamState { param_types }
+/// `fixed_paramref_hook`. The owned model installs the [`FixedParamState`] into
+/// `pstate.p_ref_hook_state` (the `FixedParams` arm); the active ref-hook arm is
+/// what selects the installed paramref hook, exactly as C's
+/// `pstate->p_paramref_hook = fixed_paramref_hook` does (no `p_coerce_param_hook`
+/// is set, matching C). The value-typed hook is reached from the parser via that
+/// installed arm (see [`fixed_paramref_hook`]).
+pub fn setup_parse_fixed_parameters(pstate: &mut ParseState<'_>, param_types: &[Oid]) {
+    // parstate->paramTypes = paramTypes; parstate->numParams = numParams;
+    // pstate->p_ref_hook_state = parstate;
+    pstate.p_ref_hook_state = ParseRefHookState::FixedParams(FixedParamState::new(param_types));
+    // pstate->p_paramref_hook = fixed_paramref_hook;
+    // (selected by the FixedParams ref-hook arm; see transformParamRef)
+    // /* no need to use p_coerce_param_hook */
 }
 
 /// `fixed_paramref_hook(pstate, pref)` (parse_param.c) — transform a `ParamRef`
 /// using fixed parameter types.
 pub fn fixed_paramref_hook<'mcx>(
     pstate: &ParseState<'mcx>,
-    parstate: &FixedParamState<'_>,
+    parstate: &FixedParamState,
     pref: &ParamRef,
 ) -> PgResult<Param> {
     let paramno = pref.number;
