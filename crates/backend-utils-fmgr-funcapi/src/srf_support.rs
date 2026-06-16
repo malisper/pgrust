@@ -384,6 +384,24 @@ pub fn srf_arg0_oid<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Option<Oid
     }
 }
 
+/// `PG_GETARG_INT64(n)` — read the `int8` argument at position `n` out of the
+/// call frame. fmgr owns the `args` array.
+pub fn srf_arg_int64<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>, n: usize) -> i64 {
+    // C: #define PG_GETARG_INT64(n) DatumGetInt64(PG_GETARG_DATUM(n))
+    fcinfo.args[n].value.as_i64()
+}
+
+/// `PG_GETARG_LSN(n)` (`utils/pg_lsn.h`) — read the `pg_lsn` (`XLogRecPtr`)
+/// argument at position `n` out of the call frame. fmgr owns the `args` array.
+pub fn srf_arg_lsn<'mcx>(
+    fcinfo: &FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> types_core::XLogRecPtr {
+    // C: #define PG_GETARG_LSN(n) DatumGetLSN(PG_GETARG_DATUM(n))
+    //    #define DatumGetLSN(X) ((XLogRecPtr) GET_8_BYTES(X))
+    fcinfo.args[n].value.as_u64()
+}
+
 /// `CStringGetTextDatum(s)` — build a `text *` Datum from a string in `mcx`
 /// (the SRF text-column helper the inward seam exposes).
 pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {

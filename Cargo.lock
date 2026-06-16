@@ -3586,8 +3586,28 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-blkreftable",
  "types-core",
  "types-error",
+ "types-walsummarizer",
+]
+
+[[package]]
+name = "backend-backup-walsummaryfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-walsummary-seams",
+ "backend-postmaster-walsummarizer",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "common-blkreftable-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
  "types-walsummarizer",
 ]
 
