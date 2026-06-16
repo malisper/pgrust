@@ -405,6 +405,7 @@ pub fn init_all() {
     backend_utils_cache_ts_cache::init_seams();
     backend_utils_cache_typcache::init_seams();
     backend_utils_error::init_seams();
+    backend_utils_error_small::init_seams();
     backend_utils_fmgr_core::init_seams();
     backend_utils_fmgr_dfmgr::init_seams();
     backend_utils_fmgr_funcapi::init_seams();

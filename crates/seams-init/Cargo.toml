@@ -402,6 +402,7 @@ backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
 backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-error-small = { path = "../backend-utils-error-small" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-fmgr-dfmgr = { path = "../backend-utils-fmgr-dfmgr" }
 backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
