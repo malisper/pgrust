@@ -37,3 +37,162 @@ seam_core::seam!(
         dependency: &[types_core::AttrNumber],
     ) -> types_error::PgResult<f64>
 );
+
+/* ===========================================================================
+ * MCV-list seams (consumed by `backend-statistics-mcv`, the
+ * most-common-value slice of the combined `backend-statistics-core` unit).
+ *
+ * The MCV byte-layout serialize/deserialize and the selectivity arithmetic
+ * are ported IN `backend-statistics-mcv`; the pieces that touch the unported
+ * build framework (`StatsBuildData` / `VacAttrStats` / the multi-sort support),
+ * the per-dimension `Datum`<->bytes value codec, the type-cache ordering-operator
+ * lookup, the `pg_statistic_ext_data` syscache, the planner-arena clause
+ * introspection, the per-clause fmgr operator dispatch and the SRF / type-I/O
+ * fmgr surface cross these seams. The owner installs them when it lands; until
+ * then a call panics loudly (mirror-pg-and-panic).
+ * ========================================================================= */
+
+seam_core::seam!(
+    /// `statext_mcv_build(StatsBuildData *data, double totalrows, int stattarget)`
+    /// (mcv.c:179) — build an MCV list from the sampled rows.
+    ///
+    /// SEAMED, not in-crate: the body needs `build_mss` / `build_sorted_items` /
+    /// `build_distinct_groups` / `build_column_frequencies` over the opaque
+    /// `StatsBuildData` (the `VacAttrStats` matrix + `Datum`/`bool` value
+    /// matrices) plus per-column `lookup_type_cache(...)->lt_opr` and the
+    /// multi-sort comparator machinery — all in the not-yet-ported extended-stats
+    /// build framework. Returns `None` when nothing was built (C `NULL`).
+    pub fn statext_mcv_build(
+        data: types_statistics::StatsBuildDataHandle,
+        totalrows: f64,
+        stattarget: i32,
+    ) -> types_error::PgResult<Option<types_statistics::MCVList>>
+);
+
+seam_core::seam!(
+    /// `statext_mcv_load(Oid mvoid, bool inh)` (mcv.c:557) — read the serialized
+    /// MCV bytea for a `pg_statistic_ext_data` tuple from the syscache.
+    ///
+    /// SEAMED: the `SearchSysCache2(STATEXTDATASTXOID, ...)` /
+    /// `SysCacheGetAttr(Anum_pg_statistic_ext_data_stxdmcv)` lookup is the
+    /// unported pg_statistic_ext_data syscache layer; it can `elog(ERROR)` for a
+    /// missing object or an un-built MCV kind, carried on `Err`. The returned
+    /// bytea (varlena framing included) is deserialized in-crate.
+    pub fn mcv_load_bytea<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mvoid: types_core::Oid,
+        inh: bool,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(typid, TYPECACHE_LT_OPR)->lt_opr` — the ordering
+    /// operator for a type (mcv.c:361/664). Returns `InvalidOid` (0) when the
+    /// type has no '<' operator; can `elog(ERROR)` on a cache failure.
+    pub fn mcv_lookup_lt_opr(
+        attrtypid: types_core::Oid,
+    ) -> types_error::PgResult<types_core::Oid>
+);
+
+seam_core::seam!(
+    /// `compare_scalars_simple(a, b, ssup)` (extended_stats.c) for a single
+    /// dimension's `(lt_opr, collation)`. Three-way `< 0 / 0 / > 0`, used to sort
+    /// and binary-search the deduplicated per-dimension value arrays during MCV
+    /// serialization.
+    ///
+    /// SEAMED: needs `PrepareSortSupportFromOrderingOp` + the fmgr comparison
+    /// dispatch over the by-value/by-ref `Datum`, all owner-side.
+    pub fn mcv_compare_scalars_simple(
+        a: types_datum::Datum,
+        b: types_datum::Datum,
+        lt_opr: types_core::Oid,
+        collation: types_core::Oid,
+    ) -> i32
+);
+
+seam_core::seam!(
+    /// Serialize one MCV value into its on-wire payload bytes for the given type
+    /// `(typlen, typbyval)`, mirroring the per-category bodies of
+    /// `statext_mcv_serialize` (mcv.c:868-919):
+    ///   * by-value  -> `store_att_byval` then the `typlen` significant bytes;
+    ///   * fixed by-ref (`typlen > 0`) -> the `typlen` bytes at the pointer;
+    ///   * varlena (`typlen == -1`) -> the detoasted `VARSIZE_ANY_EXHDR` body
+    ///     (NO length prefix — the caller prepends the uint32 length);
+    ///   * cstring (`typlen == -2`) -> the NUL-terminated bytes incl. terminator
+    ///     (NO length prefix — the caller prepends the uint32 length).
+    ///
+    /// SEAMED: `store_att_byval` / `PG_DETOAST_DATUM` / `DatumGetCString` are the
+    /// project-wide-deferred `Datum`-value codec.
+    pub fn mcv_value_to_serialized_bytes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        value: types_datum::Datum,
+        typlen: i16,
+        typbyval: bool,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// Reconstruct an MCV value `Datum` from its on-wire payload bytes for the
+    /// given type `(typlen, typbyval)`, mirroring the per-category bodies of
+    /// `statext_mcv_deserialize` (mcv.c:1186-1259):
+    ///   * by-value  -> `fetch_att(&v, true, typlen)` over the `typlen` bytes;
+    ///   * fixed by-ref (`typlen > 0`) -> a `PointerGetDatum` over a fresh copy;
+    ///   * varlena (`typlen == -1`) -> a full-header varlena built from the body;
+    ///   * cstring (`typlen == -2`) -> a `PointerGetDatum` over a copy.
+    ///
+    /// The returned `Datum` owns its backing storage in `mcx` (the deserialized
+    /// MCV list's single chunk in C).
+    ///
+    /// SEAMED: `fetch_att` / `SET_VARSIZE` / `PointerGetDatum` are the
+    /// project-wide-deferred `Datum`-value codec.
+    pub fn mcv_serialized_bytes_to_value<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        bytes: &[u8],
+        typlen: i16,
+        typbyval: bool,
+    ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `mcv_get_match_bitmap(root, clauses, keys, exprs, mcvlist, is_or)`
+    /// (mcv.c:1598) — evaluate the clause list against the MCV list and return a
+    /// per-item match bitmap (`Vec<bool>` of length `mcvlist->nitems`).
+    ///
+    /// SEAMED: the body walks planner `Node` clauses (`OpExpr` / `NullTest` /
+    /// `ScalarArrayOpExpr` / AND/OR/NOT / boolean `Var` / bare bool expr) over
+    /// the planner arena — `is_opclause` / `examine_opclause_args` /
+    /// `mcv_match_expression` / `bms_member_index` / `deconstruct_array` — and
+    /// dispatches the per-clause fmgr operator (`FunctionCall2Coll`) and
+    /// `DatumGetBool`. None of those node/fmgr surfaces is ported; `clauses` /
+    /// `keys` / `exprs` are opaque planner-arena ids the owner resolves.
+    pub fn mcv_get_match_bitmap(
+        root_id: u64,
+        clauses_id: u64,
+        keys_id: u64,
+        exprs_id: u64,
+        mcvlist: &types_statistics::MCVList,
+        is_or: bool,
+    ) -> types_error::PgResult<std::vec::Vec<bool>>
+);
+
+seam_core::seam!(
+    /// `RangeTblEntry *rte = root->simple_rte_array[rel->relid]; rte->inh`
+    /// (mcv.c:2057) — the `inh` flag the MCV load is keyed on. SEAMED: reads the
+    /// planner `PlannerInfo`/`RelOptInfo` arena.
+    pub fn mcv_rte_inh_for_rel(root_id: u64, rel_id: u64) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pg_stats_ext_mcvlist_items(fcinfo)` (mcv.c:1337) — the SRF returning the
+    /// per-item details. SEAMED: pure SRF / fmgr / tupdesc / array-builder /
+    /// type-output dispatch (`get_call_result_type` / `accumArrayResult` /
+    /// `getTypeOutputInfo` / `heap_form_tuple` / `SRF_RETURN_*`), all over the
+    /// project-wide-deferred `Datum` fmgr surface.
+    pub fn pg_stats_ext_mcvlist_items(fcinfo_id: u64) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `pg_mcv_list_out(fcinfo)` (mcv.c:1497) — `return byteaout(fcinfo)`.
+    /// SEAMED: the `byteaout` fmgr dispatch over the opaque `FunctionCallInfo`.
+    pub fn pg_mcv_list_out(fcinfo_id: u64) -> types_error::PgResult<types_datum::Datum>
+);

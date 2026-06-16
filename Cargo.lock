@@ -11583,8 +11583,10 @@ dependencies = [
 name = "backend-statistics-core-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-statistics",
 ]
@@ -11597,6 +11599,19 @@ dependencies = [
  "backend-utils-adt-varlena",
  "mcx",
  "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
+name = "backend-statistics-mcv"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-statistics",
 ]
@@ -18219,6 +18234,7 @@ name = "types-statistics"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-datum",
 ]
 
 [[package]]
