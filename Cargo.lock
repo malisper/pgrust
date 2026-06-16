@@ -16285,6 +16285,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-activity-small",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-io-seams"
 version = "0.0.0"
 dependencies = [
@@ -21030,6 +21041,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
+ "backend-utils-activity-pgstat",
  "backend-utils-activity-small",
  "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
