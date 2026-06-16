@@ -22,7 +22,7 @@ use types_tuple::heaptuple::{HeapTupleData, TupleDescData};
 
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execexpr::ExprState;
-use types_nodes::execnodes::{ExprContext, ScanStateData, SlotId};
+use types_nodes::execnodes::{EcxtId, ScanStateData, SlotId};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::nodeagg::{
     Agg, AggSplit, AggStrategy, Aggref, HyperLogLog, TupleHashIterator, TupleHashTable,
@@ -317,12 +317,18 @@ pub struct AggStateData<'mcx> {
     pub peragg: Option<PgVec<'mcx, AggStatePerAggData<'mcx>>>,
     /// `AggStatePerTrans pertrans`.
     pub pertrans: Option<PgVec<'mcx, AggStatePerTransData<'mcx>>>,
-    /// `ExprContext *hashcontext`.
-    pub hashcontext: Option<PgBox<'mcx, ExprContext<'mcx>>>,
-    /// `ExprContext **aggcontexts` — econtexts per grouping set.
-    pub aggcontexts: Option<PgVec<'mcx, PgBox<'mcx, ExprContext<'mcx>>>>,
-    /// `ExprContext *tmpcontext`.
-    pub tmpcontext: Option<PgBox<'mcx, ExprContext<'mcx>>>,
+    /// `ExprContext *hashcontext`. In C this is an `ExprContext *` aliasing one
+    /// context owned by the EState's pool (`CreateWorkExprContext(estate)`); in
+    /// the owned model `ExprContext *` is an [`EcxtId`] index into
+    /// `EStateData::es_exprcontexts`, mirroring `PlanStateData::ps_ExprContext`.
+    pub hashcontext: Option<EcxtId>,
+    /// `ExprContext **aggcontexts` — econtexts per grouping set. Each element is
+    /// an `ExprContext *` aliasing an EState-pool context
+    /// (`ExecAssignExprContext`); in the owned model that is an [`EcxtId`].
+    pub aggcontexts: Option<PgVec<'mcx, EcxtId>>,
+    /// `ExprContext *tmpcontext` — aliases `ss.ps.ps_ExprContext` (itself an
+    /// [`EcxtId`] into the EState pool); carried as the same id.
+    pub tmpcontext: Option<EcxtId>,
     /// `ExprContext *curaggcontext` — index into `aggcontexts` (field 14).
     pub curaggcontext: i32,
     /// `AggStatePerAgg curperagg` — index into `peragg`, or -1.

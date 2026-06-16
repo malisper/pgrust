@@ -570,9 +570,9 @@ pub fn finalize_aggregates<'mcx>(
             debug_assert!(aggstrategy != AGG_HASHED && aggstrategy != AGG_MIXED);
 
             if pertrans.num_inputs == 1 {
-                process_ordered_aggregate_single(aggstate, pertrans, pergroupstate)?;
+                process_ordered_aggregate_single(aggstate, pertrans, pergroupstate, estate)?;
             } else {
-                process_ordered_aggregate_multi(aggstate, pertrans, pergroupstate)?;
+                process_ordered_aggregate_multi(aggstate, pertrans, pergroupstate, estate)?;
             }
         } else if pertrans.num_distinct_cols > 0 && pertrans.haslast {
             pertrans.haslast = false;
