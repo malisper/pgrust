@@ -146,7 +146,8 @@ seam_core::seam!(
     /// `build_child_join_rel(root, outer_rel, inner_rel, parent_joinrel,
     /// restrictlist, sjinfo, nappinfos, appinfos)` (relnode.c) — build the
     /// child-join `RelOptInfo` for a partitionwise join segment.
-    pub fn build_child_join_rel(
+    pub fn build_child_join_rel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         outer_rel: RelId,
         inner_rel: RelId,

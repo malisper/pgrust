@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use types_core::primitive::{Cost, Selectivity};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     IndexPath, NodeId, ParamPathInfo, Path, PathId, PathNode, PlannerInfo, RelId, RinfoId,
 };
@@ -652,7 +653,8 @@ pub fn cost_tidscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId, tidqual
 
 /// `cost_tidrangescan` (costsize.c:1362). `tidrangequals` are the implicitly-
 /// AND'ed CTID range qual expression handles.
-pub fn cost_tidrangescan(
+pub fn cost_tidrangescan<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     rel: RelId,
@@ -684,7 +686,7 @@ pub fn cost_tidrangescan(
 
     // selectivity via clauselist_selectivity over the bare qual nodes.
     let selectivity =
-        cz::clauselist_selectivity::call(root, tidrangequals, relid as i32, super::JOIN_INNER as i32, None);
+        cz::clauselist_selectivity::call(run, root, tidrangequals, relid as i32, super::JOIN_INNER as i32, None);
     let mut pages_d = (selectivity * pages as f64).ceil();
     if pages_d <= 0.0 {
         pages_d = 1.0;
@@ -719,7 +721,8 @@ pub fn cost_tidrangescan(
  * ========================================================================== */
 
 /// `cost_subqueryscan` — fills a `SubqueryScanPath` (by `PathId`).
-pub fn cost_subqueryscan(
+pub fn cost_subqueryscan<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     rel: RelId,
@@ -756,7 +759,7 @@ pub fn cost_subqueryscan(
 
     let new_rows = clamp_row_est(
         sub_rows
-            * cz::clauselist_selectivity::call(root, &qpqual_nodes, 0, super::JOIN_INNER as i32, None),
+            * cz::clauselist_selectivity::call(run, root, &qpqual_nodes, 0, super::JOIN_INNER as i32, None),
     );
 
     {

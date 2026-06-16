@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{CmdType, NodeId, PlannerInfo, RelId, Relids};
 
 /* ==========================================================================
@@ -276,7 +277,8 @@ seam_core::seam!(
     /// `DatumGetFloat8(OidFunctionCall4Coll(oprrest, inputcollid, root,
     /// operatorid, args, varRelid))` (fmgr.c): invoke a restriction-selectivity
     /// estimator. `args` are arena node handles. `Err` carries the fmgr ereport.
-    pub fn call_oprrest(
+    pub fn call_oprrest<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         oprrest: Oid,
         operatorid: Oid,
@@ -289,7 +291,8 @@ seam_core::seam!(
     /// `DatumGetFloat8(OidFunctionCall5Coll(oprjoin, inputcollid, root,
     /// operatorid, args, jointype, sjinfo))` (fmgr.c): invoke a
     /// join-selectivity estimator. `sjinfo` is passed by its node handle.
-    pub fn call_oprjoin(
+    pub fn call_oprjoin<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         oprjoin: Oid,
         operatorid: Oid,
@@ -303,7 +306,8 @@ seam_core::seam!(
     /// The `function_selectivity` body's `SupportRequestSelectivity` dispatch
     /// over `get_func_support(funcid)` — returns `Some(sel)` on a successful
     /// support-function reply, `None` to fall back to the historical 0.3333333.
-    pub fn call_func_selectivity_support(
+    pub fn call_func_selectivity_support<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         funcid: Oid,
         args: &[NodeId],

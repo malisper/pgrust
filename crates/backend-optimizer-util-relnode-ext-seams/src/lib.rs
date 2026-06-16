@@ -124,7 +124,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `set_joinrel_size_estimates(root, joinrel, outer_rel, inner_rel, sjinfo,
     /// restrictlist)` (costsize.c) — set the joinrel's `rows`.
-    pub fn set_joinrel_size_estimates(
+    pub fn set_joinrel_size_estimates<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         joinrel: RelId,
         outer_rel: RelId,
@@ -135,7 +136,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `get_parameterized_baserel_size(root, rel, param_clauses)` (costsize.c).
-    pub fn get_parameterized_baserel_size(
+    pub fn get_parameterized_baserel_size<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         baserel: RelId,
         param_clauses: &[RinfoId],
@@ -144,7 +146,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_parameterized_joinrel_size(root, rel, outer_path, inner_path, sjinfo,
     /// restrict_clauses)` (costsize.c).
-    pub fn get_parameterized_joinrel_size(
+    pub fn get_parameterized_joinrel_size<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         joinrel: RelId,
         outer_path: PathId,

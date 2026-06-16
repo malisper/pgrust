@@ -4,6 +4,7 @@
 
 
 use types_core::primitive::Cost;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     AggStrategy, NodeId, PathId, PathNode, PlannerInfo, AGG_HASHED, AGG_MIXED,
     AGG_PLAIN, AGG_SORTED,
@@ -30,7 +31,8 @@ pub use backend_optimizer_util_pathnode_seams::AggClauseCostsLite;
 
 /// `cost_agg` — fills an Agg path (by `PathId`). `quals` are the HAVING-qual
 /// expression handles.
-pub fn cost_agg(
+pub fn cost_agg<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     aggstrategy: AggStrategy,
@@ -152,7 +154,7 @@ pub fn cost_agg(
 
         output_tuples = clamp_row_est(
             output_tuples
-                * cz::clauselist_selectivity::call(root, quals, 0, super::JOIN_INNER as i32, None),
+                * cz::clauselist_selectivity::call(run, root, quals, 0, super::JOIN_INNER as i32, None),
         );
     }
 
@@ -168,7 +170,8 @@ pub fn cost_agg(
  * ========================================================================== */
 
 /// `cost_group` — fills a Group path (by `PathId`). `quals` are HAVING-quals.
-pub fn cost_group(
+pub fn cost_group<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     num_group_cols: i32,
@@ -192,7 +195,7 @@ pub fn cost_group(
 
         output_tuples = clamp_row_est(
             output_tuples
-                * cz::clauselist_selectivity::call(root, quals, 0, super::JOIN_INNER as i32, None),
+                * cz::clauselist_selectivity::call(run, root, quals, 0, super::JOIN_INNER as i32, None),
         );
     }
 

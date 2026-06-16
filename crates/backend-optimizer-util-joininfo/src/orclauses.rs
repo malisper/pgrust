@@ -7,6 +7,7 @@ use backend_nodes_core::makefuncs::{make_ands_explicit, make_orclause};
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_core::primitive::Index;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, RinfoId, JOIN_INNER};
 
 use crate::bms;
@@ -31,7 +32,7 @@ const RELOPT_BASEREL: types_pathnodes::RelOptKind = types_pathnodes::RELOPT_BASE
 /// `extract_restriction_or_clauses`
 ///	  Examine join OR-of-AND clauses to see if any useful restriction OR clauses
 ///	  can be extracted.  If so, add them to the query.
-pub fn extract_restriction_or_clauses(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn extract_restriction_or_clauses<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo) -> PgResult<()> {
     // Examine each baserel for potential join OR clauses.
     for rti in 1..root.simple_rel_array_size {
         let rel = match root.simple_rel_array.get(rti as usize).copied().flatten() {
@@ -56,7 +57,7 @@ pub fn extract_restriction_or_clauses(root: &mut PlannerInfo) -> PgResult<()> {
                 if let Some(orclause) = extract_or_clause(root, rinfo, rel)? {
                     // If successful, decide whether we want to use the clause, and
                     // insert it into the rel's restrictinfo list if so.
-                    consider_new_or_clause(root, rel, orclause, rinfo)?;
+                    consider_new_or_clause(run, root, rel, orclause, rinfo)?;
                 }
             }
         }
@@ -171,7 +172,8 @@ fn extract_or_clause(
 /// Consider whether a successfully-extracted restriction OR clause is actually
 /// worth using.  If so, add it to the planner's data structures, and adjust the
 /// original join clause (join_or_rinfo) to compensate.
-fn consider_new_or_clause(
+fn consider_new_or_clause<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     orclause: Expr,
@@ -196,7 +198,7 @@ fn consider_new_or_clause(
     // Estimate its selectivity.  Doing it on the RestrictInfo representation
     // allows the result to get cached, saving work later.
     let or_selec =
-        small_seam::clause_selectivity::call(root, or_rinfo, 0, JOIN_INNER, None)?;
+        small_seam::clause_selectivity::call(run, root, or_rinfo, 0, JOIN_INNER, None)?;
 
     // The clause is only worth adding if it rejects a useful fraction of the
     // base relation's rows; threshold 0.9.
@@ -225,6 +227,7 @@ fn consider_new_or_clause(
 
         // Compute inner-join size.
         let orig_selec = small_seam::clause_selectivity::call(
+            run,
             root,
             join_or_rinfo,
             0,

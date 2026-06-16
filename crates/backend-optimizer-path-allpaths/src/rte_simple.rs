@@ -62,7 +62,7 @@ pub fn set_tablefunc_pathlist<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerIn
 /// a named tuplestore RTE.
 pub fn set_namedtuplestore_pathlist<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
     // Mark rel with estimated output rows, width, etc.
-    backend_optimizer_path_costsize::sizeest::set_namedtuplestore_size_estimates(root, rel);
+    backend_optimizer_path_costsize::sizeest::set_namedtuplestore_size_estimates(run, root, rel);
     let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
     let path = pathnode::create_namedtuplestorescan_path::call(root, run, rel, &required_outer)?;
     pathnode::add_path::call(root, rel, path)?;
@@ -73,7 +73,7 @@ pub fn set_namedtuplestore_pathlist<'mcx>(run: &PlannerRun<'mcx>, root: &mut Pla
 /// `RTE_RESULT` RTE.
 pub fn set_result_pathlist<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
     // Mark rel with estimated output rows, width, etc.
-    backend_optimizer_path_costsize::sizeest::set_result_size_estimates(root, rel);
+    backend_optimizer_path_costsize::sizeest::set_result_size_estimates(run, root, rel);
     let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
     let path = pathnode::create_resultscan_path::call(root, run, rel, &required_outer)?;
     pathnode::add_path::call(root, rel, path)?;

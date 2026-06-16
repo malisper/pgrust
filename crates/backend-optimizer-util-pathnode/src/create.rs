@@ -379,7 +379,7 @@ pub fn create_tidrangescan_path<'mcx>(
         PathNode::TidRangePath(p) => p.tidrangequals.clone(),
         _ => Vec::new(),
     };
-    seam::cost_tidrangescan::call(root, id, rel, &trq);
+    seam::cost_tidrangescan::call(run, root, id, rel, &trq);
     Ok(id)
 }
 
@@ -803,7 +803,7 @@ pub fn create_subqueryscan_path<'mcx>(
         path,
         subpath: Some(subpath),
     }));
-    seam::cost_subqueryscan::call(root, id, rel, subpath, trivial_pathtarget);
+    seam::cost_subqueryscan::call(run, root, id, rel, subpath, trivial_pathtarget);
     Ok(id)
 }
 
@@ -1219,7 +1219,7 @@ pub fn create_mergejoin_path<'mcx>(
         materialize_inner: false,
     };
     let id = root.alloc_path(PathNode::MergePath(pathnode));
-    seam::final_cost_mergejoin::call(root, id, workspace, extra);
+    seam::final_cost_mergejoin::call(run, root, id, workspace, extra);
     Ok(id)
 }
 
@@ -1279,7 +1279,7 @@ pub fn create_hashjoin_path<'mcx>(
         inner_rows_total: 0.0,
     };
     let id = root.alloc_path(PathNode::HashPath(pathnode));
-    seam::final_cost_hashjoin::call(root, id, workspace, extra);
+    seam::final_cost_hashjoin::call(run, root, id, workspace, extra);
     Ok(id)
 }
 
@@ -1569,7 +1569,8 @@ pub fn create_sort_path(
 }
 
 /// `create_group_path(...)` (pathnode.c:3265).
-pub fn create_group_path(
+pub fn create_group_path<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
@@ -1597,6 +1598,7 @@ pub fn create_group_path(
         qual: qual.clone(),
     }));
     seam::cost_group::call(
+        run,
         root,
         id,
         num_group_cols,
@@ -1647,7 +1649,8 @@ pub fn create_upper_unique_path(
 }
 
 /// `create_agg_path(...)` (pathnode.c:3378).
-pub fn create_agg_path(
+pub fn create_agg_path<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
@@ -1694,6 +1697,7 @@ pub fn create_agg_path(
         qual: qual.clone(),
     }));
     seam::cost_agg::call(
+        run,
         root,
         id,
         aggstrategy,
@@ -1719,7 +1723,8 @@ pub fn create_agg_path(
 
 /// `create_groupingsets_path(...)` (pathnode.c:3461). Not seam-exported (no
 /// joinpath/util caller binds it yet) but ported in full for completeness.
-pub fn create_groupingsets_path(
+pub fn create_groupingsets_path<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
@@ -1773,7 +1778,7 @@ pub fn create_groupingsets_path(
         if is_first {
             let (dn, sc, tc, rw) = (sp.disabled_nodes, sp.startup_cost, sp.total_cost, sp.rows);
             seam::cost_agg::call(
-                root, id, aggstrategy, agg_costs, num_group_cols, rollup.numGroups, &having_qual,
+                run, root, id, aggstrategy, agg_costs, num_group_cols, rollup.numGroups, &having_qual,
                 dn, sc, tc, rw, width,
             );
             is_first = false;
@@ -1786,7 +1791,7 @@ pub fn create_groupingsets_path(
             if rollup.is_hashed || is_first_sort {
                 let strat = if rollup.is_hashed { AGG_HASHED } else { AGG_SORTED };
                 seam::cost_agg::call(
-                    root, agg_id, strat, agg_costs, num_group_cols, rollup.numGroups, &having_qual,
+                    run, root, agg_id, strat, agg_costs, num_group_cols, rollup.numGroups, &having_qual,
                     0, 0.0, 0.0, sp.rows, width,
                 );
                 if !rollup.is_hashed {
@@ -1801,7 +1806,7 @@ pub fn create_groupingsets_path(
                 );
                 let s = root.path(sort_id).base().clone();
                 seam::cost_agg::call(
-                    root, agg_id, AGG_SORTED, agg_costs, num_group_cols, rollup.numGroups,
+                    run, root, agg_id, AGG_SORTED, agg_costs, num_group_cols, rollup.numGroups,
                     &having_qual, s.disabled_nodes, s.startup_cost, s.total_cost, s.rows, width,
                 );
             }

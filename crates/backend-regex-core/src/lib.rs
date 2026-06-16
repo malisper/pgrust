@@ -1,9 +1,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-// SCAFFOLD STAGE: prerequisite types and family signatures are in place ahead
-// of the algorithmic bodies (which are placeholder stubs); foundation helpers are not
-// yet called by anything.
+// Some foundation helpers and accessors mirror C entry points that have no
+// in-tree caller yet; keep them rather than diverge from the C surface.
 #![allow(dead_code)]
 // Every fallible function returns the project-wide `PgResult` (== `Result<_,
 // PgError>`); `PgError` is a large owned struct, so the un-boxed `Err` variant
@@ -26,7 +25,7 @@
 //! regexes via the four inward seams this unit owns
 //! ([`backend_regex_core_seams`]).
 //!
-//! # Decomposition (this scaffold)
+//! # Decomposition
 //!
 //! The unit (~4900 LOC) is split into six family modules:
 //!

@@ -315,7 +315,7 @@ pub fn query_planner<'mcx>(
      * Look for join OR clauses that we can extract single-relation restriction
      * OR clauses from.
      */
-    joininfo::orclauses::extract_restriction_or_clauses(root)?;
+    joininfo::orclauses::extract_restriction_or_clauses(run, root)?;
 
     /*
      * Now expand appendrels by adding "otherrels" for their children.  We delay

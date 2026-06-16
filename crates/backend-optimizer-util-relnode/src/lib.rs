@@ -662,7 +662,7 @@ pub fn build_join_rel<'mcx>(
     build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 
     /* Set estimates of the joinrel's size. */
-    ext::set_joinrel_size_estimates::call(root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
+    ext::set_joinrel_size_estimates::call(run, root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 
     /*
      * Set the consider_parallel flag if this joinrel could be scanned within a
@@ -708,7 +708,8 @@ fn is_parallel_safe_rinfos(root: &PlannerInfo, rinfos: &[RinfoId]) -> bool {
 
 /// `build_child_join_rel(root, outer_rel, inner_rel, parent_joinrel,
 /// restrictlist, sjinfo, nappinfos, appinfos)` (relnode.c).
-pub fn build_child_join_rel(
+pub fn build_child_join_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     outer_rel: RelId,
     inner_rel: RelId,
@@ -788,7 +789,7 @@ pub fn build_child_join_rel(
     root.rel_mut(joinrel).consider_parallel = pcp;
 
     /* Set estimates of the child-joinrel's size. */
-    ext::set_joinrel_size_estimates::call(root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist)?;
+    ext::set_joinrel_size_estimates::call(run, root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist)?;
 
     /* We build the join only once. */
     debug_assert!(find_join_rel(root, &root.rel(joinrel).relids).is_none());
@@ -1251,7 +1252,7 @@ pub fn get_baserel_parampathinfo<'mcx>(
     }
 
     /* Estimate the number of rows returned by the parameterized scan */
-    let rows = ext::get_parameterized_baserel_size::call(root, baserel, &pclauses);
+    let rows = ext::get_parameterized_baserel_size::call(run, root, baserel, &pclauses);
 
     /* And now we can build the ParamPathInfo */
     let ppi = ParamPathInfo {
@@ -1414,6 +1415,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
 
     /* Estimate the number of rows returned by the parameterized join */
     let rows = ext::get_parameterized_joinrel_size::call(
+        run,
         root,
         joinrel,
         outer_path,
@@ -2278,7 +2280,8 @@ fn seam_build_join_rel<'mcx>(
 ) -> PgResult<(RelId, Vec<RinfoId>)> {
     build_join_rel(root, run, joinrelids, outer_rel, inner_rel, sjinfo, pushed_down_joins)
 }
-fn seam_build_child_join_rel(
+fn seam_build_child_join_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     outer_rel: RelId,
     inner_rel: RelId,
@@ -2287,7 +2290,7 @@ fn seam_build_child_join_rel(
     sjinfo: &SpecialJoinInfo,
     appinfos: &[AppendRelInfo],
 ) -> PgResult<RelId> {
-    build_child_join_rel(root, outer_rel, inner_rel, parent_joinrel, restrictlist, sjinfo, appinfos)
+    build_child_join_rel(run, root, outer_rel, inner_rel, parent_joinrel, restrictlist, sjinfo, appinfos)
 }
 fn seam_min_join_parameterization(
     root: &PlannerInfo,

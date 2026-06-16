@@ -103,7 +103,8 @@ pub struct HashTableSize {
 seam_core::seam!(
     /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over
     /// a list of clause-expr handles (the C `List *RestrictInfo*`).
-    pub fn clauselist_selectivity(
+    pub fn clauselist_selectivity<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         clauses: &[NodeId],
         var_relid: i32,
@@ -113,7 +114,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)`.
-    pub fn clause_selectivity(
+    pub fn clause_selectivity<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         clause: NodeId,
         var_relid: i32,

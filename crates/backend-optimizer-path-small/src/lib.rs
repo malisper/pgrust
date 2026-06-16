@@ -349,20 +349,22 @@ fn find_single_relid_for_clauses(
 
 /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)`
 /// (clausesel.c).
-pub fn clauselist_selectivity(
+pub fn clauselist_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     clauses: &[RinfoId],
     var_relid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    clauselist_selectivity_ext(root, clauses, var_relid, jointype, sjinfo, true)
+    clauselist_selectivity_ext(run, root, clauses, var_relid, jointype, sjinfo, true)
 }
 
 /// `clauselist_selectivity_ext(root, clauses, varRelid, jointype, sjinfo,
 /// use_extended_stats)` (clausesel.c). Public entry over the [`RinfoId`] list
 /// (the seam form); delegates to the [`ListEntry`] core.
-pub fn clauselist_selectivity_ext(
+pub fn clauselist_selectivity_ext<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     clauses: &[RinfoId],
     var_relid: i32,
@@ -371,13 +373,14 @@ pub fn clauselist_selectivity_ext(
     use_extended_stats: bool,
 ) -> PgResult<f64> {
     let entries = rinfos_as_entries(clauses);
-    clauselist_selectivity_ext_entries(root, &entries, var_relid, jointype, sjinfo, use_extended_stats)
+    clauselist_selectivity_ext_entries(run, root, &entries, var_relid, jointype, sjinfo, use_extended_stats)
 }
 
 /// The `ListEntry`-shaped core of `clauselist_selectivity_ext`, so the AND
 /// recursion in `clause_selectivity_ext` can pass an AND's bare-expr `args`
 /// (the C `rinfo == NULL` elements) as well as real RestrictInfos.
-fn clauselist_selectivity_ext_entries(
+fn clauselist_selectivity_ext_entries<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     clauses: &[ListEntry],
     var_relid: i32,
@@ -393,6 +396,7 @@ fn clauselist_selectivity_ext_entries(
     if clauses.len() == 1 {
         let clause = clauses[0].clause(root);
         return clause_selectivity_ext(
+            run,
             root,
             clauses[0].cref(),
             &clause,
@@ -415,6 +419,7 @@ fn clauselist_selectivity_ext_entries(
                 if let Some(rinfos) = all_rinfos(clauses) {
                     // Estimate as many clauses as possible using extended stats.
                     let (sel, est) = seam::statext_clauselist_selectivity::call(
+                        run,
                         root,
                         &rinfos,
                         var_relid,
@@ -449,6 +454,7 @@ fn clauselist_selectivity_ext_entries(
         // Compute the selectivity of this clause in isolation.
         let clause0 = entry.clause(root);
         let s2 = clause_selectivity_ext(
+            run,
             root,
             entry.cref(),
             &clause0,
@@ -557,6 +563,7 @@ fn clauselist_selectivity_ext_entries(
 
                 // Adjust for double-exclusion of NULLs
                 s2v += seam::nulltestsel_var::call(
+                    run,
                     root,
                     NullTestType::IS_NULL as i32,
                     &rqelem.var,
@@ -600,7 +607,8 @@ fn clauselist_selectivity_ext_entries(
 
 /// `clauselist_selectivity_or(root, clauses, varRelid, jointype, sjinfo,
 /// use_extended_stats)` (clausesel.c): selectivity of an implicitly-ORed list.
-fn clauselist_selectivity_or(
+fn clauselist_selectivity_or<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     clauses: &[ListEntry],
     var_relid: i32,
@@ -619,6 +627,7 @@ fn clauselist_selectivity_or(
             if root.rel(rel).rtekind == RTE_RELATION && !root.rel(rel).statlist.is_empty() {
                 if let Some(rinfos) = all_rinfos(clauses) {
                     let (sel, est) = seam::statext_clauselist_selectivity::call(
+                        run,
                         root,
                         &rinfos,
                         var_relid,
@@ -649,6 +658,7 @@ fn clauselist_selectivity_or(
 
         let clause = entry.clause(root);
         let s2 = clause_selectivity_ext(
+            run,
             root,
             entry.cref(),
             &clause,
@@ -770,7 +780,8 @@ fn treat_as_join_clause(
 
 /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)` (clausesel.c).
 /// The clause is supplied as a [`RinfoId`] (the preferred RestrictInfo form).
-pub fn clause_selectivity(
+pub fn clause_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     clause: RinfoId,
     var_relid: i32,
@@ -779,6 +790,7 @@ pub fn clause_selectivity(
 ) -> PgResult<f64> {
     let clause_node = root.node(root.rinfo(clause).clause).clone();
     clause_selectivity_ext(
+        run,
         root,
         ClauseRef::Rinfo(clause),
         &clause_node,
@@ -796,7 +808,8 @@ pub fn clause_selectivity(
 /// is the expression to estimate. When `cref` is a `RestrictInfo`, this function
 /// applies the C unwrap (pseudoconstant gate, cache lookup, OR-clause swap) and
 /// then estimates the contained clause.
-fn clause_selectivity_ext(
+fn clause_selectivity_ext<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     cref: ClauseRef,
     clause: &Expr,
@@ -866,7 +879,7 @@ fn clause_selectivity_ext(
         // return the default selectivity...
         if var.varlevelsup == 0 && (var_relid == 0 || var_relid == var.varno) {
             // Use the restriction selectivity function for a bool Var
-            s1 = seam::boolvarsel::call(root, clause, var_relid)?;
+            s1 = seam::boolvarsel::call(run, root, clause, var_relid)?;
         }
     } else if let Expr::Const(con) = clause {
         // bool constant is pretty easy...
@@ -879,7 +892,7 @@ fn clause_selectivity_ext(
         };
     } else if let Expr::Param(_) = clause {
         // see if we can replace the Param
-        let subst = seam::estimate_expression_value::call(root, clause)?;
+        let subst = seam::estimate_expression_value::call(run, root, clause)?;
         if let Expr::Const(con) = &subst {
             s1 = if con.constisnull {
                 0.0
@@ -896,6 +909,7 @@ fn clause_selectivity_ext(
         let arg = get_notclausearg(clause).clone();
         s1 = 1.0
             - clause_selectivity_ext(
+                run,
                 root,
                 ClauseRef::Bare,
                 &arg,
@@ -908,6 +922,7 @@ fn clause_selectivity_ext(
         // share code with clauselist_selectivity()
         let args = boolexpr_args_as_entries(clause);
         s1 = clauselist_selectivity_ext_entries(
+            run,
             root,
             &args,
             var_relid,
@@ -920,6 +935,7 @@ fn clause_selectivity_ext(
         // connected by OR.
         let args = boolexpr_args_as_entries(clause);
         s1 = clauselist_selectivity_or(
+            run,
             root,
             &args,
             var_relid,
@@ -936,12 +952,12 @@ fn clause_selectivity_ext(
         if treat_as_join_clause(root, clause, cref, var_relid, sjinfo)? {
             // Estimate selectivity for a join clause.
             s1 = seam::join_selectivity::call(
-                root, opno, &args, inputcollid, jointype, sjinfo,
+                run, root, opno, &args, inputcollid, jointype, sjinfo,
             )?;
         } else {
             // Estimate selectivity for a restriction clause.
             s1 = seam::restriction_selectivity::call(
-                root, opno, &args, inputcollid, var_relid,
+                run, root, opno, &args, inputcollid, var_relid,
             )?;
         }
 
@@ -955,6 +971,7 @@ fn clause_selectivity_ext(
             // Try to get an estimate from the support function, if any
             let is_join = treat_as_join_clause(root, clause, cref, var_relid, sjinfo)?;
             s1 = seam::function_selectivity::call(
+                run,
                 root,
                 funcclause.funcid,
                 &funcclause.args,
@@ -968,15 +985,16 @@ fn clause_selectivity_ext(
     } else if let Expr::ScalarArrayOpExpr(_) = clause {
         // Use node specific selectivity calculation function
         let is_join = treat_as_join_clause(root, clause, cref, var_relid, sjinfo)?;
-        s1 = seam::scalararraysel::call(root, clause, is_join, var_relid, jointype, sjinfo)?;
+        s1 = seam::scalararraysel::call(run, root, clause, is_join, var_relid, jointype, sjinfo)?;
     } else if let Expr::RowCompareExpr(_) = clause {
         // Use node specific selectivity calculation function
-        s1 = seam::rowcomparesel::call(root, clause, var_relid, jointype, sjinfo)?;
+        s1 = seam::rowcomparesel::call(run, root, clause, var_relid, jointype, sjinfo)?;
     } else if let Expr::NullTest(nulltest) = clause {
         // Use node specific selectivity calculation function. C reads
         // `((NullTest *) clause)->arg` directly (never NULL for a valid node).
         if let Some(arg) = nulltest.arg.as_deref().cloned() {
             s1 = seam::nulltestsel::call(
+                run,
                 root,
                 nulltest.nulltesttype as i32,
                 &arg,
@@ -989,6 +1007,7 @@ fn clause_selectivity_ext(
         // Use node specific selectivity calculation function
         if let Some(arg) = booltest.arg.as_deref().cloned() {
             s1 = seam::booltestsel::call(
+                run,
                 root,
                 booltest.booltesttype as i32,
                 &arg,
@@ -1008,6 +1027,7 @@ fn clause_selectivity_ext(
         // Not sure this case is needed, but it can't hurt
         if let Some(arg) = rt.arg.as_deref().cloned() {
             s1 = clause_selectivity_ext(
+                run,
                 root,
                 ClauseRef::Bare,
                 &arg,
@@ -1021,6 +1041,7 @@ fn clause_selectivity_ext(
         // Not sure this case is needed, but it can't hurt
         if let Some(arg) = cd.arg.as_deref().cloned() {
             s1 = clause_selectivity_ext(
+                run,
                 root,
                 ClauseRef::Bare,
                 &arg,
@@ -1035,7 +1056,7 @@ fn clause_selectivity_ext(
         // This only works if it's an immutable expression in Vars of a single
         // relation; but boolvarsel() checks that internally and returns a
         // suitable default if not.
-        s1 = seam::boolvarsel::call(root, clause, var_relid)?;
+        s1 = seam::boolvarsel::call(run, root, clause, var_relid)?;
     }
 
     // Cache the result if possible

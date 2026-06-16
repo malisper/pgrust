@@ -1309,7 +1309,8 @@ fn get_relation_statistics_worker(
 
 /// `restriction_selectivity(root, operatorid, args, inputcollid, varRelid)`
 /// (plancat.c).
-pub fn restriction_selectivity(
+pub fn restriction_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     operatorid: Oid,
     args: &[NodeId],
@@ -1321,7 +1322,7 @@ pub fn restriction_selectivity(
     if oprrest == InvalidOid {
         return Ok(0.5);
     }
-    let result = ext::call_oprrest::call(root, oprrest, operatorid, args, inputcollid, var_relid)?;
+    let result = ext::call_oprrest::call(run, root, oprrest, operatorid, args, inputcollid, var_relid)?;
     if !(0.0..=1.0).contains(&result) {
         return Err(types_error::PgError::error(alloc::format!(
             "invalid restriction selectivity: {}",
@@ -1333,7 +1334,8 @@ pub fn restriction_selectivity(
 
 /// `join_selectivity(root, operatorid, args, inputcollid, jointype, sjinfo)`
 /// (plancat.c). `sjinfo` is passed by its arena node handle (`None` = NULL).
-pub fn join_selectivity(
+pub fn join_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     operatorid: Oid,
     args: &[NodeId],
@@ -1345,7 +1347,7 @@ pub fn join_selectivity(
     if oprjoin == InvalidOid {
         return Ok(0.5);
     }
-    let result = ext::call_oprjoin::call(root, oprjoin, operatorid, args, inputcollid, jointype, sjinfo)?;
+    let result = ext::call_oprjoin::call(run, root, oprjoin, operatorid, args, inputcollid, jointype, sjinfo)?;
     if !(0.0..=1.0).contains(&result) {
         return Err(types_error::PgError::error(alloc::format!(
             "invalid join selectivity: {}",
@@ -1357,7 +1359,8 @@ pub fn join_selectivity(
 
 /// `function_selectivity(root, funcid, args, inputcollid, is_join, varRelid,
 /// jointype, sjinfo)` (plancat.c).
-pub fn function_selectivity(
+pub fn function_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     funcid: Oid,
     args: &[NodeId],
@@ -1373,7 +1376,7 @@ pub fn function_selectivity(
         return Ok(0.3333333);
     }
     let sresult = ext::call_func_selectivity_support::call(
-        root, funcid, args, inputcollid, is_join, var_relid, jointype, sjinfo,
+        run, root, funcid, args, inputcollid, is_join, var_relid, jointype, sjinfo,
     )?;
     match sresult {
         None => Ok(0.3333333),
@@ -1585,7 +1588,8 @@ fn seam_get_relation_data_width(reloid: Oid, attr_widths: &[i32]) -> u32 {
     }
 }
 
-fn seam_restriction_selectivity(
+fn seam_restriction_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     operatorid: Oid,
     args: &[Expr],
@@ -1593,10 +1597,11 @@ fn seam_restriction_selectivity(
     var_relid: i32,
 ) -> PgResult<f64> {
     let arg_ids = intern_args(root, args);
-    restriction_selectivity(root, operatorid, &arg_ids, inputcollid, var_relid)
+    restriction_selectivity(run, root, operatorid, &arg_ids, inputcollid, var_relid)
 }
 
-fn seam_join_selectivity(
+fn seam_join_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     operatorid: Oid,
     args: &[Expr],
@@ -1605,10 +1610,11 @@ fn seam_join_selectivity(
     sjinfo: Option<&types_pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
     let arg_ids = intern_args(root, args);
-    join_selectivity(root, operatorid, &arg_ids, inputcollid, jointype as i16, sjinfo)
+    join_selectivity(run, root, operatorid, &arg_ids, inputcollid, jointype as i16, sjinfo)
 }
 
-fn seam_function_selectivity(
+fn seam_function_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     funcid: Oid,
     args: &[Expr],
@@ -1620,7 +1626,7 @@ fn seam_function_selectivity(
 ) -> PgResult<f64> {
     let arg_ids = intern_args(root, args);
     function_selectivity(
-        root, funcid, &arg_ids, inputcollid, is_join, var_relid, jointype as i16, sjinfo,
+        run, root, funcid, &arg_ids, inputcollid, is_join, var_relid, jointype as i16, sjinfo,
     )
 }
 

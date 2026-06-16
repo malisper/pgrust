@@ -109,13 +109,14 @@ fn expression_returns_set_rows_seam(root: &PlannerInfo, node: NodeId) -> f64 {
 fn cost_tidscan_seam(root: &mut PlannerInfo, path: PathId, rel: RelId, tidquals: &[NodeId]) {
     crate::scans::cost_tidscan(root, path, rel, tidquals);
 }
-fn cost_tidrangescan_seam(
+fn cost_tidrangescan_seam<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     rel: RelId,
     tidrangequals: &[NodeId],
 ) {
-    crate::scans::cost_tidrangescan(root, path, rel, tidrangequals);
+    crate::scans::cost_tidrangescan(run, root, path, rel, tidrangequals);
 }
 
 fn cost_merge_append_seam(
@@ -205,7 +206,8 @@ fn cost_incremental_sort_seam(
     );
 }
 
-fn cost_agg_seam(
+fn cost_agg_seam<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     aggstrategy: types_pathnodes::AggStrategy,
@@ -220,6 +222,7 @@ fn cost_agg_seam(
     input_width: i32,
 ) {
     crate::exprcost::cost_agg(
+        run,
         root,
         path,
         aggstrategy,
