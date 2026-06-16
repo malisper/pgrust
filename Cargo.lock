@@ -16422,11 +16422,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-io"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-instrument",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-io-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "portability-instr-time",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-io-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -16447,6 +16467,26 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-wal"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-instrument",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-io-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-walstats-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -21181,6 +21221,8 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
  "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-wal",
  "backend-utils-activity-small",
  "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",

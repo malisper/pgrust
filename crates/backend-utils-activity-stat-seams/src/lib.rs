@@ -14,6 +14,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_buffer_read_time(usecs)` (`pgstat.h` inline →
+    /// `pgStatBlockReadTime`, `utils/activity/pgstat_database.c`) — accumulate
+    /// block-read time into the current database's pending stats. Owned by
+    /// `pgstat_database.c` (not yet ported), so it remains seam-and-panic; the
+    /// only reachable caller in the workspace is the WAL-write IO path, which
+    /// never takes this (non-WAL) branch.
+    pub fn pgstat_count_buffer_read_time(usecs: u64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_buffer_write_time(usecs)` (`pgstat.h` inline →
+    /// `pgStatBlockWriteTime`, `utils/activity/pgstat_database.c`) — accumulate
+    /// block-write time into the current database's pending stats. Owned by
+    /// `pgstat_database.c` (unported); seam-and-panic.
+    pub fn pgstat_count_buffer_write_time(usecs: u64)
+);
+
+seam_core::seam!(
     /// `pgstat_flush_io(bool nowait)` (`utils/activity/pgstat_io.c`) — flush
     /// the backend's pending IO statistics. Returns true if some stats could
     /// not be flushed because of contention (`pgstat_io_flush_cb`'s result).

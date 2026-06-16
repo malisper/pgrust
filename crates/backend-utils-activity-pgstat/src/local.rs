@@ -36,7 +36,12 @@ thread_local! {
 }
 
 /// Borrow `pgStatLocal` mutably for the duration of `f`.
-pub(crate) fn with_local<R>(f: impl FnOnce(&mut PgStat_LocalState) -> R) -> R {
+///
+/// Public so per-kind owner crates (e.g. `pgstat_io` / `pgstat_wal`) can reach
+/// their fixed-kind shared region (`pgStatLocal.shmem->io` / `->wal`) and the
+/// cached snapshot from their `flush_static_cb` / fetch paths, which the core
+/// dispatches without passing the control block.
+pub fn with_local<R>(f: impl FnOnce(&mut PgStat_LocalState) -> R) -> R {
     PG_STAT_LOCAL.with(|l| f(&mut l.borrow_mut()))
 }
 

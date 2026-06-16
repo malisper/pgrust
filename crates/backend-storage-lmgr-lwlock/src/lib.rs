@@ -1644,6 +1644,22 @@ fn lwlock_acquire_guard<'l>(
     ))
 }
 
+/// `lwlock_conditional_acquire` seam shape: try to acquire without blocking,
+/// handing back `Some(guard)` if obtained (`LWLockConditionalAcquire` returned
+/// `true`) or `None` if not.
+fn lwlock_conditional_acquire_guard<'l>(
+    lock: &'l LWLock,
+    mode: LWLockMode,
+) -> PgResult<Option<backend_storage_lmgr_lwlock_seams::LWLockGuard<'l>>> {
+    if LWLockConditionalAcquire(lock, mode)? {
+        Ok(Some(backend_storage_lmgr_lwlock_seams::LWLockGuard::new(
+            lock, true,
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
 /// `lwlock_acquire_main` seam shape: acquire a built-in lock by offset,
 /// returning the seam's [`MainLWLockGuard`] (which releases by offset through
 /// the seam system). `MyProcNumber` is read from the globals seam, matching
@@ -1789,6 +1805,9 @@ pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_initialize::set(LWLockInitialize);
     backend_storage_lmgr_lwlock_seams::get_lwlock_identifier::set(get_lwlock_identifier_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_acquire::set(lwlock_acquire_guard);
+    backend_storage_lmgr_lwlock_seams::lwlock_conditional_acquire::set(
+        lwlock_conditional_acquire_guard,
+    );
     backend_storage_lmgr_lwlock_seams::lwlock_release::set(LWLockRelease);
     backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::set(lwlock_acquire_main_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_release_main::set(lwlock_release_main_seam);

@@ -5,6 +5,7 @@
 //! then a call panics loudly.
 
 use types_core::instrument::instr_time;
+use types_pgstat::activity_pgstat::{IOContext, IOObject, IOOp};
 
 seam_core::seam!(
     /// `pgstat_prepare_io_time(track_io_timing)` — capture the I/O start time
@@ -36,4 +37,31 @@ seam_core::seam!(
     /// `pgstat_report_wait_end()` (wait_event) — clear this backend's reported
     /// wait event (used in `WalSndErrorCleanup`). Infallible.
     pub fn pgstat_report_wait_end()
+);
+
+seam_core::seam!(
+    /// `pgstat_count_backend_io_op(io_object, io_context, io_op, cnt, bytes)`
+    /// (`pgstat_backend.c`) — accumulate one I/O into this backend's per-backend
+    /// pending stats (PGSTAT_KIND_BACKEND). Owned by `pgstat_backend.c`, which is
+    /// not yet ported, so it remains seam-and-panic.
+    pub fn pgstat_count_backend_io_op(
+        io_object: IOObject,
+        io_context: IOContext,
+        io_op: IOOp,
+        cnt: u32,
+        bytes: u64,
+    )
+);
+
+seam_core::seam!(
+    /// `pgstat_count_backend_io_op_time(io_object, io_context, io_op, io_time)`
+    /// (`pgstat_backend.c`) — accumulate one I/O's elapsed time into this
+    /// backend's per-backend pending stats. Owned by `pgstat_backend.c`
+    /// (unported), so it remains seam-and-panic.
+    pub fn pgstat_count_backend_io_op_time(
+        io_object: IOObject,
+        io_context: IOContext,
+        io_op: IOOp,
+        io_time: instr_time,
+    )
 );
