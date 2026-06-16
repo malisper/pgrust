@@ -335,6 +335,7 @@ pub fn init_all() {
     backend_storage_sync::init_seams();
     backend_tcop_backend_startup::init_seams();
     backend_tcop_dest::init_seams();
+    backend_executor_tstorereceiver::init_seams();
     backend_tcop_fastpath::init_seams();
     backend_tcop_pquery::init_seams();
     backend_tcop_utility::init_seams();
@@ -371,6 +372,7 @@ pub fn init_all() {
     backend_utils_adt_pg_locale_icu::init_seams();
     backend_utils_adt_quote::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
+    backend_utils_adt_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();
@@ -841,6 +843,20 @@ mod recurrence_guard {
         // plan-class change, never a silent skip) until the inliner leg lands.
         // DELETE this entry when clauses.c's SRF-inliner is ported.
         ("backend_optimizer_util_clauses", "inline_set_returning_function"),
+        // DESIGN_DEBT (TD-INITSPLAN-REBUILD-JOINCLAUSE): analyzejoins.c's
+        // `remove_leftjoinrel_from_query` (left-join removal) calls
+        // `rebuild_joinclause_attr_needed` (initsplan.c:3559) to re-add the
+        // attr_needed bits contributed by join clauses after a join removal. The
+        // owner is initsplan.c (`backend-optimizer-plan-init-subselect`), where
+        // this function is NOT yet ported (the sibling `rebuild_lateral_attr_needed`
+        // IS ported and installed). The seam is declared in
+        // `backend-optimizer-plan-small-seams` and loud-panics until initsplan
+        // lands the body. DELETE this entry when initsplan ports
+        // `rebuild_joinclause_attr_needed`.
+        (
+            "backend_optimizer_plan_small",
+            "rebuild_joinclause_attr_needed",
+        ),
         // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
         // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
         // `init_local_reloptions(&relopts, 0)` +

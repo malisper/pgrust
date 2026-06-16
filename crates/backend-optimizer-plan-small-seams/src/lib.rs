@@ -83,3 +83,24 @@ seam_core::seam!(
     /// adding "otherrels" for their children, propagating lateral_relids etc.
     pub fn add_other_rels_to_query(root: &mut PlannerInfo)
 );
+
+seam_core::seam!(
+    /// `rebuild_lateral_attr_needed(root)` (initsplan.c:807): re-add
+    /// `attr_needed`/`ph_needed` bits for Vars/PHVs needed for lateral references,
+    /// after a join removal cleared the per-rel attr_needed sets. Called by
+    /// analyzejoins.c's `remove_leftjoinrel_from_query` /
+    /// `remove_self_join_rel`. Owned by `backend-optimizer-plan-init-subselect`
+    /// (ported).
+    pub fn rebuild_lateral_attr_needed<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
+);
+
+seam_core::seam!(
+    /// `rebuild_joinclause_attr_needed(root)` (initsplan.c:3559): partially
+    /// repeat the work of `deconstruct_jointree` to re-add the `attr_needed` bits
+    /// contributed by join clauses, after a join removal cleared the per-rel
+    /// attr_needed sets. Called by analyzejoins.c's
+    /// `remove_leftjoinrel_from_query` / `remove_self_join_rel`. Owned by
+    /// `backend-optimizer-plan-init-subselect` (NOT YET PORTED — panics until the
+    /// owner lands it).
+    pub fn rebuild_joinclause_attr_needed<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
+);

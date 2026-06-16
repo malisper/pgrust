@@ -227,6 +227,7 @@ pub fn add_paths_to_joinrel<'mcx>(
         }
         JOIN_UNIQUE_OUTER => jp::innerrel_is_unique::call(
             root,
+            run,
             &clone_relids(&root.rel(joinrel).relids),
             &clone_relids(&root.rel(outerrel).relids),
             innerrel,
@@ -236,6 +237,7 @@ pub fn add_paths_to_joinrel<'mcx>(
         ),
         _ => jp::innerrel_is_unique::call(
             root,
+            run,
             &clone_relids(&root.rel(joinrel).relids),
             &clone_relids(&root.rel(outerrel).relids),
             innerrel,

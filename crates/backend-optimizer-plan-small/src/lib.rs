@@ -277,7 +277,7 @@ pub fn query_planner<'mcx>(
      * jointree preprocessing, but the necessary information isn't available
      * until we've built baserel data structures and classified qual clauses.
      */
-    joinlist = analyzejoins_seam::remove_useless_joins::call(root, joinlist);
+    joinlist = analyzejoins_seam::remove_useless_joins::call(root, run, joinlist);
 
     /*
      * Also, reduce any semijoins with unique inner rels to plain inner joins.
