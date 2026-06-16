@@ -44,6 +44,7 @@ pub mod globals;
 pub mod guc;
 pub mod interrupt;
 pub mod logging;
+pub mod simple_query;
 
 #[cfg(test)]
 mod tests;
@@ -120,6 +121,15 @@ pub fn init_seams() {
         guc::restrict_nonsystem_relation_kind,
     );
     guc::install_guc_hooks();
+
+    // --- F1: simple-Query analyze+rewrite entry (postgres.c owns
+    // pg_analyze_and_rewrite_fixedparams; its consumer is copyto.c). COPY passes
+    // no parameter types, matching the seam's no-param signature.
+    backend_parser_analyze_seams::pg_analyze_and_rewrite_fixedparams::set(
+        |mcx, parsetree, query_string| {
+            simple_query::pg_analyze_and_rewrite_fixedparams(mcx, parsetree, query_string, &[])
+        },
+    );
 
     // Reference `quickdie_handler` so the `pqsigfunc`-shaped wrapper is kept and
     // available for the postmaster's SIGQUIT install (done by F0a when it lands).

@@ -34,20 +34,38 @@
 //!   `nocachegetattr` primitives) against `RelationGetDescr`, then
 //!   `quote_identifier` / `get_namespace_name` for the schema/name columns and
 //!   the F2 `getObjectTypeDescription` + F3 `getObjectIdentity` legs.
-//! - `textarray_to_strvaluelist`, `strlist_to_textarray` — still
-//!   mirror-and-panic, genuinely gated on the array Datum value lane
-//!   (`types_array::ArrayType` is header-only, no element-bytes payload).
-//! - `pg_get_object_address` — mirror-and-panic, gated on the parser
-//!   node-construction lane (`makeFloat`/`makeString`/`ObjectWithArgs`) plus the
-//!   array deconstruct lane (`textarray_to_strvaluelist`).
+//! - `textarray_to_strvaluelist`, `strlist_to_textarray` — filled over the
+//!   array value lane: the on-disk `text[]` byte image is deconstructed
+//!   (`deconstruct_text_array_nullable`) / built (`build_text_array_nullable`)
+//!   through the arrayfuncs owner seams (the `types_array::ArrayType` header is
+//!   not the carrier — the array crosses as its varlena byte image).
+//! - `pg_get_object_address` — filled: `read_objtype_from_string` decodes the
+//!   type, the name/args `text[]` byte images are deconstructed, the per-object
+//!   `Node` tree is assembled (`makeFloat`/`makeString` value lists,
+//!   `ObjectWithArgs`, `list_make2`/`lcons`, `typeStringToTypeName`), then the
+//!   F0 `get_object_address` resolves it. The 3-column record assembly
+//!   (`heap_form_tuple`) stays with the fcinfo caller; the value boundary
+//!   returns the resolved `ObjectAddress`.
 
 use mcx::{Mcx, PgString};
-use types_array::ArrayType;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::OidIsValid;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_nodes::parsenodes::ObjectType;
+use types_nodes::parsenodes::{
+    OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC, OBJECT_ATTRIBUTE,
+    OBJECT_CAST, OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION, OBJECT_DATABASE, OBJECT_DEFACL,
+    OBJECT_DEFAULT, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER, OBJECT_EXTENSION,
+    OBJECT_FDW, OBJECT_FOREIGN_SERVER, OBJECT_FOREIGN_TABLE, OBJECT_FUNCTION, OBJECT_INDEX,
+    OBJECT_LANGUAGE, OBJECT_LARGEOBJECT, OBJECT_MATVIEW, OBJECT_OPCLASS, OBJECT_OPERATOR,
+    OBJECT_OPFAMILY, OBJECT_PARAMETER_ACL, OBJECT_POLICY, OBJECT_PROCEDURE, OBJECT_PUBLICATION,
+    OBJECT_PUBLICATION_NAMESPACE, OBJECT_PUBLICATION_REL, OBJECT_ROLE, OBJECT_ROUTINE, OBJECT_RULE,
+    OBJECT_SCHEMA, OBJECT_SEQUENCE, OBJECT_STATISTIC_EXT, OBJECT_SUBSCRIPTION, OBJECT_TABCONSTRAINT,
+    OBJECT_TABLE, OBJECT_TABLESPACE, OBJECT_TRANSFORM, OBJECT_TRIGGER, OBJECT_TSCONFIGURATION,
+    OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE, OBJECT_USER_MAPPING,
+    OBJECT_VIEW,
+};
 
 use crate::description::get_object_description as f1_get_object_description;
 use crate::identity::get_object_identity_parts as f3_get_object_identity_parts;
@@ -58,41 +76,57 @@ use crate::type_description::get_object_type_description as f2_get_object_type_d
  * ------------------------------------------------------------------------- */
 
 /// `textarray_to_strvaluelist(ArrayType *arr)` (objectaddress.c 2083):
-/// `deconstruct_array_builtin(arr, TEXTOID)` then build a `List` of `String`
-/// value nodes (NULL elements `ereport(ERROR)`). Modeled as a `Vec<String>`.
-pub fn textarray_to_strvaluelist(_mcx: Mcx<'_>, _arr: &ArrayType) -> PgResult<Vec<String>> {
-    // Gated on the array Datum value lane: `deconstruct_array_builtin(arr,
-    // TEXTOID, ...)` needs the array payload bytes, but `types_array::ArrayType`
-    // models only the fixed 16-byte header — there is no element-bytes lane to
-    // deconstruct here, and the `backend-utils-adt-arrayfuncs-seams`
-    // deconstruct seams are keyed on a `Datum`/`&[u8]` payload, not this header
-    // value. Mirror-and-panic until the SQL value lane lands.
-    panic!(
-        "decomp: textarray_to_strvaluelist gated on the array Datum value lane \
-         (deconstruct_array_builtin needs the text[] payload bytes, absent from \
-         the header-only types_array::ArrayType)"
-    )
+/// `deconstruct_array_builtin(arr, TEXTOID, &elems, &nulls, &nelems)` then build
+/// a `List` of `String` value nodes (`makeString(TextDatumGetCString(elems[i]))`);
+/// a NULL element `ereport(ERROR)`. The owned model takes the on-disk `text[]`
+/// byte image (a `Datum::ByRef` array column / `PG_GETARG_ARRAYTYPE_P` payload)
+/// and returns the C `List *` of `String`s as a `Vec<String>` — the caller wraps
+/// each in a `Node::String` (`makeString`).
+pub fn textarray_to_strvaluelist<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr_bytes: &[u8],
+) -> PgResult<Vec<String>> {
+    // deconstruct_array_builtin(arr, TEXTOID, &elems, &nulls, &nelems);
+    let pairs =
+        backend_utils_adt_arrayfuncs_seams::deconstruct_text_array_nullable::call(mcx, arr_bytes)?;
+
+    let mut list: Vec<String> = Vec::with_capacity(pairs.len());
+    for elem in pairs.iter() {
+        match elem {
+            // if (nulls[i]) ereport(ERROR, ...);
+            None => {
+                return Err(PgError::error("name or argument lists may not contain nulls")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+            // list = lappend(list, makeString(TextDatumGetCString(elems[i])));
+            Some(s) => list.push(s.as_str().to_string()),
+        }
+    }
+
+    Ok(list)
 }
 
 /// `strlist_to_textarray(List *list)` (objectaddress.c 6131): build a one-dim
-/// `text[]` from the strings via `construct_md_array` (`None` ⇒ a NULL
-/// element). Modeled over `&[Option<String>]`.
+/// `text[]` from the strings via `construct_md_array(datums, nulls, 1, &j, lb,
+/// TEXTOID, -1, false, TYPALIGN_INT)` (each `CStringGetTextDatum(name)`; a `None`
+/// cell ⇒ a NULL element). The owned model takes `&[Option<String>]` and returns
+/// the array varlena's raw byte image (carried on a by-reference `text[]`
+/// `Datum`).
 pub fn strlist_to_textarray<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _list: &[Option<String>],
-) -> PgResult<ArrayType> {
-    // Gated on the array Datum value lane: `construct_md_array(datums, nulls, 1,
-    // &j, lb, TEXTOID, -1, false, TYPALIGN_INT)` builds a real `text[]` varlena
-    // with an element-bytes payload, but `types_array::ArrayType` models only
-    // the fixed header — there is no payload lane to populate here. The
-    // `pg_identify_object_as_address` value-boundary caller does not need this:
-    // it returns the deconstructed `Vec<Option<String>>` columns directly.
-    // Mirror-and-panic until the SQL value lane lands.
-    panic!(
-        "decomp: strlist_to_textarray gated on the array Datum value lane \
-         (construct_md_array builds a text[] payload, absent from the \
-         header-only types_array::ArrayType)"
-    )
+    mcx: Mcx<'mcx>,
+    list: &[Option<String>],
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // The C builds `datums`/`nulls` (`CStringGetTextDatum(name)` per non-null
+    // cell, `nulls[j] = true` per NULL) then `construct_md_array(..., TEXTOID,
+    // -1, false, TYPALIGN_INT)`. The arrayfuncs `build_text_array_nullable` seam
+    // is exactly that array-build half over per-element `Option<text payload>`;
+    // the element payload is the raw UTF-8 bytes (`CStringGetTextDatum` wraps a
+    // C-string, so the payload is the string bytes, no NUL).
+    let elems: Vec<Option<&[u8]>> = list
+        .iter()
+        .map(|c| c.as_ref().map(|s| s.as_bytes()))
+        .collect();
+    backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(mcx, &elems)
 }
 
 /* ---------------------------------------------------------------------------
@@ -104,27 +138,305 @@ pub fn strlist_to_textarray<'mcx>(
 /// resolve to an `ObjectAddress` and return the `(classid, objid, objsubid)`
 /// record. Modeled at the value boundary.
 pub fn pg_get_object_address<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _type_name: &str,
-    _object_names: &[Option<String>],
-    _object_args: &[Option<String>],
+    mcx: Mcx<'mcx>,
+    type_name: &str,
+    name_arr_bytes: &[u8],
+    args_arr_bytes: &[u8],
 ) -> PgResult<ObjectAddress> {
-    // Gated on (a) the array Datum value lane — the C deconstructs the
-    // `object_names`/`object_args` `text[]` inputs via `deconstruct_array_builtin`
-    // / `textarray_to_strvaluelist` (both blocked: `types_array::ArrayType` is
-    // header-only, no element-bytes payload) — and (b) the parser
-    // node-construction lane: the C assembles parser `Node`s (`makeFloat`,
-    // `makeString` String-value lists, `ObjectWithArgs`, `list_make2`/`lcons`)
-    // per object type before invoking the `get_object_address` seam.
-    // `read_objtype_from_string` (F0) and `typeStringToTypeName` (now installed)
-    // are ready, but the String/Float/ObjectWithArgs Node assembly + the array
-    // deconstruct lane are not. Mirror-and-panic until those land.
-    panic!(
-        "decomp: pg_get_object_address gated on the parser node-construction \
-         lane (makeFloat / makeString / ObjectWithArgs assembly) and the array \
-         Datum value lane (deconstruct of object_names/object_args via \
-         textarray_to_strvaluelist)"
-    )
+    use types_parsenodes::{Float, Node, ObjectWithArgs, StringNode, TypeName};
+
+    // char *ttype = TextDatumGetCString(PG_GETARG_DATUM(0));
+    // ArrayType *namearr = PG_GETARG_ARRAYTYPE_P(1);
+    // ArrayType *argsarr = PG_GETARG_ARRAYTYPE_P(2);
+    // (The varlena text arg + the two text[] arrays cross the value boundary as
+    // the decoded `&str` + their on-disk array byte images.)
+
+    // itype = read_objtype_from_string(ttype);
+    // if (itype < 0) ereport(ERROR, "unsupported object type \"%s\"");
+    let itype = crate::resolve::read_objtype_from_string(type_name)?;
+    if itype < 0 {
+        return Err(
+            PgError::error(format!("unsupported object type \"{type_name}\""))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    let objtype = ObjectType::from_i32(itype)
+        .expect("read_objtype_from_string returns a valid non-negative ObjectType code");
+
+    // Builds the per-object-type carriers the switch below assembles into a Node.
+    let mut name: Vec<Node> = Vec::new();
+    let mut typename: Option<TypeName> = None;
+    let mut args: Vec<Node> = Vec::new();
+    let mut objnode: Option<Node> = None;
+
+    // Convert the text array to the representation appropriate for the given
+    // object type. Most use a simple string Values list, but there are some
+    // exceptions.
+    if objtype == OBJECT_TYPE
+        || objtype == OBJECT_DOMAIN
+        || objtype == OBJECT_CAST
+        || objtype == OBJECT_TRANSFORM
+        || objtype == OBJECT_DOMCONSTRAINT
+    {
+        // deconstruct_array_builtin(namearr, TEXTOID, &elems, &nulls, &nelems);
+        let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_text_array_nullable::call(
+            mcx,
+            name_arr_bytes,
+        )?;
+        if elems.len() != 1 {
+            return Err(PgError::error("name list length must be exactly 1")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+        let elem0 = match &elems[0] {
+            Some(s) => s.as_str(),
+            None => {
+                return Err(PgError::error("name or argument lists may not contain nulls")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        };
+        // typename = typeStringToTypeName(TextDatumGetCString(elems[0]), NULL);
+        typename =
+            Some(backend_parser_parse_type_seams::type_string_to_type_name::call(elem0)?);
+    } else if objtype == OBJECT_LARGEOBJECT {
+        let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_text_array_nullable::call(
+            mcx,
+            name_arr_bytes,
+        )?;
+        if elems.len() != 1 {
+            return Err(PgError::error("name list length must be exactly 1")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+        let elem0 = match &elems[0] {
+            Some(s) => s.as_str(),
+            None => {
+                return Err(PgError::error("large object OID may not be null")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        };
+        // objnode = (Node *) makeFloat(TextDatumGetCString(elems[0]));
+        objnode = Some(Node::Float(Float {
+            fval: Some(elem0.to_string()),
+        }));
+    } else {
+        // name = textarray_to_strvaluelist(namearr);
+        name = textarray_to_strvaluelist(mcx, name_arr_bytes)?
+            .into_iter()
+            .map(|s| Node::String(StringNode { sval: Some(s) }))
+            .collect();
+        if name.is_empty() {
+            return Err(PgError::error("name list length must be at least 1")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+    }
+
+    // If args are given, decode them according to the object type.
+    if objtype == OBJECT_AGGREGATE
+        || objtype == OBJECT_FUNCTION
+        || objtype == OBJECT_PROCEDURE
+        || objtype == OBJECT_ROUTINE
+        || objtype == OBJECT_OPERATOR
+        || objtype == OBJECT_CAST
+        || objtype == OBJECT_AMOP
+        || objtype == OBJECT_AMPROC
+    {
+        // in these cases, the args list must be of TypeName
+        let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_text_array_nullable::call(
+            mcx,
+            args_arr_bytes,
+        )?;
+        args = Vec::with_capacity(elems.len());
+        for elem in elems.iter() {
+            let s = match elem {
+                Some(s) => s.as_str(),
+                None => {
+                    return Err(PgError::error("name or argument lists may not contain nulls")
+                        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+                }
+            };
+            // args = lappend(args, typeStringToTypeName(..., NULL));
+            args.push(Node::TypeName(
+                backend_parser_parse_type_seams::type_string_to_type_name::call(s)?,
+            ));
+        }
+    } else {
+        // For all other object types, use string Values.
+        args = textarray_to_strvaluelist(mcx, args_arr_bytes)?
+            .into_iter()
+            .map(|s| Node::String(StringNode { sval: Some(s) }))
+            .collect();
+    }
+
+    // get_object_address is pretty sensitive to the length of its input lists;
+    // check that they're what it wants.
+    match objtype {
+        OBJECT_PUBLICATION_NAMESPACE | OBJECT_USER_MAPPING => {
+            if name.len() != 1 {
+                return Err(PgError::error("name list length must be exactly 1")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+            // fall through to check args length
+            if args.len() != 1 {
+                return Err(PgError::error("argument list length must be exactly 1")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        }
+        OBJECT_DOMCONSTRAINT
+        | OBJECT_CAST
+        | OBJECT_PUBLICATION_REL
+        | OBJECT_DEFACL
+        | OBJECT_TRANSFORM => {
+            if args.len() != 1 {
+                return Err(PgError::error("argument list length must be exactly 1")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        }
+        OBJECT_OPFAMILY | OBJECT_OPCLASS => {
+            if name.len() < 2 {
+                return Err(PgError::error("name list length must be at least 2")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        }
+        OBJECT_AMOP | OBJECT_AMPROC => {
+            if name.len() < 3 {
+                return Err(PgError::error("name list length must be at least 3")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+            // fall through to check args length
+            if args.len() != 2 {
+                return Err(PgError::error("argument list length must be exactly 2")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        }
+        OBJECT_OPERATOR => {
+            if args.len() != 2 {
+                return Err(PgError::error("argument list length must be exactly 2")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+        }
+        _ => {}
+    }
+
+    // Now build the Node type that get_object_address() expects for the given
+    // type.
+    match objtype {
+        OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW | OBJECT_INDEX
+        | OBJECT_FOREIGN_TABLE | OBJECT_COLUMN | OBJECT_ATTRIBUTE | OBJECT_COLLATION
+        | OBJECT_CONVERSION | OBJECT_STATISTIC_EXT | OBJECT_TSPARSER | OBJECT_TSDICTIONARY
+        | OBJECT_TSTEMPLATE | OBJECT_TSCONFIGURATION | OBJECT_DEFAULT | OBJECT_POLICY
+        | OBJECT_RULE | OBJECT_TRIGGER | OBJECT_TABCONSTRAINT | OBJECT_OPCLASS
+        | OBJECT_OPFAMILY => {
+            // objnode = (Node *) name;
+            objnode = Some(Node::List(name));
+        }
+        OBJECT_ACCESS_METHOD
+        | OBJECT_DATABASE
+        | OBJECT_EVENT_TRIGGER
+        | OBJECT_EXTENSION
+        | OBJECT_FDW
+        | OBJECT_FOREIGN_SERVER
+        | OBJECT_LANGUAGE
+        | OBJECT_PARAMETER_ACL
+        | OBJECT_PUBLICATION
+        | OBJECT_ROLE
+        | OBJECT_SCHEMA
+        | OBJECT_SUBSCRIPTION
+        | OBJECT_TABLESPACE => {
+            if name.len() != 1 {
+                return Err(PgError::error("name list length must be exactly 1")
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+            // objnode = linitial(name);
+            objnode = Some(name.into_iter().next().expect("len == 1"));
+        }
+        OBJECT_TYPE | OBJECT_DOMAIN => {
+            // objnode = (Node *) typename;
+            objnode = Some(Node::TypeName(
+                typename.expect("typename built above for OBJECT_TYPE/DOMAIN"),
+            ));
+        }
+        OBJECT_CAST | OBJECT_DOMCONSTRAINT | OBJECT_TRANSFORM => {
+            // objnode = (Node *) list_make2(typename, linitial(args));
+            let tn = typename.expect("typename built above for CAST/DOMCONSTRAINT/TRANSFORM");
+            let arg0 = args.into_iter().next().expect("args length == 1 checked");
+            objnode = Some(Node::List(vec![Node::TypeName(tn), arg0]));
+        }
+        OBJECT_PUBLICATION_REL => {
+            // objnode = (Node *) list_make2(name, linitial(args));
+            let arg0 = args.into_iter().next().expect("args length == 1 checked");
+            objnode = Some(Node::List(vec![Node::List(name), arg0]));
+        }
+        OBJECT_PUBLICATION_NAMESPACE | OBJECT_USER_MAPPING => {
+            // objnode = (Node *) list_make2(linitial(name), linitial(args));
+            let name0 = name.into_iter().next().expect("name length == 1 checked");
+            let arg0 = args.into_iter().next().expect("args length == 1 checked");
+            objnode = Some(Node::List(vec![name0, arg0]));
+        }
+        OBJECT_DEFACL => {
+            // objnode = (Node *) lcons(linitial(args), name);
+            let arg0 = args.into_iter().next().expect("args length == 1 checked");
+            let mut list = vec![arg0];
+            list.extend(name);
+            objnode = Some(Node::List(list));
+        }
+        OBJECT_AMOP | OBJECT_AMPROC => {
+            // objnode = (Node *) list_make2(name, args);
+            objnode = Some(Node::List(vec![Node::List(name), Node::List(args)]));
+        }
+        OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE
+        | OBJECT_OPERATOR => {
+            // ObjectWithArgs *owa = makeNode(ObjectWithArgs);
+            // owa->objname = name; owa->objargs = args; objnode = (Node *) owa;
+            // objname is the C `List *` of String value nodes → the repo
+            // ObjectWithArgs.objname is `Vec<String>`; objargs is the TypeName
+            // list (Node::TypeName cells).
+            let objname: Vec<String> = name
+                .into_iter()
+                .map(|n| match n {
+                    Node::String(StringNode { sval }) => sval.unwrap_or_default(),
+                    // textarray_to_strvaluelist only emits String nodes.
+                    _ => unreachable!("objname list holds only String value nodes"),
+                })
+                .collect();
+            objnode = Some(Node::ObjectWithArgs(ObjectWithArgs {
+                objname,
+                objargs: args,
+                objfuncargs: Vec::new(),
+                args_unspecified: false,
+            }));
+        }
+        // OBJECT_LARGEOBJECT: already handled above (objnode = makeFloat(...)).
+        _ => {}
+    }
+
+    // if (objnode == NULL) elog(ERROR, "unrecognized object type: %d", type);
+    let objnode = match objnode {
+        Some(n) => n,
+        None => {
+            return Err(PgError::error(format!(
+                "unrecognized object type: {objtype:?}"
+            )));
+        }
+    };
+
+    // addr = get_object_address(type, objnode, &relation, AccessShareLock, false);
+    let resolved = crate::resolve::get_object_address(
+        mcx,
+        objtype,
+        &objnode,
+        types_storage::lock::AccessShareLock,
+        false,
+    )?;
+
+    // We don't need the relcache entry, thank you very much.
+    if let Some(relation) = resolved.relation {
+        relation.close(types_storage::lock::AccessShareLock)?;
+    }
+
+    // The C builds a 3-column record tuple here (get_call_result_type +
+    // heap_form_tuple over ObjectIdGetDatum/Int32GetDatum). The value boundary
+    // returns the resolved ObjectAddress directly; the fcinfo record assembly is
+    // the caller's responsibility.
+    Ok(resolved.address)
 }
 
 /// `pg_describe_object(PG_FUNCTION_ARGS)` (objectaddress.c 4220): the
@@ -471,7 +783,3 @@ pub fn pg_get_acl<'mcx>(
     )
 }
 
-/// Quiet the unused-import lint until the fill stage references `ObjectType`
-/// in the resolution path of `pg_get_object_address`.
-#[allow(dead_code)]
-fn _objtype_marker(_t: ObjectType) {}

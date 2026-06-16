@@ -28,6 +28,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetRemoteDestReceiverParams(receiver, portal)` (printtup.c) — bind the
+    /// `DestRemote*` receiver to `portal` (its portal name + result formats).
+    /// `exec_simple_query` calls this for `DestRemote`. Owner routing
+    /// (printtup -> dest router) unported; scaffolded slot.
+    pub fn set_remote_dest_receiver_params(
+        receiver: DestReceiverHandle,
+        portal: &types_portal::Portal,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `dest->rStartup(dest, operation, tupdesc)` (tcop/dest.h): tell the
     /// receiver a result set of `tupdesc` rows is about to be sent under the
     /// given command type (`begin_tup_output_tupdesc` passes `CMD_SELECT`).

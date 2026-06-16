@@ -212,7 +212,7 @@ pub fn transformExprRecurse<'mcx>(
 
     let result: Expr = match expr {
         Node::ColumnRef(c) => transformColumnRef(pstate, c)?,
-        Node::ParamRef(_) => seam_transform_param_ref(pstate, expr)?,
+        Node::ParamRef(pref) => transformParamRef(pstate, &pref)?,
 
         // T_A_Const → make_const(pstate, (A_Const *) expr).
         Node::A_Const(a) => transform_a_const(pstate, a)?,
@@ -3053,14 +3053,50 @@ fn seam_transform_column_ref_hook_currentof<'mcx>(
     )
 }
 
-fn seam_transform_param_ref<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _pref: Node<'mcx>,
+/// `transformParamRef(pstate, pref)` (parse_expr.c) — transform a `$n`
+/// parameter reference into a `Param`.
+///
+/// The core parser knows nothing about Params; in C the work is done by the
+/// installed `pstate->p_paramref_hook`. The owned model selects the hook from
+/// the active `pstate.p_ref_hook_state` arm — the real artifact the C function
+/// pointer selects (cf. `setup_parse_{fixed,variable}_parameters`, which set the
+/// ref-hook state and the hook in lockstep). If no hook is installed (or it
+/// returns NULL) we throw the generic "there is no parameter $n" error, exactly
+/// as C does.
+fn transformParamRef<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    pref: &types_nodes::rawnodes::ParamRef,
 ) -> PgResult<Expr> {
-    panic!(
-        "transformParamRef applies the opaque p_paramref_hook (cross-ABI function \
-         pointer); the hook ABI is not yet modeled."
-    )
+    use types_nodes::parsestmt::ParseRefHookState;
+
+    // The small1 paramref hooks take a `types_nodes::params::ParamRef`; bridge
+    // from the raw-node `ParamRef` (same fields).
+    let hook_pref = types_nodes::params::ParamRef {
+        number: pref.number,
+        location: pref.location,
+    };
+
+    // if (pstate->p_paramref_hook != NULL) result = pstate->p_paramref_hook(...)
+    // else result = NULL;
+    let result: Option<types_nodes::primnodes::Param> = match &pstate.p_ref_hook_state {
+        ParseRefHookState::FixedParams(parstate) => Some(
+            backend_parser_small1::fixed_paramref_hook(pstate, parstate, &hook_pref)?,
+        ),
+        ParseRefHookState::VarParams(parstate) => Some(
+            backend_parser_small1::variable_paramref_hook(pstate, parstate, &hook_pref)?,
+        ),
+        ParseRefHookState::None => None,
+    };
+
+    // if (result == NULL) ereport(ERROR, "there is no parameter $%d", ...)
+    match result {
+        Some(param) => Ok(Expr::Param(param)),
+        None => Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_PARAMETER)
+            .errmsg(alloc::format!("there is no parameter ${}", pref.number))
+            .errposition(parser_errposition(pstate, pref.location))
+            .into_error()),
+    }
 }
 
 /// `count_nonjunk_tlist_entries(targetlist)` (parse_node.c) — the number of

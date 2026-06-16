@@ -105,9 +105,14 @@ fn parser_errposition_negative_and_no_text() {
 fn fixed_paramref_hook_resolves_in_range() {
     install_test_seams();
     let ctx = mcx::MemoryContext::new("test");
-    let pstate = ps(ctx.mcx());
+    let mut pstate = ps(ctx.mcx());
     let types = [INT4OID, BOOLOID];
-    let parstate = setup_parse_fixed_parameters(&types);
+    setup_parse_fixed_parameters(&mut pstate, &types);
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_fixed_params()
+        .expect("fixed-param ref-hook state installed")
+        .clone();
     let pref = ParamRef { number: 2, location: -1 };
     let param = fixed_paramref_hook(&pstate, &parstate, &pref).unwrap();
     assert_eq!(param.paramkind, PARAM_EXTERN);
@@ -120,16 +125,26 @@ fn fixed_paramref_hook_resolves_in_range() {
 fn fixed_paramref_hook_rejects_out_of_range() {
     install_test_seams();
     let ctx = mcx::MemoryContext::new("test");
-    let pstate = ps(ctx.mcx());
+    let mut pstate = ps(ctx.mcx());
     let types = [INT4OID];
-    let parstate = setup_parse_fixed_parameters(&types);
+    setup_parse_fixed_parameters(&mut pstate, &types);
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_fixed_params()
+        .expect("fixed-param ref-hook state installed")
+        .clone();
     // paramno 0, > numParams, and an InvalidOid slot are all errors.
     for n in [0, 2] {
         let pref = ParamRef { number: n, location: -1 };
         assert!(fixed_paramref_hook(&pstate, &parstate, &pref).is_err());
     }
     let inv = [InvalidOid];
-    let parstate2 = setup_parse_fixed_parameters(&inv);
+    setup_parse_fixed_parameters(&mut pstate, &inv);
+    let parstate2 = pstate
+        .p_ref_hook_state
+        .as_fixed_params()
+        .expect("fixed-param ref-hook state installed")
+        .clone();
     let pref = ParamRef { number: 1, location: -1 };
     assert!(fixed_paramref_hook(&pstate, &parstate2, &pref).is_err());
 }

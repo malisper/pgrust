@@ -41,6 +41,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_report_query_id(query_id, force)` (`backend_status.c`): advertise
+    /// the running query's jumble id on the backend status entry.
+    /// `exec_simple_query` resets it to `0` (`force = true`) per parsetree.
+    /// Owner unported; scaffolded slot.
+    pub fn pgstat_report_query_id(query_id: u64, force: bool)
+);
+
+seam_core::seam!(
+    /// `pgstat_report_plan_id(plan_id, force)` (`backend_status.c`): advertise
+    /// the running query's plan id on the backend status entry.
+    /// `exec_simple_query` resets it to `0` (`force = true`) per parsetree.
+    /// Owner unported; scaffolded slot.
+    pub fn pgstat_report_plan_id(plan_id: u64, force: bool)
+);
+
+seam_core::seam!(
     /// `pgstat_report_activity(STATE_IDLE, NULL)` (`backend_status.c`): mark
     /// this backend idle and clear the current activity string. Infallible.
     pub fn pgstat_report_activity_idle()

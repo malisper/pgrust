@@ -15,6 +15,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCommandLogLevel(parsetree)` (utility.c:3249) — the `LogStmtLevel`
+    /// (carried as `i32`, `tcop/tcopprot.h`) for a raw parse-tree node, used by
+    /// `check_log_statement` to decide whether `log_statement` covers it. Pure
+    /// classification; can `ereport` only on a malformed node.
+    pub fn get_command_log_level<'mcx>(parsetree: &Node<'mcx>) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
     /// queryEnv, dest, qc)` (utility.c) — execute a utility (non-optimizable)
     /// statement. `pquery.c`'s `PortalRunUtility` drives it for the portal's

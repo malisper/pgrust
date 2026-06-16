@@ -40,6 +40,22 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 pg-prng = { path = "../pg-prng" }
 
+# Owner crates of the simple-Query (F1) entry points that have no consumable
+# seam: the parser driver (raw_parser), parse-analysis (parse_analyze_*,
+# analyze_requires_snapshot), the portal-run driver (PortalRun /
+# PortalSetResultFormat), and the command-tag classifier. Acyclic: each depends
+# only on `*-seams` leaves, never on this owner crate.
+backend-parser-driver = { path = "../backend-parser-driver" }
+backend-parser-analyze = { path = "../backend-parser-analyze" }
+backend-tcop-pquery = { path = "../backend-tcop-pquery" }
+backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
+
+# Vocabulary types the F1 pipeline threads.
+types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-portal = { path = "../types-portal" }
+types-snapshot = { path = "../types-snapshot" }
+
 # Seam crates (leaf; never create cycles).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
@@ -62,6 +78,17 @@ backend-main-main-seams = { path = "../backend-main-main-seams" }
 backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+
+# F1 simple-Query pipeline seams.
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
