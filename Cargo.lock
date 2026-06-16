@@ -13245,6 +13245,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-dbsize"
+version = "0.0.0"
+dependencies = [
+ "backend-common-relpath",
+ "backend-utils-adt-numeric",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-numeric",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-adt-domains-seams"
 version = "0.0.0"
 dependencies = [
