@@ -203,6 +203,7 @@ pub fn init_all() {
     backend_libpq_be_fsstubs::init_seams();
     backend_libpq_hba::init_seams();
     backend_libpq_be_gssapi_common::init_seams();
+    backend_libpq_be_secure_common::init_seams();
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();

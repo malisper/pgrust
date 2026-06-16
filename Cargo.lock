@@ -9293,6 +9293,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure-common"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-common-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "common-percentrepl",
+ "common-string",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-common-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-seams"
 version = "0.0.0"
 dependencies = [
@@ -18638,6 +18663,7 @@ dependencies = [
  "backend-libpq-auth-scram",
  "backend-libpq-be-fsstubs",
  "backend-libpq-be-gssapi-common",
+ "backend-libpq-be-secure-common",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",

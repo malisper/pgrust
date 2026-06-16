@@ -122,6 +122,9 @@ pub fn init_seams() {
     fd_seams::copy_write_file::set(seams::copy_write_file);
     fd_seams::free_file::set(seams::free_file);
     fd_seams::close_pipe_to_program::set(seams::close_pipe_to_program);
+    fd_seams::open_pipe_stream_read::set(seams::open_pipe_stream_read);
+    fd_seams::pipe_read_line::set(seams::pipe_read_line);
+    fd_seams::close_pipe_stream::set(seams::close_pipe_stream);
     fd_seams::stdout_stream::set(seams::stdout_stream);
 
     // VFD temp-file API consumed by buffile.c.

@@ -258,6 +258,54 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `OpenPipeStream(command, "r")` (fd.c) — `popen` the command for reading,
+    /// registering the pipe with the vfd machinery. Unlike
+    /// [`open_pipe_stream_write`], this faithfully reproduces the C contract that
+    /// a `popen` failure returns `NULL` (here `Ok(None)`) with `errno` left set
+    /// (retrievable via [`last_errno`]) rather than `ereport`ing — the
+    /// `run_ssl_passphrase_command` caller reports the failure at its own
+    /// `is_server_start`-dependent loglevel. `Err` carries only the
+    /// `reserveAllocatedDesc` exhaustion `ereport(ERROR)`.
+    pub fn open_pipe_stream_read(command: &str) -> PgResult<Option<PgFileStream>>
+);
+
+/// Outcome of a `fgets(buf, size, fh)` + `ferror(fh)` read against a pipe
+/// stream opened for reading ([`open_pipe_stream_read`]). Mirrors the three C
+/// observable cases in `run_ssl_passphrase_command`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PipeReadLine {
+    /// `fgets` returned the buffer: one line (up to `size - 1` bytes, including
+    /// any trailing newline) was read. Carries the bytes actually read.
+    Line(Vec<u8>),
+    /// `fgets` returned `NULL` and `ferror(fh)` was false: end of file with no
+    /// data (the caller leaves `buf` as the empty string).
+    Eof,
+    /// `fgets` returned `NULL` and `ferror(fh)` was true: a read error. Carries
+    /// the OS `errno` for the caller's `%m` expansion.
+    Error(i32),
+}
+
+seam_core::seam!(
+    /// `fgets(buf, size, fh)` + `ferror(fh)` against a pipe stream opened with
+    /// [`open_pipe_stream_read`] (fd-owned stdio). Reads at most `size - 1`
+    /// bytes up to and including the first newline. Returns the
+    /// [`PipeReadLine`] outcome; the caller owns the strip-CRLF / message logic.
+    pub fn pipe_read_line(stream: PgFileStream, size: i32) -> PgResult<PipeReadLine>
+);
+
+seam_core::seam!(
+    /// `ClosePipeStream(fh)` (fd.c) — `pclose` the pipe and deregister it,
+    /// returning the raw `pclose` wait status (`-1` on a `pclose` error with
+    /// `errno` set, `0` on a clean child exit, non-zero for the child's wait
+    /// status). Unlike [`close_pipe_to_program`], this returns the raw code so
+    /// the `run_ssl_passphrase_command` caller can build its own
+    /// loglevel-dependent `ereport`s. `Err` is reserved for the
+    /// not-from-OpenPipeStream `ereport(WARNING)`'s longjmp surface (none in
+    /// practice).
+    pub fn close_pipe_stream(stream: PgFileStream) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `stdout` (the C stdio global) as a registered stream token, for the
     /// COPY TO STDOUT-to-server-log path (copyto.c:919, `cstate->copy_file =
     /// stdout`). Infallible.

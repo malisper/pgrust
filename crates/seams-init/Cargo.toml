@@ -200,6 +200,7 @@ backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }
 backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
+backend-libpq-be-secure-common = { path = "../backend-libpq-be-secure-common" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
