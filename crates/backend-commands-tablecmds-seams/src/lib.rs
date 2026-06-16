@@ -8,6 +8,23 @@ use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
+    /// `RangeVarCallbackOwnsRelation(relation, relId, oldRelId, arg)`
+    /// (tablecmds.c) — the `RangeVarGetRelidExtended` callback used by
+    /// `AlterSequence` (and others): nothing to do for a not-found relation
+    /// (`!OidIsValid(relId)`), else `SearchSysCache1(RELOID)` and reject a
+    /// relation the current user does not own (`object_ownercheck` /
+    /// `aclcheck_error`), and a system catalog when `!allowSystemTableMods`
+    /// (`IsSystemClass`). `relation` is only read for `relation->relname` in
+    /// the error messages, so the seam passes the name alone. `Err` carries
+    /// the lookup/ACL `ereport(ERROR)`s.
+    pub fn range_var_callback_owns_relation(
+        relname: &str,
+        rel_id: Oid,
+        old_rel_id: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `PreCommit_on_commit_actions()` — ON COMMIT DROP / DELETE ROWS work;
     /// can `ereport(ERROR)`.
     pub fn pre_commit_on_commit_actions() -> PgResult<()>
@@ -61,4 +78,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ResetRelRewrite(myrelid)` (tablecmds.c).
     pub fn reset_rel_rewrite(myrelid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DefineRelation(stmt, RELKIND_SEQUENCE, seq->ownerId, NULL, NULL)`
+    /// (tablecmds.c) for a sequence (sequence.c `DefineSequence`): the owner
+    /// builds the `CreateStmt` carrying the three NOT NULL columns
+    /// (`last_value int8`, `log_cnt int8`, `is_called bool`) from `seq`'s
+    /// `RangeVar` + `if_not_exists`, runs `DefineRelation`, and returns the new
+    /// sequence relation's `ObjectAddress`. The owned-tree `CreateSeqStmt`
+    /// crosses by reference; `Err` carries the `ereport(ERROR)`s.
+    pub fn define_sequence_relation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        seq: &types_nodes::ddlnodes::CreateSeqStmt<'_>,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );

@@ -388,6 +388,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `(int2vector *) DatumGetPointer(datum)` then read `->values[0 ..
+    /// ->dim1]` (e.g. `pg_index.indoption`) operating on the on-disk
+    /// `int2vector` byte image `bytes` (a `Datum::ByRef` attribute image). An
+    /// `int2vector` is a 1-D `ArrayType` of `INT2OID` (2-byte pass-by-value,
+    /// short-aligned, no NULLs, lower bound 0 — `int2vectorin` constructs it
+    /// that way); the image is detoasted (`detoast_attr`), and `ARR_DATA_PTR`
+    /// is read as the C `int16[ARR_DIMS[0]]`, returned in `mcx`. An
+    /// empty/zero-dimension vector yields an empty result (the C `dim1 == 0`
+    /// case). Fallible on detoast / truncated element data.
+    pub fn int2vector_to_i16s_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> PgResult<PgVec<'mcx, i16>>
+);
+
+seam_core::seam!(
     /// `deconstruct_array_builtin(DatumGetArrayTypeP(bytes), TEXTOID, &elems,
     /// NULL, &nelems)` then `TextDatumGetCString` per element (arrayfuncs.c)
     /// operating on the on-disk `text[]` byte image `bytes` (a `Datum::ByRef`

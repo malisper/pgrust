@@ -1669,6 +1669,41 @@ pub fn oidvector_to_oids_bytes<'mcx>(
     read_fixed4_oid_array(mcx, &arr, dim1)
 }
 
+/// Seam `int2vector_to_i16s_bytes` — `(int2vector *) DatumGetPointer(datum)`
+/// then `->values[0 .. ->dim1]`, reading the on-disk `int2vector` byte image
+/// directly.
+///
+/// An `int2vector` is a 1-D `ArrayType` of `INT2OID` (2-byte pass-by-value,
+/// short-aligned, no NULLs, lower bound 0 — `int2vectorin` constructs it that
+/// way), so `ARR_DATA_PTR` is `dim1` consecutive native-endian `int16` words
+/// (the C reads `vec->values` directly; an `int2vector` is laid out as
+/// `int32 ndim; int32 dataoffset; Oid elemtype; int dim1; int lbound1; int16
+/// values[];` — a flat `ArrayType` header followed by the int16 array data).
+/// A zero-dimension vector yields an empty result.
+pub fn int2vector_to_i16s_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<PgVec<'mcx, i16>> {
+    // DatumGetArrayTypeP(d) — detoast (int2vectors are PLAIN storage, so this
+    // is the verbatim-copy fall-through, but route through the seam for parity).
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    // dim1 == ARR_DIMS(vec)[0]; a 0-D vector (ndim == 0) has no elements.
+    let dim1 = if ndim >= 1 { foundation::arr_dim(&arr, 0) } else { 0 };
+    let start = foundation::arr_data_ptr_off(&arr);
+    let n = dim1.max(0) as usize;
+    let mut v = mcx::vec_with_capacity_in::<i16>(mcx, n)?;
+    for i in 0..n {
+        let off = start + i * 2;
+        let b = arr.get(off..off + 2).ok_or_else(|| {
+            PgError::error("malformed array (truncated element data)")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        })?;
+        v.push(i16::from_ne_bytes([b[0], b[1]]));
+    }
+    Ok(v)
+}
+
 /// Seam `text_array_to_strings_bytes` —
 /// `deconstruct_array_builtin(DatumGetArrayTypeP(bytes), TEXTOID, ...)` then
 /// `TextDatumGetCString` per element, reading the on-disk `text[]` byte image
