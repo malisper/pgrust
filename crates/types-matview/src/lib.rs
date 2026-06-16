@@ -5,7 +5,7 @@
 //! (`QueryCompletion`/`CommandTag`), and matview-specific read-out value types
 //! the matview driver branches on, plus the opaque handles for objects owned by
 //! the not-yet-ported executor / planner / rewriter (`Query *`, `PlannedStmt *`,
-//! `QueryDesc *`, `DestReceiver *`, `TupleTableSlot *`, `TupleDesc`). Those C
+//! `QueryDesc *`). Those C
 //! objects are created and consumed entirely inside seam calls into their owning
 //! subsystems; matview never inspects their internals, so they stay opaque (the
 //! semantic opacity C's `void`-free pointers carry through this driver), to be
@@ -110,45 +110,12 @@ impl QueryDescHandle {
     }
 }
 
-/// Opaque handle to a `DestReceiver *` (the `DR_transientrel` the runtime
-/// allocates and wires).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DestReceiverHandle(pub usize);
-
-impl DestReceiverHandle {
-    pub const NULL: DestReceiverHandle = DestReceiverHandle(0);
-    #[inline]
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
-
-/// Opaque handle to a `TupleTableSlot *` the executor hands the
-/// `transientrel_receive` callback.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TupleSlotHandle(pub usize);
-
-impl TupleSlotHandle {
-    pub const NULL: TupleSlotHandle = TupleSlotHandle(0);
-    #[inline]
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
-
-/// Opaque handle to a `TupleDesc` the executor hands the
-/// `transientrel_startup` callback (unused by C `transientrel_startup`, but part
-/// of the `rStartup` vtable contract).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TupleDescHandle(pub usize);
-
-impl TupleDescHandle {
-    pub const NULL: TupleDescHandle = TupleDescHandle(0);
-    #[inline]
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
+// The `DR_transientrel` `DestReceiver` and the `TupleTableSlot`/`TupleDesc` the
+// executor hands its callbacks are no longer modeled here: the receiver is owned
+// in-crate by `backend-commands-matview` and registered into the
+// `backend-tcop-dest` value-router (mirroring `createas.c`'s `DR_intorel`), so its
+// callbacks take the real `types_nodes::tuptable::SlotData` /
+// `types_tuple::heaptuple::TupleDescData` directly.
 
 // ---------------------------------------------------------------------------
 // Read-out value bundles the in-crate logic branches on.

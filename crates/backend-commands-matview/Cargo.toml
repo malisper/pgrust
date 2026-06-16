@@ -17,7 +17,20 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-catalog = { path = "../types-catalog" }
 types-matview = { path = "../types-matview" }
+types-dest = { path = "../types-dest" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-tableam = { path = "../types-tableam" }
 backend-utils-error = { path = "../backend-utils-error" }
+
+# The DR_transientrel receiver is owned in-crate (mirroring createas's
+# DR_intorel): the tcop-dest value-router + the real table-AM / heap
+# bulk-insert / xact owners its callbacks reach directly.
+backend-tcop-dest = { path = "../backend-tcop-dest" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 
 # matview's own inward seams (it installs every one of these)
 backend-commands-matview-seams = { path = "../backend-commands-matview-seams" }

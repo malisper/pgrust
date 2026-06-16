@@ -6767,17 +6767,26 @@ dependencies = [
 name = "backend-commands-matview"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-table-table",
+ "backend-access-table-tableam",
+ "backend-access-transam-xact",
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
+ "backend-tcop-dest",
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "mcx",
  "seam-core",
  "types-catalog",
  "types-core",
+ "types-dest",
  "types-error",
  "types-matview",
+ "types-nodes",
+ "types-rel",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -6789,6 +6798,8 @@ dependencies = [
  "types-core",
  "types-error",
  "types-matview",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -11365,6 +11376,7 @@ dependencies = [
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-plan-setrefs",
  "backend-optimizer-plan-small",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepjointree-seams",
@@ -12764,6 +12776,30 @@ dependencies = [
  "types-core",
  "types-error",
  "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-auxprocess"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc",
+ "backend-utils-activity-status-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-more-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "backend-utils-resowner-resowner-seams",
+ "mcx",
+ "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20894,6 +20930,7 @@ dependencies = [
  "backend-port-sysv-sema",
  "backend-port-sysv-shmem",
  "backend-postmaster-autovacuum",
+ "backend-postmaster-auxprocess",
  "backend-postmaster-bgworker",
  "backend-postmaster-bgwriter",
  "backend-postmaster-checkpointer",
