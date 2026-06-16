@@ -156,6 +156,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XidInMVCCSnapshot(xid, snapshot)` (snapmgr.c): is `xid` still seen as
+    /// in-progress by the given MVCC snapshot? Can `ereport(ERROR)` on the
+    /// subtransaction-overflow recheck (`SubTransGetTopmostTransaction` ->
+    /// `TransactionIdDidCommit`), carried on `Err`.
+    pub fn xid_in_mvcc_snapshot(
+        xid: types_core::TransactionId,
+        snapshot: &types_snapshot::SnapshotData,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
     /// catalog snapshot so the next catalog read takes a fresh one — driven by
     /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;

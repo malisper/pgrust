@@ -168,6 +168,13 @@ pub struct RelationData<'mcx> {
     /// Built by `RelationBuildTriggers` (commands/trigger.c, F1); until that
     /// lands the relcache builder leaves it `None`.
     pub rd_trigdesc: Option<PgBox<'mcx, types_trigger::TriggerDesc<'mcx>>>,
+    /// `bool pgstat_enabled` (`utils/rel.h`) — whether this relation's
+    /// cumulative statistics should be counted. Read by the `pgstat_count_*`
+    /// seams (they pass it through to the pgstat owner, mirroring the C count
+    /// macros' `pgstat_should_count_relation(rel)` gate). The relcache builder
+    /// sets it from `pgstat_relation_init`'s rules; the pending-stats link
+    /// (C `rd_rel->pgstat_info`) is keyed by OID inside pgstat, not carried.
+    pub pgstat_enabled: bool,
 }
 
 impl<'mcx> RelationData<'mcx> {
@@ -515,6 +522,7 @@ mod tests {
             rd_indoption: mcx::PgVec::new_in(mcx),
             rd_indcollation: mcx::PgVec::new_in(mcx),
             rd_trigdesc: None,
+            pgstat_enabled: false,
         }
     }
 

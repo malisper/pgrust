@@ -1470,6 +1470,43 @@ pub fn exec_init_qual<'mcx>(
     Ok(Some(mcx::alloc_in(mcx, state)?))
 }
 
+/// `ExecPrepareQual(qual, estate)` (execExpr.c) — prepare a standalone qual with
+/// no parent `PlanState`. C does
+/// `qual = (List *) expression_planner((Expr *) qual)` then
+/// `ExecInitQual(qual, NULL)`, in `estate->es_query_cxt`.
+///
+/// An empty qual (the C `NIL`) compiles to `None` (the always-true `NULL`
+/// ExprState) without touching the planner — the index-build path's
+/// non-partial-index case. A non-empty qual reaches `expression_planner`
+/// (optimizer/planner.c, unported, no reachable owner seam) and loud-panics
+/// there, mirror-PG-and-panic; the `ExecInitQual` compile that would follow is
+/// [`exec_init_qual`]'s own logic.
+pub fn exec_prepare_qual<'mcx>(
+    qual: Option<&[Expr]>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
+    // exec_init_qual allocates in estate.es_query_cxt.
+    match qual {
+        None => return Ok(None),
+        Some(q) if q.is_empty() => return Ok(None),
+        Some(_) => {}
+    }
+
+    // qual = (List *) expression_planner((Expr *) qual);
+    //
+    // expression_planner() (optimizer/planner.c) const-folds / inlines the
+    // standalone qual before compilation. It is unported and has no reachable
+    // owner seam; per mirror-PG-and-panic, a non-empty qual loud-panics naming
+    // that owner. (Non-partial index builds pass NIL and never reach here.)
+    panic!(
+        "execExpr-core: ExecPrepareQual needs expression_planner (optimizer/planner.c, \
+         unported — no reachable owner seam) for a non-empty qual; the ExecInitQual(qual, NULL) \
+         compile that follows it is exec_init_qual's own logic. Partial-index predicates are \
+         blocked on the planner; non-partial index builds (NIL predicate) work."
+    );
+}
+
 /// `ExecInitExprList(nodes, parent)` (execExpr.c).
 pub fn exec_init_expr_list<'mcx>(
     nodes: &[Option<&Expr>],

@@ -242,6 +242,7 @@ fn make_rel(mcx: Mcx<'_>, oid: Oid, relkind: u8) -> Relation<'_> {
         rd_indoption: mcx::PgVec::new_in(mcx),
         rd_indcollation: mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
+        pgstat_enabled: false,
     };
     Relation::open(data, Some(rel_closer))
 }

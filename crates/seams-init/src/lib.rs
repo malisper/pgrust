@@ -75,6 +75,7 @@ pub fn init_all() {
     backend_backup_sink::init_seams();
     backend_bootstrap_bootstrap::init_seams();
     backend_catalog_catalog::init_seams();
+    backend_catalog_storage::init_seams();
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
@@ -85,6 +86,7 @@ pub fn init_all() {
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_enum::init_seams();
+    backend_catalog_pg_inherits::init_seams();
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
@@ -166,7 +168,10 @@ pub fn init_all() {
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
     backend_nodes_equalfuncs::init_seams();
+    backend_nodes_outfuncs::init_seams();
+    backend_nodes_readfuncs::init_seams();
     backend_access_hash_core::init_seams();
+    backend_access_hashfunc::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
     backend_optimizer_path_allpaths::init_seams();
@@ -285,6 +290,7 @@ pub fn init_all() {
     backend_utils_adt_char::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_geo_ops::init_seams();
+    backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numeric::init_seams();
@@ -916,26 +922,18 @@ mod recurrence_guard {
         // retired: heapam_handler.c (core stage) + tableamapi.c::GetTableAmRoutine
         // are ported in backend-access-heap-heapam-handler-core, which installs all
         // four provider-facing seams from its init_seams().)
-        // DESIGN_DEBT (TD-INDEXBUILDSCAN): provider-unported.
-        // `table_index_build_scan` (tableam.h) dispatches to the heap AM's
-        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`).
-        // hashbuild / hashbuildempty call it; it becomes a real install once
-        // heapam_handler.c lands. See DESIGN_DEBT.md.
-        ("backend_access_table_tableam", "table_index_build_scan"),
-        // DESIGN_DEBT (TD-INDEXBUILDSCAN, cont.): provider-unported.
-        // `table_index_build_range_scan` (tableam.h) dispatches to the heap AM's
-        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`) — the
-        // parallel of `table_index_build_scan` above. brin (brininsert/bringetbitmap
-        // summarization, backend-access-brin-insert-vacuum) calls it; it becomes a
-        // real install once heapam_handler.c lands. It is deliberately NOT a tuple
-        // entry here: the brin consumer imports the seam fn directly
-        // (`use ...::table_index_build_range_scan;` then
-        // `table_index_build_range_scan::call(...)`), so the recurrence guard's
-        // call-site scanner reads the leading ident as the FN (lib resolves to the
-        // fn name), never attributing the call to the tableam-seams crate — the
-        // guard therefore never "fires" on it, and a tuple entry would be reported
-        // STALE. Tracked here + in DESIGN_DEBT.md as known bookkeeping; pay down
-        // with heapam_handler.c alongside `table_index_build_scan`.
+        // (Both serial index-build heap-scan seams are now INSTALLED by
+        // backend-access-heap-heapam-handler-core (build_scan) on the canonical,
+        // fully-typed contract (mcx + execnodes::IndexInfo<'mcx> + canonical
+        // Datum): `table_index_build_range_scan` -> heapam_index_build_range_scan
+        // (brinsummarize reaches it via build_index_info), and the whole-relation
+        // `table_index_build_scan` -> the same provider over the entire relation.
+        // The IndexInfo-through-ambuild keystone re-signed all the AM serial
+        // build drivers to carry the real `execnodes::IndexInfo` + mcx, so the
+        // `table_index_build_scan` allowlist entry is retired. The brin consumer
+        // imports the range-scan seam fn directly so the recurrence guard's
+        // call-site scanner never attributed that call to the tableam-seams
+        // crate; it was never a tuple entry and needs none.)
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the

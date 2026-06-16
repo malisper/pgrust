@@ -1,0 +1,40 @@
+[package]
+name = "backend-utils-sort-tuplesort"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_sort_tuplesort"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-slot = { path = "../types-slot" }
+types-sortsupport = { path = "../types-sortsupport" }
+mcx = { path = "../mcx" }
+# Direct dependency on the now-landed real LogicalTapeSet engine (logtape.c).
+# `backend-utils-sort-storage` does NOT depend on tuplesort, so this edge is
+# acyclic; tuplesort calls `logtape::*` directly (no new tape seams needed).
+backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+# Re-exports the `LogicalTapeSet` / `LogicalTape` vocabulary types (the owner
+# `backend-utils-sort-storage` implements the ops over them).
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+# The sort-support comparator-invocation seams (ApplySortComparator etc.).
+backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
+# MinimalTuple flat-blob codec (writetup_heap/readtup_heap byte serialization +
+# heap_deform_minimal_tuple_flat for the readtup_heap datum1 re-extraction).
+# This crate does NOT depend on sort-storage/tuplesort, so the edge is acyclic.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+
+[dev-dependencies]
+# An in-memory BufFile provider for the external-merge tape tests (a leaf-crate
+# test binary cannot install the workspace's real buffile/fd seams).
+backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
+types-storage = { path = "../types-storage" }

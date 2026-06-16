@@ -82,6 +82,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_indoption: mcx::PgVec::new_in(mcx),
         rd_indcollation: mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
+        pgstat_enabled: false,
     };
     Relation::open(data, None)
 }
