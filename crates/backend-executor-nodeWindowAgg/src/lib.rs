@@ -42,6 +42,7 @@
 // so the dependency is omitted until that boundary lands.
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
+use backend_executor_execGrouping_seams as execGrouping;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
@@ -2043,23 +2044,34 @@ pub fn ExecInitWindowAgg<'mcx>(
 
     // Set up data for comparing tuples.
     if wnode.partNumCols > 0 {
-        // execTuplesMatchPrepare(scanDesc, partNumCols, partColIdx,
-        //                        partOperators, partCollations, &ps)
-        //
-        // execTuplesMatchPrepare lives in execGrouping.c, which has no seam
-        // here; the equality-ExprState compile is genuinely cross-crate.
-        panic!(
-            "backend-executor-nodeWindowAgg::ExecInitWindowAgg: \
-             execTuplesMatchPrepare (partition equality) is owned by the \
-             not-yet-ported executor/execGrouping unit; no seam exists yet"
-        );
+        // winstate->partEqfunction =
+        //     execTuplesMatchPrepare(scanDesc, node->partNumCols,
+        //                            node->partColIdx, node->partOperators,
+        //                            node->partCollations, &winstate->ss.ps);
+        winstate.partEqfunction = execGrouping::exec_tuples_match_prepare::call(
+            clone_desc(&scanDesc, mcx)?,
+            wnode.partNumCols,
+            wnode.partColIdx.as_ref().expect("partColIdx not set"),
+            wnode.partOperators.as_ref().expect("partOperators not set"),
+            wnode.partCollations.as_ref().expect("partCollations not set"),
+            &mut winstate.ss.ps,
+            estate,
+        )?;
     }
     if wnode.ordNumCols > 0 {
-        panic!(
-            "backend-executor-nodeWindowAgg::ExecInitWindowAgg: \
-             execTuplesMatchPrepare (ordering equality) is owned by the \
-             not-yet-ported executor/execGrouping unit; no seam exists yet"
-        );
+        // winstate->ordEqfunction =
+        //     execTuplesMatchPrepare(scanDesc, node->ordNumCols,
+        //                            node->ordColIdx, node->ordOperators,
+        //                            node->ordCollations, &winstate->ss.ps);
+        winstate.ordEqfunction = execGrouping::exec_tuples_match_prepare::call(
+            clone_desc(&scanDesc, mcx)?,
+            wnode.ordNumCols,
+            wnode.ordColIdx.as_ref().expect("ordColIdx not set"),
+            wnode.ordOperators.as_ref().expect("ordOperators not set"),
+            wnode.ordCollations.as_ref().expect("ordCollations not set"),
+            &mut winstate.ss.ps,
+            estate,
+        )?;
     }
 
     // WindowAgg nodes use aggvalues and aggnulls like Agg nodes.
