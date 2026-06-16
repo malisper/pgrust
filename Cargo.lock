@@ -5735,6 +5735,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-variable"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogprefetcher",
+ "backend-commands-variable-seams",
+ "backend-libpq-pqcomm",
+ "backend-postmaster-syslogger",
+ "backend-timezone-localtime",
+ "backend-timezone-pgtz",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr",
+ "common-encnames-seams",
+ "common-path-seams",
+ "common-string",
+ "mcx",
+ "state-pgtz",
+ "types-core",
+ "types-datetime",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
+name = "backend-commands-variable-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-common-exec-seams"
 version = "0.0.0"
 dependencies = [
@@ -12877,6 +12923,7 @@ dependencies = [
 name = "backend-utils-adt-array-more-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-tsvector-ext-seams",
  "mcx",
  "seam-core",
  "types-error",
@@ -13760,10 +13807,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-tsvector-core"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-array-more-seams",
+ "backend-utils-adt-ts-small",
+ "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-adt-tsvector-ext-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-stringinfo",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-utils-adt-tsvector-core-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-tsvector-ext-seams"
+version = "0.0.0"
+dependencies = [
  "seam-core",
  "types-error",
  "types-tsearch",
@@ -16148,6 +16224,7 @@ dependencies = [
  "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-trigger",
+ "backend-commands-variable",
  "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
@@ -16338,6 +16415,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
  "backend-utils-cache-attoptcache",

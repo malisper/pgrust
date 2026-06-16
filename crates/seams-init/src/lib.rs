@@ -98,6 +98,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
@@ -309,6 +310,7 @@ pub fn init_all() {
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
+    backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();
     backend_utils_adt_version::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
