@@ -747,3 +747,62 @@ seam_core::seam!(
         slot: types_nodes::SlotId,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+// ===========================================================================
+// Standalone-slot forms (a slot made by `MakeSingleTupleTableSlot`, held as a
+// payload-bearing `SlotData` outside `es_tupleTable`). The incremental-sort
+// node's `group_pivot` / `transfer_tuple` slots are standalone, so these forms
+// take `&mut SlotData` directly instead of an `es_tupleTable` `SlotId`.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h) for a standalone
+    /// [`SlotData`]: fetch a regular attribute as `(datum, isnull)`, deforming
+    /// up to `attnum` first. Mutably borrows the slot (deforming populates
+    /// `tts_values`/`tts_isnull`); detoast can allocate, so fallible. The
+    /// pool-`SlotId` form is [`slot_getattr`].
+    pub fn slot_getattr_standalone<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::SlotData<'mcx>,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        bool,
+    )>
+);
+
+seam_core::seam!(
+    /// `ExecClearTuple(slot)` (tuptable.h) for a standalone [`SlotData`]: clear
+    /// the slot's stored tuple (releasing any held resources). Clearing can
+    /// release a buffer pin whose bookkeeping can `elog(ERROR)`, carried on
+    /// `Err`. The pool-`SlotId` form is [`exec_clear_tuple`].
+    pub fn exec_clear_tuple_standalone<'mcx>(
+        slot: &mut types_nodes::SlotData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h) with BOTH slots standalone
+    /// [`SlotData`]s (the incremental-sort `ExecCopySlot(group_pivot,
+    /// transfer_tuple)`): copy the source slot's tuple into the destination.
+    /// Copies the tuple, fallible on OOM. The pool-`SlotId` form is
+    /// [`exec_copy_slot`].
+    pub fn exec_copy_slot_standalone<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        dstslot: &mut types_nodes::SlotData<'mcx>,
+        srcslot: &mut types_nodes::SlotData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h) where `dstslot` is a
+    /// standalone [`SlotData`] and `srcslot` is an `es_tupleTable` pool slot
+    /// (the incremental-sort `ExecCopySlot(group_pivot, outer_result_slot)`):
+    /// copy the pool source slot's tuple into the standalone destination.
+    /// Copies the tuple, fallible on OOM.
+    pub fn exec_copy_pool_slot_into_standalone<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        dstslot: &mut types_nodes::SlotData<'mcx>,
+        srcslot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);

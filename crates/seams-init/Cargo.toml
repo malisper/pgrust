@@ -200,6 +200,7 @@ backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncrementalSort" }
 backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }

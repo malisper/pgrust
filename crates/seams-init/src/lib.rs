@@ -202,6 +202,7 @@ pub fn init_all() {
     backend_executor_nodeSetOp::init_seams();
     backend_executor_nodeSubqueryscan::init_seams();
     backend_executor_nodeSort::init_seams();
+    backend_executor_nodeIncrementalSort::init_seams();
     backend_executor_nodeSubplan::init_seams();
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();

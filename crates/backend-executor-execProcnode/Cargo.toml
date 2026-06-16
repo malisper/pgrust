@@ -37,6 +37,7 @@ backend-executor-nodeGather = { path = "../backend-executor-nodeGather" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncrementalSort" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
