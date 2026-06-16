@@ -14,27 +14,33 @@
 //! unported, so those seams panic until they land — mirror-PG-and-panic). The
 //! 16 C functions (5 extern + 11 static) are all present.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use backend_utils_error::ereport;
-use mcx::{Mcx, PgString, PgVec};
+use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use backend_commands_matview_deps_seams as seam;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
+use types_core::xact::CommandId;
+use types_dest::CommandDest;
 use types_error::{
     PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use types_matview::{
-    CommandTag, DestReceiverHandle, IndexUsabilityInfo, QueryCompletion, QueryHandle,
-    RefreshMatViewStmt, TupleDescHandle, TupleSlotHandle,
+    CommandTag, IndexUsabilityInfo, QueryCompletion, QueryHandle, RefreshMatViewStmt,
 };
+use types_nodes::nodes::CmdType;
+use types_nodes::parsestmt::DestReceiverHandle;
+use types_nodes::tuptable::SlotData;
+use types_rel::Relation;
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock,
 };
+use types_tableam::tableam::BulkInsertStateData;
 use types_tuple::access::{RELKIND_MATVIEW, RELPERSISTENCE_TEMP};
-use types_tuple::heaptuple::MaxHeapAttributeNumber;
+use types_tuple::heaptuple::{MaxHeapAttributeNumber, TupleDescData};
 
 /// `RelationRelationId` — `pg_class` OID (`catalog/pg_class.h`).
 const RelationRelationId: Oid = 1259;
@@ -46,6 +52,11 @@ const RELKIND_MATVIEW_I8: i8 = RELKIND_MATVIEW as i8;
 /// (`miscadmin.h`).
 const SECURITY_RESTRICTED_OPERATION: i32 = 0x2;
 const SECURITY_LOCAL_USERID_CHANGE: i32 = 0x1;
+
+/// `TABLE_INSERT_SKIP_FSM` / `TABLE_INSERT_FROZEN` (`access/tableam.h`) — the
+/// `ti_options` `transientrel_startup` sets (matview.c 499).
+const TABLE_INSERT_SKIP_FSM: i32 = 0x0002;
+const TABLE_INSERT_FROZEN: i32 = 0x0004;
 
 /* SPI result codes (`executor/spi.h`). */
 const SPI_OK_SELECT: i32 = 5;
@@ -334,7 +345,7 @@ pub fn RefreshMatViewByOid(
 
     /* Generate the data, if wanted. */
     if !skipData {
-        let dest = seam::create_transient_rel_dest_receiver::call(OIDNewHeap)?;
+        let dest = CreateTransientRelDestReceiver(OIDNewHeap)?;
         processed = refresh_matview_datafill(mcx, dest, dataQuery, query_string, is_create)?;
     }
 
@@ -455,6 +466,17 @@ fn refresh_matview_datafill(
     /* Create a QueryDesc, redirecting output to our tuple receiver */
     let queryDesc = seam::create_query_desc::call(plan, query_string.to_string(), dest)?;
 
+    /*
+     * Bind the run-scoped DR_transientrel state for the executor run. C's
+     * `CreateTransientRelDestReceiver` `palloc0`s the receiver and its private
+     * fields are filled in `transientrel_startup`; the owned model has no
+     * per-query arena at receiver-creation time, so the run owner allocates the
+     * state here (carrying the receiver's `transientoid`) and binds it to the
+     * receiver token for the duration of the run. `transientrel_startup` then
+     * opens the relation and fills the rest, exactly as C does.
+     */
+    receiver_setup_run(dest.0, mcx)?;
+
     /* call ExecutorStart to prepare the plan for execution */
     seam::executor_start::call(queryDesc)?;
 
@@ -471,30 +493,210 @@ fn refresh_matview_datafill(
     Ok(processed)
 }
 
+// ===========================================================================
+// DR_transientrel state + per-backend receiver registry (matview.c 58-66)
+// ===========================================================================
+//
+// matview.c's `DR_transientrel` is `palloc0`'d by `CreateTransientRelDestReceiver`
+// and downcast (`(DR_transientrel *) self`) inside each callback. The owned model
+// mirrors `createas.c`'s `DR_intorel`: a per-backend registry keyed by the
+// router's `state` token holds the run-bound private fields, registered into the
+// `backend-tcop-dest` value-router (the executor's dest dispatch).
+
+/// The private `DR_transientrel` fields `transientrel_startup` fills and the
+/// later callbacks consume (matview.c 58-66). `'mcx`-bound because `transientrel`
+/// (an open relcache handle from `table_open`) and `bistate` live in the
+/// per-query arena.
+struct TransientRelStateData<'mcx> {
+    /// `Oid transientoid` — the OID of the transient heap, set at receiver
+    /// creation and read by `transientrel_startup`'s `table_open`.
+    transientoid: Oid,
+    /// `Relation transientrel` — the open transient relation (`None` until
+    /// startup / once closed).
+    transientrel: Option<Relation<'mcx>>,
+    /// `CommandId output_cid` — cmin to stamp on inserted tuples.
+    output_cid: CommandId,
+    /// `int ti_options` — `table_tuple_insert` performance options.
+    ti_options: i32,
+    /// `BulkInsertState bistate` — bulk-insert state (`None` until startup).
+    bistate: Option<PgBox<'mcx, BulkInsertStateData>>,
+}
+
+/// One registered `DR_transientrel` receiver. `transientoid` is set at receiver
+/// creation (the C `self->transientoid = transientoid`); `state` is the raw
+/// pointer to the `'mcx`-bound [`TransientRelStateData`] bound for the run.
+struct ReceiverSlot {
+    /// `((DR_transientrel *) self)->transientoid` — the transient heap OID the
+    /// receiver was created for. Threaded into the run-bound state at startup.
+    transientoid: Oid,
+    /// Raw pointer to the live [`TransientRelStateData`] (set by
+    /// `transientrel_startup`, cleared by `transientrel_shutdown`). Null when no
+    /// run is in progress.
+    state: *mut (),
+}
+
+thread_local! {
+    static RECEIVERS: RefCell<Vec<Option<ReceiverSlot>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Allocate a fresh receiver slot carrying `transientoid` (1-based token; 0 is
+/// never handed out).
+fn receiver_register(transientoid: Oid) -> u64 {
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        reg.push(Some(ReceiverSlot {
+            transientoid,
+            state: core::ptr::null_mut(),
+        }));
+        reg.len() as u64
+    })
+}
+
+/// Read the `transientoid` the receiver was created for.
+fn receiver_transientoid(token: u64) -> Oid {
+    RECEIVERS.with(|r| {
+        let reg = r.borrow();
+        reg.get((token - 1) as usize)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.transientoid)
+            .unwrap_or_default()
+    })
+}
+
+/// Bind the live `TransientRelStateData` pointer to a receiver token for the run.
+fn receiver_bind(token: u64, state: *mut ()) {
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        if let Some(Some(slot)) = reg.get_mut((token - 1) as usize) {
+            slot.state = state;
+        }
+    });
+}
+
+/// Clear the bound state pointer after the run (the C `pfree(self)` invalidation).
+fn receiver_unbind(token: u64) {
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        if let Some(Some(slot)) = reg.get_mut((token - 1) as usize) {
+            slot.state = core::ptr::null_mut();
+        }
+    });
+}
+
+/// Recover the live `TransientRelStateData` for a bound receiver token (the C
+/// `(DR_transientrel *) self`).
+///
+/// SAFETY: the pointer is the arena-allocated state `transientrel_startup` bound
+/// for the synchronous executor run; it is valid until `transientrel_shutdown`
+/// clears it.
+fn receiver_state<'mcx>(token: u64) -> &'mcx mut TransientRelStateData<'mcx> {
+    let ptr = RECEIVERS.with(|r| {
+        let reg = r.borrow();
+        reg.get((token - 1) as usize)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.state)
+            .unwrap_or(core::ptr::null_mut())
+    });
+    if ptr.is_null() {
+        panic!(
+            "backend-commands-matview: transientrel callback on an unbound \
+             DR_transientrel receiver"
+        );
+    }
+    unsafe { &mut *(ptr as *mut TransientRelStateData<'mcx>) }
+}
+
 // ---------------------------------------------------------------------------
 // CreateTransientRelDestReceiver (matview.c 464-477)
 // ---------------------------------------------------------------------------
 
 /// `CreateTransientRelDestReceiver` — allocate + wire the `DR_transientrel`
-/// receiver that bulk-loads regenerated data into the transient heap. The
-/// runtime owns the allocation and wires the publicly-known function pointers to
-/// the `transientrel_*` callbacks below.
+/// receiver that bulk-loads regenerated data into the transient heap, and
+/// register it into the `backend-tcop-dest` value-router (mirroring `createas.c`'s
+/// `CreateIntoRelDestReceiver`).
+///
+/// The C body `palloc0`s a `DR_transientrel`, wires its
+/// `receiveSlot`/`rStartup`/`rShutdown`/`rDestroy` to the `transientrel_*`
+/// callbacks with `mydest = DestTransientRel`, and stores `self->transientoid`.
+/// The owned model records `transientoid` on the receiver slot; the per-query
+/// `TransientRelStateData` is set up by `refresh_matview_datafill` (the run owner)
+/// before the executor invokes `transientrel_startup`.
 pub fn CreateTransientRelDestReceiver(transientoid: Oid) -> PgResult<DestReceiverHandle> {
-    seam::create_transient_rel_dest_receiver::call(transientoid)
+    let token = receiver_register(transientoid);
+    Ok(backend_tcop_dest::register_dest_receiver(
+        CommandDest::TransientRel,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: transientrel_startup,
+            receiveSlot: transientrel_receive,
+            rShutdown: transientrel_shutdown,
+        },
+        token,
+    ))
+}
+
+/// Set up the run-bound `TransientRelStateData` for a receiver: allocate it in
+/// the per-query arena (carrying the receiver's `transientoid`, with
+/// `transientrel`/`bistate` filled later by `transientrel_startup`), leak it to a
+/// stable `'mcx` reference (it lives for the query, as the C `palloc`'d
+/// `DR_transientrel` does), and bind its raw pointer to the receiver token for the
+/// duration of the run.
+///
+/// This is the owned-model stand-in for C's `CreateTransientRelDestReceiver`
+/// `palloc0`'ing the receiver: the receiver-creation site has no per-query arena,
+/// so the run owner (`refresh_matview_datafill`) threads the arena in here.
+fn receiver_setup_run<'mcx>(token: u64, mcx: Mcx<'mcx>) -> PgResult<()> {
+    let transientoid = receiver_transientoid(token);
+    let state = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        TransientRelStateData {
+            transientoid,
+            transientrel: None,
+            output_cid: 0,
+            ti_options: 0,
+            bistate: None,
+        },
+    )?);
+    receiver_bind(token, state as *mut TransientRelStateData<'mcx> as *mut ());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // transientrel_startup (matview.c 482-503)
 // ---------------------------------------------------------------------------
 
-/// `transientrel_startup` — executor startup for the transient-rel receiver
-/// (the `rStartup` callback). `operation`/`typeinfo` are unused by the C body.
-pub fn transientrel_startup(
-    dest: DestReceiverHandle,
-    _operation: i32,
-    _typeinfo: TupleDescHandle,
+/// `transientrel_startup` — executor startup for the transient-rel receiver (the
+/// `rStartup` callback). `operation`/`typeinfo` are unused by the C body.
+fn transientrel_startup<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    _operation: CmdType,
+    _typeinfo: &TupleDescData<'mcx>,
 ) -> PgResult<()> {
-    seam::transientrel_startup_impl::call(dest)
+    let st = receiver_state::<'mcx>(state);
+
+    /* Open the transient relation we are about to fill. */
+    let transientrel = backend_access_table_table::table_open(mcx, st.transientoid, NoLock)?;
+
+    /*
+     * Valid smgr_targblock implies something already wrote to the relation. This
+     * may be harmless, but this function hasn't planned for it.
+     *
+     * C: Assert(RelationGetTargetBlock(transientrel) == InvalidBlockNumber).
+     * `RelationGetTargetBlock` reads `rd_smgr->smgr_targblock`, which the trimmed
+     * relcache projection does not carry; the C check is a debug-only `Assert`
+     * (a no-op in release), so it is elided here — no logic depends on it.
+     */
+
+    st.transientrel = Some(transientrel);
+    st.output_cid = backend_access_transam_xact::GetCurrentCommandId(true)?;
+    st.ti_options = TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN;
+    st.bistate = Some(mcx::alloc_in(
+        mcx,
+        backend_access_heap_heapam::GetBulkInsertState()?,
+    )?);
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -503,9 +705,35 @@ pub fn transientrel_startup(
 
 /// `transientrel_receive` — receive one tuple (insert it into the transient
 /// heap); returns the C `true` (the `receiveSlot` callback).
-pub fn transientrel_receive(slot: TupleSlotHandle, dest: DestReceiverHandle) -> PgResult<bool> {
+fn transientrel_receive<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let st = receiver_state::<'mcx>(state);
+
+    /*
+     * Note that the input slot might not be of the type of the target relation.
+     * That's supported by table_tuple_insert(), but slightly less efficient than
+     * inserting with the right slot - but the alternative would be to copy into a
+     * slot of the right type, which would not be cheap either.
+     */
+    let rel = st
+        .transientrel
+        .as_ref()
+        .expect("transientrel_receive: DR_transientrel relation is open");
+    let bistate = st.bistate.as_deref_mut();
+    backend_access_table_tableam::table_tuple_insert(
+        mcx,
+        rel,
+        slot,
+        st.output_cid,
+        st.ti_options,
+        bistate,
+    )?;
+
     /* We know this is a newly created relation, so there are no indexes. */
-    seam::transientrel_receive_impl::call(dest, slot)
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -514,18 +742,56 @@ pub fn transientrel_receive(slot: TupleSlotHandle, dest: DestReceiverHandle) -> 
 
 /// `transientrel_shutdown` — executor end for the transient-rel receiver (the
 /// `rShutdown` callback).
-pub fn transientrel_shutdown(dest: DestReceiverHandle) -> PgResult<()> {
-    seam::transientrel_shutdown_impl::call(dest)
+fn transientrel_shutdown<'mcx>(mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
+    let _ = mcx;
+    let st = receiver_state::<'mcx>(state);
+
+    if let Some(bistate) = st.bistate.as_deref_mut() {
+        backend_access_heap_heapam::FreeBulkInsertState(bistate);
+    }
+
+    {
+        let rel = st
+            .transientrel
+            .as_ref()
+            .expect("transientrel_shutdown: DR_transientrel relation is open");
+        /*
+         * table_finish_bulk_insert(transientrel, ti_options): the heap AM's
+         * `finish_bulk_insert` vtable slot is not yet ported, so this stays on the
+         * frontier (mirror-PG-and-panic), matching `backend-commands-createas`.
+         */
+        seam::table_finish_bulk_insert::call(rel, st.ti_options)?;
+    }
+
+    /* close transientrel, but keep lock until commit */
+    if let Some(rel) = st.transientrel.take() {
+        backend_access_table_table::table_close(rel, NoLock)?;
+    }
+
+    /* myState->transientrel = NULL: release the run-bound state pointer. */
+    receiver_unbind(state);
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // transientrel_destroy (matview.c 553-557)
 // ---------------------------------------------------------------------------
 
-/// `transientrel_destroy` — release the DestReceiver object (the `rDestroy`
-/// callback).
-pub fn transientrel_destroy(dest: DestReceiverHandle) -> PgResult<()> {
-    seam::transientrel_destroy_impl::call(dest)
+/// `transientrel_destroy` — release the DestReceiver object (C: `pfree(self)`).
+///
+/// In the owned model the `DR_transientrel` is a [`ReceiverSlot`] in the
+/// per-backend registry plus the arena-allocated [`TransientRelStateData`]; the
+/// latter is freed when its query context resets (as the C `palloc` is), and the
+/// slot is a small fixed entry, so there is nothing to `pfree` here. The
+/// dest-router vtable does not carry `rDestroy` (it is the owner's teardown path;
+/// see `backend_tcop_dest`), so this is not wired into the vtable — it exists for
+/// C-function parity and to document the no-op (matching `createas.c`'s
+/// `intorel_destroy`).
+#[allow(dead_code)]
+fn transientrel_destroy(_self: DestReceiverHandle) {
+    /* pfree(self): the registry slot + arena state are reclaimed by context
+     * reset; nothing to free explicitly. */
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,9 +1271,10 @@ pub fn init_seams() {
         SetMatViewPopulatedState(ctx.mcx(), relation, newstate)
     });
     s::MatViewIncrementalMaintenanceIsEnabled::set(MatViewIncrementalMaintenanceIsEnabled);
-    s::CreateTransientRelDestReceiver::set(CreateTransientRelDestReceiver);
-    s::transientrel_startup::set(transientrel_startup);
-    s::transientrel_receive::set(transientrel_receive);
-    s::transientrel_shutdown::set(transientrel_shutdown);
-    s::transientrel_destroy::set(transientrel_destroy);
+
+    // The DR_transientrel receiver (CreateTransientRelDestReceiver +
+    // transientrel_startup/receive/shutdown/destroy) is owned in-crate and
+    // registered into the backend-tcop-dest value-router at receiver-creation
+    // time (see CreateTransientRelDestReceiver), mirroring createas's DR_intorel.
+    // It is not a cross-crate seam, so nothing is installed here for it.
 }
