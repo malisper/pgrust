@@ -2102,7 +2102,7 @@ pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
 /// `ColumnDef` nodes (the `(...)` after AS).
 pub fn DefineCompositeType<'mcx>(
     mcx: Mcx<'mcx>,
-    typevar: &types_nodes::rawnodes::RangeVar<'mcx>,
+    typevar: &mut types_nodes::rawnodes::RangeVar<'mcx>,
     coldeflist: &[Node],
 ) -> PgResult<ObjectAddress> {
     /*
