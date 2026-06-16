@@ -108,6 +108,7 @@ pub fn init_all() {
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_commands_seclabel::init_seams();
+    backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();

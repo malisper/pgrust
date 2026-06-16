@@ -4478,6 +4478,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-tablespace-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-storage"
 version = "0.0.0"
 dependencies = [
@@ -5467,6 +5481,56 @@ dependencies = [
  "types-error",
  "types-rel",
  "types-storage",
+]
+
+[[package]]
+name = "backend-commands-tablespace"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions",
+ "backend-access-transam-xact",
+ "backend-access-transam-xloginsert",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-catalog-pg-tablespace-seams",
+ "backend-commands-comment",
+ "backend-commands-seclabel",
+ "backend-commands-tablespace-globals-seams",
+ "backend-commands-tablespace-seams",
+ "backend-common-relpath",
+ "backend-postmaster-checkpointer-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-tblspc-fs-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-standby",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-commands-tablespace-globals-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -11177,6 +11241,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-tblspc-fs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-freespace"
 version = "0.0.0"
 dependencies = [
@@ -15924,6 +15996,7 @@ dependencies = [
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
  "backend-commands-seclabel",
+ "backend-commands-tablespace",
  "backend-commands-trigger",
  "backend-common-relpath",
  "backend-executor-execAmi",
