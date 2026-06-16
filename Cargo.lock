@@ -13888,6 +13888,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath-exec"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonpath",
+ "backend-utils-adt-jsonpath-exec-seams",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-regexp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
+ "types-jsonpath",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-exec-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonpath-gram-seams"
 version = "0.0.0"
 dependencies = [
