@@ -93,3 +93,61 @@ seam_core::seam!(
         seq: &types_nodes::ddlnodes::CreateSeqStmt<'_>,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );
+
+// ---------------------------------------------------------------------------
+// Generic ALTER dispatch targets driven by commands/alter.c (ExecRenameStmt /
+// ExecAlterObjectSchemaStmt / AlterObjectNamespace_oid).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `RenameRelation(RenameStmt *stmt)` (tablecmds.c) — ALTER TABLE/VIEW/...
+    /// RENAME TO. Returns the renamed relation's [`ObjectAddress`].
+    pub fn RenameRelation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `renameatt(RenameStmt *stmt)` (tablecmds.c) — ALTER ... RENAME COLUMN.
+    pub fn renameatt<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `RenameConstraint(RenameStmt *stmt)` (tablecmds.c) — ALTER ... RENAME
+    /// CONSTRAINT (for OBJECT_TABCONSTRAINT / OBJECT_DOMCONSTRAINT).
+    pub fn RenameConstraint<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `AlterTableNamespace(AlterObjectSchemaStmt *stmt, Oid *oldschema)`
+    /// (tablecmds.c) — ALTER TABLE/SEQUENCE/VIEW/... SET SCHEMA. When
+    /// `want_oldschema` is true the previous schema OID is returned in the
+    /// tuple's second slot (the C `*oldschema` out-parameter); otherwise that
+    /// slot is `InvalidOid`.
+    pub fn AlterTableNamespace<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::AlterObjectSchemaStmt,
+        want_oldschema: bool,
+    ) -> PgResult<(types_catalog::catalog_dependency::ObjectAddress, Oid)>
+);
+
+seam_core::seam!(
+    /// `AlterTableNamespaceInternal(Relation rel, Oid oldNspOid, Oid nspOid,
+    /// ObjectAddresses *objsMoved)` (tablecmds.c) — move an already-open
+    /// relation (and its dependent objects) to `nspOid`. Used by ALTER
+    /// EXTENSION SET SCHEMA via `AlterObjectNamespace_oid`.
+    pub fn AlterTableNamespaceInternal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        old_nsp_oid: Oid,
+        nsp_oid: Oid,
+        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    ) -> PgResult<()>
+);

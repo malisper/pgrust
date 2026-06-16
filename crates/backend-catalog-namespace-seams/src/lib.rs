@@ -30,6 +30,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `isAnyTempNamespace(namespaceId)` (namespace.c): is the namespace a
+    /// temporary-table namespace belonging to ANY backend (matches the
+    /// `pg_temp%` / `pg_toast_temp%` naming). May read `pg_namespace`.
+    /// Consumed by pg_publication.c's `check_publication_add_schema`.
+    pub fn is_any_temp_namespace<'mcx>(mcx: Mcx<'mcx>, namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
     /// text-search configuration given its possibly-qualified name list.
     /// With `missing_ok = false` a missing configuration raises

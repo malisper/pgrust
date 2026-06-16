@@ -422,3 +422,11 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn RemoveTriggerById(trigOid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `renametrig(RenameStmt *stmt)` (trigger.c) — ALTER TRIGGER ... RENAME TO.
+    pub fn renametrig<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
