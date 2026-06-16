@@ -4470,6 +4470,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-partition"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-next",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-partition-seams",
+ "backend-nodes-core",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-partition-seams"
 version = "0.0.0"
 dependencies = [
@@ -19476,6 +19508,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
+ "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
