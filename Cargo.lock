@@ -4119,6 +4119,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-catalog-data"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-relcache-seams",
+ "types-core",
+ "types-relcache-entry",
+]
+
+[[package]]
 name = "backend-catalog-aclchk"
 version = "0.0.0"
 dependencies = [
@@ -20809,6 +20818,7 @@ dependencies = [
  "backend-backup-zstd",
  "backend-bootstrap-bootparse",
  "backend-bootstrap-bootstrap",
+ "backend-bootstrap-catalog-data",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
  "backend-catalog-dependency",
