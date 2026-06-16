@@ -62,6 +62,19 @@ fn heap_drop_with_catalog_seam(relid: types_core::Oid) -> PgResult<()> {
     crate::heap_drop_with_catalog(ctx.mcx(), relid)
 }
 
+/// Seam body for `RemoveAttributeById(relid, attnum)` (dependency.c's
+/// `doDeletion` `OCLASS_CLASS` column arm). The inward seam carries no `mcx`.
+fn remove_attribute_by_id_seam(relid: types_core::Oid, attnum: i32) -> PgResult<()> {
+    let ctx = MemoryContext::new("RemoveAttributeById");
+    crate::RemoveAttributeById(ctx.mcx(), relid, attnum as types_core::AttrNumber)
+}
+
+/// Seam body for `RelationClearMissing(rel)` (the ALTER ... DROP DEFAULT path).
+fn relation_clear_missing_seam(rel: &types_rel::Relation<'_>) -> PgResult<()> {
+    let ctx = MemoryContext::new("RelationClearMissing");
+    crate::RelationClearMissing(ctx.mcx(), rel)
+}
+
 /// `init_seams()` — install the heap.c inward seams this crate owns. Wired into
 /// the workspace `seams-init` aggregator.
 pub fn init_seams() {
@@ -72,4 +85,20 @@ pub fn init_seams() {
     // they install without a wrapper.
     backend_catalog_heap_seams::heap_create::set(crate::heap_create);
     backend_catalog_heap_seams::InsertPgClassTuple::set(crate::create::InsertPgClassTuple);
+
+    // Attribute-mutate inward seams (dependency.c / ALTER paths). The bodies
+    // are real; their writable-pg_attribute-carrier sub-seams panic until that
+    // keystone lands (mirror-and-panic).
+    backend_catalog_heap_seams::RemoveAttributeById::set(remove_attribute_by_id_seam);
+    backend_catalog_heap_seams::relation_clear_missing::set(relation_clear_missing_seam);
+
+    // Constraint-cooker outward seams the tablecmds CREATE-TABLE path consumes
+    // (declared in `backend-commands-tablecmds-seams`, owned here). Signatures
+    // match exactly, so they install without a wrapper.
+    backend_commands_tablecmds_seams::add_relation_new_constraints::set(
+        crate::AddRelationNewConstraints,
+    );
+    backend_commands_tablecmds_seams::add_relation_not_null_constraints::set(
+        crate::AddRelationNotNullConstraints,
+    );
 }

@@ -126,6 +126,94 @@ seam_core::seam!(
 );
 
 /* ===========================================================================
+ * Constraint-cooker / attribute-mutate sub-seams: the catalog-write carriers
+ * the typed model has not yet assembled. `backend-catalog-heap` drives these
+ * from its real `SetRelationNumChecks` / `MergeWithExistingConstraint` /
+ * `RemoveAttributeById` / `RelationClearMissing` / `StoreAttrMissingVal`
+ * bodies; each panics loudly (mirror-and-panic) until the carrier lands.
+ * ========================================================================= */
+
+seam_core::seam!(
+    /// `SetRelationNumChecks`'s disk-store branch (heap.c): `table_open(
+    /// RelationRelationId, RowExclusiveLock)` + `SearchSysCacheCopy1(RELOID)` +
+    /// `relStruct->relchecks = numchecks` + `CatalogTupleUpdate` + `table_close`.
+    /// Blocked: the trimmed `PgClassForm` carries no `relchecks` field and the
+    /// typed catalog-write model exposes no pg_class relchecks-set carrier. The
+    /// caller has already read the current value and confirmed it differs from
+    /// `numchecks` (the `relchecks == numchecks` `CacheInvalidate` branch is
+    /// real in the caller). `Err` carries the heap-mutation `ereport(ERROR)`s.
+    pub fn set_relation_num_checks(relid: Oid, numchecks: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MergeWithExistingConstraint(rel, ccname, expr, ...)` (heap.c): the
+    /// `pg_constraint` lookup + conflict checks + `conislocal` / `coninhcount`
+    /// / `connoinherit` / `conenforced` field-update path. Blocked: needs a
+    /// `conbin` reader (`fastgetattr` + `stringToNode` + `equal`) and an
+    /// extended `pg_constraint` field-update carrier the typed catalog-write
+    /// model has not assembled. `expr` is passed pre-flattened as its
+    /// `nodeToString` image (`ccbin`) so the seam can compare against the
+    /// stored `conbin`. Returns `true` if merged (duplicate). `Err` carries the
+    /// conflict / mutation `ereport(ERROR)`s.
+    pub fn merge_with_existing_constraint(
+        relid: Oid,
+        ccname: &str,
+        ccbin: &str,
+        allow_merge: bool,
+        is_local: bool,
+        is_enforced: bool,
+        is_initially_valid: bool,
+        is_no_inherit: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `RemoveAttributeById`'s pg_attribute mutation (heap.c): `relation_open(
+    /// relid, AccessExclusiveLock)` + `table_open(AttributeRelationId,
+    /// RowExclusiveLock)` + `SearchSysCacheCopy2(ATTNUM)` + the GETSTRUCT field
+    /// mutations (`attisdropped = true`, `atttypid = 0`, `attnotnull = false`,
+    /// `attgenerated = 0`, rename to `........pg.dropped.N........`,
+    /// `atthasmissing = false`) + nulling `attmissingval` / `attstattarget` /
+    /// `attacl` / `attoptions` / `attfdwoptions` via `heap_modify_tuple` +
+    /// `CatalogTupleUpdate` + `table_close`. Holds the AccessExclusiveLock on
+    /// the owning relation until end of transaction (NoLock close). Blocked on
+    /// the writable full-row `ATTNUM` syscache copy + `pg_attribute`
+    /// `CatalogTupleUpdate` carrier. The `RemoveStatistics` half is real in the
+    /// caller. `Err` carries the heap-mutation `ereport(ERROR)`s.
+    pub fn remove_attribute_by_id_update(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationClearMissing`'s pg_attribute mutation (heap.c): `table_open(
+    /// AttributeRelationId, RowExclusiveLock)` + for each of the `natts`
+    /// columns `SearchSysCache2(ATTNUM)`, and where `atthasmissing` is set,
+    /// `heap_modify_tuple` clearing `atthasmissing` + nulling `attmissingval`
+    /// + `CatalogTupleUpdate` + `table_close`. Blocked on the writable full-row
+    /// `ATTNUM` syscache copy + `pg_attribute` `CatalogTupleUpdate` carrier.
+    /// `Err` carries the heap-mutation `ereport(ERROR)`s.
+    pub fn relation_clear_missing_update(relid: Oid, natts: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `StoreAttrMissingVal`'s pg_attribute mutation (heap.c): `table_open(
+    /// AttributeRelationId, RowExclusiveLock)` + `SearchSysCache2(ATTNUM)` +
+    /// `construct_array(&missingval, 1, atttypid, attlen, attbyval, attalign)` +
+    /// `heap_modify_tuple` setting `atthasmissing = true` + `attmissingval` +
+    /// `CatalogTupleUpdate` + `table_close`. Blocked on the writable full-row
+    /// `ATTNUM` syscache copy + `pg_attribute` `CatalogTupleUpdate` carrier (and
+    /// `construct_array`). `missingval` is the single by-value/by-ref element.
+    /// `Err` carries the heap-mutation `ereport(ERROR)`s.
+    pub fn store_attr_missing_val(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+        missingval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    ) -> PgResult<()>
+);
+
+/* ===========================================================================
  * Low-level relation-create seams `index_create` (catalog/index.c) calls
  * directly (it does NOT go through `heap_create_with_catalog`): `heap_create`
  * creates the uncataloged index relcache entry and `InsertPgClassTuple`
