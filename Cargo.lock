@@ -1267,6 +1267,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hashfunc"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-oid-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-access-hashvalidate"
 version = "0.0.0"
 dependencies = [
@@ -15412,6 +15428,7 @@ dependencies = [
  "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hash-xlog",
+ "backend-access-hashfunc",
  "backend-access-hashvalidate",
  "backend-access-heap-heapam",
  "backend-access-heap-heapam-handler-core",

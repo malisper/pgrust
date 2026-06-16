@@ -377,7 +377,12 @@ pub fn _hash_init<'mcx>(
     let item_width = maxalign_sizeof_index_tuple_data() as i32
         + crate::pagebytes::maxalign_data_width(data_width)
         + SIZEOF_ITEM_ID_DATA as i32; // line pointer
-    let mut ffactor = hash_get_target_page_usage(types_hash::hashpage::HASH_DEFAULT_FILLFACTOR) / item_width;
+    // HashGetTargetPageUsage(rel) = BLCKSZ * HashGetFillFactor(rel) / 100,
+    // where HashGetFillFactor reads the relation's fillfactor reloption
+    // (defaulting to HASH_DEFAULT_FILLFACTOR). (hash.h:281)
+    let mut ffactor = hash_get_target_page_usage(
+        rel.get_fillfactor(types_hash::hashpage::HASH_DEFAULT_FILLFACTOR),
+    ) / item_width;
     if ffactor < 10 {
         ffactor = 10;
     }
