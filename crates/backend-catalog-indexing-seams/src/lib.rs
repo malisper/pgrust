@@ -853,6 +853,73 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InsertRule`'s create branch (rewriteDefine.c:126-134): `rewriteObjectId
+    /// = GetNewOidWithIndex(rel, RewriteOidIndexId, Anum_pg_rewrite_oid)` +
+    /// `heap_form_tuple(rd_att, values, nulls)` + `CatalogTupleInsert(rel, tup)`
+    /// + `heap_freetuple`. The `ev_qual` / `ev_action` `pg_node_tree` columns
+    /// cross as their already-`nodeToString`'d text; `ev_enabled` is always
+    /// inserted `RULE_FIRES_ON_ORIGIN`. Returns the freshly allocated rule OID.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_rewrite<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        rulename: &str,
+        ev_class: Oid,
+        ev_type: u8,
+        is_instead: bool,
+        ev_qual: &str,
+        ev_action: &str,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `InsertRule`'s replace branch (rewriteDefine.c:99-123): `tup =
+    /// heap_modify_tuple(oldtup, rd_att, values, nulls, replaces)` with
+    /// `replaces[]` true only for `ev_type` / `is_instead` / `ev_qual` /
+    /// `ev_action`, then `CatalogTupleUpdate(rel, &tup->t_self, tup)`. The OID,
+    /// `rulename`, `ev_class` and `ev_enabled` are taken from `oldtup`. Returns
+    /// `((Form_pg_rewrite) GETSTRUCT(tup))->oid`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_rewrite<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        ev_type: u8,
+        is_instead: bool,
+        ev_qual: &str,
+        ev_action: &str,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `EnableDisableRule`'s in-place toggle (rewriteDefine.c:731-732):
+    /// `ruleform->ev_enabled = CharGetDatum(fires_when)` then
+    /// `CatalogTupleUpdate(rel, &ruletup->t_self, ruletup)`. Re-forms the row
+    /// from `oldtup` with only `ev_enabled` replaced and updates at
+    /// `oldtup->t_self`. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_rewrite_enabled<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        ev_enabled: u8,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RenameRewriteRule`'s in-place rename (rewriteDefine.c:848-850):
+    /// `namestrcpy(&(ruleform->rulename), newName)` then `CatalogTupleUpdate(
+    /// rel, &ruletup->t_self, ruletup)`. Re-forms the row from `oldtup` with
+    /// only `rulename` replaced and updates at `oldtup->t_self`. `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_rewrite_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        new_name: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CreateStatistics`'s tuple build + insert (commands/statscmds.c +
     /// catalog/indexing.c): `GetNewOidWithIndex(rel, StatisticExtOidIndexId,
     /// Anum_pg_statistic_ext_oid)` + the `values[]`/`nulls[]` fill — including
@@ -867,4 +934,40 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AggregateCreate`'s fresh-row path (pg_aggregate.c:730-731 +
+    /// catalog/indexing.c + heapam): `tup = heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)`. The `pg_aggregate` row has
+    /// no OID column — the key column `aggfnoid` is the pre-assigned `pg_proc` OID
+    /// carried in `row.form.aggfnoid`. The 20 fixed columns cross as
+    /// `row.form`; the two `CATALOG_VARLEN` `text` columns (`agginitval` /
+    /// `aggminitval`) are `row.agginitval` / `row.aggminitval`, each `None` ⇒
+    /// `nulls[Anum_pg_aggregate_* - 1] = true`. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_aggregate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AggregateCreate`'s REPLACE path (pg_aggregate.c:724-726 +
+    /// catalog/indexing.c + heapam): `tup = heap_modify_tuple(oldtup,
+    /// RelationGetDescr(rel), values, nulls, replaces)` + `CatalogTupleUpdate(rel,
+    /// &tup->t_self, tup)`. `oldtup` is the held `SearchSysCache1(AGGFNOID, procOid)`
+    /// tuple (supplying both the not-replaced columns and the `t_self` update
+    /// target); the replacement columns cross as `row`; `replaces` pins
+    /// `aggfnoid`/`aggkind`/`aggnumdirectargs` to the old tuple
+    /// (`replaces[..] = false`), every other column replaced. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_aggregate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
+        replaces: types_catalog::pg_aggregate::PgAggregateReplaces,
+    ) -> PgResult<()>
 );

@@ -556,6 +556,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` returning the held
+    /// `pg_aggregate` tuple (`AggregateCreate`'s REPLACE path,
+    /// pg_aggregate.c:690). Returns the owned [`FormedTuple`] copy (supplying the
+    /// not-replaced columns + the `t_self` update target for
+    /// `heap_modify_tuple`/`CatalogTupleUpdate`) together with the projected
+    /// [`AggRow`] (`oldagg->aggkind` / `oldagg->aggnumdirectargs`, which
+    /// `AggregateCreate` validates before the update). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid` ⇒ C falls through to the fresh-insert branch).
+    pub fn aggregate_tuple_by_fnoid<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<
+        Option<(
+            types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+            AggRow,
+        )>,
+    >
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(PROCOID, funcid)` projected to the [`FuncProcAttrs`]
     /// (`Form_pg_proc` `GETSTRUCT` scalars + the `SysCacheGetAttr` array
     /// columns `proallargtypes` / `proargmodes` / `proargnames` /
@@ -2444,4 +2464,36 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         acl_oid: Oid,
     ) -> PgResult<Option<Option<PgVec<'mcx, AclItem>>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(ev_class),
+    /// PointerGetDatum(rulename))` + `GETSTRUCT` (rewriteDefine.c). The
+    /// writable `pg_rewrite` tuple for `(ev_class, rulename)` plus its deformed
+    /// fixed columns (`oid`/`ev_class`/`ev_type`/`ev_enabled`/`is_instead`),
+    /// or `None` if no such rule exists (`!HeapTupleIsValid`). The whole tuple
+    /// crosses for the InsertRule replace branch's `heap_modify_tuple` and for
+    /// EnableDisableRule / RenameRewriteRule's in-place column update at
+    /// `ruletup->t_self`; the form serves the `ruleform->ev_class` /
+    /// `ev_enabled` / `ev_type` / `oid` reads. Can `ereport(ERROR)` (OOM on the
+    /// copy), carried on `Err`.
+    pub fn rule_tuple_by_relname<'mcx>(
+        mcx: Mcx<'mcx>,
+        ev_class: Oid,
+        rulename: &str,
+    ) -> PgResult<
+        Option<(
+            types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+            types_catalog::pg_rewrite::FormData_pg_rewrite,
+        )>,
+    >
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` + `GETSTRUCT`
+    /// (`relkind`, `relnamespace`) for `RangeVarCallbackForRenameRule`
+    /// (rewriteDefine.c:762-765). `Ok(None)` on a cache miss (the C
+    /// "concurrently dropped" fast return). Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn class_relkind_namespace(relid: Oid) -> PgResult<Option<(u8, Oid)>>
 );
