@@ -851,8 +851,51 @@ fn partitions_are_ordered(root: &PlannerInfo, rel: RelId) -> bool {
 }
 
 /// `get_cheapest_fractional_path(childrel, tuple_fraction)` (pathkeys.c).
-fn get_cheapest_fractional_path(root: &PlannerInfo, rel: RelId, tuple_fraction: f64) -> PathId {
-    crate::seams::get_cheapest_fractional_path::call(root, rel, tuple_fraction)
+///
+/// Find the cheapest path (by `compare_fractional_path_costs`) for retrieving
+/// `tuple_fraction` of `rel`'s rows. Mirrors `get_cheapest_fractional_path`:
+/// start from the cheapest-total path and replace it whenever a path is strictly
+/// cheaper for the requested fraction.
+pub(crate) fn get_cheapest_fractional_path(
+    root: &PlannerInfo,
+    rel: RelId,
+    tuple_fraction: f64,
+) -> PathId {
+    // C dereferences best_path->rows unconditionally, so the cheapest-total path
+    // is assumed present (the upper rel always has one by the time the planner
+    // picks a final path).
+    let mut best_path = root
+        .rel(rel)
+        .cheapest_total_path
+        .expect("get_cheapest_fractional_path: rel has no cheapest_total_path");
+
+    // If all tuples will be retrieved, just return the cheapest-total path.
+    if tuple_fraction <= 0.0 {
+        return best_path;
+    }
+
+    // Convert absolute # of tuples to a fraction; no need to clamp to 0..1.
+    let mut tuple_fraction = tuple_fraction;
+    if tuple_fraction >= 1.0 && root.path(best_path).base().rows > 0.0 {
+        tuple_fraction /= root.path(best_path).base().rows;
+    }
+
+    let cheapest_total = best_path;
+    for &path in &root.rel(rel).pathlist {
+        if path == cheapest_total
+            || pathnode::compare_fractional_path_costs::call(
+                root,
+                best_path,
+                path,
+                tuple_fraction,
+            ) <= 0
+        {
+            continue;
+        }
+        best_path = path;
+    }
+
+    best_path
 }
 
 /// `get_cheapest_parallel_safe_total_inner(childrel->pathlist)` (pathkeys.c).
