@@ -17,6 +17,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)` (amapi.c): look up the index
+    /// AM's `amhandler` from pg_am, call it, and return the full
+    /// `IndexAmRoutine` vtable by value (the C `pfree`s the returned struct
+    /// after reading it). Read by `catalog/index.c` `ConstructTupleDescriptor`
+    /// for `amroutine->amkeytype`. `Err` carries the C `cache lookup failed` /
+    /// `does not have a handler` validation.
+    pub fn get_index_am_routine_by_amid(
+        amoid: types_core::Oid,
+    ) -> types_error::PgResult<types_tableam::amapi::IndexAmRoutine>
+);
+
+seam_core::seam!(
     /// `GetIndexAmRoutine(amhandler)` (amapi.c): call the index AM's handler
     /// function (`OidFunctionCall0(amhandler)` returning an `IndexAmRoutine*`)
     /// and hand back the vtable for the relcache to cache in `rd_indam`. In C

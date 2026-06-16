@@ -4263,21 +4263,34 @@ dependencies = [
 name = "backend-catalog-index"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-index-amapi-seams",
+ "backend-access-table-table-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
+ "backend-catalog-heap-seams",
  "backend-catalog-index-seams",
+ "backend-catalog-indexing-seams",
  "backend-commands-matview-deps-seams",
+ "backend-nodes-core",
+ "backend-nodes-core-seams",
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-rewrite-rewritemanip-seams",
  "backend-utils-activity-backend-progress-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-misc-guc-seams",
  "mcx",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-nodes",
  "types-rel",
  "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]

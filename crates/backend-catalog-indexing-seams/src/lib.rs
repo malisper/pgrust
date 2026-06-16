@@ -245,6 +245,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AppendAttributeTuples(indexRelation, attopts, stattargets)`
+    /// (catalog/index.c): `table_open(AttributeRelationId, RowExclusiveLock)`,
+    /// `CatalogOpenIndexes`, `InsertPgAttributeTuples(pg_attribute,
+    /// RelationGetDescr(indexRelation), InvalidOid, attrs_extra, indstate)`,
+    /// `CatalogCloseIndexes`, `table_close`. The per-attribute `attoptions`
+    /// (`attopts[i]` as a reloptions text array) and `attstattarget`
+    /// (`stattargets[i]`, `None` ⇒ SQL NULL) overrides ride in optional parallel
+    /// arrays indexed by attno-1; `None` for the whole array == the C NULL
+    /// `attopts` / `stattargets` (the only shape the `index_create` call site
+    /// here passes). Delegated to the catalog-indexing / heap layer (which owns
+    /// `InsertPgAttributeTuples` and the index's stored `RelationGetDescr`); the
+    /// owner installs it from `init_seams()`. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn append_attribute_tuples<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: &types_rel::Relation<'mcx>,
+        attopts: Option<&[Option<std::vec::Vec<u8>>]>,
+        stattargets: Option<&[Option<i16>]>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(rel, OpfamilyOidIndexId, Anum_pg_opfamily_oid)` +
     /// `heap_form_tuple` + `CatalogTupleInsert` for one pg_opfamily row
     /// (opclasscmds.c `CreateOpFamily`): assign the row OID, form the tuple

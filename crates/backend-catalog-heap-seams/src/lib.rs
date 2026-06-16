@@ -175,6 +175,21 @@ pub struct PgClassWriteFields {
 }
 
 seam_core::seam!(
+    /// `CheckAttributeType(attname, atttypid, attcollation, containing_rowtypes,
+    /// flags)` (catalog/heap.c): verify a type is safe to store in a table /
+    /// index column (rejects pseudo-types such as anonymous `record`, walks
+    /// composite/array element types, checks collation derivability). As called
+    /// by `catalog/index.c` `ConstructTupleDescriptor` for an expression index
+    /// column: `containing_rowtypes = NIL`, `flags = 0`. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn check_attribute_type(
+        attname: &str,
+        atttypid: Oid,
+        attcollation: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heap_create(relname, relnamespace, reltablespace, relid, relfilenumber,
     /// accessmtd, tupDesc, relkind, relpersistence, shared_relation,
     /// mapped_relation, allow_system_table_mods, &relfrozenxid, &relminmxid,
