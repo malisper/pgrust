@@ -13700,6 +13700,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-name"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace-seams",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-sortsupport",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-network"
 version = "0.0.0"
 dependencies = [
