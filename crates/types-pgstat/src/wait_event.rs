@@ -296,6 +296,15 @@ pub const WAIT_EVENT_WAL_RECEIVER_WAIT_START: u32 = PG_WAIT_IPC + 54;
 /// `wait_event_names.txt`.
 pub const WAIT_EVENT_WAL_WRITE: u32 = PG_WAIT_IO + 80;
 
+/// `WAIT_EVENT_WAL_SUMMARY_READ` — "Waiting for a read from a WAL summary
+/// file." Index 76 of the IO section of `wait_event_names.txt` (it sorts
+/// between `WAL_SENDER_WRITE_DATA` and `WAL_SUMMARY_WRITE`).
+pub const WAIT_EVENT_WAL_SUMMARY_READ: u32 = PG_WAIT_IO + 76;
+
+/// `WAIT_EVENT_WAL_SUMMARY_WRITE` — "Waiting for a write to a WAL summary
+/// file." Index 77 of the IO section of `wait_event_names.txt`.
+pub const WAIT_EVENT_WAL_SUMMARY_WRITE: u32 = PG_WAIT_IO + 77;
+
 /// `WAIT_EVENT_LOGICAL_LAUNCHER_MAIN` — 9th entry (index 8) of the Activity
 /// section of `wait_event_names.txt` (ARCHIVER_MAIN, AUTOVACUUM_MAIN,
 /// BGWRITER_HIBERNATE, BGWRITER_MAIN, CHECKPOINTER_MAIN, CHECKPOINTER_SHUTDOWN,

@@ -77,6 +77,7 @@ backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
 backend-backup-basebackup-target = { path = "../backend-backup-basebackup-target" }
 backend-backup-server = { path = "../backend-backup-server" }
+backend-backup-walsummary = { path = "../backend-backup-walsummary" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-backup-sink-support = { path = "../backend-backup-sink-support" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }

@@ -587,6 +587,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `File PathNameOpenFile(const char *fileName, int fileFlags)` (fd.c) —
+    /// allocate a VFD and open the named file into it with the default file
+    /// mode. Returns the opened VFD on success; on an open failure it returns a
+    /// negative [`File`] (the C `< 0`) with `errno` set (retrievable via
+    /// [`last_errno`]) rather than `ereport`ing, exactly like C — the caller
+    /// inspects `errno` to decide whether to tolerate the failure or raise its
+    /// own `ereport`. `Err` is reserved for the VFD-allocation `ereport(ERROR)`.
+    pub fn path_name_open_file(file_name: &str, file_flags: i32)
+        -> types_error::PgResult<File>
+);
+
+seam_core::seam!(
+    /// `lstat(path, &statbuf)` returning the raw `st_mtime` (a `time_t`)
+    /// (walsummary.c `RemoveWalSummaryIfOlderThan`). `Ok(None)` mirrors C's
+    /// `errno == ENOENT` (the file does not exist); any other `lstat` failure
+    /// is the C `ereport(ERROR, errcode_for_file_access, "could not stat
+    /// file")`, carried on `Err`. The modification time is returned unconverted
+    /// (seconds since the epoch) so the caller can compare it against a
+    /// `time_t` cutoff exactly as the C does.
+    pub fn lstat_mtime(path: &str) -> types_error::PgResult<Option<i64>>
+);
+
+seam_core::seam!(
     /// `pg_mkdir_p(path, pg_dir_create_mode)` (`port/pgmkdirp.c`, reached via
     /// fd.c's directory helpers) — create the directory `path` and any missing
     /// parent directories. Returns `Ok(())` on success; on failure returns the
