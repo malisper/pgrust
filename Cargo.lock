@@ -9997,6 +9997,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-openssl",
+ "backend-libpq-be-secure-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-net",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-common"
 version = "0.0.0"
 dependencies = [
@@ -10019,6 +10038,30 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-openssl"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-common-seams",
+ "backend-libpq-be-secure-openssl-ffi-seams",
+ "backend-libpq-be-secure-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-net",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-openssl-ffi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -19691,7 +19734,9 @@ dependencies = [
  "backend-libpq-auth-scram",
  "backend-libpq-be-fsstubs",
  "backend-libpq-be-gssapi-common",
+ "backend-libpq-be-secure",
  "backend-libpq-be-secure-common",
+ "backend-libpq-be-secure-openssl",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",
