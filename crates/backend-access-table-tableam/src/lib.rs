@@ -357,7 +357,7 @@ pub fn table_beginscan_strat<'mcx>(
     relation: &Relation<'mcx>,
     snapshot: Snapshot,
     nkeys: i32,
-    key: mcx::PgVec<'mcx, ScanKeyData>,
+    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
     allow_strat: bool,
     allow_sync: bool,
 ) -> PgResult<TableScanDesc<'mcx>> {
@@ -376,7 +376,7 @@ pub fn table_beginscan_catalog<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
     nkeys: i32,
-    key: mcx::PgVec<'mcx, ScanKeyData>,
+    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags =
         SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
@@ -674,7 +674,7 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
 pub fn table_rescan<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    key: Option<&[ScanKeyData]>,
+    key: Option<&[ScanKeyData<'mcx>]>,
 ) -> PgResult<()> {
     let routine = am(&scan.rs_rd);
     (routine.scan_rescan)(mcx, scan, key, false, false, false, false)

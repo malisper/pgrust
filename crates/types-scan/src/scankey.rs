@@ -77,7 +77,7 @@ pub struct ScanKeyData<'mcx> {
     pub sk_subkeys: Option<alloc::vec::Vec<ScanKeyData<'mcx>>>,
 }
 
-impl ScanKeyData<'_> {
+impl<'mcx> ScanKeyData<'mcx> {
     pub fn empty() -> Self {
         Self {
             sk_flags: 0,
@@ -89,5 +89,35 @@ impl ScanKeyData<'_> {
             sk_argument: Datum::null(),
             sk_subkeys: None,
         }
+    }
+
+    /// Deep-clone this scan key (re-allocating its by-reference `sk_argument`
+    /// bytes, and any `sk_subkeys`, in `mcx`), relifetiming it to `'b`. Used by
+    /// the scan layers that copy a caller's `ScanKeyData` array into the scan's
+    /// own arena (`heap_beginscan`'s `rs_key`, `systable_beginscan`).
+    pub fn clone_in<'b>(
+        &self,
+        mcx: mcx::Mcx<'b>,
+    ) -> types_error::PgResult<ScanKeyData<'b>> {
+        let sk_subkeys = match &self.sk_subkeys {
+            None => None,
+            Some(subs) => {
+                let mut out = alloc::vec::Vec::with_capacity(subs.len());
+                for sub in subs {
+                    out.push(sub.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+        };
+        Ok(ScanKeyData {
+            sk_flags: self.sk_flags,
+            sk_attno: self.sk_attno,
+            sk_strategy: self.sk_strategy,
+            sk_subtype: self.sk_subtype,
+            sk_collation: self.sk_collation,
+            sk_func: self.sk_func,
+            sk_argument: self.sk_argument.clone_in(mcx)?,
+            sk_subkeys,
+        })
     }
 }
