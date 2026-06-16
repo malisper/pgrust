@@ -162,10 +162,10 @@ pub fn anyenum_in(_str: &str) -> PgResult<Datum> {
 
 /// `anyenum_out` (pseudotypes.c:197): `return enum_out(fcinfo)`.
 ///
-/// An `anyenum` value is a by-value enum OID; it crosses to the (unported)
-/// `enum.c` owner as that `Oid` via the scalar seam crate.
-pub fn anyenum_out<'mcx>(mcx: Mcx<'mcx>, enumval: Datum) -> PgResult<PgString<'mcx>> {
-    backend_utils_adt_scalar_seams::enum_out::call(mcx, enumval.as_oid())
+/// An `anyenum` value is a by-value enum OID; forward it to the real
+/// `enum.c` output function (direct dep, no cycle).
+pub fn anyenum_out(enumval: Datum) -> PgResult<alloc::string::String> {
+    backend_utils_adt_enum::enum_out(enumval.as_oid())
 }
 
 // ===========================================================================

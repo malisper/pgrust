@@ -28,8 +28,8 @@ backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetyp
 # range_out crosses a dependency cycle (rangetypes), so it is a seam.
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
 
-# enum_out: enum.c (unit backend-utils-adt-scalar) is unported; seam-and-panic.
-backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
+# enum_out: real enum.c port (direct dep, acyclic).
+backend-utils-adt-enum = { path = "../backend-utils-adt-enum" }
 
 [dev-dependencies]
 # Identity encoding-conversion mocks for the cstring recv/send ASCII paths.
