@@ -47,22 +47,19 @@
 //! `File`, builds the `ReadWalSummary` read-callback closure over the cursor,
 //! and hands it directly to the blkreftable owner's
 //! `common_blkreftable::create_block_ref_table_reader` (a plain pub fn — the C
-//! `CreateBlockRefTableReader`), which mints and returns the reader handle.
+//! `CreateBlockRefTableReader`), which returns the owned `BlockRefTableReader`.
 //! blkreftable assembles and raises its own corruption `ereport(ERROR)`
 //! (subsuming C's `ReportWalSummaryError`), keyed by the `error_filename` this
-//! owner passes. The matching `FileClose` is [`wal_summary_reader_file_close`];
-//! this owner records the open `File` keyed by the returned reader handle so
-//! that teardown can find and close it.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+//! owner passes. The seam returns `(BlockRefTableReader, File)`: the open `File`
+//! (a `Copy` VFD descriptor captured by the read callback) is threaded back by
+//! the caller to the matching `FileClose` ([`wal_summary_reader_file_close`]),
+//! so no side registry is needed.
 
 use mcx::{Mcx, PgVec};
 
 use backend_utils_error::ereport;
 use backend_utils_error::errno::sqlstate_for_file_access;
-use types_blkreftable::BlockRefTableReaderHandle;
+use types_blkreftable::BlockRefTableReader;
 use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
 use types_error::{ErrorLocation, PgError, PgResult, DEBUG2};
 use types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARY_READ, WAIT_EVENT_WAL_SUMMARY_WRITE};
@@ -92,13 +89,13 @@ fn loc(funcname: &str) -> ErrorLocation {
 }
 
 // ---------------------------------------------------------------------------
-// Per-reader WAL-summary I/O state.
+// WAL-summary I/O state.
 //
 // `WalSummaryIO { File file; off_t filepos; }` (backup/walsummary.h) — the
-// `read_callback_arg` for the block-reference-table reader. The reader struct
-// is blkreftable-owned and opaque (a `BlockRefTableReaderHandle`), so this
-// owner keeps the cursor in a registry keyed by that handle: the read / report
-// / close seams resolve the handle back to its `WalSummaryIO`.
+// write-path callback arg (`WriteWalSummary`'s `io->filepos += nbytes`). On the
+// read path the cursor is captured directly by the `ReadWalSummary` closure in
+// `wal_summary_create_reader` (the reader is an owned `BlockRefTableReader`, not
+// an opaque handle, so no side registry is needed).
 // ---------------------------------------------------------------------------
 
 /// `WalSummaryIO` (backup/walsummary.h).
@@ -108,12 +105,6 @@ struct WalSummaryIo {
     file: File,
     /// `io->filepos` — the read/write cursor advanced by each callback.
     filepos: i64,
-}
-
-/// Registry of live `WalSummaryIO` cursors keyed by reader handle.
-fn io_registry() -> &'static Mutex<HashMap<u64, WalSummaryIo>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<u64, WalSummaryIo>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +494,7 @@ fn list_comparator_for_wal_summary_files(ws1: &WalSummaryFile, ws2: &WalSummaryF
 fn wal_summary_create_reader<'mcx>(
     _mcx: Mcx<'mcx>,
     ws: WalSummaryFile,
-) -> PgResult<BlockRefTableReaderHandle> {
+) -> PgResult<(BlockRefTableReader, File)> {
     // io.filepos = 0;
     // io.file = OpenWalSummaryFile(&ws, false);
     let file = match open_wal_summary_file(&ws, false)? {
@@ -552,15 +543,11 @@ fn wal_summary_create_reader<'mcx>(
     //                                    FilePathName(io.file),
     //                                    ReportWalSummaryError, NULL);
     match blkreftable_owner::create_block_ref_table_reader(read_callback, error_filename) {
-        Ok(reader) => {
-            // Record the open File keyed by the reader handle so the matching
-            // FileClose teardown (wal_summary_reader_file_close) can close it.
-            io_registry()
-                .lock()
-                .unwrap()
-                .insert(reader.0, WalSummaryIo { file, filepos: 0 });
-            Ok(reader)
-        }
+        // Return the owned reader plus the open File (a Copy VFD descriptor):
+        // the reader's ReadWalSummary callback already captured a copy of `file`
+        // for its reads; the caller threads this returned `file` to the matching
+        // FileClose teardown (wal_summary_reader_file_close).
+        Ok(reader) => Ok((reader, file)),
         Err(e) => {
             // The reader was not constructed; close the file we opened so it
             // does not leak (the C path FileCloses on the error too).
@@ -573,12 +560,11 @@ fn wal_summary_create_reader<'mcx>(
 /// `wal_summary_reader_file_close` — the `pg_wal_summary_contents` reader
 /// teardown: after `DestroyBlockRefTableReader(reader)` (blkreftable-owned),
 /// `FileClose(io.file)` closes the WAL summary file the reader was reading. The
-/// open `File` lives in this owner's registry keyed by the reader handle.
-fn wal_summary_reader_file_close(reader: BlockRefTableReaderHandle) {
+/// open `File` is the one returned by [`wal_summary_create_reader`], threaded
+/// back by the caller.
+fn wal_summary_reader_file_close(file: File) {
     // FileClose(io.file);
-    if let Some(io) = io_registry().lock().unwrap().remove(&reader.0) {
-        fd::file_close::call(io.file);
-    }
+    fd::file_close::call(file);
 }
 
 // ---------------------------------------------------------------------------

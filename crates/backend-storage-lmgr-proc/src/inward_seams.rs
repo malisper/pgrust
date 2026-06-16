@@ -431,6 +431,44 @@ fn proc_is_regular_backend(procno: ProcNumber) -> bool {
     with_proc_by_number(procno, |p| p.isRegularBackend)
 }
 
+// ---- sync-rep PGPROC fields (syncrep.c wait queue) ----
+//
+// The SyncRepQueue heads live in `WalSndCtl` (walsender); these are only the
+// per-proc fields C touches: `syncRepState`, `waitLSN`, and the intrusive
+// `syncRepLinks` (pgprocno-indexed `proclist_node`, exactly like `lwWaitLink`).
+
+fn my_proc_sync_rep_state() -> i32 {
+    with_my_proc_ref(|p| p.syncRepState)
+}
+
+fn set_my_proc_sync_rep_state(state: i32) {
+    with_my_proc(|p| p.syncRepState = state);
+}
+
+fn set_proc_sync_rep_state(procno: ProcNumber, state: i32) {
+    with_proc_by_number(procno, |p| p.syncRepState = state);
+}
+
+fn my_proc_wait_lsn() -> XLogRecPtr {
+    with_my_proc_ref(|p| p.waitLSN)
+}
+
+fn set_my_proc_wait_lsn(lsn: XLogRecPtr) {
+    with_my_proc(|p| p.waitLSN = lsn);
+}
+
+fn proc_wait_lsn(procno: ProcNumber) -> XLogRecPtr {
+    with_proc_by_number(procno, |p| p.waitLSN)
+}
+
+fn proc_sync_rep_links(procno: ProcNumber) -> proclist_node {
+    with_proc_by_number(procno, |p| p.syncRepLinks)
+}
+
+fn set_proc_sync_rep_links(procno: ProcNumber, node: proclist_node) {
+    with_proc_by_number(procno, |p| p.syncRepLinks = node);
+}
+
 /// `XidCacheRemoveRunningXids`'s MyProc subxid-cache mutation (procarray.c).
 /// Removes each of `children` (then `xid`) from `MyProc->subxids.xids[]` via the
 /// C find-and-swap-with-last scan, decrementing both `MyProc->subxidStatus.count`
@@ -1006,4 +1044,14 @@ pub(crate) fn install() {
     seams::proc_global_semas::set(crate::proc_shmem::ProcGlobalSemas);
     seams::proc_global_shmem_size::set(|| Ok(crate::proc_shmem::ProcGlobalShmemSize()));
     seams::init_proc_global::set(crate::proc_shmem::InitProcGlobal);
+
+    // Sync-rep PGPROC fields (syncrep.c wait queue).
+    seams::my_proc_sync_rep_state::set(my_proc_sync_rep_state);
+    seams::set_my_proc_sync_rep_state::set(set_my_proc_sync_rep_state);
+    seams::set_proc_sync_rep_state::set(set_proc_sync_rep_state);
+    seams::my_proc_wait_lsn::set(my_proc_wait_lsn);
+    seams::set_my_proc_wait_lsn::set(set_my_proc_wait_lsn);
+    seams::proc_wait_lsn::set(proc_wait_lsn);
+    seams::proc_sync_rep_links::set(proc_sync_rep_links);
+    seams::set_proc_sync_rep_links::set(set_proc_sync_rep_links);
 }

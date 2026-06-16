@@ -50,3 +50,28 @@ seam_core::seam!(
     /// on-disk-external. `attr` is the verbatim varlena datum bytes.
     pub fn toast_chunk_id(attr: &[u8]) -> types_error::PgResult<Option<types_core::Oid>>
 );
+
+// ---------------------------------------------------------------------------
+// Extension for the `backend-utils-adt-array-typanalyze` unit
+// (`utils/adt/array_typanalyze.c`).
+//
+// `compute_array_stats` calls `toast_raw_datum_size(value)`
+// (array_typanalyze.c:327) on each sampled array value to skip arrays wider
+// than `ARRAY_WIDTH_THRESHOLD` after detoasting. This crosses into the detoast
+// owner; the owning unit installs it from its `init_seams()` when it lands,
+// until then a call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `toast_raw_datum_size(value)` (access/common/detoast.c): the *logical*
+    /// (decompressed, fully-detoasted) size in bytes of a varlena `Datum`,
+    /// including the varlena header. Unlike [`toast_datum_size`] (the physical
+    /// on-disk size), this reports what the value occupies once expanded, which
+    /// is what `compute_array_stats` compares against `ARRAY_WIDTH_THRESHOLD`.
+    /// `value` is the canonical `'mcx` value (a varlena array). `Err` carries
+    /// the toast-fetch `ereport(ERROR)` surface.
+    pub fn toast_raw_datum_size<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        value: types_tuple::Datum<'mcx>,
+    ) -> types_error::PgResult<i64>
+);

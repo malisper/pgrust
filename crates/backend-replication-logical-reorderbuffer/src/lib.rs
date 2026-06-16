@@ -117,24 +117,49 @@ pub enum ReorderBufferChangeType {
     Truncate,
 }
 
-/// Per-`action` payload of a [`ReorderBufferChange`] (the C anonymous `union`).
+/// `ReorderBufferTupleBuf` (reorderbuffer.h) — a decoded tuple owned by the
+/// reorder buffer.
 ///
-/// Only the variants exercised by the foundational family carry full data; the
-/// `tp` (tuple insert/update/delete) bodies cross via the change-replay family
-/// and are kept as their plain field set so the struct round-trips.
+/// In C this is `{ HeapTupleData tuple; Size alloc_tuple_size; HeapTupleHeaderData
+/// header; char data[FLEXIBLE_ARRAY_MEMBER]; }`: a self-contained allocation in
+/// the reorder buffer's own memory context (NOT the per-record decoding `'mcx`),
+/// into which `decode.c`'s `DecodeXLogTuple` `memcpy`s the WAL tuple bytes. The
+/// reorder buffer holds these across many WAL records and replays them later, so
+/// they outlive any single `'mcx` arena — hence an owned (`'static`) byte buffer
+/// rather than an `'mcx`-bound [`types_tuple::FormedTuple`]. The fixed
+/// `HeapTupleData` fields (`t_len`/`t_self`/`t_tableOid`) are carried explicitly;
+/// `tuple.t_data` points at the inline `data` block, modeled here as the owned
+/// `data` `Vec<u8>` (the full on-disk tuple image: header + nulls bitmap +
+/// user data).
+#[derive(Clone, Debug, Default)]
+pub struct ReorderBufferTupleBuf {
+    /// `tuple.t_len` — length of the tuple image in `data`.
+    pub t_len: u32,
+    /// `tuple.t_self` — item pointer (origin of the tuple).
+    pub t_self: ItemPointerData,
+    /// `tuple.t_tableOid` — table OID.
+    pub t_table_oid: types_core::Oid,
+    /// The contiguous tuple image (`header` + `data[]` in C): the
+    /// `HeapTupleHeaderData` bytes followed by the nulls bitmap and user-data
+    /// area, exactly as `DecodeXLogTuple` lays it out. Owned by the reorder
+    /// buffer.
+    pub data: Vec<u8>,
+}
+
+/// Per-`action` payload of a [`ReorderBufferChange`] (the C anonymous `union`).
 #[derive(Clone, Debug, Default)]
 pub enum ReorderBufferChangeData {
     /// No payload yet assigned.
     #[default]
     None,
-    /// `tp` — INSERT / UPDATE / DELETE / SPEC_INSERT.
+    /// `tp` — INSERT / UPDATE / DELETE / SPEC_INSERT. `oldtuple`/`newtuple` are
+    /// the decoded tuple images the reorder buffer owns (C: `HeapTuple` pointing
+    /// into a `ReorderBufferTupleBuf`).
     Tp {
         rlocator: RelFileLocator,
         clear_toast_afterwards: bool,
-        // The decoded HeapTuples are owned by the change-replay family; the
-        // foundational family never constructs them.
-        oldtuple: Option<()>,
-        newtuple: Option<()>,
+        oldtuple: Option<ReorderBufferTupleBuf>,
+        newtuple: Option<ReorderBufferTupleBuf>,
     },
     /// `truncate` — REORDER_BUFFER_CHANGE_TRUNCATE.
     Truncate {

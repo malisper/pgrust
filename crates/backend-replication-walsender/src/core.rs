@@ -307,8 +307,11 @@ pub struct WalSndSlot {
 #[repr(C)]
 pub struct WalSndCtlData {
     /// `dlist_head SyncRepQueue[NUM_SYNC_REP_WAIT_MODE]` — owned by syncrep.c;
-    /// stored here (the struct's owner) and reached by syncrep through seams.
-    pub SyncRepQueue: [types_storage::ilist::dlist_head; NUM_SYNC_REP_WAIT_MODE],
+    /// stored here (the struct's owner) and operated on by syncrep via the
+    /// `with_sync_rep_queue` accessor. Modeled as a `proclist_head` (pgprocno
+    /// head/tail) — the shmem-safe intrusive representation, exactly like the
+    /// LWLock/CV wait lists; the per-PGPROC links live in `syncRepLinks`.
+    pub SyncRepQueue: [types_storage::storage::proclist_head; NUM_SYNC_REP_WAIT_MODE],
     /// `XLogRecPtr lsn[NUM_SYNC_REP_WAIT_MODE]`.
     pub lsn: [XLogRecPtr; NUM_SYNC_REP_WAIT_MODE],
     /// `bits8 sync_standbys_status`.
@@ -389,6 +392,113 @@ pub fn slot_spin_acquire(slot: &WalSndSlot) {
 #[inline]
 pub fn slot_spin_release(slot: &WalSndSlot) {
     backend_storage_lmgr_s_lock::s_unlock(&slot.mutex);
+}
+
+/// Run `f` with mutable access to `WalSndCtl->SyncRepQueue[mode]` (a
+/// `proclist_head`). syncrep.c owns these queue heads but they are stored in
+/// this crate's shmem struct, so the queue operations reach them through here
+/// while holding `SyncRepLock`.
+#[inline]
+pub fn with_sync_rep_queue<R>(
+    mode: usize,
+    f: impl FnOnce(&mut types_storage::storage::proclist_head) -> R,
+) -> R {
+    f(&mut wal_snd_ctl_mut().SyncRepQueue[mode])
+}
+
+/// `WalSndCtl->lsn[mode]`.
+#[inline]
+pub fn ctl_lsn(mode: usize) -> XLogRecPtr {
+    wal_snd_ctl().lsn[mode]
+}
+
+/// `WalSndCtl->lsn[mode] = lsn`.
+#[inline]
+pub fn set_ctl_lsn(mode: usize, lsn: XLogRecPtr) {
+    wal_snd_ctl_mut().lsn[mode] = lsn;
+}
+
+/// `WalSndCtl->sync_standbys_status = status`.
+#[inline]
+pub fn set_ctl_sync_standbys_status(status: u8) {
+    wal_snd_ctl_mut().sync_standbys_status = status;
+}
+
+/// `am_cascading_walsender` — whether this walsender is cascading WAL to
+/// another standby (synchronous cascade replication is not allowed, so a
+/// cascading sender always gets priority zero).
+pub fn am_cascading_walsender() -> bool {
+    proc_get(|p| p.am_cascading_walsender)
+}
+
+/// `MyWalSnd->state` (under the slot mutex). `MyWalSnd` must be set.
+pub fn WalSndGetState() -> WalSndState {
+    let slot = walsnds_slot(crate::shmem_array::my_walsnd_index());
+    slot_spin_acquire(slot);
+    let s = slot.state;
+    slot_spin_release(slot);
+    s
+}
+
+/// `MyWalSnd->flush` (under the slot mutex). `MyWalSnd` must be set.
+pub fn WalSndGetFlush() -> XLogRecPtr {
+    let slot = walsnds_slot(crate::shmem_array::my_walsnd_index());
+    slot_spin_acquire(slot);
+    let f = slot.flush;
+    slot_spin_release(slot);
+    f
+}
+
+/// The fields `SyncRepGetCandidateStandbys` snapshots from `WalSndCtl->walsnds[i]`
+/// under the slot mutex (`SpinLockAcquire(&walsnd->mutex)` ... `SpinLockRelease`),
+/// plus whether the slot is `MyWalSnd`.
+#[derive(Clone, Copy, Debug)]
+pub struct WalSndCandidate {
+    pub pid: pid_t,
+    pub state: WalSndState,
+    pub write: XLogRecPtr,
+    pub flush: XLogRecPtr,
+    pub apply: XLogRecPtr,
+    pub sync_standby_priority: c_int,
+    pub is_me: bool,
+}
+
+/// Snapshot `WalSndCtl->walsnds[i]` under its spinlock for sync-standby
+/// candidate selection. `is_me` is `(&walsnds[i] == MyWalSnd)`.
+pub fn walsnd_candidate_snapshot(i: c_int) -> WalSndCandidate {
+    let slot = walsnds_slot(i);
+    slot_spin_acquire(slot);
+    let snap = WalSndCandidate {
+        pid: slot.pid,
+        state: slot.state,
+        write: slot.write,
+        flush: slot.flush,
+        apply: slot.apply,
+        sync_standby_priority: slot.sync_standby_priority,
+        is_me: crate::shmem_array::my_walsnd_is_set()
+            && i == crate::shmem_array::my_walsnd_index(),
+    };
+    slot_spin_release(slot);
+    snap
+}
+
+/// `MyWalSnd->sync_standby_priority` (under the slot mutex).
+pub fn my_sync_standby_priority() -> c_int {
+    let slot = walsnds_slot(crate::shmem_array::my_walsnd_index());
+    slot_spin_acquire(slot);
+    let p = slot.sync_standby_priority;
+    slot_spin_release(slot);
+    p
+}
+
+/// `SpinLockAcquire(&MyWalSnd->mutex); MyWalSnd->sync_standby_priority = prio;
+/// SpinLockRelease;` — `SyncRepInitConfig`'s priority publish.
+pub fn set_my_sync_standby_priority(prio: c_int) {
+    let idx = crate::shmem_array::my_walsnd_index();
+    let slot = walsnds_slot_mut(idx);
+    slot_spin_acquire(slot);
+    slot.sync_standby_priority = prio;
+    slot_spin_release(slot);
 }
 
 /// A `Size`-typed shmem accumulation total (kept as `Size`).

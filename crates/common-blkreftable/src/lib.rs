@@ -25,15 +25,19 @@
 //!
 //! # Repo reconciliation
 //!
-//! * The C `BlockRefTable *` and `BlockRefTableReader *` are opaque pointers.
-//!   Here the in-memory table and the reader live in process-global registries
-//!   (`thread_local!` like the other registry-token owners), named by the
-//!   [`BlockRefTableHandle`] / [`BlockRefTableReaderHandle`] tokens the consumers
-//!   already hold. This mirrors the C `palloc` into a long-lived memory context.
+//! * The C `BlockRefTable *` and `BlockRefTableReader *` are opaque pointers
+//!   palloc'd into a long-lived memory context. Here they are the genuine owned
+//!   [`BlockRefTable`] / [`BlockRefTableReader`] structs (defined in the
+//!   `types-blkreftable` carrier crate, the `blkreftable.h` equivalent): the
+//!   producer constructs them and the consumers thread them by `&` / `&mut`
+//!   exactly as C threads the `BlockRefTable *`. No process-global registry: the
+//!   table's lifetime is the caller's (the WAL summarizer's `SummarizeWAL`
+//!   invocation, or the `IncrementalBackupInfo`), and the reader's lifetime is
+//!   the per-summary-file read loop.
 //! * The C buffered I/O over `io_callback_fn` is preserved: the writer buffers
-//!   into a [`BlockRefTableBuffer`] and the consumer's [`write_block_ref_table`]
-//!   seam returns the fully serialized bytes (the backend would instead stream
-//!   them through its `WriteWalSummary` callback). The reader drives a boxed
+//!   into a `WriteBuffer` and the consumer's [`write_block_ref_table`] seam
+//!   returns the fully serialized bytes (the backend would instead stream them
+//!   through its `WriteWalSummary` callback). The reader drives a boxed
 //!   `read_callback` closure installed by the walsummary owner via
 //!   [`create_block_ref_table_reader`].
 //! * `hash_bytes` and `pg_comp_crc32c` are the primitives behind the C
@@ -41,15 +45,18 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
-use std::collections::HashMap;
 
 use mcx::{Mcx, PgVec};
-use types_blkreftable::{BlockRefTableHandle, BlockRefTableReaderHandle};
+use types_blkreftable::{
+    BlockRefTable, BlockRefTableEntry, BlockRefTableKey, BlockRefTableReader, ReadBuffer,
+};
+// Re-export the read-callback alias (defined in the carrier crate) as part of
+// this owner's public `create_block_ref_table_reader` API, so callers that only
+// depend on the owner can name it.
+pub use types_blkreftable::ReadCallback;
 use types_core::{
     uint16, uint32, BlockNumber, ForkNumber, InvalidBlockNumber, BITS_PER_BYTE,
 };
@@ -79,86 +86,34 @@ const BLOCKREFTABLE_MAGIC: u32 = 0x652b_137b;
 const SERIALIZED_ENTRY_LEN: usize = 24;
 
 // ---------------------------------------------------------------------------
-// Key / entry (blkreftable.c `BlockRefTableKey`, `struct BlockRefTableEntry`).
+// Key / entry helpers (blkreftable.c `BlockRefTableKey`, `struct
+// BlockRefTableEntry`). The structs themselves live in the `types-blkreftable`
+// carrier crate; the construction + raw-key logic lives here in the owner.
 // ---------------------------------------------------------------------------
 
-/// `typedef struct BlockRefTableKey { RelFileLocator rlocator; ForkNumber forknum; }`.
-///
-/// The C `SH_HASH_KEY` hashes `sizeof(BlockRefTableKey)` raw bytes and
-/// `SH_EQUAL` is a `memcmp`; we reproduce that exactly via the canonical
-/// 16-byte serialization below so the hash matches the C layout.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct BlockRefTableKey {
-    rlocator: RelFileLocator,
-    forknum: ForkNumber,
+/// The 16 raw key bytes the C `SH_HASH_KEY` hashes: `spcOid`, `dbOid`,
+/// `relNumber` (each a 4-byte `Oid`) then `forknum` (a 4-byte int), in C
+/// struct order with zero padding (`= {0}` in C ensures padding is zero;
+/// the layout has none).
+fn key_raw_bytes(key: &BlockRefTableKey) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&key.rlocator.spcOid.to_ne_bytes());
+    b[4..8].copy_from_slice(&key.rlocator.dbOid.to_ne_bytes());
+    b[8..12].copy_from_slice(&key.rlocator.relNumber.to_ne_bytes());
+    b[12..16].copy_from_slice(&(key.forknum as i32).to_ne_bytes());
+    b
 }
 
-impl BlockRefTableKey {
-    /// The 16 raw key bytes the C `SH_HASH_KEY` hashes: `spcOid`, `dbOid`,
-    /// `relNumber` (each a 4-byte `Oid`) then `forknum` (a 4-byte int), in C
-    /// struct order with zero padding (`= {0}` in C ensures padding is zero;
-    /// the layout has none).
-    fn raw_bytes(&self) -> [u8; 16] {
-        let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&self.rlocator.spcOid.to_ne_bytes());
-        b[4..8].copy_from_slice(&self.rlocator.dbOid.to_ne_bytes());
-        b[8..12].copy_from_slice(&self.rlocator.relNumber.to_ne_bytes());
-        b[12..16].copy_from_slice(&(self.forknum as i32).to_ne_bytes());
-        b
-    }
-}
-
-/// `struct BlockRefTableEntry` (blkreftable.c).
-///
-/// The three parallel arrays are kept exactly as in C. `chunk_data[c]` is the
-/// `uint16 *` chunk body; its allocated length is `chunk_size[c]` and the number
-/// of meaningful slots is `chunk_usage[c]` (`== MAX_ENTRIES_PER_CHUNK` means the
-/// chunk is a bitmap). `nchunks` is the common allocated length of the three
-/// arrays.
-#[derive(Clone, Debug)]
-pub struct BlockRefTableEntry {
-    key: BlockRefTableKey,
-    limit_block: BlockNumber,
-    nchunks: uint32,
-    chunk_size: Vec<uint16>,
-    chunk_usage: Vec<uint16>,
-    chunk_data: Vec<Vec<uint16>>,
-}
-
-impl BlockRefTableEntry {
-    /// A freshly inserted entry with no chunks (the `!found` arm of the C
-    /// insert helpers initializes exactly these fields).
-    fn empty(key: BlockRefTableKey, limit_block: BlockNumber) -> Self {
-        BlockRefTableEntry {
-            key,
-            limit_block,
-            nchunks: 0,
-            chunk_size: Vec::new(),
-            chunk_usage: Vec::new(),
-            chunk_data: Vec::new(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The in-memory table (`struct BlockRefTable`).
-// ---------------------------------------------------------------------------
-
-/// `struct BlockRefTable { blockreftable_hash *hash; MemoryContext mcxt; }`.
-///
-/// The simplehash over `BlockRefTableEntry` becomes a `HashMap` keyed by the
-/// raw key bytes (matching the C `memcmp` equality) carrying the entry. We keep
-/// insertion-time tagging too: the C iterate order is arbitrary, and the writer
-/// sorts before emitting, so iteration order does not affect output.
-pub struct BlockRefTable {
-    hash: HashMap<[u8; 16], BlockRefTableEntry>,
-}
-
-impl BlockRefTable {
-    fn new() -> Self {
-        BlockRefTable {
-            hash: HashMap::new(),
-        }
+/// A freshly inserted entry with no chunks (the `!found` arm of the C insert
+/// helpers initializes exactly these fields).
+fn entry_empty(key: BlockRefTableKey, limit_block: BlockNumber) -> BlockRefTableEntry {
+    BlockRefTableEntry {
+        key,
+        limit_block,
+        nchunks: 0,
+        chunk_size: Vec::new(),
+        chunk_usage: Vec::new(),
+        chunk_data: Vec::new(),
     }
 }
 
@@ -306,83 +261,54 @@ impl WriteBuffer {
 }
 
 // ---------------------------------------------------------------------------
-// Reader (`struct BlockRefTableReader` + `struct BlockRefTableBuffer` read side).
+// Reader buffered read (`struct BlockRefTableBuffer` read side). The `ReadBuffer`
+// struct lives in the carrier crate; the buffered-read logic is the owner's.
 // ---------------------------------------------------------------------------
 
-/// `io_callback_fn` on the read path: `fn(callback_arg, data, length) -> bytes_read`.
-/// The boxed closure reads up to `data.len()` bytes into `data`, returning the
-/// number actually read (0 = EOF), mirroring the C `read_callback`.
-pub type ReadCallback = Box<dyn FnMut(&mut [u8]) -> usize>;
+/// `BlockRefTableRead(reader, data, length)`: read exactly `out.len()` bytes
+/// into `out`, updating the running CRC over the returned data.
+fn read_buffer(buf: &mut ReadBuffer, out: &mut [u8], error_filename: &str) -> PgResult<()> {
+    let mut written = 0usize;
+    let total = out.len();
 
-/// Read-side buffer (`struct BlockRefTableBuffer`).
-struct ReadBuffer {
-    io_callback: ReadCallback,
-    data: Vec<u8>,
-    used: usize,
-    cursor: usize,
-    crc: u32,
-}
+    // Loop until read is fully satisfied.
+    while written < total {
+        let mut length = total - written;
+        if buf.cursor < buf.used {
+            // Satisfy as much of the request as possible from the buffer.
+            let bytes_to_copy = core::cmp::min(length, buf.used - buf.cursor);
+            out[written..written + bytes_to_copy]
+                .copy_from_slice(&buf.data[buf.cursor..buf.cursor + bytes_to_copy]);
+            buf.crc = comp_crc32c(buf.crc, &buf.data[buf.cursor..buf.cursor + bytes_to_copy]);
+            buf.cursor += bytes_to_copy;
+            written += bytes_to_copy;
+        } else if length >= BUFSIZE {
+            // Long request: read directly into the caller's buffer.
+            let dst = &mut out[written..written + length];
+            let bytes_read = (buf.io_callback)(dst);
+            buf.crc = comp_crc32c(buf.crc, &dst[..bytes_read]);
+            written += bytes_read;
+            length -= bytes_read;
+            let _ = length;
 
-/// `struct BlockRefTableReader`.
-pub struct BlockRefTableReader {
-    buffer: ReadBuffer,
-    error_filename: alloc::string::String,
-    total_chunks: uint32,
-    consumed_chunks: uint32,
-    chunk_size: Vec<uint16>,
-    chunk_data: Vec<uint16>,
-    chunk_position: uint32,
-}
+            // If we didn't get anything, that's bad.
+            if bytes_read == 0 {
+                return Err(report_error(error_filename, "ends unexpectedly", &[]));
+            }
+        } else {
+            // Refill our buffer.
+            buf.data.resize(BUFSIZE, 0);
+            let n = (buf.io_callback)(&mut buf.data[..BUFSIZE]);
+            buf.used = n;
+            buf.cursor = 0;
 
-impl ReadBuffer {
-    /// `BlockRefTableRead(reader, data, length)`: read exactly `out.len()` bytes,
-    /// updating the running CRC over the returned data.
-    fn read(&mut self, out: &mut [u8], error_filename: &str) -> PgResult<()> {
-        let mut written = 0usize;
-        let total = out.len();
-
-        // Loop until read is fully satisfied.
-        while written < total {
-            let mut length = total - written;
-            if self.cursor < self.used {
-                // Satisfy as much of the request as possible from the buffer.
-                let bytes_to_copy = core::cmp::min(length, self.used - self.cursor);
-                out[written..written + bytes_to_copy]
-                    .copy_from_slice(&self.data[self.cursor..self.cursor + bytes_to_copy]);
-                self.crc = comp_crc32c(
-                    self.crc,
-                    &self.data[self.cursor..self.cursor + bytes_to_copy],
-                );
-                self.cursor += bytes_to_copy;
-                written += bytes_to_copy;
-            } else if length >= BUFSIZE {
-                // Long request: read directly into the caller's buffer.
-                let dst = &mut out[written..written + length];
-                let bytes_read = (self.io_callback)(dst);
-                self.crc = comp_crc32c(self.crc, &dst[..bytes_read]);
-                written += bytes_read;
-                length -= bytes_read;
-                let _ = length;
-
-                // If we didn't get anything, that's bad.
-                if bytes_read == 0 {
-                    return Err(report_error(error_filename, "ends unexpectedly", &[]));
-                }
-            } else {
-                // Refill our buffer.
-                self.data.resize(BUFSIZE, 0);
-                let n = (self.io_callback)(&mut self.data[..BUFSIZE]);
-                self.used = n;
-                self.cursor = 0;
-
-                // If we didn't get anything, that's bad.
-                if self.used == 0 {
-                    return Err(report_error(error_filename, "ends unexpectedly", &[]));
-                }
+            // If we didn't get anything, that's bad.
+            if buf.used == 0 {
+                return Err(report_error(error_filename, "ends unexpectedly", &[]));
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// Build the `report_error_fn` `ereport(ERROR)` message. The C callback formats
@@ -645,90 +571,56 @@ fn write_entry(buffer: &mut WriteBuffer, entry: &BlockRefTableEntry) {
 }
 
 // ---------------------------------------------------------------------------
-// Registries (process-global, mirroring the C palloc'd opaque pointers).
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Live in-memory `BlockRefTable`s keyed by handle id.
-    static TABLES: RefCell<HashMap<u64, BlockRefTable>> = RefCell::new(HashMap::new());
-    /// Live `BlockRefTableReader`s keyed by handle id.
-    static READERS: RefCell<HashMap<u64, BlockRefTableReader>> = RefCell::new(HashMap::new());
-    /// Monotonic id allocator (shared so table and reader ids never collide,
-    /// keeping handles globally distinguishable for debugging).
-    static NEXT_ID: RefCell<u64> = RefCell::new(1);
-}
-
-fn alloc_id() -> u64 {
-    NEXT_ID.with(|n| {
-        let mut n = n.borrow_mut();
-        let id = *n;
-        *n += 1;
-        id
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Public API + seam bodies — in-memory table side.
+//
+// The seams take the table / reader by `&` / `&mut` (the C `BlockRefTable *` /
+// `BlockRefTableReader *`); the caller owns the value. No registry.
 // ---------------------------------------------------------------------------
 
-/// `CreateEmptyBlockRefTable()` (seam `create_empty_block_ref_table`).
-fn create_empty_block_ref_table(_mcx: Mcx<'_>) -> PgResult<BlockRefTableHandle> {
-    let id = alloc_id();
-    TABLES.with(|t| t.borrow_mut().insert(id, BlockRefTable::new()));
-    Ok(BlockRefTableHandle(id))
+/// `CreateEmptyBlockRefTable()` (seam `create_empty_block_ref_table`). The
+/// backend palloc's the table in `CurrentMemoryContext`; here it is a plain
+/// owned value the caller keeps for the lifetime of its operation.
+fn create_empty_block_ref_table(_mcx: Mcx<'_>) -> PgResult<BlockRefTable> {
+    Ok(BlockRefTable::new())
 }
 
 /// `BlockRefTableSetLimitBlock(brtab, rlocator, forknum, limit_block)`.
 fn block_ref_table_set_limit_block(
-    brtab: BlockRefTableHandle,
+    brtab: &mut BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
     limit_block: BlockNumber,
 ) -> PgResult<()> {
     let key = BlockRefTableKey { rlocator, forknum };
-    let raw = key.raw_bytes();
-    TABLES.with(|t| {
-        let mut tables = t.borrow_mut();
-        let table = tables
-            .get_mut(&brtab.0)
-            .expect("BlockRefTableSetLimitBlock: unknown BlockRefTableHandle");
-        match table.hash.get_mut(&raw) {
-            None => {
-                // !found: record the limit block in a fresh entry.
-                table
-                    .hash
-                    .insert(raw, BlockRefTableEntry::empty(key, limit_block));
-            }
-            Some(entry) => {
-                entry_set_limit_block(entry, limit_block);
-            }
+    let raw = key_raw_bytes(&key);
+    match brtab.hash.get_mut(&raw) {
+        None => {
+            // !found: record the limit block in a fresh entry.
+            brtab.hash.insert(raw, entry_empty(key, limit_block));
         }
-    });
+        Some(entry) => {
+            entry_set_limit_block(entry, limit_block);
+        }
+    }
     Ok(())
 }
 
 /// `BlockRefTableMarkBlockModified(brtab, rlocator, forknum, blknum)`.
 fn block_ref_table_mark_block_modified(
-    brtab: BlockRefTableHandle,
+    brtab: &mut BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
     blknum: BlockNumber,
 ) -> PgResult<()> {
     let key = BlockRefTableKey { rlocator, forknum };
-    let raw = key.raw_bytes();
-    TABLES.with(|t| {
-        let mut tables = t.borrow_mut();
-        let table = tables
-            .get_mut(&brtab.0)
-            .expect("BlockRefTableMarkBlockModified: unknown BlockRefTableHandle");
-        let entry = table
-            .hash
-            .entry(raw)
-            // !found: initialize limit_block to InvalidBlockNumber (higher than
-            // any legal block number).
-            .or_insert_with(|| BlockRefTableEntry::empty(key, InvalidBlockNumber));
-        entry_mark_block_modified(entry, blknum);
-    });
+    let raw = key_raw_bytes(&key);
+    let entry = brtab
+        .hash
+        .entry(raw)
+        // !found: initialize limit_block to InvalidBlockNumber (higher than any
+        // legal block number).
+        .or_insert_with(|| entry_empty(key, InvalidBlockNumber));
+    entry_mark_block_modified(entry, blknum);
     Ok(())
 }
 
@@ -736,19 +628,13 @@ fn block_ref_table_mark_block_modified(
 /// (seam `block_ref_table_get_entry`): look up the entry; return its
 /// `limit_block` if present, else `None`.
 fn block_ref_table_get_entry(
-    brtab: BlockRefTableHandle,
+    brtab: &BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
 ) -> Option<BlockNumber> {
     let key = BlockRefTableKey { rlocator, forknum };
-    let raw = key.raw_bytes();
-    TABLES.with(|t| {
-        let tables = t.borrow();
-        let table = tables
-            .get(&brtab.0)
-            .expect("BlockRefTableGetEntry: unknown BlockRefTableHandle");
-        table.hash.get(&raw).map(|entry| entry.limit_block)
-    })
+    let raw = key_raw_bytes(&key);
+    brtab.hash.get(&raw).map(|entry| entry.limit_block)
 }
 
 /// `BlockRefTableGetEntry(...)` + `BlockRefTableEntryGetBlocks(...)`
@@ -757,7 +643,7 @@ fn block_ref_table_get_entry(
 /// (at most `nblocks`).
 fn block_ref_table_get_entry_blocks<'mcx>(
     mcx: Mcx<'mcx>,
-    brtab: BlockRefTableHandle,
+    brtab: &BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
     start_blkno: BlockNumber,
@@ -765,18 +651,12 @@ fn block_ref_table_get_entry_blocks<'mcx>(
     nblocks: usize,
 ) -> PgResult<Option<(BlockNumber, PgVec<'mcx, BlockNumber>)>> {
     let key = BlockRefTableKey { rlocator, forknum };
-    let raw = key.raw_bytes();
-    let result = TABLES.with(|t| {
-        let tables = t.borrow();
-        let table = tables
-            .get(&brtab.0)
-            .expect("BlockRefTableGetEntryBlocks: unknown BlockRefTableHandle");
-        table.hash.get(&raw).map(|entry| {
-            let limit_block = entry.limit_block;
-            let mut blocks: Vec<BlockNumber> = Vec::new();
-            entry_get_blocks(entry, start_blkno, stop_blkno, &mut blocks, nblocks);
-            (limit_block, blocks)
-        })
+    let raw = key_raw_bytes(&key);
+    let result = brtab.hash.get(&raw).map(|entry| {
+        let limit_block = entry.limit_block;
+        let mut blocks: Vec<BlockNumber> = Vec::new();
+        entry_get_blocks(entry, start_blkno, stop_blkno, &mut blocks, nblocks);
+        (limit_block, blocks)
     });
     match result {
         None => Ok(None),
@@ -793,38 +673,31 @@ fn block_ref_table_get_entry_blocks<'mcx>(
 /// bytes (the backend would stream them through its write callback).
 fn write_block_ref_table<'mcx>(
     mcx: Mcx<'mcx>,
-    brtab: BlockRefTableHandle,
+    brtab: &BlockRefTable,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut buffer = WriteBuffer::new();
 
     // Write magic number.
     buffer.write(&BLOCKREFTABLE_MAGIC.to_ne_bytes());
 
-    TABLES.with(|t| {
-        let tables = t.borrow();
-        let table = tables
-            .get(&brtab.0)
-            .expect("WriteBlockRefTable: unknown BlockRefTableHandle");
+    if !brtab.hash.is_empty() {
+        // Extract entries into serializable form and sort them.
+        let mut sdata: Vec<&BlockRefTableEntry> = brtab.hash.values().collect();
+        sdata.sort_by_key(|e| {
+            let sentry = BlockRefTableSerializedEntry {
+                rlocator: e.key.rlocator,
+                forknum: e.key.forknum,
+                limit_block: e.limit_block,
+                nchunks: e.nchunks,
+            };
+            sentry.cmp_key()
+        });
 
-        if !table.hash.is_empty() {
-            // Extract entries into serializable form and sort them.
-            let mut sdata: Vec<&BlockRefTableEntry> = table.hash.values().collect();
-            sdata.sort_by_key(|e| {
-                let sentry = BlockRefTableSerializedEntry {
-                    rlocator: e.key.rlocator,
-                    forknum: e.key.forknum,
-                    limit_block: e.limit_block,
-                    nchunks: e.nchunks,
-                };
-                sentry.cmp_key()
-            });
-
-            // Loop over entries in sorted order and serialize each one.
-            for entry in sdata {
-                write_entry(&mut buffer, entry);
-            }
+        // Loop over entries in sorted order and serialize each one.
+        for entry in sdata {
+            write_entry(&mut buffer, entry);
         }
-    });
+    }
 
     // Write out terminator and CRC and flush buffer.
     buffer.terminate();
@@ -845,15 +718,16 @@ fn write_block_ref_table<'mcx>(
 /// The C `io_callback_fn`/`report_error_fn` are owned by the walsummary unit
 /// (`ReadWalSummary` / `ReportWalSummaryError`); that owner calls this with a
 /// boxed `read_callback`. The error callback is folded into the returned
-/// [`PgError`] (`error_filename` is captured for the messages). Registers the
-/// reader and returns its handle.
+/// [`PgError`] (`error_filename` is captured for the messages). Returns the
+/// owned reader (the C `BlockRefTableReader *`), which the caller threads by
+/// `&mut`.
 ///
 /// Returns `Err` if the magic number is wrong, matching the C
 /// `error_callback(...)` (which `ereport(ERROR)`s).
 pub fn create_block_ref_table_reader(
     read_callback: ReadCallback,
     error_filename: alloc::string::String,
-) -> PgResult<BlockRefTableReaderHandle> {
+) -> PgResult<BlockRefTableReader> {
     let mut reader = BlockRefTableReader {
         buffer: ReadBuffer {
             io_callback: read_callback,
@@ -873,7 +747,7 @@ pub fn create_block_ref_table_reader(
     // Verify magic number.
     let mut magic_bytes = [0u8; 4];
     let fname = reader.error_filename.clone();
-    reader.buffer.read(&mut magic_bytes, &fname)?;
+    read_buffer(&mut reader.buffer, &mut magic_bytes, &fname)?;
     let magic = u32::from_ne_bytes(magic_bytes);
     if magic != BLOCKREFTABLE_MAGIC {
         return Err(report_error(
@@ -886,9 +760,7 @@ pub fn create_block_ref_table_reader(
         ));
     }
 
-    let id = alloc_id();
-    READERS.with(|r| r.borrow_mut().insert(id, reader));
-    Ok(BlockRefTableReaderHandle(id))
+    Ok(reader)
 }
 
 // ---------------------------------------------------------------------------
@@ -897,64 +769,58 @@ pub fn create_block_ref_table_reader(
 
 /// `BlockRefTableReaderNextRelation(reader, &rlocator, &forknum, &limit_block)`.
 fn block_ref_table_reader_next_relation(
-    reader: BlockRefTableReaderHandle,
+    reader: &mut BlockRefTableReader,
 ) -> PgResult<Option<(RelFileLocator, ForkNumber, BlockNumber)>> {
-    READERS.with(|r| {
-        let mut readers = r.borrow_mut();
-        let reader = readers
-            .get_mut(&reader.0)
-            .expect("BlockRefTableReaderNextRelation: unknown BlockRefTableReaderHandle");
-        let fname = reader.error_filename.clone();
+    let fname = reader.error_filename.clone();
 
-        // Sanity check: all chunks must have been consumed.
-        debug_assert!(reader.total_chunks == reader.consumed_chunks);
+    // Sanity check: all chunks must have been consumed.
+    debug_assert!(reader.total_chunks == reader.consumed_chunks);
 
-        // Read serialized entry.
-        let mut sbytes = [0u8; SERIALIZED_ENTRY_LEN];
-        reader.buffer.read(&mut sbytes, &fname)?;
+    // Read serialized entry.
+    let mut sbytes = [0u8; SERIALIZED_ENTRY_LEN];
+    read_buffer(&mut reader.buffer, &mut sbytes, &fname)?;
 
-        // If we read the all-zero sentinel, read and check the CRC.
-        let zentry = [0u8; SERIALIZED_ENTRY_LEN];
-        if sbytes == zentry {
-            // CRC of the file excluding the 4-byte CRC: snapshot the accumulator
-            // before reading those bytes, finalize the copy.
-            let expected_crc = fin_crc32c(reader.buffer.crc);
+    // If we read the all-zero sentinel, read and check the CRC.
+    let zentry = [0u8; SERIALIZED_ENTRY_LEN];
+    if sbytes == zentry {
+        // CRC of the file excluding the 4-byte CRC: snapshot the accumulator
+        // before reading those bytes, finalize the copy.
+        let expected_crc = fin_crc32c(reader.buffer.crc);
 
-            let mut actual_bytes = [0u8; 4];
-            reader.buffer.read(&mut actual_bytes, &fname)?;
-            let actual_crc = u32::from_ne_bytes(actual_bytes);
+        let mut actual_bytes = [0u8; 4];
+        read_buffer(&mut reader.buffer, &mut actual_bytes, &fname)?;
+        let actual_crc = u32::from_ne_bytes(actual_bytes);
 
-            if expected_crc != actual_crc {
-                return Err(report_error(
-                    &fname,
-                    "has wrong checksum",
-                    &[
-                        ("expected", format!("{expected_crc:08X}")),
-                        ("found", format!("{actual_crc:08X}")),
-                    ],
-                ));
-            }
-
-            return Ok(None);
+        if expected_crc != actual_crc {
+            return Err(report_error(
+                &fname,
+                "has wrong checksum",
+                &[
+                    ("expected", format!("{expected_crc:08X}")),
+                    ("found", format!("{actual_crc:08X}")),
+                ],
+            ));
         }
 
-        let sentry = BlockRefTableSerializedEntry::from_bytes(&sbytes);
+        return Ok(None);
+    }
 
-        // Read chunk size array.
-        reader.chunk_size = vec![0u16; sentry.nchunks as usize];
-        let mut size_bytes = vec![0u8; sentry.nchunks as usize * 2];
-        reader.buffer.read(&mut size_bytes, &fname)?;
-        for j in 0..(sentry.nchunks as usize) {
-            reader.chunk_size[j] =
-                u16::from_ne_bytes(size_bytes[j * 2..j * 2 + 2].try_into().unwrap());
-        }
+    let sentry = BlockRefTableSerializedEntry::from_bytes(&sbytes);
 
-        // Set up for chunk scan.
-        reader.total_chunks = sentry.nchunks;
-        reader.consumed_chunks = 0;
+    // Read chunk size array.
+    reader.chunk_size = vec![0u16; sentry.nchunks as usize];
+    let mut size_bytes = vec![0u8; sentry.nchunks as usize * 2];
+    read_buffer(&mut reader.buffer, &mut size_bytes, &fname)?;
+    for j in 0..(sentry.nchunks as usize) {
+        reader.chunk_size[j] =
+            u16::from_ne_bytes(size_bytes[j * 2..j * 2 + 2].try_into().unwrap());
+    }
 
-        Ok(Some((sentry.rlocator, sentry.forknum, sentry.limit_block)))
-    })
+    // Set up for chunk scan.
+    reader.total_chunks = sentry.nchunks;
+    reader.consumed_chunks = 0;
+
+    Ok(Some((sentry.rlocator, sentry.forknum, sentry.limit_block)))
 }
 
 /// `BlockRefTableReaderGetBlocks(reader, blocks, nblocks)` — fetch up to
@@ -962,91 +828,83 @@ fn block_ref_table_reader_next_relation(
 /// returns them as a vector; empty means the current fork is exhausted.
 fn block_ref_table_reader_get_blocks<'mcx>(
     mcx: Mcx<'mcx>,
-    reader: BlockRefTableReaderHandle,
+    reader: &mut BlockRefTableReader,
     nblocks: usize,
 ) -> PgResult<PgVec<'mcx, BlockNumber>> {
     // Must provide space for at least one block number to be returned.
     debug_assert!(nblocks > 0);
 
-    let result = READERS.with(|r| -> PgResult<Vec<BlockNumber>> {
-        let mut readers = r.borrow_mut();
-        let reader = readers
-            .get_mut(&reader.0)
-            .expect("BlockRefTableReaderGetBlocks: unknown BlockRefTableReaderHandle");
-        let fname = reader.error_filename.clone();
+    let fname = reader.error_filename.clone();
 
-        let mut blocks: Vec<BlockNumber> = Vec::new();
-        let mut blocks_found = 0usize;
+    let mut blocks: Vec<BlockNumber> = Vec::new();
+    let mut blocks_found = 0usize;
 
-        // Loop collecting blocks to return to caller.
-        loop {
-            // If we've read at least one chunk, maybe it has blocks of interest.
-            if reader.consumed_chunks > 0 {
-                let chunkno = reader.consumed_chunks - 1;
-                let chunk_size = reader.chunk_size[chunkno as usize];
+    // Loop collecting blocks to return to caller.
+    loop {
+        // If we've read at least one chunk, maybe it has blocks of interest.
+        if reader.consumed_chunks > 0 {
+            let chunkno = reader.consumed_chunks - 1;
+            let chunk_size = reader.chunk_size[chunkno as usize];
 
-                if chunk_size as u32 == MAX_ENTRIES_PER_CHUNK {
-                    // Bitmap format: search for set bits.
-                    while reader.chunk_position < BLOCKS_PER_CHUNK && blocks_found < nblocks {
-                        let chunkoffset = reader.chunk_position;
-                        let w = reader.chunk_data[(chunkoffset / BLOCKS_PER_ENTRY) as usize];
-                        if (w & (1u16 << (chunkoffset % BLOCKS_PER_ENTRY))) != 0 {
-                            blocks.push(chunkno * BLOCKS_PER_CHUNK + chunkoffset);
-                            blocks_found += 1;
-                        }
-                        reader.chunk_position += 1;
-                    }
-                } else {
-                    // Array format: each entry is a 2-byte offset.
-                    while reader.chunk_position < chunk_size as u32 && blocks_found < nblocks {
-                        blocks.push(
-                            chunkno * BLOCKS_PER_CHUNK
-                                + reader.chunk_data[reader.chunk_position as usize] as u32,
-                        );
+            if chunk_size as u32 == MAX_ENTRIES_PER_CHUNK {
+                // Bitmap format: search for set bits.
+                while reader.chunk_position < BLOCKS_PER_CHUNK && blocks_found < nblocks {
+                    let chunkoffset = reader.chunk_position;
+                    let w = reader.chunk_data[(chunkoffset / BLOCKS_PER_ENTRY) as usize];
+                    if (w & (1u16 << (chunkoffset % BLOCKS_PER_ENTRY))) != 0 {
+                        blocks.push(chunkno * BLOCKS_PER_CHUNK + chunkoffset);
                         blocks_found += 1;
-                        reader.chunk_position += 1;
                     }
+                    reader.chunk_position += 1;
+                }
+            } else {
+                // Array format: each entry is a 2-byte offset.
+                while reader.chunk_position < chunk_size as u32 && blocks_found < nblocks {
+                    blocks.push(
+                        chunkno * BLOCKS_PER_CHUNK
+                            + reader.chunk_data[reader.chunk_position as usize] as u32,
+                    );
+                    blocks_found += 1;
+                    reader.chunk_position += 1;
                 }
             }
-
-            // We found enough blocks, so we're done.
-            if blocks_found >= nblocks {
-                break;
-            }
-
-            // Need the next chunk; if there are none left, we're done.
-            if reader.consumed_chunks == reader.total_chunks {
-                break;
-            }
-
-            // Read data for next chunk and reset scan position. The next chunk
-            // might be empty, consuming no bytes from the underlying file.
-            let next_chunk_size = reader.chunk_size[reader.consumed_chunks as usize];
-            if next_chunk_size > 0 {
-                let mut chunk_bytes = vec![0u8; next_chunk_size as usize * 2];
-                reader.buffer.read(&mut chunk_bytes, &fname)?;
-                for j in 0..(next_chunk_size as usize) {
-                    reader.chunk_data[j] =
-                        u16::from_ne_bytes(chunk_bytes[j * 2..j * 2 + 2].try_into().unwrap());
-                }
-            }
-            reader.consumed_chunks += 1;
-            reader.chunk_position = 0;
         }
 
-        Ok(blocks)
-    })?;
+        // We found enough blocks, so we're done.
+        if blocks_found >= nblocks {
+            break;
+        }
 
-    let mut out = mcx::vec_with_capacity_in(mcx, result.len())?;
-    out.extend_from_slice(&result);
+        // Need the next chunk; if there are none left, we're done.
+        if reader.consumed_chunks == reader.total_chunks {
+            break;
+        }
+
+        // Read data for next chunk and reset scan position. The next chunk
+        // might be empty, consuming no bytes from the underlying file.
+        let next_chunk_size = reader.chunk_size[reader.consumed_chunks as usize];
+        if next_chunk_size > 0 {
+            let mut chunk_bytes = vec![0u8; next_chunk_size as usize * 2];
+            read_buffer(&mut reader.buffer, &mut chunk_bytes, &fname)?;
+            for j in 0..(next_chunk_size as usize) {
+                reader.chunk_data[j] =
+                    u16::from_ne_bytes(chunk_bytes[j * 2..j * 2 + 2].try_into().unwrap());
+            }
+        }
+        reader.consumed_chunks += 1;
+        reader.chunk_position = 0;
+    }
+
+    let mut out = mcx::vec_with_capacity_in(mcx, blocks.len())?;
+    out.extend_from_slice(&blocks);
     Ok(out)
 }
 
-/// `DestroyBlockRefTableReader(reader)`.
-fn destroy_block_ref_table_reader(reader: BlockRefTableReaderHandle) {
-    READERS.with(|r| {
-        r.borrow_mut().remove(&reader.0);
-    });
+/// `DestroyBlockRefTableReader(reader)`. The reader is dropped (freeing its
+/// buffers + the boxed read callback) when the owned value passed by the caller
+/// goes out of scope; the seam takes it by value to mirror the C `pfree`.
+fn destroy_block_ref_table_reader(_reader: BlockRefTableReader) {
+    // Dropping `_reader` frees the buffers and the boxed read callback.
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,7 +919,7 @@ pub fn create_block_ref_table_entry(
     rlocator: RelFileLocator,
     forknum: ForkNumber,
 ) -> BlockRefTableEntry {
-    BlockRefTableEntry::empty(BlockRefTableKey { rlocator, forknum }, InvalidBlockNumber)
+    entry_empty(BlockRefTableKey { rlocator, forknum }, InvalidBlockNumber)
 }
 
 /// `BlockRefTableEntrySetLimitBlock(entry, limit_block)`.
@@ -1158,13 +1016,18 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    // Install the CRC seam (port-crc32c owner) for the roundtrip test.
+    // Install the CRC seam (port-crc32c owner) for the roundtrip test. A `Once`
+    // makes the install race-free across the parallel test threads (a bare
+    // is_installed check-then-call races: two threads both observe "not
+    // installed" and the second double-installs, panicking the seam).
     fn ensure_crc() {
-        // pg_comp_crc32c is installed by port-crc32c::init_seams; call it once.
-        // is_installed avoids double-install panic across tests.
-        if !port_pg_crc32c_seams::pg_comp_crc32c::is_installed() {
-            port_crc32c::init_seams();
-        }
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            if !port_pg_crc32c_seams::pg_comp_crc32c::is_installed() {
+                port_crc32c::init_seams();
+            }
+        });
     }
 
     fn rl(spc: u32, db: u32, rel: u32) -> RelFileLocator {
@@ -1221,9 +1084,9 @@ mod tests {
             n
         });
 
-        let h = create_block_ref_table_reader(cb, "test".into()).expect("reader create");
+        let mut reader = create_block_ref_table_reader(cb, "test".into()).expect("reader create");
 
-        let next = block_ref_table_reader_next_relation(h).expect("next");
+        let next = block_ref_table_reader_next_relation(&mut reader).expect("next");
         let (got_rl, got_fork, _limit) = next.expect("one relation");
         assert_eq!(got_rl, loc);
         assert_eq!(got_fork, ForkNumber::MAIN_FORKNUM);
@@ -1232,7 +1095,8 @@ mod tests {
         let mcx_ctx = mcx::MemoryContext::new("t");
         let mut got: Vec<BlockNumber> = Vec::new();
         loop {
-            let batch = block_ref_table_reader_get_blocks(mcx_ctx.mcx(), h, 3).expect("get");
+            let batch =
+                block_ref_table_reader_get_blocks(mcx_ctx.mcx(), &mut reader, 3).expect("get");
             if batch.is_empty() {
                 break;
             }
@@ -1242,10 +1106,10 @@ mod tests {
         assert_eq!(got, expected);
 
         // End-of-table sentinel + CRC must validate.
-        let end = block_ref_table_reader_next_relation(h).expect("crc ok");
+        let end = block_ref_table_reader_next_relation(&mut reader).expect("crc ok");
         assert!(end.is_none());
 
-        destroy_block_ref_table_reader(h);
+        destroy_block_ref_table_reader(reader);
     }
 
     /// A corrupted CRC must be detected (silent-corruption guard).
@@ -1272,12 +1136,12 @@ mod tests {
             *pos += n;
             n
         });
-        let h = create_block_ref_table_reader(cb, "bad".into()).expect("reader");
+        let mut reader = create_block_ref_table_reader(cb, "bad".into()).expect("reader");
         // First next returns the entry (limit_block default), then end checks CRC.
-        let _ = block_ref_table_reader_next_relation(h).expect("entry");
-        let err = block_ref_table_reader_next_relation(h);
+        let _ = block_ref_table_reader_next_relation(&mut reader).expect("entry");
+        let err = block_ref_table_reader_next_relation(&mut reader);
         assert!(err.is_err(), "corrupted CRC must be rejected");
-        destroy_block_ref_table_reader(h);
+        destroy_block_ref_table_reader(reader);
     }
 
     /// SetLimitBlock must forget equal-or-higher blocks.

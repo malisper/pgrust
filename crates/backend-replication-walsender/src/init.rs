@@ -134,10 +134,10 @@ pub fn WalSndShmemInit() {
         // First time through, so initialize.
         unsafe {
             core::ptr::write_bytes(ptr, 0, size);
-            // Initialize the fixed header in place (CVs / dlists / status).
+            // Initialize the fixed header in place (CVs / queues / status).
             let header = WalSndCtlData {
                 SyncRepQueue: core::array::from_fn(|_| {
-                    types_storage::ilist::dlist_head::default()
+                    types_storage::storage::proclist_head::default()
                 }),
                 lsn: [0; NUM_SYNC_REP_WAIT_MODE],
                 sync_standbys_status: 0,
@@ -150,12 +150,13 @@ pub fn WalSndShmemInit() {
 
         set_wal_snd_ctl(ctl_ptr);
 
-        // The SyncRepQueue dlist heads, the three CVs, and the slot mutexes were
-        // written in their initialized state above; SpinLockInit each slot
-        // mutex and ConditionVariableInit the three CVs (matching C).
+        // The SyncRepQueue heads, the three CVs, and the slot mutexes were
+        // written in their initialized state above; dlist_init each queue head
+        // (C `dlist_init`, here `proclist_init` to the empty head/tail),
+        // SpinLockInit each slot mutex and ConditionVariableInit the three CVs.
         let ctl = wal_snd_ctl_mut();
         for q in ctl.SyncRepQueue.iter_mut() {
-            *q = types_storage::ilist::dlist_head::new();
+            *q = types_storage::storage::proclist_head::default();
         }
         let max = crate::max_wal_senders_guc();
         let mut i: i32 = 0;

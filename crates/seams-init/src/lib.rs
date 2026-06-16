@@ -93,6 +93,7 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_objectaddress::init_seams();
+    backend_catalog_partition::init_seams();
     backend_catalog_indexing::init_seams();
     backend_catalog_heap::init_seams();
     backend_catalog_index::init_seams();
@@ -151,6 +152,7 @@ pub fn init_all() {
     backend_commands_sequence::init_seams();
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
+    backend_commands_tsearchcmds::init_seams();
     backend_commands_typecmds::init_seams();
     backend_conv_utf8_and_big5::init_seams();
     backend_conv_utf8_and_cyrillic::init_seams();
@@ -303,6 +305,7 @@ pub fn init_all() {
     backend_replication_logical_slotsync::init_seams();
     backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
+    backend_replication_syncrep::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
@@ -360,6 +363,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
+    backend_utils_adt_array_typanalyze::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
@@ -384,6 +388,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
+    backend_utils_adt_rangetypes_typanalyze::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
@@ -406,6 +411,7 @@ pub fn init_all() {
     backend_utils_cache_ts_cache::init_seams();
     backend_utils_cache_typcache::init_seams();
     backend_utils_error::init_seams();
+    backend_utils_error_small::init_seams();
     backend_utils_fmgr_core::init_seams();
     backend_utils_fmgr_dfmgr::init_seams();
     backend_utils_fmgr_funcapi::init_seams();
@@ -447,6 +453,7 @@ pub fn init_all() {
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
+    backend_utils_sort_small::init_seams();
     backend_utils_sort_sortsupport::init_seams();
     backend_utils_sort_storage::init_seams();
     backend_utils_sort_tuplesort::init_seams();

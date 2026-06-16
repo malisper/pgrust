@@ -1243,6 +1243,59 @@ impl<'mcx> Node<'mcx> {
         }
     }
 
+    /// `&mut ((Plan *) node)->...` — the embedded `Plan` base, for mutation
+    /// (e.g. `finalize_plan` writing back `extParam`/`allParam`).
+    pub fn plan_head_mut(&mut self) -> &mut crate::nodeindexscan::Plan<'mcx> {
+        match self {
+            Node::Append(a) => &mut a.plan,
+            Node::ModifyTable(m) => &mut m.plan,
+            Node::Material(m) => &mut m.plan,
+            Node::Gather(g) => &mut g.plan,
+            Node::GatherMerge(g) => &mut g.plan,
+            Node::MergeAppend(m) => &mut m.plan,
+            Node::BitmapAnd(b) => &mut b.plan,
+            Node::MergeJoin(m) => &mut m.join.plan,
+            Node::RecursiveUnion(r) => &mut r.plan,
+            Node::Group(g) => &mut g.plan,
+            Node::ProjectSet(p) => &mut p.plan,
+            Node::Result(r) => &mut r.plan,
+            Node::SetOp(s) => &mut s.plan,
+            Node::Memoize(m) => &mut m.plan,
+            Node::IndexScan(m) => &mut m.scan.plan,
+            Node::IndexOnlyScan(m) => &mut m.scan.plan,
+            Node::BitmapIndexScan(m) => &mut m.scan.plan,
+            Node::Limit(m) => &mut m.plan,
+            Node::Unique(u) => &mut u.plan,
+            Node::Sort(s) => &mut s.plan,
+            Node::IncrementalSort(s) => &mut s.sort.plan,
+            Node::Agg(a) => &mut a.plan,
+            Node::WindowAgg(w) => &mut w.plan,
+            Node::TableFuncScan(t) => &mut t.scan.plan,
+            Node::FunctionScan(f) => &mut f.scan.plan,
+            Node::ValuesScan(v) => &mut v.scan.plan,
+            Node::CteScan(c) => &mut c.scan.plan,
+            Node::NamedTuplestoreScan(n) => &mut n.scan.plan,
+            Node::NestLoop(m) => &mut m.join.plan,
+            Node::HashJoin(h) => &mut h.join.plan,
+            Node::Hash(h) => &mut h.plan,
+            Node::TidRangeScan(t) => &mut t.scan.plan,
+            Node::SampleScan(s) => &mut s.scan.plan,
+            Node::TidScan(t) => &mut t.scan.plan,
+            Node::WorkTableScan(w) => &mut w.scan.plan,
+            Node::SeqScan(s) => &mut s.scan.plan,
+            Node::SubqueryScan(s) => &mut s.scan.plan,
+            Node::ForeignScan(f) => &mut f.scan.plan,
+            Node::CustomScan(c) => &mut c.scan.plan,
+            Node::Expr(_) => {
+                panic!("Node::plan_head_mut: called on an expression node, which has no Plan base")
+            }
+            _ => panic!(
+                "Node::plan_head_mut: called on a parse-tree node ({}), which has no Plan base",
+                self.tag()
+            ),
+        }
+    }
+
     /// `outerPlan(node)` (plannodes.h) — `node->plan.lefttree`.
     pub fn outer_plan(&self) -> Option<&Node<'mcx>> {
         self.plan_head().lefttree.as_deref()

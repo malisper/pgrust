@@ -230,3 +230,167 @@ seam_core::seam!(
         origin_lsn: XLogRecPtr,
     )
 );
+
+// ---------------------------------------------------------------------------
+// Further decode.c entry points (the change-replay / commit-time family).
+//
+// These are declared here so `decode.c` can be ported against a complete seam
+// surface; the owning reorder-buffer families (change replay, spill, streaming,
+// cleanup/commit-time) are not yet landed, so the installed bodies panic loudly
+// (mirror-PG-and-panic) until those families land.
+//
+// The decoded-change payload crosses as the pieces `decode.c` assembles: the
+// `ReorderBufferChangeKind` discriminant plus the relation locator and the
+// owned [`DecodedTuple`] images (the reorder buffer's `ReorderBufferTupleBuf`),
+// rather than the owner-private `ReorderBufferChange` struct (which would form a
+// crate cycle).
+// ---------------------------------------------------------------------------
+
+/// The on-the-wire image of one decoded heap tuple (`ReorderBufferTupleBuf`):
+/// the fixed `HeapTupleData` fields plus the contiguous tuple bytes the reorder
+/// buffer owns. Mirrors
+/// `backend_replication_logical_reorderbuffer::ReorderBufferTupleBuf` without
+/// forming a dependency cycle on the owner crate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DecodedTuple {
+    /// `tuple.t_len`.
+    pub t_len: u32,
+    /// `tuple.t_self`.
+    pub t_self: ItemPointerData,
+    /// `tuple.t_tableOid`.
+    pub t_table_oid: types_core::Oid,
+    /// The contiguous tuple image (header + nulls bitmap + user data).
+    pub data: Vec<u8>,
+}
+
+/// Which heap change `ReorderBufferQueueChange` is recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodedChangeKind {
+    /// `REORDER_BUFFER_CHANGE_INSERT`.
+    Insert,
+    /// `REORDER_BUFFER_CHANGE_UPDATE`.
+    Update,
+    /// `REORDER_BUFFER_CHANGE_DELETE`.
+    Delete,
+    /// `REORDER_BUFFER_CHANGE_INTERNAL_SPEC_INSERT`.
+    SpecInsert,
+    /// `REORDER_BUFFER_CHANGE_INTERNAL_SPEC_CONFIRM`.
+    SpecConfirm,
+    /// `REORDER_BUFFER_CHANGE_INTERNAL_SPEC_ABORT`.
+    SpecAbort,
+    /// `REORDER_BUFFER_CHANGE_TRUNCATE`.
+    Truncate,
+}
+
+seam_core::seam!(
+    /// `ReorderBufferProcessXid(rb, xid, lsn)` — note that `xid` produced WAL at
+    /// `lsn`, creating the txn entry if it does not exist yet.
+    pub fn ReorderBufferProcessXid(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr)
+);
+seam_core::seam!(
+    /// `ReorderBufferQueueChange(rb, xid, lsn, change, toast_insert)` — queue one
+    /// decoded heap change. The `change` is conveyed as its discriminant plus the
+    /// relation locator and the decoded old/new tuple images.
+    pub fn ReorderBufferQueueChange(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        kind: DecodedChangeKind,
+        rlocator: RelFileLocator,
+        oldtuple: Option<DecodedTuple>,
+        newtuple: Option<DecodedTuple>,
+        toast_insert: bool,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferQueueMessage(rb, xid, snapshot_now, lsn, transactional,
+    /// prefix, message_size, message)` — queue a logical decoding message.
+    pub fn ReorderBufferQueueMessage(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        transactional: bool,
+        prefix: Vec<u8>,
+        message: Vec<u8>,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferForget(rb, xid, lsn)` — discard a transaction's changes
+    /// without replaying them (e.g. its catalog snapshot was never built).
+    pub fn ReorderBufferForget(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr)
+);
+seam_core::seam!(
+    /// `ReorderBufferAbort(rb, xid, lsn, abort_time)` — abort a transaction and
+    /// its subtransactions.
+    pub fn ReorderBufferAbort(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        abort_time: TimestampTz,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferAbortOld(rb, oldestRunningXid)` — abort in-progress txns
+    /// that started before `oldestRunningXid` (crash recovery cleanup).
+    pub fn ReorderBufferAbortOld(rb: ReorderBufferHandle, oldest_running_xid: TransactionId)
+);
+seam_core::seam!(
+    /// `ReorderBufferFinishPrepared(rb, xid, commit_lsn, end_lsn, two_phase_at,
+    /// commit_time, origin_id, origin_lsn, gid, is_commit)` — replay the
+    /// commit/abort of a previously prepared transaction.
+    pub fn ReorderBufferFinishPrepared(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        two_phase_at: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+        gid: Vec<u8>,
+        is_commit: bool,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferPrepare(rb, xid, gid)` — replay a PREPARE TRANSACTION.
+    pub fn ReorderBufferPrepare(rb: ReorderBufferHandle, xid: TransactionId, gid: Vec<u8>)
+);
+seam_core::seam!(
+    /// `ReorderBufferSkipPrepare(rb, xid)` — mark that the prepare for `xid`
+    /// should be skipped (the plugin's `filter_prepare_cb` returned true).
+    pub fn ReorderBufferSkipPrepare(rb: ReorderBufferHandle, xid: TransactionId)
+);
+seam_core::seam!(
+    /// `ReorderBufferImmediateInvalidation(rb, ninvalidations, invalidations)` —
+    /// execute cache invalidations immediately (XLOG_XACT_INVALIDATIONS outside a
+    /// transaction).
+    pub fn ReorderBufferImmediateInvalidation(
+        rb: ReorderBufferHandle,
+        invalidations: Vec<SharedInvalidationMessage>,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferAddInvalidations(rb, xid, lsn, ninvalidations,
+    /// invalidations)` — accumulate cache invalidations for txn `xid`.
+    pub fn ReorderBufferAddInvalidations(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        invalidations: Vec<SharedInvalidationMessage>,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferRememberPrepareInfo(rb, xid, prepare_lsn, end_lsn,
+    /// prepare_time, origin_id, origin_lsn)` — stash the metadata needed to later
+    /// replay the prepared transaction's commit/abort. Returns the C `bool`
+    /// indicating whether the prepare should proceed.
+    pub fn ReorderBufferRememberPrepareInfo(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        prepare_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        prepare_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+    ) -> bool
+);
