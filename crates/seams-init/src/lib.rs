@@ -355,6 +355,7 @@ pub fn init_all() {
     backend_tcop_utility::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
+    backend_snowball_dict_snowball::init_seams();
     backend_timezone_strftime::init_seams();
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();

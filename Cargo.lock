@@ -13669,6 +13669,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-snowball-dict-snowball"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-snowball-dict-snowball-seams",
+ "backend-snowball-runtime",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-dict-snowball-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-runtime"
+version = "0.0.0"
+
+[[package]]
 name = "backend-statistics-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -19904,6 +19936,7 @@ dependencies = [
  "backend-replication-walsender",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
