@@ -20,3 +20,32 @@ seam_core::seam!(
     /// `backend-utils-adt-float`.
     pub fn float8_div(a: f64, b: f64) -> PgResult<f64>
 );
+
+// ---------------------------------------------------------------------------
+// libm transcendentals not exposed by Rust's `std` (`<math.h>`): `erf`, `erfc`,
+// `tgamma`, `lgamma`. float.c calls these directly from the C standard library.
+// They have no PostgreSQL owner crate; until a `common-libm` provider lands the
+// `derf`/`derfc`/`dgamma`/`dlgamma` cores route through these outward seams and
+// panic loudly (mirror-pg-and-panic). Pure FP routines, no failure surface.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `erf(x)` (`<math.h>`): the Gauss error function.
+    pub fn erf(x: f64) -> f64
+);
+
+seam_core::seam!(
+    /// `erfc(x)` (`<math.h>`): the complementary error function.
+    pub fn erfc(x: f64) -> f64
+);
+
+seam_core::seam!(
+    /// `tgamma(x)` (`<math.h>`): the true gamma function.
+    pub fn tgamma(x: f64) -> f64
+);
+
+seam_core::seam!(
+    /// `lgamma(x)` (`<math.h>`): the natural log of `|gamma(x)|` (the C
+    /// `signgam` side output is unused by float.c's `dlgamma`).
+    pub fn lgamma(x: f64) -> f64
+);

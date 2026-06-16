@@ -32,11 +32,15 @@ pub mod keystone;
 /// `backend-catalog-indexing-seams` are installed by the F1 family fills (which
 /// form the heap tuple from their crossed `FormData_*` row before calling the
 /// engine here). [`family1::install`] sets the F1 seams whose substrate is
-/// fully present (pure `heap_form_tuple` + engine + `GetNewOidWithIndex`); the
-/// rest stay uninstalled (mirror-pg-and-panic) until their substrate lands
-/// (`heap_multi_insert` for the multi-insert seams,
-/// `construct_array_builtin`/`SearchSysCacheCopy1`/ACL rewrite for the
-/// array/syscache/owner-update seams).
+/// fully present (pure `heap_form_tuple` + engine + `GetNewOidWithIndex`),
+/// including the three multi-insert seams
+/// (`catalog_tuples_multi_insert_pg_{depend,shdepend,enum}`): the engine
+/// `CatalogTuplesMultiInsertWithInfo` is ported here, calling the
+/// `backend-access-heap-heapam-seams::heap_multi_insert` seam (mirror-pg-and-
+/// panic until the heapam insert family lands) and running `CatalogIndexInsert`
+/// per inserted tuple. The rest stay uninstalled (mirror-pg-and-panic) until
+/// their substrate lands (`construct_array_builtin` / `SearchSysCacheCopy1` /
+/// ACL rewrite for the array/syscache/owner-update seams).
 pub fn init_seams() {
     family1::install();
 }
