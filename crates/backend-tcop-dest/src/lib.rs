@@ -82,7 +82,19 @@ use types_error::PgResult;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::tuptable::SlotData;
+use types_portal::{CommandTag, QueryCompletion};
 use types_tuple::heaptuple::TupleDescData;
+
+// Protocol message-type bytes (`protocol.h` / `PqMsg_*`). Defined locally,
+// mirroring the per-crate convention in `printtup`/`explain_dr`/`auth` (there is
+// no central protocol module in the workspace yet).
+
+/// `PqMsg_CommandComplete` (`protocol.h`).
+const PqMsg_CommandComplete: u8 = b'C';
+/// `PqMsg_ReadyForQuery` (`protocol.h`).
+const PqMsg_ReadyForQuery: u8 = b'Z';
+/// `PqMsg_EmptyQueryResponse` (`protocol.h`).
+const PqMsg_EmptyQueryResponse: u8 = b'I';
 
 /// The first three function-pointer slots of a C `DestReceiver` struct
 /// (`tcop/dest.h`): `rStartup`, `receiveSlot`, `rShutdown`. (`rDestroy` is not
@@ -375,6 +387,134 @@ fn dest_get_mydest_impl(dest: DestReceiverHandle) -> CommandDest {
     lookup(dest).mydest
 }
 
+// ===========================================================================
+// Command-completion / protocol helpers (dest.c) — BeginCommand, EndCommand,
+// EndReplicationCommand, NullCommand, ReadyForQuery.
+// ===========================================================================
+
+/// `void BeginCommand(CommandTag commandTag, CommandDest dest)` (dest.c):
+/// initialize the destination at the start of a command. "Nothing to do at
+/// present" — but the call site is preserved faithfully.
+pub fn BeginCommand(_command_tag: CommandTag, _dest: CommandDest) {
+    // Nothing to do at present
+}
+
+/// `void EndCommand(const QueryCompletion *qc, CommandDest dest, bool
+/// force_undecorated_output)` (dest.c): clean up the destination at the end of
+/// a command. For the remote destinations this builds the command-completion
+/// tag and sends the protocol `CommandComplete` ('C') message; for all other
+/// destinations it does nothing.
+///
+/// C uses a stack `char completionTag[COMPLETION_TAG_BUFSIZE]` and
+/// `BuildQueryCompletionString(...) -> len`, then
+/// `pq_putmessage(PqMsg_CommandComplete, completionTag, len + 1)` — the `+ 1`
+/// sends the trailing NUL. Here `build_query_completion_string` returns the tag
+/// (without terminator) allocated in `mcx`; we append a single NUL to match the
+/// `len + 1` byte count exactly.
+pub fn EndCommand<'mcx>(
+    mcx: Mcx<'mcx>,
+    qc: &QueryCompletion,
+    dest: CommandDest,
+    force_undecorated_output: bool,
+) -> PgResult<()> {
+    match dest {
+        CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::RemoteSimple => {
+            let tag = backend_tcop_cmdtag::build_query_completion_string(
+                mcx,
+                qc,
+                force_undecorated_output,
+            )?;
+            // len = strlen(completionTag); send len + 1 bytes (incl. NUL).
+            let mut body = alloc::vec::Vec::with_capacity(tag.as_bytes().len() + 1);
+            body.extend_from_slice(tag.as_bytes());
+            body.push(0);
+            let _eof =
+                backend_libpq_pqcomm_seams::pq_putmessage::call(PqMsg_CommandComplete, &body)?;
+        }
+
+        CommandDest::None
+        | CommandDest::Debug
+        | CommandDest::Spi
+        | CommandDest::Tuplestore
+        | CommandDest::IntoRel
+        | CommandDest::CopyOut
+        | CommandDest::SqlFunction
+        | CommandDest::TransientRel
+        | CommandDest::TupleQueue
+        | CommandDest::ExplainSerialize => {}
+    }
+    Ok(())
+}
+
+/// `void EndReplicationCommand(const char *commandTag)` (dest.c): a stripped
+/// down `EndCommand` for replication commands — send the `CommandComplete`
+/// ('C') message for the given tag. `strlen(commandTag) + 1` sends the trailing
+/// NUL.
+pub fn end_replication_command_impl(command_tag: alloc::string::String) -> PgResult<()> {
+    let bytes = command_tag.as_bytes();
+    let mut body = alloc::vec::Vec::with_capacity(bytes.len() + 1);
+    body.extend_from_slice(bytes);
+    body.push(0);
+    let _eof = backend_libpq_pqcomm_seams::pq_putmessage::call(PqMsg_CommandComplete, &body)?;
+    Ok(())
+}
+
+/// `void NullCommand(CommandDest dest)` (dest.c): tell the destination an empty
+/// query string was recognized. For the remote destinations this sends the
+/// protocol `EmptyQueryResponse` ('I') message (with no body); for all other
+/// destinations it does nothing. This ensures a recognizable end to the
+/// response to an Execute message in the extended query protocol.
+pub fn NullCommand(dest: CommandDest) -> PgResult<()> {
+    match dest {
+        CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::RemoteSimple => {
+            // Tell the FE that we saw an empty query string
+            backend_libpq_pqformat::pq_putemptymessage(PqMsg_EmptyQueryResponse)?;
+        }
+
+        CommandDest::None
+        | CommandDest::Debug
+        | CommandDest::Spi
+        | CommandDest::Tuplestore
+        | CommandDest::IntoRel
+        | CommandDest::CopyOut
+        | CommandDest::SqlFunction
+        | CommandDest::TransientRel
+        | CommandDest::TupleQueue
+        | CommandDest::ExplainSerialize => {}
+    }
+    Ok(())
+}
+
+/// `void ReadyForQuery(CommandDest dest)` (dest.c): tell the destination we are
+/// ready for a new query. For the remote destinations this sends the protocol
+/// `ReadyForQuery` ('Z') message — which in protocol 3.0+ carries the
+/// transaction-block status code — and flushes the output (the flush happens in
+/// any case for the remote dests). For all other destinations it does nothing.
+pub fn ReadyForQuery<'mcx>(mcx: Mcx<'mcx>, dest: CommandDest) -> PgResult<()> {
+    match dest {
+        CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::RemoteSimple => {
+            let mut buf = backend_libpq_pqformat::pq_beginmessage(mcx, PqMsg_ReadyForQuery)?;
+            let code = backend_access_transam_xact_seams::transaction_block_status_code::call();
+            backend_libpq_pqformat::pq_sendbyte(&mut buf, code as u8)?;
+            backend_libpq_pqformat::pq_endmessage(buf)?;
+            // Flush output at end of cycle in any case.
+            let _eof = backend_libpq_pqcomm_seams::pq_flush::call()?;
+        }
+
+        CommandDest::None
+        | CommandDest::Debug
+        | CommandDest::Spi
+        | CommandDest::Tuplestore
+        | CommandDest::IntoRel
+        | CommandDest::CopyOut
+        | CommandDest::SqlFunction
+        | CommandDest::TransientRel
+        | CommandDest::TupleQueue
+        | CommandDest::ExplainSerialize => {}
+    }
+    Ok(())
+}
+
 /// Install this crate's inward seams. Wired into `seams-init`.
 pub fn init_seams() {
     backend_tcop_dest_seams::dest_rstartup::set(dest_rstartup_impl);
@@ -382,6 +522,12 @@ pub fn init_seams() {
     backend_tcop_dest_seams::dest_rshutdown::set(dest_rshutdown_impl);
     backend_tcop_dest_seams::create_dest_receiver::set(CreateDestReceiver);
     backend_tcop_dest_seams::dest_get_mydest::set(dest_get_mydest_impl);
+    // Command-completion / protocol helpers (dest.c).
+    backend_tcop_dest_seams::begin_command::set(BeginCommand);
+    backend_tcop_dest_seams::end_command::set(EndCommand);
+    backend_tcop_dest_seams::null_command::set(NullCommand);
+    backend_tcop_dest_seams::ready_for_query::set(ReadyForQuery);
+    backend_tcop_dest_seams::end_replication_command::set(end_replication_command_impl);
 }
 
 #[cfg(test)]

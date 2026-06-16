@@ -361,3 +361,11 @@ seam_core::seam!(
     /// `SYNCHRONOUS_COMMIT_LOCAL_FLUSH`.
     pub fn synchronous_commit() -> i32
 );
+
+seam_core::seam!(
+    /// `TransactionBlockStatusCode()` (xact.c:5003): the one-character
+    /// transaction-block status indicator the protocol `ReadyForQuery` ('Z')
+    /// message carries — `'I'` idle (not in a block), `'T'` in a transaction,
+    /// `'E'` in a failed transaction. Pure read of backend-local block state.
+    pub fn transaction_block_status_code() -> char
+);
