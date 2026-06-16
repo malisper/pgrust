@@ -4270,6 +4270,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-table",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
@@ -4291,7 +4292,9 @@ dependencies = [
 name = "backend-catalog-pg-enum-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -13145,6 +13148,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-ascii"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
+ "types-error",
+ "types-fmgr",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-adt-cash"
 version = "0.0.0"
 dependencies = [
@@ -13180,6 +13194,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-datetime"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-xact",
+ "backend-timezone-localtime",
+ "backend-timezone-pgtz",
+ "backend-timezone-strftime-seams",
+ "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-isoweek-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-numutils",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-fmgr-core",
+ "common-hashfn",
+ "mcx",
+ "state-pgtz",
+ "types-core",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-misc-more2",
+ "types-numeric",
+ "types-pgtime",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-datetime-seams"
 version = "0.0.0"
 dependencies = [
@@ -13212,12 +13255,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-encode"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-encode-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-encode-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-enum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-catalog-pg-enum-seams",
+ "backend-libpq-pqformat",
+ "backend-storage-ipc-procarray-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-scan",
+ "types-stringinfo",
+ "types-tuple",
 ]
 
 [[package]]
@@ -13403,6 +13481,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-op"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-array-more-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-tsvector-ext-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-seams"
 version = "0.0.0"
 dependencies = [
@@ -13443,6 +13537,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonpath"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-nodeFuncs-seams",
+ "backend-regex-core",
+ "backend-utils-adt-formatting",
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonpath-gram-seams",
+ "backend-utils-adt-numeric",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-jsonpath",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonpath-gram-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-jsonpath",
+]
+
+[[package]]
 name = "backend-utils-adt-lsn-trigfuncs"
 version = "0.0.0"
 dependencies = [
@@ -13455,6 +13577,32 @@ dependencies = [
  "types-numeric",
  "types-ri-triggers",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-mac"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-mac-seams",
+ "common-hashfn",
+ "types-error",
+ "types-network",
+]
+
+[[package]]
+name = "backend-utils-adt-mac-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-mac8"
+version = "0.0.0"
+dependencies = [
+ "common-hashfn",
+ "types-error",
+ "types-network",
 ]
 
 [[package]]
@@ -13983,6 +14131,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-uuid"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "common-hashfn",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+ "types-uuid",
+]
+
+[[package]]
 name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
@@ -14044,6 +14210,24 @@ dependencies = [
  "mcx",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-xid8funcs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "backend-utils-time-snapmgr-seams",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
 ]
 
 [[package]]
@@ -14510,6 +14694,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "mcx",
+ "types-acl",
  "types-cache",
  "types-catalog",
  "types-core",
@@ -14539,6 +14724,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-acl",
  "types-cache",
  "types-catalog",
  "types-cluster",
@@ -16159,6 +16345,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-strong-random-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep"
 version = "0.0.0"
 dependencies = [
@@ -16540,6 +16733,8 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-datetime",
+ "backend-utils-adt-encode",
  "backend-utils-adt-float",
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
@@ -16729,6 +16924,7 @@ name = "types-cache"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-acl",
  "types-core",
  "types-datum",
  "types-scan",
@@ -16974,6 +17170,14 @@ name = "types-jsonb"
 version = "0.0.0"
 dependencies = [
  "types-datum",
+]
+
+[[package]]
+name = "types-jsonpath"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
+ "types-jsonb",
 ]
 
 [[package]]
@@ -17431,6 +17635,14 @@ name = "types-typcache"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-uuid"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-nodes",
 ]
 
 [[package]]
