@@ -29,8 +29,8 @@ use types_nodes::primnodes::{Expr, TargetEntry};
 
 use crate::{
     out_expr, out_node_inner, write_bitmapset_opt_field, write_bool_field, write_enum_field,
-    write_float_field, write_int_field, write_long_field, write_oid_field, write_string_field,
-    write_uint64_field, write_uint_field,
+    write_expr_field, write_float_field, write_int_field, write_long_field, write_oid_field,
+    write_string_field, write_uint64_field, write_uint_field,
 };
 
 // ---------------------------------------------------------------------------
@@ -336,6 +336,21 @@ fn out_functionscan(buf: &mut String, n: &types_nodes::nodefunctionscan::Functio
     out_scan_fields(buf, &n.scan, "scan.", wl);
     write_rtf_list_field(buf, "functions", n.functions.as_deref(), wl);
     write_bool_field(buf, "funcordinality", n.funcordinality);
+}
+
+/// `_outTableFuncScan` — scan fields then `WRITE_NODE_FIELD(tablefunc)`. The
+/// `tablefunc` child is a `TableFunc` node framed by the out_parse_family writer.
+fn out_tablefuncscan(
+    buf: &mut String,
+    n: &types_nodes::nodetablefuncscan::TableFuncScan<'_>,
+    wl: bool,
+) {
+    buf.push_str("TABLEFUNCSCAN");
+    out_scan_fields(buf, &n.scan, "scan.", wl);
+    let _ = write!(buf, " :tablefunc ");
+    crate::framed(buf, |b| {
+        crate::out_parse_family::out_table_func(b, &n.tablefunc, wl)
+    });
 }
 
 fn out_material(buf: &mut String, n: &types_nodes::nodeforeigncustom::Material<'_>, wl: bool) {
@@ -793,6 +808,33 @@ fn out_foreignscan(
     write_bool_field(buf, "fsSystemCol", n.fsSystemCol);
 }
 
+/// `_outWindowAgg` (outfuncs.funcs.c) — writes every field in struct order.
+fn out_windowagg(buf: &mut String, n: &types_nodes::nodewindowagg::WindowAgg<'_>, wl: bool) {
+    buf.push_str("WINDOWAGG");
+    out_plan_fields(buf, &n.plan, "plan.", wl);
+    write_string_field(buf, "winname", n.winname.as_ref().map(|s| s.as_str()));
+    write_uint_field(buf, "winref", n.winref);
+    write_int_field(buf, "partNumCols", n.partNumCols);
+    write_attrnumber_array(buf, "partColIdx", opt_slice(&n.partColIdx));
+    write_oid_array(buf, "partOperators", opt_slice(&n.partOperators));
+    write_oid_array(buf, "partCollations", opt_slice(&n.partCollations));
+    write_int_field(buf, "ordNumCols", n.ordNumCols);
+    write_attrnumber_array(buf, "ordColIdx", opt_slice(&n.ordColIdx));
+    write_oid_array(buf, "ordOperators", opt_slice(&n.ordOperators));
+    write_oid_array(buf, "ordCollations", opt_slice(&n.ordCollations));
+    write_int_field(buf, "frameOptions", n.frameOptions);
+    write_expr_field(buf, "startOffset", n.startOffset.as_deref(), wl);
+    write_expr_field(buf, "endOffset", n.endOffset.as_deref(), wl);
+    write_expr_opt_list(buf, "runCondition", n.runCondition.as_deref(), wl);
+    write_expr_opt_list(buf, "runConditionOrig", n.runConditionOrig.as_deref(), wl);
+    write_oid_field(buf, "startInRangeFunc", n.startInRangeFunc);
+    write_oid_field(buf, "endInRangeFunc", n.endInRangeFunc);
+    write_oid_field(buf, "inRangeColl", n.inRangeColl);
+    write_bool_field(buf, "inRangeAsc", n.inRangeAsc);
+    write_bool_field(buf, "inRangeNullsFirst", n.inRangeNullsFirst);
+    write_bool_field(buf, "topWindow", n.topWindow);
+}
+
 /// Optional-`PgVec` → `&[]` (empty) or its slice; used where the repo stores an
 /// array column as `Option<PgVec<_>>` but C always emits the bare `( ...)` over
 /// `numCols` (never `<>` here — the count-paired arrays are always present when
@@ -855,16 +897,8 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
              updateColnosLists/withCheckOptionLists/returningLists/mergeActionLists/\
              mergeJoinConditions list-of-lists) are all modeled and writable"
         ),
-        Node::WindowAgg(_) => panic!(
-            "_outWindowAgg: not serialized — the repo WindowAgg struct trims the \
-             `winname` field that C's _outWindowAgg writes (WRITE_STRING_FIELD(winname)); \
-             field unmodeled"
-        ),
-        Node::TableFuncScan(_) => panic!(
-            "_outTableFuncScan: not serialized — `tablefunc` is carried as a bare \
-             TableFunc struct, whose framed `{{TABLEFUNC ...}}` writer lives in another \
-             node family (not reachable as a Node here)"
-        ),
+        Node::WindowAgg(n) => crate::framed(buf, |b| out_windowagg(b, n, wl)),
+        Node::TableFuncScan(n) => crate::framed(buf, |b| out_tablefuncscan(b, n, wl)),
         Node::FunctionScan(n) => crate::framed(buf, |b| out_functionscan(b, n, wl)),
         Node::SampleScan(n) => crate::framed(buf, |b| out_samplescan(b, n, wl)),
         Node::CustomScan(_) => panic!(
