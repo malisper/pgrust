@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     EcId, EmId, JoinType, RelId, Relids, RinfoId, PlannerInfo, SpecialJoinInfo,
 };
@@ -46,7 +47,8 @@ seam_core::seam!(
     /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)`
     /// (clausesel.c): selectivity of an implicitly-ANDed `RestrictInfo`/clause
     /// list. The arena form takes the clause list as `RinfoId` handles.
-    pub fn clauselist_selectivity(
+    pub fn clauselist_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clauses: &[RinfoId],
         var_relid: i32,
@@ -60,7 +62,8 @@ seam_core::seam!(
     /// (clausesel.c): selectivity of a single `RestrictInfo`, identified by its
     /// [`RinfoId`] handle. (orclauses.c estimates its extracted OR clause and the
     /// original join OR clause through this.)
-    pub fn clause_selectivity(
+    pub fn clause_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clause: RinfoId,
         var_relid: i32,
@@ -80,7 +83,8 @@ seam_core::seam!(
     /// partial selectivity and writes back, via the returned `Relids`, the
     /// 0-based clause-position set it consumed (the C `*estimatedclauses`
     /// in/out parameter is folded into the return tuple).
-    pub fn statext_clauselist_selectivity(
+    pub fn statext_clauselist_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clauses: &[RinfoId],
         var_relid: i32,
@@ -99,7 +103,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `restriction_selectivity(root, operatorid, args, inputcollid, varRelid)`
     /// (plancat.c): dispatch to the operator's restriction estimator.
-    pub fn restriction_selectivity(
+    pub fn restriction_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
         args: &[Expr],
@@ -110,7 +115,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `join_selectivity(root, operatorid, args, inputcollid, jointype, sjinfo)`
     /// (plancat.c): dispatch to the operator's join estimator.
-    pub fn join_selectivity(
+    pub fn join_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
         args: &[Expr],
@@ -122,7 +128,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `function_selectivity(root, funcid, args, inputcollid, is_join,
     /// varRelid, jointype, sjinfo)` (plancat.c): support-function estimate.
-    pub fn function_selectivity(
+    pub fn function_selectivity<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         funcid: Oid,
         args: &[Expr],
@@ -136,7 +143,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `scalararraysel(root, clause, is_join_clause, varRelid, jointype, sjinfo)`
     /// (selfuncs.c).
-    pub fn scalararraysel(
+    pub fn scalararraysel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clause: &Expr,
         is_join_clause: bool,
@@ -147,7 +155,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `rowcomparesel(root, clause, varRelid, jointype, sjinfo)` (selfuncs.c).
-    pub fn rowcomparesel(
+    pub fn rowcomparesel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clause: &Expr,
         var_relid: i32,
@@ -158,7 +167,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `nulltestsel(root, nulltesttype, arg, varRelid, jointype, sjinfo)`
     /// (selfuncs.c). `arg` is the tested expression by value.
-    pub fn nulltestsel(
+    pub fn nulltestsel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
         arg: &Expr,
@@ -171,7 +181,8 @@ seam_core::seam!(
     /// `nulltestsel(root, IS_NULL, var, varRelid, jointype, sjinfo)` form used
     /// by `clauselist_selectivity` for the range-pair null adjustment, where the
     /// tested `var` is the common range variable (an `&Expr`).
-    pub fn nulltestsel_var(
+    pub fn nulltestsel_var<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
         var: &Expr,
@@ -183,7 +194,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `booltestsel(root, booltesttype, arg, varRelid, jointype, sjinfo)`
     /// (selfuncs.c).
-    pub fn booltestsel(
+    pub fn booltestsel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         booltesttype: i32,
         arg: &Expr,
@@ -195,7 +207,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `boolvarsel(root, arg, varRelid)` (selfuncs.c): selectivity of a boolean
     /// expression treated as a variable.
-    pub fn boolvarsel(
+    pub fn boolvarsel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         arg: &Expr,
         var_relid: i32,
@@ -221,7 +234,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `estimate_expression_value(root, node)` (clauses.c): fold a node to a
     /// `Const` if possible. Returns the (possibly-rewritten) expression by value.
-    pub fn estimate_expression_value(root: &mut PlannerInfo, node: &Expr) -> PgResult<Expr>
+    pub fn estimate_expression_value<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        node: &Expr,
+    ) -> PgResult<Expr>
 );
 
 /* ======================================================================

@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{Cost, Oid, Selectivity};
 use types_pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     HashPath, JoinType, MergePath, NestPath, Path, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
@@ -520,7 +521,8 @@ fn outer_pathtarget_width(p: &Path) -> i32 {
 }
 
 /// `approx_tuple_count` (costsize.c:5303).
-fn approx_tuple_count(
+fn approx_tuple_count<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     outer_id: PathId,
     inner_id: PathId,
@@ -536,14 +538,15 @@ fn approx_tuple_count(
 
     for &id in quals {
         let clause = root.rinfo(id).clause;
-        selec *= cz::clause_selectivity::call(root, clause, 0, JOIN_INNER as i32, Some(&sjinfo));
+        selec *= cz::clause_selectivity::call(run, root, clause, 0, JOIN_INNER as i32, Some(&sjinfo));
     }
 
     clamp_row_est(selec * outer_tuples * inner_tuples)
 }
 
 /// `final_cost_mergejoin` (costsize.c:3792) — fills a `MergePath` (by `PathId`).
-pub fn final_cost_mergejoin(
+pub fn final_cost_mergejoin<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     workspace: &JoinCostWorkspace,
@@ -616,7 +619,7 @@ pub fn final_cost_mergejoin(
         mp.skip_mark_restore = skip_mark_restore;
     }
 
-    mergejointuples = approx_tuple_count(root, outer_id, inner_id, &mergeclauses);
+    mergejointuples = approx_tuple_count(run, root, outer_id, inner_id, &mergeclauses);
 
     let outer_is_unique = matches!(root.path(outer_id), PathNode::UniquePath(_));
     if outer_is_unique || skip_mark_restore {
@@ -759,7 +762,8 @@ pub fn initial_cost_hashjoin(
 }
 
 /// `final_cost_hashjoin` (costsize.c:4286) — fills a `HashPath` (by `PathId`).
-pub fn final_cost_hashjoin(
+pub fn final_cost_hashjoin<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     workspace: &JoinCostWorkspace,
@@ -915,7 +919,7 @@ pub fn final_cost_hashjoin(
             * clamp_row_est(inner_path_rows * innerbucketsize)
             * 0.5;
 
-        hashjointuples = approx_tuple_count(root, outer_id, inner_id, &hashclauses);
+        hashjointuples = approx_tuple_count(run, root, outer_id, inner_id, &hashclauses);
     }
 
     startup_cost += qp_qual_cost.startup;
@@ -948,7 +952,8 @@ fn get_rightop(_root: &PlannerInfo, clause: types_pathnodes::NodeId) -> types_pa
  * ========================================================================== */
 
 /// `compute_semi_anti_join_factors`.
-pub fn compute_semi_anti_join_factors(
+pub fn compute_semi_anti_join_factors<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     joinrel: RelId,
     outerrel: RelId,
@@ -974,6 +979,7 @@ pub fn compute_semi_anti_join_factors(
         joinquals_ids.iter().map(|&id| root.rinfo(id).clause).collect();
 
     let jselec = cz::clauselist_selectivity::call(
+        run,
         root,
         &joinqual_nodes,
         0,
@@ -984,6 +990,7 @@ pub fn compute_semi_anti_join_factors(
     let norm_sjinfo = cz::init_dummy_sjinfo::call(root, outerrel, innerrel);
 
     let nselec = cz::clauselist_selectivity::call(
+        run,
         root,
         &joinqual_nodes,
         0,
@@ -1009,7 +1016,8 @@ pub fn compute_semi_anti_join_factors(
  * ========================================================================== */
 
 /// `get_parameterized_baserel_size` (costsize.c:5378).
-pub fn get_parameterized_baserel_size(
+pub fn get_parameterized_baserel_size<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rel: RelId,
     param_clauses: &[RinfoId],
@@ -1023,7 +1031,7 @@ pub fn get_parameterized_baserel_size(
     }
 
     let mut nrows = baserel.tuples
-        * cz::clauselist_selectivity::call(root, &all_nodes, baserel.relid as i32, JOIN_INNER as i32, None);
+        * cz::clauselist_selectivity::call(run, root, &all_nodes, baserel.relid as i32, JOIN_INNER as i32, None);
     nrows = clamp_row_est(nrows);
     if nrows > baserel.rows {
         nrows = baserel.rows;
@@ -1032,7 +1040,8 @@ pub fn get_parameterized_baserel_size(
 }
 
 /// `set_joinrel_size_estimates` (costsize.c:5427).
-pub fn set_joinrel_size_estimates(
+pub fn set_joinrel_size_estimates<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     outer_rel: RelId,
@@ -1043,6 +1052,7 @@ pub fn set_joinrel_size_estimates(
     let outer_rows = root.rel(outer_rel).rows;
     let inner_rows = root.rel(inner_rel).rows;
     let rows = calc_joinrel_size_estimate(
+        run,
         root,
         rel,
         outer_rel,
@@ -1056,7 +1066,8 @@ pub fn set_joinrel_size_estimates(
 }
 
 /// `get_parameterized_joinrel_size` (costsize.c:5459).
-pub fn get_parameterized_joinrel_size(
+pub fn get_parameterized_joinrel_size<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rel: RelId,
     outer_path: PathId,
@@ -1068,6 +1079,7 @@ pub fn get_parameterized_joinrel_size(
     let inner = root.path(inner_path).base();
 
     let mut nrows = calc_joinrel_size_estimate(
+        run,
         root,
         rel,
         outer.parent,
@@ -1084,7 +1096,8 @@ pub fn get_parameterized_joinrel_size(
 }
 
 /// `calc_joinrel_size_estimate` (costsize.c:5500).
-pub fn calc_joinrel_size_estimate(
+pub fn calc_joinrel_size_estimate<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     joinrel: RelId,
     outer_rel: RelId,
@@ -1116,12 +1129,12 @@ pub fn calc_joinrel_size_estimate(
             }
         }
 
-        jselec = cz::clauselist_selectivity::call(root, &joinqual_nodes, 0, jointype as i32, Some(sjinfo));
-        pselec = cz::clauselist_selectivity::call(root, &pushedqual_nodes, 0, jointype as i32, Some(sjinfo));
+        jselec = cz::clauselist_selectivity::call(run, root, &joinqual_nodes, 0, jointype as i32, Some(sjinfo));
+        pselec = cz::clauselist_selectivity::call(run, root, &pushedqual_nodes, 0, jointype as i32, Some(sjinfo));
     } else {
         let quals: Vec<types_pathnodes::NodeId> =
             worklist.iter().map(|&id| root.rinfo(id).clause).collect();
-        jselec = cz::clauselist_selectivity::call(root, &quals, 0, jointype as i32, Some(sjinfo));
+        jselec = cz::clauselist_selectivity::call(run, root, &quals, 0, jointype as i32, Some(sjinfo));
         pselec = 0.0;
     }
 

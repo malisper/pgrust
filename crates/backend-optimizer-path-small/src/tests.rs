@@ -69,6 +69,14 @@ fn install_relids_seams() {
     });
 }
 
+/// An empty planner-run context for selectivity tests. The synthetic clauses
+/// here are bare arena nodes that never reach `planner_rt_fetch`, so an empty
+/// store is sufficient; the parameter exists purely to thread `&PlannerRun`
+/// through the re-signed selectivity spine.
+fn mk_run<'mcx>(mcx: mcx::Mcx<'mcx>) -> PlannerRun<'mcx> {
+    PlannerRun::new(mcx)
+}
+
 /* ---- arena builders ----------------------------------------------------- */
 
 fn mk_rel(root: &mut PlannerInfo, relid: u32, tuples: f64) -> RelId {
@@ -118,7 +126,9 @@ fn current_of_selectivity_is_one_over_tuples() {
     let rinfo = mk_rinfo(&mut root, node, 1);
 
     // clause_selectivity reaches the CurrentOfExpr arm: 1 / tuples = 1/50.
-    let s = clause_selectivity(&mut root, rinfo, 0, JOIN_INNER, None).unwrap();
+    let cx = mcx::MemoryContext::new("t");
+    let run = mk_run(cx.mcx());
+    let s = clause_selectivity(&run, &mut root, rinfo, 0, JOIN_INNER, None).unwrap();
     assert!((s - (1.0 / 50.0)).abs() < 1e-12, "got {s}");
 }
 
@@ -143,7 +153,9 @@ fn range_pair_selectivity_combines_bounds() {
     let r_lt = mk_rinfo_op(&mut root, lt, 1);
     let r_gt = mk_rinfo_op(&mut root, gt, 1);
 
-    let s = clauselist_selectivity(&mut root, &[r_lt, r_gt], 0, JOIN_INNER, None).unwrap();
+    let cx = mcx::MemoryContext::new("t");
+    let run = mk_run(cx.mcx());
+    let s = clauselist_selectivity(&run, &mut root, &[r_lt, r_gt], 0, JOIN_INNER, None).unwrap();
 
     // hibound = losel = 0.25; paired = hisel + losel - 1 + nullfrac
     //         = 0.25 + 0.25 - 1.0 + 0.10 = -0.40  -> <= 0 and < -0.01
@@ -165,7 +177,9 @@ fn range_pair_positive_combination() {
     let r_lt = mk_rinfo_op(&mut root, lt, 1);
     let r_gt = mk_rinfo_op(&mut root, gt, 1);
 
-    let s = clauselist_selectivity(&mut root, &[r_lt, r_gt], 0, JOIN_INNER, None).unwrap();
+    let cx = mcx::MemoryContext::new("t");
+    let run = mk_run(cx.mcx());
+    let s = clauselist_selectivity(&run, &mut root, &[r_lt, r_gt], 0, JOIN_INNER, None).unwrap();
     // 0.7 + 0.7 - 1.0 + 0.0 = 0.4
     assert!((s - 0.4).abs() < 1e-12, "got {s}");
 }
@@ -231,10 +245,10 @@ fn install_estimator_seams(ineq_sel: f64, null_frac: f64) {
                 _ => 0,
             })
         });
-        seam::restriction_selectivity::set(|_r, _op, _a, _c, _v| {
+        seam::restriction_selectivity::set(|_run, _r, _op, _a, _c, _v| {
             Ok(f64::from_bits(SEL.load(std::sync::atomic::Ordering::SeqCst)))
         });
-        seam::nulltestsel_var::set(|_r, _t, _v, _vr, _jt, _sj| {
+        seam::nulltestsel_var::set(|_run, _r, _t, _v, _vr, _jt, _sj| {
             Ok(f64::from_bits(NULLF.load(std::sync::atomic::Ordering::SeqCst)))
         });
         // The pseudoconstant-on-one-side test: the right operand is the const.

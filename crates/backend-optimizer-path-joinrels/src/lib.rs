@@ -1279,6 +1279,7 @@ fn try_partitionwise_join<'mcx>(
         let mut child_joinrel = root.rel(joinrel).part_rels[cnt_parts];
         if child_joinrel.is_none() {
             let built = bms::build_child_join_rel::call(
+                run,
                 root,
                 child_rel1,
                 child_rel2,

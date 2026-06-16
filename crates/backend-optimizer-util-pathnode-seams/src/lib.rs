@@ -514,7 +514,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_group_path(...)` (pathnode.c:3265).
-    pub fn create_group_path(
+    pub fn create_group_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -535,7 +536,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_agg_path(...)` (pathnode.c:3378).
-    pub fn create_agg_path(
+    pub fn create_agg_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -892,9 +894,9 @@ seam_core::seam!(
     pub fn cost_tidscan(root: &mut PlannerInfo, path: PathId, rel: RelId, tidquals: &[NodeId])
 );
 seam_core::seam!(
-    pub fn cost_tidrangescan(root: &mut PlannerInfo, path: PathId, rel: RelId, tidrangequals: &[NodeId])
+    pub fn cost_tidrangescan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, tidrangequals: &[NodeId])
 );
-seam_core::seam!(pub fn cost_subqueryscan(root: &mut PlannerInfo, path: PathId, rel: RelId, subpath: PathId, trivial_pathtarget: bool));
+seam_core::seam!(pub fn cost_subqueryscan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, subpath: PathId, trivial_pathtarget: bool));
 seam_core::seam!(pub fn cost_functionscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_tablefuncscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_valuesscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
@@ -985,7 +987,8 @@ seam_core::seam!(
     /// `cost_group(path, root, numGroupCols, numGroups, quals,
     /// input_disabled_nodes, input_startup_cost, input_total_cost,
     /// input_tuples)`.
-    pub fn cost_group(
+    pub fn cost_group<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         num_group_cols: i32,
@@ -1001,7 +1004,8 @@ seam_core::seam!(
     /// `cost_agg(path, root, aggstrategy, aggcosts, numGroupCols, numGroups,
     /// quals, input_disabled_nodes, input_startup_cost, input_total_cost,
     /// input_tuples, input_width)`.
-    pub fn cost_agg(
+    pub fn cost_agg<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         aggstrategy: AggStrategy,
@@ -1051,7 +1055,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `final_cost_mergejoin(root, path, workspace, extra)`.
-    pub fn final_cost_mergejoin(
+    pub fn final_cost_mergejoin<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         workspace: &types_pathnodes::optimizer_plan::JoinCostWorkspace,
@@ -1060,7 +1065,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `final_cost_hashjoin(root, path, workspace, extra)`.
-    pub fn final_cost_hashjoin(
+    pub fn final_cost_hashjoin<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         workspace: &types_pathnodes::optimizer_plan::JoinCostWorkspace,

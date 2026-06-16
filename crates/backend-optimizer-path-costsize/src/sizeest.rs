@@ -2,6 +2,7 @@
 //! `set_pathtarget_cost_width` / `get_expr_width`.
 
 use types_core::primitive::{Cost, Oid};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PathTarget, PlannerInfo, RelId};
 
 use backend_optimizer_path_costsize_seams as cz;
@@ -25,14 +26,14 @@ fn is_special_varno(varno: i32) -> bool {
 }
 
 /// `set_baserel_size_estimates` (costsize.c:5328).
-pub fn set_baserel_size_estimates(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_baserel_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
 
     let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
     let clause_nodes = rinfo_clause_nodes(root, &baserestrictinfo);
 
     let nrows = root.rel(rel).tuples
-        * cz::clauselist_selectivity::call(root, &clause_nodes, 0, super::JOIN_INNER as i32, None);
+        * cz::clauselist_selectivity::call(run, root, &clause_nodes, 0, super::JOIN_INNER as i32, None);
 
     root.rel_mut(rel).rows = clamp_row_est(nrows);
 
@@ -43,25 +44,25 @@ pub fn set_baserel_size_estimates(root: &mut PlannerInfo, rel: RelId) {
 }
 
 /// `set_function_size_estimates` (costsize.c:6066).
-pub fn set_function_size_estimates(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_function_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
     // rte->functions are unreachable in the fabled arena → the largest
     // expression_returns_set_rows over them is read through a focused seam.
     let tuples = cz::rte_function_max_set_rows::call(root, rel);
     debug_assert!(rt_rtekind(root, rel) == RTE_FUNCTION);
     root.rel_mut(rel).tuples = tuples;
-    set_baserel_size_estimates(root, rel);
+    set_baserel_size_estimates(run, root, rel);
 }
 
 /// `set_tablefunc_size_estimates` (costsize.c:6104) — hardwired 100 rows.
-pub fn set_tablefunc_size_estimates(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_tablefunc_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
     root.rel_mut(rel).tuples = 100.0;
-    set_baserel_size_estimates(root, rel);
+    set_baserel_size_estimates(run, root, rel);
 }
 
 /// `set_cte_size_estimates` (costsize.c:6151).
-pub fn set_cte_size_estimates(root: &mut PlannerInfo, rel: RelId, cte_rows: f64) {
+pub fn set_cte_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId, cte_rows: f64) {
     debug_assert!(root.rel(rel).relid > 0);
     let self_reference = cz::rte_cte_self_reference::call(root, rel);
     if self_reference {
@@ -69,25 +70,25 @@ pub fn set_cte_size_estimates(root: &mut PlannerInfo, rel: RelId, cte_rows: f64)
     } else {
         root.rel_mut(rel).tuples = cte_rows;
     }
-    set_baserel_size_estimates(root, rel);
+    set_baserel_size_estimates(run, root, rel);
 }
 
 /// `set_namedtuplestore_size_estimates` (costsize.c:6192).
-pub fn set_namedtuplestore_size_estimates(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_namedtuplestore_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
     let enrtuples = cz::rte_enrtuples::call(root, rel);
     root.rel_mut(rel).tuples = enrtuples;
     if root.rel(rel).tuples < 0.0 {
         root.rel_mut(rel).tuples = 1000.0;
     }
-    set_baserel_size_estimates(root, rel);
+    set_baserel_size_estimates(run, root, rel);
 }
 
 /// `set_result_size_estimates` (costsize.c:6224).
-pub fn set_result_size_estimates(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_result_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
     root.rel_mut(rel).tuples = 1.0;
-    set_baserel_size_estimates(root, rel);
+    set_baserel_size_estimates(run, root, rel);
 }
 
 /// `get_expr_width` (costsize.c:6404).

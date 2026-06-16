@@ -336,9 +336,9 @@ pub fn set_rel_size<'mcx>(
                 // Subqueries build their paths immediately (no param choice).
                 subquery::set_subquery_pathlist(root, rel, rti)?;
             }
-            RTE_FUNCTION => backend_optimizer_path_costsize::sizeest::set_function_size_estimates(root, rel),
+            RTE_FUNCTION => backend_optimizer_path_costsize::sizeest::set_function_size_estimates(run, root, rel),
             RTE_TABLEFUNC => {
-                backend_optimizer_path_costsize::sizeest::set_tablefunc_size_estimates(root, rel)
+                backend_optimizer_path_costsize::sizeest::set_tablefunc_size_estimates(run, root, rel)
             }
             RTE_VALUES => seams::set_values_size_estimates::call(root, rel),
             RTE_CTE => {
@@ -433,7 +433,7 @@ pub fn set_plain_rel_size<'mcx>(
     // Test partial indexes first (partial unique indexes can affect estimates).
     check_index_predicates(mcx, root, run, rel)?;
     // Mark rel with estimated output rows, width, etc.
-    backend_optimizer_path_costsize::sizeest::set_baserel_size_estimates(root, rel);
+    backend_optimizer_path_costsize::sizeest::set_baserel_size_estimates(run, root, rel);
     Ok(())
 }
 
@@ -596,7 +596,7 @@ pub fn set_tablesample_rel_size<'mcx>(
     root.rel_mut(rel).tuples = tuples;
 
     // Mark rel with estimated output rows, width, etc.
-    backend_optimizer_path_costsize::sizeest::set_baserel_size_estimates(root, rel);
+    backend_optimizer_path_costsize::sizeest::set_baserel_size_estimates(run, root, rel);
     Ok(())
 }
 

@@ -23,3 +23,4 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 
 [dev-dependencies]
 types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }

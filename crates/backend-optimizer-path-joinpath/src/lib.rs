@@ -264,7 +264,7 @@ pub fn add_paths_to_joinrel<'mcx>(
     // SEMI/ANTI/inner_unique correction factors.
     if jointype == JOIN_SEMI || jointype == JOIN_ANTI || extra.inner_unique {
         extra.semifactors = jp::compute_semi_anti_join_factors::call(
-            root, joinrel, outerrel, innerrel, jointype, sjinfo, restrictlist,
+            run, root, joinrel, outerrel, innerrel, jointype, sjinfo, restrictlist,
         );
     }
 
