@@ -13081,6 +13081,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-syncrep"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-syncrep-gram",
+ "backend-replication-syncrep-scanner-seams",
+ "backend-replication-syncrep-seams",
+ "backend-replication-walsender",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-ps-status-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-replication",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-syncrep-gram"
 version = "0.0.0"
 dependencies = [
@@ -19514,6 +19539,7 @@ dependencies = [
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
  "backend-replication-slot",
+ "backend-replication-syncrep",
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",

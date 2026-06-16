@@ -53,6 +53,27 @@ pub struct WalSnd {
     pub replyTime: TimestampTz,
 }
 
+/// `typedef struct SyncRepStandbyData` (`replication/syncrep.h`) — the
+/// per-walsender data `SyncRepGetCandidateStandbys` collects under each slot's
+/// spinlock for one candidate synchronous standby.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SyncRepStandbyData {
+    /// `pid_t pid` — the standby's walsender PID.
+    pub pid: pid_t,
+    /// `int walsnd_index` — its index into `WalSndCtl->walsnds[]`.
+    pub walsnd_index: i32,
+    /// `bool is_me` — whether this entry is the calling walsender's own slot.
+    pub is_me: bool,
+    /// `int sync_standby_priority`.
+    pub sync_standby_priority: i32,
+    /// `XLogRecPtr write` — the standby's last-reported write position.
+    pub write: XLogRecPtr,
+    /// `XLogRecPtr flush` — the standby's last-reported flush position.
+    pub flush: XLogRecPtr,
+    /// `XLogRecPtr apply` — the standby's last-reported apply position.
+    pub apply: XLogRecPtr,
+}
+
 /// The "more easily understood" sync-state classification reported by
 /// `pg_stat_get_wal_senders` (walsender.c).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
