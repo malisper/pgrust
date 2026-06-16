@@ -788,7 +788,7 @@ pub fn gistgettuple<'mcx>(
 
     if gist(scan).firstCall {
         // Begin the scan by processing the root page.
-        pgstat_count_index_scan::call(scan.index_relation.rd_id);
+        pgstat_count_index_scan::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled);
         if let Some(instr) = scan.instrument.as_mut() {
             instr.nsearches += 1;
         }
@@ -915,7 +915,7 @@ pub fn gistgetbitmap<'mcx>(
         return Ok(0);
     }
 
-    pgstat_count_index_scan::call(scan.index_relation.rd_id);
+    pgstat_count_index_scan::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled);
     if let Some(instr) = scan.instrument.as_mut() {
         instr.nsearches += 1;
     }

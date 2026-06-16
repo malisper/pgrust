@@ -46,73 +46,95 @@ seam_core::seam!(
     pub fn pgstat_init_relation(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
 
+// --- per-relation count seams (pgstat.h macros / pgstat_relation.c) ---
+//
+// The C count macros gate on `pgstat_should_count_relation(rel)`, which checks
+// `rel->pgstat_info != NULL` (a live pending entry) else `rel->pgstat_enabled`
+// (lazily creating one via `pgstat_assoc_relation`). Our `RelationData` carries
+// only `pgstat_enabled` (the pending-entry link is keyed by relation OID inside
+// pgstat, not back-pointered from the relcache), so each count seam carries
+// `(relid, pgstat_enabled)` — the narrowest faithful capability for the owner
+// to replicate the C gate without an ambient relcache lookup. The owner reads
+// `pgstat_enabled` off the caller's `RelationData`; callers pass it explicitly.
+
 seam_core::seam!(
     /// `pgstat_count_index_tuples(rel, n)` (pgstat.h macro): add `n` to the
-    /// relation's pending `t_tuples_returned` counter (only when
-    /// `rel->pgstat_info` is set). The per-relation pending stats live in
-    /// pgstat; the macro never errors.
-    pub fn pgstat_count_index_tuples(index_oid: types_core::primitive::Oid, n: i64)
+    /// relation's pending `tuples_returned` counter (only when
+    /// `pgstat_should_count_relation`). `pgstat_enabled` mirrors
+    /// `rel->pgstat_enabled`; the macro never errors.
+    pub fn pgstat_count_index_tuples(
+        index_oid: types_core::primitive::Oid,
+        pgstat_enabled: bool,
+        n: i64,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_fetch(rel)` (pgstat.h macro): increment the
-    /// relation's pending `t_tuples_fetched` counter.
-    pub fn pgstat_count_heap_fetch(index_oid: types_core::primitive::Oid)
+    /// relation's pending `tuples_fetched` counter (only when
+    /// `pgstat_should_count_relation`).
+    pub fn pgstat_count_heap_fetch(index_oid: types_core::primitive::Oid, pgstat_enabled: bool)
 );
 
 seam_core::seam!(
     /// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the
-    /// relation's pending `t_numscans` counter (only when `rel->pgstat_info` is
-    /// set). Keyed by the relation OID; the macro never errors.
-    pub fn pgstat_count_index_scan(index_oid: types_core::primitive::Oid)
+    /// relation's pending `numscans` counter (only when
+    /// `pgstat_should_count_relation`). The macro never errors.
+    pub fn pgstat_count_index_scan(index_oid: types_core::primitive::Oid, pgstat_enabled: bool)
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_scan(rel)` (pgstat.h macro): increment the relation's
-    /// pending `t_numscans` counter (only when `rel->pgstat_info` is set). Keyed
-    /// by the relation OID; the macro never errors.
-    pub fn pgstat_count_heap_scan(relid: types_core::primitive::Oid)
+    /// pending `numscans` counter (only when `pgstat_should_count_relation`).
+    /// The macro never errors.
+    pub fn pgstat_count_heap_scan(relid: types_core::primitive::Oid, pgstat_enabled: bool)
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_getnext(rel)` (pgstat.h macro): increment the
-    /// relation's pending `t_tuples_returned` counter (only when
-    /// `rel->pgstat_info` is set). Keyed by the relation OID; the macro never
-    /// errors.
-    pub fn pgstat_count_heap_getnext(relid: types_core::primitive::Oid)
+    /// relation's pending `tuples_returned` counter (only when
+    /// `pgstat_should_count_relation`). The macro never errors.
+    pub fn pgstat_count_heap_getnext(relid: types_core::primitive::Oid, pgstat_enabled: bool)
 );
 
 seam_core::seam!(
-    /// `pgstat_count_heap_insert(rel, n)` (pgstat.h macro): add `n` to the
+    /// `pgstat_count_heap_insert(rel, n)` (pgstat_relation.c): add `n` to the
     /// relation's pending `tuples_inserted` counter (only when
-    /// `rel->pgstat_info` is set). Keyed by the relation OID; the per-relation
-    /// pending stats live in pgstat; the macro never errors.
-    pub fn pgstat_count_heap_insert(relid: types_core::primitive::Oid, n: i64)
+    /// `pgstat_should_count_relation`). The function never errors.
+    pub fn pgstat_count_heap_insert(relid: types_core::primitive::Oid, pgstat_enabled: bool, n: i64)
 );
 
 seam_core::seam!(
-    /// `pgstat_count_heap_delete(rel)` (pgstat.h macro): bump the relation's
-    /// pending `tuples_deleted` counter (only when `rel->pgstat_info` is set).
-    /// Keyed by the relation OID; the per-relation pending stats live in
-    /// pgstat; the macro never errors.
-    pub fn pgstat_count_heap_delete(relid: types_core::primitive::Oid)
+    /// `pgstat_count_heap_delete(rel)` (pgstat_relation.c): bump the relation's
+    /// pending `tuples_deleted` counter (only when
+    /// `pgstat_should_count_relation`). The function never errors.
+    pub fn pgstat_count_heap_delete(relid: types_core::primitive::Oid, pgstat_enabled: bool)
 );
 
 seam_core::seam!(
     /// `pgstat_count_heap_update(rel, hot, newpage)` (pgstat_relation.c): bump
-    /// the relation's pending `tuples_updated` counter (and the `tuples_hot_updated`
-    /// / `tuples_newpage_updated` sub-counters per the `hot` / `newpage` flags),
-    /// only when `rel->pgstat_info` is set. Keyed by the relation OID; the
-    /// per-relation pending stats live in pgstat; the function never errors.
-    pub fn pgstat_count_heap_update(relid: types_core::primitive::Oid, hot: bool, newpage: bool)
+    /// the relation's pending `tuples_updated` counter (and the
+    /// `tuples_hot_updated` / `tuples_newpage_updated` sub-counters per the
+    /// `hot` / `newpage` flags), only when `pgstat_should_count_relation`. The
+    /// function never errors.
+    pub fn pgstat_count_heap_update(
+        relid: types_core::primitive::Oid,
+        pgstat_enabled: bool,
+        hot: bool,
+        newpage: bool,
+    )
 );
 
 seam_core::seam!(
     /// `pgstat_update_heap_dead_tuples(rel, delta)` (pgstat_relation.c): add
     /// `delta` to the relation's pending dead-tuple counter (on-access pruning
-    /// reports tuples it reclaimed this way). Keyed by the relation OID;
-    /// no-ops when the relation has no pending-stats entry, never errors.
-    pub fn pgstat_update_heap_dead_tuples(relid: types_core::primitive::Oid, delta: i32)
+    /// reports tuples it reclaimed this way). No-ops when
+    /// `!pgstat_should_count_relation`; never errors.
+    pub fn pgstat_update_heap_dead_tuples(
+        relid: types_core::primitive::Oid,
+        pgstat_enabled: bool,
+        delta: i32,
+    )
 );
 
 seam_core::seam!(

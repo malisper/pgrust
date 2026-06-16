@@ -667,10 +667,11 @@ pub fn init_seams() {
     sx::table_parallelscan_reinitialize::set(table_parallelscan_reinitialize);
     // The canonical, fully-typed serial index-build heap scan
     // (heapam_index_build_range_scan). brinsummarize reaches it with the real
-    // execnodes::IndexInfo + an explicit arena. (The whole-relation
-    // `table_index_build_scan` seam carries the opaque amapi::IndexInfo and no
-    // mcx — its consumers never receive the real IndexInfo — so it stays
-    // CONTRACT_RECONCILE_PENDING until the IndexInfo-through-ambuild-vtable
-    // keystone lands; see seams-init allowlist rationale.)
+    // execnodes::IndexInfo + an explicit arena; the whole-relation
+    // `table_index_build_scan` forwards to the same provider over the entire
+    // relation (anyvisible = false, start_blockno = 0, numblocks =
+    // InvalidBlockNumber), and the AM build drivers now carry the real
+    // execnodes::IndexInfo + mcx through their ambuild signatures.
     sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
+    sx::table_index_build_scan::set(build_scan::provider_index_build_scan);
 }

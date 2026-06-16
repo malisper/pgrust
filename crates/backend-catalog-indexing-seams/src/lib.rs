@@ -387,6 +387,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `StoreSingleInheritance`'s tuple build + insert: `heap_form_tuple(
+    /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)`
+    /// (catalog/indexing.c + heapam). `pg_inherits` has no OID column, so
+    /// nothing is returned. `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_inherits(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_inherits::PgInheritsInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ConversionCreate`'s tuple build + insert: `GetNewOidWithIndex(rel,
     /// ConversionOidIndexId, Anum_pg_conversion_oid)` + `namestrcpy` +
     /// `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +

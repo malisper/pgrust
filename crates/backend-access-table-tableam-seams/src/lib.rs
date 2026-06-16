@@ -36,11 +36,21 @@ seam_core::seam!(
     /// invokes (mirroring the C `IndexBuildCallback` function pointer +
     /// `state`). Returns the number of heap tuples scanned (C `double`). `Err`
     /// carries the scan / callback `ereport(ERROR)` surface.
+    ///
+    /// In C this inline wrapper just forwards to `index_build_range_scan` with
+    /// `anyvisible = false`, `start_blockno = 0`, `numblocks =
+    /// InvalidBlockNumber` (the whole relation); the heap AM owner installs it
+    /// that way, dispatching to the same `heapam_index_build_range_scan`
+    /// provider. The `index_info` is the real executor `IndexInfo<'mcx>` (so
+    /// the AM build driver can read `ii_Unique` / `ii_NullsNotDistinct` and the
+    /// scan can set `ii_BrokenHotChain`), matching the
+    /// [`table_index_build_range_scan`] contract.
     #[allow(clippy::type_complexity)]
     pub fn table_index_build_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         table_rel: &types_rel::Relation<'mcx>,
         index_rel: &types_rel::Relation<'mcx>,
-        index_info: &mut types_tableam::amapi::IndexInfo,
+        index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         progress: bool,
         callback: &mut dyn FnMut(

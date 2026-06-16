@@ -727,7 +727,7 @@ pub fn ginNewScanKey<'mcx>(scan: &mut IndexScanDescData<'mcx>) -> PgResult<()> {
     }
 
     // pgstat_count_index_scan(scan->indexRelation);
-    pgstat_count_index_scan::call(index_oid);
+    pgstat_count_index_scan::call(index_oid, scan.index_relation.pgstat_enabled);
     // if (scan->instrument) scan->instrument->nsearches++;
     if let Some(instr) = scan.instrument.as_mut() {
         instr.nsearches += 1;
