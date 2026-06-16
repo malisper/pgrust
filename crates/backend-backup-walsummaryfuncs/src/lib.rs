@@ -170,12 +170,14 @@ pub fn pg_wal_summary_contents<'mcx>(
     // reader = CreateBlockRefTableReader(ReadWalSummary, &io,
     //                                    FilePathName(io.file),
     //                                    ReportWalSummaryError, NULL);
-    let reader = walsummary::wal_summary_create_reader::call(mcx, ws)?;
+    // The seam returns the owned reader plus the open File (the reader's read
+    // callback captured a copy of the File; the File is threaded to FileClose).
+    let (mut reader, file) = walsummary::wal_summary_create_reader::call(mcx, ws)?;
 
     // while (BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
     //                                        &limit_block)) { ... }
     while let Some((rlocator, forknum, limit_block)) =
-        blkreftable::block_ref_table_reader_next_relation::call(reader)?
+        blkreftable::block_ref_table_reader_next_relation::call(&mut reader)?
     {
         // CHECK_FOR_INTERRUPTS();
         tcop::check_for_interrupts::call()?;
@@ -219,7 +221,7 @@ pub fn pg_wal_summary_contents<'mcx>(
             // if (nblocks == 0) break;
             let blocks = blkreftable::block_ref_table_reader_get_blocks::call(
                 mcx,
-                reader,
+                &mut reader,
                 MAX_BLOCKS_PER_CALL,
             )?;
             if blocks.is_empty() {
@@ -249,7 +251,7 @@ pub fn pg_wal_summary_contents<'mcx>(
     //   DestroyBlockRefTableReader(reader);
     //   FileClose(io.file);
     blkreftable::destroy_block_ref_table_reader::call(reader);
-    walsummary::wal_summary_reader_file_close::call(reader);
+    walsummary::wal_summary_reader_file_close::call(file);
 
     // return (Datum) 0;
     Ok(Datum::null())

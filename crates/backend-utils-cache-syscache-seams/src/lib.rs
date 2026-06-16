@@ -1145,6 +1145,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(PARTRELID, ObjectIdGetDatum(parentId))` projected to
+    /// `Form_pg_partitioned_table.partdefid` (catalog/partition.c
+    /// `get_default_partition_oid`): the OID of the default partition of the
+    /// given partitioned table, or `Ok(None)` when no `pg_partitioned_table`
+    /// row exists for `parentId` (`!HeapTupleIsValid`), in which case the
+    /// caller leaves the result `InvalidOid`. The installer owns the
+    /// `ReleaseSysCache`.
+    pub fn search_partrelid_partdefid(parentId: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `update_default_partition_oid(parentId, defaultPartId)`
+    /// (catalog/partition.c): set `pg_partitioned_table.partdefid` of the
+    /// partitioned table `parentId` to `defaultPartId`. The whole
+    /// `table_open(PartitionedRelationId, RowExclusiveLock)` /
+    /// `SearchSysCacheCopy1(PARTRELID, ...)` / in-place `partdefid` write /
+    /// `CatalogTupleUpdate` / `heap_freetuple` / `table_close` sequence rides
+    /// on the `pg_partitioned_table` syscache tuple-copy + the heap-form value
+    /// layer (unported here); the installer raises `elog(ERROR, "cache lookup
+    /// failed for partition key of relation %u")` on a cache miss. Loud-panics
+    /// until the `pg_partitioned_table` write owner lands.
+    pub fn update_default_partition_oid(parentId: Oid, defaultPartId: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
     /// `Form_pg_class.relnamespace` (`get_rel_namespace`). `Ok(None)` on a
     /// cache miss (`!HeapTupleIsValid`); the installer owns the

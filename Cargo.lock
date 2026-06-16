@@ -1640,6 +1640,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-rewriteheap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-heaptoast",
+ "backend-access-heap-rewriteheap-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-replication-slot-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-page",
+ "backend-storage-smgr-bulkwrite",
+ "backend-storage-smgr-bulkwrite-seams",
+ "backend-storage-smgr-smgr",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-heap-rewriteheap-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-smgr-bulkwrite-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
@@ -3868,6 +3916,7 @@ dependencies = [
  "types-blkreftable",
  "types-core",
  "types-error",
+ "types-storage",
  "types-walsummarizer",
 ]
 
@@ -4466,6 +4515,38 @@ dependencies = [
  "types-parsenodes",
  "types-rel",
  "types-storage",
+]
+
+[[package]]
+name = "backend-catalog-partition"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-next",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-partition-seams",
+ "backend-nodes-core",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7061,6 +7142,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-tsearchcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-parser-func",
+ "backend-parser-parse-func-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-tsearchcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -7192,10 +7303,30 @@ dependencies = [
  "seam-core",
  "types-cluster",
  "types-core",
+ "types-dsa",
  "types-error",
  "types-nodes",
  "types-rel",
  "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-commands-vacuumparallel"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-commands-vacuum-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dsa",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
  "types-vacuum",
 ]
 
@@ -10783,13 +10914,18 @@ dependencies = [
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-small-seams",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache-seams",
  "mcx",
@@ -10798,6 +10934,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -16017,6 +16154,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-tupdesc",
+ "backend-parser-coerce-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-json",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-misc2",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-typcache",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "backend-utils-sort-storage",
+ "common-jsonapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-jsonfuncs",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -19446,6 +19620,7 @@ dependencies = [
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-pruneheap",
+ "backend-access-heap-rewriteheap",
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-amapi",
@@ -19512,6 +19687,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
+ "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
@@ -19565,8 +19741,10 @@ dependencies = [
  "backend-commands-statscmds",
  "backend-commands-tablespace",
  "backend-commands-trigger",
+ "backend-commands-tsearchcmds",
  "backend-commands-typecmds",
  "backend-commands-vacuum",
+ "backend-commands-vacuumparallel",
  "backend-commands-variable",
  "backend-commands-view",
  "backend-common-relpath",
@@ -19796,6 +19974,7 @@ dependencies = [
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
+ "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
@@ -19982,6 +20161,11 @@ dependencies = [
 [[package]]
 name = "types-blkreftable"
 version = "0.0.0"
+dependencies = [
+ "hashbrown",
+ "types-core",
+ "types-storage",
+]
 
 [[package]]
 name = "types-brin"
@@ -20243,6 +20427,7 @@ name = "types-json"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -20251,6 +20436,19 @@ name = "types-jsonb"
 version = "0.0.0"
 dependencies = [
  "types-datum",
+]
+
+[[package]]
+name = "types-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-tuple",
 ]
 
 [[package]]

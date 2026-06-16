@@ -69,7 +69,7 @@ use types_core::primitive::AttrNumber;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::CmdType;
-use types_pathnodes::{NodeId, PlannerInfo, TargetEntryNode};
+use types_pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
 
 // ===========================================================================
 // preprocess_targetlist (preptlist.c:64) — SELECT core
@@ -123,9 +123,11 @@ pub fn preprocess_targetlist<'mcx>(
     if !root.rowMarks.is_empty() {
         panic!(
             "preprocess_targetlist: FOR-UPDATE/SHARE rowMarks junk-column stanza not yet ported — \
-             `root.rowMarks` is carried as unresolved `NodeId` handles (no arena store / \
-             `rti`/`allMarkTypes`/`rowmarkId` accessors); needs the PlanRowMark-carrier keystone \
-             (preprocess_rowmarks owner)"
+             `root.rowMarks` now carries resolvable `PlanRowMarkId` handles (the carrier keystone \
+             landed the `PlannerRun` rowmark store + `planner_rowmark_fetch`), but this driver is \
+             not threaded the `&PlannerRun` needed to resolve `rc->rti`/`allMarkTypes`/`rowmarkId` \
+             and the junk-Var build is DML/locking logic deferred to that analyze family \
+             (`preprocess_rowmarks` owner) + setrefs"
         );
     }
 
@@ -216,17 +218,28 @@ pub fn extract_update_targetlist_colnos(
 /// seam-and-panic there rather than silently return `None` (which would
 /// mis-report "no rowmark" and skip required junk-column / locking logic).
 ///
-/// Returns the matching `NodeId` handle (the `PlanRowMark`'s arena id) or
-/// `None`. The only consumer in the current tree is `check_index_predicates`
-/// (indxpath), which only needs the not-NULL test — see [`has_plan_rowmark`].
-pub fn get_plan_rowmark(rowmarks: &[NodeId], _rtindex: u32) -> Option<NodeId> {
+/// Returns the matching [`PlanRowMarkId`] handle or `None`. The only consumer in
+/// the current tree is `check_index_predicates` (indxpath), which only needs the
+/// not-NULL test — see [`has_plan_rowmark`].
+///
+/// The PlanRowMark-carrier keystone landed the [`PlanRowMarkId`] store on
+/// `PlannerRun`, so `rowMarks` now carries resolvable handles; but resolving
+/// `rc->rti` to compare against `rtindex` needs the `&PlannerRun` value, which
+/// this lookup is not yet threaded (its only caller, `seam_has_plan_rowmark`,
+/// receives only `&PlannerInfo`). On every reachable SELECT path `root.rowMarks`
+/// is empty (it is filled by the still-unported `preprocess_rowmarks`), so the
+/// list-walk is a no-op; a non-empty list is unreachable until the DML/locking
+/// analyze family threads the run, so we seam-and-panic rather than silently
+/// return `None`.
+pub fn get_plan_rowmark(rowmarks: &[PlanRowMarkId], _rtindex: u32) -> Option<PlanRowMarkId> {
     if rowmarks.is_empty() {
         return None;
     }
     panic!(
-        "get_plan_rowmark: PlanRowMark lookup not yet ported — `rowMarks` carries unresolved \
-         `NodeId` handles (no arena store / `rti` accessor); needs the PlanRowMark-carrier \
-         keystone (preprocess_rowmarks owner)"
+        "get_plan_rowmark: PlanRowMark lookup not yet threaded the `&PlannerRun` run context \
+         needed to resolve `rc->rti` — `rowMarks` now carries `PlanRowMarkId` handles into the \
+         run's rowmark store, but `seam_has_plan_rowmark` receives only `&PlannerInfo`; needs the \
+         DML/locking analyze family to thread the run (`preprocess_rowmarks` owner)"
     );
 }
 

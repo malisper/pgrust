@@ -91,6 +91,7 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
             relreplident: b'd',
             relispartition: false,
             relfrozenxid: 0,
+            relminmxid: 0,
         },
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,

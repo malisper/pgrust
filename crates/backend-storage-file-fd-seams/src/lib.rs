@@ -433,6 +433,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_pwrite(fd, buf, offset)` against a *transient* fd (the
+    /// `OpenTransientFile` return value, a fd.c descriptor-table index). The
+    /// installed impl resolves the transient index to the kernel fd first.
+    /// Returns bytes written (>=0) or `-errno`. Consumed by
+    /// `rewriteheap.c`'s `heap_xlog_logical_rewrite` replay.
+    pub fn pg_pwrite_transient(fd: i32, buf: &[u8], offset: i64) -> isize
+);
+
+seam_core::seam!(
+    /// `pg_ftruncate(fd, length)` against a *transient* fd (the
+    /// `OpenTransientFile` return value). The installed impl resolves the
+    /// transient index to the kernel fd first. Returns 0 on success or
+    /// `-errno`. Consumed by `rewriteheap.c`'s `heap_xlog_logical_rewrite`
+    /// replay (truncate-tail-to-offset).
+    pub fn pg_ftruncate_transient(fd: i32, length: i64) -> i32
+);
+
+seam_core::seam!(
     /// `close(fd)` — close a bare kernel fd (the `BasicOpenFile` return value,
     /// e.g. the recovery WAL segment fd). Returns 0 on success or `-errno`. The
     /// recovery page-read driver (`XLogPageRead`) calls `close()` on its

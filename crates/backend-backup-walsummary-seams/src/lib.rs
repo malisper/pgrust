@@ -5,9 +5,10 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_blkreftable::BlockRefTableReaderHandle;
+use types_blkreftable::BlockRefTableReader;
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::PgResult;
+use types_storage::file::File;
 use types_walsummarizer::WalSummaryFile;
 
 seam_core::seam!(
@@ -57,21 +58,25 @@ seam_core::seam!(
     /// `BlockRefTableReader`. The `File`, the `ReadWalSummary` read callback
     /// (over the `WalSummaryIO` cursor), and the `ReportWalSummaryError`
     /// error callback are all walsummary/fd-owned, so the open + reader
-    /// construction is bundled into this single owner seam (it allocates the
-    /// reader in `mcx` and threads the open `File` through the reader's
-    /// callback arg). `Err` carries the file-open / reader-create
+    /// construction is bundled into this single owner seam. It returns the
+    /// owned `BlockRefTableReader` (the C `BlockRefTableReader *` — the open
+    /// `File` is captured by the reader's `ReadWalSummary` read callback) plus
+    /// the `File` handle the caller threads to the matching
+    /// [`wal_summary_reader_file_close`] teardown (a `Copy` VFD descriptor, so
+    /// it can be both captured by the callback and returned for the eventual
+    /// `FileClose`). `Err` carries the file-open / reader-create
     /// `ereport(ERROR)`.
     pub fn wal_summary_create_reader<'mcx>(
         mcx: Mcx<'mcx>,
         ws: WalSummaryFile,
-    ) -> PgResult<BlockRefTableReaderHandle>
+    ) -> PgResult<(BlockRefTableReader, File)>
 );
 
 seam_core::seam!(
     /// The `pg_wal_summary_contents` reader teardown: after
     /// `DestroyBlockRefTableReader(reader)` (blkreftable-owned), `FileClose(
     /// io.file)` closes the WAL summary file the reader was reading. The open
-    /// `File` lives in the reader's walsummary-owned callback arg, so the
-    /// close is seamed here keyed by the same reader handle. Infallible in C.
-    pub fn wal_summary_reader_file_close(reader: BlockRefTableReaderHandle)
+    /// `File` (a `Copy` VFD descriptor) is the one returned by
+    /// [`wal_summary_create_reader`]; the caller threads it here. Infallible in C.
+    pub fn wal_summary_reader_file_close(file: File)
 );

@@ -39,12 +39,13 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Index;
 use types_nodes::copy_query::Query;
+use types_nodes::nodelockrows::PlanRowMark;
 use types_nodes::nodes::Node;
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::FromExpr;
 
-use crate::{PathId, PlanId, PlannerInfo, QueryId, RangeTblEntryId};
+use crate::{PathId, PlanId, PlanRowMarkId, PlannerInfo, QueryId, RangeTblEntryId};
 
 /// The query store for one planner invocation — the resolver behind every
 /// [`QueryId`].
@@ -94,6 +95,16 @@ pub struct PlannerRun<'mcx> {
     /// matching `subroots[i]`'s `path_arena`) the subplan's `Plan` was created
     /// from. C only ever appends this list; the handle is carried for fidelity.
     subpaths: PgVec<'mcx, PathId>,
+    /// Backing store for every [`PlanRowMark`]; a [`PlanRowMarkId`] indexes here.
+    /// This is the value resolver behind both `PlannerInfo::rowMarks` (the C
+    /// per-query `List *rowMarks` of owned `PlanRowMark *`, built by
+    /// `preprocess_rowmarks`) and `PlannerGlobal::finalrowmarks` (the flat-copied
+    /// list `set_plan_references` builds) — see [`planner_rowmark_fetch`].
+    /// `PlanRowMark` is a scalar-only struct, so a flat copy in setrefs is a
+    /// plain `Copy` of the resolved value re-interned here. Allocated in the
+    /// planner-run [`Mcx`] so the store shares the run's context lifetime, the
+    /// same shape as the RTE store.
+    rowmarks: PgVec<'mcx, PlanRowMark>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -106,6 +117,7 @@ impl<'mcx> PlannerRun<'mcx> {
             subplans: PgVec::new_in(mcx),
             subroots: PgVec::new_in(mcx),
             subpaths: PgVec::new_in(mcx),
+            rowmarks: PgVec::new_in(mcx),
         }
     }
 
@@ -248,6 +260,53 @@ impl<'mcx> PlannerRun<'mcx> {
     }
 
     /* --------------------------------------------------------------------
+     * PlanRowMark store — the value resolver behind `PlannerInfo::rowMarks`
+     * and `PlannerGlobal::finalrowmarks`. C keeps both as `List *` of owned
+     * `PlanRowMark *`: `preprocess_rowmarks` (planmain.c) builds the per-query
+     * list via `makeNode(PlanRowMark)` + `lappend(root->rowMarks, ...)`, and
+     * `set_plan_references` (setrefs.c:305-323) walks `root->rowMarks`,
+     * flat-copies each into `glob->finalrowmarks`. Those values pin to the
+     * arena world that `PlannerInfo`/`PlannerGlobal` deliberately keep
+     * lifetime-free, so they live here and the lists carry `PlanRowMarkId`
+     * handles — exactly the intern/resolve shape of the RTE store above.
+     * ------------------------------------------------------------------ */
+
+    /// Intern a [`PlanRowMark`] into the store, returning the [`PlanRowMarkId`]
+    /// handle that resolves to it. The producer paths: `preprocess_rowmarks`
+    /// hands each freshly built `PlanRowMark` here and appends the returned id
+    /// to `PlannerInfo::rowMarks`; `set_plan_references` re-interns each
+    /// flat-copied rowmark and appends to `PlannerGlobal::finalrowmarks`.
+    #[inline]
+    pub fn intern_rowmark(&mut self, rowmark: PlanRowMark) -> PlanRowMarkId {
+        let id = PlanRowMarkId(self.rowmarks.len() as u32);
+        self.rowmarks.push(rowmark);
+        id
+    }
+
+    /// Resolve a [`PlanRowMarkId`] to its [`PlanRowMark`] — the safe-Rust
+    /// rendering of a `PlanRowMark *` deref. Panics on an out-of-range handle
+    /// (a handle never produced by [`intern_rowmark`](Self::intern_rowmark) is a
+    /// planner bug, like indexing past `rel_arena`'s end).
+    #[inline]
+    pub fn resolve_rowmark(&self, id: PlanRowMarkId) -> &PlanRowMark {
+        &self.rowmarks[id.0 as usize]
+    }
+
+    /// Resolve a [`PlanRowMarkId`] for mutation (`preprocess_rowmarks` ORs
+    /// `allMarkTypes` and sets `isParent` on existing entries while building the
+    /// list; setrefs renumbers `rti`/`prti` by `rtoffset`).
+    #[inline]
+    pub fn resolve_rowmark_mut(&mut self, id: PlanRowMarkId) -> &mut PlanRowMark {
+        &mut self.rowmarks[id.0 as usize]
+    }
+
+    /// Number of interned [`PlanRowMark`]s.
+    #[inline]
+    pub fn rowmark_len(&self) -> usize {
+        self.rowmarks.len()
+    }
+
+    /* --------------------------------------------------------------------
      * SubPlan stores — the value resolver behind `PlannerGlobal::subplans` /
      * `subroots` / `subpaths`. C keeps three parallel `glob` lists of owned
      * `Plan *` / `PlannerInfo *` / `Path *`; a `SubPlan`'s 1-based `plan_id`
@@ -364,6 +423,27 @@ pub fn planner_rt_fetch<'a, 'mcx>(
         // rt_fetch fallback: list_nth(parse->rtable, rti-1).
         &run.rtable(root.parse)[(rti as usize) - 1]
     }
+}
+
+/// Fetch the [`PlanRowMark`] at position `idx` of `root->rowMarks` — the
+/// safe-Rust rendering of `(PlanRowMark *) list_nth(root->rowMarks, idx)`.
+///
+/// `set_plan_references` (setrefs.c:305-323) walks `root->rowMarks` by list
+/// position, reading each rowmark's `rti`/`prti`/`rowmarkId`/`markType` to
+/// flat-copy it into `glob->finalrowmarks`; `preprocess_targetlist` (preptlist)
+/// likewise iterates the list to build resjunk Vars. This projects
+/// `root.rowMarks[idx]` to its [`PlanRowMarkId`] and resolves the owned
+/// [`PlanRowMark`] through the run's rowmark store. Panics on an out-of-range
+/// `idx` (a position past the list end is a planner bug, like the C `list_nth`
+/// past the list end).
+#[inline]
+pub fn planner_rowmark_fetch<'a, 'mcx>(
+    run: &'a PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    idx: usize,
+) -> &'a PlanRowMark {
+    let id = root.rowMarks[idx];
+    run.resolve_rowmark(id)
 }
 
 /// `planner_subplan_get_plan(root, subplan)` (subselect.c) — fetch the owned
@@ -497,6 +577,57 @@ mod tests {
         // resolve_rte_mut threads back to the same node.
         run.resolve_rte_mut(id0).rtekind = RTEKind::RTE_VALUES;
         assert_eq!(run.resolve_rte(id0).rtekind, RTEKind::RTE_VALUES);
+    }
+
+    #[test]
+    fn rowmark_intern_resolve_and_fetch() {
+        // The rowmark store is the value resolver behind PlannerInfo::rowMarks /
+        // PlannerGlobal::finalrowmarks; intern hands back dense, in-order ids and
+        // planner_rowmark_fetch walks root.rowMarks by list position.
+        use types_nodes::nodelockrows::{PlanRowMark, ROW_MARK_COPY, ROW_MARK_EXCLUSIVE};
+
+        let cx = MemoryContext::new("planner-run");
+        let mut run = PlannerRun::new(cx.mcx());
+        assert_eq!(run.rowmark_len(), 0);
+
+        let mut rm0 = PlanRowMark::default();
+        rm0.rti = 1;
+        rm0.markType = ROW_MARK_EXCLUSIVE;
+        let mut rm1 = PlanRowMark::default();
+        rm1.rti = 2;
+        rm1.markType = ROW_MARK_COPY;
+
+        let id0 = run.intern_rowmark(rm0);
+        let id1 = run.intern_rowmark(rm1);
+        assert_eq!(id0, PlanRowMarkId(0));
+        assert_eq!(id1, PlanRowMarkId(1));
+        assert_eq!(run.rowmark_len(), 2);
+
+        // resolve_rowmark is the safe-Rust `PlanRowMark *` deref.
+        assert_eq!(run.resolve_rowmark(id0).rti, 1);
+        assert_eq!(run.resolve_rowmark(id1).markType, ROW_MARK_COPY);
+
+        // resolve_rowmark_mut threads back (preprocess_rowmarks ORs allMarkTypes).
+        run.resolve_rowmark_mut(id0).allMarkTypes = 7;
+        assert_eq!(run.resolve_rowmark(id0).allMarkTypes, 7);
+
+        // root.rowMarks carries the handles by list position; setrefs walks them
+        // with planner_rowmark_fetch and flat-copies into glob.finalrowmarks.
+        let mut root = crate::PlannerInfo::default();
+        root.rowMarks = alloc::vec![id0, id1];
+        assert_eq!(planner_rowmark_fetch(&run, &root, 0).rti, 1);
+        assert_eq!(planner_rowmark_fetch(&run, &root, 1).rti, 2);
+
+        // setrefs' flat-copy: read each rowmark, Copy it, re-intern into the
+        // store and append the new handle to glob.finalrowmarks.
+        let mut glob = crate::PlannerGlobal::default();
+        for idx in 0..root.rowMarks.len() {
+            let flat = *planner_rowmark_fetch(&run, &root, idx);
+            let fid = run.intern_rowmark(flat);
+            glob.finalrowmarks.push(fid);
+        }
+        assert_eq!(glob.finalrowmarks.len(), 2);
+        assert_eq!(run.resolve_rowmark(glob.finalrowmarks[0]).rti, 1);
     }
 
     #[test]
