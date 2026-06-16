@@ -34,6 +34,23 @@ pub fn init_seams() {
     );
     backend_rewrite_rewritehandler_seams::get_view_query::set(seam_get_view_query);
     backend_rewrite_rewritehandler_seams::relation_is_updatable::set(relation_is_updatable);
+    backend_rewrite_rewritehandler_seams::query_rewrite_canonical::set(
+        seam_query_rewrite_canonical,
+    );
+}
+
+/// `QueryRewrite(parsetree)` (rewriteHandler.c:4566) — the canonical top-level
+/// rule-rewriter entry over the value-typed `Query`.
+fn seam_query_rewrite_canonical<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: types_nodes::copy_query::Query<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::copy_query::Query<'mcx>>> {
+    let results = crate::QueryRewrite(mcx, parsetree)?;
+    let mut out = mcx::PgVec::new_in(mcx);
+    for q in results {
+        out.push(q);
+    }
+    Ok(out)
 }
 
 fn seam_get_view_query<'mcx>(

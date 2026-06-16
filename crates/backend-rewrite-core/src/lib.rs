@@ -87,7 +87,7 @@ pub use change::{
     ChangeVarNodesWalkExpression,
 };
 pub use increment::{IncrementVarSublevelsUp, IncrementVarSublevelsUp_rtable, SetVarReturningType};
-pub use insert_select::getInsertSelectQuery;
+pub use insert_select::{getInsertSelectQuery, getInsertSelectQueryIndex};
 pub use manip_rule::{adjustJoinTreeList, AddInvertedQual, AddQual, CombineRangeTables};
 pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
 pub use offset::OffsetVarNodes;
