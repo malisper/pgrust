@@ -991,7 +991,7 @@ pub fn heap_update<'mcx>(
         heapam_seam::unlock_tuple_tuplock::call(relation, oldtup.tuple.t_self, lockmode)?;
     }
 
-    pgstat_seam::pgstat_count_heap_update::call(relation.rd_id, use_hot_update, newbuf != buffer);
+    pgstat_seam::pgstat_count_heap_update::call(relation.rd_id, relation.pgstat_enabled, use_hot_update, newbuf != buffer);
 
     /*
      * If heaptup is a private (toasted) copy, copy t_self back to the caller's

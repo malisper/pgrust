@@ -365,7 +365,7 @@ pub fn heap_insert<'mcx>(
     cache_invalidate_heap_tuple(relation, &heaptup.tuple)?;
 
     /* Note: speculative insertions are counted too, even if aborted later */
-    pgstat_seam::pgstat_count_heap_insert::call(relation.rd_id, 1);
+    pgstat_seam::pgstat_count_heap_insert::call(relation.rd_id, relation.pgstat_enabled, 1);
 
     /*
      * If heaptup is a private copy, copy t_self back to the caller's image.

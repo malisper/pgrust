@@ -13,4 +13,5 @@ pub mod activity_pgstat;
 pub mod backend_progress;
 pub mod backend_status;
 pub mod backend_utils_activity_pgstat_bgwriter;
+pub mod pgstat_internal;
 pub mod wait_event;

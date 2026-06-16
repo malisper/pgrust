@@ -16289,7 +16289,9 @@ name = "types-pgstat"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-replication",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
