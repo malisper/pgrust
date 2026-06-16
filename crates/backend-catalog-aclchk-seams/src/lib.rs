@@ -158,6 +158,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `aclcheck_error_col(aclerr, objtype, objectname, colname)` (aclchk.c):
+    /// the column-flavoured permission-denied error (`ACLCHECK_NO_PRIV` ->
+    /// "permission denied for column ... of relation ..."; `ACLCHECK_NOT_OWNER`
+    /// delegates to [`aclcheck_error`]). Raises for a non-OK `aclerr`, carried
+    /// on `Err`.
+    pub fn aclcheck_error_col(
+        aclerr: AclResult,
+        objtype: ObjectType,
+        objectname: Option<String>,
+        colname: String,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `aclcheck_error_type(aclerr, typeOid)` (aclchk.c): the type-flavoured
+    /// permission-denied error — uses the element type instead of the array
+    /// type and `format_type_be`-formats it, then delegates to
+    /// `aclcheck_error(aclerr, OBJECT_TYPE, ...)`. Always raises for a non-OK
+    /// `aclerr`, carried on `Err`. (Re-homed from
+    /// `backend-commands-functioncmds-seams`, where functioncmds was merely its
+    /// first consumer; aclchk.c is its real owner.)
+    pub fn aclcheck_error_type(aclerr: AclResult, type_oid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `errorConflictingDefElem(defel, pstate)` (aclchk.c): always raises
     /// `ERRCODE_SYNTAX_ERROR` ("conflicting or redundant options") at the
     /// `DefElem`'s parse location. `defname` carries the conflicting option

@@ -130,7 +130,7 @@ fn compute_return_type(
 
     let aclresult = seam::type_aclcheck::call(rettype, seam::get_user_id::call()?, ACL_USAGE)?;
     if aclresult != ACLCHECK_OK {
-        seam::aclcheck_error_type::call(aclresult, rettype)?;
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, rettype)?;
     }
 
     Ok((rettype, return_type.setof))
@@ -251,7 +251,7 @@ pub fn interpret_function_parameter_list(
 
         let aclresult = seam::type_aclcheck::call(toid, seam::get_user_id::call()?, ACL_USAGE)?;
         if aclresult != ACLCHECK_OK {
-            seam::aclcheck_error_type::call(aclresult, toid)?;
+            backend_catalog_aclchk_seams::aclcheck_error_type::call(aclresult, toid)?;
         }
 
         if t.setof {

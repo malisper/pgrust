@@ -23,17 +23,18 @@
 
 use mcx::Mcx;
 use types_catalog as cat;
-use types_core::Oid;
+use types_core::{InvalidOid, Oid};
 use types_error::PgResult;
 use types_rel::Relation;
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::ItemPointerData;
 
-use backend_access_common_heaptuple::heap_form_tuple;
+use backend_access_common_heaptuple::{heap_form_tuple, heap_modify_tuple};
 use backend_catalog_catalog::GetNewOidWithIndex;
 
 use crate::keystone::{
-    CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert, CatalogTuplesMultiInsertWithInfo,
+    CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert, CatalogTupleUpdate,
+    CatalogTuplesMultiInsertWithInfo,
 };
 
 /// `NameGetDatum(&name)` for a 64-byte `NameData` image: a by-reference Datum
@@ -487,6 +488,87 @@ fn insert_pg_statistic_ext<'mcx>(
     Ok(statoid)
 }
 
+/* ======================================================================== *
+ * pg_language — CreateProceduralLanguage (OID column + lanname NameData +
+ * lanacl varlen, always NULL on the values we form).
+ * ======================================================================== */
+
+/// The `values[]` / `nulls[]` arrays C builds for the `pg_language` row, with
+/// `oid` stamped to `langoid`. `lanacl` is column 9 and always NULL.
+fn language_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    langoid: Oid,
+    row: &cat::pg_language::PgLanguageInsertRow,
+) -> PgResult<([Datum<'mcx>; cat::pg_language::Natts_pg_language], [bool; cat::pg_language::Natts_pg_language])> {
+    // values[Anum_pg_language_oid - 1]           = ObjectIdGetDatum(langoid);
+    // namestrcpy(&langname, languageName);
+    // values[Anum_pg_language_lanname - 1]        = NameGetDatum(&langname);
+    // values[Anum_pg_language_lanowner - 1]       = ObjectIdGetDatum(languageOwner);
+    // values[Anum_pg_language_lanispl - 1]        = BoolGetDatum(true);
+    // values[Anum_pg_language_lanpltrusted - 1]   = BoolGetDatum(stmt->pltrusted);
+    // values[Anum_pg_language_lanplcallfoid - 1]  = ObjectIdGetDatum(handlerOid);
+    // values[Anum_pg_language_laninline - 1]      = ObjectIdGetDatum(inlineOid);
+    // values[Anum_pg_language_lanvalidator - 1]   = ObjectIdGetDatum(valOid);
+    // (lanacl left as the zeroed value; nulls[Anum_pg_language_lanacl - 1] = true.)
+    let values = [
+        Datum::from_oid(langoid),
+        name_datum(mcx, &row.lanname)?,
+        Datum::from_oid(row.lanowner),
+        Datum::from_bool(row.lanispl),
+        Datum::from_bool(row.lanpltrusted),
+        Datum::from_oid(row.lanplcallfoid),
+        Datum::from_oid(row.laninline),
+        Datum::from_oid(row.lanvalidator),
+        Datum::from_oid(InvalidOid), // lanacl placeholder; nulls[] marks it NULL
+    ];
+    // memset(nulls, false, ...); nulls[Anum_pg_language_lanacl - 1] = true;
+    let mut nulls = [false; cat::pg_language::Natts_pg_language];
+    nulls[cat::pg_language::Anum_pg_language_lanacl as usize - 1] = true;
+    Ok((values, nulls))
+}
+
+fn insert_pg_language<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_language::PgLanguageInsertRow,
+) -> PgResult<Oid> {
+    // langoid = GetNewOidWithIndex(rel, LanguageOidIndexId, Anum_pg_language_oid);
+    let langoid = GetNewOidWithIndex(
+        rel,
+        cat::pg_language::LanguageOidIndexId,
+        cat::pg_language::Anum_pg_language_oid,
+    )?;
+    let (values, nulls) = language_values(mcx, langoid, row)?;
+    // tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+    // CatalogTupleInsert(rel, tup);
+    form_and_insert(mcx, rel, &values, &nulls)?;
+    Ok(langoid)
+}
+
+fn update_pg_language<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    row: &cat::pg_language::PgLanguageInsertRow,
+) -> PgResult<()> {
+    // replaces[] starts all-true; oid / lanowner / lanacl are pinned to the old
+    // tuple (proclang.c:144-146), so heap_modify_tuple takes them from `oldtup`.
+    let mut replaces = [true; cat::pg_language::Natts_pg_language];
+    replaces[cat::pg_language::Anum_pg_language_oid as usize - 1] = false;
+    replaces[cat::pg_language::Anum_pg_language_lanowner as usize - 1] = false;
+    replaces[cat::pg_language::Anum_pg_language_lanacl as usize - 1] = false;
+
+    // The not-replaced columns are read from `oldtup`, so any OID here is unused;
+    // pass InvalidOid for the oid slot (replaces[oid] = false ignores it).
+    let (values, nulls) = language_values(mcx, InvalidOid, row)?;
+
+    // tup = heap_modify_tuple(oldtup, RelationGetDescr(rel), values, nulls, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_modify_tuple(mcx, oldtup, &tupdesc, &values, &nulls, &replaces)?;
+    // CatalogTupleUpdate(rel, &tup->t_self, tup);
+    CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)
+}
+
 /// Install the F1 per-catalog typed seams whose substrate is fully present
 /// (pure `heap_form_tuple` + engine, plus `GetNewOidWithIndex` for the
 /// OID-column catalogs). Wired from [`crate::init_seams`].
@@ -498,6 +580,8 @@ pub fn install() {
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_enum::set(insert_pg_enum);
     backend_catalog_indexing_seams::get_new_oid_with_index_pg_enum::set(get_new_oid_pg_enum);
     backend_catalog_indexing_seams::catalog_tuple_update_pg_enum::set(update_pg_enum);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_language::set(insert_pg_language);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_language::set(update_pg_language);
     backend_catalog_indexing_seams::catalog_tuples_multi_insert_pg_depend::set(multi_insert_pg_depend);
     backend_catalog_indexing_seams::catalog_tuples_multi_insert_pg_shdepend::set(
         multi_insert_pg_shdepend,

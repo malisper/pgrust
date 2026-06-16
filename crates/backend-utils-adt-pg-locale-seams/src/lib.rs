@@ -318,3 +318,16 @@ seam_core::seam!(
     /// See [`localized_full_months`].
     pub fn localized_abbrev_days<'mcx>(mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, PgVec<'mcx, u8>>>
 );
+
+seam_core::seam!(
+    /// `tolower_l(c, locale->info.lt)` (pg_locale_libc.c, via `SB_lower_char` in
+    /// like.c): single-byte lower-case fold of `c` through the libc `locale_t`
+    /// (`info.lt`) of the resolved locale identified by `collid`. The flag-core
+    /// [`PgLocaleStruct`] does not carry the provider-specific `info` union (the
+    /// libc `locale_t` lives inside pg_locale.c's permanent cache), so this seam
+    /// re-keys by `collid`; the owner re-resolves the same cache entry and calls
+    /// `tolower_l`. Reached only on `SB_lower_char`'s third leg (locale is neither
+    /// C/POSIX nor the default), so the collation is always a non-default libc
+    /// collation. Infallible (libc `tolower_l` does not error).
+    pub fn char_tolower(c: u8, collid: Oid) -> u8
+);

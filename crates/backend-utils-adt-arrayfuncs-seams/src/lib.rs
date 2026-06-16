@@ -302,6 +302,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array_builtin(names, n, NAMEOID)` (arrayfuncs.c), the array
+    /// half of `current_schemas` (name.c). Each input element is the
+    /// `NAMEDATALEN`-byte, NUL-padded `NameData` image of one schema name (the
+    /// `name` Datum the C `DirectFunctionCall1(namein, ...)` produced); the
+    /// elements are pass-by-reference fixed-length `name` values. An empty
+    /// input yields a zero-element array (not NULL). The result is the array
+    /// varlena's raw bytes allocated in `mcx`, so the caller can carry it on
+    /// the canonical by-reference `Datum`. `Err` carries the `MaxAllocSize` /
+    /// OOM `ereport(ERROR)` surface.
+    pub fn build_name_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[&[u8]],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// The element-deconstruct + per-element `OutputFunctionCall` walk of
     /// `array_to_text_internal` (arrayfuncs.c / varlena.c:5130-5178): given the
     /// already-detoasted array varlena bytes (`DatumGetArrayTypeP(v)` — the
@@ -369,6 +385,22 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         bytes: &[u8],
     ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `(int2vector *) DatumGetPointer(datum)` then read `->values[0 ..
+    /// ->dim1]` (e.g. `pg_index.indoption`) operating on the on-disk
+    /// `int2vector` byte image `bytes` (a `Datum::ByRef` attribute image). An
+    /// `int2vector` is a 1-D `ArrayType` of `INT2OID` (2-byte pass-by-value,
+    /// short-aligned, no NULLs, lower bound 0 — `int2vectorin` constructs it
+    /// that way); the image is detoasted (`detoast_attr`), and `ARR_DATA_PTR`
+    /// is read as the C `int16[ARR_DIMS[0]]`, returned in `mcx`. An
+    /// empty/zero-dimension vector yields an empty result (the C `dim1 == 0`
+    /// case). Fallible on detoast / truncated element data.
+    pub fn int2vector_to_i16s_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> PgResult<PgVec<'mcx, i16>>
 );
 
 seam_core::seam!(

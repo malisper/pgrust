@@ -338,6 +338,160 @@ pub fn LargeObjectExistsWithSnapshot(
     Ok(retval)
 }
 
+/* ===========================================================================
+ * largeobject_owner_acl — the catalog read backing aclchk.c's
+ * `pg_largeobject_aclmask_snapshot` (pg_largeobject_metadata has no syscache,
+ * so the projection lives here in the snapshot-scanning domain).
+ * ========================================================================= */
+
+/// `Anum_pg_largeobject_metadata_lomowner` — the owner column number.
+const Anum_pg_largeobject_metadata_lomowner: AttrNumber = 2;
+/// `Anum_pg_largeobject_metadata_lomacl` — the ACL column number.
+const Anum_pg_largeobject_metadata_lomacl: AttrNumber = 3;
+
+/// `sizeof(AclItem)` (`utils/acl.h`) — 16 bytes (`pg_type.dat` `aclitem`
+/// `typlen => 16`).
+const SIZEOF_ACLITEM: usize = 16;
+/// `ARR_HDRSZ` fixed `ArrayType` header (ndim/dataoffset/elemtype precede the
+/// dims), in bytes.
+const ARRAYTYPE_HDRSZ: usize = 16;
+
+fn arr_read_i32(a: &[u8], off: usize) -> i32 {
+    i32::from_ne_bytes([a[off], a[off + 1], a[off + 2], a[off + 3]])
+}
+
+fn arr_maxalign(len: usize) -> usize {
+    // MAXALIGN to 8 bytes.
+    (len + 7) & !7
+}
+
+/// `DatumGetAclP(aclDatum)` + walk the `aclitem[]` elements: detoast the stored
+/// ACL varlena, then read `ACL_NUM(acl) = ARR_DIMS(acl)[0]` fixed-16-byte items
+/// from `ACL_DAT(acl) = ARR_DATA_PTR(acl)`. A stored ACL is always a
+/// well-formed 1-D no-nulls `aclitem` array; a 0-dimension image yields the
+/// empty vector. (Mirrors the syscache ACL projection's `decode_acl`.)
+fn decode_acl<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    raw: &[u8],
+) -> PgResult<mcx::PgVec<'mcx, types_acl::AclItem>> {
+    let arr = backend_access_common_detoast_seams::detoast_attr::call(mcx, raw)?;
+    let ndim = arr_read_i32(&arr, 4);
+    let dataoffset = arr_read_i32(&arr, 8);
+    let data_off = if dataoffset != 0 {
+        dataoffset as usize
+    } else {
+        arr_maxalign(ARRAYTYPE_HDRSZ + 2 * 4 * ndim as usize)
+    };
+    let dim0 = if ndim >= 1 {
+        arr_read_i32(&arr, ARRAYTYPE_HDRSZ)
+    } else {
+        0
+    };
+    let n = if ndim >= 1 { dim0.max(0) as usize } else { 0 };
+    let mut items: mcx::PgVec<'mcx, types_acl::AclItem> = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let off = data_off + i * SIZEOF_ACLITEM;
+        let b = arr.get(off..off + SIZEOF_ACLITEM).ok_or_else(|| {
+            types_error::PgError::error("largeobject ACL projection: truncated aclitem array data")
+        })?;
+        // AclItem { ai_grantee: Oid, ai_grantor: Oid, ai_privs: AclMode (u64) }.
+        let ai_grantee = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+        let ai_grantor = u32::from_ne_bytes([b[4], b[5], b[6], b[7]]);
+        let ai_privs =
+            u64::from_ne_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+        items.push(types_acl::AclItem {
+            ai_grantee,
+            ai_grantor,
+            ai_privs,
+        });
+    }
+    Ok(items)
+}
+
+/// Catalog read for `pg_largeobject_aclmask_snapshot` (aclchk.c): the
+/// `table_open` + snapshot `systable_beginscan` over
+/// `pg_largeobject_metadata`, then `GETSTRUCT(lomowner)` +
+/// `heap_getattr(Anum_pg_largeobject_metadata_lomacl)`. Returns `(lomowner,
+/// decoded lomacl)`; `None` ACL is the C SQL-null column (caller builds
+/// `acldefault`). `Ok(None)` for a missing object (caller raises). `snapshot ==
+/// None` is the C `NULL`.
+pub fn largeobject_owner_acl<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    lobj_oid: Oid,
+    snapshot: Option<Rc<SnapshotData>>,
+) -> PgResult<Option<(Oid, Option<mcx::PgVec<'mcx, types_acl::AclItem>>)>> {
+    // pg_lo_meta = table_open(LargeObjectMetadataRelationId, AccessShareLock);
+    let pg_lo_meta = table_open(mcx, LargeObjectMetadataRelationId, AccessShareLock)?;
+
+    // ScanKeyInit(&entry[0], Anum_pg_largeobject_metadata_oid,
+    //             BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(lobj_oid));
+    let skey = [oid_key(Anum_pg_largeobject_metadata_oid, lobj_oid)?];
+
+    // scan = systable_beginscan(pg_lo_meta, LargeObjectMetadataOidIndexId, true,
+    //                           snapshot, 1, entry);
+    let mut scan = genam::systable_beginscan::call(
+        &pg_lo_meta,
+        LargeObjectMetadataOidIndexId,
+        true,
+        snapshot.as_deref(),
+        &skey,
+    )?;
+
+    // tuple = systable_getnext(scan);
+    // if (!HeapTupleIsValid(tuple)) -> caller raises "large object %u does not exist".
+    let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
+    let Some(tuple) = tuple else {
+        scan.end()?;
+        pg_lo_meta.close(AccessShareLock)?;
+        return Ok(None);
+    };
+
+    // ownerId = ((Form_pg_largeobject_metadata) GETSTRUCT(tuple))->lomowner;
+    // aclDatum = heap_getattr(tuple, Anum_pg_largeobject_metadata_lomacl,
+    //                         RelationGetDescr(pg_lo_meta), &isNull);
+    let cols = backend_access_common_heaptuple::heap_deform_tuple(
+        mcx,
+        &tuple.tuple,
+        &pg_lo_meta.rd_att,
+        &tuple.data,
+    )?;
+
+    let (owner_val, owner_null) = &cols[(Anum_pg_largeobject_metadata_lomowner - 1) as usize];
+    if *owner_null {
+        return Err(types_error::PgError::error(
+            "pg_largeobject_metadata.lomowner is null",
+        ));
+    }
+    let ownerId: Oid = match owner_val {
+        Datum::ByVal(v) => *v as u32,
+        Datum::ByRef(_) => {
+            return Err(types_error::PgError::error(
+                "pg_largeobject_metadata.lomowner is by-reference",
+            ))
+        }
+    };
+
+    let (acl_val, acl_null) = &cols[(Anum_pg_largeobject_metadata_lomacl - 1) as usize];
+    let acl = if *acl_null {
+        None
+    } else {
+        match acl_val {
+            Datum::ByRef(b) => Some(decode_acl(mcx, &b[..])?),
+            Datum::ByVal(_) => {
+                return Err(types_error::PgError::error(
+                    "pg_largeobject_metadata.lomacl is by-value",
+                ))
+            }
+        }
+    };
+
+    // systable_endscan(scan); table_close(pg_lo_meta, AccessShareLock);
+    scan.end()?;
+    pg_lo_meta.close(AccessShareLock)?;
+
+    Ok(Some((ownerId, acl)))
+}
+
 /// Install this unit's inward seam(s). Wired into `seams-init`'s `init_all`.
 pub fn init_seams() {
     backend_catalog_pg_largeobject_seams::large_object_exists_with_snapshot::set(
@@ -345,4 +499,5 @@ pub fn init_seams() {
     );
     backend_catalog_pg_largeobject_seams::large_object_exists::set(LargeObjectExists);
     backend_catalog_pg_largeobject_seams::LargeObjectDrop::set(LargeObjectDrop);
+    backend_catalog_pg_largeobject_seams::largeobject_owner_acl::set(largeobject_owner_acl);
 }

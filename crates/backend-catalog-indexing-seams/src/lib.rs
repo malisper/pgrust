@@ -8,6 +8,7 @@
 //! owner forms the heap tuple against the pg_depend descriptor.
 
 use types_catalog::catalog_dependency::FormData_pg_depend;
+use types_catalog::pg_sequence::FormData_pg_sequence;
 use types_catalog::catalog_shdepend::FormData_pg_shdepend;
 use types_catalog::opclasscmds_catalog::{
     FormData_pg_amop, FormData_pg_amproc, FormData_pg_opclass, FormData_pg_opfamily,
@@ -95,6 +96,41 @@ seam_core::seam!(
         rel_oid: Oid,
         toast_relid: Oid,
     ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `rel = table_open(SequenceRelationId, RowExclusiveLock)`;
+    /// `heap_form_tuple(RelationGetDescr(rel), pgs_values, pgs_nulls)`;
+    /// `CatalogTupleInsert(rel, tuple)`; `heap_freetuple`;
+    /// `table_close(rel, RowExclusiveLock)` (sequence.c `DefineSequence`
+    /// pg_sequence fill). The whole open/form/insert/close cycle is in the
+    /// owner; the new row crosses as the deformed `FormData_pg_sequence`. `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_insert_pg_sequence(form: &FormData_pg_sequence) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `rel = table_open(SequenceRelationId, RowExclusiveLock)`;
+    /// `seqtuple = SearchSysCacheCopy1(SEQRELID, seqrelid)`; overwrite the
+    /// `Form_pg_sequence` fields from `form`; `CatalogTupleUpdate(rel,
+    /// &seqtuple->t_self, seqtuple)`; `InvokeObjectPostAlterHook(
+    /// RelationRelationId, seqrelid, 0)`; `table_close(rel, RowExclusiveLock)`
+    /// (sequence.c `AlterSequence`). Keyed by `form.seqrelid`. The returned
+    /// `bool` is `HeapTupleIsValid(seqtuple)` — the caller raises
+    /// `cache lookup failed for sequence %u` when `false`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_update_pg_sequence(form: &FormData_pg_sequence) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `rel = table_open(SequenceRelationId, RowExclusiveLock)`;
+    /// `tuple = SearchSysCache1(SEQRELID, relid)`; `CatalogTupleDelete(rel,
+    /// &tuple->t_self)`; `ReleaseSysCache(tuple)`; `table_close(rel,
+    /// RowExclusiveLock)` (sequence.c `DeleteSequenceTuple`). The returned
+    /// `bool` is `HeapTupleIsValid(tuple)` — the caller raises
+    /// `cache lookup failed for sequence %u` when `false`. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_delete_pg_sequence(relid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -466,6 +502,37 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_enum::PgEnumInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateProceduralLanguage`'s create branch: `langoid = GetNewOidWithIndex(
+    /// rel, LanguageOidIndexId, Anum_pg_language_oid)` + `heap_form_tuple(
+    /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)`
+    /// (proclang.c:159-163 + catalog/indexing.c + heapam). Returns the freshly
+    /// allocated `pg_language` OID. `lanacl` is always inserted NULL. `Err`
+    /// carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_language<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_language::PgLanguageInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CreateProceduralLanguage`'s replace branch: `tup = heap_modify_tuple(
+    /// oldtup, RelationGetDescr(rel), values, nulls, replaces)` +
+    /// `CatalogTupleUpdate(rel, &tup->t_self, tup)` (proclang.c:149-150 +
+    /// catalog/indexing.c + heapam). The `replaces[]` mask leaves
+    /// `oid`/`lanowner`/`lanacl` unchanged (taken from `oldtup`), so the existing
+    /// OID, ownership and ACL are preserved exactly as C. `oldtup` supplies both
+    /// the unchanged columns and the `t_self` update target. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_language<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_language::PgLanguageInsertRow,
     ) -> PgResult<()>
 );
 

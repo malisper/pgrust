@@ -47,3 +47,14 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn RemoveExtensionById(extId: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `checkMembershipInCurrentExtension(object)` (extension.c): when running
+    /// inside a CREATE EXTENSION script, insist the addressed object is a
+    /// member of the extension being created; raise `ERRCODE_DUPLICATE_OBJECT`
+    /// otherwise. A no-op when not `creating_extension`. `Err` carries the
+    /// `ereport(ERROR)`.
+    pub fn check_membership_in_current_extension(
+        object: &types_catalog::catalog_dependency::ObjectAddress,
+    ) -> PgResult<()>
+);

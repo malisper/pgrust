@@ -712,11 +712,48 @@ seam_core::seam!(
     ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
 );
 
+seam_core::seam!(
+    /// `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid, CStringGetDatum(langname))`
+    /// (`get_language_oid`, proclang.c): the language's OID by name, or
+    /// `InvalidOid` on a cache miss. The missing-language error is the caller's
+    /// (`get_language_oid` raises `ERRCODE_UNDEFINED_OBJECT` when `!missing_ok`).
+    pub fn language_oid_by_name(langname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(LANGNAME, PointerGetDatum(languageName))` (proclang.c
+    /// pre-existing-definition check): the writable `pg_language` tuple by name
+    /// plus its deformed `oid`/`lanowner`, or `None` if no such language exists.
+    /// `CreateProceduralLanguage`'s replace branch needs the whole tuple
+    /// (`heap_modify_tuple` keeps `oid`/`lanowner`/`lanacl` from it) and the
+    /// `oldform->oid`.
+    pub fn language_tuple_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        langname: &str,
+    ) -> PgResult<
+        Option<(
+            types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+            types_catalog::pg_language::FormData_pg_language,
+        )>,
+    >
+);
+
 /* ---- CLUSTER pg_class / pg_index writable copies (backend-commands-cluster) */
 
 seam_core::seam!(
     /// `SearchSysCacheExists1(RELOID, indexOid)` (syscache.c).
     pub fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `SearchSysCache1(SEQRELID, ObjectIdGetDatum(seqid))` + `GETSTRUCT`
+    /// projected to the `pg_sequence` row (sequence.c
+    /// `SearchSysCache1`/`SearchSysCacheCopy1`). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the caller raises `cache lookup failed for
+    /// sequence %u`. The projected row is a by-value copy out of the catcache,
+    /// so a caller that mutates it (`AlterSequence`) treats it as its own.
+    pub fn search_seqrelid(
+        seqid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_sequence::FormData_pg_sequence>>
 );
 seam_core::seam!(
     /// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` (syscache.c): the

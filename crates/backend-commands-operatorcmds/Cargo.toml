@@ -1,0 +1,36 @@
+[package]
+name = "backend-commands-operatorcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_operatorcmds"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-commands-define = { path = "../backend-commands-define" }
+backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
+
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-pg-operator-seams = { path = "../backend-catalog-pg-operator-seams" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-parser-parse-oper-seams = { path = "../backend-parser-parse-oper-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-opclass = { path = "../types-opclass" }
+types-parsenodes = { path = "../types-parsenodes" }
