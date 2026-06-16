@@ -347,6 +347,7 @@ pub fn init_all() {
     backend_utils_mmgr_portalmem::init_seams();
     backend_utils_sort_sortsupport::init_seams();
     backend_utils_sort_storage::init_seams();
+    backend_utils_sort_tuplesort::init_seams();
     backend_utils_time_combocid::init_seams();
     backend_utils_time_snapmgr::init_seams();
     common_checksum_helper::init_seams();
@@ -1375,6 +1376,24 @@ mod recurrence_guard {
         // Installing needs an arena->owned TypeName bridge (a contract reconcile),
         // not a bare `::set`. See DESIGN_DEBT.md.
         ("backend_parser_driver", "raw_parse_type_name"),
+        // DESIGN_DEBT (TD-TUPLESORT-INDEX-VARIANTS, F3b): the tuplesort unit's
+        // INDEX-tuple sort variants — `tuplesort_begin_index_btree`
+        // (nbtsort.c `_bt_leafbuild`), `tuplesort_begin_index_hash`
+        // (hash.c index build), `tuplesort_putindextuplevalues` +
+        // `tuplesort_getindextuple` (both index builds). F3a landed the engine +
+        // the heap/datum variants (begin_heap/begin_datum + the variant-agnostic
+        // put/get/performsort/end/rescan/markpos/get_stats seams); the index
+        // variants' `comparetup_index_*` / `writetup_index` / `readtup_index` +
+        // `removeabbrev_index` (tuplesortvariants.c) and their `begin_index_*`
+        // entry points are F3b. The begin seams are NOT installed (and the engine
+        // loud-panics in the index writetup/comparetup arms), so the four
+        // index-only seams stay seam-panics until F3b lands. (begin_index_gist
+        // has no live caller, so it is not flagged.) DELETE each entry as F3b
+        // installs its begin/put/get index seam.
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_btree"),
+        ("backend_utils_sort_tuplesort", "tuplesort_begin_index_hash"),
+        ("backend_utils_sort_tuplesort", "tuplesort_putindextuplevalues"),
+        ("backend_utils_sort_tuplesort", "tuplesort_getindextuple"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
