@@ -559,6 +559,10 @@ pub fn init_seams() {
         ParseNum::Err { .. } => None,
     });
 
+    // --- check_GUC_name_for_parameter_acl (guc.c:1410), consumed by
+    //     pg_parameter_acl.c's ParameterAclCreate. ---
+    s::check_guc_name_for_parameter_acl::set(check_guc_name_for_parameter_acl);
+
     // --- Boot init. ---
     s::initialize_guc_options::set(try_initialize_guc_options);
 
@@ -741,6 +745,69 @@ fn install_guc_state_transfer_seams() {
         live::with_store_mut(|reg| serialize::restore_guc_state(reg, buf))
             .ok_or_else(guc_store_uninitialized)?
     });
+}
+
+/// `assignable_custom_variable_name(name, skip_errors, elevel)` (guc.c:1121):
+/// decide whether `name` is acceptable as a (yet-to-be-defined) custom GUC. A
+/// custom name is `class.subname` (a `GUC_QUALIFIER_SEPARATOR` `.` separator),
+/// must be syntactically valid (`valid_custom_variable_name`), and must not
+/// collide with a previously-reserved class prefix. A single-part unknown name
+/// is rejected. `skip_errors == false` turns each rejection into the C
+/// `ereport(elevel, ...)`; here `elevel == ERROR`, so a rejection is `Err`.
+///
+/// `reserved_class_prefix` (populated only by `MarkGUCPrefixReserved`, which is
+/// not yet ported) is empty in this build, so the reserved-prefix loop has no
+/// iterations — matching a backend that has not loaded any prefix-reserving
+/// extension.
+fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResult<bool> {
+    // const char *sep = strchr(name, GUC_QUALIFIER_SEPARATOR);
+    const GUC_QUALIFIER_SEPARATOR: char = '.';
+    if name.contains(GUC_QUALIFIER_SEPARATOR) {
+        // The name must be syntactically acceptable ...
+        if !process_config::valid_custom_variable_name(name) {
+            if !skip_errors {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_NAME)
+                    .errmsg(format!("invalid configuration parameter name \"{name}\""))
+                    .errdetail(
+                        "Custom parameter names must be two or more simple identifiers separated by dots.",
+                    )
+                    .into_error());
+            }
+            return Ok(false);
+        }
+        // ... and it must not match any previously-reserved prefix.
+        // `reserved_class_prefix` is empty (MarkGUCPrefixReserved unported), so
+        // the C `foreach(lc, reserved_class_prefix)` loop is a no-op here.
+
+        // OK to create it.
+        return Ok(true);
+    }
+
+    // Unrecognized single-part name.
+    if !skip_errors {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("unrecognized configuration parameter \"{name}\""))
+            .into_error());
+    }
+    Ok(false)
+}
+
+/// `check_GUC_name_for_parameter_acl(name)` (guc.c:1410): allow creating a
+/// `pg_parameter_acl` entry for `name` only if the GUC exists or `name` is a
+/// valid custom GUC name; otherwise throw. (May be applied before or after
+/// canonicalization.)
+fn check_guc_name_for_parameter_acl(name: &str) -> PgResult<()> {
+    // OK if the GUC exists.  C: find_option(name, false, true, DEBUG5) — a pure
+    // lookup with placeholder-creation disabled and errors skipped.
+    let found = live::with_store(|reg| reg.find_option(name).is_some()).unwrap_or(false);
+    if found {
+        return Ok(());
+    }
+    // Otherwise, it'd better be a valid custom GUC name.
+    assignable_custom_variable_name(name, false)?;
+    Ok(())
 }
 
 /// The live GUC store has not been built yet (`initialize_guc_options` not run).

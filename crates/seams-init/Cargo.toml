@@ -90,6 +90,7 @@ backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
 backend-catalog-pg-collation = { path = "../backend-catalog-pg-collation" }
+backend-catalog-pg-parameter-acl = { path = "../backend-catalog-pg-parameter-acl" }
 backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-operator = { path = "../backend-catalog-pg-operator" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }

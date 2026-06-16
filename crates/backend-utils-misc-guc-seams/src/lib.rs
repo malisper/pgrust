@@ -21,6 +21,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `check_GUC_name_for_parameter_acl(name)` (guc.c:1410): throw unless a
+    /// `pg_parameter_acl` entry may be created for `name` — i.e. the GUC exists
+    /// (`find_option`) or `name` is a valid custom GUC name
+    /// (`assignable_custom_variable_name`). `Ok(())` means allowed; `Err` is the
+    /// C `ereport(ERROR)`. Consumed by pg_parameter_acl.c's `ParameterAclCreate`.
+    pub fn check_guc_name_for_parameter_acl(name: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `SetConfigOption(name, value, PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)`
     /// (guc.c) — used by `SetOuterUserId` to keep the `is_superuser` GUC in
     /// sync. Can `ereport(ERROR)` on an invalid value.

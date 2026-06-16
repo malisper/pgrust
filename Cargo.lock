@@ -4677,6 +4677,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-parameter-acl"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-table-table-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing",
+ "backend-catalog-pg-parameter-acl-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-parameter-acl-seams"
 version = "0.0.0"
 dependencies = [
@@ -18464,6 +18489,7 @@ dependencies = [
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-operator",
+ "backend-catalog-pg-parameter-acl",
  "backend-catalog-pg-proc",
  "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
