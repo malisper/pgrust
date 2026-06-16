@@ -368,6 +368,7 @@ backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }
 backend-utils-adt-quote = { path = "../backend-utils-adt-quote" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
+backend-utils-adt-selfuncs = { path = "../backend-utils-adt-selfuncs" }
 backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }

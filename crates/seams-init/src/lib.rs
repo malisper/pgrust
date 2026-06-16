@@ -370,6 +370,7 @@ pub fn init_all() {
     backend_utils_adt_pg_locale_icu::init_seams();
     backend_utils_adt_quote::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
+    backend_utils_adt_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();

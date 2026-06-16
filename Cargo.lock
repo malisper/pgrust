@@ -16264,6 +16264,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-util-clauses-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-selfuncs",
+]
+
+[[package]]
 name = "backend-utils-adt-selfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -19208,6 +19227,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-selfuncs",
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
