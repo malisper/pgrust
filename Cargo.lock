@@ -4119,6 +4119,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-catalog-data"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-relcache-seams",
+ "types-core",
+ "types-relcache-entry",
+]
+
+[[package]]
 name = "backend-catalog-aclchk"
 version = "0.0.0"
 dependencies = [
@@ -16009,12 +16018,15 @@ dependencies = [
  "backend-parser-driver",
  "backend-postmaster-autovacuum-seams",
  "backend-postmaster-interrupt",
+ "backend-postmaster-pmchild-seams",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-launcher-seams",
  "backend-replication-walsender-seams",
  "backend-rewrite-rewritehandler-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-ipci-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
@@ -16035,6 +16047,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc",
@@ -16074,6 +16087,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-dest",
  "types-error",
  "types-guc",
@@ -20804,6 +20818,7 @@ dependencies = [
  "backend-backup-zstd",
  "backend-bootstrap-bootparse",
  "backend-bootstrap-bootstrap",
+ "backend-bootstrap-catalog-data",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
  "backend-catalog-dependency",

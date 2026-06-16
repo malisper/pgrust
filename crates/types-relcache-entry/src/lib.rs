@@ -258,6 +258,24 @@ pub struct OwnedConstrCheck {
     pub ccnoinherit: bool,
 }
 
+/// The genbki bootstrap schema for one nailed catalog: the hardcoded
+/// `Schema_pg_*[]` `FormData_pg_attribute` rows `formrdesc` consumes, plus the
+/// catalog relation OID (`FormData_pg_attribute.attrelid`).
+///
+/// The C `formrdesc(name, reltype, isshared, natts, attrs)` reads
+/// `attrs[0]->attrelid` to set `rd_id`; the [`OwnedAttr`] mirror drops
+/// `attrelid` (it is identical for every row), so the bootstrap data owner
+/// carries it alongside the row vector. This is the carrier the
+/// `catalog_schema_attrs` seam hands back.
+#[derive(Clone, Debug, Default)]
+pub struct BootstrapCatalogSchema {
+    /// `FormData_pg_attribute.attrelid` — the catalog relation OID, used for
+    /// `rd_id` in `formrdesc` (which the `OwnedAttr` rows cannot carry).
+    pub relid: Oid,
+    /// The `Schema_pg_*[]` attribute rows.
+    pub attrs: Vec<OwnedAttr>,
+}
+
 /// One `FormData_pg_attribute` row of [`OwnedTupleDesc`] (owned mirror).
 #[derive(Clone, Debug, Default)]
 pub struct OwnedAttr {

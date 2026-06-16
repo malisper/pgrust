@@ -101,5 +101,11 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 
+# F0b: the single-user standalone bootstrap (PostgresSingleUserMain) callees.
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
+backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
+backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
