@@ -97,6 +97,7 @@ pub fn init_all() {
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
+    backend_catalog_pg_proc::init_seams();
     backend_catalog_pg_publication::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
@@ -210,6 +211,7 @@ pub fn init_all() {
     backend_common_relpath::init_seams();
     backend_optimizer_path_costsize::init_seams();
     backend_optimizer_path_equivclass::init_seams();
+    backend_optimizer_plan_init_subselect::init_seams();
     backend_optimizer_path_small::init_seams();
     backend_optimizer_util_joininfo::init_seams();
     backend_optimizer_util_paramassign::init_seams();

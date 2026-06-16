@@ -946,6 +946,51 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_proc, ProcedureOidIndexId, Anum_pg_proc_oid)`
+    /// (catalog/catalog.c): allocate a fresh `pg_proc` row OID that does not
+    /// collide with any existing row, verified against `ProcedureOidIndexId`.
+    /// Returned to the `pg_proc.c` port (`ProcedureCreate`'s new-row branch) so
+    /// the OID-assignment decision stays in the owner. `Err` carries the
+    /// index-probe error surface.
+    pub fn get_new_oid_with_index_pg_proc<'mcx>(rel: &types_rel::Relation<'mcx>) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `ProcedureCreate`'s new-row path: `heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)` + `heap_freetuple` for
+    /// one `pg_proc` row (catalog/indexing.c + heapam). The fixed columns plus
+    /// the `oidvector` `proargtypes`, the `CATALOG_VARLEN` columns
+    /// (`proallargtypes`/`proargmodes`/`proargnames`/`proargdefaults`/
+    /// `protrftypes`/`probin`/`prosqlbody`/`proconfig`/`proacl`) cross as the
+    /// deformed [`PgProcInsertRow`]; `None` for a varlen column is
+    /// `nulls[Anum_pg_proc_* - 1] = true`. The owner has already assigned
+    /// `row.fields.oid`. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_proc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_proc::PgProcInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcedureCreate`'s replace path: `heap_modify_tuple(oldtup,
+    /// RelationGetDescr(rel), values, nulls, replaces)` with every column
+    /// replaced *except* `oid`/`proowner`/`proacl`
+    /// (`replaces[Anum_pg_proc_{oid,proowner,proacl} - 1] = false`,
+    /// pg_proc.c:580-585), then `CatalogTupleUpdate(rel, &tup->t_self, tup)`
+    /// (catalog/indexing.c + heapam). The replacement columns cross as the
+    /// deformed [`PgProcInsertRow`]; the held `oldtup` supplies the
+    /// not-replaced columns and the `t_self` update target. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_proc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_proc::PgProcInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CreateStatistics`'s tuple build + insert (commands/statscmds.c +
     /// catalog/indexing.c): `GetNewOidWithIndex(rel, StatisticExtOidIndexId,
     /// Anum_pg_statistic_ext_oid)` + the `values[]`/`nulls[]` fill — including

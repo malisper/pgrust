@@ -3870,6 +3870,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "mcx",
  "seam-core",
+ "types-array",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -4577,6 +4578,54 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-proc-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-functioncmds-seams",
+ "backend-parser-coerce",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-acl",
+ "types-array",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-catalog-pg-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9344,6 +9393,45 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-init-subselect"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-init-subselect-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -17539,6 +17627,7 @@ dependencies = [
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-operator",
+ "backend-catalog-pg-proc",
  "backend-catalog-pg-publication",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
@@ -17649,6 +17738,7 @@ dependencies = [
  "backend-optimizer-path-small",
  "backend-optimizer-plan-analyzejoins",
  "backend-optimizer-plan-createplan",
+ "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
