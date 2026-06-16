@@ -4060,6 +4060,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-aggregate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-aggregate-seams",
+ "backend-commands-functioncmds-seams",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-func-seams",
+ "backend-parser-parse-oper-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-aggregate-seams"
 version = "0.0.0"
 dependencies = [
@@ -11631,6 +11658,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-statistics-mvdistinct"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
 name = "backend-storage-aio-aio-seams"
 version = "0.0.0"
 dependencies = [
@@ -17206,6 +17245,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
+ "backend-catalog-pg-aggregate",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",

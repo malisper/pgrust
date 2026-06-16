@@ -94,6 +94,7 @@ backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
+backend-catalog-pg-aggregate = { path = "../backend-catalog-pg-aggregate" }
 backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
