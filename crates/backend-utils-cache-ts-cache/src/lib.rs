@@ -272,7 +272,11 @@ fn elog_error<T>(message: String) -> PgResult<T> {
 fn byval_oid(value: Datum<'_>) -> PgResult<Oid> {
     match &value {
         Datum::ByVal(_) => Ok(value.as_oid()),
-        Datum::ByRef(_) => elog_error("ts_cache: expected a by-value oid".into()),
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => elog_error("ts_cache: expected a by-value oid".into()),
     }
 }
 
@@ -293,7 +297,11 @@ fn getattr_name(
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             Ok(String::from_utf8_lossy(&b[..len]).into_owned())
         }
-        Datum::ByVal(_) => elog_error("ts_cache: name attribute is by-value".into()),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => elog_error("ts_cache: name attribute is by-value".into()),
     }
 }
 
@@ -564,7 +572,11 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
                     // varlena bytes cross the seam.
                     let bytes = match &opt {
                         Datum::ByRef(b) => &b[..],
-                        Datum::ByVal(_) => {
+                        Datum::ByVal(_)
+                        | Datum::Cstring(_)
+                        | Datum::Composite(_)
+                        | Datum::Expanded(_)
+                        | Datum::Internal(_) => {
                             return elog_error("dictinitoption is not by-reference".into())
                         }
                     };
@@ -711,14 +723,22 @@ pub fn lookup_ts_config_cache<'mcx>(
             let toktype_d = &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0;
             let toktype = match toktype_d {
                 Datum::ByVal(_) => toktype_d.as_i32(),
-                Datum::ByRef(_) => {
+                Datum::ByRef(_)
+                | Datum::Cstring(_)
+                | Datum::Composite(_)
+                | Datum::Expanded(_)
+                | Datum::Internal(_) => {
                     return elog_error("maptokentype is not by-value".into())
                 }
             };
             let mapdict_d = &row[(Anum_pg_ts_config_map_mapdict - 1) as usize].0;
             let mapdict = match mapdict_d {
                 Datum::ByVal(_) => mapdict_d.as_oid(),
-                Datum::ByRef(_) => return elog_error("mapdict is not by-value".into()),
+                Datum::ByRef(_)
+                | Datum::Cstring(_)
+                | Datum::Composite(_)
+                | Datum::Expanded(_)
+                | Datum::Internal(_) => return elog_error("mapdict is not by-value".into()),
             };
 
             if toktype <= 0 || toktype as usize > MAXTOKENTYPE {

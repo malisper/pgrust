@@ -7,6 +7,39 @@
 //! typed reference rather than an untyped `&[u8]` — construction asserts the
 //! `VARTAG_EXPANDED` shape, so a non-expanded datum stops loud at the
 //! boundary instead of being silently misread by the owner.
+//!
+//! Also home to the [`ExpandedObject`] *trait* — the live, possibly-mutable
+//! in-memory expanded object (PG `VARATT_IS_EXPANDED`) with its
+//! `ExpandedObjectMethods` vtable. It lives here (the bottom of the
+//! `types-datum` layer) so that both `types-tuple` (the canonical `Datum`
+//! value enum) and `types-fmgr` (the fmgr boundary `RefPayload`) can name the
+//! one trait without a layering cycle.
+
+extern crate alloc;
+use alloc::vec;
+
+/// Mirror of PG's `ExpandedObjectMethods` vtable (`utils/expandeddatum.h`): the
+/// two method pointers every expanded (`VARATT_IS_EXPANDED`) object exposes.
+/// `: Any` enables the checked downcast (PG's `EA_MAGIC` identity check before a
+/// C cast). The flattened image `flatten_into` writes must be exactly
+/// `get_flat_size()` bytes (PG `allocated_size` cross-check).
+pub trait ExpandedObject: core::any::Any {
+    /// C: `EOM_get_flat_size_method` — bytes the flat varlena image needs.
+    fn get_flat_size(&self) -> usize;
+    /// C: `EOM_flatten_into_method` — serialize the flat varlena image into
+    /// `dst`, whose length is exactly a preceding `get_flat_size()`.
+    fn flatten_into(&self, dst: &mut [u8]);
+}
+
+/// Value-only clone of a live expanded object: flatten it into its varlena
+/// byte image (there is no `Clone` on the trait object). Shared by both the
+/// canonical `Datum::Expanded` arm and `RefPayload::Expanded`.
+pub fn flatten_expanded(eo: &dyn ExpandedObject) -> alloc::vec::Vec<u8> {
+    let n = eo.get_flat_size();
+    let mut dst = vec![0u8; n];
+    eo.flatten_into(&mut dst);
+    dst
+}
 
 /// `VARTAG_EXPANDED_RO` (`varatt.h`, `enum vartag_external`).
 pub const VARTAG_EXPANDED_RO: u8 = 2;

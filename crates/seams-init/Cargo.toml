@@ -197,6 +197,7 @@ backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
+backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
