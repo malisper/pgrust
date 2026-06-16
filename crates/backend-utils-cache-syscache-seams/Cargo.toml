@@ -17,6 +17,7 @@ types-hash = { path = "../types-hash" }
 types-namespace = { path = "../types-namespace" }
 types-nodes = { path = "../types-nodes" }
 types-cache = { path = "../types-cache" }
+types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }
 types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }

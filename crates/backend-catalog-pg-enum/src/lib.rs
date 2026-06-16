@@ -24,12 +24,13 @@
 use core::cell::RefCell;
 use std::collections::HashSet;
 
-use mcx::{Mcx, MemoryContext};
+use mcx::{Mcx, MemoryContext, PgVec};
 
 use types_catalog::catalog::TYPE_RELATION_ID;
 use types_catalog::pg_enum::{
     Anum_pg_enum_enumlabel, Anum_pg_enum_enumsortorder, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
-    EnumOidIndexId, EnumRelationId, EnumTypIdLabelIndexId, PgEnumInsertRow,
+    EnumOidIndexId, EnumRelationId, EnumTupleData, EnumTypIdLabelIndexId,
+    EnumTypIdSortOrderIndexId, PgEnumInsertRow,
 };
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_core::Size;
@@ -43,6 +44,7 @@ use types_tuple::heaptuple::ItemPointerData;
 use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
+use backend_access_index_indexam_seams as indexam_seams;
 use backend_access_table_table as table;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_catalog_binary_upgrade_seams as binary_upgrade_seams;
@@ -197,6 +199,69 @@ fn list_enum_members<'mcx>(
         });
     }
     scan.end()?;
+    Ok(out)
+}
+
+/// The `enum.c` `enum_endpoint` / `enum_range_internal` ordered scan of
+/// `pg_enum` for the members of `enumtypoid`, in sort order. Mirrors enum.c:
+/// `table_open(EnumRelationId)`, `index_open(EnumTypIdSortOrderIndexId)`,
+/// `systable_beginscan_ordered` keyed on `enumtypid`, then a
+/// `ForwardScanDirection` `systable_getnext_ordered` loop. Each member is
+/// projected to an [`EnumTupleData`] (the `Form_pg_enum` columns enum.c reads
+/// plus the header `xmin`/`xmin_committed` for `check_safe_enum_use`); the
+/// `enum.c` `check_safe_enum_use` call and the lower/upper windowing stay in
+/// the consumer.
+pub fn scan_enum_typid_sorted<'mcx>(
+    mcx: Mcx<'mcx>,
+    enumtypoid: Oid,
+) -> PgResult<PgVec<'mcx, EnumTupleData>> {
+    use types_scan::sdir::ScanDirection::ForwardScanDirection;
+    use types_storage::lock::AccessShareLock;
+    use types_tuple::heaptuple::{HeapTupleHeaderGetXmin, HeapTupleHeaderXminCommitted};
+
+    let skey = [oid_key(Anum_pg_enum_enumtypid, enumtypoid)?];
+
+    let enum_rel = table::table_open(mcx, EnumRelationId, AccessShareLock)?;
+    let enum_idx = indexam_seams::index_open::call(mcx, EnumTypIdSortOrderIndexId, AccessShareLock)?;
+    let mut enum_scan =
+        genam_seams::systable_beginscan_ordered::call(&enum_rel, &enum_idx, None, &skey)?;
+
+    let mut out: PgVec<'mcx, EnumTupleData> = PgVec::new_in(mcx);
+
+    while let Some(tup) =
+        genam_seams::systable_getnext_ordered::call(mcx, enum_scan.desc_mut(), ForwardScanDirection)?
+    {
+        let cols = heap_deform_tuple(mcx, &tup.tuple, &enum_rel.rd_att, &tup.data)?;
+        let oid = cols[Anum_pg_enum_oid as usize - 1].0.as_oid();
+        let enumtypid = cols[Anum_pg_enum_enumtypid as usize - 1].0.as_oid();
+        let enumlabel = {
+            let mut n = [0u8; NAMEDATALEN];
+            if let Datum::ByRef(b) = &cols[Anum_pg_enum_enumlabel as usize - 1].0 {
+                let take = core::cmp::min(NAMEDATALEN, b.len());
+                n[..take].copy_from_slice(&b[..take]);
+            }
+            n
+        };
+        let header = tup
+            .tuple
+            .t_data
+            .as_ref()
+            .expect("scanned pg_enum tuple has a header");
+        let item = EnumTupleData {
+            oid,
+            enumtypid,
+            enumlabel,
+            xmin_committed: HeapTupleHeaderXminCommitted(header),
+            xmin: HeapTupleHeaderGetXmin(header),
+        };
+        out.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<EnumTupleData>()))?;
+        out.push(item);
+    }
+
+    enum_scan.end()?;
+    enum_idx.close(AccessShareLock)?;
+    enum_rel.close(AccessShareLock)?;
+
     Ok(out)
 }
 
@@ -766,7 +831,9 @@ pub fn init_seams() {
     use backend_catalog_pg_enum_seams as seams;
 
     seams::at_eoxact_enum::set(AtEOXact_Enum);
+    seams::enum_uncommitted::set(EnumUncommitted);
     seams::scan_enum_members::set(scan_enum_members_seam);
+    seams::scan_enum_typid_sorted::set(scan_enum_typid_sorted);
 
     rt::estimate_uncommitted_enums_space::set(|| Ok(EstimateUncommittedEnumsSpace()));
     rt::serialize_uncommitted_enums::set(|space, len| {

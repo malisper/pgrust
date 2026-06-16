@@ -1673,6 +1673,8 @@ pub fn init_seams() {
     seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
     seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
     seams::get_top_transaction_id::set(GetTopTransactionId);
+    seams::get_top_full_transaction_id::set(GetTopFullTransactionId);
+    seams::get_top_full_transaction_id_if_any::set(GetTopFullTransactionIdIfAny);
     seams::get_current_transaction_id_if_any::set(GetCurrentTransactionIdIfAny);
     seams::is_subxact_top_xid_log_pending::set(IsSubxactTopXidLogPending);
     seams::set_check_xid_alive::set(SetCheckXidAlive);
