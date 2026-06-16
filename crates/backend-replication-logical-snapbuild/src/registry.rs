@@ -16,8 +16,11 @@ use types_core::primitive::{TransactionId, XLogRecPtr};
 use types_logical::{ReorderBufferHandle, SnapBuildHandle};
 
 use crate::{
-    allocate_snapshot_builder, free_snapshot_builder, snap_build_reset_exported_snapshot_state,
-    snap_build_snapshot_exists, SnapBuild,
+    allocate_snapshot_builder, free_snapshot_builder, snap_build_commit_txn,
+    snap_build_get_or_build_snapshot, snap_build_get_two_phase_at, snap_build_process_change,
+    snap_build_process_new_cid, snap_build_process_running_xacts,
+    snap_build_reset_exported_snapshot_state, snap_build_serialization_point,
+    snap_build_snapshot_exists, snap_build_xact_needs_skip, SnapBuild,
 };
 
 ::std::thread_local! {
@@ -123,6 +126,62 @@ fn seam_set_two_phase_at(handle: SnapBuildHandle, lsn: XLogRecPtr) {
     with_builder(handle, |b| b.two_phase_at = lsn);
 }
 
+// ---------------------------------------------------------------------------
+// decode.c entry points (change processing / snapshot generation). Each
+// resolves the handle to the live builder and forwards to the (landed) owner
+// function.
+// ---------------------------------------------------------------------------
+
+fn seam_process_change(handle: SnapBuildHandle, xid: TransactionId, lsn: XLogRecPtr) -> bool {
+    with_builder(handle, |b| snap_build_process_change(b, xid, lsn))
+}
+
+fn seam_process_new_cid(
+    handle: SnapBuildHandle,
+    xid: TransactionId,
+    lsn: XLogRecPtr,
+    xlrec: types_xlog_records::heapam_xlog::xl_heap_new_cid,
+) -> types_error::PgResult<()> {
+    with_builder(handle, |b| snap_build_process_new_cid(b, xid, lsn, &xlrec))
+}
+
+fn seam_commit_txn(
+    handle: SnapBuildHandle,
+    lsn: XLogRecPtr,
+    xid: TransactionId,
+    subxacts: alloc::vec::Vec<TransactionId>,
+    xinfo: u32,
+) {
+    with_builder(handle, |b| snap_build_commit_txn(b, lsn, xid, &subxacts, xinfo));
+}
+
+fn seam_process_running_xacts(
+    handle: SnapBuildHandle,
+    lsn: XLogRecPtr,
+    running: types_xlog_records::standbydefs::xl_running_xacts,
+    running_xids: alloc::vec::Vec<TransactionId>,
+) -> types_error::PgResult<()> {
+    with_builder(handle, |b| {
+        snap_build_process_running_xacts(b, lsn, &running, &running_xids)
+    })
+}
+
+fn seam_get_or_build_snapshot(handle: SnapBuildHandle) -> types_snapshot::SnapshotData {
+    with_builder(handle, |b| snap_build_get_or_build_snapshot(b))
+}
+
+fn seam_xact_needs_skip(handle: SnapBuildHandle, ptr: XLogRecPtr) -> bool {
+    with_builder(handle, |b| snap_build_xact_needs_skip(b, ptr))
+}
+
+fn seam_get_two_phase_at(handle: SnapBuildHandle) -> XLogRecPtr {
+    with_builder(handle, |b| snap_build_get_two_phase_at(b))
+}
+
+fn seam_serialization_point(handle: SnapBuildHandle, lsn: XLogRecPtr) -> types_error::PgResult<()> {
+    with_builder(handle, |b| snap_build_serialization_point(b, lsn))
+}
+
 /// Install the six inward seams this unit owns across the two seam crates.
 pub fn init_seams() {
     backend_replication_logical_snapbuild_seams::AllocateSnapshotBuilder::set(seam_allocate);
@@ -133,4 +192,15 @@ pub fn init_seams() {
         snap_build_reset_exported_snapshot_state,
     );
     backend_replication_snapbuild_seams::snap_build_snapshot_exists::set(snap_build_snapshot_exists);
+
+    // decode.c entry points (change processing / snapshot generation).
+    use backend_replication_logical_snapbuild_seams as s;
+    s::SnapBuildProcessChange::set(seam_process_change);
+    s::SnapBuildProcessNewCid::set(seam_process_new_cid);
+    s::SnapBuildCommitTxn::set(seam_commit_txn);
+    s::SnapBuildProcessRunningXacts::set(seam_process_running_xacts);
+    s::SnapBuildGetOrBuildSnapshot::set(seam_get_or_build_snapshot);
+    s::SnapBuildXactNeedsSkip::set(seam_xact_needs_skip);
+    s::SnapBuildGetTwoPhaseAt::set(seam_get_two_phase_at);
+    s::SnapBuildSerializationPoint::set(seam_serialization_point);
 }

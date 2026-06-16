@@ -303,6 +303,7 @@ pub fn init_all() {
     backend_replication_logical_slotsync::init_seams();
     backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
+    backend_replication_syncrep::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
@@ -360,6 +361,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
+    backend_utils_adt_array_typanalyze::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
@@ -383,6 +385,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
+    backend_utils_adt_rangetypes_typanalyze::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();

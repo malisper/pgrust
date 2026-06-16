@@ -302,6 +302,7 @@ backend-replication-logical-reorderbuffer = { path = "../backend-replication-log
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
+backend-replication-syncrep = { path = "../backend-replication-syncrep" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
@@ -357,6 +358,7 @@ backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
+backend-utils-adt-array-typanalyze = { path = "../backend-utils-adt-array-typanalyze" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
@@ -382,6 +384,7 @@ backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs
 backend-utils-adt-selfuncs = { path = "../backend-utils-adt-selfuncs" }
 backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
+backend-utils-adt-rangetypes-typanalyze = { path = "../backend-utils-adt-rangetypes-typanalyze" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }

@@ -244,9 +244,42 @@ pub struct RelOptionsToken {
     pub bytes: Vec<u8>,
 }
 
-/// Opaque `CatalogIndexState` handle (`access/genam.h` `CatalogOpenIndexes`
-/// result) — the open index-insert state `swap_relation_files` threads through
-/// `CatalogTupleUpdateWithInfo` and closes with `CatalogCloseIndexes`. The
-/// catalog-indexing owner keys it; this consumer only forwards the token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CatalogIndexStateToken(pub u64);
+/// `CatalogIndexState` (the on-disk C type is `struct ResultRelInfo *`).
+///
+/// The cut-down owned representation of a catalog's open indexes plus the heap
+/// relation — exactly the three `ResultRelInfo` fields `CatalogIndexInsert`
+/// reads:
+///   * `ri_RelationDesc`     → [`Self::heap_relation`]
+///   * `ri_NumIndices`       → `index_descs.len()`
+///   * `ri_IndexRelationDescs` / `ri_IndexRelationInfo` → the parallel
+///     [`Self::index_descs`] / [`Self::index_infos`] vectors.
+///
+/// `CatalogOpenIndexes` shares `execUtils.c`'s `ResultRelInfo` only as an
+/// allocation convenience; it deliberately builds **no** `EState` (so partial /
+/// expressional / exclusion indexes on catalogs are unsupported). The port
+/// therefore models the cut-down state directly rather than routing through
+/// `execIndexing.c`.
+///
+/// Built by `CatalogOpenIndexes` (≈ `ExecOpenIndices` minus the `EState`),
+/// torn down by `CatalogCloseIndexes` (both in the catalog-indexing owner).
+///
+/// This is the real owned value the catalog-mutation lifecycle threads: the
+/// `catalog_open_indexes` seam returns it, the `*_with_info_*` seams borrow it
+/// `&mut`, and `catalog_close_indexes` consumes it. It lives in this leaf type
+/// crate (not the owner) so the seam declarations and the cross-crate consumers
+/// (cluster, large-object) can name the value directly — no opaque handle.
+pub struct CatalogIndexState<'mcx> {
+    /// `indstate->ri_RelationDesc` — the open catalog (heap) relation. A
+    /// borrow-free alias of the caller's open relation (no release authority),
+    /// as in `CatalogOpenIndexes` where `ri_RelationDesc = heapRel` merely
+    /// points at the caller's open relation.
+    pub heap_relation: types_rel::Relation<'mcx>,
+    /// `indstate->ri_IndexRelationDescs` — the open index relations, in the
+    /// relcache `RelationGetIndexList` order `ExecOpenIndices` uses. Each
+    /// carries its own `RowExclusiveLock` release authority taken by
+    /// `index_open`, released by `CatalogCloseIndexes`.
+    pub index_descs: Vec<types_rel::Relation<'mcx>>,
+    /// `indstate->ri_IndexRelationInfo` — the per-index `IndexInfo`, parallel
+    /// to [`Self::index_descs`].
+    pub index_infos: Vec<types_nodes::execnodes::IndexInfo<'mcx>>,
+}

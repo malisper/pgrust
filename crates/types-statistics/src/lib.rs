@@ -345,6 +345,47 @@ pub struct StatsBuildData<'mcx> {
     pub nulls: Vec<Vec<bool>>,
 }
 
+/// `ArrayAnalyzeExtraData` (`utils/adt/array_typanalyze.c:36`) — the
+/// element-type metadata `array_typanalyze` gathers from the type cache for
+/// `compute_array_stats`.
+///
+/// The C struct carries `FmgrInfo *cmp` / `FmgrInfo *hash` (pointers into the
+/// element type's long-lived typcache entry) plus the saved
+/// `std_compute_stats` / `std_extra_data` from `std_typanalyze`. In this repo's
+/// value model:
+///
+///   * `cmp` / `hash` carry the support functions' **proc OIDs** (not
+///     `FmgrInfo`): the fmgr `FunctionCall1Coll` / `FunctionCall2Coll`
+///     invocations are routed through owner seams that build a fresh
+///     `FmgrInfo` from the OID, mirroring the rangetypes approach of seaming
+///     fmgr calls by the owner;
+///   * the saved standard `compute_stats` routine is reached through the
+///     `std_compute_stats` analyze-seam (it lives in the unported analyze.c),
+///     so `std_compute_stats` / `std_extra_data` are not carried here.
+///
+/// It lives in this `types-statistics` crate (which already hosts
+/// [`VacAttrStats`]) so both the array-typanalyze leaf and the typcache-seam
+/// installer can name it without a dependency cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrayAnalyzeExtraData {
+    /// element type's OID (`type_id`).
+    pub type_id: Oid,
+    /// default equality operator's OID (`eq_opr`).
+    pub eq_opr: Oid,
+    /// collation to use (`coll_id`).
+    pub coll_id: Oid,
+    /// physical properties of element type (`typbyval`).
+    pub typbyval: bool,
+    /// `typlen`.
+    pub typlen: i16,
+    /// `typalign` (C `char`).
+    pub typalign: i8,
+    /// the element type's comparison support function OID (C `FmgrInfo *cmp`).
+    pub cmp: Oid,
+    /// the element type's hash support function OID (C `FmgrInfo *hash`).
+    pub hash: Oid,
+}
+
 /// `MVDependency` (`statistics/statistics.h`).
 ///
 /// C is a flexible-array struct:
