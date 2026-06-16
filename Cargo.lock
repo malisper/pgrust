@@ -4175,6 +4175,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-collation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-table-table-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-collationcmds-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-constraint"
 version = "0.0.0"
 dependencies = [
@@ -17620,6 +17649,7 @@ dependencies = [
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-collation",
  "backend-catalog-pg-constraint",
  "backend-catalog-pg-conversion",
  "backend-catalog-pg-database",
