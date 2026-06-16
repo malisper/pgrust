@@ -386,6 +386,9 @@ pub fn init_all() {
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
+    backend_conv_cyrillic_and_mic::init_seams();
+    backend_conv_latin_and_mic::init_seams();
+    backend_conv_latin2_and_win1250::init_seams();
     backend_conv_euc_cn_and_mic::init_seams();
     backend_conv_euc_jp_and_sjis::init_seams();
     backend_conv_euc_kr_and_mic::init_seams();

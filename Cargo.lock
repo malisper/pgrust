@@ -6772,6 +6772,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-cyrillic-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-conv-euc-cn-and-mic"
 version = "0.0.0"
 dependencies = [
@@ -6822,6 +6833,28 @@ dependencies = [
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-latin-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-latin2-and-win1250"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
  "types-wchar",
 ]
 
@@ -6907,7 +6940,6 @@ name = "backend-conv-utf8-and-gb18030"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6918,7 +6950,6 @@ name = "backend-conv-utf8-and-gbk"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6930,7 +6961,6 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-error",
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6952,7 +6982,6 @@ name = "backend-conv-utf8-and-johab"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6963,7 +6992,6 @@ name = "backend-conv-utf8-and-sjis"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6974,7 +7002,6 @@ name = "backend-conv-utf8-and-sjis2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6985,7 +7012,6 @@ name = "backend-conv-utf8-and-uhc"
 version = "0.0.0"
 dependencies = [
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -6997,7 +7023,6 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-error",
  "backend-utils-mb-conv-string-helpers",
- "backend-utils-mb-mbutils-seams",
  "common-wchar",
  "types-error",
  "types-wchar",
@@ -17110,6 +17135,7 @@ dependencies = [
  "backend-utils-mb-mbutils-seams",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "common-encnames-seams",
  "common-wchar",
  "mcx",
  "types-error",
@@ -18503,11 +18529,14 @@ dependencies = [
  "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
+ "backend-conv-cyrillic-and-mic",
  "backend-conv-euc-cn-and-mic",
  "backend-conv-euc-jp-and-sjis",
  "backend-conv-euc-kr-and-mic",
  "backend-conv-euc-tw-and-big5",
  "backend-conv-euc2004-sjis2004",
+ "backend-conv-latin-and-mic",
+ "backend-conv-latin2-and-win1250",
  "backend-conv-utf8-and-big5",
  "backend-conv-utf8-and-cyrillic",
  "backend-conv-utf8-and-euc-cn",

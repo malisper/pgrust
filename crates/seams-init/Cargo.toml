@@ -383,6 +383,9 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-cyrillic-and-mic = { path = "../backend-conv-cyrillic-and-mic" }
+backend-conv-latin-and-mic = { path = "../backend-conv-latin-and-mic" }
+backend-conv-latin2-and-win1250 = { path = "../backend-conv-latin2-and-win1250" }
 backend-conv-euc-cn-and-mic = { path = "../backend-conv-euc-cn-and-mic" }
 backend-conv-euc-jp-and-sjis = { path = "../backend-conv-euc-jp-and-sjis" }
 backend-conv-euc-kr-and-mic = { path = "../backend-conv-euc-kr-and-mic" }
