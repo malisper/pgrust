@@ -2233,6 +2233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-replorigindesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-replorigindesc-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-replorigindesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2270,6 +2281,19 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-rmgrdesc-smgrdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-smgrdesc-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
  "types-wal",
 ]
 
@@ -2341,6 +2365,18 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-rmgrdesc-xlogdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xlogdesc-seams",
+ "backend-utils-adt-timestamp-seams",
+ "mcx",
+ "types-core",
+ "types-error",
  "types-wal",
 ]
 
@@ -17579,6 +17615,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-error-small"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-syslogger-seams",
+ "backend-utils-error",
+ "backend-utils-error-small-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-error-small-seams"
 version = "0.0.0"
 dependencies = [
@@ -18443,6 +18490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-small"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-sort-sortsupport"
 version = "0.0.0"
 dependencies = [
@@ -19275,8 +19331,11 @@ dependencies = [
  "backend-access-nbtree-core",
  "backend-access-nbtree-nbtree",
  "backend-access-nbtree-nbtsort",
+ "backend-access-rmgrdesc-replorigindesc",
  "backend-access-rmgrdesc-small",
+ "backend-access-rmgrdesc-smgrdesc",
  "backend-access-rmgrdesc-xactdesc",
+ "backend-access-rmgrdesc-xlogdesc",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
  "backend-access-spgist-core",
@@ -19643,6 +19702,7 @@ dependencies = [
  "backend-utils-cache-ts-cache",
  "backend-utils-cache-typcache",
  "backend-utils-error",
+ "backend-utils-error-small",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr",
  "backend-utils-fmgr-funcapi",
@@ -19667,6 +19727,7 @@ dependencies = [
  "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
+ "backend-utils-sort-small",
  "backend-utils-sort-sortsupport",
  "backend-utils-sort-storage",
  "backend-utils-sort-tuplesort",

@@ -9,12 +9,32 @@
 //! their data-corruption error.
 
 use crate::wal::RelFileLocator;
-use types_core::{int64, Oid, TransactionId};
+use types_core::{
+    int64, MultiXactId, MultiXactOffset, Oid, RepOriginId, TimeLineID, TimestampTz, TransactionId,
+    XLogRecPtr,
+};
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_ne_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
 
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_ne_bytes(
         data.get(offset..offset + 4)?.try_into().ok()?,
     ))
+}
+
+fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_ne_bytes(
+        data.get(offset..offset + 8)?.try_into().ok()?,
+    ))
+}
+
+/// Read a C `bool` (one byte; nonzero == true), the layout `xl_*` records use.
+fn read_bool(data: &[u8], offset: usize) -> Option<bool> {
+    Some(*data.get(offset)? != 0)
 }
 
 fn read_i32(data: &[u8], offset: usize) -> Option<i32> {
@@ -422,5 +442,302 @@ impl xl_tblspc_drop_rec {
 
     pub const fn ts_id(&self) -> Oid {
         self.ts_id
+    }
+}
+
+/// `CheckPoint` (catalog/pg_control.h) — the checkpoint record body shared by
+/// `XLOG_CHECKPOINT_SHUTDOWN` / `XLOG_CHECKPOINT_ONLINE`. `sizeof == 88`; the
+/// `time` field (a `pg_time_t`) is not rendered by `xlog_desc`, so it is not
+/// exposed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckPoint {
+    redo: XLogRecPtr,
+    ThisTimeLineID: TimeLineID,
+    PrevTimeLineID: TimeLineID,
+    fullPageWrites: bool,
+    wal_level: i32,
+    /// `FullTransactionId` (a `uint64` value).
+    nextXid: u64,
+    nextOid: Oid,
+    nextMulti: MultiXactId,
+    nextMultiOffset: MultiXactOffset,
+    oldestXid: TransactionId,
+    oldestXidDB: Oid,
+    oldestMulti: MultiXactId,
+    oldestMultiDB: Oid,
+    oldestCommitTsXid: TransactionId,
+    newestCommitTsXid: TransactionId,
+    oldestActiveXid: TransactionId,
+}
+
+impl CheckPoint {
+    /// redo@0, ThisTimeLineID@8, PrevTimeLineID@12, fullPageWrites@16,
+    /// wal_level@20, nextXid@24 (u64), nextOid@32, nextMulti@36,
+    /// nextMultiOffset@40, oldestXid@44, oldestXidDB@48, oldestMulti@52,
+    /// oldestMultiDB@56, time@64 (skipped), oldestCommitTsXid@72,
+    /// newestCommitTsXid@76, oldestActiveXid@80.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            redo: read_u64(data, 0)?,
+            ThisTimeLineID: read_u32(data, 8)?,
+            PrevTimeLineID: read_u32(data, 12)?,
+            fullPageWrites: read_bool(data, 16)?,
+            wal_level: read_i32(data, 20)?,
+            nextXid: read_u64(data, 24)?,
+            nextOid: read_u32(data, 32)?,
+            nextMulti: read_u32(data, 36)?,
+            nextMultiOffset: read_u32(data, 40)?,
+            oldestXid: read_u32(data, 44)?,
+            oldestXidDB: read_u32(data, 48)?,
+            oldestMulti: read_u32(data, 52)?,
+            oldestMultiDB: read_u32(data, 56)?,
+            oldestCommitTsXid: read_u32(data, 72)?,
+            newestCommitTsXid: read_u32(data, 76)?,
+            oldestActiveXid: read_u32(data, 80)?,
+        })
+    }
+
+    pub const fn redo(&self) -> XLogRecPtr {
+        self.redo
+    }
+    pub const fn this_timeline_id(&self) -> TimeLineID {
+        self.ThisTimeLineID
+    }
+    pub const fn prev_timeline_id(&self) -> TimeLineID {
+        self.PrevTimeLineID
+    }
+    pub const fn full_page_writes(&self) -> bool {
+        self.fullPageWrites
+    }
+    pub const fn wal_level(&self) -> i32 {
+        self.wal_level
+    }
+    /// The `FullTransactionId` value (`.value`).
+    pub const fn next_xid(&self) -> u64 {
+        self.nextXid
+    }
+    pub const fn next_oid(&self) -> Oid {
+        self.nextOid
+    }
+    pub const fn next_multi(&self) -> MultiXactId {
+        self.nextMulti
+    }
+    pub const fn next_multi_offset(&self) -> MultiXactOffset {
+        self.nextMultiOffset
+    }
+    pub const fn oldest_xid(&self) -> TransactionId {
+        self.oldestXid
+    }
+    pub const fn oldest_xid_db(&self) -> Oid {
+        self.oldestXidDB
+    }
+    pub const fn oldest_multi(&self) -> MultiXactId {
+        self.oldestMulti
+    }
+    pub const fn oldest_multi_db(&self) -> Oid {
+        self.oldestMultiDB
+    }
+    pub const fn oldest_commit_ts_xid(&self) -> TransactionId {
+        self.oldestCommitTsXid
+    }
+    pub const fn newest_commit_ts_xid(&self) -> TransactionId {
+        self.newestCommitTsXid
+    }
+    pub const fn oldest_active_xid(&self) -> TransactionId {
+        self.oldestActiveXid
+    }
+}
+
+/// `xl_restore_point` (access/xlog_internal.h) — `rp_time` plus the fixed
+/// `char rp_name[MAXFNAMELEN]`. `rp_name` starts at offset 8 (after the
+/// `TimestampTz`); `xlog_desc` only renders `rp_name`, kept as a borrow of the
+/// NUL-terminated bytes (the C `%s` relies on the terminator).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_restore_point<'a> {
+    rp_time: TimestampTz,
+    rp_name: &'a [u8],
+}
+
+impl<'a> xl_restore_point<'a> {
+    /// rp_time@0, rp_name@8 (`char[64]`, NUL-terminated).
+    pub fn from_bytes(data: &'a [u8]) -> Option<Self> {
+        let rp_time = read_i64(data, 0)?;
+        let name_bytes = data.get(8..)?;
+        let nul = name_bytes.iter().position(|&b| b == 0)?;
+        Some(Self {
+            rp_time,
+            rp_name: &name_bytes[..nul],
+        })
+    }
+
+    pub const fn rp_time(&self) -> TimestampTz {
+        self.rp_time
+    }
+
+    /// `rp_name` up to (excluding) its NUL terminator.
+    pub const fn rp_name(&self) -> &'a [u8] {
+        self.rp_name
+    }
+}
+
+/// `xl_parameter_change` (access/xlog_internal.h). `sizeof == 28`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_parameter_change {
+    MaxConnections: i32,
+    max_worker_processes: i32,
+    max_wal_senders: i32,
+    max_prepared_xacts: i32,
+    max_locks_per_xact: i32,
+    wal_level: i32,
+    wal_log_hints: bool,
+    track_commit_timestamp: bool,
+}
+
+impl xl_parameter_change {
+    /// MaxConnections@0, max_worker_processes@4, max_wal_senders@8,
+    /// max_prepared_xacts@12, max_locks_per_xact@16, wal_level@20,
+    /// wal_log_hints@24, track_commit_timestamp@25.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            MaxConnections: read_i32(data, 0)?,
+            max_worker_processes: read_i32(data, 4)?,
+            max_wal_senders: read_i32(data, 8)?,
+            max_prepared_xacts: read_i32(data, 12)?,
+            max_locks_per_xact: read_i32(data, 16)?,
+            wal_level: read_i32(data, 20)?,
+            wal_log_hints: read_bool(data, 24)?,
+            track_commit_timestamp: read_bool(data, 25)?,
+        })
+    }
+
+    pub const fn max_connections(&self) -> i32 {
+        self.MaxConnections
+    }
+    pub const fn max_worker_processes(&self) -> i32 {
+        self.max_worker_processes
+    }
+    pub const fn max_wal_senders(&self) -> i32 {
+        self.max_wal_senders
+    }
+    pub const fn max_prepared_xacts(&self) -> i32 {
+        self.max_prepared_xacts
+    }
+    pub const fn max_locks_per_xact(&self) -> i32 {
+        self.max_locks_per_xact
+    }
+    pub const fn wal_level(&self) -> i32 {
+        self.wal_level
+    }
+    pub const fn wal_log_hints(&self) -> bool {
+        self.wal_log_hints
+    }
+    pub const fn track_commit_timestamp(&self) -> bool {
+        self.track_commit_timestamp
+    }
+}
+
+/// `xl_end_of_recovery` (access/xlog_internal.h). `sizeof == 24`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_end_of_recovery {
+    end_time: TimestampTz,
+    ThisTimeLineID: TimeLineID,
+    PrevTimeLineID: TimeLineID,
+    wal_level: i32,
+}
+
+impl xl_end_of_recovery {
+    /// end_time@0, ThisTimeLineID@8, PrevTimeLineID@12, wal_level@16.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            end_time: read_i64(data, 0)?,
+            ThisTimeLineID: read_u32(data, 8)?,
+            PrevTimeLineID: read_u32(data, 12)?,
+            wal_level: read_i32(data, 16)?,
+        })
+    }
+
+    pub const fn end_time(&self) -> TimestampTz {
+        self.end_time
+    }
+    pub const fn this_timeline_id(&self) -> TimeLineID {
+        self.ThisTimeLineID
+    }
+    pub const fn prev_timeline_id(&self) -> TimeLineID {
+        self.PrevTimeLineID
+    }
+    pub const fn wal_level(&self) -> i32 {
+        self.wal_level
+    }
+}
+
+/// `xl_overwrite_contrecord` (access/xlog_internal.h). `sizeof == 16`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_overwrite_contrecord {
+    overwritten_lsn: XLogRecPtr,
+    overwrite_time: TimestampTz,
+}
+
+impl xl_overwrite_contrecord {
+    /// overwritten_lsn@0, overwrite_time@8.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            overwritten_lsn: read_u64(data, 0)?,
+            overwrite_time: read_i64(data, 8)?,
+        })
+    }
+
+    pub const fn overwritten_lsn(&self) -> XLogRecPtr {
+        self.overwritten_lsn
+    }
+    pub const fn overwrite_time(&self) -> TimestampTz {
+        self.overwrite_time
+    }
+}
+
+/// `xl_replorigin_set` (replication/origin.h). `sizeof == 16`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_replorigin_set {
+    remote_lsn: XLogRecPtr,
+    node_id: RepOriginId,
+    force: bool,
+}
+
+impl xl_replorigin_set {
+    /// remote_lsn@0, node_id@8 (`RepOriginId` == `uint16`), force@10.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            remote_lsn: read_u64(data, 0)?,
+            node_id: read_u16(data, 8)?,
+            force: read_bool(data, 10)?,
+        })
+    }
+
+    pub const fn remote_lsn(&self) -> XLogRecPtr {
+        self.remote_lsn
+    }
+    pub const fn node_id(&self) -> RepOriginId {
+        self.node_id
+    }
+    pub const fn force(&self) -> bool {
+        self.force
+    }
+}
+
+/// `xl_replorigin_drop` (replication/origin.h).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_replorigin_drop {
+    node_id: RepOriginId,
+}
+
+impl xl_replorigin_drop {
+    /// node_id@0 (`RepOriginId` == `uint16`).
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            node_id: read_u16(data, 0)?,
+        })
+    }
+
+    pub const fn node_id(&self) -> RepOriginId {
+        self.node_id
     }
 }

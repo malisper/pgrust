@@ -44,8 +44,11 @@ pub fn init_all() {
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
+    backend_access_rmgrdesc_replorigindesc::init_seams();
     backend_access_rmgrdesc_small::init_seams();
+    backend_access_rmgrdesc_smgrdesc::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();
+    backend_access_rmgrdesc_xlogdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_brin_xlog::init_seams();
@@ -402,6 +405,7 @@ pub fn init_all() {
     backend_utils_cache_ts_cache::init_seams();
     backend_utils_cache_typcache::init_seams();
     backend_utils_error::init_seams();
+    backend_utils_error_small::init_seams();
     backend_utils_fmgr_core::init_seams();
     backend_utils_fmgr_dfmgr::init_seams();
     backend_utils_fmgr_funcapi::init_seams();
@@ -443,6 +447,7 @@ pub fn init_all() {
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
+    backend_utils_sort_small::init_seams();
     backend_utils_sort_sortsupport::init_seams();
     backend_utils_sort_storage::init_seams();
     backend_utils_sort_tuplesort::init_seams();

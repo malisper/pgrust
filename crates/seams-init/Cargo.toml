@@ -47,8 +47,11 @@ backend-access-gist-core = { path = "../backend-access-gist-core" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
 backend-access-nbt-xlog = { path = "../backend-access-nbt-xlog" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
+backend-access-rmgrdesc-replorigindesc = { path = "../backend-access-rmgrdesc-replorigindesc" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
+backend-access-rmgrdesc-smgrdesc = { path = "../backend-access-rmgrdesc-smgrdesc" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
+backend-access-rmgrdesc-xlogdesc = { path = "../backend-access-rmgrdesc-xlogdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
 backend-replication-logical-message = { path = "../backend-replication-logical-message" }
 backend-access-spgist-core = { path = "../backend-access-spgist-core" }
@@ -399,6 +402,7 @@ backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
 backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-error-small = { path = "../backend-utils-error-small" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-fmgr-dfmgr = { path = "../backend-utils-fmgr-dfmgr" }
 backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
@@ -447,6 +451,7 @@ backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
 backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+backend-utils-sort-small = { path = "../backend-utils-sort-small" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
 backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
