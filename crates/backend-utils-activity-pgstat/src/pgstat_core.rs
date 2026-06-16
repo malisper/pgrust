@@ -349,6 +349,21 @@ pub fn pgstat_init_snapshot_fixed() -> PgResult<()> {
 pub fn pgstat_reset(kind: PgStat_Kind, dboid: Oid, objid: u64) -> PgResult<()> {
     let ts = timestamp::get_current_timestamp::call();
 
+    // reset the "single counter"
+    pgstat_reset_entry(kind, dboid, objid, ts)
+}
+
+/// `pgstat_reset_entry(kind, dboid, objid, ts)` (`pgstat_shmem.c`) — reset one
+/// variable-numbered stats entry: acquire its content lock (exclusive), zero
+/// the kind-specific stats body following the common header, then stamp the
+/// reset timestamp through the kind's `reset_timestamp_cb`
+/// (`shared_stat_reset_contents`).
+pub fn pgstat_reset_entry(
+    kind: PgStat_Kind,
+    dboid: Oid,
+    objid: u64,
+    ts: TimestampTz,
+) -> PgResult<()> {
     // Acquire the entry's content lock (exclusive) and zero its stats body.
     let entry_ref = shmem::pgstat_get_entry_ref_locked(kind, dboid, objid, false)?;
     let entry_ref = match entry_ref {
