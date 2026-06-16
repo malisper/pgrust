@@ -47,6 +47,9 @@ use types_error::{PgError, PgResult};
 use types_rel::{Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::RowExclusiveLock;
+use types_tuple::access::{
+    RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE,
+};
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -75,7 +78,12 @@ const NATTS_PG_NAMESPACE: usize = 4;
 
 // pg_class field positions (catalog/pg_class.h).
 const ANUM_PG_CLASS_OID: i16 = 1;
+const ANUM_PG_CLASS_RELPAGES: i16 = 10;
+const ANUM_PG_CLASS_RELTUPLES: i16 = 11;
+const ANUM_PG_CLASS_RELALLVISIBLE: i16 = 12;
+const ANUM_PG_CLASS_RELALLFROZEN: i16 = 13;
 const ANUM_PG_CLASS_RELTOASTRELID: i16 = 14;
+const ANUM_PG_CLASS_RELHASINDEX: i16 = 15;
 const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
 
 // pg_sequence (CATALOG(pg_sequence,2224)): 8 fixed columns.
@@ -637,12 +645,13 @@ fn set_pg_class_reltoastrelid_inplace(
 
     let keys = [oid_key(ANUM_PG_CLASS_OID, rel_oid)?];
     let new_oid = toast_relid;
-    let mut mutate = |data: &mut [u8]| -> PgResult<()> {
+    let mut mutate = |data: &mut [u8]| -> PgResult<bool> {
         if off + 4 > data.len() {
             return Err(PgError::error("reltoastrelid offset out of range"));
         }
         data[off..off + 4].copy_from_slice(&new_oid.to_ne_bytes());
-        Ok(())
+        // bootstrap path always overwrites reltoastrelid → always dirty.
+        Ok(true)
     };
     let res = genam::systable_inplace_update::call(
         mcx,
@@ -653,6 +662,217 @@ fn set_pg_class_reltoastrelid_inplace(
         &mut mutate,
     )?;
     Ok(res.is_some())
+}
+
+/// `index_update_stats(rel, hasindex, reltuples)` (catalog/index.c) — the
+/// non-transactional (`systable_inplace_update`) write of `rel`'s `pg_class`
+/// row that finishes `index_build` / `index_create` / `reindex`. Sets
+/// `relhasindex`, and (when `reltuples >= 0 && !IsBinaryUpgrade`, subject to the
+/// autovacuum/relkind relstats rules) `relpages` / `reltuples` /
+/// `relallvisible` / `relallfrozen`, then commits via `_finish` (WAL + cache
+/// inval) when any column changed, or `_cancel` +
+/// `CacheInvalidateRelcacheByTuple` when nothing changed.
+///
+/// The C edits `(Form_pg_class) GETSTRUCT(tuple)` in place under the locked
+/// pg_class buffer. The combined `systable_inplace_update` seam supplies that
+/// user-data byte area to the `mutate` callback, which reads the live column
+/// bytes (to decide `dirty`), pokes the new fixed-width values at their
+/// descriptor offsets, and returns the `dirty` flag the owner uses to choose
+/// `_finish` vs `_cancel`. pg_class columns 10..=15 are all fixed-width and
+/// precede the variable-length tail (`relacl`@32 …), so each sits at a constant
+/// data-area offset computable from the descriptor.
+fn index_update_stats(rel: &Relation<'_>, hasindex: bool, reltuples: f64) -> PgResult<()> {
+    let ctx = MemoryContext::new("index_update_stats");
+    let mcx = ctx.mcx();
+
+    let relid = rel.rd_id;
+
+    let mut reltuples = reltuples;
+
+    /*
+     * As a special hack, if we are dealing with an empty table and the
+     * existing reltuples is -1, we leave that alone. This ensures that
+     * creating an index as part of CREATE TABLE doesn't cause the table to
+     * prematurely look like it's been vacuumed.
+     */
+    if reltuples == 0.0 && (rel.rd_rel.reltuples as f64) < 0.0 {
+        reltuples = -1.0;
+    }
+
+    /*
+     * Don't update statistics during binary upgrade, because the indexes are
+     * created before the data is moved into place.
+     */
+    let mut update_stats = reltuples >= 0.0 && !backend_utils_init_small_seams::is_binary_upgrade::call();
+
+    /*
+     * If autovacuum is off, user may not be expecting table relstats to
+     * change. Preserve any restored table statistics in that case.
+     */
+    if rel.rd_rel.relkind == RELKIND_RELATION
+        || rel.rd_rel.relkind == RELKIND_TOASTVALUE
+        || rel.rd_rel.relkind == RELKIND_MATVIEW
+    {
+        if backend_postmaster_autovacuum_seams::auto_vacuuming_active::call() {
+            // StdRdOptions *options = (StdRdOptions *) rel->rd_options;
+            if let Some(options) = rel.rd_options.as_ref() {
+                if !options.autovacuum.enabled {
+                    update_stats = false;
+                }
+            }
+        } else {
+            update_stats = false;
+        }
+    }
+
+    /*
+     * Finish I/O and visibility map buffer locks before the inplace update
+     * locks the pg_class buffer.
+     */
+    let mut relpages: u32 = 0;
+    let mut relallvisible: u32 = 0;
+    let mut relallfrozen: u32 = 0;
+    if update_stats {
+        relpages = backend_utils_cache_relcache_seams::relation_get_number_of_blocks::call(
+            &reopen_self(mcx, rel)?,
+        )?;
+
+        if rel.rd_rel.relkind != RELKIND_INDEX {
+            let (av, af) = backend_access_heap_vacuumlazy_seams::visibilitymap_count::call(relid)?;
+            relallvisible = av;
+            relallfrozen = af;
+        }
+    }
+
+    /*
+     * Always update via a non-transactional, overwrite-in-place update (see
+     * the three reasons in catalog/index.c: bootstrap, reindexing pg_class
+     * itself, and the share-lock concurrent-CREATE-INDEX race).
+     */
+    let r = reopen(mcx, rel)?;
+
+    // Compute the fixed data-area byte offsets of every column we touch.
+    let tupdesc = r.rd_att_clone_in(mcx)?;
+    let off_relpages = fixed_attr_offset(&tupdesc, ANUM_PG_CLASS_RELPAGES)
+        .ok_or_else(|| PgError::error("pg_class relpages not at a fixed offset"))?;
+    let off_reltuples = fixed_attr_offset(&tupdesc, ANUM_PG_CLASS_RELTUPLES)
+        .ok_or_else(|| PgError::error("pg_class reltuples not at a fixed offset"))?;
+    let off_relallvisible = fixed_attr_offset(&tupdesc, ANUM_PG_CLASS_RELALLVISIBLE)
+        .ok_or_else(|| PgError::error("pg_class relallvisible not at a fixed offset"))?;
+    let off_relallfrozen = fixed_attr_offset(&tupdesc, ANUM_PG_CLASS_RELALLFROZEN)
+        .ok_or_else(|| PgError::error("pg_class relallfrozen not at a fixed offset"))?;
+    let off_relhasindex = fixed_attr_offset(&tupdesc, ANUM_PG_CLASS_RELHASINDEX)
+        .ok_or_else(|| PgError::error("pg_class relhasindex not at a fixed offset"))?;
+
+    let keys = [oid_key(ANUM_PG_CLASS_OID, relid)?];
+
+    // The mutate callback mirrors C's `rd_rel = GETSTRUCT(tuple)` read-poke:
+    // compute `dirty` by comparing the live column bytes against the new
+    // values, write the changed ones in place, and return `dirty`. We also keep
+    // the flag in `was_dirty` so the cancel branch below can issue the extra
+    // `CacheInvalidateRelcacheByTuple`.
+    let mut was_dirty = false;
+    let was_dirty_ref = &mut was_dirty;
+    let mut mutate = |data: &mut [u8]| -> PgResult<bool> {
+        // relhasindex is a bool (1 byte).
+        if off_relhasindex >= data.len() {
+            return Err(PgError::error("relhasindex offset out of range"));
+        }
+        let mut dirty = false;
+        if (data[off_relhasindex] != 0) != hasindex {
+            data[off_relhasindex] = hasindex as u8;
+            dirty = true;
+        }
+
+        if update_stats {
+            // relpages, relallvisible, relallfrozen are int4; reltuples is float4.
+            if off_reltuples + 4 > data.len()
+                || off_relallvisible + 4 > data.len()
+                || off_relallfrozen + 4 > data.len()
+            {
+                return Err(PgError::error("pg_class stats column offset out of range"));
+            }
+            let new_relpages = relpages as i32;
+            let new_reltuples = reltuples as f32;
+            let new_relallvisible = relallvisible as i32;
+            let new_relallfrozen = relallfrozen as i32;
+
+            let cur_relpages = i32::from_ne_bytes(
+                data[off_relpages..off_relpages + 4].try_into().unwrap(),
+            );
+            if cur_relpages != new_relpages {
+                data[off_relpages..off_relpages + 4].copy_from_slice(&new_relpages.to_ne_bytes());
+                dirty = true;
+            }
+            let cur_reltuples = f32::from_ne_bytes(
+                data[off_reltuples..off_reltuples + 4].try_into().unwrap(),
+            );
+            if cur_reltuples != new_reltuples {
+                data[off_reltuples..off_reltuples + 4].copy_from_slice(&new_reltuples.to_ne_bytes());
+                dirty = true;
+            }
+            let cur_relallvisible = i32::from_ne_bytes(
+                data[off_relallvisible..off_relallvisible + 4].try_into().unwrap(),
+            );
+            if cur_relallvisible != new_relallvisible {
+                data[off_relallvisible..off_relallvisible + 4]
+                    .copy_from_slice(&new_relallvisible.to_ne_bytes());
+                dirty = true;
+            }
+            let cur_relallfrozen = i32::from_ne_bytes(
+                data[off_relallfrozen..off_relallfrozen + 4].try_into().unwrap(),
+            );
+            if cur_relallfrozen != new_relallfrozen {
+                data[off_relallfrozen..off_relallfrozen + 4]
+                    .copy_from_slice(&new_relallfrozen.to_ne_bytes());
+                dirty = true;
+            }
+        }
+        *was_dirty_ref = dirty;
+        Ok(dirty)
+    };
+
+    let tid = genam::systable_inplace_update::call(
+        mcx,
+        &r,
+        cat::catalog::CLASS_OID_INDEX_ID,
+        true,
+        &keys,
+        &mut mutate,
+    )?;
+
+    // !HeapTupleIsValid(tuple) → elog(ERROR, "could not find tuple ...").
+    if tid.is_none() {
+        return Err(PgError::error(format!(
+            "could not find tuple for relation {relid}"
+        )));
+    }
+
+    /*
+     * When nothing changed, the seam ran `systable_inplace_update_cancel` (no
+     * WAL). C then still issues `CacheInvalidateRelcacheByTuple(tuple)` so the
+     * new index's catalog rows force a relcache rebuild when they become
+     * visible. That inval reads only the row's `oid` (= relid) and `relisshared`
+     * — both carried by the relation projection — so build the trimmed
+     * `PgClassForm` from `rel` and invalidate. (When dirty, the seam's `_finish`
+     * already sent transactional + immediate cache invals.)
+     */
+    if !was_dirty {
+        let form = types_cluster::PgClassForm {
+            relisshared: rel.rd_rel.relisshared,
+            ..types_cluster::PgClassForm::default()
+        };
+        backend_utils_cache_inval_seams::cache_invalidate_relcache_by_pg_class::call(relid, &form)?;
+    }
+
+    Ok(())
+}
+
+/// Re-open `rel` for the `RelationGetNumberOfBlocks` smgr probe. The C reads the
+/// block count off the same passed `rel`; the owned model re-acquires the
+/// cache-carrying `Relation` (idempotent relcache lookup, lock already held).
+fn reopen_self<'mcx>(mcx: Mcx<'mcx>, rel: &RelationData<'_>) -> PgResult<Relation<'mcx>> {
+    table_open(mcx, rel.rd_id, types_storage::lock::NoLock)
 }
 
 /// The fixed byte offset, within a heap tuple's user-data area, of the 1-based
@@ -2000,4 +2220,9 @@ pub fn install() {
 
     // objectaddress.
     s::get_catalog_object_by_oid::set(get_catalog_object_by_oid);
+
+    // catalog/index.c pg_class in-place stats producer (sub-keystone #348): the
+    // `index_update_stats` seam is declared on `backend-catalog-index-seams`
+    // (index.c's owner), installed here because this is the pg_class-write layer.
+    backend_catalog_index_seams::index_update_stats::set(index_update_stats);
 }

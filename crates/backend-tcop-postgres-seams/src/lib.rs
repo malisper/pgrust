@@ -272,3 +272,54 @@ seam_core::seam!(
     /// Installed by walsender via `pqsignal(SIGINT, ...)`.
     pub fn statement_cancel_handler(postgres_signal_arg: i32)
 );
+
+// --- Cross-unit callees of `ProcessInterrupts`/`ProcessRecoveryConflictInterrupt`
+// (tcop/postgres.c) whose owners are NOT yet ported. These are declared here
+// (the owner consuming them is tcop/postgres.c) and remain seam-and-panic until
+// their real owners land, mirroring the C call into an unported subsystem
+// ("Mirror PG and panic"). They are allowlisted in the recurrence guard with a
+// provider-unported note. ---
+
+seam_core::seam!(
+    /// `pgstat_report_recovery_conflict(reason)` (pgstat_relation.c /
+    /// pgstat.c) — bump the per-database recovery-conflict counters for the
+    /// given conflict `reason`. Called from `ProcessRecoveryConflictInterrupt`
+    /// just before the conflict `ereport`. Owner (cumulative-stats recovery
+    /// conflict reporting) is unported.
+    pub fn pgstat_report_recovery_conflict(reason: types_storage::ProcSignalReason)
+);
+
+seam_core::seam!(
+    /// `pgStatSessionEndCause = DISCONNECT_KILLED;` (pgstat.c session-stats
+    /// global) — set in `die()` so the cumulative stats system records the
+    /// session as terminated by an administrator. Owner (the
+    /// `pgStatSessionEndCause` session-stats global) is unported.
+    pub fn set_session_end_cause_killed()
+);
+
+seam_core::seam!(
+    /// `IsLogicalWorker()` (logicalworker.c) — whether the current process is a
+    /// logical-replication apply worker (i.e. `MyLogicalRepWorker != NULL`).
+    /// `ProcessInterrupts` reads it to phrase the `ProcDiePending` FATAL.
+    /// Owner (logicalworker.c) is unported.
+    pub fn is_logical_worker() -> bool
+);
+
+seam_core::seam!(
+    /// `MyBgworkerEntry->bgw_type` (bgworker.c) — the `bgw_type` string of the
+    /// background worker the current process is running, read by
+    /// `ProcessInterrupts` to phrase the background-worker termination FATAL.
+    /// The owning bgworker-registration state (`MyBgworkerEntry`) is not yet
+    /// exposed through an accessor.
+    pub fn my_bgworker_type() -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `progname` (main.c global `extern const char *progname`) — the program
+    /// name set once at startup by `get_progname(argv[0])`. `process_postgres_switches`
+    /// reads it only for the bad-command-line-argument FATAL hint
+    /// (`errhint("Try \"%s --help\" ...")`). The repo's main.c port threads
+    /// `progname` as a parameter rather than keeping the global, so there is no
+    /// existing accessor; this stands in for the global read.
+    pub fn progname() -> alloc::string::String
+);

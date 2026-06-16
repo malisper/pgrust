@@ -31,8 +31,10 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-# `HTAB` — the real dynahash control struct C's `tuplecid_data` points at
-# (`HTAB *`); inherited-opaque body, populated by the dynahash port.
-types-hash = { path = "../types-hash" }
+# Owns the historic-snapshot tuplecid map types (`ReorderBufferTupleCidKey/Ent`,
+# `TupleCidHash`) — the real owned value behind C's `static HTAB *tuplecid_data`,
+# homed in `types-logical` so snapmgr can store it without depending on the
+# reorderbuffer crate (which depends on snapmgr, not the reverse).
+types-logical = { path = "../types-logical" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }

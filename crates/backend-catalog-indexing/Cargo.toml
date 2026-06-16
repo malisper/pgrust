@@ -22,6 +22,13 @@ types-storage = { path = "../types-storage" }
 # Own inward-seam declarations (installed by this crate's init_seams()).
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 
+# index_update_stats (catalog/index.c) dependency seams: IsBinaryUpgrade
+# (init-small), AutoVacuumingActive (autovacuum), visibilitymap_count
+# (vacuumlazy), all leaf seam crates with no edge back to this crate.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+
 # Engine callees — direct deps (the C indexing.c includes executor.h /
 # access/heapam.h / access/genam.h / catalog/index.h, calling these directly).
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
