@@ -931,7 +931,7 @@ fn brinsummarize<'mcx>(
                     types_core::primitive::InvalidBlockNumber,
                 )?;
                 state = Some(st);
-                index_info = Some(build_index_info::call(index)?);
+                index_info = Some(build_index_info::call(mcx, index)?);
             }
             summarize_range(
                 mcx,

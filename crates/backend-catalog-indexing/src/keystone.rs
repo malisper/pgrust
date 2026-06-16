@@ -124,7 +124,7 @@ pub fn CatalogOpenIndexes<'mcx>(
                     backend_access_index_indexam::index_open(mcx, index_oid, RowExclusiveLock)?;
                 // ii = BuildIndexInfo(indexDesc);
                 // (speculative == false for catalogs, so no BuildSpeculativeIndexInfo)
-                let ii = backend_catalog_index_seams::build_index_info::call(&index_desc)?;
+                let ii = backend_catalog_index_seams::build_index_info::call(mcx, &index_desc)?;
                 // relationDescs[i] = indexDesc; indexInfoArray[i] = ii; i++;
                 index_descs.push(index_desc);
                 index_infos.push(ii);

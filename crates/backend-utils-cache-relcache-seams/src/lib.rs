@@ -498,6 +498,25 @@ seam_core::seam!(
     pub fn rd_index_indisready(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
 seam_core::seam!(
+    /// `index->rd_index->indnullsnotdistinct` — does this unique index treat
+    /// NULLs as not-distinct? Read by `BuildIndexInfo`
+    /// (`indexStruct->indnullsnotdistinct`) for `makeIndexInfo`. `false` if
+    /// `rd_index == NULL` (not an index). Pure read.
+    pub fn rd_index_indnullsnotdistinct(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `rel->rd_rel->relpersistence` — the relation's persistence
+    /// (`RELPERSISTENCE_PERMANENT`/`UNLOGGED`/`TEMP`). Read by `index_build`
+    /// (the unlogged init-fork check) and `index_update_stats`. Pure read.
+    pub fn rd_rel_relpersistence(rel: &types_rel::Relation<'_>) -> types_error::PgResult<i8>
+);
+seam_core::seam!(
+    /// `rel->rd_rel->relkind` — the relation's kind (`RELKIND_RELATION`/
+    /// `INDEX`/`TOASTVALUE`/`MATVIEW`/…). Read by `index_update_stats` to gate
+    /// the autovacuum / visibility-map handling. Pure read.
+    pub fn rd_rel_relkind(rel: &types_rel::Relation<'_>) -> types_error::PgResult<i8>
+);
+seam_core::seam!(
     /// `index->rd_indam->amclusterable`.
     pub fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );

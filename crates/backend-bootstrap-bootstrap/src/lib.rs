@@ -1058,12 +1058,12 @@ pub fn index_register(heap: Oid, ind: Oid, index_info: IndexInfo<'static>) {
 /// `build_indices` — fill in all the indexes registered earlier.
 pub fn build_indices(mcx: Mcx<'static>) -> PgResult<()> {
     /* for (; ILHead != NULL; ILHead = ILHead->il_next) */
-    while let Some(entry) = il_head_pop() {
+    while let Some(mut entry) = il_head_pop() {
         /* need not bother with locks during bootstrap */
         let heap = backend_access_table_table::table_open(mcx, entry.il_heap, types_storage::lock::NoLock)?;
         let ind = backend_access_index_indexam_seams::index_open::call(mcx, entry.il_ind, types_storage::lock::NoLock)?;
 
-        backend_catalog_index_seams::index_build::call(&heap, &ind, &entry.il_info)?;
+        backend_catalog_index_seams::index_build::call(mcx, &heap, &ind, &mut entry.il_info)?;
 
         ind.close(types_storage::lock::NoLock)?; /* index_close(ind, NoLock) */
         heap.close(types_storage::lock::NoLock)?; /* table_close(heap, NoLock) */

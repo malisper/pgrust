@@ -618,7 +618,7 @@ fn build_index_value_desc<'b, 'mcx>(
     // The values/nulls arrays passed to BuildIndexValueDescription should be
     // the results of FormIndexDatum, which are the "raw" input to the index
     // AM.
-    let index_info = catalog_index_seams::build_index_info::call(&index_desc)?;
+    let index_info = catalog_index_seams::build_index_info::call(mcx, &index_desc)?;
     let (values, isnull) =
         catalog_index_seams::form_index_datum::call(&index_info, tableslot, estate)?;
 

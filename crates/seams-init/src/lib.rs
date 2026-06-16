@@ -1623,6 +1623,26 @@ mod recurrence_guard {
         ("backend_utils_cache_relcache", "relation_fdwroutine"),
         ("backend_utils_cache_relcache", "set_relation_fdwroutine"),
         //
+        // -- backend-utils-cache-relcache (pg_node_tree decode unported) --
+        // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE): `BuildIndexInfo` (#334,
+        // catalog/index.c) calls `RelationGetIndexExpressions` /
+        // `RelationGetIndexPredicate` (and, for exclusion indexes,
+        // `RelationGetExclusionInfo`) unconditionally, mirroring the C
+        // `makeIndexInfo(... RelationGetIndexExpressions(index),
+        // RelationGetIndexPredicate(index) ...)`. The relcache owner's bodies for
+        // these delegate the `pg_index.indexprs`/`indpred` `stringToNode` +
+        // eval_const_expressions + fix_opfuncids node-tree transform to
+        // `nodexform_seam::index_{expressions,predicate}` (the node-tree string
+        // reader), which is unported — so the relcache owner cannot install them
+        // and they loud-panic (mirror-PG-and-panic) when reached. The live
+        // `BuildIndexInfo` consumers (bootstrap catalogs, brin, amcheck) index
+        // simple columns, where the C returns NIL without decoding; the panic
+        // only fires on a real expression / predicate / exclusion index. Install
+        // + DELETE these three when the node-tree decode (`stringToNode`) lands.
+        ("backend_utils_cache_relcache", "relation_get_index_expressions"),
+        ("backend_utils_cache_relcache", "relation_get_index_predicate"),
+        ("backend_utils_cache_relcache", "relation_get_exclusion_info"),
+        //
         // -- backend-utils-cache-inval (OID-refetch wrapper unported) --
         // DESIGN_DEBT (TD-INVAL-OID-REFETCH): `cache_invalidate_heap_tuple`
         // (class_id, object_id) is the `CacheInvalidateHeapTuple(rel, tuple,

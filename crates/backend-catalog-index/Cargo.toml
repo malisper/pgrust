@@ -12,9 +12,26 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-nodes = { path = "../types-nodes" }
+types-tableam = { path = "../types-tableam" }
 
 # This unit's own inward seam declarations (installed by `init_seams`).
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+
+# Relcache reads (`rd_index`/`rd_rel`/`rd_indam` fields, the index-AM vtable via
+# `relation_rd_indam`, and the `pg_node_tree`-decoding `RelationGetIndex-
+# {Expressions,Predicate}` / `RelationGetExclusionInfo`) used by
+# `BuildIndexInfo` and `index_build`.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# Processing-mode reads (`IsNormalProcessingMode`).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+# `GetUserIdAndSecContext` (matview-deps owns the getter).
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+# GUC nest level / RestrictSearchPath / AtEOXact_GUC.
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+# pgstat progress (CREATE INDEX phase report).
+backend-utils-activity-backend-progress-seams = { path = "../backend-utils-activity-backend-progress-seams" }
 
 # The reindex parallel-state transfer seams (owned by parallel.c's seam crate;
 # this unit installs the index.c bodies — EstimateReindexStateSpace /

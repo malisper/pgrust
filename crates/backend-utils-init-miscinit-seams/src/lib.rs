@@ -66,6 +66,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsNormalProcessingMode()` (miscadmin.h): `Mode == NormalProcessing`.
+    /// A plain global read — infallible.
+    pub fn is_normal_processing_mode() -> bool
+);
+
+seam_core::seam!(
     /// `InNoForceRLSOperation()` (miscinit.c): `SecurityRestrictionContext &
     /// SECURITY_NOFORCE_RLS`. A plain backend-local global read — infallible.
     pub fn in_no_force_rls_operation() -> bool

@@ -793,6 +793,7 @@ pub fn init_seams() {
     );
     s::is_bootstrap_processing_mode::set(IsBootstrapProcessingMode);
     s::is_init_processing_mode::set(IsInitProcessingMode);
+    s::is_normal_processing_mode::set(IsNormalProcessingMode);
     s::get_user_id_and_sec_context::set(GetUserIdAndSecContext);
     s::set_user_id_and_sec_context::set(SetUserIdAndSecContext);
     s::get_user_name_from_id::set(|mcx, roleid, noerr| GetUserNameFromId(mcx, roleid, noerr));

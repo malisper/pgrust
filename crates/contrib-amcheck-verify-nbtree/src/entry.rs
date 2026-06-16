@@ -302,7 +302,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
 
     // Snapshot for the uniqueness check (taken once per index check).
     if state.checkunique {
-        let indexinfo = backend_catalog_index_seams::build_index_info::call(rel)?;
+        let indexinfo = backend_catalog_index_seams::build_index_info::call(state.mcx, rel)?;
         let need_snapshot = indexinfo.ii_Unique && state.snapshot.is_none();
         state.indexinfo = Some(indexinfo);
         if need_snapshot {

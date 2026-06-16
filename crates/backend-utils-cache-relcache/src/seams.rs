@@ -83,6 +83,9 @@ pub fn init_seams() {
     sx::rd_index_indisprimary::set(rd_index_indisprimary);
     sx::rd_index_indisexclusion::set(rd_index_indisexclusion);
     sx::rd_index_indisready::set(rd_index_indisready);
+    sx::rd_index_indnullsnotdistinct::set(rd_index_indnullsnotdistinct);
+    sx::rd_rel_relpersistence::set(rd_rel_relpersistence);
+    sx::rd_rel_relkind::set(rd_rel_relkind);
     sx::rd_indam_amclusterable::set(rd_indam_amclusterable);
     sx::relation_is_mapped::set(relation_is_mapped);
     sx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
@@ -654,6 +657,17 @@ fn rd_index_indisready(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     with_entry(index.rd_id, |rd| {
         rd.rd_index.as_ref().is_some_and(|i| i.indisready)
     })
+}
+fn rd_index_indnullsnotdistinct(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indnullsnotdistinct)
+    })
+}
+fn rd_rel_relpersistence(rel: &types_rel::Relation<'_>) -> PgResult<i8> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relpersistence as i8)
+}
+fn rd_rel_relkind(rel: &types_rel::Relation<'_>) -> PgResult<i8> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relkind as i8)
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // `index->rd_indam->amclusterable`: the trimmed in-cache `IndexAmRoutine`
