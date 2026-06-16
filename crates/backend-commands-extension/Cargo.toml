@@ -31,10 +31,34 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
+backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-seams" }
+backend-utils-adt-name = { path = "../backend-utils-adt-name" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
+backend-commands-comment = { path = "../backend-commands-comment" }
+backend-commands-alter = { path = "../backend-commands-alter" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+types-acl = { path = "../types-acl" }
+types-relcache-entry = { path = "../types-relcache-entry" }
+
 backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 common-path-seams = { path = "../common-path-seams" }
 common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
