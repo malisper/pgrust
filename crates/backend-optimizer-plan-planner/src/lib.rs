@@ -624,17 +624,19 @@ fn subquery_planner<'mcx>(
         // Expr bridge (above). reduce_outer_joins / remove_useless_result_rtes
         // (C:1206-1216):
         if has_outer_joins {
-            backend_optimizer_prep_prepjointree::reduce_outer_joins(mcx, &mut root)?;
+            let parse = run.resolve_mut(root.parse);
+            backend_optimizer_prep_prepjointree::reduce_outer_joins(mcx, &mut root, parse)?;
         }
         if has_result_rtes || has_outer_joins {
-            backend_optimizer_prep_prepjointree::remove_useless_result_rtes(mcx, &mut root)?;
+            let parse = run.resolve_mut(root.parse);
+            backend_optimizer_prep_prepjointree::remove_useless_result_rtes(mcx, &mut root, parse)?;
         }
 
         // grouping_planner(root, tuple_fraction, setops) (C:1221).
         grouping_planner(mcx, run, &mut root, tuple_fraction, setops)?;
 
         // SS_identify_outer_params(root) (C:1227).
-        backend_optimizer_plan_init_subselect::SS_identify_outer_params(&mut root);
+        backend_optimizer_plan_init_subselect::correlation::SS_identify_outer_params(&mut root);
 
         // final_rel = fetch_upper_rel(...); SS_charge_for_initplans(root, final_rel)
         // (C:1235-1236). SS_charge_for_initplans has no ported owner.
@@ -905,11 +907,38 @@ fn grouping_planner<'mcx>(
     }
 
     // preprocess_aggrefs over processed_tlist + havingQual if hasAggs (C:1576-1580).
+    //
+    //   preprocess_aggrefs(root, (Node *) root->processed_tlist);
+    //   preprocess_aggrefs(root, (Node *) parse->havingQual);
+    //
+    // The C walks each List/expression. Our `preprocess_aggrefs` takes a single
+    // `&Expr`; `processed_tlist` is a `Vec<NodeId>` of `TargetEntry`s and the
+    // walker descends each TargetEntry to its `expr`, so we mirror that by
+    // resolving every TargetEntry's `expr` and walking it. Because the exprs
+    // live inside `root`'s arena and `preprocess_aggrefs` needs `&mut root`, we
+    // deep-clone each expr out of the arena first (`Expr::clone_in`, keystone
+    // #280) to release the immutable borrow, exactly as `preprocess_aggref`
+    // already clones the working Aggref node.
     {
         let has_aggs = run.resolve(root.parse).hasAggs;
         if has_aggs {
-            let parse = run.resolve_mut(root.parse);
-            backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, parse)?;
+            // processed_tlist: clone each TargetEntry's expr, then walk it.
+            let tlist_exprs: Vec<types_pathnodes::NodeId> =
+                root.processed_tlist.iter().map(|te| root.targetentry(*te).expr).collect();
+            for expr_id in tlist_exprs {
+                let cloned = root.node(expr_id).clone_in(mcx)?;
+                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &cloned)?;
+            }
+            // havingQual: parse->havingQual is a NodePtr<Node> with no bridge to
+            // the arena `Expr` model (same gate as the expression-preprocessing
+            // block above). Mirror PG and panic precisely if present.
+            if run.resolve(root.parse).havingQual.is_some() {
+                panic!(
+                    "grouping_planner: preprocess_aggrefs over parse->havingQual \
+                     (planner.c:1580) is gated on the arena-Expr bridge for the \
+                     Query.havingQual NodePtr<Node> field"
+                );
+            }
         }
     }
 
