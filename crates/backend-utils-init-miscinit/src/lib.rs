@@ -892,6 +892,9 @@ pub fn init_seams() {
     // Background writer backend-type set (MyBackendType lives in globals.c).
     s::set_my_backend_type_bg_writer::set(|| SetMyBackendType(BackendType::BgWriter));
 
+    // Walwriter backend-type set (MyBackendType lives in globals.c).
+    s::set_my_backend_type_wal_writer::set(|| SetMyBackendType(BackendType::WalWriter));
+
     // `CritSectionCount > 0` (the START_CRIT_SECTION counter in globals.c) —
     // CompactCheckpointerRequestQueue avoids allocating inside a crit section.
     s::in_critical_section::set(|| backend_utils_init_small::globals::CritSectionCount() > 0);

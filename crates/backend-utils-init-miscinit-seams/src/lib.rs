@@ -446,6 +446,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyBackendType = B_WAL_WRITER` — set this backend's type to the
+    /// walwriter (globals.c stores `MyBackendType`; the walwriter sets it
+    /// before `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_wal_writer()
+);
+
+seam_core::seam!(
     /// `AmCheckpointerProcess()` (miscadmin.h): `MyBackendType ==
     /// B_CHECKPOINTER`. Pure backend-local read.
     pub fn am_checkpointer_process() -> bool
