@@ -33,6 +33,7 @@ pub mod eval_composite;
 pub mod eval_json_xml;
 pub mod eval_misc;
 pub mod eval_scalar;
+pub mod eval_subscript;
 pub mod interp_loop;
 pub mod justs;
 pub mod saophash;

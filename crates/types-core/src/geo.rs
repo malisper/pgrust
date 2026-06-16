@@ -41,6 +41,38 @@ impl Point {
     }
 }
 
+/// `LSEG` (geo_decls.h:106) -- a line segment specified by its two endpoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LSEG {
+    pub p: [Point; 2],
+}
+
+/// `LINE` (geo_decls.h:128) -- the general line equation `Ax + By + C = 0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LINE {
+    pub A: f64,
+    pub B: f64,
+    pub C: f64,
+}
+
+/// `CIRCLE` (geo_decls.h:162) -- a center point and a radius.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CIRCLE {
+    pub center: Point,
+    pub radius: f64,
+}
+
+/// `offsetof(PATH, p)` (geo_decls.h:115) -- the size of the fixed PATH header
+/// (`vl_len_`, `npts`, `closed`, `dummy`: four `int32`s), before the flexible
+/// array of `Point`. Used by the `path_in`/`path_add` integer-overflow guards.
+pub const PATH_HEADER_SIZE: usize = 16;
+
+/// `offsetof(POLYGON, p)` (geo_decls.h:151) -- the size of the fixed POLYGON
+/// header (`vl_len_`, `npts`: two `int32`s; then `BOX boundbox`, 32 bytes),
+/// before the flexible array of `Point`. Used by the `poly_in`/`circle_poly`
+/// integer-overflow guards.
+pub const POLYGON_HEADER_SIZE: usize = 40;
+
 /// `BOX` (geo_decls.h) -- a rectangle given by two corner points, sorted so
 /// that `high` holds the upper-right and `low` the lower-left corner.  Field
 /// order matches the C struct (`high`, then `low`).

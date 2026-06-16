@@ -23,11 +23,11 @@ use backend_utils_cache_lsyscache_seams::{IOFuncSelector, TypLenByValAlign, Type
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use mcx::{Mcx, PgBox};
+use types_nodes::execexpr::{SubscriptHandler, SubscriptRoutines};
 use types_nodes::nodes::Node;
 use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
 use types_cache::typcache::{PgRangeRow, PgTypeRow};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
 };
@@ -49,6 +49,8 @@ const BPCHAROID: Oid = 1042;
 /// `F_ARRAY_SUBSCRIPT_HANDLER` (`fmgroids.h`) — the `array_subscript_handler`
 /// builtin OID; the `IsTrueArrayType` test.
 const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+/// `F_RAW_ARRAY_SUBSCRIPT_HANDLER` (`fmgroids.h`) — `raw_array_subscript_handler`.
+const F_RAW_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
 
 /// `IsTrueArrayType(typeForm)` (`catalog/pg_type.h`): a "true" array type has a
 /// valid `typelem` and the `array_subscript_handler` as its `typsubscript`.
@@ -778,16 +780,51 @@ pub fn get_typsubscript(typid: Oid) -> PgResult<(Oid, Oid)> {
 /// return (const struct SubscriptRoutines *) DatumGetPointer(OidFunctionCall0(typsubscript));
 /// ```
 ///
-/// The `OidFunctionCall0` routes through the fmgr owner's seam; its returned
-/// `Datum` is the `const SubscriptRoutines *` pointer word, kept opaque (the
-/// struct lives in `nodes/subscripting.h`, outside this unit, and no ported
-/// caller consumes it yet). `None` is the C NULL (not subscriptable).
-pub fn get_subscripting_routines(typid: Oid) -> PgResult<Option<(Datum, Oid)>> {
+/// In C the `OidFunctionCall0(typsubscript)` invokes the type's SQL handler,
+/// which returns a pointer to its `static const SubscriptRoutines`. The owned
+/// model has no fmgr-dispatchable handler bodies for these builtins; instead we
+/// resolve the handler OID directly to the real [`SubscriptRoutines`] value
+/// each builtin handler returns (`array_subscript_handler` /
+/// `raw_array_subscript_handler`, utils/adt/arraysubs.c), which is faithful
+/// (the handler is a pure constant-returning function). `None` is the C NULL
+/// (not subscriptable). A handler OID we do not model yet is a loud panic
+/// (mirror-PG-and-panic) rather than a silent miss.
+pub fn get_subscripting_routines(
+    typid: Oid,
+) -> PgResult<Option<(SubscriptRoutines, Oid)>> {
     let (typsubscript, typelem) = get_typsubscript(typid)?;
     if !OidIsValid(typsubscript) {
         return Ok(None);
     }
-    let routines = fmgr::oid_function_call0::call(typsubscript)?;
+    // C: OidFunctionCall0(typsubscript) -> the handler's static SubscriptRoutines.
+    let routines = match typsubscript {
+        // array_subscript_handler (arraysubs.c):
+        //   .transform = array_subscript_transform, .exec_setup = array_exec_setup,
+        //   .fetch_strict = true, .fetch_leakproof = true, .store_leakproof = false
+        F_ARRAY_SUBSCRIPT_HANDLER => SubscriptRoutines {
+            handler: SubscriptHandler::Array,
+            fetch_strict: true,
+            fetch_leakproof: true,
+            store_leakproof: false,
+        },
+        // raw_array_subscript_handler (arraysubs.c): same exec_setup, same flags.
+        F_RAW_ARRAY_SUBSCRIPT_HANDLER => SubscriptRoutines {
+            handler: SubscriptHandler::RawArray,
+            fetch_strict: true,
+            fetch_leakproof: true,
+            store_leakproof: false,
+        },
+        // Any other subscripting handler (e.g. jsonb_subscript_handler) is not
+        // modeled yet; OidFunctionCall0 would dispatch to its body. Mirror PG
+        // and panic at the unported owner.
+        other => panic!(
+            "getSubscriptingRoutines: typsubscript handler OID {} is not a modeled \
+             subscript handler (only array_subscript_handler / \
+             raw_array_subscript_handler are ported; jsonb_subscript_handler and \
+             other type handlers remain unported)",
+            other
+        ),
+    };
     Ok(Some((routines, typelem)))
 }
 

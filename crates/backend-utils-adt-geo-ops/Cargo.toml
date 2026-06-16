@@ -12,3 +12,9 @@ path = "src/lib.rs"
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 backend-utils-adt-geo-ops-seams = { path = "../backend-utils-adt-geo-ops-seams" }
+backend-utils-adt-float-seams = { path = "../backend-utils-adt-float-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+
+[dev-dependencies]
+backend-utils-adt-float = { path = "../backend-utils-adt-float" }

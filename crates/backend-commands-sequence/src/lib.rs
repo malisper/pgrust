@@ -285,7 +285,7 @@ pub fn DefineSequence<'mcx>(
              * object be a member of the extension, to avoid security risks.
              */
             let address = object_address_set(RelationRelationId, seqoid);
-            backend_commands_extension_seams::check_membership_in_current_extension::call(&address)?;
+            backend_catalog_pg_depend_seams::checkMembershipInCurrentExtension::call(mcx, &address)?;
 
             /* OK to skip */
             ereport(NOTICE)
