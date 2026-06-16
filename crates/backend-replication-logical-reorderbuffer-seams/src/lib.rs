@@ -361,6 +361,12 @@ seam_core::seam!(
     pub fn ReorderBufferSkipPrepare(rb: ReorderBufferHandle, xid: TransactionId)
 );
 seam_core::seam!(
+    /// `ReorderBufferInvalidate(rb, xid, lsn)` — execute the txn's accumulated
+    /// cache invalidations without replaying its changes (a prepared txn we
+    /// decided to skip, see `DecodePrepare`).
+    pub fn ReorderBufferInvalidate(rb: ReorderBufferHandle, xid: TransactionId, lsn: XLogRecPtr)
+);
+seam_core::seam!(
     /// `ReorderBufferImmediateInvalidation(rb, ninvalidations, invalidations)` —
     /// execute cache invalidations immediately (XLOG_XACT_INVALIDATIONS outside a
     /// transaction).

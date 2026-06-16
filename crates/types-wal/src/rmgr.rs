@@ -330,26 +330,32 @@ pub struct XLogReaderState<'mcx> {
     pub restore_errmsg: core::cell::RefCell<alloc::string::String>,
 }
 
-/// `LogicalDecodingContext` (replication/logical.h), trimmed.
-pub struct LogicalDecodingContext<'mcx> {
-    /// `MemoryContext context` — the context this is all allocated in.
-    pub context: Mcx<'mcx>,
-    /// `bool fast_forward` — fast-forward decoding context (no output
-    /// plugin loaded).
-    pub fast_forward: bool,
-}
+/// `LogicalDecodingContext` (replication/logical.h) — the single canonical
+/// decoding context, defined once in [`types_logical`] so that both
+/// `logical.c` (its owner) and `decode.c` (whose `rm_decode` callbacks receive
+/// it) name the same rich struct. Re-exported here so `RmDecode` and the rmgr
+/// table can name it without `types-wal` itself defining a divergent shape.
+pub use types_logical::LogicalDecodingContext;
 
 /// `XLogRecordBuffer` (replication/decode.h) — the unit of WAL data handed
 /// to the `rm_decode` callbacks. Complete: the C struct has exactly these
 /// three fields.
-pub struct XLogRecordBuffer<'r, 'mcx> {
+///
+/// `record` is the `XLogReaderState *` the C `rm_decode` callbacks read
+/// through. In this repo the live reader is owned by the xlogreader crate's
+/// backend-local registry (it is not borrowable across a seam), so it is
+/// carried here as the opaque [`XLogReaderHandle`] the decode owner reads
+/// record fields off through the xlogreader owner's handle-based accessor
+/// seams (the same handle `logical.c` holds in `ctx->reader`).
+#[derive(Clone, Copy, Debug)]
+pub struct XLogRecordBuffer {
     /// `XLogRecPtr origptr`.
     pub origptr: XLogRecPtr,
     /// `XLogRecPtr endptr`.
     pub endptr: XLogRecPtr,
     /// `XLogReaderState *record` — the reader positioned on the record being
     /// decoded (decode.c only reads through it).
-    pub record: &'r XLogReaderState<'mcx>,
+    pub record: types_logical::XLogReaderHandle,
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +394,7 @@ pub type RmMask = fn(pagedata: &mut [u8], blkno: BlockNumber) -> PgResult<()>;
 /// struct XLogRecordBuffer *buf)`. Decode routines `elog(ERROR)` on
 /// unexpected record info, carried on `Err`.
 pub type RmDecode =
-    fn(ctx: &mut LogicalDecodingContext<'_>, buf: &mut XLogRecordBuffer<'_, '_>) -> PgResult<()>;
+    fn(ctx: &mut LogicalDecodingContext, buf: &mut XLogRecordBuffer) -> PgResult<()>;
 
 /// `typedef struct RmgrData` (access/xlog_internal.h). Field order matches C.
 ///

@@ -397,6 +397,10 @@ fn seam_remember_prepare_info(
     panic!("ReorderBufferRememberPrepareInfo: change-replay family not yet ported");
 }
 
+fn seam_invalidate(_rb: ReorderBufferHandle, _xid: TransactionId, _lsn: XLogRecPtr) {
+    panic!("ReorderBufferInvalidate: change-replay family not yet ported");
+}
+
 // ---------------------------------------------------------------------------
 // Active tuplecid hash (the `static HTAB *tuplecid_data` that
 // SetupHistoricSnapshot points at, owned here because reorderbuffer builds and
@@ -557,6 +561,7 @@ pub fn init_seams() {
     s::ReorderBufferFinishPrepared::set(seam_finish_prepared);
     s::ReorderBufferPrepare::set(seam_prepare);
     s::ReorderBufferSkipPrepare::set(seam_skip_prepare);
+    s::ReorderBufferInvalidate::set(seam_invalidate);
     s::ReorderBufferImmediateInvalidation::set(seam_immediate_invalidation);
     s::ReorderBufferAddInvalidations::set(seam_add_invalidations);
     s::ReorderBufferRememberPrepareInfo::set(seam_remember_prepare_info);
