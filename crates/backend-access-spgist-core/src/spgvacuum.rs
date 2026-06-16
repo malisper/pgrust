@@ -137,12 +137,12 @@ struct SpgBulkDeleteState<'a, 'mcx> {
 
 /// `dt->tupstate` (low 2 bits of `bits` @0) — same encoding as a leaf tuple.
 #[inline]
-fn dt_tupstate(dt: &[u8]) -> u32 {
+pub(crate) fn dt_tupstate(dt: &[u8]) -> u32 {
     lt_tupstate(dt)
 }
 /// `dt->tupstate = v`.
 #[inline]
-fn dt_set_tupstate(dt: &mut [u8], v: u32) {
+pub(crate) fn dt_set_tupstate(dt: &mut [u8], v: u32) {
     let w = u32::from_ne_bytes([dt[0], dt[1], dt[2], dt[3]]);
     let w = (w & !0x3) | (v & 0x3);
     dt[0..4].copy_from_slice(&w.to_ne_bytes());
@@ -154,7 +154,7 @@ fn dt_pointer(dt: &[u8]) -> ItemPointerData {
 }
 /// `ItemPointerSetInvalid(&dt->pointer)` — write the invalid block/offset image.
 #[inline]
-fn dt_set_pointer_invalid(dt: &mut [u8]) {
+pub(crate) fn dt_set_pointer_invalid(dt: &mut [u8]) {
     let mut ip = ItemPointerData::default();
     ItemPointerSetInvalid(&mut ip);
     write_item_pointer(&mut dt[6..12], &ip);
@@ -490,7 +490,7 @@ fn vacuum_leaf_page<'mcx>(
 }
 
 /// Swap the line pointers (`ItemIdData`, 4 bytes) of two offsets on a page.
-fn swap_item_ids(page: &mut [u8], src: OffsetNumber, dest: OffsetNumber) -> PgResult<()> {
+pub(crate) fn swap_item_ids(page: &mut [u8], src: OffsetNumber, dest: OffsetNumber) -> PgResult<()> {
     // The item-id array starts right after the page header (SizeOfPageHeaderData
     // = 24); each ItemIdData is 4 bytes, 1-based offsets.
     let id_src = item_id_byte_offset(src);

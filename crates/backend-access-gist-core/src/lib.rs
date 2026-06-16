@@ -35,6 +35,7 @@ pub mod gist_scan;
 pub mod gist_vacuum;
 pub mod gistsplit;
 pub mod gistutil;
+pub mod gistxlog;
 
 pub use gist_insert::{gistSplit, gistdoinsert, gistplacetopage, gistprunepage};
 pub use gist_page::{
@@ -77,4 +78,19 @@ pub fn init_seams() {
     backend_access_gist_am_seams::gistvacuumcleanup::set(
         |mcx, info, stats| gistvacuumcleanup(mcx, info, stats),
     );
+
+    // gistxlog.c rmgr-table callbacks (gist_redo / gist_xlog_startup /
+    // gist_xlog_cleanup / gist_mask) + the GiST WAL-write seams the insert
+    // spine reaches (gist_xlog_split / gist_xlog_update / gist_xlog_delete /
+    // gist_xlog_page_delete / gist_xlog_page_reuse / gist_get_fake_lsn).
+    backend_access_gist_core_seams::gist_redo::set(gistxlog::gist_redo);
+    backend_access_gist_core_seams::gist_xlog_startup::set(gistxlog::gist_xlog_startup);
+    backend_access_gist_core_seams::gist_xlog_cleanup::set(gistxlog::gist_xlog_cleanup);
+    backend_access_gist_core_seams::gist_mask::set(gistxlog::gist_mask);
+    backend_access_gist_core_seams::gist_xlog_split::set(gistxlog::gist_xlog_split);
+    backend_access_gist_core_seams::gist_xlog_update::set(gistxlog::gist_xlog_update);
+    backend_access_gist_core_seams::gist_xlog_delete::set(gistxlog::gist_xlog_delete);
+    backend_access_gist_core_seams::gist_xlog_page_delete::set(gistxlog::gist_xlog_page_delete);
+    backend_access_gist_core_seams::gist_xlog_page_reuse::set(gistxlog::gist_xlog_page_reuse);
+    backend_access_gist_core_seams::gist_get_fake_lsn::set(gistxlog::gist_get_fake_lsn);
 }

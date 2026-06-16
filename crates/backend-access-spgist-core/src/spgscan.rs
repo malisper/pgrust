@@ -245,7 +245,9 @@ impl<'mcx> AmOpaqueType<'mcx> for SpGistScanOpaqueData<'mcx> {
 /// Downcast `scan.opaque` to the SP-GiST scan working state (the A0 tag-checked
 /// downcast); panics with a clear message if the descriptor was not built by
 /// [`spgbeginscan`] (a programming error — C would just cast `void *`).
-fn so<'a, 'mcx>(scan: &'a mut IndexScanDescData<'mcx>) -> &'a mut SpGistScanOpaqueData<'mcx> {
+pub(crate) fn so<'a, 'mcx>(
+    scan: &'a mut IndexScanDescData<'mcx>,
+) -> &'a mut SpGistScanOpaqueData<'mcx> {
     scan.opaque
         .as_deref_mut()
         .expect("SP-GiST scan descriptor has no opaque (not built by spgbeginscan)")

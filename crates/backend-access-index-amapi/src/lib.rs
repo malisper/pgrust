@@ -66,6 +66,8 @@ const F_HASHHANDLER: Oid = 331;
 const F_GISTHANDLER: Oid = 332;
 /// `F_GINHANDLER` (pg_proc.dat oid 333) — the GIN AM handler function.
 const F_GINHANDLER: Oid = 333;
+/// `F_SPGHANDLER` (pg_proc.dat oid 334) — the SP-GiST AM handler function.
+const F_SPGHANDLER: Oid = 334;
 /// `F_BRINHANDLER` (pg_proc.dat oid 335) — the BRIN AM handler function.
 const F_BRINHANDLER: Oid = 335;
 
@@ -104,6 +106,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmRoutine> {
         F_HASHHANDLER => backend_access_hash_entry::hashhandler(),
         F_GISTHANDLER => backend_access_gist_core::gisthandler(),
         F_GINHANDLER => backend_access_gin_ginutil::ginhandler(),
+        F_SPGHANDLER => backend_access_spgist_core::spghandler(),
         F_BRINHANDLER => backend_access_brin_scan::brinhandler(),
         // A handler the built-in fmgr table doesn't carry would be a
         // dynamically loaded extension AM, reached through the (unported)
