@@ -9692,6 +9692,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9733,6 +9734,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]

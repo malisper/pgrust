@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
 # The `node_to_string_with_locations` inward seam this unit owns is declared on
 # the `backend-nodes-core` owner's seam crate (it was re-homed there so the
 # install guard can track it); installing it here retires the live panic the

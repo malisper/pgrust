@@ -219,7 +219,7 @@ fn arrayexpr_components(saop_node: &Expr) -> PgResult<Vec<Expr>> {
 fn make_dummy_const(
     arrayconst: &Const,
     elemtype: Oid,
-    _lbva: lsyscache::TypLenByValAlign,
+    lbva: lsyscache::TypLenByValAlign,
     value: types_datum::datum::Datum,
     isnull: bool,
 ) -> Expr {
@@ -227,16 +227,18 @@ fn make_dummy_const(
      * The per-element value comes back as a bare machine word from
      * deconstruct_array; carry it as the canonical Datum's by-value arm (the
      * same `as_usize`/`from_usize` word lane clauses.c uses for folded array
-     * Const values).  The `constlen`/`constbyval` decorations the C stamps
-     * are not fields of this repo's trimmed `Const` (only the downstream
-     * `eval_const_test` re-derives storage from `test_op`).
+     * Const values).  `constlen`/`constbyval` are stamped from the element
+     * type's `elmlen`/`elmbyval` (the C `state->const_expr.constlen =
+     * state->elmlen; constbyval = state->elmbyval`).
      */
     Expr::Const(Const {
         consttype: elemtype,
         consttypmod: -1,
         constcollid: arrayconst.constcollid,
+        constlen: lbva.typlen as i32,
         constvalue: types_tuple::backend_access_common_heaptuple::Datum::from_usize(value.as_usize()),
         constisnull: isnull,
+        constbyval: lbva.typbyval,
         // makeConst sets location = -1.
         location: -1,
     })
