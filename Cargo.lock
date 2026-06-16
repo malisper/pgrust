@@ -17037,6 +17037,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-ruleutils"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-utils-adt-ruleutils-seams"
 version = "0.0.0"
 dependencies = [
@@ -20114,6 +20129,7 @@ dependencies = [
  "backend-utils-adt-rangetypes-typanalyze",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
+ "backend-utils-adt-ruleutils",
  "backend-utils-adt-scalar-datum-core",
  "backend-utils-adt-selfuncs",
  "backend-utils-adt-tsvector-core",
