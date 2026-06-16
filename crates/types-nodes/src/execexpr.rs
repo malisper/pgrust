@@ -27,7 +27,7 @@ use crate::execnodes::{EcxtId, Opaque};
 use types_slot::{TupleSlotKind, TupleTableSlot};
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodes::NodeTag;
-use crate::planstate::PlanStateNode;
+use crate::planstate::{PlanStateLink, PlanStateNode};
 use crate::primnodes::{Expr, ScalarArrayOpExpr, SubPlan, Var};
 
 /// `EEO_FLAG_IS_QUAL` (execnodes.h) — this expression is a qualification.
@@ -1239,8 +1239,13 @@ pub struct ExprState<'mcx> {
     pub steps_len: i32,
     /// `int steps_alloc` — allocated length of the steps array.
     pub steps_alloc: i32,
-    /// `struct PlanState *parent` — parent PlanState node, if any.
-    pub parent: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// `struct PlanState *parent` — NON-owning back-pointer to the parent
+    /// PlanState node, if any. C's bare `PlanState *`: the node OWNS this
+    /// `ExprState` (its quals/projection), so an owning `PgBox` here would be an
+    /// ownership cycle; the [`PlanStateLink`] is the lifetime-free raw back-ptr
+    /// (mirroring `EStateLink`) that lets an in-flight node be its own
+    /// expressions' parent.
+    pub parent: Option<PlanStateLink>,
     /// `ParamListInfo ext_params` — for compiling PARAM_EXTERN nodes (opaque
     /// address; the param-list owner threads the real list).
     pub ext_params: usize,

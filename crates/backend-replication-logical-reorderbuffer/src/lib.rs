@@ -21,8 +21,14 @@
 //!
 //! * **change replay** — `ReorderBufferProcessTXN` / `ReorderBufferReplay` /
 //!   `ReorderBufferCommit` / iterator (`ReorderBufferIterTXN*`).
-//! * **spill-to-disk** — `ReorderBufferSerialize*` / `ReorderBufferRestore*` /
-//!   `ReorderBufferCheckMemoryLimit` / `ReorderBufferCleanupSerializedTXNs`.
+//! * **spill-to-disk codec** (landed, see [`spill`]) —
+//!   `ReorderBufferSerializeTXN` / `ReorderBufferSerializeChange` /
+//!   `ReorderBufferRestoreChanges` / `ReorderBufferRestoreChange` /
+//!   `ReorderBufferRestoreCleanup` / `ReorderBufferCleanupSerializedTXNs` /
+//!   `ReorderBufferSerializedPath`. The eviction *driver*
+//!   (`ReorderBufferCheckMemoryLimit` + `txn_heap` `LargestTXN` /
+//!   `LargestStreamableTopTXN`) stays seam-panic: it reads `rb->private_data`
+//!   (`ReorderBufferCanStartStreaming`), the unmodeled `LogicalDecodingContext`.
 //! * **streaming** — `ReorderBufferStreamTXN` / `ReorderBufferStreamCommit`.
 //! * **toast reassembly** — `ReorderBufferToast*`.
 //! * **cleanup / commit-time** — `ReorderBufferCleanupTXN` /
@@ -54,6 +60,7 @@ use types_tuple::ItemPointerData;
 mod registry;
 mod replay;
 mod snapshot;
+mod spill;
 mod toast;
 pub use registry::{init_seams, with_buffer, with_buffer_opt};
 pub use snapshot::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
@@ -370,6 +377,10 @@ impl ReorderBufferTXN {
     /// `rbtxn_is_serialized(txn)`.
     pub fn is_serialized(&self) -> bool {
         self.txn_flags & RBTXN_IS_SERIALIZED != 0
+    }
+    /// `rbtxn_is_serialized_clear(txn)`.
+    pub fn is_serialized_clear(&self) -> bool {
+        self.txn_flags & RBTXN_IS_SERIALIZED_CLEAR != 0
     }
     /// `rbtxn_is_streamed(txn)`.
     pub fn is_streamed(&self) -> bool {
@@ -1313,7 +1324,7 @@ impl ReorderBuffer {
     /// `txn_heap` pairing heap and accumulates `rb->size`). Until that family
     /// lands the foundational queueing still records the per-change size on the
     /// txn so the data is not lost, but the heap/global accounting is deferred.
-    fn change_memory_update_add(&mut self, txn_xid: TransactionId, sz: usize) {
+    pub(crate) fn change_memory_update_add(&mut self, txn_xid: TransactionId, sz: usize) {
         self.with_txn(txn_xid, |t| {
             t.size += sz;
             t.total_size += sz;
@@ -1499,25 +1510,20 @@ impl ReorderBuffer {
         self.total_bytes += n;
     }
 
-    // ----- spill family entry points (serialize / restore) -----------------
+    // ----- spill statistics (UpdateDecodingStats reads these via the
+    //       reorderbuffer_stats seam; the spill codec increments them) --------
 
-    /// `ReorderBufferSerializeTXN(rb, txn)` — spill the txn's in-memory changes
-    /// to disk. The spill family is not yet ported; reachable only for a
-    /// serialized txn during the k-way merge.
-    pub(crate) fn serialize_txn(&mut self, _xid: TransactionId) {
-        panic!("ReorderBufferSerializeTXN: spill-to-disk family not yet ported");
+    /// `rb->spillCount += n`.
+    pub(crate) fn spill_count_add(&mut self, n: i64) {
+        self.spill_count += n;
     }
-
-    /// `ReorderBufferRestoreChanges(rb, txn, &file, &segno)` — page a serialized
-    /// txn's changes back into memory. Spill family; not yet ported.
-    pub(crate) fn restore_changes(&mut self, _xid: TransactionId) -> bool {
-        panic!("ReorderBufferRestoreChanges: spill-to-disk family not yet ported");
+    /// `rb->spillBytes += n`.
+    pub(crate) fn spill_bytes_add(&mut self, n: i64) {
+        self.spill_bytes += n;
     }
-
-    /// `ReorderBufferRestoreCleanup(rb, txn)` — delete a serialized txn's spill
-    /// segments. Spill family; not yet ported.
-    pub(crate) fn restore_cleanup(&mut self, _xid: TransactionId) {
-        panic!("ReorderBufferRestoreCleanup: spill-to-disk family not yet ported");
+    /// `rb->spillTxns += n`.
+    pub(crate) fn spill_txns_add(&mut self, n: i64) {
+        self.spill_txns += n;
     }
 
     // ----- streaming family entry points -----------------------------------
@@ -1654,21 +1660,46 @@ fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> bool {
 }
 
 /// `ReorderBufferChangeSize(change)` — bytes attributed to a change for memory
-/// accounting. Only the foundational change kinds are sized exactly; the tuple
-/// kinds are sized by the change-replay family (they carry decoded tuples this
-/// family never builds).
+/// accounting (`sizeof(ReorderBufferChange)` plus the per-action payload).
+/// Mirrors the C switch arm for arm.
 pub(crate) fn change_size(change: &ReorderBufferChange) -> usize {
     let base = core::mem::size_of::<ReorderBufferChange>();
+    // C uses HeapTupleData header size for each decoded tuple; we carry the
+    // decoded image in ReorderBufferTupleBuf (t_len + the contiguous bytes).
+    let heap_tuple_data = core::mem::size_of::<ItemPointerData>()
+        + core::mem::size_of::<u32>()
+        + core::mem::size_of::<types_core::Oid>();
     match &change.data {
+        ReorderBufferChangeData::Tp {
+            oldtuple, newtuple, ..
+        } => {
+            let mut sz = base;
+            if let Some(t) = oldtuple {
+                sz += heap_tuple_data + t.t_len as usize;
+            }
+            if let Some(t) = newtuple {
+                sz += heap_tuple_data + t.t_len as usize;
+            }
+            sz
+        }
         ReorderBufferChangeData::Inval(msgs) => {
             base + msgs.len() * core::mem::size_of::<SharedInvalidationMessage>()
         }
-        ReorderBufferChangeData::Msg { prefix, message } => base + prefix.len() + message.len(),
-        ReorderBufferChangeData::Snapshot(_)
-        | ReorderBufferChangeData::CommandId(_)
+        ReorderBufferChangeData::Msg { prefix, message } => {
+            // C: prefix_size (= strlen+1) + message_size + sizeof(Size)*2.
+            base + (prefix.len() + 1) + message.len() + 2 * core::mem::size_of::<usize>()
+        }
+        ReorderBufferChangeData::Snapshot(snap) => {
+            base + core::mem::size_of::<SnapshotData>()
+                + core::mem::size_of::<TransactionId>() * snap.xcnt as usize
+                + core::mem::size_of::<TransactionId>() * snap.subxcnt.max(0) as usize
+        }
+        ReorderBufferChangeData::Truncate { relids, .. } => {
+            base + core::mem::size_of::<types_core::Oid>() * relids.len()
+        }
+        ReorderBufferChangeData::CommandId(_)
         | ReorderBufferChangeData::TupleCid { .. }
         | ReorderBufferChangeData::None => base,
-        ReorderBufferChangeData::Tp { .. } | ReorderBufferChangeData::Truncate { .. } => base,
     }
 }
 
