@@ -1,0 +1,17 @@
+[package]
+name = "backend-conv-utf8-and-euc-tw"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_conv_utf8_and_euc_tw"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+types-wchar = { path = "../types-wchar" }
+types-error = { path = "../types-error" }

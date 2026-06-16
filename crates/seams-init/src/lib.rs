@@ -134,6 +134,13 @@ pub fn init_all() {
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_typecmds::init_seams();
+    backend_conv_utf8_and_big5::init_seams();
+    backend_conv_utf8_and_cyrillic::init_seams();
+    backend_conv_utf8_and_euc2004::init_seams();
+    backend_conv_utf8_and_euc_cn::init_seams();
+    backend_conv_utf8_and_euc_jp::init_seams();
+    backend_conv_utf8_and_euc_kr::init_seams();
+    backend_conv_utf8_and_euc_tw::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
     backend_executor_execExpr::init_seams();
@@ -379,6 +386,11 @@ pub fn init_all() {
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
+    backend_conv_euc_cn_and_mic::init_seams();
+    backend_conv_euc_jp_and_sjis::init_seams();
+    backend_conv_euc_kr_and_mic::init_seams();
+    backend_conv_euc_tw_and_big5::init_seams();
+    backend_conv_euc2004_sjis2004::init_seams();
     backend_utils_mb_conv_string_helpers::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();

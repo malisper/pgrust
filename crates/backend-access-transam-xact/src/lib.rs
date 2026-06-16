@@ -51,7 +51,8 @@ use types_core::{LocalTransactionId, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG5, ERRCODE_ACTIVE_SQL_TRANSACTION,
     ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_NO_ACTIVE_SQL_TRANSACTION,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_S_E_INVALID_SPECIFICATION, ERROR, FATAL, WARNING,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_READ_ONLY_SQL_TRANSACTION,
+    ERRCODE_S_E_INVALID_SPECIFICATION, ERROR, FATAL, WARNING,
 };
 
 pub(crate) use backend_access_transam_parallel_seams as parallel_seams;
@@ -1365,6 +1366,18 @@ pub fn TransStateAsString(state: TransState) -> &'static str {
 //  Predicates over the block state (xact.c:3648-3789, 4971-5044)
 // ---------------------------------------------------------------------------
 
+/// `PreventCommandIfReadOnly` (utility.c:404)
+pub fn PreventCommandIfReadOnly(cmdname: &str) -> PgResult<()> {
+    if xs(|s| s.XactReadOnly) {
+        return ereport(ERROR)
+            .errcode(ERRCODE_READ_ONLY_SQL_TRANSACTION)
+            // translator: %s is name of a SQL command, eg CREATE
+            .errmsg(format!("cannot execute {cmdname} in a read-only transaction"))
+            .finish(xact_location("PreventCommandIfReadOnly"));
+    }
+    Ok(())
+}
+
 /// `PreventInTransactionBlock` (xact.c:3648)
 pub fn PreventInTransactionBlock(isTopLevel: bool, stmtType: &str) -> PgResult<()> {
     // xact block?
@@ -1652,6 +1665,7 @@ fn seam_set_xact_iso_level_repeatable_read() {
 pub fn init_seams() {
     use backend_access_transam_xact_seams as seams;
     seams::command_counter_increment::set(CommandCounterIncrement);
+    seams::prevent_command_if_read_only::set(PreventCommandIfReadOnly);
     seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
     seams::transaction_id_is_current_transaction_id::set(TransactionIdIsCurrentTransactionId);
     seams::is_transaction_state::set(IsTransactionState);

@@ -6770,6 +6770,137 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-euc-cn-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-jp-and-sjis"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-kr-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-tw-and-big5"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc2004-sjis2004"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-big5"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-cyrillic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-cn"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-jp"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-kr"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc-tw"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-utf8-and-euc2004"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -18269,6 +18400,18 @@ dependencies = [
  "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
+ "backend-conv-euc-cn-and-mic",
+ "backend-conv-euc-jp-and-sjis",
+ "backend-conv-euc-kr-and-mic",
+ "backend-conv-euc-tw-and-big5",
+ "backend-conv-euc2004-sjis2004",
+ "backend-conv-utf8-and-big5",
+ "backend-conv-utf8-and-cyrillic",
+ "backend-conv-utf8-and-euc-cn",
+ "backend-conv-utf8-and-euc-jp",
+ "backend-conv-utf8-and-euc-kr",
+ "backend-conv-utf8-and-euc-tw",
+ "backend-conv-utf8-and-euc2004",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",
