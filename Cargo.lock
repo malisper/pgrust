@@ -13447,6 +13447,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-op"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-array-more-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-tsvector-ext-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-error",
+ "types-jsonb",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonb-seams"
 version = "0.0.0"
 dependencies = [
