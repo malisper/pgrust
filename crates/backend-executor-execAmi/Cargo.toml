@@ -30,6 +30,7 @@ backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan
 backend-executor-nodeGather = { path = "../backend-executor-nodeGather" }
 backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
 backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
+backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }

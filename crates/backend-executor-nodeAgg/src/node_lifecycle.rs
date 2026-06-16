@@ -4,7 +4,7 @@
 //! per-trans build that reads the catalog for each aggregate).
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Oid, OidIsValid};
+use types_core::primitive::{Oid, OidIsValid, INVALID_OID};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
@@ -13,7 +13,11 @@ use types_nodes::nodeagg::{
 use crate::aggstate::{AggStateData, AggStatePerTransData};
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, SlotId};
+use types_nodes::fmgr::FunctionCallInfoBaseData;
+use types_core::fmgr::FmgrInfo;
 use types_tuple::heaptuple::TupleDescData;
+
+extern crate alloc;
 
 use crate::FindColsContext;
 
@@ -373,25 +377,37 @@ pub fn build_pertrans_for_aggref<'mcx>(
     //                            numTransArgs, pertrans->aggCollation,
     //                            (Node *) aggstate, NULL);
     //
-    // build_aggregate_transfn_expr (parse_agg.c, #224 — installed),
-    // fmgr_info + fmgr_info_set_expr (fmgr.c — now installed: the resolved
-    // transfn FmgrInfo can be stamped with the transfnexpr so the transfn reads
-    // its declared arg types via get_fn_expr_argtype) are available. The
-    // remaining blocker is InitFunctionCallInfoData allocating the transfn call
-    // frame (`transfn_fcinfo`) carrying `(Node *) aggstate` as the fmgr context
-    // — the #324/#165 agg call-frame channel, still gated on the
-    // PlanState-ownership keystone. Panic loudly here (mirror-PG-and-panic). The
-    // remaining owned arithmetic below is kept verbatim (unreachable) so it
-    // lands once that owner does.
-    panic!(
-        "backend-utils-fmgr (InitFunctionCallInfoData): build_pertrans_for_aggref needs the \
-         transfn call frame (transfn_fcinfo carrying (Node *) aggstate as context) — the \
-         #324/#165 agg call-frame channel, still gated on the PlanState-ownership keystone. \
-         build_aggregate_transfn_expr + fmgr_info + fmgr_info_set_expr are installed \
-         (numTransArgs={num_trans_args}, numDirectArgs={num_direct_args})"
-    );
+    // build_aggregate_transfn_expr (parse_agg.c) + fmgr_info + fmgr_info_set_expr
+    // (fmgr.c) + InitFunctionCallInfoData for the transfn call frame.
+    let (transfnexpr, _invtransfnexpr) =
+        backend_parser_parse_agg_seams::build_aggregate_transfn_expr::call(
+            input_types,
+            num_arguments,
+            num_direct_args as i32,
+            aggref.aggvariadic,
+            aggtranstype,
+            aggref.inputcollid,
+            transfn_oid,
+            INVALID_OID,
+            false,
+        )?;
+    let mut transfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, transfn_oid)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut transfn, &transfnexpr);
+    pertrans.transfn = transfn.clone();
+    // pertrans->transfn_fcinfo = palloc(SizeForFunctionCallInfo(numTransArgs));
+    // InitFunctionCallInfoData(*fcinfo, &pertrans->transfn, numTransArgs,
+    //                          pertrans->aggCollation, (Node *) aggstate, NULL);
+    //
+    // F4 RESIDUAL (#324/#335 agg call-frame channel): the C `(Node *) aggstate`
+    // context cannot be stored — `FunctionCallInfoBaseData.context` is
+    // `Option<&Node>` and the `Node` enum carries no AggState variant (adding one
+    // is the same erased-carrier + self-reference keystone as PlanStateNode::Agg,
+    // not yet built). The frame is built with `context: None`; the live-AggState
+    // resolution (`AggCheckCallContext` / `AggGetAggref` et al.) and the
+    // transition runtime (`advance_transition_function`) stay seam-panicked.
+    let transfn_fcinfo = new_agg_fcinfo(mcx, transfn, num_trans_args, pertrans.agg_collation)?;
+    pertrans.transfn_fcinfo = Some(transfn_fcinfo);
 
-    #[allow(unreachable_code)]
     {
         // get info about the state value's datatype
         //   get_typlenbyval(aggtranstype, &pertrans->transtypeLen,
@@ -404,14 +420,14 @@ pub fn build_pertrans_for_aggref<'mcx>(
         //   fmgr_info_set_expr; serialfn_fcinfo = palloc(SizeForFunctionCallInfo(1));
         //   InitFunctionCallInfoData(..., 1, InvalidOid, (Node *) aggstate, NULL); }
         if OidIsValid(aggserialfn) {
-            build_serialfn_call_frame_owned(pertrans, aggstate, aggserialfn)?;
+            build_serialfn_call_frame_owned(pertrans, aggstate, aggserialfn, mcx)?;
         }
 
         // if (OidIsValid(aggdeserialfn)) { build_aggregate_deserialfn_expr; fmgr_info;
         //   fmgr_info_set_expr; deserialfn_fcinfo = palloc(SizeForFunctionCallInfo(2));
         //   InitFunctionCallInfoData(..., 2, InvalidOid, (Node *) aggstate, NULL); }
         if OidIsValid(aggdeserialfn) {
-            build_deserialfn_call_frame_owned(pertrans, aggstate, aggdeserialfn)?;
+            build_deserialfn_call_frame_owned(pertrans, aggstate, aggdeserialfn, mcx)?;
         }
 
         // If we're doing either DISTINCT or ORDER BY for a plain agg, then we have
@@ -470,9 +486,11 @@ pub fn build_pertrans_for_aggref<'mcx>(
         //                                                   &TTSOpsMinimalTuple);
         //   }
         if num_sort_cols > 0 || aggref.aggfilter.is_some() {
-            let sortdesc = exec_type_from_tl_owned(aggref)?;
+            let sortdesc = exec_type_from_tl_owned(aggref, mcx)?;
             let sortslot = exec_init_extra_tuple_slot_minimal(estate, &sortdesc)?;
-            pertrans.sortdesc = Some(sortdesc);
+            // `exec_type_from_tl_owned` returns the canonical `TupleDesc`
+            // (= Option<PgBox<..>>); store it directly.
+            pertrans.sortdesc = sortdesc;
             pertrans.sortslot = Some(sortslot);
         }
 
@@ -497,11 +515,8 @@ pub fn build_pertrans_for_aggref<'mcx>(
                 pertrans.inputtype_by_val = in_byval;
             } else if num_distinct_cols > 0 {
                 // we will need an extra slot to store prior values
-                let sortdesc = pertrans
-                    .sortdesc
-                    .as_ref()
-                    .expect("build_pertrans_for_aggref: sortdesc built above");
-                let uniqslot = exec_init_extra_tuple_slot_minimal(estate, sortdesc)?;
+                let desc = clone_tuple_desc(&pertrans.sortdesc, mcx)?;
+                let uniqslot = exec_init_extra_tuple_slot_minimal(estate, &desc)?;
                 pertrans.uniqslot = Some(uniqslot);
             }
 
@@ -579,9 +594,9 @@ pub fn build_pertrans_for_aggref<'mcx>(
             //       pertrans->equalfnMulti = execTuplesMatchPrepare(sortdesc, numDistinctCols,
             //                                   sortColIdx, ops, sortCollations, &aggstate->ss.ps);
             if num_distinct_cols == 1 {
-                fmgr_info_get_opcode_into_equalfn_one(pertrans, ops[0])?;
+                fmgr_info_get_opcode_into_equalfn_one(pertrans, ops[0], mcx)?;
             } else {
-                exec_tuples_match_prepare_owned(pertrans, aggstate, &ops, num_distinct_cols)?;
+                exec_tuples_match_prepare_owned(pertrans, aggstate, &ops, num_distinct_cols, estate)?;
             }
             // pfree(ops);  (PgVec drops with the context)
             let _ = ops;
@@ -615,15 +630,9 @@ fn clone_aggref_into<'mcx>(
     mcx: Mcx<'mcx>,
     aggref: &Aggref<'mcx>,
 ) -> PgResult<PgBox<'mcx, Aggref<'mcx>>> {
-    // The Aggref carries only POD/Oid scalars plus expression-node Lists owned
-    // by the unported nodes vocabulary; storing the back-reference faithfully
-    // needs that owner's copyObject. Until it lands the copy panics loudly
-    // rather than fabricate a partial node.
-    let _ = (mcx, aggref);
-    panic!(
-        "backend-nodes-copyfuncs: pertrans->aggref back-reference needs copyObject over the \
-         Aggref expression-node lists (unported nodes vocabulary)"
-    )
+    // pertrans->aggref = aggref; — the owned model stores a deep copy
+    // (copyObject shape) of the executor-side Aggref.
+    alloc_in(mcx, aggref.clone_in(mcx)?)
 }
 
 /// `get_typlenbyval(typid, &typlen, &typbyval)` (lsyscache.c) — typcache read.
@@ -632,74 +641,135 @@ fn get_typlenbyval_owned(typid: Oid) -> PgResult<(i16, bool)> {
     backend_utils_cache_lsyscache_seams::get_typlenbyval::call(typid)
 }
 
+/// `palloc(SizeForFunctionCallInfo(nargs)); InitFunctionCallInfoData(*fcinfo,
+/// flinfo, nargs, fncollation, (Node *) aggstate, NULL)` — allocate and
+/// zero-init a transition/serial/deserial call frame carrying the resolved
+/// `FmgrInfo`.
+///
+/// F4 RESIDUAL (#324/#335): the C `(Node *) aggstate` context is stored as
+/// `None` here — `FunctionCallInfoBaseData.context` is `Option<&Node>` and the
+/// `Node` enum carries no AggState variant. The frame is otherwise complete; the
+/// live-AggState resolution + transition runtime stay seam-panicked.
+fn new_agg_fcinfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    flinfo: FmgrInfo,
+    nargs: i32,
+    fncollation: Oid,
+) -> PgResult<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>> {
+    let mut args = vec_with_capacity_in_std(nargs as usize);
+    for _ in 0..nargs {
+        args.push(types_datum::NullableDatum::default());
+    }
+    let fcinfo = FunctionCallInfoBaseData {
+        flinfo: Some(flinfo),
+        context: None, // C: (Node *) aggstate — F4 residual (no Node::AggState)
+        resultinfo: None,
+        fncollation,
+        isnull: false,
+        nargs: nargs as i16,
+        args,
+    };
+    alloc_in(mcx, fcinfo)
+}
+
+/// `Vec::with_capacity` for the std `Vec` the shared `FunctionCallInfoBaseData`
+/// uses for `args` (not arena-allocated — the C frame's flexible array is a
+/// plain palloc, and the shared vocab carries a std `Vec`).
+fn vec_with_capacity_in_std<T>(cap: usize) -> alloc::vec::Vec<T> {
+    alloc::vec::Vec::with_capacity(cap)
+}
+
 /// `build_aggregate_serialfn_expr` + `fmgr_info`/`fmgr_info_set_expr` +
 /// `InitFunctionCallInfoData` for the 1-arg serialfn call frame.
 fn build_serialfn_call_frame_owned<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
-    aggstate: &mut AggStateData<'mcx>,
+    _aggstate: &mut AggStateData<'mcx>,
     aggserialfn: Oid,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (pertrans, aggstate, aggserialfn);
-    panic!(
-        "backend-parser-parse-agg / backend-utils-fmgr: build_aggregate_serialfn_expr + \
-         fmgr_info + InitFunctionCallInfoData (serialfn call frame) not exposed by this unit's \
-         seams yet"
-    )
+    // build_aggregate_serialfn_expr(aggserialfn, &serialfnexpr);
+    // fmgr_info(aggserialfn, &pertrans->serialfn);
+    // fmgr_info_set_expr((Node *) serialfnexpr, &pertrans->serialfn);
+    // serialfn_fcinfo = palloc(SizeForFunctionCallInfo(1));
+    // InitFunctionCallInfoData(*serialfn_fcinfo, &pertrans->serialfn, 1,
+    //                          InvalidOid, (Node *) aggstate, NULL);
+    let serialfnexpr =
+        backend_parser_parse_agg_seams::build_aggregate_serialfn_expr::call(aggserialfn)?;
+    let mut serialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggserialfn)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut serialfn, &serialfnexpr);
+    pertrans.serialfn = serialfn.clone();
+    pertrans.serialfn_fcinfo = Some(new_agg_fcinfo(mcx, serialfn, 1, INVALID_OID)?);
+    Ok(())
 }
 
 /// `build_aggregate_deserialfn_expr` + `fmgr_info`/`fmgr_info_set_expr` +
 /// `InitFunctionCallInfoData` for the 2-arg deserialfn call frame.
 fn build_deserialfn_call_frame_owned<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
-    aggstate: &mut AggStateData<'mcx>,
+    _aggstate: &mut AggStateData<'mcx>,
     aggdeserialfn: Oid,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (pertrans, aggstate, aggdeserialfn);
-    panic!(
-        "backend-parser-parse-agg / backend-utils-fmgr: build_aggregate_deserialfn_expr + \
-         fmgr_info + InitFunctionCallInfoData (deserialfn call frame) not exposed by this \
-         unit's seams yet"
-    )
+    let deserialfnexpr =
+        backend_parser_parse_agg_seams::build_aggregate_deserialfn_expr::call(aggdeserialfn)?;
+    let mut deserialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggdeserialfn)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut deserialfn, &deserialfnexpr);
+    pertrans.deserialfn = deserialfn.clone();
+    pertrans.deserialfn_fcinfo = Some(new_agg_fcinfo(mcx, deserialfn, 2, INVALID_OID)?);
+    Ok(())
 }
 
 /// `ExecTypeFromTL(aggref->args)` (execTuples.c) — build the sort tupledesc.
 fn exec_type_from_tl_owned<'mcx>(
     aggref: &Aggref<'mcx>,
-) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-    let _ = aggref;
-    panic!(
-        "backend-executor-execTuples: ExecTypeFromTL over aggref->args (expression-node \
-         TargetEntry list) not exposed by this unit's seams yet"
-    )
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    // ExecTypeFromTL takes a &[TargetEntry]; materialize a contiguous copy of
+    // the aggref's args (which are stored as PgBox<TargetEntry>).
+    let mut tl: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        vec_with_capacity_in(mcx, list_len(&aggref.args))?;
+    if let Some(args) = aggref.args.as_ref() {
+        for tle in args.iter() {
+            tl.push(tle.clone_in(mcx)?);
+        }
+    }
+    backend_executor_execTuples_seams::exec_type_from_tl::call(mcx, &tl)
 }
 
 /// `ExecInitExtraTupleSlot(estate, desc, &TTSOpsMinimalTuple)` — owned by
 /// execTuples; the unit already declares `exec_init_extra_tuple_slot`.
 fn exec_init_extra_tuple_slot_minimal<'mcx>(
     estate: &mut EStateData<'mcx>,
-    desc: &PgBox<'mcx, TupleDescData<'mcx>>,
+    desc: &types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<SlotId> {
-    let _ = (estate, desc);
-    panic!(
-        "backend-executor-execTuples: ExecInitExtraTupleSlot(TTSOpsMinimalTuple) reached \
-         through the execTuples seam once build_pertrans_for_aggref's transfn frame lands"
+    let desc_clone = clone_tuple_desc(desc, estate.es_query_cxt)?;
+    backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(
+        estate,
+        desc_clone,
+        types_nodes::TupleSlotKind::MinimalTuple,
     )
 }
 
 /// `tle = get_sortgroupclause_tle(sortcl, aggref->args)` then `tle->resno` and
-/// `exprCollation((Node *) tle->expr)` (nodes/nodeFuncs.c). Both reads need the
-/// planner-owned TargetEntry/expression-node vocabulary (the trimmed shared
-/// `TargetEntry` carries neither `resno` nor the typed expr collation), so the
-/// resolution belongs to the unported nodeFuncs owner.
+/// `exprCollation((Node *) tle->expr)` (nodes/nodeFuncs.c).
 fn sortgroupclause_tle_resno_and_collation<'mcx>(
     sortcl: &types_nodes::nodeagg::SortGroupClauseAgg,
     aggref: &Aggref<'mcx>,
 ) -> PgResult<(types_core::primitive::AttrNumber, Oid)> {
-    let _ = (sortcl, aggref);
-    panic!(
-        "backend-nodes-nodeFuncs: get_sortgroupclause_tle + tle->resno + exprCollation over \
-         aggref->args (expression-node TargetEntry list) not exposed by this unit's seams yet"
-    )
+    // get_sortgroupclause_tle: the TargetEntry whose ressortgroupref matches.
+    let args = aggref
+        .args
+        .as_ref()
+        .expect("sortgroupclause_tle: aggref->args is NULL");
+    let tle = args
+        .iter()
+        .find(|tle| tle.ressortgroupref == sortcl.tle_sort_group_ref)
+        .expect("get_sortgroupclause_tle: no matching TargetEntry");
+    let collation = match tle.expr.as_ref() {
+        Some(e) => backend_nodes_nodeFuncs_seams::exprCollation::call(e),
+        None => INVALID_OID,
+    };
+    Ok((tle.resno, collation))
 }
 
 /// `fmgr_info(get_opcode(eqop), &pertrans->equalfnOne)` — single-column
@@ -707,12 +777,11 @@ fn sortgroupclause_tle_resno_and_collation<'mcx>(
 fn fmgr_info_get_opcode_into_equalfn_one<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
     eqop: Oid,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (pertrans, eqop);
-    panic!(
-        "backend-utils-cache-lsyscache / backend-utils-fmgr: get_opcode + fmgr_info for the \
-         single-column DISTINCT comparator not exposed by this unit's seams yet"
-    )
+    let opcode = backend_utils_cache_lsyscache_seams::get_opcode::call(eqop)?;
+    pertrans.equalfn_one = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, opcode)?;
+    Ok(())
 }
 
 /// `execTuplesMatchPrepare(...)` (execGrouping.c) — multi-column distinct
@@ -722,29 +791,87 @@ fn exec_tuples_match_prepare_owned<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     ops: &PgVec<'mcx, Oid>,
     num_distinct_cols: i32,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (pertrans, aggstate, ops, num_distinct_cols);
-    panic!(
-        "backend-executor-execGrouping: execTuplesMatchPrepare (multi-column DISTINCT \
-         comparator) not exposed by this unit's seams yet"
-    )
+    let mcx = estate.es_query_cxt;
+    // execTuplesMatchPrepare(sortdesc, numDistinctCols, sortColIdx, ops,
+    //                        sortCollations, &aggstate->ss.ps)
+    debug_assert!(
+        pertrans.sortdesc.is_some(),
+        "exec_tuples_match_prepare: sortdesc is NULL"
+    );
+    let desc = clone_tuple_desc(&pertrans.sortdesc, mcx)?;
+    let sort_col_idx = pertrans
+        .sort_col_idx
+        .as_ref()
+        .expect("exec_tuples_match_prepare: sortColIdx is NULL")
+        .clone();
+    let sort_collations = pertrans
+        .sort_collations
+        .as_ref()
+        .expect("exec_tuples_match_prepare: sortCollations is NULL")
+        .clone();
+    pertrans.equalfn_multi = backend_executor_execGrouping_seams::exec_tuples_match_prepare::call(
+        desc,
+        num_distinct_cols,
+        &sort_col_idx,
+        ops,
+        &sort_collations,
+        &mut aggstate.ss.ps,
+        estate,
+    )?;
+    Ok(())
+}
+
+/// Deep-copy a `TupleDesc` (the C reads a shared `TupleDesc` pointer; the owned
+/// seams take an owned `TupleDesc`, so clone it for each consumer).
+fn clone_tuple_desc<'mcx>(
+    desc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    match desc {
+        Some(d) => Ok(Some(alloc_in(mcx, d.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
 }
 
 /// `GetAggInitVal(textInitVal, transtype)` — convert the `agginitval` text
 /// Datum into the transition type's internal Datum via its input function.
-pub fn GetAggInitVal<'mcx>(text_init_val: Datum<'mcx>, transtype: Oid) -> PgResult<Datum<'mcx>> {
+pub fn GetAggInitVal<'mcx>(
+    mcx: Mcx<'mcx>,
+    str_init_val: &str,
+    transtype: Oid,
+) -> PgResult<Datum<'mcx>> {
     // getTypeInputInfo(transtype, &typinput, &typioparam);
     // strInitVal = TextDatumGetCString(textInitVal);
     // initVal = OidInputFunctionCall(typinput, strInitVal, typioparam, -1);
     //
-    // getTypeInputInfo (lsyscache.c) and OidInputFunctionCall (fmgr.c) are not
-    // exposed by this unit's seam dependencies; the conversion lands with
-    // them.
-    let _ = (text_init_val, transtype);
-    panic!(
-        "backend-utils-cache-lsyscache / backend-utils-fmgr: GetAggInitVal needs \
-         getTypeInputInfo + OidInputFunctionCall, not exposed by this unit's seams yet"
+    // The repo carries the agginitval as the already-detoasted `Option<String>`
+    // column of `AggFormData` (the syscache projection did the `SysCacheGetAttr`
+    // + text read), so the C `TextDatumGetCString` is folded into the caller;
+    // here we run getTypeInputInfo + OidInputFunctionCall.
+    let (typinput, typioparam) =
+        backend_utils_cache_lsyscache_seams::get_type_input_info::call(transtype)?;
+    backend_utils_fmgr_fmgr_seams::oid_input_function_call::call(
+        mcx,
+        typinput,
+        str_init_val,
+        typioparam,
+        -1,
     )
+}
+
+/// `ExecProcNode` callback dispatcher for an Agg node: recover the concrete
+/// `AggStateData` from the `PlanStateNode::Agg` carrier (the C
+/// `castNode(AggState, pstate)`) and run [`ExecAgg`].
+pub fn exec_agg_node<'mcx>(
+    pstate: &mut types_nodes::planstate::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let agg = pstate
+        .as_agg_state_mut_typed::<AggStateData<'mcx>>()
+        .expect("castNode(AggState, pstate) failed");
+    ExecAgg(agg, estate)
 }
 
 /// `ExecAgg(pstate)` — the node's `ExecProcNode` callback: produce the next

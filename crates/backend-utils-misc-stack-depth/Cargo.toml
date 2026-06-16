@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-error = { path = "../types-error" }

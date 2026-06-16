@@ -111,16 +111,16 @@ pub fn ExecEvalGroupingFunc<'mcx>(
         .parent
         .map(|l| l.get())
         .expect("ExecEvalGroupingFunc: EEOP_GROUPING_FUNC step has no parent PlanState");
-    let aggstate_any = parent.as_agg_state().expect(
-        "ExecEvalGroupingFunc: castNode(AggState, state->parent) — the parent AggState is owned \
-         by nodeAgg, which has not yet threaded its T_AggState into PlanStateNode",
-    );
-    // `dyn Any` downcasts only to `'static` types; the erased payload is a fully
-    // owned `AggStateData` so its `'static` instantiation is the registered
-    // TypeId. (This `.expect` is unreachable until the threading above lands.)
-    let aggstate = aggstate_any
-        .downcast_ref::<backend_executor_nodeAgg::AggStateData<'static>>()
-        .expect("ExecEvalGroupingFunc: parent PlanState payload is not an AggStateData");
+    // AggState *aggstate = castNode(AggState, state->parent); — recover the
+    // concrete `AggStateData` from the tag-checked erased `AggStateLive`
+    // carrier the `PlanStateNode::Agg` variant holds (the faithful rendering of
+    // C's `castNode` across the nodeAgg->types-nodes crate boundary).
+    let aggstate = parent
+        .as_agg_state_typed::<backend_executor_nodeAgg::AggStateData<'_>>()
+        .expect(
+            "ExecEvalGroupingFunc: castNode(AggState, state->parent) — parent PlanState is not \
+             an AggStateData",
+        );
     let grouped_cols = aggstate.grouped_cols.as_deref();
 
     // foreach(lc, op->d.grouping_func.clauses)

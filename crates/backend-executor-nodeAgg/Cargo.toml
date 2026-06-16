@@ -21,6 +21,15 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+types-acl = { path = "../types-acl" }
+types-datum = { path = "../types-datum" }
+types-catalog = { path = "../types-catalog" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }

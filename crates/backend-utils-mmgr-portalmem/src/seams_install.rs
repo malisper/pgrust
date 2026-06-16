@@ -73,6 +73,19 @@ pub fn init_seams() {
 
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     seams::enable_portal_manager::set(crate::EnablePortalManager);
+
+    // `MemoryContextInit()` (utils/mmgr/mcxt.c). In stock PG this creates the
+    // process-global `TopMemoryContext`/`ErrorContext` very early in `main()`.
+    // This repo's `mcx` model has NO ambient/global context (docs/mctx-design.md:
+    // "deliberately no ambient current context"): every context is an owned
+    // value threaded through `Mcx<'mcx>`, and the top-level context the boot path
+    // needs is created by the binary shell and handed to `pg_main` as
+    // `Mcx<'static>`. There is therefore nothing for `MemoryContextInit` to
+    // bootstrap here, so the faithful body is a successful no-op. Homed on the
+    // mmgr-family owner (portalmem) because the mcxt.c interrupt/logging surface
+    // has no dedicated body crate in the mcx world and `mcx` itself cannot depend
+    // on the seam crate (the seam crate depends on `mcx`).
+    backend_utils_mmgr_mcxt_seams::memory_context_init::set(|| Ok(()));
 }
 
 /// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`

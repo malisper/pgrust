@@ -163,6 +163,169 @@ pub struct Aggref<'mcx> {
     pub location: i32,
 }
 
+impl<'mcx> Aggref<'mcx> {
+    /// Build the executor-side `Aggref<'mcx>` from the lifetime-free
+    /// expression-tree [`crate::primnodes::Aggref`] discovered during
+    /// `ExecInitExprRec`.
+    ///
+    /// In C there is a single `Aggref` struct that both the expression tree and
+    /// `aggstate->aggs` carry. The repo split it into the lifetime-free
+    /// [`crate::primnodes::Aggref`] (in the `Expr` tree) and this executor-side
+    /// `nodeagg::Aggref<'mcx>` (whose child lists are arena-allocated
+    /// `PgVec`/`PgBox`). This is the faithful `copyObject`-shape bridge between
+    /// them: it deep-copies the args / direct-args / filter into `mcx` and maps
+    /// the order/distinct SortGroupClauses field-for-field.
+    pub fn from_primnode(
+        src: &crate::primnodes::Aggref,
+        mcx: Mcx<'mcx>,
+    ) -> PgResult<Aggref<'mcx>> {
+        // List *aggargtypes (Oid list).
+        let mut aggargtypes = vec_with_capacity_in(mcx, src.aggargtypes.len())?;
+        for t in src.aggargtypes.iter() {
+            aggargtypes.push(*t);
+        }
+
+        // List *aggdirectargs (plain Exprs).
+        let mut aggdirectargs = vec_with_capacity_in(mcx, src.aggdirectargs.len())?;
+        for e in src.aggdirectargs.iter() {
+            aggdirectargs.push(alloc_in(mcx, e.clone_in(mcx)?)?);
+        }
+
+        // List *args (TargetEntry list).
+        let mut args = vec_with_capacity_in(mcx, src.args.len())?;
+        for tle in src.args.iter() {
+            args.push(alloc_in(mcx, tle.clone_in(mcx)?)?);
+        }
+
+        // List *aggorder / List *aggdistinct (SortGroupClause lists).
+        let map_sgc = |v: &[crate::rawnodes::SortGroupClause]| -> PgResult<PgVec<'mcx, SortGroupClauseAgg>> {
+            let mut out = vec_with_capacity_in(mcx, v.len())?;
+            for c in v.iter() {
+                out.push(SortGroupClauseAgg {
+                    tle_sort_group_ref: c.tleSortGroupRef,
+                    eqop: c.eqop,
+                    sortop: c.sortop,
+                    nulls_first: c.nulls_first,
+                });
+            }
+            Ok(out)
+        };
+        let aggorder = map_sgc(&src.aggorder)?;
+        let aggdistinct = map_sgc(&src.aggdistinct)?;
+
+        // Expr *aggfilter.
+        let aggfilter = match src.aggfilter.as_ref() {
+            Some(f) => Some(alloc_in(mcx, f.clone_in(mcx)?)?),
+            None => None,
+        };
+
+        Ok(Aggref {
+            aggfnoid: src.aggfnoid,
+            aggtype: src.aggtype,
+            aggcollid: src.aggcollid,
+            inputcollid: src.inputcollid,
+            aggtranstype: src.aggtranstype,
+            aggargtypes: Some(aggargtypes),
+            aggdirectargs: Some(aggdirectargs),
+            args: Some(args),
+            aggorder: Some(aggorder),
+            aggdistinct: Some(aggdistinct),
+            aggfilter,
+            aggstar: src.aggstar,
+            aggvariadic: src.aggvariadic,
+            aggkind: src.aggkind,
+            aggpresorted: src.aggpresorted,
+            agglevelsup: src.agglevelsup,
+            aggsplit: src.aggsplit,
+            aggno: src.aggno,
+            aggtransno: src.aggtransno,
+            location: src.location,
+        })
+    }
+
+    /// Deep copy of the executor-side `Aggref` into `mcx` (C: `copyObject`
+    /// shape). Used for the `pertrans->aggref` / `peragg->aggref` back-references.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Aggref<'b>> {
+        let clone_oids = |v: &Option<PgVec<'_, Oid>>| -> PgResult<Option<PgVec<'b, Oid>>> {
+            match v {
+                Some(v) => {
+                    let mut out = vec_with_capacity_in(mcx, v.len())?;
+                    for x in v.iter() {
+                        out.push(*x);
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let clone_exprs =
+            |v: &Option<PgVec<'_, PgBox<'_, Expr>>>| -> PgResult<Option<PgVec<'b, PgBox<'b, Expr>>>> {
+                match v {
+                    Some(v) => {
+                        let mut out = vec_with_capacity_in(mcx, v.len())?;
+                        for e in v.iter() {
+                            out.push(alloc_in(mcx, e.clone_in(mcx)?)?);
+                        }
+                        Ok(Some(out))
+                    }
+                    None => Ok(None),
+                }
+            };
+        let clone_tles = |v: &Option<PgVec<'_, PgBox<'_, TargetEntry<'_>>>>|
+         -> PgResult<Option<PgVec<'b, PgBox<'b, TargetEntry<'b>>>>> {
+            match v {
+                Some(v) => {
+                    let mut out = vec_with_capacity_in(mcx, v.len())?;
+                    for tle in v.iter() {
+                        out.push(alloc_in(mcx, tle.clone_in(mcx)?)?);
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let clone_sgc = |v: &Option<PgVec<'_, SortGroupClauseAgg>>|
+         -> PgResult<Option<PgVec<'b, SortGroupClauseAgg>>> {
+            match v {
+                Some(v) => {
+                    let mut out = vec_with_capacity_in(mcx, v.len())?;
+                    for c in v.iter() {
+                        out.push(*c);
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let aggfilter = match self.aggfilter.as_ref() {
+            Some(f) => Some(alloc_in(mcx, f.clone_in(mcx)?)?),
+            None => None,
+        };
+        Ok(Aggref {
+            aggfnoid: self.aggfnoid,
+            aggtype: self.aggtype,
+            aggcollid: self.aggcollid,
+            inputcollid: self.inputcollid,
+            aggtranstype: self.aggtranstype,
+            aggargtypes: clone_oids(&self.aggargtypes)?,
+            aggdirectargs: clone_exprs(&self.aggdirectargs)?,
+            args: clone_tles(&self.args)?,
+            aggorder: clone_sgc(&self.aggorder)?,
+            aggdistinct: clone_sgc(&self.aggdistinct)?,
+            aggfilter,
+            aggstar: self.aggstar,
+            aggvariadic: self.aggvariadic,
+            aggkind: self.aggkind,
+            aggpresorted: self.aggpresorted,
+            agglevelsup: self.agglevelsup,
+            aggsplit: self.aggsplit,
+            aggno: self.aggno,
+            aggtransno: self.aggtransno,
+            location: self.location,
+        })
+    }
+}
+
 /// `Agg` plan node (nodes/plannodes.h).
 #[derive(Debug, Default)]
 pub struct Agg<'mcx> {

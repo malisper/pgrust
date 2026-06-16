@@ -123,6 +123,7 @@ pub fn init_seams() {
     seams::exec_build_hash32_from_attrs::set(execExpr_domain_agg::exec_build_hash32_from_attrs);
     seams::exec_build_grouping_equal::set(execExpr_domain_agg::exec_build_grouping_equal);
     seams::exec_build_param_set_equal::set(execExpr_domain_agg::exec_build_param_set_equal);
+    seams::exec_build_agg_trans::set(execExpr_domain_agg::seam_exec_build_agg_trans);
 
     // --- execExpr-modify: nodeModifyTable / execPartition leaf builders ---
     seams::exec_init_merge_when_qual::set(execExpr_modify::exec_init_merge_when_qual);

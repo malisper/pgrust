@@ -299,6 +299,17 @@ pub struct AggStateData<'mcx> {
     pub ss: ScanStateData<'mcx>,
     /// `List *aggs` — all Aggref nodes in targetlist & quals.
     pub aggs: Option<PgVec<'mcx, PgBox<'mcx, Aggref<'mcx>>>>,
+    /// The expression-tree-shaped [`types_nodes::primnodes::Aggref`] originals
+    /// for each entry of [`Self::aggs`], parallel by index. In C there is one
+    /// `Aggref` struct; the repo splits the expression-tree node
+    /// (`primnodes::Aggref`) from the executor satellite (`nodeagg::Aggref`).
+    /// `ExecInitExprRec` discovers the `primnodes::Aggref`s; `ExecInitAgg`
+    /// converts each into the satellite for `aggs` and keeps the original here so
+    /// the parse_agg helpers (`get_aggregate_argtypes`,
+    /// `build_aggregate_*fn_expr`) — which take `&primnodes::Aggref` — can be
+    /// called. Compile-time-only bookkeeping (not in the C struct). `None` is
+    /// the pre-discovery NIL.
+    pub aggs_prim: Option<PgVec<'mcx, types_nodes::primnodes::Aggref>>,
     /// `int numaggs`.
     pub numaggs: i32,
     /// `int numtrans`.
@@ -463,4 +474,43 @@ impl<'mcx> AggStateData<'mcx> {
     pub fn new_in(_mcx: Mcx<'mcx>) -> PgResult<Self> {
         Ok(Self::default())
     }
+}
+
+// ---------------------------------------------------------------------------
+// PlanStateNode::Agg carrier — let an `AggStateData<'mcx>` ride through the
+// central `types_nodes::PlanStateNode` enum (and across the nodeAgg->execExpr
+// `exec_build_agg_trans` seam edge) behind the tag-checked, owned
+// `AggStateLive` trait object. `AggStateData` lives in THIS crate, above
+// `types-nodes`, so the enum cannot name it directly; this is the faithful
+// rendering of C's `castNode(AggState, planstate)` across the crate boundary.
+// ---------------------------------------------------------------------------
+
+impl<'mcx> types_nodes::aggstate_carrier::AggStateLive<'mcx> for AggStateData<'mcx> {
+    fn agg_state_tag(&self) -> u64 {
+        types_nodes::aggstate_carrier::AGG_STATE_TAG
+    }
+
+    fn live_type_name(&self) -> &'static str {
+        types_nodes::aggstate_carrier::live_type_name_of::<Self>()
+    }
+
+    fn tag(&self) -> types_nodes::nodes::NodeTag {
+        types_nodes::execstate_tags::T_AggState
+    }
+
+    fn ps(&self) -> &types_nodes::execnodes::PlanStateData<'mcx> {
+        &self.ss.ps
+    }
+
+    fn ps_mut(&mut self) -> &mut types_nodes::execnodes::PlanStateData<'mcx> {
+        &mut self.ss.ps
+    }
+
+    fn ss(&self) -> &types_nodes::execnodes::ScanStateData<'mcx> {
+        &self.ss
+    }
+}
+
+impl<'mcx> types_nodes::aggstate_carrier::AggStateTagged<'mcx> for AggStateData<'mcx> {
+    const TAG: u64 = types_nodes::aggstate_carrier::AGG_STATE_TAG;
 }
