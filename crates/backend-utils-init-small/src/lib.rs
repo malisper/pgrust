@@ -165,6 +165,15 @@ pub fn init_seams() {
     // so the standalone-boot seam declared in `backend-tcop-postgres-seams` is
     // installed by its owner (globals.c) pointing at the real setter.
     backend_tcop_postgres_seams::set_pg_start_time::set(globals::SetPgStartTime);
+
+    // GUC variable accessors (`conf->variable`) for the globals.c integers backed
+    // by GUC settings. The GUC machinery seeds these from boot_val during
+    // InitializeGUCOptions and the shmem-sizing path reads them.
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::NBuffers.install(GucVarAccessors {
+        get: globals::NBuffers,
+        set: globals::SetNBuffers,
+    });
 }
 
 #[cfg(test)]
