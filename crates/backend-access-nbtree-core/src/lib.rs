@@ -81,6 +81,11 @@ pub fn init_seams() {
     seams::bt_start_vacuum::set(utils::bt_start_vacuum);
     seams::bt_end_vacuum::set(utils::bt_end_vacuum);
 
+    // BTVacInfo shared state (nbtutils.c) — the ipci.c `CalculateShmemSize` /
+    // `CreateOrAttachShmemStructs` entry points.
+    backend_access_nbtree_seams::btree_shmem_size::set(utils::bt_shmem_size);
+    backend_access_nbtree_seams::btree_shmem_init::set(utils::bt_shmem_init);
+
     // --- nbtinsert.c (1) ---
     seams::bt_doinsert::set(insert::bt_doinsert);
 

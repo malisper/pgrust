@@ -397,6 +397,10 @@ pub const SINVAL_WRITE_LOCK: usize = 6;
 /// offset of the custom-wait-event lock in `MainLWLockArray`.
 pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
 
+/// `BtreeVacuumLock` (`lwlocklist.h`, `PG_LWLOCK(20, BtreeVacuum)`): offset of
+/// the lock interlocking the btree vacuum cycle-id shared array (`btvacinfo`).
+pub const BTREE_VACUUM_LOCK: usize = 20;
+
 /// `RelCacheInitLock` (`lwlocklist.h`, `PG_LWLOCK(16, RelCacheInit)`): offset of
 /// the relation-cache init-file lock in `MainLWLockArray`. Held while reading or
 /// updating `pg_internal.init`.
