@@ -13687,6 +13687,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-uuid"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "common-hashfn",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+ "types-uuid",
+]
+
+[[package]]
 name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
@@ -15863,6 +15881,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-strong-random-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep"
 version = "0.0.0"
 dependencies = [
@@ -17126,6 +17151,14 @@ name = "types-typcache"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-uuid"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-nodes",
 ]
 
 [[package]]

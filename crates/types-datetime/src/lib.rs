@@ -119,6 +119,8 @@ pub const JULIAN_MAXYEAR: i32 = 5_874_898;
 pub const JULIAN_MAXMONTH: i32 = 6;
 pub const JULIAN_MAXDAY: i32 = 3;
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
+/// `UNIX_EPOCH_JDATE == date2j(1970,1,1)` (datatype/timestamp.h).
+pub const UNIX_EPOCH_JDATE: i32 = 2_440_588;
 pub const DATETIME_MIN_JULIAN: i32 = 0;
 pub const DATE_END_JULIAN: i32 = 2_147_483_494;
 
