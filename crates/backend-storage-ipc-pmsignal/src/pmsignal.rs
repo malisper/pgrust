@@ -267,6 +267,25 @@ pub fn send_postmaster_signal_xlog_is_shutdown() {
     SendPostmasterSignal(PMSignalReason::PMSIGNAL_XLOG_IS_SHUTDOWN);
 }
 
+/// `SendPostmasterSignal(PMSIGNAL_RECOVERY_STARTED)` — the startup process's
+/// signal that it has begun redo, so the postmaster can launch the
+/// archiver/bgwriter/checkpointer for recovery.
+pub fn send_postmaster_signal_recovery_started() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_RECOVERY_STARTED);
+}
+
+/// `SendPostmasterSignal(PMSIGNAL_RECOVERY_CONSISTENT)` — recovery has reached
+/// a consistent state.
+pub fn send_postmaster_signal_recovery_consistent() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_RECOVERY_CONSISTENT);
+}
+
+/// `SendPostmasterSignal(PMSIGNAL_BEGIN_HOT_STANDBY)` — the postmaster may now
+/// begin accepting read-only (hot-standby) connections.
+pub fn send_postmaster_signal_begin_hot_standby() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_BEGIN_HOT_STANDBY);
+}
+
 /// `CheckPostmasterSignal` — check whether `reason` was signaled, clearing the
 /// flag if so. Called by the postmaster after receiving `SIGUSR1`.
 ///

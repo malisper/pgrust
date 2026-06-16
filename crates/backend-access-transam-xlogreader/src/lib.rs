@@ -1990,6 +1990,33 @@ pub fn XLogRecGetTotalLen(state: &XLogReaderState<'_>) -> uint32 {
         .total_len()
 }
 
+/// `XLogRecGetData(decoder)` (xlogreader.h) — `(decoder)->record->main_data`,
+/// the record's main data area. The caller (the recovery redo driver)
+/// guarantees a decoded current record.
+pub fn XLogRecGetData<'a>(state: &'a XLogReaderState<'_>) -> &'a [u8] {
+    current(state)
+        .expect("XLogRecGetData requires a decoded current record")
+        .main_data()
+}
+
+/// `XLogRecGetXid(decoder)` (xlogreader.h) — `(decoder)->record->header.xl_xid`,
+/// the (bare, epoch-less) transaction id of the reader's current record.
+pub fn XLogRecGetXid(state: &XLogReaderState<'_>) -> TransactionId {
+    current(state)
+        .expect("XLogRecGetXid requires a decoded current record")
+        .xid()
+}
+
+/// `XLogRecMaxBlockId(decoder)` (xlogreader.h) —
+/// `(decoder)->record->max_block_id`, the highest block id registered in the
+/// reader's current record (`-1` when none). `XLogRecHasAnyBlockRefs` is
+/// `max_block_id >= 0`.
+pub fn reader_max_block_id(state: &XLogReaderState<'_>) -> i32 {
+    current(state)
+        .expect("XLogRecMaxBlockId requires a decoded current record")
+        .max_block_id()
+}
+
 /// `XLogRecHasBlockRef(record, block_id)` (xlogreader.h inline).
 fn has_block_ref(state: &XLogReaderState<'_>, block_id: u8) -> bool {
     match current(state) {
@@ -2084,6 +2111,54 @@ pub fn restore_block_image(
     block_id: u8,
     buf: Buffer,
 ) -> PgResult<bool> {
+    // Decode the block image into a full `BLCKSZ` page (hole re-zeroed), then
+    // copy it onto the buffer's live page bytes through the bufmgr seam. On a
+    // decode failure the error text is already recorded and we return false.
+    let page = match decode_block_image_page(state, block_id)? {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+
+    // The bufmgr owns the page; the seam runs our copy over it.
+    seams::with_buffer_page::call(buf, &mut |dst: &mut [u8]| {
+        dst[..BLCKSZ].copy_from_slice(&page[..BLCKSZ]);
+        Ok(())
+    })?;
+
+    Ok(true)
+}
+
+/// `RestoreBlockImage(record, block_id, page)` (xlogreader.c:2075) — the
+/// faithful C signature, restoring the full-page image of `block_id` of the
+/// current record onto a caller-provided `BLCKSZ` byte buffer (C's `char *page`).
+///
+/// This is the form `verifyBackupPageConsistency` uses: it restores into a
+/// plain scratch page (`primary_image_masked`) to mask + `memcmp`, never
+/// touching a shared buffer. Returns `false` on failure (with the reader's
+/// error slot populated); `Err` carries a decode `ereport(ERROR)`.
+pub fn restore_block_image_bytes(
+    state: &XLogReaderState<'_>,
+    block_id: u8,
+    page: &mut [u8],
+) -> PgResult<bool> {
+    match decode_block_image_page(state, block_id)? {
+        Some(p) => {
+            page[..BLCKSZ].copy_from_slice(&p[..BLCKSZ]);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Shared decode core for `RestoreBlockImage`: validate the block reference,
+/// decompress if needed, and re-insert the page "hole" as zeroes, yielding the
+/// reconstructed `BLCKSZ` page. Returns `Ok(None)` when a failure message has
+/// been recorded on the reader (the public wrappers then return `Ok(false)`),
+/// `Err` for a hard `ereport(ERROR)`.
+fn decode_block_image_page(
+    state: &XLogReaderState<'_>,
+    block_id: u8,
+) -> PgResult<Option<Vec<u8>>> {
     // Validate the block reference + image presence (reads on the current rec).
     let d = match current(state) {
         Some(d) => d,
@@ -2096,7 +2171,7 @@ pub fn restore_block_image(
                     h, l, block_id
                 ),
             );
-            return Ok(false);
+            return Ok(None);
         }
     };
     if (block_id as i32) > d.max_block_id() || !d.has_block_ref(block_id as usize) {
@@ -2108,7 +2183,7 @@ pub fn restore_block_image(
                 h, l, block_id
             ),
         );
-        return Ok(false);
+        return Ok(None);
     }
     if !d.blocks()[block_id as usize].has_image() {
         let (h, l) = lsn_fmt(state.ReadRecPtr);
@@ -2119,7 +2194,7 @@ pub fn restore_block_image(
                 h, l, block_id
             ),
         );
-        return Ok(false);
+        return Ok(None);
     }
 
     // Snapshot the block-image inputs.
@@ -2151,7 +2226,7 @@ pub fn restore_block_image(
                         state,
                         format!("could not decompress image at {:X}/{:X}, block {}", h, l, block_id),
                     );
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
         } else if (bimg_info & BKPIMAGE_COMPRESS_LZ4) != 0 {
@@ -2164,7 +2239,7 @@ pub fn restore_block_image(
                     h, l, "LZ4", block_id
                 ),
             );
-            return Ok(false);
+            return Ok(None);
         } else if (bimg_info & BKPIMAGE_COMPRESS_ZSTD) != 0 {
             // USE_ZSTD not defined in this build (mirrors the C #else).
             let (h, l) = lsn_fmt(state.ReadRecPtr);
@@ -2175,7 +2250,7 @@ pub fn restore_block_image(
                     h, l, "zstd", block_id
                 ),
             );
-            return Ok(false);
+            return Ok(None);
         } else {
             let (h, l) = lsn_fmt(state.ReadRecPtr);
             set_restore_error(
@@ -2185,31 +2260,26 @@ pub fn restore_block_image(
                     h, l, block_id
                 ),
             );
-            return Ok(false);
+            return Ok(None);
         }
         ptr = tmp;
     } else {
         ptr = raw;
     }
 
-    // Generate the page onto the buffer's live page bytes, accounting for the
-    // hole. The bufmgr owns the page; the seam runs our closure over it.
-    seams::with_buffer_page::call(buf, &mut |page: &mut [u8]| {
-        if hole_length == 0 {
-            page[..BLCKSZ].copy_from_slice(&ptr[..BLCKSZ]);
-        } else {
-            page[..hole_offset].copy_from_slice(&ptr[..hole_offset]);
-            for b in page[hole_offset..hole_offset + hole_length].iter_mut() {
-                *b = 0;
-            }
-            page[hole_offset + hole_length..BLCKSZ].copy_from_slice(
-                &ptr[hole_offset..hole_offset + (BLCKSZ - (hole_offset + hole_length))],
-            );
-        }
-        Ok(())
-    })?;
+    // Generate the reconstructed page, re-inserting the hole as zeroes.
+    let mut page = alloc::vec![0u8; BLCKSZ];
+    if hole_length == 0 {
+        page[..BLCKSZ].copy_from_slice(&ptr[..BLCKSZ]);
+    } else {
+        page[..hole_offset].copy_from_slice(&ptr[..hole_offset]);
+        // bytes [hole_offset, hole_offset+hole_length) stay zero
+        page[hole_offset + hole_length..BLCKSZ].copy_from_slice(
+            &ptr[hole_offset..hole_offset + (BLCKSZ - (hole_offset + hole_length))],
+        );
+    }
 
-    Ok(true)
+    Ok(Some(page))
 }
 
 // ===========================================================================

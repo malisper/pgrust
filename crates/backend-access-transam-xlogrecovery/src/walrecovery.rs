@@ -201,6 +201,33 @@ pub fn init_wal_recovery_reader(
 }
 
 // ===========================================================================
+// Held-reader accessors for the replay driver.
+//
+// The replay family (`replay.rs`) is handed an opaque `RecordRef` naming "the
+// held reader's current decoded record"; to drive `GetRmgr().rm_redo`, read the
+// record header (`xl_rmid`/`xl_info`/`xl_xid`), the main data area
+// (`XLogRecGetData`), and the reader cursor (`ReadRecPtr`/`EndRecPtr`), it needs
+// the live reader. These mirror the C `xlogreader` file-static dereference.
+// ===========================================================================
+
+/// `xlogreader` (the held recovery reader) as a shared borrow. Mirrors the C
+/// `XLogRecGetXXX(xlogreader)` macro dereference.
+#[inline]
+pub(crate) fn reader_state() -> &'static XLogReaderState<'static> {
+    let p = XLOGREADER.with(Cell::get);
+    debug_assert!(!p.is_null(), "recovery reader accessed before InitWalRecovery");
+    unsafe { &*p }
+}
+
+/// `xlogreader` (the held recovery reader) as a mutable borrow — used to invoke
+/// `rm_redo(xlogreader)` (the `RmRedo` callback takes `&mut XLogReaderState`).
+#[inline]
+#[allow(clippy::mut_from_ref)]
+pub(crate) fn reader_state_mut() -> &'static mut XLogReaderState<'static> {
+    reader()
+}
+
+// ===========================================================================
 // XLogRecGetRmid / XLogRecGetInfo / XLogRecGetTotalLen seam installs.
 //
 // The recovery driver's ReadCheckpointRecord reads the current record's header

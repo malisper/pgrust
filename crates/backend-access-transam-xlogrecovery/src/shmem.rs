@@ -379,6 +379,82 @@ pub fn confirm_recovery_paused() {
     spin_lock_release(&ctl.info_lck);
 }
 
+/// `PerformWalRecovery` initial-progress block (xlogrecovery.c:1682-1700): seed
+/// the shared replay-progress words "as if we had just replayed the record
+/// before the REDO location", under `info_lck`.
+pub(crate) fn init_replay_progress(
+    last_read: XLogRecPtr,
+    last_end: XLogRecPtr,
+    last_tli: TimeLineID,
+) {
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    let m = ctl_mut();
+    m.lastReplayedReadRecPtr = last_read;
+    m.lastReplayedEndRecPtr = last_end;
+    m.lastReplayedTLI = last_tli;
+    m.replayEndRecPtr = last_end;
+    m.replayEndTLI = last_tli;
+    m.recoveryLastXTime = 0;
+    m.currentChunkStartTime = 0;
+    m.recoveryPauseState = RecoveryPauseState::NotPaused;
+    spin_lock_release(&ctl.info_lck);
+}
+
+/// `ApplyWalRecord` (xlogrecovery.c:1991-1994): update the shared
+/// `replayEndRecPtr`/`replayEndTLI` before replaying a record, under `info_lck`,
+/// so `XLogFlush` updates `minRecoveryPoint` correctly.
+pub(crate) fn set_replay_end(end_rec_ptr: XLogRecPtr, tli: TimeLineID) {
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    let m = ctl_mut();
+    m.replayEndRecPtr = end_rec_ptr;
+    m.replayEndTLI = tli;
+    spin_lock_release(&ctl.info_lck);
+}
+
+/// `ApplyWalRecord` (xlogrecovery.c:2028-2032): update the shared
+/// `lastReplayed*` words after a record has been successfully replayed, under
+/// `info_lck`.
+pub(crate) fn set_last_replayed(
+    read_rec_ptr: XLogRecPtr,
+    end_rec_ptr: XLogRecPtr,
+    tli: TimeLineID,
+) {
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    let m = ctl_mut();
+    m.lastReplayedReadRecPtr = read_rec_ptr;
+    m.lastReplayedEndRecPtr = end_rec_ptr;
+    m.lastReplayedTLI = tli;
+    spin_lock_release(&ctl.info_lck);
+}
+
+/// `(XLogRecoveryCtl->lastReplayedEndRecPtr, lastReplayedTLI)` read assuming the
+/// caller is the startup process (`CheckRecoveryConsistency`, xlogrecovery.c:
+/// 2211-2215: "assume that we are called in the startup process, and hence
+/// don't need a lock"). Mirrors the C lock-free read.
+pub(crate) fn last_replayed_end_rec_ptr_unlocked() -> (XLogRecPtr, TimeLineID) {
+    let ctl = ctl();
+    (ctl.lastReplayedEndRecPtr, ctl.lastReplayedTLI)
+}
+
+/// `((volatile XLogRecoveryCtlData *) XLogRecoveryCtl)->recoveryPauseState`
+/// (xlogrecovery.c:1808): the redo loop's intentionally-unlocked pause-state
+/// peek (the comment there explains why no `info_lck` is taken).
+pub(crate) fn recovery_pause_state_unlocked() -> RecoveryPauseState {
+    ctl().recoveryPauseState
+}
+
+/// `CheckRecoveryConsistency` (xlogrecovery.c:2283-2285): publish
+/// `SharedHotStandbyActive = true` under `info_lck`.
+pub(crate) fn set_shared_hot_standby_active() {
+    let ctl = ctl();
+    spin_lock_acquire(&ctl.info_lck);
+    ctl_mut().SharedHotStandbyActive = true;
+    spin_lock_release(&ctl.info_lck);
+}
+
 /// `XLogRecPtr GetXLogReplayRecPtr(NULL)` — the NULL-`replayTLI` form, dropping
 /// the timeline. A thin wrapper over [`get_xlog_replay_rec_ptr`] for the
 /// callers that only want the LSN.

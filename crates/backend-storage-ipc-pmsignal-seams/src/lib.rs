@@ -71,3 +71,24 @@ seam_core::seam!(
     /// Async-signal-safe and infallible in C.
     pub fn send_postmaster_signal_xlog_is_shutdown()
 );
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_RECOVERY_STARTED)` (pmsignal.c) — tell
+    /// the postmaster the startup process has begun redo, so it can launch the
+    /// archiver / bgwriter / checkpointer for recovery. Narrow per-reason seam.
+    pub fn send_postmaster_signal_recovery_started()
+);
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_RECOVERY_CONSISTENT)` (pmsignal.c) — tell
+    /// the postmaster recovery has reached a consistent state. Narrow
+    /// per-reason seam.
+    pub fn send_postmaster_signal_recovery_consistent()
+);
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_BEGIN_HOT_STANDBY)` (pmsignal.c) — tell
+    /// the postmaster it may begin accepting read-only (hot-standby)
+    /// connections. Narrow per-reason seam.
+    pub fn send_postmaster_signal_begin_hot_standby()
+);

@@ -229,6 +229,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RestoreBlockImage(record, block_id, page)` (xlogreader.c:2075) — the
+    /// faithful C signature: decompress/copy the FPI onto a caller-provided
+    /// `BLCKSZ` scratch page (C's `char *page`), never touching a shared
+    /// buffer. Used by `verifyBackupPageConsistency` to mask + `memcmp`.
+    /// Returns `false` (with `record->errormsg_buf` populated) on a decompress
+    /// failure.
+    pub fn restore_block_image_bytes(
+        record: &XLogReaderState<'_>,
+        block_id: u8,
+        page: &mut [u8],
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `record->errormsg_buf` (xlogreader.c) — the reader's error text after a
     /// failed `RestoreBlockImage`.
     pub fn reader_errormsg_buf(record: &XLogReaderState<'_>) -> String
