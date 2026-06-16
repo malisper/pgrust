@@ -13,6 +13,7 @@ pub mod pg_cast;
 pub mod pg_constraint;
 pub mod pg_conversion;
 pub mod pg_enum;
+pub mod pg_proc;
 pub mod pg_type;
 pub mod pg_inherits;
 pub mod pg_rewrite;

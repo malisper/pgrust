@@ -775,6 +775,287 @@ fn update_pg_rewrite_name<'mcx>(
     )
 }
 
+/* ======================================================================== *
+ * pg_proc — ProcedureCreate (OID column + proname NameData + oidvector
+ * proargtypes + the CATALOG_VARLEN columns: proallargtypes / proargmodes /
+ * proargnames / proargdefaults / protrftypes / probin / prosqlbody /
+ * proconfig / proacl). pg_proc.c:320-380, 580-609.
+ * ======================================================================== */
+
+/// `OIDOID` (`pg_type_d.h`).
+const OIDOID: Oid = 26;
+/// `CHAROID` (`pg_type_d.h`).
+const CHAROID: Oid = 18;
+/// `TEXTOID` (`pg_type_d.h`).
+const TEXTOID: Oid = 25;
+
+/// `PointerGetDatum(buildoidvector(oids, n))` (oid.c): the on-disk `oidvector`
+/// image — a varlena-ish fixed-layout struct (`int2vector`-shaped) whose header
+/// (`vl_len_` via `SET_VARSIZE`, then `ndim=1`, `dataoffset=0`,
+/// `elemtype=OIDOID`, `dim1=n`, `lbound1=0`) is followed by the `n` `Oid`
+/// values. `OidVectorSize(n) = offsetof(oidvector, values) + n * sizeof(Oid) =
+/// 24 + 4n`. Returned as the verbatim `Datum::ByRef` bytes (header included).
+fn buildoidvector<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
+    // offsetof(oidvector, values): vl_len_(4) + ndim(4) + dataoffset(4) +
+    // elemtype(4) + dim1(4) + lbound1(4) = 24.
+    const HEADER: usize = 24;
+    let n = oids.len();
+    let total = HEADER + n * core::mem::size_of::<Oid>();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    // SET_VARSIZE(result, OidVectorSize(n)): va_header = (uint32) total << 2.
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    // ndim = 1; dataoffset = 0; elemtype = OIDOID; dim1 = n; lbound1 = 0.
+    buf[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    buf[12..16].copy_from_slice(&OIDOID.to_ne_bytes());
+    buf[16..20].copy_from_slice(&(n as i32).to_ne_bytes());
+    buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    // memcpy(result->values, oids, n * sizeof(Oid));
+    for (i, v) in oids.iter().enumerate() {
+        let off = HEADER + i * 4;
+        buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+    }
+    Ok(Datum::ByRef(buf))
+}
+
+/// `construct_array_builtin(oids, n, OIDOID)` — a 1-D `Oid[]` array varlena.
+/// OID is pass-by-value, so the element-`Datum` path of `construct_array`
+/// resolves without the by-ref `datum_as_byte_window` detoast leg.
+fn build_oid_array<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
+    let mut elems: mcx::PgVec<'mcx, types_datum::datum::Datum> =
+        mcx::vec_with_capacity_in(mcx, oids.len())?;
+    for &o in oids {
+        elems.push(types_datum::datum::Datum::from_oid(o));
+    }
+    // construct_array(.., OIDOID): elmlen=4, elmbyval=true, elmalign='i'.
+    let buf = backend_utils_adt_arrayfuncs::construct::construct_array(
+        mcx, &elems, OIDOID, 4, true, b'i',
+    )?;
+    Ok(Datum::ByRef(buf))
+}
+
+/// `construct_array(chars, n, CHAROID, 1, true, 'c')` — a 1-D `char[]` array
+/// varlena. `char` is pass-by-value.
+fn build_char_array<'mcx>(mcx: Mcx<'mcx>, chars: &[i8]) -> PgResult<Datum<'mcx>> {
+    let mut elems: mcx::PgVec<'mcx, types_datum::datum::Datum> =
+        mcx::vec_with_capacity_in(mcx, chars.len())?;
+    for &c in chars {
+        elems.push(types_datum::datum::Datum::from_char(c));
+    }
+    let buf = backend_utils_adt_arrayfuncs::construct::construct_array(
+        mcx, &elems, CHAROID, 1, true, b'c',
+    )?;
+    Ok(Datum::ByRef(buf))
+}
+
+/// `construct_array(text_datums, n, TEXTOID, -1, false, 'i')` — a 1-D `text[]`
+/// array varlena built directly from the UTF-8 strings (the by-ref text builder
+/// in arrayfuncs).
+fn build_text_array_datum<'mcx>(mcx: Mcx<'mcx>, strs: &[&str]) -> PgResult<Datum<'mcx>> {
+    let buf = backend_utils_adt_arrayfuncs::construct::build_text_array(mcx, strs)?;
+    Ok(Datum::ByRef(buf))
+}
+
+/// `CStringGetTextDatum(s)` — a `text` varlena Datum: a 4-byte (full) varlena
+/// header (`SET_VARSIZE`) followed by the string bytes.
+fn proc_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    let payload = s.as_bytes();
+    let total = 4 + payload.len();
+    let word = (total as u32) << 2;
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    buf[0..4].copy_from_slice(&word.to_ne_bytes());
+    buf[4..].copy_from_slice(payload);
+    Ok(Datum::ByRef(buf))
+}
+
+/// Build the full `values[]` / `nulls[]` arrays for a `pg_proc` row from the
+/// crossed [`PgProcInsertRow`], mirroring pg_proc.c:320-379. `oid` is taken
+/// from `row.fields.oid` (the owner assigned it on the new-row path; on the
+/// replace path it is unused — `replaces[oid] = false`). `proacl` is column 30:
+/// present only on a fresh insert with a default ACL.
+fn proc_values_nulls<'mcx>(
+    mcx: Mcx<'mcx>,
+    row: &cat::pg_proc::PgProcInsertRow,
+) -> PgResult<(
+    [Datum<'mcx>; cat::pg_proc::Natts_pg_proc],
+    [bool; cat::pg_proc::Natts_pg_proc],
+)> {
+    use cat::pg_proc as pp;
+    let f = &row.fields;
+
+    // memset(nulls, false, ...); set per-column below.
+    let mut nulls = [false; pp::Natts_pg_proc];
+
+    // proname (NameData) — the row carries the already-truncated name string.
+    let mut name_image = [0u8; 64];
+    for (i, &b) in f.proname.as_bytes().iter().take(63).enumerate() {
+        name_image[i] = b;
+    }
+
+    // Fixed-width columns (pg_proc.c:327-345).
+    let mut values: [Datum<'mcx>; pp::Natts_pg_proc] = [
+        Datum::from_oid(f.oid),                                  // oid
+        name_datum(mcx, &name_image)?,                          // proname
+        Datum::from_oid(f.pronamespace),                        // pronamespace
+        Datum::from_oid(f.proowner),                            // proowner
+        Datum::from_oid(f.prolang),                             // prolang
+        Datum::from_f32(f.procost),                             // procost
+        Datum::from_f32(f.prorows),                             // prorows
+        Datum::from_oid(f.provariadic),                         // provariadic
+        Datum::from_oid(f.prosupport),                          // prosupport
+        Datum::from_char(f.prokind),                            // prokind
+        Datum::from_bool(f.prosecdef),                          // prosecdef
+        Datum::from_bool(f.proleakproof),                       // proleakproof
+        Datum::from_bool(f.proisstrict),                        // proisstrict
+        Datum::from_bool(f.proretset),                          // proretset
+        Datum::from_char(f.provolatile),                        // provolatile
+        Datum::from_char(f.proparallel),                        // proparallel
+        Datum::from_u16(f.pronargs as u16),                     // pronargs (UInt16GetDatum)
+        Datum::from_u16(f.pronargdefaults as u16),              // pronargdefaults
+        Datum::from_oid(f.prorettype),                          // prorettype
+        // proargtypes (oidvector) — always present.
+        buildoidvector(mcx, &row.proargtypes)?,
+        // proallargtypes (Oid[]) — placeholder; overwritten or nulled below.
+        Datum::ByVal(0),
+        Datum::ByVal(0), // proargmodes (char[])
+        Datum::ByVal(0), // proargnames (text[])
+        Datum::ByVal(0), // proargdefaults (pg_node_tree)
+        Datum::ByVal(0), // protrftypes (Oid[])
+        proc_text_datum(mcx, &row.prosrc)?, // prosrc (text) — always present.
+        Datum::ByVal(0), // probin (text)
+        Datum::ByVal(0), // prosqlbody (pg_node_tree)
+        Datum::ByVal(0), // proconfig (text[])
+        Datum::ByVal(0), // proacl (aclitem[])
+    ];
+
+    // proallargtypes (pg_proc.c:347-350).
+    match &row.proallargtypes {
+        Some(v) => values[(pp::Anum_pg_proc_proallargtypes - 1) as usize] = build_oid_array(mcx, v)?,
+        None => nulls[(pp::Anum_pg_proc_proallargtypes - 1) as usize] = true,
+    }
+    // proargmodes (pg_proc.c:351-354).
+    match &row.proargmodes {
+        Some(v) => values[(pp::Anum_pg_proc_proargmodes - 1) as usize] = build_char_array(mcx, v)?,
+        None => nulls[(pp::Anum_pg_proc_proargmodes - 1) as usize] = true,
+    }
+    // proargnames (pg_proc.c:355-358) — each unnamed slot is the empty string.
+    match &row.proargnames {
+        Some(v) => {
+            let strs: Vec<&str> =
+                v.iter().map(|o| o.as_deref().unwrap_or("")).collect();
+            values[(pp::Anum_pg_proc_proargnames - 1) as usize] =
+                build_text_array_datum(mcx, &strs)?;
+        }
+        None => nulls[(pp::Anum_pg_proc_proargnames - 1) as usize] = true,
+    }
+    // proargdefaults (pg_proc.c:359-362) — CStringGetTextDatum(nodeToString(...)).
+    match &row.proargdefaults {
+        Some(s) => {
+            values[(pp::Anum_pg_proc_proargdefaults - 1) as usize] = proc_text_datum(mcx, s)?
+        }
+        None => nulls[(pp::Anum_pg_proc_proargdefaults - 1) as usize] = true,
+    }
+    // protrftypes (pg_proc.c:363-366).
+    match &row.protrftypes {
+        Some(v) => values[(pp::Anum_pg_proc_protrftypes - 1) as usize] = build_oid_array(mcx, v)?,
+        None => nulls[(pp::Anum_pg_proc_protrftypes - 1) as usize] = true,
+    }
+    // probin (pg_proc.c:368-371).
+    match &row.probin {
+        Some(s) => values[(pp::Anum_pg_proc_probin - 1) as usize] = proc_text_datum(mcx, s)?,
+        None => nulls[(pp::Anum_pg_proc_probin - 1) as usize] = true,
+    }
+    // prosqlbody (pg_proc.c:372-375) — CStringGetTextDatum(nodeToString(...)).
+    match &row.prosqlbody {
+        Some(s) => values[(pp::Anum_pg_proc_prosqlbody - 1) as usize] = proc_text_datum(mcx, s)?,
+        None => nulls[(pp::Anum_pg_proc_prosqlbody - 1) as usize] = true,
+    }
+    // proconfig (pg_proc.c:376-379) — text[] of "name=value" entries.
+    match &row.proconfig {
+        Some(v) => {
+            let strs: Vec<&str> = v.iter().map(|s| s.as_str()).collect();
+            values[(pp::Anum_pg_proc_proconfig - 1) as usize] = build_text_array_datum(mcx, &strs)?;
+        }
+        None => nulls[(pp::Anum_pg_proc_proconfig - 1) as usize] = true,
+    }
+    // proacl (pg_proc.c:599-602) — set on the insert path with a default ACL.
+    // The shared `types_array::ArrayType` carrier is the 16-byte varlena header
+    // only (no `aclitem[]` data area — see backend-catalog-aclchk, the
+    // `get_user_default_acl` owner, which is itself mirror-and-panic until a
+    // real `Acl` carrier lands), so the column image is the framed header. This
+    // path is only reached once `get_user_default_acl` returns a real value,
+    // which the ACL-carrier keystone delivers together with the widened
+    // `ArrayType`; until then the producer panics and `proacl` is always None.
+    match &row.proacl {
+        Some(acl) => {
+            values[(pp::Anum_pg_proc_proacl - 1) as usize] =
+                Datum::ByRef(array_type_header_bytes(mcx, acl)?)
+        }
+        None => nulls[(pp::Anum_pg_proc_proacl - 1) as usize] = true,
+    }
+
+    Ok((values, nulls))
+}
+
+/// Frame the (header-only) `types_array::ArrayType` varlena header into its
+/// 16-byte on-disk image. See the `proacl` note in [`proc_values_nulls`].
+fn array_type_header_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    acl: &types_array::ArrayType,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 16)?;
+    buf.resize(16, 0u8);
+    buf[0..4].copy_from_slice(&acl.vl_len_.to_ne_bytes());
+    buf[4..8].copy_from_slice(&acl.ndim.to_ne_bytes());
+    buf[8..12].copy_from_slice(&acl.dataoffset.to_ne_bytes());
+    buf[12..16].copy_from_slice(&acl.elemtype.to_ne_bytes());
+    Ok(buf)
+}
+
+fn get_new_oid_pg_proc<'mcx>(rel: &Relation<'mcx>) -> PgResult<Oid> {
+    GetNewOidWithIndex(
+        rel,
+        cat::pg_proc::ProcedureOidIndexId,
+        cat::pg_proc::Anum_pg_proc_oid,
+    )
+}
+
+fn insert_pg_proc<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_proc::PgProcInsertRow,
+) -> PgResult<()> {
+    let (values, nulls) = proc_values_nulls(mcx, row)?;
+    // tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+    // CatalogTupleInsert(rel, tup);
+    form_and_insert(mcx, rel, &values, &nulls)
+}
+
+fn update_pg_proc<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    row: &cat::pg_proc::PgProcInsertRow,
+) -> PgResult<()> {
+    use cat::pg_proc as pp;
+    // replaces[] starts all-true; oid / proowner / proacl are pinned to the old
+    // tuple (pg_proc.c:580-585), so heap_modify_tuple takes them from `oldtup`.
+    let mut replaces = [true; pp::Natts_pg_proc];
+    replaces[(pp::Anum_pg_proc_oid - 1) as usize] = false;
+    replaces[(pp::Anum_pg_proc_proowner - 1) as usize] = false;
+    replaces[(pp::Anum_pg_proc_proacl - 1) as usize] = false;
+
+    let (values, nulls) = proc_values_nulls(mcx, row)?;
+    // tup = heap_modify_tuple(oldtup, RelationGetDescr(rel), values, nulls, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_modify_tuple(mcx, oldtup, &tupdesc, &values, &nulls, &replaces)?;
+    // CatalogTupleUpdate(rel, &tup->t_self, tup);
+    CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)
+}
+
 /// Install the F1 per-catalog typed seams whose substrate is fully present
 /// (pure `heap_form_tuple` + engine, plus `GetNewOidWithIndex` for the
 /// OID-column catalogs). Wired from [`crate::init_seams`].
@@ -802,4 +1083,7 @@ pub fn install() {
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_statistic_ext::set(
         insert_pg_statistic_ext,
     );
+    backend_catalog_indexing_seams::get_new_oid_with_index_pg_proc::set(get_new_oid_pg_proc);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_proc::set(insert_pg_proc);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_proc::set(update_pg_proc);
 }

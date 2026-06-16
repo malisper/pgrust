@@ -1249,6 +1249,83 @@ pub fn build_name_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&[u8]]) -> PgResult<PgVec
     Ok(result)
 }
 
+/// `construct_array(text_datums, n, TEXTOID, -1, false, 'i')` (arrayfuncs.c)
+/// over `text`-typed elements, taking each element's UTF-8 string directly
+/// rather than a pointer-word `Datum` that `datum_as_byte_window` would have to
+/// resolve. `TEXTOID` is variable-length (`elmlen = -1`), pass-by-reference,
+/// int-aligned, and these arrays never contain NULLs (matching pg_proc.c's
+/// `proargnames`/`proconfig` builds, which use `CStringGetTextDatum("")` for an
+/// unnamed slot). Mirrors `construct_md_array` for the 1-D, no-null,
+/// variable-length case: each element is stored as its `text` varlena image
+/// (4-byte `SET_VARSIZE` header + payload), int-aligned.
+pub fn build_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<PgVec<'mcx, u8>> {
+    let (_elmlen, _elmbyval, elmalign) = construct_builtin_meta(foundation::TEXTOID)?;
+    let nelems = elems.len() as i32;
+
+    // nelems <= 0 -> construct_empty_array (matches construct_md_array).
+    if nelems <= 0 {
+        return construct_empty_array(mcx, foundation::TEXTOID);
+    }
+
+    // Compute total data space exactly as construct_md_array: each
+    // variable-length element contributes VARHDRSZ + payload bytes
+    // (att_addlength_pointer), int-aligned per element (att_align_nominal),
+    // with the alignment applied before each element after the first.
+    let mut nbytes: i32 = 0;
+    for (i, s) in elems.iter().enumerate() {
+        let img_len = (4 + s.len()) as i32; // VARHDRSZ + payload (full 4-byte header)
+        if i != 0 {
+            nbytes = foundation::att_align_nominal(nbytes as usize, elmalign) as i32;
+        }
+        nbytes = nbytes
+            .checked_add(img_len)
+            .filter(|n| alloc_size_is_valid(*n))
+            .ok_or_else(|| {
+                PgError::error(format!(
+                    "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            })?;
+    }
+
+    // No nulls: dataoffset == 0, overhead is the non-null header.
+    let dataoffset = 0;
+    nbytes += foundation::arr_overhead_nonulls(1) as i32;
+    if !alloc_size_is_valid(nbytes) {
+        return Err(PgError::error(format!(
+            "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0); // palloc0
+
+    let dims = [nelems];
+    let lbs = [1];
+    foundation::set_header(&mut result, total, 1, dataoffset, foundation::TEXTOID);
+    foundation::write_dims(&mut result, &dims);
+    foundation::write_lbounds(&mut result, 1, &lbs);
+
+    // CopyArrayEls for variable-length by-reference, no nulls: write each
+    // element's text varlena image (SET_VARSIZE header + payload) at the
+    // int-aligned data offset.
+    let mut p = foundation::arr_data_ptr_off(&result);
+    for s in elems {
+        p = foundation::att_align_nominal(p, elmalign);
+        let payload = s.as_bytes();
+        let img_len = 4 + payload.len();
+        // SET_VARSIZE(elem, img_len): full 4-byte varlena header.
+        let word = (img_len as u32) << 2;
+        result[p..p + 4].copy_from_slice(&word.to_ne_bytes());
+        result[p + 4..p + img_len].copy_from_slice(payload);
+        p += img_len;
+    }
+
+    Ok(result)
+}
+
 /// Seam `decode_text_array_to_strings` — the array half of evtcache.c's
 /// `DecodeTextArrayToBitmapset`: `DatumGetArrayTypeP` (detoast) + the
 /// `ARR_NDIM != 1 || ARR_HASNULL || ARR_ELEMTYPE != TEXTOID` validity check
