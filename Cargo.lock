@@ -8929,12 +8929,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-fsstubs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-pg-largeobject",
+ "backend-libpq-be-fsstubs-seams",
+ "backend-storage-large-object",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-guc-tables",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-be-fsstubs-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -18200,6 +18221,7 @@ dependencies = [
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-libpq-auth",
+ "backend-libpq-be-fsstubs",
  "backend-libpq-crypt",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
