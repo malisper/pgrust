@@ -468,7 +468,7 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
 
     /* Process bootstrap input. */
     backend_access_transam_xact_seams::start_transaction_command::call()?;
-    backend_bootstrap_bootparse_seams::boot_yyparse::call()?;
+    backend_bootstrap_bootparse_seams::boot_yyparse::call(mcx)?;
     backend_access_transam_xact_seams::commit_transaction_command::call()?;
 
     /*
@@ -1105,7 +1105,10 @@ fn relation_get_attr(rel: &RelationData<'_>, i: i32) -> FormData_pg_attribute {
  * Process-local global accessors (single-threaded bootstrap backend).
  * ========================================================================= */
 
-fn boot_reldesc_is_open() -> bool {
+/// `boot_reldesc != NULL` — whether a relation is currently open. Exposed so
+/// the bootparse front end's `Boot_CreateStmt` action can mirror the C check
+/// `if (boot_reldesc) { ... closerel(NULL); }`.
+pub fn boot_reldesc_is_open() -> bool {
     STATE.with(|s| s.borrow().boot_reldesc.is_some())
 }
 /// Borrow the open `boot_reldesc` and run `f` on it. Panics if no relation is
@@ -1131,21 +1134,33 @@ fn with_boot_reldesc_res<R>(f: impl FnOnce(&RelationData<'static>) -> PgResult<R
         f(rel)
     })
 }
-fn set_boot_reldesc(v: Option<Relation<'static>>) {
+/// Set the `boot_reldesc` global. Exposed so the bootparse front end's
+/// `Boot_CreateStmt` action can store the relation it just created via
+/// `heap_create` (C: `boot_reldesc = heap_create(...)`).
+pub fn set_boot_reldesc(v: Option<Relation<'static>>) {
     STATE.with(|s| s.borrow_mut().boot_reldesc = v);
 }
 fn take_boot_reldesc() -> Option<Relation<'static>> {
     STATE.with(|s| s.borrow_mut().boot_reldesc.take())
 }
 
-fn numattr() -> i32 {
+/// `int numattr` — number of attributes accumulated for the current relation.
+/// Exposed so the bootparse front end mirrors the grammar's direct use of the
+/// `numattr` global (`numattr = 0` in `Boot_CreateStmt`, `++numattr` /
+/// `numattr-1` in `boot_column_def`, the `CreateTupleDesc(numattr, attrtypes)`
+/// build, and the `num_columns_read != numattr` insert check).
+pub fn numattr() -> i32 {
     STATE.with(|s| s.borrow().numattr)
 }
-fn set_numattr(v: i32) {
+/// Set the `numattr` global (the grammar's `numattr = 0` / `++numattr`).
+pub fn set_numattr(v: i32) {
     STATE.with(|s| s.borrow_mut().numattr = v);
 }
 
-fn attrtypes(i: usize) -> Option<FormData_pg_attribute> {
+/// `Form_pg_attribute attrtypes[i]` — the accumulated attribute info for column
+/// `i`. Exposed so the bootparse front end can read the array to assemble the
+/// `CreateTupleDesc(numattr, attrtypes)` descriptor in `Boot_CreateStmt`.
+pub fn attrtypes(i: usize) -> Option<FormData_pg_attribute> {
     STATE.with(|s| s.borrow().attrtypes[i])
 }
 fn set_attrtypes(i: usize, v: Option<FormData_pg_attribute>) {

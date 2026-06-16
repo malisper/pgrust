@@ -4001,9 +4001,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-bootparse"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-common-tupdesc",
+ "backend-bootstrap-bootparse-seams",
+ "backend-bootstrap-bootscanner",
+ "backend-bootstrap-bootstrap",
+ "backend-catalog-heap",
+ "backend-catalog-heap-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-toasting",
+ "backend-commands-indexcmds-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-bootstrap-bootparse-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -6509,10 +6536,13 @@ dependencies = [
 name = "backend-commands-indexcmds-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-amapi",
+ "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -20343,6 +20373,7 @@ dependencies = [
  "backend-backup-throttle",
  "backend-backup-walsummary",
  "backend-backup-zstd",
+ "backend-bootstrap-bootparse",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
