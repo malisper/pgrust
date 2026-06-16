@@ -187,7 +187,7 @@ fn install_catalog() {
         backend_utils_adt_jsonfuncs_seams::categorize_type::set(|_typoid| {
             Ok((Cat::JSONTYPE_NUMERIC, 42))
         });
-        backend_utils_adt_jsonfuncs_seams::output_function_call::set(|_oid, val: &Datum| {
+        backend_utils_adt_jsonfuncs_seams::output_function_call::set(|_mcx, _oid, val: &Datum| {
             Ok(alloc::format!("{}", val.as_i32()).into_bytes())
         });
         // datum_to_json_internal (post-audit) guards recursion with
