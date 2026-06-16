@@ -506,10 +506,31 @@ pub(crate) fn get_parent_directory(path: &str) -> String {
 // Seam wiring.
 // ===========================================================================
 
-/// Install the four inward seams this unit owns.
+/// `RenameDatabase` inward-seam shape (the landed consumer passes no `Mcx`): run
+/// the rename in a transient context. Only the `ObjectAddress` (Copy) escapes.
+fn rename_database_seam(
+    oldname: &str,
+    newname: &str,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = mcx::MemoryContext::new("RenameDatabase");
+    heavy::RenameDatabase(ctx.mcx(), oldname, newname)
+}
+
+/// `AlterDatabaseOwner` inward-seam shape (no `Mcx`): run in a transient context.
+fn alter_database_owner_seam(
+    dbname: &str,
+    new_owner_id: Oid,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = mcx::MemoryContext::new("AlterDatabaseOwner");
+    heavy::AlterDatabaseOwner(ctx.mcx(), dbname, new_owner_id)
+}
+
+/// Install the inward seams this unit owns.
 pub fn init_seams() {
     inward::dbase_redo::set(dbase_redo);
     inward::get_database_name::set(get_database_name);
     inward::database_is_invalid_form::set(database_is_invalid_form);
     inward::get_database_oid::set(get_database_oid);
+    inward::RenameDatabase::set(rename_database_seam);
+    inward::AlterDatabaseOwner::set(alter_database_owner_seam);
 }
