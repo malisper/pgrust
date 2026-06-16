@@ -59,6 +59,8 @@ pub fn init_seams() {
     // Datum via `backend_access_common_heaptuple::HeapTupleGetDatum`.
     backend_utils_fmgr_funcapi_seams::record_from_values::set(tupledesc::record_from_values);
     backend_utils_fmgr_funcapi_seams::srf_arg0_oid::set(srf_support::srf_arg0_oid);
+    backend_utils_fmgr_funcapi_seams::srf_arg_int64::set(srf_support::srf_arg_int64);
+    backend_utils_fmgr_funcapi_seams::srf_arg_lsn::set(srf_support::srf_arg_lsn);
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
     );

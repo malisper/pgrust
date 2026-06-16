@@ -91,6 +91,7 @@ pub fn init_all() {
     backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_constraint::init_seams();
+    backend_catalog_pg_attrdef::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_dependency::init_seams();
     backend_catalog_pg_enum::init_seams();

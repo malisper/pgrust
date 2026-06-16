@@ -3586,8 +3586,28 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-blkreftable",
  "types-core",
  "types-error",
+ "types-walsummarizer",
+]
+
+[[package]]
+name = "backend-backup-walsummaryfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-walsummary-seams",
+ "backend-postmaster-walsummarizer",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "common-blkreftable-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
  "types-walsummarizer",
 ]
 
@@ -4190,6 +4210,32 @@ dependencies = [
  "types-core",
  "types-error",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-catalog-pg-attrdef"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-attrdef-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18504,6 +18550,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
  "backend-catalog-pg-aggregate",
+ "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",
