@@ -18019,6 +18019,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-blkreftable"
+version = "0.0.0"
+dependencies = [
+ "common-blkreftable-seams",
+ "mcx",
+ "port-crc32c",
+ "port-pg-crc32c-seams",
+ "types-blkreftable",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "common-blkreftable-seams"
 version = "0.0.0"
 dependencies = [
@@ -18982,6 +18996,7 @@ dependencies = [
  "backend-utils-sort-tuplesort",
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
+ "common-blkreftable",
  "common-checksum-helper",
  "common-hashfn",
  "common-ip",
