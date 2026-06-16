@@ -14338,6 +14338,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-varbit"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-arrayutils",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-utils-adt-varchar"
 version = "0.0.0"
 dependencies = [
