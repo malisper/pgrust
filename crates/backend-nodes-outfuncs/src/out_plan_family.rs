@@ -280,6 +280,22 @@ fn out_seqscan(buf: &mut String, n: &types_nodes::nodeseqscan::SeqScan<'_>, wl: 
     out_scan_fields(buf, &n.scan, "scan.", wl);
 }
 
+/// `_outSampleScan` (outfuncs.funcs.c) — `Scan scan` base then
+/// `WRITE_NODE_FIELD(tablesample)` over the `TableSampleClause *` (its framed
+/// `{TABLESAMPLECLAUSE ...}` writer lives in the parse family). A `NULL`
+/// `tablesample` renders `<>` (`outNode(NULL)`).
+fn out_samplescan(buf: &mut String, n: &types_nodes::nodesamplescan::SampleScan<'_>, wl: bool) {
+    buf.push_str("SAMPLESCAN");
+    out_scan_fields(buf, &n.scan, "scan.", wl);
+    buf.push_str(" :tablesample ");
+    match n.tablesample.as_deref() {
+        None => buf.push_str("<>"),
+        Some(ts) => {
+            crate::framed(buf, |b| crate::out_parse_family::out_table_sample_clause(b, ts, wl))
+        }
+    }
+}
+
 /// `WRITE_NODE_FIELD(functions)` over the `List *` of framed `RangeTblFunction`
 /// (C: `outNode` of the list → `({RANGETBLFUNCTION ...} ...)`). Each element is
 /// the parse-family-owned `_outRangeTblFunction`, framed by `{`/`}`. A `None`
@@ -822,10 +838,17 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
 
         // ---- mirror-pg-and-panic: field-type unmodeled in this family ----
         Node::ModifyTable(_) => panic!(
-            "_outModifyTable: not serialized — the node carries nested non-Node \
-             list-of-lists (updateColnosLists/withCheckOptionLists/returningLists/\
-             mergeActionLists/mergeJoinConditions) and MergeAction children, none \
-             of which are reachable through this family's outNode dispatch"
+            "_outModifyTable: not serialized — `rowMarks` is `List *` of \
+             `PlanRowMark` (C `WRITE_NODE_FIELD(rowMarks)`), but `PlanRowMark` is \
+             NOT a `Node` enum variant and has no `_outPlanRowMark`/`_readPlanRowMark` \
+             writer in this model (it exists only as a typed struct in \
+             `nodelockrows`), AND the carrier types it as `PgVec<PgBox<Node>>` which \
+             cannot hold one — so the field can neither be written nor round-tripped. \
+             Prereq keystone: promote `PlanRowMark` to a serializable `Node` variant \
+             (with its `_out`/`_read`) and re-type `ModifyTable.rowMarks` to a typed \
+             `PgVec<PlanRowMark>`; the remaining fields (incl. the \
+             updateColnosLists/withCheckOptionLists/returningLists/mergeActionLists/\
+             mergeJoinConditions list-of-lists) are all modeled and writable"
         ),
         Node::WindowAgg(_) => panic!(
             "_outWindowAgg: not serialized — the repo WindowAgg struct trims the \
@@ -838,11 +861,7 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
              node family (not reachable as a Node here)"
         ),
         Node::FunctionScan(n) => crate::framed(buf, |b| out_functionscan(b, n, wl)),
-        Node::SampleScan(_) => panic!(
-            "_outSampleScan: not serialized — `tablesample` is a bare \
-             TableSampleClause whose framed writer lives in another node family \
-             (not reachable as a Node here)"
-        ),
+        Node::SampleScan(n) => crate::framed(buf, |b| out_samplescan(b, n, wl)),
         Node::CustomScan(_) => panic!(
             "_outCustomScan: not serialized — `custom_private` and `methods` are \
              opaque provider pointers (the C `:methods` token reads \
