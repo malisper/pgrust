@@ -25,7 +25,8 @@
 extern crate alloc;
 
 use alloc::string::String;
-use types_core::primitive::{BlockNumber, ForkNumber};
+use alloc::vec::Vec;
+use types_core::primitive::{BlockNumber, ForkNumber, RepOriginId, TransactionId};
 use types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
 use types_storage::RelFileLocator;
@@ -447,4 +448,68 @@ seam_core::seam!(
     pub fn xlog_rec_total_len(
         record: types_wal::xlogrecovery_carriers::RecordRef,
     ) -> u32
+);
+
+// ---------------------------------------------------------------------------
+// Handle-based decoded-record accessors consumed by logical decoding
+// (`decode.c`).
+//
+// During logical decoding the live `XLogReaderState` (with its current
+// `DecodedXLogRecord`) lives in the xlogreader owner's backend-local registry
+// behind an `XLogReaderHandle`; it cannot be borrowed across a seam. These
+// accessors re-read the reader's current decoded record (`reader->record`)
+// through the handle, mirroring the C `XLogRecGet*` macros that dereference
+// `record->record_origin` / `record->header.xl_*` / `record->main_data` /
+// `record->blocks[block_id]`. Owned (`Vec<u8>`) returns copy the bytes out of
+// the reader's decode arena (decode.c immediately `memcpy`s them into the
+// reorder buffer's own context, so the copy is faithful and short-lived).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `reader->ReadRecPtr` — start of the record currently being decoded.
+    pub fn reader_ReadRecPtr(reader: XLogReaderHandle) -> XLogRecPtr
+);
+seam_core::seam!(
+    /// `XLogRecGetInfo(record)` — the `xl_info` byte of the reader's current
+    /// decoded record.
+    pub fn xlog_rec_get_info(reader: XLogReaderHandle) -> u8
+);
+seam_core::seam!(
+    /// `XLogRecGetRmid(record)` — the resource-manager id of the current record.
+    pub fn xlog_rec_get_rmid(reader: XLogReaderHandle) -> u8
+);
+seam_core::seam!(
+    /// `XLogRecGetXid(record)` — the transaction id that produced the current
+    /// record.
+    pub fn xlog_rec_get_xid(reader: XLogReaderHandle) -> TransactionId
+);
+seam_core::seam!(
+    /// `XLogRecGetTopXid(record)` — the top-level transaction id (`Invalid` when
+    /// the record is not a subtransaction's).
+    pub fn xlog_rec_get_top_xid(reader: XLogReaderHandle) -> TransactionId
+);
+seam_core::seam!(
+    /// `XLogRecGetOrigin(record)` — the replication origin of the current
+    /// record (`InvalidRepOriginId` when none).
+    pub fn xlog_rec_get_origin(reader: XLogReaderHandle) -> RepOriginId
+);
+seam_core::seam!(
+    /// `XLogRecGetData(record)` — the record's main data area, copied out.
+    pub fn xlog_rec_get_main_data(reader: XLogReaderHandle) -> Vec<u8>
+);
+seam_core::seam!(
+    /// `XLogRecGetDataLen(record)` — `record->main_data_len`.
+    pub fn xlog_rec_get_main_data_len(reader: XLogReaderHandle) -> u32
+);
+seam_core::seam!(
+    /// `XLogRecGetBlockTagExtended(record, block_id, &rlocator, ...)` — the
+    /// relation locator of backup block `block_id`, or `None` when the block is
+    /// not in use (the C `Assert(false)` / `return false` path).
+    pub fn xlog_rec_get_block_tag(reader: XLogReaderHandle, block_id: u8) -> Option<RelFileLocator>
+);
+seam_core::seam!(
+    /// `XLogRecGetBlockData(record, block_id, &len)` — the per-block data bytes
+    /// of backup block `block_id`, copied out (`None` when the block has no
+    /// data).
+    pub fn xlog_rec_get_block_data(reader: XLogReaderHandle, block_id: u8) -> Option<Vec<u8>>
 );

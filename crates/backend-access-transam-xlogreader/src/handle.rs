@@ -268,11 +268,140 @@ pub fn XLogRecGetFullXid(handle: XLogReaderHandle) -> types_core::FullTransactio
     with_reader(handle, |state| crate::XLogRecGetFullXid(state))
 }
 
-/// Install the five handle seams this unit owns.
+/// `reader->ReadRecPtr` (xlogreader.h) of the handle reader.
+pub fn reader_ReadRecPtr(handle: XLogReaderHandle) -> XLogRecPtr {
+    with_reader(handle, |state| state.ReadRecPtr)
+}
+
+// ---------------------------------------------------------------------------
+// Handle-based decoded-record accessors consumed by logical decoding
+// (`decode.c`). Each reads the reader's *current* decoded record
+// (`reader->record`, the record `XLogReadRecord`/`XLogNextRecord` just made
+// current). decode.c only ever calls these after a successful read, so the
+// record is present; a `None` means the C would have dereferenced NULL, which
+// cannot happen on the logical-decoding path.
+// ---------------------------------------------------------------------------
+
+/// `XLogRecGetInfo(reader->record)`.
+pub fn xlog_rec_get_info(handle: XLogReaderHandle) -> u8 {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_info called without a decoded record")
+            .info()
+    })
+}
+
+/// `XLogRecGetRmid(reader->record)`.
+pub fn xlog_rec_get_rmid(handle: XLogReaderHandle) -> u8 {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_rmid called without a decoded record")
+            .header()
+            .rmid()
+    })
+}
+
+/// `XLogRecGetXid(reader->record)`.
+pub fn xlog_rec_get_xid(handle: XLogReaderHandle) -> types_core::primitive::TransactionId {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_xid called without a decoded record")
+            .xid()
+    })
+}
+
+/// `XLogRecGetTopXid(reader->record)`.
+pub fn xlog_rec_get_top_xid(handle: XLogReaderHandle) -> types_core::primitive::TransactionId {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_top_xid called without a decoded record")
+            .toplevel_xid()
+    })
+}
+
+/// `XLogRecGetOrigin(reader->record)`.
+pub fn xlog_rec_get_origin(handle: XLogReaderHandle) -> types_core::primitive::RepOriginId {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_origin called without a decoded record")
+            .record_origin()
+    })
+}
+
+/// `XLogRecGetData(reader->record)` — the main data area, copied out.
+pub fn xlog_rec_get_main_data(handle: XLogReaderHandle) -> alloc::vec::Vec<u8> {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_main_data called without a decoded record")
+            .data()
+            .to_vec()
+    })
+}
+
+/// `XLogRecGetDataLen(reader->record)`.
+pub fn xlog_rec_get_main_data_len(handle: XLogReaderHandle) -> u32 {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .expect("xlog_rec_get_main_data_len called without a decoded record")
+            .main_data_len()
+    })
+}
+
+/// `XLogRecGetBlockTagExtended(reader->record, block_id, &rlocator, ...)` —
+/// the relation locator of backup block `block_id`, `None` when not in use.
+pub fn xlog_rec_get_block_tag(
+    handle: XLogReaderHandle,
+    block_id: u8,
+) -> Option<types_storage::RelFileLocator> {
+    with_reader(handle, |state| {
+        crate::xlog_rec_get_block_tag_extended(state, block_id).map(|tag| tag.rlocator)
+    })
+}
+
+/// `XLogRecGetBlockData(reader->record, block_id, &len)` — the per-block data
+/// bytes, copied out (`None` when the block has no data).
+pub fn xlog_rec_get_block_data(
+    handle: XLogReaderHandle,
+    block_id: u8,
+) -> Option<alloc::vec::Vec<u8>> {
+    with_reader(handle, |state| {
+        state
+            .record
+            .as_ref()
+            .and_then(|d| d.block_data(block_id as usize))
+            .map(|b| b.to_vec())
+    })
+}
+
+/// Install the handle seams this unit owns.
 pub fn init_seams() {
     seam::XLogReaderAllocate::set(XLogReaderAllocate);
     seam::XLogReaderFree::set(XLogReaderFree);
     seam::XLogBeginRead::set(XLogBeginRead);
     seam::XLogReadRecord::set(XLogReadRecord);
     seam::reader_EndRecPtr::set(reader_EndRecPtr);
+    seam::reader_ReadRecPtr::set(reader_ReadRecPtr);
+    seam::xlog_rec_get_info::set(xlog_rec_get_info);
+    seam::xlog_rec_get_rmid::set(xlog_rec_get_rmid);
+    seam::xlog_rec_get_xid::set(xlog_rec_get_xid);
+    seam::xlog_rec_get_top_xid::set(xlog_rec_get_top_xid);
+    seam::xlog_rec_get_origin::set(xlog_rec_get_origin);
+    seam::xlog_rec_get_main_data::set(xlog_rec_get_main_data);
+    seam::xlog_rec_get_main_data_len::set(xlog_rec_get_main_data_len);
+    seam::xlog_rec_get_block_tag::set(xlog_rec_get_block_tag);
+    seam::xlog_rec_get_block_data::set(xlog_rec_get_block_data);
 }

@@ -216,6 +216,11 @@ pub struct ParsedCommitAbort {
     pub twophase_xid: TransactionId,
     pub origin_lsn: XLogRecPtr,
     pub origin_timestamp: TimestampTz,
+    /// Byte offset of the NUL-terminated `twophase_gid` string within the
+    /// record (only valid when `XACT_XINFO_HAS_GID` is set), with its length
+    /// (excluding the NUL). `0`/`0` when no GID is present.
+    pub twophase_gid_offset: usize,
+    pub twophase_gid_len: usize,
 }
 
 /// `ParseCommitRecord(uint8 info, xl_xact_commit *xlrec, ..)` (xactdesc.c).
@@ -296,9 +301,13 @@ fn parse_commit_abort_body(
         parsed.twophase_xid = u32_at(data, offset)?;
         offset += SIZE_OF_XACT_TWOPHASE;
         if parsed.xinfo & XACT_XINFO_HAS_GID != 0 {
-            // The describers do not print the commit/abort GID; only step over
-            // the NUL-terminated string to keep the origin offset correct.
+            // Record the GID offset/length (decode.c forwards the real gid to
+            // ReorderBufferFinishPrepared); the describers do not print it but
+            // we still step over the NUL-terminated string to keep the origin
+            // offset correct.
             let gid_len = nul_terminated_len(data, offset)?;
+            parsed.twophase_gid_offset = offset;
+            parsed.twophase_gid_len = gid_len;
             offset += gid_len + 1;
         }
     }
@@ -478,9 +487,23 @@ pub fn parse_prepare_record(data: &[u8]) -> PgResult<ParsedPrepare> {
 // Element accessors (lazy reads of the variable-length arrays).
 // ---------------------------------------------------------------------------
 
-fn subxact_at(data: &[u8], subxacts_offset: usize, index: usize) -> PgResult<TransactionId> {
+/// `parsed->subxacts[index]` — the `index`-th subtransaction xid of a parsed
+/// commit/abort/prepare record (decode.c iterates these).
+pub fn subxact_at(data: &[u8], subxacts_offset: usize, index: usize) -> PgResult<TransactionId> {
     let off = element_offset(subxacts_offset, index, SIZE_OF_TRANSACTION_ID)?;
     u32_at(data, off)
+}
+
+/// `parsed->twophase_gid` — the NUL-stripped GID bytes of a parsed
+/// commit/abort 2PC record (`COMMIT_PREPARED` / `ABORT_PREPARED`), or an empty
+/// slice when no GID was logged. decode.c forwards these to `FilterPrepare` /
+/// `ReorderBufferFinishPrepared`.
+pub fn commit_abort_gid<'a>(data: &'a [u8], parsed: &ParsedCommitAbort) -> &'a [u8] {
+    if parsed.twophase_gid_len == 0 {
+        return &[];
+    }
+    data.get(parsed.twophase_gid_offset..parsed.twophase_gid_offset + parsed.twophase_gid_len)
+        .unwrap_or(&[])
 }
 
 fn rellocator_at(data: &[u8], xlocators_offset: usize, index: usize) -> PgResult<RelFileLocator> {
