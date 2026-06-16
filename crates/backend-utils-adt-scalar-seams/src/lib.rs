@@ -26,3 +26,15 @@ seam_core::seam!(
     /// returns `false`). Infallible at the ereport level.
     pub fn parse_bool(value: &str) -> Option<bool>
 );
+
+seam_core::seam!(
+    /// `enum_out(enumval Oid)` (`utils/adt/enum.c`): render an enum value's OID
+    /// to its label text. C looks the label up via `SearchSysCache1(ENUMOID)`
+    /// and `ereport(ERROR)`s with `ERRCODE_INVALID_PARAMETER_VALUE` for an
+    /// invalid enum value, so the seam is fallible. The label is a fresh
+    /// `pstrdup` in the caller's context (a `cstring`).
+    pub fn enum_out<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        enumval: types_core::primitive::Oid,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
