@@ -1234,6 +1234,28 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"NEXTVALUEEXPR" => read_next_value_expr().map(|n| Node::Expr(Expr::NextValueExpr(n))),
         b"INFERENCEELEM" => read_inference_elem(mcx).map(|n| Node::Expr(Expr::InferenceElem(n))),
         b"RETURNINGEXPR" => read_returning_expr(mcx).map(|n| Node::Expr(Expr::ReturningExpr(n))),
+        // NOTE: `_outSubPlan`/`_outAlternativeSubPlan` serialize faithfully
+        // (the OUT side is exact), but the repo carriers `SubPlanExpr(Box<
+        // SubPlan<'static>>)` / `AlternativeSubPlanExpr(Box<AlternativeSubPlan<
+        // 'static>>)` are pinned to `'static`, so a reader cannot store the
+        // mcx-allocated `testexpr`/`args` children read off the cursor into the
+        // `'static` SubPlan. Reconstructing SUBPLAN needs a lifetime-carrying
+        // SubPlanExpr carrier (an `Expr`-model follow-on). Mirror-pg-and-panic on
+        // READ (the OUT side stays available for plan-tree serialization/debug).
+        b"SUBPLAN" => {
+            return Some(Err(elog_error(
+                "readSubPlan: SubPlanExpr carrier is `Box<SubPlan<'static>>`; \
+                 cannot store mcx-allocated testexpr/args children — needs a \
+                 lifetime-carrying SubPlanExpr carrier (Expr-model follow-on)",
+            )))
+        }
+        b"ALTERNATIVESUBPLAN" => {
+            return Some(Err(elog_error(
+                "readAlternativeSubPlan: AlternativeSubPlanExpr carrier is \
+                 `Box<AlternativeSubPlan<'static>>`; cannot store mcx-allocated \
+                 SubPlan children — same `'static`-carrier blocker as SUBPLAN",
+            )))
+        }
         _ => return None,
     };
     Some(res)

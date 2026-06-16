@@ -565,6 +565,84 @@ fn out_returning_expr(buf: &mut String, n: &types_nodes::primnodes::ReturningExp
     write_opt_box_expr(buf, "retexpr", &n.retexpr, wl);
 }
 
+/// A `List *` of `Expr` carried as `PgVec<PgBox<Expr>>` (e.g. `SubPlan.args`).
+/// C: `outNode` of the list → `({...} {...})`; a NIL list is `<>`, but the repo
+/// carries an always-present (possibly empty) Vec, which serializes as `()`
+/// (the faithful encoding of an empty `List *`). `_readSubPlan` reads it via
+/// `nodeRead`, so an empty `()` round-trips to an empty Vec.
+fn write_pgbox_expr_list_field(
+    buf: &mut String,
+    name: &str,
+    list: &[mcx::PgBox<'_, Expr>],
+    wl: bool,
+) {
+    use core::fmt::Write as _;
+    let _ = write!(buf, " :{} ", name);
+    buf.push('(');
+    let mut first = true;
+    for e in list {
+        if !first {
+            buf.push(' ');
+        }
+        first = false;
+        out_expr(buf, e, wl);
+    }
+    buf.push(')');
+}
+
+/// `_outSubPlan` (outfuncs.funcs.c). `testexpr` is a single `Node *` child (an
+/// `OpExpr`/`RowCompareExpr`); `paramIds`/`setParam`/`parParam` are `IntList`s;
+/// `args` is a `List *` of `Expr`.
+fn out_subplan(buf: &mut String, n: &types_nodes::primnodes::SubPlan<'_>, wl: bool) {
+    buf.push_str("SUBPLAN");
+    write_enum_field(buf, "subLinkType", n.subLinkType as i32);
+    // testexpr: Option<PgBox<Expr>> — single Node child.
+    {
+        use core::fmt::Write as _;
+        let _ = write!(buf, " :testexpr ");
+        match n.testexpr.as_deref() {
+            None => buf.push_str("<>"),
+            Some(e) => out_expr(buf, e, wl),
+        }
+    }
+    crate::write_int_list_field(buf, "paramIds", Some(&n.paramIds));
+    write_int_field(buf, "plan_id", n.plan_id);
+    write_string_field(buf, "plan_name", n.plan_name.as_ref().map(|s| s.as_str()));
+    write_oid_field(buf, "firstColType", n.firstColType);
+    write_int_field(buf, "firstColTypmod", n.firstColTypmod);
+    write_oid_field(buf, "firstColCollation", n.firstColCollation);
+    write_bool_field(buf, "useHashTable", n.useHashTable);
+    write_bool_field(buf, "unknownEqFalse", n.unknownEqFalse);
+    write_bool_field(buf, "parallel_safe", n.parallel_safe);
+    crate::write_int_list_field(buf, "setParam", Some(&n.setParam));
+    crate::write_int_list_field(buf, "parParam", Some(&n.parParam));
+    write_pgbox_expr_list_field(buf, "args", &n.args, wl);
+    crate::write_float_field(buf, "startup_cost", n.startup_cost);
+    crate::write_float_field(buf, "per_call_cost", n.per_call_cost);
+}
+
+/// `_outAlternativeSubPlan` (outfuncs.funcs.c): a single `:subplans` node list
+/// of `SubPlan`s.
+fn out_alternative_subplan(
+    buf: &mut String,
+    n: &types_nodes::primnodes::AlternativeSubPlan<'_>,
+    wl: bool,
+) {
+    buf.push_str("ALTERNATIVESUBPLAN");
+    use core::fmt::Write as _;
+    let _ = write!(buf, " :subplans ");
+    buf.push('(');
+    let mut first = true;
+    for sp in &n.subplans {
+        if !first {
+            buf.push(' ');
+        }
+        first = false;
+        crate::framed(buf, |b| out_subplan(b, sp, wl));
+    }
+    buf.push(')');
+}
+
 // ---------------------------------------------------------------------------
 // Raw-grammar `Node::X` writers. These share C node tags/LABELs with the
 // post-analysis Expr forms; their children are raw `Node *` (NodePtr), written
@@ -790,6 +868,8 @@ pub(crate) fn out_expr_body(buf: &mut String, e: &Expr, wl: bool) -> bool {
         Expr::NextValueExpr(n) => out_next_value_expr(buf, n, wl),
         Expr::InferenceElem(n) => out_inference_elem(buf, n, wl),
         Expr::ReturningExpr(n) => out_returning_expr(buf, n, wl),
+        Expr::SubPlan(n) => out_subplan(buf, &n.0, wl),
+        Expr::AlternativeSubPlan(n) => out_alternative_subplan(buf, &n.0, wl),
         _ => return false,
     }
     true
