@@ -1206,6 +1206,65 @@ fn update_namespace_owner_tuple(nspoid: Oid, old_owner: Oid, new_owner: Oid) -> 
     rel.close(RowExclusiveLock)
 }
 
+/// `AlterObjectOwner_internal`'s modified-tuple write (alter.c 1012-1046) for an
+/// arbitrary simple catalog. The caller (alter.c) opened `rel` (catalog
+/// `catalog_id`, RowExclusiveLock) and locked the row via
+/// `get_catalog_object_by_oid_extended(.., locktuple=true)`. We re-fetch the row
+/// over a re-open of the same relation, set `owner` (and, when `anum_acl !=
+/// InvalidAttrNumber` and the ACL is non-null, `aclnewowner(acl, old, new)`),
+/// `heap_modify_tuple` + `CatalogTupleUpdate`, then `UnlockTuple(rel,
+/// &oldtup->t_self, InplaceUpdateTupleLock)` — releasing the lock the caller's
+/// `get_catalog_object_by_oid_extended` took. The generic `aclitem[]`
+/// re-serialization is [`acl_new_owner_datum`], shared with the per-catalog
+/// typed owner-tuple writers.
+fn update_object_owner_tuple(
+    rel: &RelationData<'_>,
+    anum_oid: i16,
+    object_id: Oid,
+    anum_owner: i16,
+    anum_acl: i16,
+    old_owner: Oid,
+    new_owner: Oid,
+) -> PgResult<()> {
+    const INVALID_ATTR_NUMBER: i16 = 0;
+    let ctx = MemoryContext::new("update_object_owner_tuple");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, anum_oid, object_id)?.ok_or_else(|| {
+        PgError::error(format!(
+            "cache lookup failed for object {object_id} of catalog {}",
+            rel.rd_id
+        ))
+    })?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+
+    // values[Anum_owner - 1] = ObjectIdGetDatum(new_ownerId).
+    set_col(&mut values, &mut nulls, &mut replaces, anum_owner, Datum::from_oid(new_owner));
+
+    // if (Anum_acl != InvalidAttrNumber) { datum = heap_getattr(Anum_acl);
+    //   if (!isnull) values[Anum_acl-1] = aclnewowner(acl, old, new); }
+    if anum_acl != INVALID_ATTR_NUMBER {
+        let acl_idx = (anum_acl - 1) as usize;
+        if !nulls[acl_idx] {
+            if let Datum::ByRef(bytes) = &values[acl_idx] {
+                let new_acl = acl_new_owner_datum(mcx, &bytes.clone(), old_owner, new_owner)?;
+                set_col(&mut values, &mut nulls, &mut replaces, anum_acl, new_acl);
+            }
+        }
+    }
+
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)?;
+
+    // UnlockTuple(rel, &oldtup->t_self, InplaceUpdateTupleLock).
+    backend_storage_lmgr_lmgr_seams::unlock_tuple::call(
+        rel.rd_id,
+        oldtup.tuple.t_self,
+        types_storage::lock::InplaceUpdateTupleLock,
+    )?;
+    r.close(RowExclusiveLock)
+}
+
 /* ======================================================================== *
  * pg_foreign_data_wrapper / pg_foreign_server / pg_user_mapping /
  * pg_foreign_table (foreigncmds.c).
@@ -1792,19 +1851,83 @@ fn get_catalog_object_by_oid<'mcx>(
     let mut scan = genam::systable_beginscan::call(&r, InvalidOid, false, None, &keys)?;
     let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
     // if (locktup) LockTuple(catalog, &tuple->t_self, InplaceUpdateTupleLock);
-    // The locked-tuple variant takes a tuple lock; the lmgr tuple-lock seam is
-    // not reachable from this crate, but `locktuple` is `false` on every
-    // get_catalog_object_by_oid (non-extended) caller, and the extended callers
-    // that pass `true` are not yet ported. Surface a faithful error if a future
-    // caller requests it rather than silently skipping the lock.
-    if locktuple && tuple.is_some() {
-        scan.end()?;
-        return Err(PgError::error(
-            "get_catalog_object_by_oid: locktuple path requires the lmgr tuple-lock seam (unreached)",
-        ));
+    // The heavyweight tuple-tag lock is held until transaction end (released by
+    // the transaction resource owner), so it is taken imperatively — mirroring
+    // the C `LockTuple` in `get_catalog_object_by_oid_extended`.
+    if locktuple {
+        if let Some(t) = &tuple {
+            backend_storage_lmgr_lmgr_seams::lock_tuple::call(
+                catalog.rd_id,
+                t.tuple.t_self,
+                types_storage::lock::InplaceUpdateTupleLock,
+            )?;
+        }
     }
     scan.end()?;
     Ok(tuple)
+}
+
+/// `pg_get_acl`'s catalog read (objectaddress.c 4426). The caller
+/// (objectaddress) has already resolved the catalog substitution
+/// (`pg_largeobject` -> `pg_largeobject_metadata`) and the `aclitem[]` column
+/// attnum (`anum_acl`) / OID column attnum (`anum_oid`) via
+/// `get_object_attnum_acl` / `get_object_attnum_oid`, and decided whether this
+/// is a relation-attribute ACL (`classId == RelationRelationId && objsubid !=
+/// 0`). We read the `aclitem[]` column verbatim and return it as the raw
+/// varlena `Datum` (the C `PG_RETURN_DATUM`), or `None` for `PG_RETURN_NULL`.
+fn get_acl_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    catalog_id: Oid,
+    anum_oid: i16,
+    anum_acl: i16,
+    object_id: Oid,
+    objsubid: i32,
+    is_relation_attr: bool,
+) -> PgResult<Option<Datum<'mcx>>> {
+    if is_relation_attr {
+        // The ACL is retrieved from pg_attribute.attacl via
+        // SearchSysCacheCopyAttNum(objectId, objsubid) (objectaddress.c).
+        use backend_utils_cache_syscache as syscache;
+        use types_cache::syscache::SysCacheKey;
+        let attnum = objsubid as i16;
+        let tup = syscache::SearchSysCache2(
+            mcx,
+            syscache::ATTNUM,
+            SysCacheKey::Value(types_datum::Datum::from_oid(object_id)),
+            SysCacheKey::Value(types_datum::Datum::from_i16(attnum)),
+        )?;
+        let Some(tup) = tup else {
+            return Ok(None);
+        };
+        let (datum, isnull) = syscache::SysCacheGetAttr(
+            mcx,
+            syscache::ATTNUM,
+            &tup,
+            types_catalog::pg_attribute::Anum_pg_attribute_attacl as i32,
+        )?;
+        syscache::ReleaseSysCache(tup);
+        if isnull {
+            return Ok(None);
+        }
+        return Ok(Some(datum));
+    }
+
+    // rel = table_open(catalogId, AccessShareLock); the OID-keyed scan; then
+    // heap_getattr(tup, Anum_acl, RelationGetDescr(rel), &isnull).
+    let _ = objsubid;
+    let rel = table_open(mcx, catalog_id, types_storage::lock::AccessShareLock)?;
+    let tup = fetch_by_oid(mcx, &rel, anum_oid, object_id)?;
+    let Some(tup) = tup else {
+        rel.close(types_storage::lock::AccessShareLock)?;
+        return Ok(None);
+    };
+    let (values, nulls) = deform(mcx, &rel, &tup)?;
+    rel.close(types_storage::lock::AccessShareLock)?;
+    let i = (anum_acl - 1) as usize;
+    if nulls[i] {
+        return Ok(None);
+    }
+    Ok(Some(values[i].clone()))
 }
 
 /// Install the F2 seam bodies. Wired from [`crate::init_seams`] via
@@ -1848,6 +1971,11 @@ pub fn install() {
     // pg_namespace.
     s::rename_namespace_tuple::set(rename_namespace_tuple);
     s::update_namespace_owner_tuple::set(update_namespace_owner_tuple);
+
+    // Generic owner-tuple write (alter.c AlterObjectOwner_internal) + pg_get_acl
+    // catalog read (objectaddress.c).
+    s::update_object_owner_tuple::set(update_object_owner_tuple);
+    s::get_acl_datum::set(get_acl_datum);
 
     // pg_foreign_* / pg_user_mapping.
     s::catalog_tuple_insert_pg_foreign_data_wrapper::set(catalog_tuple_insert_pg_foreign_data_wrapper);

@@ -1536,26 +1536,19 @@ mod recurrence_guard {
         //
         // The entries that REMAIN below are still genuinely uninstalled+called:
         // the typecmds.c F3/F4 narrow single-column pg_type mutators (their
-        // owning typecmds arms are not yet ported) and the generic
-        // update_object_owner_tuple. DELETE each as its owner installs it.
+        // owning typecmds arms are not yet ported). DELETE each as its owner
+        // installs it.
+        //
+        // The generic update_object_owner_tuple (alter.c AlterObjectOwner_internal)
+        // is now INSTALLED by backend-catalog-indexing's family2 — it deforms the
+        // re-fetched row, sets the owner column, re-serializes aclnewowner(acl,
+        // old, new) into the aclitem[] varlena via the shared acl_new_owner_datum
+        // codec, CatalogTupleUpdate + UnlockTuple — so its entry was DELETED.
         ("backend_catalog_indexing", "catalog_tuple_update_typowner_typacl_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typnamespace_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typnotnull_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_typdefault_pg_type"),
         ("backend_catalog_indexing", "catalog_tuple_update_attrs_pg_type"),
-        // -- alter.c (AlterObjectOwner_internal, generic catalog) --
-        // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
-        // AlterObjectOwner_internal builds the modified owner tuple for an
-        // ARBITRARY simple catalog — set the owner column and, when the catalog
-        // has an ACL column, re-serialize aclnewowner(acl, old, new) back into
-        // the aclitem[] varlena — then CatalogTupleUpdate + UnlockTuple. The
-        // generic aclitem[]-varlena re-serialization into an arbitrary tuple
-        // column has no owned-model counterpart at this layer (every other
-        // owner-change uses a per-catalog typed writer, e.g.
-        // update_namespace_owner_tuple). Declared on the indexing owner so the
-        // landed alter dispatch can call it; loud-panics until indexing's
-        // generic aclitem[] write lands. DELETE when indexing installs it.
-        ("backend_catalog_indexing", "update_object_owner_tuple"),
         // ===================================================================
         // AUDIT-FIX #345 — blind-spot revealed by the col-4-fallback guard fix.
         // The 24 merged/audited rows with an EMPTY `crate` column (and the
