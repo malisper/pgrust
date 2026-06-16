@@ -28,6 +28,7 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
 backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }

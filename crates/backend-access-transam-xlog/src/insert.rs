@@ -252,7 +252,7 @@ fn WALInsertLockAcquire() -> PgResult<()> {
 }
 
 /// `WALInsertLockAcquireExclusive(void)` (xlog.c:1443).
-fn WALInsertLockAcquireExclusive() -> PgResult<()> {
+pub(crate) fn WALInsertLockAcquireExclusive() -> PgResult<()> {
     // SAFETY: live lock array.
     unsafe {
         for i in 0..NUM_XLOGINSERT_LOCKS - 1 {
@@ -271,7 +271,7 @@ fn WALInsertLockAcquireExclusive() -> PgResult<()> {
 }
 
 /// `WALInsertLockRelease(void)` (xlog.c:1472).
-fn WALInsertLockRelease() -> PgResult<()> {
+pub(crate) fn WALInsertLockRelease() -> PgResult<()> {
     if HOLDING_ALL_LOCKS.with(Cell::get) {
         // SAFETY: live lock array.
         unsafe {

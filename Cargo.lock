@@ -3334,6 +3334,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
+ "backend-access-transam-xloginsert-seams",
  "backend-postmaster-checkpointer-seams",
  "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
@@ -13565,6 +13566,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-repl-scanner"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scansup-seams",
+ "backend-replication-repl-scanner-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-repl-scanner-seams"
 version = "0.0.0"
 dependencies = [
@@ -13967,6 +13981,32 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-rewrite-rewritehandler"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-table-table",
+ "backend-catalog-pg-depend",
+ "backend-commands-view-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-core",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-trigger",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20466,6 +20506,7 @@ dependencies = [
  "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
+ "backend-replication-repl-scanner",
  "backend-replication-slot",
  "backend-replication-syncrep",
  "backend-replication-syncrep-scanner",
@@ -20473,6 +20514,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-replication-walsender",
  "backend-rewrite-core",
+ "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",

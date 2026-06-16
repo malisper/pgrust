@@ -318,6 +318,7 @@ pub fn init_all() {
     backend_replication_logical_slotsync::init_seams();
     backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
+    backend_replication_repl_scanner::init_seams();
     backend_replication_syncrep::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
@@ -325,6 +326,7 @@ pub fn init_all() {
     backend_replication_walsender::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_rewrite_core::init_seams();
+    backend_rewrite_rewritehandler::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
     backend_storage_file_fileset::init_seams();

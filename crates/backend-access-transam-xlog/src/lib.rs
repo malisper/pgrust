@@ -85,6 +85,12 @@ pub use write::{
     XLogShutdownWalRcv,
 };
 
+pub mod control_funcs;
+pub use control_funcs::{
+    AllowCascadeReplication, ReachedEndOfBackup, RequestXLogSwitch, UpdateFullPageWrites,
+    XLogPutNextOid, XLogReportParameters, XLogRestorePoint,
+};
+
 pub mod driver;
 pub use driver::{
     CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
@@ -645,14 +651,10 @@ xlog_driver_deferred! {
     pub fn StartupXLOG();
     /// `ShutdownXLOG(code, arg)` — the WAL-engine shutdown driver.
     pub fn ShutdownXLOG(code: i32, arg: Datum<'static>);
-    /// `XLogPutNextOid(nextOid)` — log the next-OID checkpoint hint.
-    pub fn XLogPutNextOid(next_oid: Oid);
-    /// `RequestXLogSwitch(mark_unimportant)` — force a WAL segment switch.
-    pub fn RequestXLogSwitch(mark_unimportant: bool) -> XLogRecPtr;
-    /// `XLogRestorePoint(rpName)` — log a named restore point.
-    pub fn XLogRestorePoint(rp_name: &str) -> XLogRecPtr;
-    /// `UpdateFullPageWrites()` — toggle full-page-writes, logging the change.
-    pub fn UpdateFullPageWrites();
+    // `XLogPutNextOid`, `RequestXLogSwitch`, `XLogRestorePoint`,
+    // `UpdateFullPageWrites` are now REAL in [`crate::control_funcs`]
+    // (re-exported above), built on the ported WAL-insert path + the XLogCtl /
+    // ControlFile shmem region; they are no longer in the deferred-driver list.
 
     /// `GetActiveWalLevelOnStandby()` — the wal_level a standby replays with.
     pub fn GetActiveWalLevelOnStandby() -> WalLevel;
@@ -781,6 +783,17 @@ pub fn init_seams() {
     s::get_fake_lsn_for_unlogged_rel::set(driver::GetFakeLSNForUnloggedRel);
     s::get_last_seg_switch_data::set(driver::GetLastSegSwitchData);
     s::get_last_important_rec_ptr::set(driver::GetLastImportantRecPtr);
+
+    // The small WAL-record-emitting + control-file housekeeping functions, now
+    // REAL in [`crate::control_funcs`] (built on the ported WAL-insert path +
+    // the XLogCtl / ControlFile shmem region). These front varsup (XLogPutNextOid),
+    // the checkpointer (RequestXLogSwitch / UpdateFullPageWrites), and the
+    // recovery driver (ReachedEndOfBackup / AllowCascadeReplication).
+    s::xlog_put_next_oid::set(control_funcs::XLogPutNextOid);
+    s::request_xlog_switch::set(control_funcs::RequestXLogSwitch);
+    s::update_full_page_writes::set(control_funcs::UpdateFullPageWrites);
+    s::reached_end_of_backup::set(control_funcs::ReachedEndOfBackup);
+    s::allow_cascade_replication::set(control_funcs::AllowCascadeReplication);
     {
         use backend_replication_walreceiverfuncs_seams as wf;
         wf::set_install_xlog_file_segment_active::set(|| {
