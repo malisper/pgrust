@@ -11091,6 +11091,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-planner"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-inherits",
+ "backend-foreign-foreign",
+ "backend-nodes-core",
+ "backend-optimizer-path-allpaths",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-plan-createplan",
+ "backend-optimizer-plan-init-subselect",
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-planner-ext-seams",
+ "backend-optimizer-plan-planner-seams",
+ "backend-optimizer-plan-setrefs",
+ "backend-optimizer-plan-small",
+ "backend-optimizer-prep-prepagg",
+ "backend-optimizer-prep-prepjointree",
+ "backend-optimizer-prep-prepjointree-seams",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-prep-preptlist",
+ "backend-optimizer-prep-prepunion-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-vars",
+ "backend-parser-analyze",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-planner-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -11109,6 +11157,31 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-setrefs"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs",
+ "backend-optimizer-plan-setrefs-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-setrefs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -11289,6 +11362,17 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-prepunion-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -20240,6 +20324,8 @@ dependencies = [
  "backend-optimizer-plan-analyzejoins",
  "backend-optimizer-plan-createplan",
  "backend-optimizer-plan-init-subselect",
+ "backend-optimizer-plan-planner",
+ "backend-optimizer-plan-setrefs",
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
