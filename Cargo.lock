@@ -15542,6 +15542,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-postgres"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-xact",
+ "backend-access-transam-xact-seams",
+ "backend-commands-async",
+ "backend-commands-user-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqsignal",
+ "backend-main-main-seams",
+ "backend-postmaster-autovacuum-seams",
+ "backend-replication-logical-applyparallelworker",
+ "backend-replication-logical-launcher-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-sinval",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-proc",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-guc-tables-seams",
+ "backend-utils-misc-timeout",
+ "backend-utils-misc-timeout-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "libc",
+ "mcx",
+ "pg-prng",
+ "port-pgstrcasecmp",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+ "types-stringinfo",
+ "types-timeout",
+]
+
+[[package]]
 name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
@@ -20429,6 +20482,7 @@ dependencies = [
  "backend-tcop-backend-startup",
  "backend-tcop-dest",
  "backend-tcop-fastpath",
+ "backend-tcop-postgres",
  "backend-tcop-pquery",
  "backend-tcop-utility",
  "backend-timezone-localtime",
