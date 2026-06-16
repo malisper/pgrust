@@ -24,8 +24,20 @@
 //!    fields a real producer does not yet supply, so they are seam-and-panic
 //!    (mirror-PG-and-panic) until the plan layer lands as ruleutils F0b.
 //!
-//! The expression deparser (F1), the query-tree deparsers (F2), and the catalog
-//! definition builders (F3) all build on this engine and are NOT in F0a.
+//! **F1 (the expression deparser) is now landed** in the [`expr_deparse`]
+//! module: the precedence-aware `get_rule_expr` tree-walker and its per-node
+//! deparsers (operators, functions, aggregates, window functions, constants,
+//! coercions, CASE, ARRAY/ROW/COALESCE/MIN-MAX, NULL/boolean tests, sub-links,
+//! subscripts, the `isSimpleNode` precedence oracle, and the Query-side
+//! `get_variable`). F1 introduces the output buffer (`DeparseContext::buf`) the
+//! engine renders into. The plan-tree-navigation arms (#159), the F2 query-tree
+//! deparsers (`get_rule_orderby` / `get_rule_windowspec` / `get_query_def`), and
+//! the catalog name generators (`generate_operator_name` /
+//! `generate_function_name`) it reaches are seam-and-panic until those families
+//! land.
+//!
+//! The query-tree deparsers (F2) and the catalog definition builders (F3) build
+//! on F1 and are NOT in this family.
 //!
 //! C source: `src/backend/utils/adt/ruleutils.c`.
 #![no_std]
@@ -51,6 +63,13 @@ use types_nodes::rawnodes::{Alias, FromExpr, JoinExpr};
 
 mod seams;
 pub use seams::init_seams;
+
+mod expr_deparse;
+pub use expr_deparse::{
+    get_coercion_expr, get_const_expr, get_func_expr, get_oper_expr, get_parameter,
+    get_rule_expr, get_rule_expr_funccall, get_rule_expr_paren, get_rule_expr_toplevel,
+    get_rule_list_toplevel, get_sublink_expr, get_variable, isSimpleNode,
+};
 
 /// `AccessShareLock` (`storage/lockdefs.h`) — the lock `deparse_context_for`
 /// takes on its synthetic relation RTE.
@@ -122,8 +141,23 @@ fn rt_fetch<'a, 'mcx>(
 /// The `buf`/`StringInfo` output sink is deliberately not modeled in F0a (it is
 /// introduced with the F2 query deparsers that actually emit text).
 pub struct DeparseContext<'mcx> {
+    /// `StringInfo buf` — output buffer to append to. F0a never emitted text, so
+    /// the buffer is introduced with F1 (the expression deparser is the first
+    /// family that renders SQL). Modeled as the owned [`types_stringinfo::StringInfo`]
+    /// (the C `appendStringInfo*` family lives in `stringinfo.c`; the deparser's
+    /// thin append helpers in `expr_deparse` wrap the byte buffer directly).
+    pub buf: types_stringinfo::StringInfo<'mcx>,
     /// `List *namespaces` — list of `deparse_namespace` nodes.
     pub namespaces: PgVec<'mcx, DeparseNamespace<'mcx>>,
+    /// `TupleDesc resultDesc` — if top level of a view, the view's tupdesc.
+    /// Read by [`get_variable`]'s `varInOrderBy` column-name-match path.
+    pub resultDesc: Option<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>,
+    /// `List *targetList` — current query level's SELECT targetlist. Read by
+    /// [`get_variable`]'s `varInOrderBy` path; set by the F2 query deparsers.
+    pub targetList: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>,
+    /// `List *windowClause` — current query level's WINDOW clause (list of
+    /// `WindowClause`). Read by the `WindowFunc` `OVER` query-decompilation path.
+    pub windowClause: PgVec<'mcx, types_nodes::rawnodes::WindowClause<'mcx>>,
     /// `int prettyFlags` — enabling of pretty-print functions.
     pub prettyFlags: i32,
     /// `int wrapColumn` — max line length, or -1 for no limit.

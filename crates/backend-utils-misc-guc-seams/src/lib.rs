@@ -164,6 +164,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `standard_conforming_strings` (guc.c bool global): whether ordinary
+    /// string literals treat backslashes literally (SQL-standard) rather than
+    /// as C-style escapes. Read by ruleutils' `simple_quote_literal` to choose
+    /// the literal-quoting rule (it never emits `E''`).
+    pub fn standard_conforming_strings() -> bool
+);
+
+seam_core::seam!(
     /// `autovacuum_work_mem` (guc.c global, KB; `-1` means "use
     /// maintenance_work_mem"): the memory limit an autovacuum worker uses.
     /// Read by `ginInsertCleanup` when invoked from an autovacuum worker.
