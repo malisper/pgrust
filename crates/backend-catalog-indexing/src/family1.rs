@@ -569,6 +569,212 @@ fn update_pg_language<'mcx>(
     CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)
 }
 
+/* ======================================================================== *
+ * pg_rewrite — InsertRule / EnableDisableRule / RenameRewriteRule
+ * (rewriteDefine.c). OID column + rulename NameData + two pg_node_tree text
+ * columns (ev_qual, ev_action).
+ * ======================================================================== */
+
+/// `CStringGetTextDatum(s)` — a `text` varlena Datum: the 4-byte (full) varlena
+/// header followed by the string bytes (no trailing NUL). Mirrors C's
+/// `cstring_to_text` storage image carried as on-disk bytes.
+fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    let payload = s.as_bytes();
+    let total = 4 + payload.len();
+    // SET_VARSIZE(result, total): the length word is (total << 2) in native
+    // byte order (4-byte varlena header, VARTAG full).
+    let word = (total as u32) << 2;
+    let mut buf = Vec::with_capacity(total);
+    buf.extend_from_slice(&word.to_ne_bytes());
+    buf.extend_from_slice(payload);
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &buf)?))
+}
+
+/// `namestrcpy(&name, src)` — copy `src` into a zero-filled 64-byte `NameData`,
+/// truncated to `NAMEDATALEN`, force-terminated at the last slot.
+fn namestrcpy_image(src: &str) -> [u8; 64] {
+    let mut name = [0u8; 64];
+    for (i, &byte) in src.as_bytes().iter().take(64).enumerate() {
+        name[i] = byte;
+    }
+    name[64 - 1] = 0;
+    name
+}
+
+/// The `((Form_pg_rewrite) GETSTRUCT(tup))->oid` of a formed/held pg_rewrite
+/// tuple, read out of the deformed fixed columns.
+fn rewrite_tuple_oid<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>, tup: &FormedTuple<'mcx>) -> PgResult<Oid> {
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let cols = backend_access_common_heaptuple::heap_deform_tuple(mcx, &tup.tuple, &tupdesc, &tup.data)?;
+    let idx = cat::pg_rewrite::Anum_pg_rewrite_oid as usize - 1;
+    let (value, isnull) = &cols[idx];
+    if *isnull {
+        return Err(types_error::PgError::error("pg_rewrite.oid is NULL"));
+    }
+    Ok(value.as_oid())
+}
+
+/// Build the full `values[]`/`nulls[]` for a pg_rewrite row.
+fn rewrite_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    rulename: &str,
+    ev_class: Oid,
+    ev_type: u8,
+    ev_enabled: u8,
+    is_instead: bool,
+    ev_qual: &str,
+    ev_action: &str,
+) -> PgResult<([Datum<'mcx>; cat::pg_rewrite::Natts_pg_rewrite], [bool; cat::pg_rewrite::Natts_pg_rewrite])> {
+    let values = [
+        Datum::from_oid(oid),
+        name_datum(mcx, &namestrcpy_image(rulename))?,
+        Datum::from_oid(ev_class),
+        Datum::from_char(ev_type as i8),
+        Datum::from_char(ev_enabled as i8),
+        Datum::from_bool(is_instead),
+        cstring_get_text_datum(mcx, ev_qual)?,
+        cstring_get_text_datum(mcx, ev_action)?,
+    ];
+    let nulls = [false; cat::pg_rewrite::Natts_pg_rewrite];
+    Ok((values, nulls))
+}
+
+fn insert_pg_rewrite<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    rulename: &str,
+    ev_class: Oid,
+    ev_type: u8,
+    is_instead: bool,
+    ev_qual: &str,
+    ev_action: &str,
+) -> PgResult<Oid> {
+    // rewriteObjectId = GetNewOidWithIndex(rel, RewriteOidIndexId, Anum_pg_rewrite_oid);
+    let rewrite_oid = GetNewOidWithIndex(
+        rel,
+        cat::pg_rewrite::RewriteOidIndexId,
+        cat::pg_rewrite::Anum_pg_rewrite_oid,
+    )?;
+    // values[Anum_pg_rewrite_ev_enabled - 1] = CharGetDatum(RULE_FIRES_ON_ORIGIN);
+    let (values, nulls) = rewrite_values(
+        mcx,
+        rewrite_oid,
+        rulename,
+        ev_class,
+        ev_type,
+        cat::pg_rewrite::RULE_FIRES_ON_ORIGIN,
+        is_instead,
+        ev_qual,
+        ev_action,
+    )?;
+    // tup = heap_form_tuple(pg_rewrite_desc->rd_att, values, nulls);
+    // CatalogTupleInsert(pg_rewrite_desc, tup);
+    form_and_insert(mcx, rel, &values, &nulls)?;
+    Ok(rewrite_oid)
+}
+
+fn update_pg_rewrite<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    ev_type: u8,
+    is_instead: bool,
+    ev_qual: &str,
+    ev_action: &str,
+) -> PgResult<Oid> {
+    // replaces[] starts all-false; only ev_type / is_instead / ev_qual /
+    // ev_action are replaced (rewriteDefine.c:110-113). All other columns
+    // (oid / rulename / ev_class / ev_enabled) are taken from `oldtup`.
+    let mut replaces = [false; cat::pg_rewrite::Natts_pg_rewrite];
+    replaces[cat::pg_rewrite::Anum_pg_rewrite_ev_type as usize - 1] = true;
+    replaces[cat::pg_rewrite::Anum_pg_rewrite_is_instead as usize - 1] = true;
+    replaces[cat::pg_rewrite::Anum_pg_rewrite_ev_qual as usize - 1] = true;
+    replaces[cat::pg_rewrite::Anum_pg_rewrite_ev_action as usize - 1] = true;
+
+    // The not-replaced columns are read from `oldtup`; pass placeholders for them.
+    let (values, nulls) = rewrite_values(
+        mcx,
+        InvalidOid,
+        "",
+        InvalidOid,
+        ev_type,
+        cat::pg_rewrite::RULE_FIRES_ON_ORIGIN,
+        is_instead,
+        ev_qual,
+        ev_action,
+    )?;
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_modify_tuple(mcx, oldtup, &tupdesc, &values, &nulls, &replaces)?;
+    // CatalogTupleUpdate(pg_rewrite_desc, &tup->t_self, tup);
+    CatalogTupleUpdate(mcx, rel, tup.tuple.t_self, &mut tup)?;
+    // rewriteObjectId = ((Form_pg_rewrite) GETSTRUCT(tup))->oid;
+    rewrite_tuple_oid(mcx, rel, &tup)
+}
+
+/// Re-form `oldtup` with a single fixed column replaced and update at
+/// `oldtup->t_self` (the EnableDisableRule / RenameRewriteRule in-place mutate
+/// pattern, behaviour-identical to mutating the GETSTRUCT field then
+/// CatalogTupleUpdate of the same tuple).
+fn modify_one_pg_rewrite_column<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    attnum: usize,
+    value: Datum<'mcx>,
+) -> PgResult<()> {
+    let mut replaces = [false; cat::pg_rewrite::Natts_pg_rewrite];
+    replaces[attnum - 1] = true;
+    let mut values = [
+        Datum::from_oid(InvalidOid),
+        Datum::from_oid(InvalidOid),
+        Datum::from_oid(InvalidOid),
+        Datum::from_char(0),
+        Datum::from_char(0),
+        Datum::from_bool(false),
+        Datum::from_oid(InvalidOid),
+        Datum::from_oid(InvalidOid),
+    ];
+    values[attnum - 1] = value;
+    let nulls = [false; cat::pg_rewrite::Natts_pg_rewrite];
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_modify_tuple(mcx, oldtup, &tupdesc, &values, &nulls, &replaces)?;
+    CatalogTupleUpdate(mcx, rel, oldtup.tuple.t_self, &mut tup)
+}
+
+fn update_pg_rewrite_enabled<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    ev_enabled: u8,
+) -> PgResult<()> {
+    modify_one_pg_rewrite_column(
+        mcx,
+        rel,
+        oldtup,
+        cat::pg_rewrite::Anum_pg_rewrite_ev_enabled as usize,
+        Datum::from_char(ev_enabled as i8),
+    )
+}
+
+fn update_pg_rewrite_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    oldtup: &FormedTuple<'mcx>,
+    new_name: &str,
+) -> PgResult<()> {
+    let image = namestrcpy_image(new_name);
+    let value = name_datum(mcx, &image)?;
+    modify_one_pg_rewrite_column(
+        mcx,
+        rel,
+        oldtup,
+        cat::pg_rewrite::Anum_pg_rewrite_rulename as usize,
+        value,
+    )
+}
+
 /// Install the F1 per-catalog typed seams whose substrate is fully present
 /// (pure `heap_form_tuple` + engine, plus `GetNewOidWithIndex` for the
 /// OID-column catalogs). Wired from [`crate::init_seams`].
@@ -587,6 +793,12 @@ pub fn install() {
         multi_insert_pg_shdepend,
     );
     backend_catalog_indexing_seams::catalog_tuples_multi_insert_pg_enum::set(multi_insert_pg_enum);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_rewrite::set(insert_pg_rewrite);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_rewrite::set(update_pg_rewrite);
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_rewrite_enabled::set(
+        update_pg_rewrite_enabled,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_rewrite_name::set(update_pg_rewrite_name);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_statistic_ext::set(
         insert_pg_statistic_ext,
     );

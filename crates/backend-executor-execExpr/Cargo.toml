@@ -37,6 +37,9 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 # get_opcode / get_op_hash_functions) the hashed-subplan combining-op
 # resolution routes through.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# format_type_be(refcontainertype) for the "cannot subscript type %s" /
+# "does not support subscripted assignment" error texts in ExecInitSubscriptingRef.
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 # fmgr_info(funcid) -> FmgrInfo (fn_strict/fn_stats/fn_addr) for the Func / agg /
 # hash / IOcoerce / rowcompare / minmax / scalararrayop opcode selection and
 # fn_addr stamp (ExecInitFunc and friends read flinfo->fn_strict after lookup).

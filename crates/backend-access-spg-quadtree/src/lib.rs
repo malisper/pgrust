@@ -695,6 +695,7 @@ fn decode_orderby_points(orderbys: &[types_scan::scankey::ScanKeyData<'_>]) -> V
 
 use backend_access_spg_kdtree as kd;
 use backend_access_spg_text as text;
+use backend_utils_adt_network_spgist as inet;
 
 /// `unrecognized SP-GiST support function OID` — a dispatch to an OID no
 /// installed opclass owns (mirror-PG-and-panic: the SP-GiST core only ever
@@ -727,6 +728,12 @@ fn dispatch_config(
             // The text opclass writes its config straight into the typed out
             // (TEXTOID prefix / INT2OID label / no explicit leaf type).
             text::spg_text_config(_in, out);
+            return Ok(());
+        }
+        inet::F_INET_SPG_CONFIG => {
+            // The inet opclass writes its config straight into the typed out
+            // (CIDROID prefix / VOIDOID label / no explicit leaf type).
+            inet::inet_spg_config(_in, out);
             return Ok(());
         }
         _ => return Err(unrecognized_proc(proc_oid, "config")),
@@ -793,6 +800,7 @@ fn dispatch_choose<'mcx>(
             Ok(())
         }
         text::F_SPG_TEXT_CHOOSE => text::spg_text_choose(mcx, in_, out),
+        inet::F_INET_SPG_CHOOSE => inet::inet_spg_choose(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "choose")),
     }
 }
@@ -853,6 +861,7 @@ fn dispatch_picksplit<'mcx>(
             Ok(())
         }
         text::F_SPG_TEXT_PICKSPLIT => text::spg_text_picksplit(mcx, in_, out),
+        inet::F_INET_SPG_PICKSPLIT => inet::inet_spg_picksplit(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "picksplit")),
     }
 }
@@ -910,6 +919,7 @@ fn dispatch_inner_consistent<'mcx>(
             write_inner_out(out, local_out.nNodes, local_out.nodeNumbers, local_out.levelAdds, &local_out.traversalValues, local_out.distances)
         }
         text::F_SPG_TEXT_INNER_CONSISTENT => text::spg_text_inner_consistent(_mcx, in_, out),
+        inet::F_INET_SPG_INNER_CONSISTENT => inet::inet_spg_inner_consistent(in_, out),
         _ => Err(unrecognized_proc(proc_oid, "inner_consistent")),
     }
 }
@@ -962,6 +972,7 @@ fn dispatch_leaf_consistent<'mcx>(
             Ok(res)
         }
         text::F_SPG_TEXT_LEAF_CONSISTENT => text::spg_text_leaf_consistent(mcx, in_, out),
+        inet::F_INET_SPG_LEAF_CONSISTENT => inet::inet_spg_leaf_consistent(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "leaf_consistent")),
     }
 }
