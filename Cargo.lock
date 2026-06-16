@@ -16423,6 +16423,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-backend"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-instrument",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-io-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-io"
 version = "0.0.0"
 dependencies = [
@@ -16468,6 +16485,22 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-slru"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -21222,7 +21255,9 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
  "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-slru",
  "backend-utils-activity-pgstat-wal",
  "backend-utils-activity-small",
  "backend-utils-activity-waitevent",
