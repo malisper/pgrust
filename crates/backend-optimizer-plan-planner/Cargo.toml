@@ -28,8 +28,10 @@ backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createpl
 backend-optimizer-plan-setrefs = { path = "../backend-optimizer-plan-setrefs" }
 # query_planner.
 backend-optimizer-plan-small = { path = "../backend-optimizer-plan-small" }
-# replace_empty_jointree / SS_* (subselect.c).
+# SS_* (subselect.c) incl. SS_process_ctes.
 backend-optimizer-plan-init-subselect = { path = "../backend-optimizer-plan-init-subselect" }
+# replace_empty_jointree (prepjointree.c, ported in subselect-pullup).
+backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 # ExecSupportsBackwardScan / materialize_finished_plan outward seams.
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 # prepjointree spine (pull_up_*, reduce_outer_joins, remove_useless_result_rtes, ...).

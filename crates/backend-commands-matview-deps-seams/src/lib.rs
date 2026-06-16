@@ -20,8 +20,8 @@
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_matview::{
-    DestReceiverHandle, IndexUsabilityInfo, MatViewRelInfo, MatchMergeQual, PlannedStmtHandle,
-    QueryDescHandle, QueryHandle, TupleSlotHandle,
+    IndexUsabilityInfo, MatViewRelInfo, MatchMergeQual, PlannedStmtHandle, QueryDescHandle,
+    QueryHandle,
 };
 
 // --- relcache / table-AM / lock ------------------------------------------------
@@ -203,7 +203,7 @@ seam_core::seam!(
     pub fn create_query_desc(
         plan: PlannedStmtHandle,
         query_string: String,
-        dest: DestReceiverHandle,
+        dest: types_nodes::parsestmt::DestReceiverHandle,
     ) -> PgResult<QueryDescHandle>
 );
 seam_core::seam!(
@@ -227,39 +227,28 @@ seam_core::seam!(
     pub fn pop_active_snapshot() -> PgResult<()>
 );
 
-// --- transientrel_* DestReceiver callbacks: provider side ----------------------
+// --- transientrel_* DestReceiver: the table-AM bulk-insert flush ---------------
 //
-// matview's transientrel_* are pure delegations into the runtime that owns the
-// DR_transientrel allocation (table_open/insert/finish/close on its private
-// fields). These provider-side seams carry that work.
+// The `DR_transientrel` receiver itself is now owned in-crate by
+// `backend-commands-matview` and registered into the `backend-tcop-dest`
+// value-router (mirroring `createas.c`'s `DR_intorel`): `transientrel_startup`
+// reaches `table_open`/`GetBulkInsertState`, `transientrel_receive` reaches
+// `table_tuple_insert`, and `transientrel_shutdown` reaches
+// `FreeBulkInsertState`/`table_close` directly. The single dep left on the
+// frontier is the table-AM `finish_bulk_insert` vtable slot (unported in the
+// heap AM handler), exactly as `createas.c` carries it.
 
 seam_core::seam!(
-    /// `CreateTransientRelDestReceiver(transientoid)` — allocate + wire the
-    /// `DR_transientrel` and return its handle.
-    pub fn create_transient_rel_dest_receiver(transientoid: Oid) -> PgResult<DestReceiverHandle>
-);
-seam_core::seam!(
-    /// `transientrel_startup` body: `table_open(transientoid, NoLock)` -> fill
-    /// `transientrel`/`output_cid`/`ti_options`/`bistate`, + the target-block
-    /// assert.
-    pub fn transientrel_startup_impl(dest: DestReceiverHandle) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `transientrel_receive` body: `table_tuple_insert(transientrel, slot,
-    /// output_cid, ti_options, bistate)`; returns the C `true`.
-    pub fn transientrel_receive_impl(
-        dest: DestReceiverHandle,
-        slot: TupleSlotHandle,
-    ) -> PgResult<bool>
-);
-seam_core::seam!(
-    /// `transientrel_shutdown` body: `FreeBulkInsertState` ->
-    /// `table_finish_bulk_insert` -> `table_close(transientrel, NoLock)`.
-    pub fn transientrel_shutdown_impl(dest: DestReceiverHandle) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `transientrel_destroy` body: `pfree(self)`.
-    pub fn transientrel_destroy_impl(dest: DestReceiverHandle) -> PgResult<()>
+    /// `table_finish_bulk_insert(rel, options)` (tableam.h inline) — flush any
+    /// remaining buffered tuples for a bulk insert and, for
+    /// `TABLE_INSERT_SKIP_WAL`, fsync the relation. Called by
+    /// `transientrel_shutdown`. The heap AM's `finish_bulk_insert` vtable slot is
+    /// not yet ported, so this stays on the frontier and panics until it lands
+    /// (mirror-PG-and-panic), matching `backend-commands-createas`.
+    pub fn table_finish_bulk_insert<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        options: i32,
+    ) -> PgResult<()>
 );
 
 // --- refresh_by_match_merge: SPI + ruleutils -----------------------------------

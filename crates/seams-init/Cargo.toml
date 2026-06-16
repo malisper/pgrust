@@ -305,6 +305,7 @@ backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backe
 backend-postmaster-bgwriter = { path = "../backend-postmaster-bgwriter" }
 backend-postmaster-checkpointer = { path = "../backend-postmaster-checkpointer" }
 backend-postmaster-fork-process = { path = "../backend-postmaster-fork-process" }
+backend-postmaster-auxprocess = { path = "../backend-postmaster-auxprocess" }
 backend-postmaster-pgarch = { path = "../backend-postmaster-pgarch" }
 backend-postmaster-pmchild = { path = "../backend-postmaster-pmchild" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
