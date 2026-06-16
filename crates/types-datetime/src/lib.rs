@@ -398,3 +398,53 @@ pub struct DateToken {
     /// Meaning depends on `type`.
     pub value: i32,
 }
+
+// ---------------------------------------------------------------------------
+// Seam-vocabulary carriers (formatting.c <-> datetime/timestamp/isoweek).
+// ---------------------------------------------------------------------------
+
+/// Year/month/day triple produced by the `j2date` / isoweek seams.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct YmdDate {
+    pub year: i32,
+    pub mon: i32,
+    pub mday: i32,
+}
+
+/// An owned, seam-friendly handle to a resolved `pg_tz` (timezone) object.
+///
+/// In `formatting.c` the `TmFromChar.tzp` field and the
+/// `DecodeTimezoneAbbrevPrefix` output are `pg_tz *` — pointers into the
+/// timezone subsystem's interned zone table. The owned surface does not name
+/// that `*mut pg_tz`; the timezone seam provider returns this stable id, which
+/// it can later map back to its interned `pg_tz` when the DCH consumer asks for
+/// `DetermineTimeZoneAbbrevOffset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TzHandle(pub u32);
+
+/// Result of the `decode_timezone_abbrev_prefix` seam — the owned form of C's
+/// `DecodeTimezoneAbbrevPrefix(str, &gmtoffset, &tzp)` outputs (datetime.c).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TzAbbrevMatch {
+    /// Number of input bytes consumed (`> 0` on a match, `<= 0` on no match).
+    pub tzlen: i32,
+    /// For a fixed-offset abbreviation: the GMT offset in seconds.
+    pub gmtoffset: i32,
+    /// For a dynamic abbreviation: the resolved-later timezone handle. `None`
+    /// for a fixed-offset abbreviation (or no match).
+    pub tzp: Option<TzHandle>,
+}
+
+/// Result of the `timestamp2tm` seam — the owned form of C's
+/// `timestamp2tm(dt, &tzp, tm, &fsec, &tzn, attimezone)` outputs (timestamp.c).
+#[derive(Clone, Debug, Default)]
+pub struct Timestamp2TmResult {
+    /// The broken-down time.
+    pub tm: types_pgtime::pg_tm,
+    /// Fractional seconds (microseconds).
+    pub fsec: fsec_t,
+    /// GMT offset (seconds), when the caller requested timezone resolution.
+    pub tz: i32,
+    /// Zone-abbreviation name, when the caller requested it.
+    pub tzn: Option<String>,
+}

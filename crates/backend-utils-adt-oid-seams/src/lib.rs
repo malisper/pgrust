@@ -29,3 +29,14 @@ seam_core::seam!(
     /// `soft = false` such input propagates as a hard error on `Err`.
     pub fn oidin(s: &str, soft: bool) -> PgResult<Option<Oid>>
 );
+
+seam_core::seam!(
+    /// `check_valid_oidvector(oidArray)` (oid.c): validate that an array object
+    /// meets the restrictions of `oidvector` — `ndim == 1`, `dataoffset == 0`
+    /// (no nulls), and `elemtype == OIDOID`. A general `oid[]` array cast to
+    /// `oidvector` can violate these, so all code that receives an `oidvector`
+    /// as a SQL parameter must check it. A violation is an
+    /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH, "array is not a valid
+    /// oidvector")` (`Err`). Consumed by `hashoidvector`/`hashoidvectorextended`.
+    pub fn check_valid_oidvector(ndim: i32, dataoffset: i32, elemtype: Oid) -> PgResult<()>
+);

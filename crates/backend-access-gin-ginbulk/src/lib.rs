@@ -40,7 +40,8 @@ use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber};
 use types_error::PgError;
 use types_gin::{GinNullCategory, GinState, GinStatsData, GIN_CAT_NORM_KEY, GIN_LEAF};
 use types_rel::Relation;
-use types_tableam::amapi::{IndexBuildResult, IndexInfo};
+use types_nodes::execnodes::IndexInfo;
+use types_tableam::amapi::IndexBuildResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -576,7 +577,7 @@ pub fn ginbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    index_info: &mut IndexInfo,
+    index_info: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if relation_get_number_of_blocks(index)? != 0 {
         return Err(PgError::error("index already contains data"));
@@ -626,6 +627,7 @@ pub fn ginbuild<'mcx>(
         let bs = &mut buildstate;
         let index_alias = index.alias();
         backend_access_table_tableam_seams::table_index_build_scan::call(
+            mcx,
             heap,
             index,
             index_info,

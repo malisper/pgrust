@@ -86,6 +86,7 @@ fn make_index<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_indoption: PgVec::new_in(mcx),
         rd_indcollation: PgVec::new_in(mcx),
         rd_trigdesc: None,
+        pgstat_enabled: false,
     };
     Relation::open(data, None)
 }

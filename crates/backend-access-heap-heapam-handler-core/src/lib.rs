@@ -41,6 +41,8 @@ use types_tableam::tableam::{
 };
 use types_tuple::heaptuple::ItemPointerData;
 
+pub mod build_scan;
+
 use backend_access_heap_heapam as heapam;
 use backend_access_heap_heapam_handler_dml_seams as dml_seam;
 use backend_access_heap_pruneheap_seams as prune_seam;
@@ -663,4 +665,13 @@ pub fn init_seams() {
     sx::table_relation_toast_am::set(table_relation_toast_am);
     sx::table_relation_needs_toast_table::set(table_relation_needs_toast_table);
     sx::table_parallelscan_reinitialize::set(table_parallelscan_reinitialize);
+    // The canonical, fully-typed serial index-build heap scan
+    // (heapam_index_build_range_scan). brinsummarize reaches it with the real
+    // execnodes::IndexInfo + an explicit arena; the whole-relation
+    // `table_index_build_scan` forwards to the same provider over the entire
+    // relation (anyvisible = false, start_blockno = 0, numblocks =
+    // InvalidBlockNumber), and the AM build drivers now carry the real
+    // execnodes::IndexInfo + mcx through their ambuild signatures.
+    sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
+    sx::table_index_build_scan::set(build_scan::provider_index_build_scan);
 }

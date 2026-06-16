@@ -881,7 +881,7 @@ pub fn index_getnext_tid<'mcx>(
     }
     // Assert(ItemPointerIsValid(&scan->xs_heaptid)) — debug-only.
 
-    pgstat::pgstat_count_index_tuples::call(scan.index_relation.rd_id, 1);
+    pgstat::pgstat_count_index_tuples::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled, 1);
 
     // Return the TID of the tuple we found.
     Ok(Some(scan.xs_heaptid))
@@ -918,7 +918,7 @@ pub fn index_fetch_heap<'mcx>(
     scan.xs_heap_continue = heap_continue;
 
     if found {
-        pgstat::pgstat_count_heap_fetch::call(scan.index_relation.rd_id);
+        pgstat::pgstat_count_heap_fetch::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled);
     }
 
     // If we scanned a whole HOT chain and found only dead tuples, tell the
@@ -981,7 +981,7 @@ pub fn index_getbitmap<'mcx>(
     // have the am's getbitmap proc do all the work.
     let ntids = amgetbitmap(mcx, scan, bitmap)?;
 
-    pgstat::pgstat_count_index_tuples::call(scan.index_relation.rd_id, ntids);
+    pgstat::pgstat_count_index_tuples::call(scan.index_relation.rd_id, scan.index_relation.pgstat_enabled, ntids);
 
     Ok(ntids)
 }

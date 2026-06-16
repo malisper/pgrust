@@ -79,6 +79,7 @@ backend-backup-server = { path = "../backend-backup-server" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-storage = { path = "../backend-catalog-storage" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
@@ -89,6 +90,7 @@ backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-set
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
+backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
 backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
@@ -170,7 +172,10 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-nodes-copyfuncs = { path = "../backend-nodes-copyfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
+backend-nodes-readfuncs = { path = "../backend-nodes-readfuncs" }
 backend-access-hash-core = { path = "../backend-access-hash-core" }
+backend-access-hashfunc = { path = "../backend-access-hashfunc" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
@@ -288,6 +293,7 @@ backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

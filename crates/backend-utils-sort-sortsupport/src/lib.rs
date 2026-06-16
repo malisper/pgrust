@@ -28,8 +28,8 @@ use types_error::{PgError, PgResult};
 use types_tuple::Datum;
 use types_rel::Relation;
 use types_sortsupport::{
-    SortComparatorId, SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
-    GIST_SORTSUPPORT_PROC,
+    AbbrevAbortId, AbbrevConverterId, SortComparatorId, SortSupportData, BTORDER_PROC,
+    BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID, GIST_SORTSUPPORT_PROC,
 };
 
 use backend_utils_fmgr_core::{fmgr_info_cxt, function_call2_coll, oid_function_call1_coll};
@@ -380,6 +380,84 @@ fn apply_sort_comparator(
 }
 
 // ===========================================================================
+// Abbreviated-key hook registries + apply seams.
+//
+// The three abbreviation hooks (`abbrev_converter`, `abbrev_abort`,
+// `abbrev_full_comparator`) follow the same token model as `comparator`: the
+// abbreviation-providing unit (varlena/numeric) registers the resolved kernel
+// through its install seam and writes the token into the matching `ssup` field;
+// the sort engine invokes it through the `apply_sort_abbrev_*` seams here, which
+// interpret the token.
+//
+// `abbrev_full_comparator` shares the comparator-token space ([`SortComparatorId`]
+// into `SHIMS`), exactly as C reuses the same `int (*)(Datum, Datum, SortSupport)`
+// function-pointer type. Only the converter / abort have their own registries.
+// ===========================================================================
+
+/// A resolved `abbrev_converter` kernel: `Datum (*)(Datum original, SortSupport)`.
+/// Owned `Datum` is the canonical carrier; the abbreviated key is a
+/// pass-by-value word, but the kernel signature carries the canonical `Datum`
+/// uniformly.
+type AbbrevConverterKernel = fn(Datum<'_>, &SortSupportData<'_>) -> PgResult<Datum<'static>>;
+
+/// A resolved `abbrev_abort` kernel: `bool (*)(int memtupcount, SortSupport)`.
+type AbbrevAbortKernel = fn(i32, &mut SortSupportData<'_>) -> PgResult<bool>;
+
+thread_local! {
+    /// Token -> abbrev converter, indexed by `AbbrevConverterId.0`.
+    static ABBREV_CONVERTERS: RefCell<Vec<AbbrevConverterKernel>> =
+        const { RefCell::new(Vec::new()) };
+    /// Token -> abbrev abort, indexed by `AbbrevAbortId.0`.
+    static ABBREV_ABORTS: RefCell<Vec<AbbrevAbortKernel>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `ssup->abbrev_converter(original, ssup)` (sortsupport.h): invoke the
+/// installed abbreviation converter on the original (non-null, pass-by-reference)
+/// datum. The caller has verified `ssup.abbrev_converter.is_some()`.
+fn apply_sort_abbrev_converter(
+    original: Datum<'_>,
+    ssup: &SortSupportData<'_>,
+) -> PgResult<Datum<'static>> {
+    let id: AbbrevConverterId = ssup
+        .abbrev_converter
+        .expect("apply_sort_abbrev_converter: ssup.abbrev_converter must be set");
+    let kernel =
+        ABBREV_CONVERTERS.with(|s| s.borrow()[id.0 as usize]);
+    kernel(original, ssup)
+}
+
+/// `ssup->abbrev_abort(memtupcount, ssup)` (sortsupport.h): poll the installed
+/// abort-abbreviation cost-model callback. The caller has verified
+/// `ssup.abbrev_abort.is_some()`.
+fn apply_sort_abbrev_abort(
+    memtupcount: i32,
+    ssup: &mut SortSupportData<'_>,
+) -> PgResult<bool> {
+    let id: AbbrevAbortId = ssup
+        .abbrev_abort
+        .expect("apply_sort_abbrev_abort: ssup.abbrev_abort must be set");
+    let kernel = ABBREV_ABORTS.with(|s| s.borrow()[id.0 as usize]);
+    kernel(memtupcount, ssup)
+}
+
+/// `ssup->abbrev_full_comparator(x, y, ssup)` (sortsupport.h,
+/// `ApplySortAbbrevFullComparator`): invoke the full authoritative comparator
+/// the sortsupport routine moved aside when it installed the abbreviated
+/// comparator. The token shares the comparator space (`SHIMS`), interpreted by
+/// [`comparison_shim`]. The caller has verified
+/// `ssup.abbrev_full_comparator.is_some()`.
+fn apply_sort_abbrev_full_comparator(
+    datum1: Datum<'_>,
+    datum2: Datum<'_>,
+    ssup: &SortSupportData<'_>,
+) -> PgResult<i32> {
+    let id = ssup
+        .abbrev_full_comparator
+        .expect("apply_sort_abbrev_full_comparator: ssup.abbrev_full_comparator must be set");
+    comparison_shim(ssup.ssup_cxt, id, datum1, datum2)
+}
+
+// ===========================================================================
 // install_sortsupport_* — the substrate side of `ssup->comparator = <fastcmp>`.
 //
 // These seams are OWNED by this sort substrate (declared in nbt-compare-seams,
@@ -409,6 +487,11 @@ pub fn init_seams() {
     sx::prepare_sort_support_comparison_shim::set(PrepareSortSupportComparisonShim);
     sx::apply_sort_comparator::set(apply_sort_comparator);
     sx::prepare_sort_support_from_ordering_op::set(PrepareSortSupportFromOrderingOp);
+    sx::prepare_sort_support_from_index_rel::set(PrepareSortSupportFromIndexRel);
+    sx::prepare_sort_support_from_gist_index_rel::set(PrepareSortSupportFromGistIndexRel);
+    sx::apply_sort_abbrev_converter::set(apply_sort_abbrev_converter);
+    sx::apply_sort_abbrev_abort::set(apply_sort_abbrev_abort);
+    sx::apply_sort_abbrev_full_comparator::set(apply_sort_abbrev_full_comparator);
 
     // The fast-comparator install seams (owned by this substrate).
     nbtcompare_seams::install_sortsupport_int2::set(install_native_comparator);
