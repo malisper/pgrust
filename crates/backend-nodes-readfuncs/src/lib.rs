@@ -65,9 +65,10 @@ use mcx::{Mcx, PgBox, PgString};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
-    BoolExpr, BoolExprType, CoercionForm, Expr, ExprRelids, FuncExpr, OpExpr, Param, ParamKind,
-    TargetEntry, Var, VarReturningType,
+    BoolExpr, BoolExprType, CoercionForm, Const, Expr, ExprRelids, FuncExpr, OpExpr, Param,
+    ParamKind, TargetEntry, Var, VarReturningType,
 };
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_nodes_core::read::{self, Token};
 
@@ -379,6 +380,121 @@ fn read_param() -> PgResult<Param> {
     })
 }
 
+/// `readDatum(typbyval)` (readfuncs.c:600) — reconstruct a `Datum` from its
+/// `LENGTH [ b0 b1 ... ]` text form. The string embeds the length but not
+/// by-value-ness, so the caller passes `constbyval`.
+///
+/// For a by-value datum the C reads exactly `sizeof(Datum)` (8) signed-char
+/// byte tokens into the word's native bytes (the embedded `length` — `typlen` —
+/// is only range-checked). We rebuild the word via `from_ne_bytes` into a
+/// [`Datum::ByVal`]. For a by-reference datum the C palloc's `length` bytes and
+/// reads them in; we collect them into a [`Datum::ByRef`] image (length 0 → a
+/// NULL pointer, mirrored as an empty image).
+fn read_datum<'mcx>(mcx: Mcx<'mcx>, typbyval: bool) -> PgResult<Datum<'mcx>> {
+    // length = atoui(pg_strtok());
+    let len_tok = next_token()?;
+    let length = atoui_u64(&tok_str(&len_tok)) as usize;
+
+    // expect '['
+    let open = next_token()?;
+    if open.bytes.first() != Some(&b'[') {
+        return Err(elog_error(alloc::format!(
+            "expected \"[\" to start datum, but got \"{}\"; length = {}",
+            tok_str(&open),
+            length
+        )));
+    }
+
+    let res = if typbyval {
+        if length > core::mem::size_of::<usize>() {
+            return Err(elog_error(alloc::format!(
+                "byval datum but length = {length}"
+            )));
+        }
+        // res = 0; s = &res; for i in 0..sizeof(Datum) { s[i] = atoi(token); }
+        let mut bytes = [0u8; core::mem::size_of::<usize>()];
+        for b in bytes.iter_mut() {
+            let t = next_token()?;
+            *b = (atoi_i64(&tok_str(&t)) as i8) as u8;
+        }
+        Datum::ByVal(usize::from_ne_bytes(bytes))
+    } else if length == 0 {
+        // res = (Datum) NULL — an empty by-reference image.
+        Datum::ByRef(mcx::PgVec::new_in(mcx))
+    } else {
+        // s = palloc(length); for i in 0..length { s[i] = atoi(token); }
+        let mut bytes = mcx::PgVec::new_in(mcx);
+        bytes
+            .try_reserve(length)
+            .map_err(|_| elog_error("out of memory reading datum"))?;
+        for _ in 0..length {
+            let t = next_token()?;
+            bytes.push((atoi_i64(&tok_str(&t)) as i8) as u8);
+        }
+        Datum::ByRef(bytes)
+    };
+
+    // expect ']'
+    let close = next_token()?;
+    if close.bytes.first() != Some(&b']') {
+        return Err(elog_error(alloc::format!(
+            "expected \"]\" to end datum, but got \"{}\"; length = {}",
+            tok_str(&close),
+            length
+        )));
+    }
+    Ok(res)
+}
+
+/// `_readConst` (readfuncs.c:268). Reads the fields in the order `_outConst`
+/// wrote them, then the `:constvalue` payload (`<>` when null, else `readDatum`
+/// keyed on `constbyval`).
+fn read_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Const> {
+    let consttype = read_oid_field()?;
+    let consttypmod = read_int_field()?;
+    let constcollid = read_oid_field()?;
+    let constlen = read_int_field()?;
+    let constbyval = read_bool_field()?;
+    let constisnull = read_bool_field()?;
+    let location = read_location_field()?;
+
+    // token = pg_strtok(&length); /* skip :constvalue */
+    let _label = next_token()?;
+    let constvalue: Datum<'static> = if constisnull {
+        // token = pg_strtok(&length); /* skip "<>" */
+        let _ = next_token()?;
+        Datum::null()
+    } else {
+        // The repo's `Const.constvalue` is `Datum<'static>`; `make_const` only
+        // ever stores the by-value word arm, and `_outConst` only emits a
+        // by-value word for a non-null Const, so a reparsed Const is the
+        // by-value word. A by-reference image would require a lifetime-carrying
+        // Const carrier (the execTuples canonical-carrier follow-on, #113),
+        // matching `make_const`'s own restriction.
+        match read_datum(mcx, constbyval)? {
+            Datum::ByVal(w) => Datum::ByVal(w),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "readConst: by-reference Const value requires a lifetime-carrying \
+                     Const carrier (execTuples canonical-carrier follow-on, #113); got {:?}",
+                    core::mem::discriminant(&other)
+                )))
+            }
+        }
+    };
+
+    Ok(Const {
+        consttype,
+        consttypmod,
+        constcollid,
+        constlen,
+        constvalue,
+        constisnull,
+        constbyval,
+        location,
+    })
+}
+
 /// `_readOpExpr`/`_readDistinctExpr`/`_readNullIfExpr` (same fields).
 fn read_opexpr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<OpExpr> {
     let opno = read_oid_field()?;
@@ -503,6 +619,7 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
 
     let node: Node<'mcx> = match label {
         b"VAR" => Node::Expr(Expr::Var(read_var()?)),
+        b"CONST" => Node::Expr(Expr::Const(read_const(mcx)?)),
         b"PARAM" => Node::Expr(Expr::Param(read_param()?)),
         b"OPEXPR" => Node::Expr(Expr::OpExpr(read_opexpr(mcx)?)),
         b"DISTINCTEXPR" => Node::Expr(Expr::DistinctExpr(read_opexpr(mcx)?)),
@@ -791,16 +908,63 @@ mod tests {
     }
 
     #[test]
-    fn const_is_seam_panicked() {
-        // _outConst is not ported (the repo's Const trims constlen/constbyval,
-        // which outDatum needs); serializing one must panic loudly, not emit a
-        // partial dump.
+    fn const_byval_round_trips() {
+        // A by-value Const (the only carrier shape make_const produces):
+        // serialize it, reparse it, and assert byte-stable re-serialization.
+        ensure_seams();
         let ctx = MemoryContext::new("const");
         let mcx = ctx.mcx();
-        let node = Node::Expr(Expr::Const(Const::default()));
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = nodeToString(mcx, &node);
-        }));
-        assert!(res.is_err(), "Const serialization should panic (unported)");
+        let konst = Const {
+            consttype: 23, // INT4OID
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: 4,
+            constvalue: Datum::ByVal(42),
+            constisnull: false,
+            constbyval: true,
+            location: -1,
+        };
+        let node = Node::Expr(Expr::Const(konst));
+        let text = nodeToString(mcx, &node).unwrap();
+        assert!(text.starts_with("{CONST :consttype 23"), "{text}");
+        assert!(text.contains(":constlen 4"), "{text}");
+        assert!(text.contains(":constbyval true"), "{text}");
+        assert!(text.contains(":constisnull false"), "{text}");
+        let parsed = string_to_node(mcx, text.as_str()).unwrap();
+        let text2 = nodeToString(mcx, &parsed).unwrap();
+        assert_eq!(text.as_str(), text2.as_str());
+        // Confirm the reconstructed word survives the byte round-trip.
+        if let Node::Expr(Expr::Const(c)) = &*parsed {
+            assert_eq!(c.constvalue, Datum::ByVal(42));
+            assert!(!c.constisnull);
+            assert!(c.constbyval);
+            assert_eq!(c.constlen, 4);
+        } else {
+            panic!("expected Const, got {:?}", parsed.node_tag());
+        }
+    }
+
+    #[test]
+    fn const_null_round_trips() {
+        // A NULL Const serializes `:constvalue <>` and reparses to constisnull.
+        ensure_seams();
+        let ctx = MemoryContext::new("const");
+        let mcx = ctx.mcx();
+        let konst = Const {
+            consttype: 23,
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: 4,
+            constvalue: Datum::null(),
+            constisnull: true,
+            constbyval: true,
+            location: -1,
+        };
+        let node = Node::Expr(Expr::Const(konst));
+        let text = nodeToString(mcx, &node).unwrap();
+        assert!(text.contains(":constvalue <>"), "{text}");
+        let parsed = string_to_node(mcx, text.as_str()).unwrap();
+        let text2 = nodeToString(mcx, &parsed).unwrap();
+        assert_eq!(text.as_str(), text2.as_str());
     }
 }

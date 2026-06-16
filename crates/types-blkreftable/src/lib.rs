@@ -12,3 +12,12 @@
 /// not a pointer the consumer dereferences.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct BlockRefTableHandle(pub u64);
+
+/// Opaque handle to a `BlockRefTableReader` (`BlockRefTableReader *`,
+/// `common/blkreftable.h` — an incomplete type whose definition is private to
+/// `blkreftable.c`): the incremental on-disk reader callers drive via
+/// `BlockRefTableReaderNextRelation` / `BlockRefTableReaderGetBlocks` /
+/// `DestroyBlockRefTableReader`. A registry token the owner maps to the live
+/// reader; the genuine struct is defined when `blkreftable.c` lands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BlockRefTableReaderHandle(pub u64);

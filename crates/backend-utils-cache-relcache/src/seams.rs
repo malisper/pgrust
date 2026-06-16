@@ -101,6 +101,60 @@ pub fn init_seams() {
     sx::set_rd_amcache_hashmeta::set(set_rd_amcache_hashmeta);
     sx::rd_amcache_spgist::set(rd_amcache_spgist);
     sx::set_rd_amcache_spgist::set(set_rd_amcache_spgist);
+
+    // --- relcache-build global flags + index field reads + relfilenumber ---
+    sx::critical_relcaches_built::set(critical_relcaches_built);
+    sx::critical_shared_relcaches_built::set(critical_shared_relcaches_built);
+    sx::assert_could_get_relation::set(assert_could_get_relation);
+    sx::rd_indcollation::set(rd_indcollation);
+    sx::index_getprocid::set(index_getprocid);
+    sx::relation_set_new_relfilenumber::set(crate::initfile::RelationSetNewRelfilenumber);
+}
+
+/// `criticalRelcachesBuilt` (relcache.c) — the owned per-backend flag set once
+/// the critical relcache entries are built (gates catcache indexscans).
+fn critical_relcaches_built() -> bool {
+    crate::core_entry_store::with_state(|st| st.critical_relcaches_built)
+}
+
+/// `criticalSharedRelcachesBuilt` (relcache.c) — the owned per-backend flag set
+/// once the critical *shared* relcache entries are built.
+fn critical_shared_relcaches_built() -> bool {
+    crate::core_entry_store::with_state(|st| st.critical_shared_relcaches_built)
+}
+
+/// `AssertCouldGetRelation()` (relcache.c) — an assertion-build-only check;
+/// a no-op in non-assert builds, mirroring the C macro that compiles away.
+fn assert_could_get_relation() {}
+
+/// `rel->rd_indcollation[attno - 1]` — the collation OID of index column
+/// `attno` (1-based, as in C), read off the cached index entry's
+/// `rd_indcollation` array. `Err` only on a relcache miss.
+fn rd_indcollation(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<Oid> {
+    crate::core_entry_store::with_relation(index.rd_id, |rd| {
+        rd.rd_indcollation[(attno as usize) - 1]
+    })
+}
+
+/// `index_getprocid(irel, attnum, procnum)` (indexam.c) — the OID of the
+/// support procedure `procnum` for index column `attnum` (1-based), read off
+/// `irel->rd_support`. The procindex arithmetic (`nproc*(attnum-1) +
+/// (procnum-1)`, where `nproc = rd_indam->amsupport`) and the `procnum` range
+/// assert mirror the C. The relcache owner holds both `rd_indam` (for
+/// `amsupport`) and the `rd_support` array, so this is a pure owned-store read
+/// (the same data the sibling `indexam::index_getprocid` install reaches via
+/// the `rd_support_at` seam).
+fn index_getprocid(
+    index: &types_rel::Relation<'_>,
+    attnum: AttrNumber,
+    procnum: u16,
+) -> PgResult<RegProcedure> {
+    let nproc = relation_rd_indam(index.rd_id)
+        .map(|am| am.amsupport)
+        .unwrap_or(0);
+    debug_assert!(procnum > 0 && procnum <= nproc);
+    let procindex = (nproc as i32) * ((attnum as i32) - 1) + ((procnum as i32) - 1);
+    crate::core_entry_store::with_relation(index.rd_id, |rd| rd.rd_support[procindex as usize])
 }
 
 /* ==========================================================================

@@ -123,11 +123,10 @@ pub fn make_var(
 /// non-expanded/non-toasted format (`PG_DETOAST_DATUM`) for representation
 /// consistency, delegating the fetch/decompress to the `detoast` owner.
 ///
-/// The trimmed [`Const`] carries
-/// `consttype`/`consttypmod`/`constcollid`/`constvalue`/`constisnull`;
-/// `constlen`/`constbyval`/`location` (also set by the C) are not modeled as
-/// fields, but `constlen`/`constbyval` still drive the detoast decision exactly
-/// as in the C.
+/// The [`Const`] carries
+/// `consttype`/`consttypmod`/`constcollid`/`constlen`/`constvalue`/
+/// `constisnull`/`constbyval`/`location`; `constlen`/`constbyval` also drive the
+/// detoast decision exactly as in the C.
 pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
     consttype: Oid,
@@ -136,7 +135,7 @@ pub fn make_const<'mcx>(
     constlen: i32,
     mut constvalue: Datum<'mcx>,
     constisnull: bool,
-    _constbyval: bool,
+    constbyval: bool,
 ) -> PgResult<Const> {
     // if (!constisnull && constlen == -1)
     //     constvalue = PointerGetDatum(PG_DETOAST_DATUM(constvalue));
@@ -179,8 +178,10 @@ pub fn make_const<'mcx>(
         consttype,
         consttypmod,
         constcollid,
+        constlen,
         constvalue,
         constisnull,
+        constbyval,
         // makeConst sets location = -1.
         location: -1,
     })
@@ -200,8 +201,10 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
         consttype: BOOLOID,
         consttypmod: -1,
         constcollid: InvalidOid,
+        constlen: 1,
         constvalue: Datum::from_bool(value),
         constisnull: isnull,
+        constbyval: true,
         // makeConst sets location = -1.
         location: -1,
     }

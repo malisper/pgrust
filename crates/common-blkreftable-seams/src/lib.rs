@@ -9,7 +9,7 @@
 extern crate alloc;
 
 use mcx::Mcx;
-use types_blkreftable::BlockRefTableHandle;
+use types_blkreftable::{BlockRefTableHandle, BlockRefTableReaderHandle};
 use types_core::{BlockNumber, ForkNumber};
 use types_error::PgResult;
 use types_storage::RelFileLocator;
@@ -56,4 +56,41 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         brtab: BlockRefTableHandle,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+// ---------------------------------------------------------------------------
+// Reader side: incremental on-disk reading of a block-reference table.
+// `pg_wal_summary_contents` drives these over a `BlockRefTableReaderHandle`
+// produced by the walsummary owner's `wal_summary_create_reader` seam.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
+    /// &limit_block)` (blkreftable.c) — advance the reader to the next
+    /// relation fork, returning its `(rlocator, forknum, limit_block)`.
+    /// Returns `Ok(None)` at end-of-table (the C `false` return). `Err`
+    /// carries the read-callback / format `ereport(ERROR)` (relayed through
+    /// the reader's `error_callback`).
+    pub fn block_ref_table_reader_next_relation(
+        reader: BlockRefTableReaderHandle,
+    ) -> PgResult<Option<(RelFileLocator, ForkNumber, BlockNumber)>>
+);
+
+seam_core::seam!(
+    /// `BlockRefTableReaderGetBlocks(reader, blocks, nblocks)` (blkreftable.c)
+    /// — fetch up to `nblocks` modified block numbers of the current relation
+    /// fork, returning them in order. An empty vector signals that the current
+    /// fork is exhausted (the C `0` return). `Err` carries the read-callback /
+    /// format `ereport(ERROR)`.
+    pub fn block_ref_table_reader_get_blocks<'mcx>(
+        mcx: Mcx<'mcx>,
+        reader: BlockRefTableReaderHandle,
+        nblocks: usize,
+    ) -> PgResult<mcx::PgVec<'mcx, BlockNumber>>
+);
+
+seam_core::seam!(
+    /// `DestroyBlockRefTableReader(reader)` (blkreftable.c) — free the reader
+    /// and its buffers. Infallible in C.
+    pub fn destroy_block_ref_table_reader(reader: BlockRefTableReaderHandle)
 );

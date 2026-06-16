@@ -99,6 +99,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PG_GETARG_INT64(n)` (`DatumGetInt64(fcinfo->args[n].value)`) against
+    /// the call frame: read the `int8` argument at position `n`. Used by
+    /// `pg_wal_summary_contents`'s timeline argument. fmgr owns the trimmed
+    /// `args` array, so the read is seamed.
+    pub fn srf_arg_int64<'mcx>(
+        fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> i64
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_LSN(n)` (`DatumGetLSN(fcinfo->args[n].value)`, `utils/pg_lsn.h`)
+    /// against the call frame: read the `pg_lsn` (`XLogRecPtr`) argument at
+    /// position `n`. Used by `pg_wal_summary_contents`'s start/end LSN
+    /// arguments. fmgr owns the trimmed `args` array, so the read is seamed.
+    pub fn srf_arg_lsn<'mcx>(
+        fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> types_core::XLogRecPtr
+);
+
+seam_core::seam!(
     /// `CStringGetTextDatum(s)` (builtins.h / varlena): build a `text *`
     /// Datum from a C string, allocated in `mcx` (C: the current context). Used
     /// by `pg_stat_get_subscription` for the worker-type text column. `Err`

@@ -3586,8 +3586,28 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-blkreftable",
  "types-core",
  "types-error",
+ "types-walsummarizer",
+]
+
+[[package]]
+name = "backend-backup-walsummaryfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-walsummary-seams",
+ "backend-postmaster-walsummarizer",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "common-blkreftable-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
  "types-walsummarizer",
 ]
 
@@ -4190,6 +4210,32 @@ dependencies = [
  "types-core",
  "types-error",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-catalog-pg-attrdef"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-attrdef-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6829,6 +6875,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-cyrillic-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-conv-euc-cn-and-mic"
 version = "0.0.0"
 dependencies = [
@@ -6879,6 +6936,28 @@ dependencies = [
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-latin-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-latin2-and-win1250"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-mbutils-seams",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9691,6 +9770,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9732,6 +9812,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18501,6 +18582,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
  "backend-catalog-pg-aggregate",
+ "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",
@@ -18555,11 +18637,14 @@ dependencies = [
  "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
+ "backend-conv-cyrillic-and-mic",
  "backend-conv-euc-cn-and-mic",
  "backend-conv-euc-jp-and-sjis",
  "backend-conv-euc-kr-and-mic",
  "backend-conv-euc-tw-and-big5",
  "backend-conv-euc2004-sjis2004",
+ "backend-conv-latin-and-mic",
+ "backend-conv-latin2-and-win1250",
  "backend-conv-utf8-and-big5",
  "backend-conv-utf8-and-cyrillic",
  "backend-conv-utf8-and-euc-cn",
