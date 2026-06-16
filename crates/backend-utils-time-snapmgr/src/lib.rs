@@ -49,7 +49,9 @@ use types_storage::VirtualTransactionId;
 mod state;
 
 pub use state::SnapHandle;
-pub use types_hash::hsearch::HTAB;
+pub use types_logical::{
+    ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash,
+};
 use state::{
     new_handle, new_snapshot_data, with_state, ActiveSnapshotElt, ExportedSnapshot, SnapMgrState,
 };
@@ -1314,7 +1316,14 @@ pub fn HaveRegisteredOrActiveSnapshot() -> bool {
 }
 
 /// `SetupHistoricSnapshot` (snapmgr.c:1666).
-pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: *mut HTAB) {
+///
+/// `tuplecids` is the owned `(relfilelocator, ctid) -> (cmin, cmax)` map built
+/// by `ReorderBufferBuildTupleCidHash` (the C `HTAB *tuplecids`, which may be
+/// `NULL` == `None`). The snapshot manager takes ownership; it is the C
+/// file-scope `tuplecid_data` that `HistoricSnapshotGetTupleCids` later returns.
+pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: Option<TupleCidHash>) {
+    // C `Assert(historic_snapshot != NULL)` is structural here: a `SnapHandle`
+    // (`Rc<RefCell<SnapshotData>>`) is never null.
     with_state(|s| {
         s.historic = Some(historic_snapshot);
         s.tuplecid_data = tuplecids;
@@ -1325,7 +1334,7 @@ pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: *mut HTAB
 pub fn TeardownHistoricSnapshot(_is_error: bool) {
     with_state(|s| {
         s.historic = None;
-        s.tuplecid_data = core::ptr::null_mut();
+        s.tuplecid_data = None;
     });
 }
 
@@ -1335,9 +1344,15 @@ pub fn HistoricSnapshotActive() -> bool {
 }
 
 /// `HistoricSnapshotGetTupleCids` (snapmgr.c:1695).
-pub fn HistoricSnapshotGetTupleCids() -> *mut HTAB {
+///
+/// C returns the `HTAB *` so the reader (`ResolveCminCmaxDuringDecoding`) can
+/// look tuples up in it; here the owned map is returned by clone. The reader's
+/// only mutating use of the table is `UpdateLogicalMappings`, which is not yet
+/// ported (it panics in reorderbuffer), so a clone is faithful for every
+/// non-panicking path.
+pub fn HistoricSnapshotGetTupleCids() -> Option<TupleCidHash> {
     debug_assert!(HistoricSnapshotActive());
-    with_state(|s| s.tuplecid_data)
+    with_state(|s| s.tuplecid_data.clone())
 }
 
 /* ----------------------------------------------------------------------
@@ -1565,6 +1580,11 @@ pub fn init_seams() {
     });
     seams::pop_active_snapshot::set(PopActiveSnapshot);
     seams::historic_snapshot_active::set(HistoricSnapshotActive);
+    seams::setup_historic_snapshot::set(|snapshot, tuplecids| {
+        SetupHistoricSnapshot(new_handle(snapshot), tuplecids)
+    });
+    seams::teardown_historic_snapshot::set(TeardownHistoricSnapshot);
+    seams::historic_snapshot_get_tuple_cids::set(HistoricSnapshotGetTupleCids);
     seams::have_registered_or_active_snapshot::set(HaveRegisteredOrActiveSnapshot);
     seams::export_snapshot::set(|snapshot| ExportSnapshot(&new_handle(snapshot)));
     seams::active_snapshot_set::set(ActiveSnapshotSet);

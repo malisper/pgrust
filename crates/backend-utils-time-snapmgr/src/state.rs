@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use types_core::FirstNormalTransactionId;
 use types_core::TransactionId;
-use types_hash::hsearch::HTAB;
+use types_logical::TupleCidHash;
 use types_snapshot::{SnapshotData, SnapshotType};
 
 /// A shared, mutable, owned snapshot — the replacement for C's `Snapshot`
@@ -97,11 +97,14 @@ pub struct SnapMgrState {
     /// `static Snapshot HistoricSnapshot` (snapmgr.c:151).
     pub historic: Option<SnapHandle>,
 
-    /// `(table, ctid) => (cmin, cmax)` lookup hash during timetravel
-    /// (`static HTAB *tuplecid_data`), owned by logical decoding. Held as the
-    /// raw `*mut HTAB` C uses (null when no historic snapshot is set up); the
-    /// snapshot manager only stores and returns the pointer.
-    pub tuplecid_data: *mut HTAB,
+    /// `(relfilelocator, ctid) => (cmin, cmax)` lookup hash during timetravel
+    /// (`static HTAB *tuplecid_data`). Built by reorderbuffer's
+    /// `ReorderBufferBuildTupleCidHash` and handed to the snapshot manager by
+    /// `SetupHistoricSnapshot`; the C `HTAB *` is modelled as the real owned
+    /// map value (`None` == the C `NULL` when no historic snapshot is set up).
+    /// The manager only stores and returns it; reorderbuffer's
+    /// `ResolveCminCmaxDuringDecoding` is the sole reader.
+    pub tuplecid_data: Option<TupleCidHash>,
 
     /// Active snapshot stack (`static ActiveSnapshotElt *ActiveSnapshot`). Top
     /// of stack is the last element.
@@ -140,7 +143,7 @@ impl SnapMgrState {
             secondary: None,
             catalog: None,
             historic: None,
-            tuplecid_data: core::ptr::null_mut(),
+            tuplecid_data: None,
             active: Vec::new(),
             registered: Vec::new(),
             first_snapshot_set: false,
