@@ -7120,6 +7120,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-view"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-transam-xact",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-depend",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-view-seams",
+ "backend-nodes-core",
+ "backend-parser-analyze",
+ "backend-parser-relation",
+ "backend-rewrite-rewriteDefine",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-view-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-common-exec-seams"
 version = "0.0.0"
 dependencies = [
@@ -19244,6 +19285,7 @@ dependencies = [
  "backend-commands-typecmds",
  "backend-commands-vacuum",
  "backend-commands-variable",
+ "backend-commands-view",
  "backend-common-relpath",
  "backend-conv-cyrillic-and-mic",
  "backend-conv-euc-cn-and-mic",
