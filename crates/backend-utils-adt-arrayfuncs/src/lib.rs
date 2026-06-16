@@ -85,5 +85,6 @@ pub fn init_seams() {
     seams::array_get_float4_values::set(construct::array_get_float4_values);
     seams::deconstruct_array_bytes::set(construct::deconstruct_array_bytes);
     seams::oidvector_to_oids_bytes::set(construct::oidvector_to_oids_bytes);
+    seams::int2vector_to_i16s_bytes::set(construct::int2vector_to_i16s_bytes);
     seams::text_array_to_strings_bytes::set(construct::text_array_to_strings_bytes);
 }

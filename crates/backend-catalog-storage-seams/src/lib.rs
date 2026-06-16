@@ -148,3 +148,15 @@ seam_core::seam!(
         relpersistence: i8,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// The init-fork creation leg of `fill_seq_with_data` (sequence.c) for an
+    /// unlogged sequence: `srel = smgropen(rlocator, INVALID_PROC_NUMBER);
+    /// smgrcreate(srel, INIT_FORKNUM, false); log_smgrcreate(&rlocator,
+    /// INIT_FORKNUM)`. `log_smgrcreate` is owned by `storage.c`; the transient
+    /// `SMgrRelation` handle never crosses the boundary (smgropen is idempotent
+    /// over the shared smgr cache, and the matching `smgrclose` is done by the
+    /// caller through `relation_close_smgr` after the fork is filled+flushed).
+    /// `Err` carries the `ereport(ERROR)`s of fork creation / WAL logging.
+    pub fn smgr_create_init_fork_and_log(rlocator: RelFileLocator) -> PgResult<()>
+);
