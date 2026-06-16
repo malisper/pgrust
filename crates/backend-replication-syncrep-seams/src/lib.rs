@@ -16,3 +16,10 @@ seam_core::seam!(
     /// sync-rep wait queue during proc teardown (`ProcKill`). Infallible.
     pub fn sync_rep_cleanup_at_proc_exit()
 );
+
+seam_core::seam!(
+    /// `SyncRepUpdateSyncStandbysDefined()` (syncrep.c) — recompute and publish
+    /// in shmem whether synchronous standbys are configured, after a
+    /// `synchronous_standby_names` change. Can `ereport` on a parse error.
+    pub fn sync_rep_update_sync_standbys_defined() -> PgResult<()>
+);

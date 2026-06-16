@@ -360,6 +360,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // Datum oldVal = (Datum) 0; bool oldIsNull = true; bool haveOldVal = false;
     // Canonical value (Datum unification): `oldVal` mirrors the canonical
@@ -418,7 +419,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
         // function and transition function.
         //   MemoryContextReset(workcontext);
         //   oldContext = MemoryContextSwitchTo(workcontext);
-        tmpcontext_reset(aggstate);
+        tmpcontext_reset(aggstate, estate)?;
 
         // If DISTINCT mode, and not distinct from prior, skip it.
         //   if (isDistinct && haveOldVal &&
@@ -495,6 +496,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // ExprContext *tmpcontext = aggstate->tmpcontext;
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
@@ -512,7 +514,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         types_tuple::backend_access_common_heaptuple::Datum::null();
     let mut have_old_value = false;
     // TupleTableSlot *save = aggstate->tmpcontext->ecxt_outertuple;
-    let save = tmpcontext_outertuple(aggstate);
+    let save = tmpcontext_outertuple(aggstate, estate);
 
     let current_set = aggstate.current_set as usize;
     // Take the sort out of the per-set array for the drain (see the single
@@ -553,7 +555,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 
         // tmpcontext->ecxt_outertuple = slot1;
         // tmpcontext->ecxt_innertuple = slot2;
-        set_tmpcontext_outer_inner(aggstate, Some(slot1), slot2);
+        set_tmpcontext_outer_inner(aggstate, estate, Some(slot1), slot2);
 
         // if (numDistinctCols == 0 || !haveOldValue ||
         //     newAbbrevVal != oldAbbrevVal ||
@@ -594,7 +596,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         }
 
         // Reset context each time: ResetExprContext(tmpcontext);
-        tmpcontext_reset(aggstate);
+        tmpcontext_reset(aggstate, estate)?;
 
         // ExecClearTuple(slot1);
         exec_clear_tuple_slot(slot1)?;
@@ -611,7 +613,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 
     // restore previous slot, potentially in use for grouping sets:
     //   tmpcontext->ecxt_outertuple = save;
-    set_tmpcontext_outertuple(aggstate, save);
+    set_tmpcontext_outertuple(aggstate, estate, save);
 
     Ok(())
 }
@@ -644,7 +646,12 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
         .aggcontexts
         .as_ref()
         .expect("curaggcontext: aggcontexts not built");
-    let _ = &aggcontexts[idx].ecxt_per_tuple_memory;
+    // `aggcontexts[idx]` is an EcxtId into the EState pool; the C switches into
+    // its per-tuple memory before the datumCopy. The per-grouping-set context is
+    // present iff the id exists in the array, which is all we assert here (the
+    // pass-by-value datumCopy needs no allocation, and the pass-by-ref copy is
+    // the unported datum surface).
+    let _: types_nodes::EcxtId = aggcontexts[idx];
 }
 
 /// `aggstate->tmpcontext` (as an [`EcxtId`] for the execExpr seam). The owned
@@ -653,12 +660,9 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
 /// the id is what the seam needs. The tmpcontext is registered in the EState
 /// pool at init; its id is the AggState's stored handle.
 fn tmpcontext_ecxt(aggstate: &AggStateData<'_>) -> types_nodes::EcxtId {
-    let _ = aggstate.tmpcontext.as_ref();
-    panic!(
-        "backend-executor-nodeAgg::advance_aggregates: the tmpcontext ExprContext \
-         pool id is assigned by ExecInitAgg (not yet ported); evaltrans evaluation \
-         cannot run until that lands"
-    );
+    aggstate
+        .tmpcontext
+        .expect("advance_aggregates: tmpcontext EcxtId not assigned by ExecInitAgg")
 }
 
 /// `int Max(aggstate->phase->numsets, 1)` numerator — the current phase's
@@ -802,10 +806,7 @@ fn equalfn_multi_qual(
     aggstate: &AggStateData<'_>,
     pertrans: &AggStatePerTransData<'_>,
 ) -> PgResult<bool> {
-    let _ = (
-        pertrans.equalfn_multi.as_ref(),
-        aggstate.tmpcontext.as_ref(),
-    );
+    let _ = (pertrans.equalfn_multi.as_ref(), aggstate.tmpcontext);
     panic!(
         "backend-executor-nodeAgg::process_ordered_aggregate_multi: ExecQual(equalfnMulti) \
          needs the tmpcontext ExprContext pool id assigned by ExecInitAgg (not yet ported)"
@@ -858,45 +859,51 @@ fn resolve_slot_mut<'a, 'mcx>(
 
 /// `MemoryContextReset(aggstate->tmpcontext->ecxt_per_tuple_memory)` /
 /// `ResetExprContext(tmpcontext)` — reset the tmpcontext's per-tuple memory.
-fn tmpcontext_reset(aggstate: &mut AggStateData<'_>) {
-    let tmpcontext = aggstate
+fn tmpcontext_reset<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // tmpcontext is an EcxtId into the EState pool; reset its per-tuple memory.
+    let ecxt = aggstate
         .tmpcontext
-        .as_mut()
         .expect("tmpcontext_reset: tmpcontext not built");
-    tmpcontext.ecxt_per_tuple_memory.reset();
+    backend_executor_execUtils_seams::reset_expr_context::call(estate, ecxt)
 }
 
 /// `aggstate->tmpcontext->ecxt_outertuple` — read.
-fn tmpcontext_outertuple(aggstate: &AggStateData<'_>) -> Option<types_nodes::SlotId> {
-    let tmpcontext = aggstate
+fn tmpcontext_outertuple<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<types_nodes::SlotId> {
+    let ecxt = aggstate
         .tmpcontext
-        .as_ref()
         .expect("tmpcontext_outertuple: tmpcontext not built");
-    tmpcontext.ecxt_outertuple
+    estate.ecxt(ecxt).ecxt_outertuple
 }
 
 /// `aggstate->tmpcontext->ecxt_outertuple = slot;` — write.
-fn set_tmpcontext_outertuple(
-    aggstate: &mut AggStateData<'_>,
+fn set_tmpcontext_outertuple<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     slot: Option<types_nodes::SlotId>,
 ) {
-    let tmpcontext = aggstate
+    let ecxt = aggstate
         .tmpcontext
-        .as_mut()
         .expect("set_tmpcontext_outertuple: tmpcontext not built");
-    tmpcontext.ecxt_outertuple = slot;
+    estate.ecxt_mut(ecxt).ecxt_outertuple = slot;
 }
 
 /// `tmpcontext->ecxt_outertuple = slot1; tmpcontext->ecxt_innertuple = slot2;`
-fn set_tmpcontext_outer_inner(
-    aggstate: &mut AggStateData<'_>,
+fn set_tmpcontext_outer_inner<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     outer: Option<types_nodes::SlotId>,
     inner: Option<types_nodes::SlotId>,
 ) {
-    let tmpcontext = aggstate
+    let ecxt = aggstate
         .tmpcontext
-        .as_mut()
         .expect("set_tmpcontext_outer_inner: tmpcontext not built");
+    let tmpcontext = estate.ecxt_mut(ecxt);
     tmpcontext.ecxt_outertuple = outer;
     tmpcontext.ecxt_innertuple = inner;
 }

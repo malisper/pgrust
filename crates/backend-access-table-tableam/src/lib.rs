@@ -36,7 +36,7 @@ use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
-    SO_TEMP_SNAPSHOT, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
+    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -89,6 +89,15 @@ pub fn init_seams() {
     backend_access_table_tableam_seams::table_endscan::set(table_endscan);
     backend_access_table_tableam_seams::table_relation_set_new_filelocator::set(
         table_relation_set_new_filelocator,
+    );
+
+    // ANALYZE-sampling scan dispatch (acquire_sample_rows in commands/analyze.c).
+    backend_access_table_tableam_seams::table_beginscan_analyze::set(table_beginscan_analyze);
+    backend_access_table_tableam_seams::table_scan_analyze_next_block::set(
+        table_scan_analyze_next_block,
+    );
+    backend_access_table_tableam_seams::table_scan_analyze_next_tuple::set(
+        table_scan_analyze_next_tuple,
     );
 }
 
@@ -377,6 +386,51 @@ pub fn table_beginscan_catalog<'mcx>(
     )?;
 
     (am(relation).scan_begin)(mcx, relation, Some(snapshot), nkeys, key, None, flags)
+}
+
+/// `table_beginscan_analyze(rel)` (access/tableam.h inline) — the alternative
+/// entry point `acquire_sample_rows` uses: `scan_begin(rel, NULL, 0, NULL,
+/// NULL, SO_TYPE_ANALYZE)`.
+pub fn table_beginscan_analyze<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let flags = SO_TYPE_ANALYZE;
+    (am(relation).scan_begin)(
+        mcx,
+        relation,
+        None,
+        0,
+        mcx::PgVec::new_in(mcx),
+        None,
+        flags,
+    )
+}
+
+/// `table_scan_analyze_next_block(scan, stream)` (access/tableam.h inline) —
+/// dispatch the AM's `scan_analyze_next_block` callback.
+pub fn table_scan_analyze_next_block<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    next_buffer: &mut dyn FnMut() -> PgResult<types_storage::buf::Buffer>,
+) -> PgResult<bool> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_analyze_next_block)(mcx, scan, next_buffer)
+}
+
+/// `table_scan_analyze_next_tuple(scan, OldestXmin, liverows, deadrows, slot)`
+/// (access/tableam.h inline) — dispatch the AM's `scan_analyze_next_tuple`
+/// callback.
+pub fn table_scan_analyze_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    oldest_xmin: types_core::TransactionId,
+    liverows: &mut f64,
+    deadrows: &mut f64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_analyze_next_tuple)(mcx, scan, oldest_xmin, liverows, deadrows, slot)
 }
 
 // ===========================================================================
