@@ -1519,7 +1519,11 @@ fn decode_db_role_setting_setconfig<'mcx>(
     }
     let bytes = match value {
         Datum::ByRef(v) => v.clone(),
-        Datum::ByVal(_) => return Err(PgError::error("setconfig is by-value")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => return Err(PgError::error("setconfig is by-value")),
     };
     Ok(Some(decode_text_array(mcx, &bytes)?))
 }
@@ -1676,7 +1680,11 @@ fn deform_lo_page<'mcx>(
     let data_datum = &cols[(ANUM_PG_LARGEOBJECT_DATA - 1) as usize].0;
     let raw = match data_datum {
         Datum::ByRef(v) => &v[..],
-        Datum::ByVal(_) => return Err(PgError::error("pg_largeobject data is by-value")),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => return Err(PgError::error("pg_largeobject data is by-value")),
     };
     let (payload_off, len) = if !raw.is_empty() && (raw[0] & 0x01) != 0 {
         let hdr = (raw[0] >> 1) as usize;

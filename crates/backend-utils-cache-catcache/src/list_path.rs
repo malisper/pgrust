@@ -627,6 +627,13 @@ fn build_fetched(
                         // the cached bytes, so the stored word is the owned
                         // model's by-reference placeholder.
                         Datum::ByRef(_) => ScalarWord::null(),
+                        // The non-flat payload kinds likewise cannot inhabit a
+                        // bare Datum word; same by-reference placeholder. Not
+                        // produced on this path yet — wave 2.
+                        Datum::Cstring(_)
+                        | Datum::Composite(_)
+                        | Datum::Expanded(_)
+                        | Datum::Internal(_) => ScalarWord::null(),
                     };
                 }
             }

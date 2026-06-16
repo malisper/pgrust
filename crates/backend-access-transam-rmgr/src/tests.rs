@@ -73,6 +73,12 @@ fn setup() {
                 .map(|d| match d {
                     Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
                     Datum::ByRef(b) => types_datum::Datum::from_usize(b.len()),
+                    Datum::Cstring(_)
+                    | Datum::Composite(_)
+                    | Datum::Expanded(_)
+                    | Datum::Internal(_) => {
+                        panic!("rmgr test fixture: unexpected non-flat Datum arm")
+                    }
                 })
                 .collect();
             ROWS.with(|r| r.borrow_mut().push((words, nulls.to_vec())));

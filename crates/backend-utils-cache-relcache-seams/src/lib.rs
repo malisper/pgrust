@@ -677,3 +677,62 @@ seam_core::seam!(
         persistence: i8,
     ) -> types_error::PgResult<()>
 );
+
+/* ======================================================================== *
+ * BuildIndexInfo's relcache reads (relcache.c). `BuildIndexInfo`
+ * (catalog/index.c) fetches the index's expression / predicate node trees and,
+ * for an exclusion index, the exclusion operator/proc/strategy arrays. Each
+ * decodes the raw `rd_indextuple` (`indexprs`/`indpred` pg_node_tree text) or
+ * walks `pg_constraint`, which is the un-decoded relcache node path — keyed by
+ * the index relation. The owner installs from `init_seams()` once that decode
+ * path lands; until then the call panics (`mirror-pg-and-panic`).
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `RelationGetIndexExpressions(relation)` (relcache.c): `stringToNode` of
+    /// the raw `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`,
+    /// and `copyObject` of the cached `rd_indexprs` list into the caller's
+    /// context. Returns the expression-column trees (`List *`, the C `NIL`
+    /// becomes `None`), as `BuildIndexInfo` feeds them straight into
+    /// `makeIndexInfo`. `rel` is the open index relation. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn relation_get_index_expressions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr>>>
+);
+
+seam_core::seam!(
+    /// `RelationGetIndexPredicate(relation)` (relcache.c): `stringToNode` of the
+    /// raw `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
+    /// `make_ands_implicit`, `fix_opfuncids`, and `copyObject` of the cached
+    /// `rd_indpred` list into the caller's context. Returns the partial-index
+    /// predicate (implicit-AND `List *`, the C `NIL` becomes `None`), which
+    /// `BuildIndexInfo` feeds into `makeIndexInfo`. `rel` is the open index
+    /// relation. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_get_index_predicate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr>>>
+);
+
+seam_core::seam!(
+    /// `RelationGetExclusionInfo(indexRelation, &operators, &procs, &strategies)`
+    /// (relcache.c): for an exclusion-constraint index, find the owning
+    /// `pg_constraint` row (`get_index_constraint` + `SearchSysCache1(CONSTROID)`
+    /// + `DatumGetArrayTypeP(conexclop)`), then per key column resolve the
+    /// operator OID, its underlying function (`get_opcode`), and the opclass
+    /// strategy number (`get_op_opfamily_strategy` over the index's opfamily).
+    /// Returns the three parallel per-key arrays (length `indnkeyatts`) that
+    /// `BuildIndexInfo` stores into `ii_ExclusionOps`/`ii_ExclusionProcs`/
+    /// `ii_ExclusionStrats`. `rel` is the open index relation. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_get_exclusion_info<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<(
+        mcx::PgVec<'mcx, types_core::primitive::Oid>,
+        mcx::PgVec<'mcx, types_core::primitive::Oid>,
+        mcx::PgVec<'mcx, u16>,
+    )>
+);

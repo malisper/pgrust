@@ -1411,6 +1411,9 @@ fn relocate_datum<'mcx>(d: Datum<'static>) -> Datum<'mcx> {
         Datum::ByRef(_) => {
             panic!("_bt_skiparray_strat_adjust: by-ref skip-support result relocation not yet ported")
         }
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("_bt_skiparray_strat_adjust: non-ByVal/ByRef skip-support result not yet produced — wave 2")
+        }
     }
 }
 

@@ -457,7 +457,11 @@ pub fn GetSysCacheOid(
     debug_assert!(!is_null); // columns used as oids should never be NULL
     let result = match &value {
         Datum::ByVal(_) => value.as_oid(),
-        Datum::ByRef(_) => {
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
             return Err(PgError::error("GetSysCacheOid: oid column is not by-value"))
         }
     };
@@ -478,7 +482,11 @@ fn attisdropped(mcx: Mcx<'_>, cacheId: i32, tup: &FormedTuple<'_>) -> PgResult<b
     debug_assert!(!is_null);
     match &value {
         Datum::ByVal(_) => Ok(value.as_bool()),
-        Datum::ByRef(_) => Err(PgError::error("attisdropped is not by-value")),
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("attisdropped is not by-value")),
     }
 }
 

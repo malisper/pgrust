@@ -142,7 +142,11 @@ fn get_tablespace(mut spcid: Oid, my_database_tablespace: Oid) -> PgResult<Optio
                 } else {
                     let bytes = match &datum {
                         Datum::ByRef(b) => &b[..],
-                        Datum::ByVal(_) => {
+                        Datum::ByVal(_)
+                        | Datum::Cstring(_)
+                        | Datum::Composite(_)
+                        | Datum::Expanded(_)
+                        | Datum::Internal(_) => {
                             return Err(PgError::error("spcoptions datum is not by-reference"))
                         }
                     };

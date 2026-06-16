@@ -2031,7 +2031,11 @@ fn systable_scan_foreach(
 fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
     match &row.cols[(attno - 1) as usize].0 {
         Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
-        Datum::ByRef(_) => InvalidOid,
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => InvalidOid,
     }
 }
 
@@ -2039,7 +2043,11 @@ fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
 fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
     match &row.cols[(attno - 1) as usize].0 {
         Datum::ByVal(d) => Datum::from_usize(*d).as_bool(),
-        Datum::ByRef(_) => false,
+        Datum::ByRef(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => false,
     }
 }
 
@@ -2051,6 +2059,10 @@ fn column_name(row: &SysScanRow<'_>, attno: i16) -> String {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         }
-        Datum::ByVal(_) => String::new(),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => String::new(),
     }
 }

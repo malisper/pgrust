@@ -169,6 +169,10 @@ pub fn make_const<'mcx>(
             "make_const: by-reference Const value requires a lifetime-carrying \
              Const carrier (execTuples canonical-carrier follow-on, #113)"
         ),
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
+            "make_const: Cstring/Composite/Expanded/Internal Const value requires a \
+             lifetime-carrying Const carrier — not yet produced — wave 2"
+        ),
     };
 
     Ok(Const {
