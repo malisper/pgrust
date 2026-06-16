@@ -86,11 +86,13 @@ backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
+backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
+backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
 backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
@@ -99,6 +101,7 @@ backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
+backend-commands-variable = { path = "../backend-commands-variable" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
@@ -182,6 +185,7 @@ backend-access-hash-core = { path = "../backend-access-hash-core" }
 backend-access-hashfunc = { path = "../backend-access-hashfunc" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
+backend-commands-async = { path = "../backend-commands-async" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
@@ -312,6 +316,7 @@ backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
+backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
