@@ -974,4 +974,20 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::set(
         projections::search_constraint_tuple_by_oid,
     );
+    // ACL/owner catalog-row projections (the aclmask/aclcheck F0 keystone).
+    backend_utils_cache_syscache_seams::pg_class_owner_acl::set(projections::pg_class_owner_acl);
+    backend_utils_cache_syscache_seams::pg_attribute_owner_acl::set(
+        projections::pg_attribute_owner_acl,
+    );
+    backend_utils_cache_syscache_seams::pg_namespace_owner_acl::set(
+        projections::pg_namespace_owner_acl,
+    );
+    backend_utils_cache_syscache_seams::pg_type_owner_acl::set(projections::pg_type_owner_acl);
+    backend_utils_cache_syscache_seams::object_owner_acl::set(projections::object_owner_acl);
+    backend_utils_cache_syscache_seams::parameter_acl_by_name::set(
+        projections::parameter_acl_by_name,
+    );
+    backend_utils_cache_syscache_seams::parameter_acl_by_oid::set(
+        projections::parameter_acl_by_oid,
+    );
 }

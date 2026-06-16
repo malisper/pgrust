@@ -14550,6 +14550,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "mcx",
+ "types-acl",
  "types-cache",
  "types-catalog",
  "types-core",
@@ -14579,6 +14580,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-acl",
  "types-cache",
  "types-catalog",
  "types-cluster",
@@ -16769,6 +16771,7 @@ name = "types-cache"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-acl",
  "types-core",
  "types-datum",
  "types-scan",
