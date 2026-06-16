@@ -23,23 +23,39 @@ use types_storage::ilist::{dlist_head, dlist_node};
 /// a shared statistics entry, caching the resolved shared pointers and holding
 /// this backend's not-yet-flushed pending data for the entry.
 ///
-/// In C `shared_entry` and `shared_stats` are raw pointers into shared memory
-/// (the dshash entry and its DSA-resolved body); the faithful idiomatic model
-/// carries them as the owned/resolved structures the owner manipulates. The
-/// `pending` member is C's `void *`: each variable-numbered kind defines its own
-/// pending block layout and (de)references it through its
+/// In C `shared_entry` and `shared_stats` are raw pointers into **shared
+/// memory**: `shared_entry` points at the `PgStatShared_HashEntry` living in the
+/// dshash-backed shared stats hashtable, and `shared_stats` is that entry's
+/// `body` (a DSA pointer) already resolved with `dsa_get_address()` to a
+/// backend-local address, cached to avoid repeated resolution. The same body is
+/// shared concurrently by every backend, so the `PgStat_EntryRef` is purely a
+/// per-backend *cache of pointers into the shared segment* — it does not own the
+/// pointee, whose lifetime is the shared segment, not the EntryRef. Modeling
+/// these as owned `Box`es would be contract-divergent (it would imply private
+/// heap allocations that no other backend can see); the faithful model — and the
+/// established repo idiom for dshash/DSA entries (`dshash.c` port #77 carries
+/// resolved entries as `*mut`) — is a raw `*mut`. `null` until the reference is
+/// bound to a live shared entry (C leaves these zero in a fresh ref).
+///
+/// The `pending` member is C's `void *`: each variable-numbered kind defines its
+/// own pending block layout and (de)references it through its
 /// `PgStat_KindInfo->pending_size`. That type erasure is modeled with
 /// `Box<dyn Any>`, so per-kind crates downcast to their own pending struct in
-/// their `flush_pending_cb` / `delete_pending_cb`.
+/// their `flush_pending_cb` / `delete_pending_cb`. Unlike the two shared
+/// pointers, `pending` *is* backend-private (`MemoryContextAlloc` in
+/// `pgstat_prep_pending_entry`), so it remains an owned box.
 pub struct PgStat_EntryRef {
-    /// `PgStatShared_HashEntry *shared_entry` — the entry in the shared stats
-    /// hashtable. `None` until the reference is bound to a live shared entry.
-    pub shared_entry: Option<Box<PgStatShared_HashEntry>>,
+    /// `PgStatShared_HashEntry *shared_entry` — pointer to the entry in the
+    /// shared stats hashtable (shared memory). `null` until the reference is
+    /// bound to a live shared entry. Not owned: the pointee lives in the shared
+    /// dshash segment.
+    pub shared_entry: *mut PgStatShared_HashEntry,
 
     /// `PgStatShared_Common *shared_stats` — the stats body
-    /// (`shared_entry->body`) resolved to a local pointer, to avoid repeated
-    /// `dsa_get_address()` calls.
-    pub shared_stats: Option<Box<PgStatShared_Common>>,
+    /// (`shared_entry->body`) resolved to a backend-local pointer via
+    /// `dsa_get_address()`, to avoid repeated resolution. Not owned: the pointee
+    /// lives in the DSA-backed shared segment. `null` until bound.
+    pub shared_stats: *mut PgStatShared_Common,
 
     /// `uint32 generation` — copy of `shared_entry->generation` taken when the
     /// shared entry was retrieved (number of times reused), to detect a
@@ -56,11 +72,12 @@ pub struct PgStat_EntryRef {
 }
 
 impl PgStat_EntryRef {
-    /// A fresh, unbound entry reference (all-zero in C).
+    /// A fresh, unbound entry reference (all-zero in C: both shared pointers
+    /// `NULL`).
     pub fn new() -> Self {
         PgStat_EntryRef {
-            shared_entry: None,
-            shared_stats: None,
+            shared_entry: core::ptr::null_mut(),
+            shared_stats: core::ptr::null_mut(),
             generation: 0,
             pending: None,
             pending_node: dlist_node::new(),
