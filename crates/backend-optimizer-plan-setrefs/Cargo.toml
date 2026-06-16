@@ -1,0 +1,24 @@
+[package]
+name = "backend-optimizer-plan-setrefs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_plan_setrefs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+# expression_tree_mutator / expression_tree_walker over the Expr tree,
+# query_tree_walker over the Node tree, set_opfuncid/set_sa_opfuncid,
+# expr_type/expr_typmod/expr_collation, makefuncs, bitmapset ops, equal/copyObject.
+backend-nodes-core = { path = "../backend-nodes-core" }
+# equal() over Expr (search_indexed_tlist_for_sortgroupref / tlist_member).
+backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
+# This unit's own outward seams (cross-subsystem externals that would cycle).
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }

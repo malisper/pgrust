@@ -14,7 +14,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::{RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
+use types_core::primitive::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
 
 /// `WalLevel` (`access/xlog.h`) — `WAL_LEVEL_MINIMAL=0`, `WAL_LEVEL_REPLICA=1`,
 /// `WAL_LEVEL_LOGICAL=2`. The `wal_level`/`GetActiveWalLevelOnStandby` reads
@@ -101,6 +101,161 @@ opaque_handle!(
     /// forwards it to the plugin startup callback. `0` is the C `NIL`.
     OutputPluginOptionsHandle
 );
+
+/* =========================================================================
+ * LogicalDecodingContext + output-plugin descriptor structs (output_plugin.h,
+ * logical.h)
+ *
+ * These live here — in the shared seam-boundary types crate — so that the
+ * single canonical [`LogicalDecodingContext`] is namable by *both* of its
+ * users: `backend-replication-logical-logical` (which owns its lifecycle) and
+ * `backend-replication-logical-decode` (whose rmgr `rm_decode` callbacks
+ * receive it), as well as `types-wal`'s [`RmDecode`](../types_wal) callback
+ * type which keys the resource-manager table on it. Before unification there
+ * were two divergent definitions (a trimmed `context`/`fast_forward` shape in
+ * `types-wal::rmgr` and this rich one in `logical.c`); the trimmed one could
+ * not carry the `snapshot_builder`/`slot`/`twophase`/`callbacks` state that
+ * `decode.c` reads, so it has been retired in favour of this rich struct.
+ * ========================================================================= */
+
+/// `OutputPluginOutputType` (`output_plugin.h`).
+pub type OutputPluginOutputType = i32;
+/// `OUTPUT_PLUGIN_BINARY_OUTPUT = 0`.
+pub const OUTPUT_PLUGIN_BINARY_OUTPUT: OutputPluginOutputType = 0;
+/// `OUTPUT_PLUGIN_TEXTUAL_OUTPUT = 1`.
+pub const OUTPUT_PLUGIN_TEXTUAL_OUTPUT: OutputPluginOutputType = 1;
+
+/// `OutputPluginOptions` (`output_plugin.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputPluginOptions {
+    /// `output_type`.
+    pub output_type: OutputPluginOutputType,
+    /// `receive_rewrites`.
+    pub receive_rewrites: bool,
+}
+
+/// `OutputPluginCallbacks` (`output_plugin.h`) — which plugin callbacks the
+/// loaded plugin registered. `logical.c` only tests these for NULL and invokes
+/// the corresponding pointer (via the dfmgr seam); presence is a bool. Field
+/// order matches the C struct.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputPluginCallbacks {
+    pub startup_cb: bool,
+    pub begin_cb: bool,
+    pub change_cb: bool,
+    pub truncate_cb: bool,
+    pub commit_cb: bool,
+    pub message_cb: bool,
+    pub filter_by_origin_cb: bool,
+    pub shutdown_cb: bool,
+    pub filter_prepare_cb: bool,
+    pub begin_prepare_cb: bool,
+    pub prepare_cb: bool,
+    pub commit_prepared_cb: bool,
+    pub rollback_prepared_cb: bool,
+    pub stream_start_cb: bool,
+    pub stream_stop_cb: bool,
+    pub stream_abort_cb: bool,
+    pub stream_prepare_cb: bool,
+    pub stream_commit_cb: bool,
+    pub stream_change_cb: bool,
+    pub stream_message_cb: bool,
+    pub stream_truncate_cb: bool,
+}
+
+impl OutputPluginCallbacks {
+    /// Decode the callback-presence bitmask `load_output_plugin` returns (one
+    /// bit per callback, C struct field order, LSB = `startup_cb`).
+    pub fn from_bits(bits: u32) -> Self {
+        OutputPluginCallbacks {
+            startup_cb: bits & (1 << 0) != 0,
+            begin_cb: bits & (1 << 1) != 0,
+            change_cb: bits & (1 << 2) != 0,
+            truncate_cb: bits & (1 << 3) != 0,
+            commit_cb: bits & (1 << 4) != 0,
+            message_cb: bits & (1 << 5) != 0,
+            filter_by_origin_cb: bits & (1 << 6) != 0,
+            shutdown_cb: bits & (1 << 7) != 0,
+            filter_prepare_cb: bits & (1 << 8) != 0,
+            begin_prepare_cb: bits & (1 << 9) != 0,
+            prepare_cb: bits & (1 << 10) != 0,
+            commit_prepared_cb: bits & (1 << 11) != 0,
+            rollback_prepared_cb: bits & (1 << 12) != 0,
+            stream_start_cb: bits & (1 << 13) != 0,
+            stream_stop_cb: bits & (1 << 14) != 0,
+            stream_abort_cb: bits & (1 << 15) != 0,
+            stream_prepare_cb: bits & (1 << 16) != 0,
+            stream_commit_cb: bits & (1 << 17) != 0,
+            stream_change_cb: bits & (1 << 18) != 0,
+            stream_message_cb: bits & (1 << 19) != 0,
+            stream_truncate_cb: bits & (1 << 20) != 0,
+        }
+    }
+}
+
+/// `LogicalDecodingContext` (`logical.h`) — the single canonical decoding
+/// context. Fields in C struct order. The cross-subsystem handles
+/// (`reader`/`reorder`/`snapshot_builder`/`out`/`context`/`slot`) are opaque
+/// values the owners resolve; the bool/LSN/xid state fields are written
+/// directly by `logical.c`'s in-crate wrappers and read by `decode.c`'s rmgr
+/// handlers.
+pub struct LogicalDecodingContext {
+    /// `MemoryContext context`.
+    pub context: MemoryContextHandle,
+    /// `ReplicationSlot *slot`. `logical.c` keeps `ctx->slot =
+    /// MyReplicationSlot`; the runtime always operates on `MyReplicationSlot`,
+    /// so this records that the slot is set.
+    pub slot: bool,
+    /// `ctx->slot->data.database` — the slot's database OID. `decode.c` reads
+    /// it (the only `slot` field it touches) to filter changes to the slot's
+    /// database. `logical.c` sets it when it wires `ctx->slot`.
+    pub slot_database: Oid,
+    /// `XLogReaderState *reader`.
+    pub reader: XLogReaderHandle,
+    /// `ReorderBuffer *reorder`.
+    pub reorder: ReorderBufferHandle,
+    /// `SnapBuild *snapshot_builder`.
+    pub snapshot_builder: SnapBuildHandle,
+    /// `bool fast_forward`.
+    pub fast_forward: bool,
+    /// `OutputPluginCallbacks callbacks`.
+    pub callbacks: OutputPluginCallbacks,
+    /// `OutputPluginOptions options`.
+    pub options: OutputPluginOptions,
+    /// `List *output_plugin_options`.
+    pub output_plugin_options: OutputPluginOptionsHandle,
+    /// `prepare_write` callback presence.
+    pub prepare_write: bool,
+    /// `write` callback presence.
+    pub write: bool,
+    /// `update_progress` callback presence.
+    pub update_progress: bool,
+    /// `StringInfo out`.
+    pub out: StringInfoHandle,
+    /// `bool streaming`.
+    pub streaming: bool,
+    /// `bool twophase`.
+    pub twophase: bool,
+    /// `bool twophase_opt_given`.
+    pub twophase_opt_given: bool,
+    /// `bool accept_writes`.
+    pub accept_writes: bool,
+    /// `bool prepared_write`.
+    pub prepared_write: bool,
+    /// `XLogRecPtr write_location`.
+    pub write_location: XLogRecPtr,
+    /// `TransactionId write_xid`.
+    pub write_xid: TransactionId,
+    /// `bool end_xact`.
+    pub end_xact: bool,
+    /// `void *output_plugin_private` — opaque per-plugin state the loaded output
+    /// plugin stows in its `startup_cb` (e.g. pgoutput's `PGOutputData`) and
+    /// recovers in every later callback. The owned, value-typed replacement for
+    /// the C `void *`: any plugin's private struct, type-erased.
+    pub output_plugin_private: Option<Box<dyn core::any::Any>>,
+    /// `bool processing_required`.
+    pub processing_required: bool,
+}
 
 /// One decoded record read by `XLogReadRecord`: whether a record was returned,
 /// and whether an error string was set. Mirrors the C
@@ -189,8 +344,10 @@ pub enum OutputPluginCallbackArgs {
         message_size: Size,
         message: MessageHandle,
     },
-    /// `filter_prepare_cb(ctx, xid, gid)` — returns a bool.
-    FilterPrepare { xid: TransactionId, gid: GidHandle },
+    /// `filter_prepare_cb(ctx, xid, gid)` — returns a bool. The C `const char
+    /// *gid` is the real (NUL-stripped) gid bytes decode.c parsed out of the
+    /// 2PC record and forwards verbatim to the plugin.
+    FilterPrepare { xid: TransactionId, gid: Vec<u8> },
     /// `filter_by_origin_cb(ctx, origin_id)` — returns a bool.
     FilterByOrigin { origin_id: RepOriginId },
     /// `stream_start_cb(ctx, txn)`.

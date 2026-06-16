@@ -2317,6 +2317,23 @@ pub struct PlannerInfo {
     /// [`NodeId`] to `&Expr` through [`PlannerInfo::node`] and walk the tree;
     /// the join-path enumerator still only forwards/compares the opaque handle.
     pub node_arena: Vec<ArenaNode>,
+
+    /* ------------------------------------------------------------------
+     * setrefs.c AlternativeSubPlan workspace (pathnodes.h:597-599). Two bool
+     * arrays that exist only during `set_plan_references`; indexed in parallel
+     * with `glob->subplans` (0-based) and (re)allocated at the top of
+     * `set_plan_references` when `hasAlternativeSubPlans` is set. `Default` is
+     * the empty vector (the C `NULL` before allocation). Additive — nothing
+     * outside setrefs reads them.
+     * ------------------------------------------------------------------ */
+    /// `bool *isAltSubplan` — per-subplan flag: is this subplan referenced by an
+    /// AlternativeSubPlan?
+    #[allow(non_snake_case)]
+    pub isAltSubplan: Vec<bool>,
+    /// `bool *isUsedSubplan` — per-subplan flag: was this subplan selected as the
+    /// cheapest alternative?
+    #[allow(non_snake_case)]
+    pub isUsedSubplan: Vec<bool>,
 }
 
 /// Lifetime-free arena element for [`PlannerInfo::node_arena`].

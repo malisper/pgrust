@@ -63,6 +63,14 @@ backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
+# Heavyweight tuple-tag lock for get_catalog_object_by_oid_extended's locktuple
+# path + the generic owner-tuple write's UnlockTuple (lmgr.c LockTuple/UnlockTuple).
+# lmgr-seams carries no edge to this crate (verified: no cycle).
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+# pg_get_acl's pg_attribute (objsubid) branch: SearchSysCache2(ATTNUM) +
+# SysCacheGetAttr(attacl). syscache carries no edge to this crate (no cycle).
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+types-cache = { path = "../types-cache" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 types-foreigncmds = { path = "../types-foreigncmds" }

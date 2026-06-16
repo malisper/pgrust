@@ -42,3 +42,47 @@ seam_core::seam!(
     /// carries any `ereport` from a release callback.
     pub fn release_aux_process_resources(is_commit: bool) -> types_error::PgResult<()>
 );
+
+// --- resowner.c heavyweight-lock bookkeeping (lock.c consumers) ------------
+//
+// lock.c's LOCALLOCK grant/release paths call ResourceOwnerRememberLock /
+// ResourceOwnerForgetLock to keep each ResourceOwner's lock array in sync, and
+// ResourceOwnerGetParent during LockReassignCurrentOwner. resowner.c stores the
+// LOCALLOCK by pointer; in the handle model lock.c passes the LOCALLOCK's stable
+// hash-table key (its LOCALLOCKTAG) as the lock identity. The owner is the
+// heavyweight-lock subsystem's `ResourceOwnerHandle` (`types_storage::lock`).
+// resowner.c is unported, so these panic until it lands.
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberLock(owner, locallock)` (resowner.c) — record that
+    /// `owner` holds the heavyweight lock identified by `lock` (the LOCALLOCK's
+    /// LOCALLOCKTAG key).
+    pub fn resource_owner_remember_lock(
+        owner: types_storage::lock::ResourceOwnerHandle,
+        lock: types_storage::lock::LOCALLOCKTAG,
+    )
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetLock(owner, locallock)` (resowner.c) — drop the
+    /// heavyweight lock identified by `lock` from `owner`'s lock array.
+    pub fn resource_owner_forget_lock(
+        owner: types_storage::lock::ResourceOwnerHandle,
+        lock: types_storage::lock::LOCALLOCKTAG,
+    )
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerGetParent(owner)` (resowner.c) — the parent resource
+    /// owner of `owner`.
+    pub fn resource_owner_get_parent(
+        owner: types_storage::lock::ResourceOwnerHandle,
+    ) -> types_storage::lock::ResourceOwnerHandle
+);
+
+seam_core::seam!(
+    /// `CurrentResourceOwner` (resowner.c global) — the current resource owner,
+    /// as the heavyweight-lock subsystem's `ResourceOwnerHandle`, or `None`
+    /// when `CurrentResourceOwner == NULL`.
+    pub fn lock_current_resource_owner() -> Option<types_storage::lock::ResourceOwnerHandle>
+);

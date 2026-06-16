@@ -43,3 +43,21 @@ seam_core::seam!(
     /// `node`'s tree, or -1 if none.
     pub fn locate_agg_of_level(node: &Node<'_>, levelsup: i32) -> i32
 );
+
+seam_core::seam!(
+    /// `map_variable_attnos((Node *) exprs, 1, 0, attmap, InvalidOid,
+    /// &found_whole_row)` (rewriteManip.c) over a list of index expressions, as
+    /// `catalog/index.c` `CompareIndexInfo` calls it on `info2->ii_Expressions`
+    /// / `info2->ii_Predicate`. `target_varno`=1, `sublevels_up`=0,
+    /// `to_rowtype`=`InvalidOid` are pinned to that single call site. Returns the
+    /// freshly-mapped expression list (allocated in `mcx`) and the
+    /// `found_whole_row` out-parameter. `Err` carries the rewrite
+    /// `ereport(ERROR)` surface. Owned by the (unported) `backend-rewrite-core`
+    /// unit (`map_variable_attnos` is concrete there); installed from its
+    /// `init_seams()` when it lands — until then a call panics loudly.
+    pub fn map_variable_attnos_expr_list<'mcx>(
+        mcx: Mcx<'mcx>,
+        exprs: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+        attmap: &[types_core::primitive::AttrNumber],
+    ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::Expr>, bool)>
+);

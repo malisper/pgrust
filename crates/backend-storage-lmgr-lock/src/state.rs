@@ -16,11 +16,10 @@
 //! `LOCK`'s `wait queue` (a `Vec<ProcNumber>`), so the fine-grained seam bodies
 //! proc.c calls can reach them keyed on `(LOCKTAG, ProcNumber)`.
 
-// F0 lands the ambient-table foundation; the LockEntry/PROCLOCK-table fields,
-// the fast-path partition helper, and the method-id validator are consumed by
-// the F1-F5 families (LockAcquire/Release/fast-path/2PC) that build on this
-// state. They are deliberately present now as the foundation those families
-// fill in; allow dead_code until then (mirror-PG-and-panic frontier).
+// F0 lands the ambient-table foundation; F1/F2 fill the grant/release/wait
+// spine on top of it. A few fast-path / 2PC fields are still consumed only by
+// the deferred F3-F5 families; allow dead_code until they land
+// (mirror-PG-and-panic frontier).
 #![allow(dead_code)]
 
 use alloc::boxed::Box;
@@ -29,7 +28,7 @@ use core::cell::RefCell;
 use std::collections::HashMap;
 
 use types_core::ProcNumber;
-use types_storage::lock::{LOCALLOCK, LOCALLOCKTAG, LOCK, LOCKTAG};
+use types_storage::lock::{LOCALLOCK, LOCALLOCKTAG, LOCK, LOCKMASK, LOCKTAG};
 
 /// `FAST_PATH_STRONG_LOCK_HASH_BITS` / `FAST_PATH_STRONG_LOCK_HASH_PARTITIONS`
 /// (lock.c).
@@ -60,25 +59,35 @@ impl Default for FastPathStrongRelationLockData {
     }
 }
 
-/// The per-backend's group-locking accounting that lock.c keeps inside the
-/// PROCLOCK list of a LOCK: which `ProcNumber`s hold the lock and with which
-/// `holdMask`, plus this backend's wait queue. The `PROCLOCK` boxes live in
-/// [`SharedLockTable::proclocks`]; this is the per-`LOCK` view the wait-queue
-/// seams need.
-///
-/// The `LOCK` body itself (`types_storage::lock::LOCK`) carries the
-/// grant/wait masks and the per-mode counts. The wait queue
-/// (`lock->waitProcs`, a `dclist` of `PGPROC`s) is modeled as `wait_queue`, a
-/// `Vec<ProcNumber>` in front-to-back order.
+/// One backend's relationship to one `LOCK` — the ambient-model rendering of
+/// the C `PROCLOCK` (whose `tag.myLock` / `tag.myProc` / `dlist` links are
+/// modeled implicitly by this entry's `(LOCKTAG, ProcNumber)` key + the
+/// per-`LOCK` holder order). Only the genuine per-PROCLOCK state survives:
+/// `holdMask`, `releaseMask`, and the group leader's `ProcNumber`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcLock {
+    /// `proclock->groupLeader` — the holder's lock-group leader (its own
+    /// `ProcNumber` when not in a group).
+    pub group_leader: ProcNumber,
+    /// `proclock->holdMask` — bitmask of lock types currently held.
+    pub hold_mask: LOCKMASK,
+    /// `proclock->releaseMask` — bitmask of lock types marked for release
+    /// (`LockReleaseAll`).
+    pub release_mask: LOCKMASK,
+}
+
+/// The shared per-lockable-object entry (the C `LOCK` plus its `procLocks` /
+/// `waitProcs` lists). The `LOCK` body carries the grant/wait masks and the
+/// per-mode counts; the holder/waiter lists that C threads through intrusive
+/// `dlist`/`dclist` links are modeled as the maps/vectors here.
 #[derive(Debug, Default)]
 pub struct LockEntry {
     /// The `LOCK` struct (tag, grant/wait masks, per-mode counts).
     pub lock: LOCK,
     /// `lock->waitProcs` — front-to-back wait queue of `PGPROC`s by ProcNumber.
     pub wait_queue: Vec<ProcNumber>,
-    /// `lock->procLocks` — the `ProcNumber`s of the holders, in dlist order
-    /// (the PROCLOCK keys for this lock). The PROCLOCK bodies are in the
-    /// PROCLOCK table.
+    /// `lock->procLocks` — the holders' `ProcNumber`s in dlist (push-tail)
+    /// order, paired with their per-PROCLOCK state.
     pub holders: Vec<ProcNumber>,
 }
 
@@ -90,7 +99,7 @@ pub struct SharedLockTable {
     pub locks: HashMap<LOCKTAG, Box<LockEntry>>,
     /// `LockMethodProcLockHash` — PROCLOCK entries keyed by `(LOCKTAG, holder
     /// ProcNumber)` (the `PROCLOCKTAG` (`myLock`, `myProc`) pair).
-    pub proclocks: HashMap<(LOCKTAG, ProcNumber), Box<types_storage::lock::PROCLOCK>>,
+    pub proclocks: HashMap<(LOCKTAG, ProcNumber), ProcLock>,
 }
 
 thread_local! {

@@ -86,6 +86,9 @@ pub fn init_seams() {
     sx::rd_index_indnullsnotdistinct::set(rd_index_indnullsnotdistinct);
     sx::rd_rel_relpersistence::set(rd_rel_relpersistence);
     sx::rd_rel_relkind::set(rd_rel_relkind);
+    sx::rd_rel_relnatts::set(rd_rel_relnatts);
+    sx::rd_rel_relispartition::set(rd_rel_relispartition);
+    sx::relation_get_descr::set(relation_get_descr);
     sx::rd_indam_amclusterable::set(rd_indam_amclusterable);
     sx::relation_is_mapped::set(relation_is_mapped);
     sx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
@@ -668,6 +671,24 @@ fn rd_rel_relpersistence(rel: &types_rel::Relation<'_>) -> PgResult<i8> {
 }
 fn rd_rel_relkind(rel: &types_rel::Relation<'_>) -> PgResult<i8> {
     with_entry(rel.rd_id, |rd| rd.rd_rel.relkind as i8)
+}
+fn rd_rel_relnatts(rel: &types_rel::Relation<'_>) -> PgResult<i16> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relnatts)
+}
+fn rd_rel_relispartition(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relispartition)
+}
+/// `RelationGetDescr(rel)` — the relation's tuple descriptor. The C shares the
+/// relcache's reference-counted `rd_att`; the safe port materializes an owned
+/// `mcx`-backed copy via [`OwnedTupleDesc::project_in`] (the same projection the
+/// relcache build family uses for `rd_att`).
+fn relation_get_descr<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| {
+        rd.rd_att.project_in(mcx, rd.rd_id)
+    })?
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // `index->rd_indam->amclusterable`: the trimmed in-cache `IndexAmRoutine`

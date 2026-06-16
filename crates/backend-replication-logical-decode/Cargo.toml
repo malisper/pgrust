@@ -1,0 +1,27 @@
+[package]
+name = "backend-replication-logical-decode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_replication_logical_decode"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+backend-utils-error = { path = "../backend-utils-error" }
+types-logical = { path = "../types-logical" }
+types-wal = { path = "../types-wal" }
+types-storage = { path = "../types-storage" }
+types-xlog-records = { path = "../types-xlog-records" }
+backend-replication-logical-decode-seams = { path = "../backend-replication-logical-decode-seams" }
+backend-replication-logical-logical-seams = { path = "../backend-replication-logical-logical-seams" }
+backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
+backend-replication-logical-snapbuild-seams = { path = "../backend-replication-logical-snapbuild-seams" }
+backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
+backend-access-transam-rmgr = { path = "../backend-access-transam-rmgr" }
