@@ -21,3 +21,11 @@ backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # fix_indexqual_operand reaches indxpath.c's strip_phvs_in_index_operand by a
 # direct edge (indxpath depends only on var-SEAMS, not this owner, so no cycle).
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
+# flatten_join_alias_vars (this owner) installs the rewritemanip-seams
+# `flatten_join_alias_vars` declaration and uses rewriteManip.c's
+# IncrementVarSublevelsUp / checkExprHasSubLink / add_nulling_relids
+# (backend-rewrite-core, which does NOT depend on this crate — verified no cycle),
+# plus the prepjointree-seams `get_relids_for_join` (a seams crate — no cycle).
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-prepjointree-seams" }

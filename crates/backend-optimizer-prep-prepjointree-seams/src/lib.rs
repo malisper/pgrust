@@ -161,3 +161,21 @@ seam_core::seam!(
         parse: &mut types_nodes::copy_query::Query<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `get_relids_for_join(query, joinrelid)` (prepjointree.c:4191): find the
+    /// jointree node for the join RTE `joinrelid` (`find_jointree_node_for_rel`)
+    /// and return the set of base+OJ relids present underneath it
+    /// (`get_relids_in_jointree(jtnode, true, false)`). Errors with
+    /// `elog(ERROR, "could not find join node %d")` if the join RTE is not in the
+    /// jointree. Consumed by `alias_relid_set` / `add_nullingrels_if_needed`
+    /// (optimizer/util/var.c, `flatten_join_alias_vars`). The result is returned
+    /// as the lifetime-free [`ExprRelids`] word storage so the var.c owner can
+    /// assign it directly into a `PlaceHolderVar.phrels`. Installed by the owner's
+    /// `init_seams`.
+    pub fn get_relids_for_join<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query: &types_nodes::copy_query::Query<'mcx>,
+        joinrelid: i32,
+    ) -> types_error::PgResult<types_nodes::primnodes::ExprRelids>
+);
