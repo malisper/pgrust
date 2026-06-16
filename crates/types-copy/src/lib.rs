@@ -22,9 +22,13 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
-use mcx::{PgString, PgVec};
-use types_core::primitive::Oid;
+use mcx::{PgBox, PgString, PgVec};
+use types_core::primitive::{AttrNumber, Oid};
 use types_datum::datum::Datum;
+use types_error::SoftErrorContext;
+use types_fmgr::FmgrInfo;
+use types_nodes::execexpr::ExprState;
+use types_nodes::execnodes::{EStateLink, EcxtId};
 use types_rel::Relation;
 
 /* ===========================================================================
@@ -120,37 +124,18 @@ pub struct CopyFormatOptions<'mcx> {
 }
 
 /* ===========================================================================
- * Opaque cross-subsystem tokens (runtime-private table keys; NULL ⇒ None).
+ * Genuinely-opaque source/transport handles (inherited opacity, types.md rule
+ * 6): these name objects owned by libpq / the C stdio layer / a foreign
+ * callback — there is no value-typed Rust model to migrate them onto, so they
+ * remain keyed tokens (NULL ⇒ None).
  *
- * Inherited opacity (types.md rule 6): the parser only consults these objects
- * through seams owned by the not-yet-ported list / executor / fmgr / libpq
- * subsystems, so they cross as keyed tokens, not stand-in structs.
+ * The former `ListHandle` / `ExprContextHandle` / `EscontextHandle` /
+ * `FmgrInfoSlot` / `ExprStateHandle` opaque-`u64` tokens are RETIRED: the
+ * executor model is fully ported, so [`CopyParseState`] now carries the real
+ * `PgVec<AttrNumber>` / `EcxtId` / `SoftErrorContext` / `PgVec<FmgrInfo>` /
+ * `PgVec<Option<ExprState>>` carriers directly (matching the owned EState
+ * model that `copyfrom.c` constructs).
  * =========================================================================== */
-
-/// `List *` — the `attnumlist` (a parse/catalog list owned by the list
-/// subsystem).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ListHandle(pub u64);
-
-/// `ExprContext *` — per-tuple expression-evaluation context.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExprContextHandle(pub u64);
-
-/// `Node *` — the soft-error `ErrorSaveContext` (`cstate->escontext`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EscontextHandle(pub u64);
-
-/// A single `FmgrInfo *` slot (`&in_functions[i]`) for an input/receive
-/// function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FmgrInfoSlot(pub u64);
-
-/// An `ExprState *` (`cstate->defexprs[m]`) for a column default expression.
-///
-/// Single canonical definition lives in [`types_cache::typcache`]; this is the
-/// same `ExprState *` token the typcache/domains seams use. Re-exported here so
-/// the COPY seam contracts keep the `types_copy::ExprStateHandle` path.
-pub use types_cache::typcache::ExprStateHandle;
 
 /// `FILE *` opened for the COPY input (file or program pipe).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -240,8 +225,11 @@ pub struct CopyParseState<'mcx> {
     /* ---- the COPY target / source externals ---- */
     /// `Relation rel`.
     pub rel: Relation<'mcx>,
-    /// `List *attnumlist` — integer attnums being copied.
-    pub attnumlist: ListHandle,
+    /// `List *attnumlist` — integer attnums being copied. Modeled as the owned
+    /// `PgVec<AttrNumber>` the repo uses for an integer list (see `copyto.c`),
+    /// retiring the former opaque `ListHandle` token; the codec reads it
+    /// directly (`attnumlist.len()`, `attnumlist[i]`, iteration).
+    pub attnumlist: PgVec<'mcx, AttrNumber>,
     /// `CopySource copy_src`.
     pub copy_src: CopySource,
     /// `FILE *copy_file` (when `copy_src == COPY_FILE`).
@@ -250,8 +238,23 @@ pub struct CopyParseState<'mcx> {
     pub fe_msgbuf: Option<StringInfoHandle>,
     /// `copy_data_source_cb data_source_cb` (when `copy_src == COPY_CALLBACK`).
     pub data_source_cb: Option<DataSourceCbHandle>,
-    /// `Node *escontext` — soft-error trap for ON_ERROR IGNORE.
-    pub escontext: Option<EscontextHandle>,
+    /// `ErrorSaveContext *escontext` — soft-error trap for ON_ERROR IGNORE. The
+    /// real ported [`SoftErrorContext`] (`None` ⇒ the C pointer is NULL); the
+    /// codec hands `&mut self.escontext` to the input-function seam so soft
+    /// errors are trapped exactly as the C `InputFunctionCallSafe` path does.
+    pub escontext: Option<SoftErrorContext>,
+    /// Back-link to the owning [`EStateData`](types_nodes::execnodes::EStateData)
+    /// that `copyfrom.c` constructs (`CreateExecutorState`). The executor-state
+    /// seams (`exec_eval_expr`) resolve the per-tuple `ExprContext`, the default
+    /// `ExprState`s, and the per-query memory through this link. `None` until the
+    /// owner attaches the EState (e.g. the binary-only path that needs no
+    /// defaults). Carries only a raw address (see [`EStateLink`]).
+    pub estate: Option<EStateLink>,
+    /// `ExprContext *` — the per-tuple expression-evaluation context the default
+    /// expressions are evaluated in, as the owned-model [`EcxtId`] into the
+    /// EState's context pool (retiring the former `ExprContextHandle`). `None`
+    /// until the owner makes the per-tuple context.
+    pub econtext: Option<EcxtId>,
 
     /* ---- encoding state ---- */
     /// `int file_encoding`.
@@ -313,7 +316,19 @@ pub struct CopyParseState<'mcx> {
     /// ⇒ the field matched the NULL marker (C `raw_fields[k] == NULL`).
     pub raw_fields: Vec<Option<FieldRange>>,
 
-    /* ---- per-attribute parse externals (handles + arrays) ---- */
+    /* ---- per-attribute parse externals (real owned arrays) ---- */
+    /// `FmgrInfo *in_functions` — the input/receive function for each physical
+    /// attribute, as the real ported [`FmgrInfo`] values (retiring the former
+    /// `FmgrInfoSlot` token). The fmgr seam resolves `&in_functions[m]`.
+    pub in_functions: PgVec<'mcx, FmgrInfo>,
+    /// `Oid *typioparams` — the element type oid for each `in_functions[m]`.
+    pub typioparams: PgVec<'mcx, Oid>,
+    /// `ExprState **defexprs` — the default-value expression for each physical
+    /// attribute (`None` ⇒ the C pointer is NULL), as the real ported
+    /// [`ExprState`] (retiring the former `ExprStateHandle` token). The codec
+    /// tests presence directly; the `exec_eval_expr` seam evaluates
+    /// `defexprs[m]` in `econtext` through the owner's EState.
+    pub defexprs: PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
     /// `bool *convert_select_flags` — `None` ⇒ the C pointer is NULL (no
     /// selective conversion); else one flag per physical attribute.
     pub convert_select_flags: Option<Vec<bool>>,

@@ -20719,6 +20719,9 @@ dependencies = [
  "types-cache",
  "types-core",
  "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-nodes",
  "types-rel",
 ]
 

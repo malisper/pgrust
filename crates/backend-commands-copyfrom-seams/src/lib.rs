@@ -29,7 +29,6 @@
 
 use types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
-    EscontextHandle, ExprContextHandle, ExprStateHandle, FmgrInfoSlot, ListHandle,
 };
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
@@ -104,23 +103,12 @@ seam_core::seam!(
 );
 
 /* ===========================================================================
- * List / tuple-descriptor / relcache accessors.
+ * Tuple-descriptor / relcache accessors.
+ *
+ * NOTE: the former `list_length` / `list_nth_int` / `attnumlist_ints` seams are
+ * retired — `cstate.attnumlist` is now the real `PgVec<AttrNumber>`, so the
+ * codec reads its length / nth / iterates it directly.
  * =========================================================================== */
-
-seam_core::seam!(
-    /// `list_length(cstate->attnumlist)`.
-    pub fn list_length(list: ListHandle) -> PgResult<i32>
-);
-
-seam_core::seam!(
-    /// `list_nth_int(cstate->attnumlist, n)`.
-    pub fn list_nth_int(list: ListHandle, n: i32) -> PgResult<i32>
-);
-
-seam_core::seam!(
-    /// `foreach(cur, cstate->attnumlist) { lfirst_int(cur) }`.
-    pub fn attnumlist_ints(list: ListHandle) -> PgResult<Vec<i32>>
-);
 
 seam_core::seam!(
     /// `RelationGetDescr(rel)->natts`.
@@ -140,38 +128,41 @@ seam_core::seam!(
 
 /* ===========================================================================
  * fmgr / Datum value layer.
+ *
+ * These re-model away the former `FmgrInfoSlot` / `ExprStateHandle` /
+ * `ExprContextHandle` / `EscontextHandle` opaque tokens: the seam now takes the
+ * `cstate` plus the physical-attribute index `m`, and the owner (`copyfrom.c`,
+ * which holds the per-query `Mcx`, the `FmgrResolution`s, and the `EState`)
+ * resolves `&cstate.in_functions[m]` / `cstate.typioparams[m]` /
+ * `cstate.escontext` / `cstate.defexprs[m]` / `cstate.econtext` and dispatches
+ * the real `InputFunctionCallSafe` / `ReceiveFunctionCall` /
+ * `ExecEvalExprSwitchContext`. The seam owns the borrow of `&mut cstate` so it
+ * can resolve `&mut cstate.escontext` for the soft-error trap.  The `_typed`
+ * notes on `input_function_call_safe` are because the owner uses the Option-4
+ * cstring/bytea-typed fmgr surface (`input_function_call_safe_typed`).
+ *
+ * The `typioparam` / `in_function_slot` / `defexpr` accessor seams are retired:
+ * the codec reads `cstate.defexprs[m].is_some()` directly to detect a default,
+ * and the owner reads the per-attribute arrays straight off `cstate`.
  * =========================================================================== */
 
 seam_core::seam!(
-    /// `InputFunctionCallSafe(&in_functions[m], string, typioparam, typmod,
-    /// escontext, &result)`.
-    pub fn input_function_call_safe(flinfo: FmgrInfoSlot, string: Option<&str>, typioparam: Oid, typmod: i32, escontext: Option<EscontextHandle>) -> PgResult<Option<Datum>>
+    /// `InputFunctionCallSafe(&cstate->in_functions[m], string,
+    /// cstate->typioparams[m], typmod, cstate->escontext, &result)` — returns
+    /// `None` when a soft error was trapped (`Ok(false)` in the C).
+    pub fn input_function_call_safe<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, string: Option<&str>, typmod: i32) -> PgResult<Option<Datum>>
 );
 
 seam_core::seam!(
-    /// `ReceiveFunctionCall(&in_functions[m], buf, typioparam, typmod)`.
-    pub fn receive_function_call(flinfo: FmgrInfoSlot, buf: Option<&[u8]>, typioparam: Oid, typmod: i32) -> PgResult<Datum>
+    /// `ReceiveFunctionCall(&cstate->in_functions[m], buf,
+    /// cstate->typioparams[m], typmod)`.
+    pub fn receive_function_call<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, buf: Option<&[u8]>, typmod: i32) -> PgResult<Datum>
 );
 
 seam_core::seam!(
-    /// `ExecEvalExpr(defexprs[m], econtext, &isnull)`.
-    pub fn exec_eval_expr(exprstate: ExprStateHandle, econtext: ExprContextHandle) -> PgResult<AttrValue>
-);
-
-seam_core::seam!(
-    /// `&in_functions[m]` — the input/receive `FmgrInfo` slot for physical attr
-    /// `m`.
-    pub fn in_function_slot<'mcx>(cstate: &CopyParseState<'mcx>, m: i32) -> PgResult<FmgrInfoSlot>
-);
-
-seam_core::seam!(
-    /// `typioparams[m]`.
-    pub fn typioparam<'mcx>(cstate: &CopyParseState<'mcx>, m: i32) -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// `defexprs[m]` — `None` when the C pointer is NULL.
-    pub fn defexpr<'mcx>(cstate: &CopyParseState<'mcx>, m: i32) -> PgResult<Option<ExprStateHandle>>
+    /// `ExecEvalExpr(cstate->defexprs[m], cstate->econtext, &isnull)` — evaluate
+    /// the default expression for physical attr `m` in the per-tuple context.
+    pub fn exec_eval_expr<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32) -> PgResult<AttrValue>
 );
 
 seam_core::seam!(
