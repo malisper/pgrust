@@ -1779,6 +1779,30 @@ mod recurrence_guard {
         // DELETE these entries when funcapi grows the fmgr arg-detoast accessors.
         ("backend_utils_fmgr_funcapi", "srf_arg_varlena_bytes"),
         ("backend_utils_fmgr_funcapi", "srf_arg_record"),
+        // DESIGN_DEBT (TD-TABLECMDS-F1F6-UNPORTED): tablecmds.c is a 22k-LOC giant
+        // ported in families. Only FAMILY F0 (relation create/drop/truncate +
+        // on_commit + small helpers) is landed in `backend-commands-tablecmds`
+        // (audited). The eleven seams below are tablecmds.c functions belonging to
+        // the not-yet-ported families F1-F6 (the ALTER phase machine, column /
+        // constraint / ALTER TYPE / inheritance-partition / RENAME / SET SCHEMA /
+        // change-owner machinery, and the sequence-create driver). They are
+        // declared in `backend-commands-tablecmds-seams` and `::call`ed by already-
+        // merged consumers (commands/alter.c, parse-utilcmd, sequence.c, REASSIGN
+        // OWNED, etc.). The F0 owner crate has no body for them yet, so it cannot
+        // install them — they loud-panic (mirror-pg-and-panic) on a real call path
+        // until the owning family lands. DELETE each entry as its family ports the
+        // function and installs the seam in `init_seams()`.
+        ("backend_commands_tablecmds", "RenameRelation"),
+        ("backend_commands_tablecmds", "renameatt"),
+        ("backend_commands_tablecmds", "RenameConstraint"),
+        ("backend_commands_tablecmds", "AlterTableNamespace"),
+        ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
+        ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
+        ("backend_commands_tablecmds", "at_exec_change_owner"),
+        ("backend_commands_tablecmds", "rename_relation_internal"),
+        ("backend_commands_tablecmds", "reset_rel_rewrite"),
+        ("backend_commands_tablecmds", "range_var_callback_owns_relation"),
+        ("backend_commands_tablecmds", "define_sequence_relation"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
