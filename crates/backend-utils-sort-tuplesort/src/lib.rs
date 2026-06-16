@@ -70,8 +70,8 @@ use mcx::{vec_with_capacity_in, McxOwned, MemoryContext, Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::{
-    TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType,
-    TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
+    SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod,
+    TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
 };
 use types_rel::Relation;
 use types_sortsupport::SortSupportData;
@@ -3852,6 +3852,10 @@ pub fn init_seams() {
     sx::tuplesort_get_stats::set(seam_get_stats);
     sx::tuplesort_end::set(seam_end);
     sx::tuplesort_rescan::set(seam_rescan);
+    sx::tuplesort_reset::set(seam_reset);
+    sx::tuplesort_used_bound::set(seam_used_bound);
+    sx::tuplesort_puttupleslot_standalone::set(seam_puttupleslot_standalone);
+    sx::tuplesort_gettupleslot_standalone::set(seam_gettupleslot_standalone);
     sx::tuplesort_markpos::set(seam_markpos);
     sx::tuplesort_restorepos::set(seam_restorepos);
 
@@ -4094,6 +4098,48 @@ fn seam_markpos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
 
 fn seam_restorepos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
     with_sort_mut(state, tuplesort_restorepos)
+}
+
+fn seam_reset<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
+    with_sort_mut(state, tuplesort_reset)
+}
+
+fn seam_used_bound<'mcx>(state: &Tuplesortstate<'mcx>) -> bool {
+    with_sort(state, tuplesort_used_bound)
+}
+
+/// `tuplesort_puttupleslot` for a standalone [`SlotData`] (incremental sort's
+/// group_pivot / transfer_tuple). The deformed value/null arrays live on the
+/// slot's base header, so this delegates to the same impl as the pool form
+/// through `slot.base()`.
+fn seam_puttupleslot_standalone<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    slot: &SlotData<'mcx>,
+) -> PgResult<()> {
+    with_sort_mut(state, |s| {
+        // SAFETY: re-tie the slot ref to the engine's universal `'mcx`. The slot
+        // is only READ (cloned) here; nothing from `s` is stored into it, so no
+        // borrow outlives the call. Mirrors the pool `seam_puttupleslot`.
+        let base: &TupleTableSlot = unsafe { core::mem::transmute(slot.base()) };
+        tuplesort_puttupleslot_impl(s, base)
+    })
+}
+
+/// `tuplesort_gettupleslot` into a standalone [`SlotData`] (incremental sort's
+/// transfer_tuple). Delegates through the slot's base header.
+fn seam_gettupleslot_standalone<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    forward: bool,
+    copy: bool,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    with_sort_mut(state, |s| {
+        // SAFETY: re-tie the slot's lifetime to the engine's universal `'mcx`;
+        // the engine writes freshly-allocated values into the slot, which lives
+        // at least as long as the carrier. Mirrors the pool `seam_gettupleslot`.
+        let base: &mut TupleTableSlot = unsafe { core::mem::transmute(slot.base_mut()) };
+        tuplesort_gettupleslot_impl(s, forward, copy, base)
+    })
 }
 
 #[cfg(test)]

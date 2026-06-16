@@ -53,7 +53,7 @@ pub struct ReplaceRelidContext {
 /// `ChangeVarNodesWalkExpression((Node *) rinfo->clause, context)`: it adjusts
 /// `Var.varno` / `varnullingrels` / PHV rels / RangeTblRef etc. The arena `Expr`
 /// is lifetime-free, so it is wrapped as a `Node::Expr` for the standalone walk.
-fn change_relids_in_node(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRelidContext) {
+pub(crate) fn change_relids_in_node(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRelidContext) {
     // Wrap a clone of the arena Expr as a `Node` so the standalone walker owns a
     // `&mut Node`, then store the walked result back (mirroring the C in-place
     // mutation through the `(Node *) rinfo->clause` pointer). The arena `Expr` is
@@ -167,7 +167,7 @@ fn change_relids_in_orclause(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRel
 
 /// Depth-first collect every `Expr::RestrictInfo(RinfoRef)` handle reachable
 /// from arena node `id` through inline BoolExpr args.
-fn collect_nested_rinfos(root: &PlannerInfo, id: NodeId, out: &mut Vec<RinfoId>) {
+pub(crate) fn collect_nested_rinfos(root: &PlannerInfo, id: NodeId, out: &mut Vec<RinfoId>) {
     collect_in_expr(root.node(id), out);
 }
 

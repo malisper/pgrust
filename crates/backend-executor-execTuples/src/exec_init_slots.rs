@@ -913,4 +913,45 @@ pub fn init_seams() {
     seams::execute_attr_map_slot::set(seam_execute_attr_map_slot);
     // Slot-payload name-cstring fix-up (index-only scan over a name column).
     seams::pad_name_cstring_columns::set(seam_pad_name_cstring_columns);
+    // Standalone-slot forms (incremental sort's group_pivot / transfer_tuple).
+    seams::slot_getattr_standalone::set(seam_slot_getattr_standalone);
+    seams::exec_clear_tuple_standalone::set(seam_exec_clear_tuple_standalone);
+    seams::exec_copy_slot_standalone::set(seam_exec_copy_slot_standalone);
+    seams::exec_copy_pool_slot_into_standalone::set(seam_exec_copy_pool_slot_into_standalone);
+}
+
+/// Seam `slot_getattr_standalone` — `slot_getattr` over a standalone `SlotData`.
+fn seam_slot_getattr_standalone<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    attnum: AttrNumber,
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    crate::slot_deform::slot_getattr(mcx, slot, attnum)
+}
+
+/// Seam `exec_clear_tuple_standalone` — `ExecClearTuple` over a standalone slot.
+fn seam_exec_clear_tuple_standalone<'mcx>(slot: &mut SlotData<'mcx>) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(slot)
+}
+
+/// Seam `exec_copy_slot_standalone` — `ExecCopySlot` between two standalone
+/// slots (`group_pivot` ← `transfer_tuple`).
+fn seam_exec_copy_slot_standalone<'mcx>(
+    mcx: Mcx<'mcx>,
+    dstslot: &mut SlotData<'mcx>,
+    srcslot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecCopySlot(mcx, dstslot, srcslot)
+}
+
+/// Seam `exec_copy_pool_slot_into_standalone` — `ExecCopySlot` with a standalone
+/// destination and an `es_tupleTable` pool source (`group_pivot` ← outer slot).
+fn seam_exec_copy_pool_slot_into_standalone<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    dstslot: &mut SlotData<'mcx>,
+    srcslot: SlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let src = estate.slot_data(srcslot);
+    crate::slot_store_fetch::ExecCopySlot(mcx, dstslot, src)
 }

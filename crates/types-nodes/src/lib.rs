@@ -45,6 +45,7 @@ pub mod nodegathermerge;
 pub mod nodegroup;
 pub mod nodehash;
 pub mod nodehashjoin;
+pub mod nodeincrementalsort;
 pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
 pub mod nodelimit;
