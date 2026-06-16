@@ -1668,11 +1668,13 @@ mod recurrence_guard {
         // bodies (systable_beginscan over pg_index/pg_statistic_ext/pg_constraint/
         // pg_attrdef + per-row deform + DeconstructFkConstraintRow / get_opcode /
         // detoast) are not yet written in the genam owner (only the DTO structs
-        // exist). `systable_inplace_update` (the buffer-locking retry +
-        // heap_inplace_update_and_unlock loop) and `build_index_value_description`
-        // (the per-key out-function + ACL-visibility render) are genam.c
-        // functions not yet bodied. Install + DELETE each as the genam unit
-        // ports the corresponding scan/update/render body.
+        // exist). `build_index_value_description` (the per-key out-function +
+        // ACL-visibility render) is a genam.c function not yet bodied. Install +
+        // DELETE each as the genam unit ports the corresponding scan/render body.
+        // (`systable_inplace_update` — the buffer-locking begin/getnext retry +
+        // `heap_inplace_lock`/`heap_inplace_update_and_unlock`/`heap_inplace_unlock`
+        // loop — is now bodied + installed by the genam owner, so its allowlist
+        // entry was removed.)
         ("backend_access_index_genam", "relcache_scan_pg_index"),
         // `relcache_scan_pg_rewrite` (full-Query cache-ownership keystone): the
         // `pg_rewrite` scan + per-row `Form_pg_rewrite` + `ev_qual`/`ev_action`
@@ -1690,7 +1692,6 @@ mod recurrence_guard {
         ("backend_access_index_genam", "relcache_exclusion_info"),
         ("backend_access_index_genam", "scan_pg_attrdef"),
         ("backend_access_index_genam", "scan_pg_constraint_nncheck"),
-        ("backend_access_index_genam", "systable_inplace_update"),
         ("backend_access_index_genam", "build_index_value_description"),
         //
         // -- backend-utils-cache-relcache (FDW-routine cache slot not modeled) --
