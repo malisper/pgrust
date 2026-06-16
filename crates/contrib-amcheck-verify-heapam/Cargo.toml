@@ -1,0 +1,49 @@
+[package]
+name = "contrib-amcheck-verify-heapam"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "contrib_amcheck_verify_heapam"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }
+types-tuple = { path = "../types-tuple" }
+types-datum = { path = "../types-datum" }
+types-nodes = { path = "../types-nodes" }
+
+# Direct (acyclic) library deps.
+backend-storage-aio-read-stream = { path = "../backend-storage-aio-read-stream" }
+backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
+backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+
+# Seam crates consumed across cycles / for not-yet-installed neighbours.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-access-heap-visibilitymap-seams = { path = "../backend-access-heap-visibilitymap-seams" }
+backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

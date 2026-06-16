@@ -14,6 +14,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReadMultiXactIdRange(&oldest, &next)` (multixact.c) — the cached
+    /// `MultiXactState->oldestMultiXactId` / `nextMXact` range, read under
+    /// `MultiXactGenLock`. Returns `(oldest, next)`. Used by amcheck's
+    /// `verify_heapam` to bound-check mxids found in the heap.
+    pub fn read_multi_xact_id_range() -> types_error::PgResult<(
+        types_core::primitive::MultiXactId,
+        types_core::primitive::MultiXactId,
+    )>
+);
+
+seam_core::seam!(
     /// `GetMultiXactIdMembers(multi, &members, allow_old, only_lockers)`
     /// (multixact.c) — the live members of a multixact, returned as an owned
     /// vector (C returns a `palloc`'d `MultiXactMember[]` plus `nmembers`; an
