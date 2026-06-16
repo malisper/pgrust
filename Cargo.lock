@@ -11238,6 +11238,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-walwriter"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-interrupt",
+ "backend-postmaster-walwriter-seams",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-resowner-seams",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-postmaster-walwriter-seams"
 version = "0.0.0"
 dependencies = [
@@ -17931,6 +17964,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-postmaster-walsummarizer",
+ "backend-postmaster-walwriter",
  "backend-regex-core",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",

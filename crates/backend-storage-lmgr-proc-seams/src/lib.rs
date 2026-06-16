@@ -809,3 +809,10 @@ seam_core::seam!(
     /// advertises its own proc number at startup. Plain shmem write.
     pub fn set_checkpointer_proc_to_self() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ProcGlobal->walwriterProc = MyProcNumber` (proc.c) — the walwriter
+    /// advertises its own proc number at startup so backends can wake it while
+    /// it is sleeping (`WalWriterMain`). Plain shmem write.
+    pub fn set_walwriter_proc_to_self() -> types_error::PgResult<()>
+);

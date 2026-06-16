@@ -1,0 +1,46 @@
+[package]
+name = "backend-postmaster-walwriter"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_postmaster_walwriter"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-pgstat = { path = "../types-pgstat" }
+types-wal = { path = "../types-wal" }
+types-startup = { path = "../types-startup" }
+
+# ereport/elog and the error-report helpers (EmitErrorReport / FlushErrorState).
+backend-utils-error = { path = "../backend-utils-error" }
+# ConfigReloadPending / ShutdownRequestPending / ProcessMainLoopInterrupts (ported).
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+# XLogBackgroundFlush (real, ported) + SetWalWriterSleeping (xlog-driver owner).
+backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
+
+# Its own inward seams (installed by init_seams).
+backend-postmaster-walwriter-seams = { path = "../backend-postmaster-walwriter-seams" }
+
+# Outward owner seam crates.
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }
+backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-activity-pgstat-wal-seams = { path = "../backend-utils-activity-pgstat-wal-seams" }
+port-pgsleep-seams = { path = "../port-pgsleep-seams" }
