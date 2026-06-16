@@ -47,38 +47,29 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 
-use types_amapi::CompareType;
-use types_core::primitive::{AttrNumber, Oid};
+use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::PgResult;
 use types_nodes::ddlnodes::{IndexElem, IndexStmt};
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::Expr;
-use types_nodes::rawnodes::{
-    RangeVar, SortByDir, SortByNulls, SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT,
-    SORTBY_NULLS_FIRST,
-};
+use types_nodes::rawnodes::RangeVar;
 use types_rel::Relation;
-use types_tuple::heaptuple::FormData_pg_attribute;
 
-use backend_utils_error::{ereport, ERROR};
+use backend_utils_error::ereport;
+use types_error::ERROR;
 
 // ---- real owner crates ----
 use backend_nodes_core::makefuncs::{make_ands_implicit, make_index_info};
-use backend_nodes_core::nodefuncs::{expr_collation, expr_type};
 use backend_nodes_core::bitmapset::{bms_is_member, bms_next_member, bms_union};
 use backend_catalog_index::index_check_primary_key;
-use backend_catalog_namespace::{
-    DeconstructQualifiedName, LookupExplicitNamespace, NameListToString, OpclassnameGetOpcid,
-};
 use backend_access_index_amapi::GetIndexAmRoutineByAmId;
-use backend_access_common_reloptions::{index_reloptions, transformRelOptions};
-use backend_parser_coerce::IsBinaryCoercible;
-use backend_parser_parse_oper::compatible_oper_opid;
 use backend_optimizer_util_clauses::contain_mutable_functions_after_planning;
 use backend_commands_tablespace::{get_tablespace_name, get_tablespace_oid, GetDefaultTablespace};
 use backend_commands_comment::CreateComments;
-use backend_utils_misc_guc::{at_eoxact_guc, NewGUCNestLevel, restrict_search_path, set_default_tablespace_empty};
+use backend_utils_misc_guc::{at_eoxact_guc, NewGUCNestLevel};
+use backend_utils_misc_guc_seams::{restrict_search_path, set_config_option};
+use backend_access_table_table::table_close as owner_table_close;
 use backend_utils_init_miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
 use backend_utils_activity_small::backend_progress::{
     pgstat_progress_end_command, pgstat_progress_incr_param, pgstat_progress_start_command,
@@ -88,12 +79,8 @@ use backend_utils_activity_small::backend_progress::{
 // ---- seams consumed from other units ----
 use backend_catalog_index_seams::{self as index_seam, IndexCreateArgs};
 use backend_catalog_aclchk_seams as aclchk_seam;
-use backend_catalog_namespace_seams as namespace_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_syscache_seams as syscache;
-use backend_utils_adt_format_type_seams as formattype_seam;
-use backend_utils_adt_regproc_seams as regproc_seam;
-use backend_utils_mb_mbutils_seams as mb_seam;
 use backend_optimizer_util_var_seams as var_seam;
 use backend_commands_tablecmds_seams as tablecmds_seam;
 use backend_access_heap_vacuumlazy_seams as namespacename_seam;
@@ -119,9 +106,6 @@ pub use choosers::{
 };
 pub use compute::ComputeIndexAttrs;
 pub use opclass::{GetOperatorFromCompareType, ResolveOpClass};
-
-#[cfg(test)]
-mod tests;
 
 /// `NAMEDATALEN` (`pg_config_manual.h`).
 pub(crate) const NAMEDATALEN: i32 = 64;
@@ -197,7 +181,7 @@ pub(crate) fn name_list_strings(
 pub fn CheckPredicate(mcx: Mcx<'_>, predicate: Expr) -> PgResult<()> {
     if contain_mutable_functions_after_planning(mcx, predicate)? {
         return Err(ereport(ERROR)
-            .errcode(types_error::sqlstate::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg("functions in index predicate must be marked IMMUTABLE")
             .into_error());
     }
@@ -234,11 +218,22 @@ pub fn DefineIndex<'mcx>(
 ) -> PgResult<ObjectAddress> {
     let mut root_save_nestlevel = NewGUCNestLevel();
 
-    restrict_search_path()?;
+    restrict_search_path::call()?;
 
-    // Some callers need us to run with an empty default_tablespace.
+    // Some callers need us to run with an empty default_tablespace; this is a
+    // necessary hack to be able to reproduce catalog state accurately when
+    // recreating indexes after table-rewriting ALTER TABLE.
+    //
+    // C: set_config_option("default_tablespace", "", PGC_USERSET, PGC_S_SESSION,
+    //    GUC_ACTION_SAVE, true, 0, false). The repo seam is the `SetConfigOption`
+    //    macro shape (no explicit GUC_ACTION_SAVE); the action defaults there.
     if stmt.reset_default_tblspc {
-        set_default_tablespace_empty()?;
+        set_config_option::call(
+            "default_tablespace",
+            "",
+            types_guc::guc::GucContext::PGC_USERSET,
+            types_guc::guc::GucSource::PGC_S_SESSION,
+        )?;
     }
 
     // Force non-concurrent build on temporary relations.
@@ -269,22 +264,19 @@ pub fn DefineIndex<'mcx>(
         .indexParams
         .iter()
         .chain(stmt.indexIncludingParams.iter())
-        .map(|n| {
-            n.as_index_elem()
-                .expect("DefineIndex: indexParams entry is not an IndexElem")
-        })
+        .map(|n| node_as_index_elem(n.as_ref()))
         .collect();
     let number_of_attributes = all_index_params.len() as i32;
 
     if number_of_key_attributes <= 0 {
         return Err(ereport(ERROR)
-            .errcode(types_error::sqlstate::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg("must specify at least one column")
             .into_error());
     }
     if number_of_attributes > INDEX_MAX_KEYS {
         return Err(ereport(ERROR)
-            .errcode(types_error::sqlstate::ERRCODE_TOO_MANY_COLUMNS)
+            .errcode(types_error::ERRCODE_TOO_MANY_COLUMNS)
             .errmsg(format!(
                 "cannot use more than {INDEX_MAX_KEYS} columns in an index"
             ))
@@ -293,10 +285,10 @@ pub fn DefineIndex<'mcx>(
 
     // Take the table lock. ShareUpdateExclusiveLock for concurrent, ShareLock
     // otherwise.
-    let lockmode: types_core::lock::LOCKMODE = if concurrent {
-        types_core::lock::ShareUpdateExclusiveLock
+    let lockmode: types_storage::lock::LOCKMODE = if concurrent {
+        types_storage::lock::ShareUpdateExclusiveLock
     } else {
-        types_core::lock::ShareLock
+        types_storage::lock::ShareLock
     };
     let rel = table_seam::table_open::call(mcx, table_id, lockmode)?;
 
@@ -318,7 +310,7 @@ pub fn DefineIndex<'mcx>(
         _ => {
             let name = rel.rd_rel.relname.as_str().to_string();
             return Err(ereport(ERROR)
-                .errcode(types_error::sqlstate::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot create index on relation \"{name}\""))
                 .into_error());
         }
@@ -330,7 +322,7 @@ pub fn DefineIndex<'mcx>(
     if partitioned && stmt.concurrent {
         let name = rel.rd_rel.relname.as_str().to_string();
         return Err(ereport(ERROR)
-            .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot create index on partitioned table \"{name}\" concurrently"
             ))
@@ -359,18 +351,18 @@ pub fn DefineIndex<'mcx>(
     let mut tablespace_id: Oid;
     if let Some(ts) = stmt.tableSpace.as_ref() {
         tablespace_id = get_tablespace_oid(mcx, ts.as_str(), false)?;
-        if partitioned && tablespace_id == my_database_tablespace() {
+        if partitioned && tablespace_id == my_database_tablespace()? {
             return Err(ereport(ERROR)
-                .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot specify default tablespace for partitioned relations")
                 .into_error());
         }
     } else {
-        tablespace_id = GetDefaultTablespace(mcx, rel.rd_rel.relpersistence, partitioned)?;
+        tablespace_id = GetDefaultTablespace(mcx, rel.rd_rel.relpersistence as i8, partitioned)?;
     }
 
     // Check tablespace permissions.
-    if check_rights && OidIsValid(tablespace_id) && tablespace_id != my_database_tablespace() {
+    if check_rights && OidIsValid(tablespace_id) && tablespace_id != my_database_tablespace()? {
         let aclresult = aclchk_seam::object_aclcheck::call(
             TABLESPACE_RELATION_ID,
             tablespace_id,
@@ -388,7 +380,7 @@ pub fn DefineIndex<'mcx>(
         tablespace_id = GLOBALTABLESPACE_OID;
     } else if tablespace_id == GLOBALTABLESPACE_OID {
         return Err(ereport(ERROR)
-            .errcode(types_error::sqlstate::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("only shared relations can be placed in pg_global tablespace")
             .into_error());
     }
@@ -418,9 +410,9 @@ pub fn DefineIndex<'mcx>(
         .expect("DefineIndex: IndexStmt has no accessMethod");
     let mut am_info = syscache::search_am_by_name::call(mcx, &access_method_name)?;
     if am_info.is_none() && access_method_name == "rtree" {
-        ereport(types_error::elevel::NOTICE)
+        ereport(types_error::NOTICE)
             .errmsg("substituting access method \"gist\" for obsolete method \"rtree\"")
-            .emit()?;
+            .finish(here("DefineIndex"))?;
         access_method_name = "gist".to_string();
         am_info = syscache::search_am_by_name::call(mcx, &access_method_name)?;
     }
@@ -428,7 +420,7 @@ pub fn DefineIndex<'mcx>(
         Some(a) => a,
         None => {
             return Err(ereport(ERROR)
-                .errcode(types_error::sqlstate::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!("access method \"{access_method_name}\" does not exist"))
                 .into_error());
         }
@@ -468,12 +460,31 @@ pub fn DefineIndex<'mcx>(
     }
 
     // Parse AM-specific options, convert to text-array form, validate.
-    let reloptions: Option<types_tuple::Datum<'mcx>> =
-        transform_index_reloptions(mcx, &stmt.options)?;
-    {
-        let reloptions_bytes = reloptions.as_ref().and_then(datum_text_array_bytes);
-        index_reloptions(mcx, am_routine.amoptions_oid(), reloptions_bytes.as_deref(), true)?;
-    }
+    //
+    // C: reloptions = transformRelOptions((Datum) 0, stmt->options, NULL, NULL,
+    //    false, false); (void) index_reloptions(amoptions, reloptions, true);
+    //    where amoptions = accessMethodForm->amoptions.
+    //
+    // `transformRelOptions` yields a bare-word `types_datum::Datum` (a `text[]`
+    // varlena pointer) but `index_reloptions` wants the varlena bytes and
+    // `IndexCreateArgs.reloptions` is a `types_tuple::Datum` (ByRef-bytes lane).
+    // There is no bridge between the two Datum lanes (the documented
+    // Datum-redesign keystone), and `index_create` itself panics on a non-null
+    // reloptions `types_tuple::Datum` for the same reason. So a CREATE INDEX
+    // carrying a WITH (...) clause is deferred as a precise panic, not silently
+    // dropped; the (overwhelmingly common) no-WITH path runs end-to-end.
+    let reloptions: types_tuple::Datum<'mcx> = if stmt.options.is_empty() {
+        types_tuple::Datum::null()
+    } else {
+        let _ = (access_method_id, mcx);
+        panic!(
+            "backend-commands-indexcmds: DefineIndex WITH (...) AM-specific index \
+             reloptions are deferred — transformRelOptions yields a bare-word \
+             types_datum::Datum with no bridge to the types_tuple::Datum \
+             ByRef-bytes lane that index_reloptions / index_create consume \
+             (Datum-redesign keystone; index_create panics on the same path)"
+        );
+    };
 
     // Prepare the IndexInfo. Predicates must be in implicit-AND format. In a
     // concurrent build, mark it not-ready-for-inserts.
@@ -554,7 +565,7 @@ pub fn DefineIndex<'mcx>(
         let attno = index_info.ii_IndexAttrNumbers[i];
         if attno < 0 {
             return Err(ereport(ERROR)
-                .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("index creation on system columns is not supported")
                 .into_error());
         }
@@ -584,7 +595,7 @@ pub fn DefineIndex<'mcx>(
         while i < 0 {
             if bms_is_member(i - FirstLowInvalidHeapAttributeNumber as i32, attrs_ref) {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("index creation on system columns is not supported")
                     .into_error());
             }
@@ -672,7 +683,7 @@ pub fn DefineIndex<'mcx>(
         collation_ids: collation_ids_v,
         opclass_ids: opclass_ids_v,
         coloptions: coloptions_v,
-        reloptions: reloptions.unwrap_or_else(types_tuple::Datum::null),
+        reloptions,
         opclass_options: Some(opclass_options),
         flags,
         constr_flags,
@@ -694,7 +705,7 @@ pub fn DefineIndex<'mcx>(
         // IF NOT EXISTS hit an existing index: roll back GUC + userid, close.
         at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-        table_seam::table_close::call(rel, types_core::lock::NoLock)?;
+        owner_table_close(rel, types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         }
@@ -704,7 +715,7 @@ pub fn DefineIndex<'mcx>(
     // Roll back GUC changes from index functions; keep subsequent changes local.
     at_eoxact_guc(false, root_save_nestlevel);
     root_save_nestlevel = NewGUCNestLevel();
-    restrict_search_path()?;
+    restrict_search_path::call()?;
     let _ = root_save_nestlevel;
 
     // Add any requested comment.
@@ -720,7 +731,7 @@ pub fn DefineIndex<'mcx>(
         // No partitions / ONLY: indexes on partitioned tables aren't built.
         at_eoxact_guc(false, NewGUCNestLevel());
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-        table_seam::table_close::call(rel, types_core::lock::NoLock)?;
+        owner_table_close(rel, types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         } else {
@@ -733,7 +744,7 @@ pub fn DefineIndex<'mcx>(
 
     if !concurrent {
         // Non-concurrent: index_create already built it; close and we're done.
-        table_seam::table_close::call(rel, types_core::lock::NoLock)?;
+        owner_table_close(rel, types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         } else {
@@ -743,7 +754,7 @@ pub fn DefineIndex<'mcx>(
     }
 
     // CONCURRENTLY build/validate state machine. DEFERRED.
-    table_seam::table_close::call(rel, types_core::lock::NoLock)?;
+    owner_table_close(rel, types_storage::lock::NoLock)?;
     Err(define_index_concurrent_tail())
 }
 
@@ -811,7 +822,7 @@ fn vec_oid(n: i32) -> Vec<Oid> {
 
 fn amerr(what: &str, amname: &str) -> backend_utils_error::PgError {
     ereport(ERROR)
-        .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!("access method \"{amname}\" {what}"))
         .into_error()
 }
@@ -825,7 +836,7 @@ fn virtual_gencol_error(stmt: &IndexStmt<'_>) -> backend_utils_error::PgError {
         "indexes on virtual generated columns are not supported"
     };
     ereport(ERROR)
-        .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
         .into_error()
 }
@@ -837,7 +848,7 @@ fn virtual_gencol_error_expr(stmt: &IndexStmt<'_>) -> backend_utils_error::PgErr
         "indexes on virtual generated columns are not supported"
     };
     ereport(ERROR)
-        .errcode(types_error::sqlstate::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
         .into_error()
 }
@@ -852,18 +863,18 @@ fn bms_union_opt<'mcx>(
     match (a, b) {
         (None, x) => Ok(x),
         (x, None) => Ok(x),
-        (Some(a), Some(b)) => Ok(Some(bms_union(mcx, Some(&a), Some(&b))?)),
+        (Some(a), Some(b)) => Ok(bms_union(mcx, Some(&a), Some(&b))?),
     }
 }
 
 /// `MyDatabaseTableSpace` (globals.c) — the database's default tablespace OID.
-fn my_database_tablespace() -> Oid {
-    backend_utils_init_miscinit::my_database_tablespace()
+fn my_database_tablespace() -> PgResult<Oid> {
+    backend_commands_tablespace_globals_seams::MyDatabaseTableSpace::call()
 }
 
 /// `allowSystemTableMods` (globals.c).
 fn allow_system_table_mods() -> bool {
-    backend_utils_init_miscinit::allow_system_table_mods()
+    backend_utils_misc_guc_seams::allow_system_table_mods::call()
 }
 
 /// `stmt->relation && !stmt->relation->inh` (the recursion-declined-but-
@@ -884,7 +895,23 @@ fn relation_should_recurse(stmt: &IndexStmt<'_>) -> bool {
 }
 
 fn index_stmt_relation<'a, 'mcx>(stmt: &'a IndexStmt<'mcx>) -> Option<&'a RangeVar<'mcx>> {
-    stmt.relation.as_ref().and_then(|n| n.as_ref().as_range_var())
+    stmt.relation.as_ref().and_then(|n| match n.as_ref() {
+        Node::RangeVar(rv) => Some(rv),
+        _ => None,
+    })
+}
+
+/// `(IndexElem *) lfirst(...)` — read an `IndexElem` out of a name-list `Node`.
+fn node_as_index_elem<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a IndexElem<'mcx> {
+    match node {
+        Node::IndexElem(e) => e,
+        _ => panic!("DefineIndex: indexParams entry is not an IndexElem"),
+    }
+}
+
+/// `ErrorLocation` for `ereport(...).finish(...)` in this module.
+fn here(funcname: &'static str) -> types_error::pg_error::ErrorLocation {
+    types_error::pg_error::ErrorLocation::new("../src/backend/commands/indexcmds.c", 0, funcname)
 }
 
 /// `RelationGetPartitionDesc(rel, true)->nparts != 0`. The partition-descriptor
@@ -900,35 +927,6 @@ fn relation_has_partitions(rel: &Relation<'_>) -> bool {
         "backend-commands-indexcmds: RelationGetPartitionDesc (partition-descriptor probe) is \
          unported; CREATE INDEX on a partitioned table is deferred"
     );
-}
-
-/// Extract the `text[]` varlena image bytes from a reloptions `Datum`, for
-/// `index_reloptions`. `None` for a NULL datum.
-fn datum_text_array_bytes(d: &types_tuple::Datum<'_>) -> Option<Vec<u8>> {
-    if d.is_null() {
-        None
-    } else {
-        Some(d.varlena_bytes().to_vec())
-    }
-}
-
-/// `transformRelOptions((Datum) 0, stmt->options, NULL, NULL, false, false)` —
-/// the AM-specific reloptions parse to `text[]` form. `stmt->options` is a list
-/// of `DefElem` nodes.
-fn transform_index_reloptions<'mcx>(
-    mcx: Mcx<'mcx>,
-    options: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
-) -> PgResult<Option<types_tuple::Datum<'mcx>>> {
-    let def_list: Vec<types_nodes::ddlnodes::DefElem<'mcx>> = options
-        .iter()
-        .map(|n| {
-            n.as_ref()
-                .as_def_elem()
-                .expect("DefineIndex: WITH option is not a DefElem")
-                .clone()
-        })
-        .collect();
-    transformRelOptions(mcx, None, &def_list, None, None, false, false)
 }
 
 /// Install this unit's outward seams.

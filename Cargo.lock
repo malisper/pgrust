@@ -6506,6 +6506,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-indexcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-index-amapi",
+ "backend-access-table-table",
+ "backend-access-table-table-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-index",
+ "backend-catalog-index-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-constraint",
+ "backend-commands-comment",
+ "backend-commands-indexcmds-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-tablespace",
+ "backend-commands-tablespace-globals-seams",
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-var-seams",
+ "backend-parser-coerce",
+ "backend-parser-parse-oper",
+ "backend-utils-activity-small",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-amapi",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-pgstat",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-indexcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -20362,6 +20414,7 @@ dependencies = [
  "backend-commands-extension",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
+ "backend-commands-indexcmds",
  "backend-commands-lockcmds",
  "backend-commands-matview",
  "backend-commands-opclasscmds",

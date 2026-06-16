@@ -131,6 +131,7 @@ pub fn init_all() {
     backend_commands_vacuumparallel::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
+    backend_commands_indexcmds::init_seams();
     backend_commands_proclang::init_seams();
     backend_commands_dbcommands::init_seams();
     backend_commands_conversioncmds::init_seams();

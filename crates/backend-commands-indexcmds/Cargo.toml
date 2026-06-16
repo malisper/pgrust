@@ -21,6 +21,11 @@ types-amapi = { path = "../types-amapi" }
 types-tuple = { path = "../types-tuple" }
 types-tableam = { path = "../types-tableam" }
 types-catalog = { path = "../types-catalog" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+types-acl = { path = "../types-acl" }
+types-pgstat = { path = "../types-pgstat" }
+types-guc = { path = "../types-guc" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 
@@ -29,6 +34,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-index = { path = "../backend-catalog-index" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
@@ -36,8 +42,10 @@ backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 
 # Seams owned by this unit (installed from init_seams).
@@ -55,4 +63,5 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
