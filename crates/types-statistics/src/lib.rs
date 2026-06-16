@@ -15,9 +15,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::{AttrNumber, Oid};
-use types_datum::Datum;
 use types_tuple::pg_type::FormData_pg_type;
-use types_tuple::{HeapTuple, TupleDesc};
+// The canonical `'mcx` byte-lane value type (`ByVal(usize)` / `ByRef(PgVec<u8>)`).
+// Statistic values that may be pass-by-reference (text/numeric/varchar/…) must
+// live in this safe byte lane, NOT a bare `usize` word (which cannot carry the
+// referenced bytes and would dangle when copied into a temporary context).
+use types_tuple::{Datum, HeapTuple, TupleDesc};
 
 /// `STATISTIC_NUM_SLOTS` (`catalog/pg_statistic.h:127`): the number of
 /// statistic-kind slots in a `pg_statistic` row (and thus in [`VacAttrStats`]).
@@ -86,15 +89,15 @@ pub const STATS_MCVLIST_MAX_ITEMS: i32 = MAX_STATISTICS_TARGET;
 /// the invariant `values.len() == isnull.len() == ndimensions` is upheld by the
 /// (de)serializers and the build loop.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct MCVItem {
+pub struct MCVItem<'mcx> {
     /// frequency of this combination
     pub frequency: f64,
     /// frequency if independent
     pub base_frequency: f64,
     /// NULL flags
     pub isnull: Vec<bool>,
-    /// item values
-    pub values: Vec<Datum>,
+    /// item values (the safe `'mcx` byte lane)
+    pub values: Vec<Datum<'mcx>>,
 }
 
 /// `MCVList` (`statistics/statistics.h`).
@@ -113,7 +116,7 @@ pub struct MCVItem {
 /// The owned mirror replaces the FAM with an owned `Vec<MCVItem>`; the invariant
 /// `items.len() == nitems` is upheld by the (de)serializers and the build loop.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct MCVList {
+pub struct MCVList<'mcx> {
     /// magic constant marker
     pub magic: u32,
     /// type of MCV list (BASIC)
@@ -125,7 +128,7 @@ pub struct MCVList {
     /// OIDs of data types
     pub types: [Oid; STATS_MAX_DIMENSIONS],
     /// array of MCV items
-    pub items: Vec<MCVItem>,
+    pub items: Vec<MCVItem<'mcx>>,
 }
 
 /// `DimensionInfo` (`statistics/extended_stats_internal.h`): (de)serialization
@@ -168,8 +171,8 @@ pub struct DimensionInfo {
 /// } SortItem;
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SortItem {
-    pub values: Vec<Datum>,
+pub struct SortItem<'mcx> {
+    pub values: Vec<Datum<'mcx>>,
     pub isnull: Vec<bool>,
     pub count: i32,
 }
@@ -188,7 +191,7 @@ pub struct SortItem {
 /// (`backend-commands-analyze`); this carrier models the field faithfully as the
 /// safe function-pointer alias over the owned [`VacAttrStats`].
 pub type AnalyzeAttrFetchFunc =
-    for<'mcx> fn(stats: &VacAttrStats<'mcx>, rownum: i32, is_null: &mut bool) -> Datum;
+    for<'mcx> fn(stats: &VacAttrStats<'mcx>, rownum: i32, is_null: &mut bool) -> Datum<'mcx>;
 
 /// `AnalyzeAttrComputeStatsFunc` (`commands/vacuum.h:111`):
 /// `void (*)(VacAttrStatsP, AnalyzeAttrFetchFunc, int samplerows, double totalrows)`.
@@ -272,8 +275,8 @@ pub struct VacAttrStats<'mcx> {
     /// `numvalues[STATISTIC_NUM_SLOTS]` — length of each `stavalues[n]`.
     pub numvalues: [i32; STATISTIC_NUM_SLOTS],
     /// `stavalues[STATISTIC_NUM_SLOTS]` — owned mirror of `Datum *stavalues[]`
-    /// (the safe value lane).
-    pub stavalues: [Vec<Datum>; STATISTIC_NUM_SLOTS],
+    /// (the safe `'mcx` byte value lane).
+    pub stavalues: [Vec<Datum<'mcx>>; STATISTIC_NUM_SLOTS],
 
     /* ----- describe the stavalues[n] element types ----- */
     /// `statypid[STATISTIC_NUM_SLOTS]`.
@@ -293,7 +296,7 @@ pub struct VacAttrStats<'mcx> {
     /// `tupDesc` — tuple descriptor for `rows`.
     pub tup_desc: TupleDesc<'mcx>,
     /// `exprvals` — access info for the index fetch function (C `Datum *exprvals`).
-    pub exprvals: Vec<Datum>,
+    pub exprvals: Vec<Datum<'mcx>>,
     /// `exprnulls` — companion nulls for `exprvals` (C `bool *exprnulls`).
     pub exprnulls: Vec<bool>,
     /// `rowstride` — stride between rows in `exprvals`/`exprnulls`.
@@ -337,7 +340,7 @@ pub struct StatsBuildData<'mcx> {
     /// `stats` — per-column `VacAttrStats` (length `nattnums`).
     pub stats: Vec<VacAttrStats<'mcx>>,
     /// `values` — per-column sampled value arrays (outer `nattnums`, inner `numrows`).
-    pub values: Vec<Vec<Datum>>,
+    pub values: Vec<Vec<Datum<'mcx>>>,
     /// `nulls` — per-column sampled null flags (outer `nattnums`, inner `numrows`).
     pub nulls: Vec<Vec<bool>>,
 }

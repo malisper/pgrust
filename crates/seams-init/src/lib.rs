@@ -106,6 +106,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_vacuum::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_proclang::init_seams();
@@ -189,6 +190,7 @@ pub fn init_all() {
     backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
     backend_main_main::init_seams();
+    backend_libpq_auth::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
@@ -244,6 +246,7 @@ pub fn init_all() {
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
+    backend_postmaster_bgwriter::init_seams();
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_pgarch::init_seams();
@@ -251,6 +254,7 @@ pub fn init_all() {
     backend_postmaster_startup::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_postmaster_walsummarizer::init_seams();
+    backend_postmaster_walwriter::init_seams();
     backend_regex_core::init_seams();
     backend_replication_logical_applyparallelworker::init_seams();
     backend_replication_logical_conflict::init_seams();
@@ -303,6 +307,7 @@ pub fn init_all() {
     backend_tcop_dest::init_seams();
     backend_tcop_fastpath::init_seams();
     backend_tcop_pquery::init_seams();
+    backend_tcop_utility::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
     backend_timezone_strftime::init_seams();
@@ -1164,11 +1169,22 @@ mod recurrence_guard {
         //     value; no backing GUC variable exists in the owner (only a doc note).
         //   * io_method_sync — the `io_method == IOMETHOD_SYNC` test; the `io_method`
         //     GUC/enum lives in the unported aio.c, not this owner.
+        //   * bgwriter_flush_after — the `bgwriter_flush_after` GUC value (a
+        //     bufmgr.c `int` global). The bgwriter loop reads it via
+        //     WritebackContextInit; like checkpoint_flush_after it has no backing
+        //     GUC variable installed in this owner (the guc-tables boot value is
+        //     seeded in the GUC store but the seam is not `::set` by the owner —
+        //     the GUC machinery installs it when it fully ports). Same class as
+        //     maintenance_io_concurrency / io_method_sync. (checkpoint_flush_after
+        //     escapes the guard only because it is `::call`ed inside this owner
+        //     crate — the OUTWARD-seam exclusion — whereas bgwriter_flush_after is
+        //     called from the bgwriter consumer.)
         // DELETE each entry as the shmem allocator + aio GUC source land.
         ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_init"),
         ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
         ("backend_storage_buffer_bufmgr", "io_method_sync"),
         ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
+        ("backend_storage_buffer_bufmgr", "bgwriter_flush_after"),
         // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
         // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
         // The latch<->proc handle spaces were unified: a `LatchHandle` is a
