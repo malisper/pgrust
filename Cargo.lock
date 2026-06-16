@@ -10779,13 +10779,18 @@ dependencies = [
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-small-seams",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache-seams",
  "mcx",
@@ -10794,6 +10799,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-tuple",
 ]
 
 [[package]]
