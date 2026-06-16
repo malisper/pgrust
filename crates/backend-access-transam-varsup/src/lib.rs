@@ -807,6 +807,20 @@ pub fn init_seams() {
     // `clog_redo` caller) carries the shared-state-mutation channel on `Err`.
     seams::advance_oldest_clog_xid::set(AdvanceOldestClogXid);
 
+    // `SetTransactionIdLimit(oldest, oldest_db)` — the WAL-startup (xlog.c:5639)
+    // and vacuum wraparound-limit setter. `varsup.c` OWNS the body but the seam
+    // contract was scaffolded in the consumer crate
+    // (`backend-commands-vacuum-seams`, `::call`ed by vacuum and the future
+    // StartupXLOG driver); install it here so the single declared seam resolves.
+    // The seam is `Mcx`-free; the body only consults its `mcx` to format a
+    // database-name warning while inside a live transaction (never during
+    // `StartupXLOG`), so a throwaway context suffices, mirroring the
+    // `get_new_transaction_id` install above.
+    backend_commands_vacuum_seams::set_transaction_id_limit::set(|oldest, oldest_db| {
+        let cx = MemoryContext::new("SetTransactionIdLimit seam");
+        SetTransactionIdLimit(cx.mcx(), oldest, oldest_db)
+    });
+
     // `GetNewObjectId()` and `StopGeneratingPinnedObjectIds()` (catalog.c
     // callers) carry their `ereport(ERROR)` paths on `Err`.
     seams::get_new_object_id::set(GetNewObjectId);
@@ -826,6 +840,17 @@ pub fn init_seams() {
     // `ProcArrayLock`. The fields live in the `TransamVariables` singleton owned
     // here; procarray reaches them through these owner seams (the backing
     // `Mutex` provides the mutual exclusion the LWLock gives in C).
+    // `TransamVariables->nextXid = checkPoint.nextXid; nextOid = checkPoint.nextOid;
+    // oidCount = 0;` — the WAL-startup (xlog.c:5631-5634) seed of the XID/OID
+    // counters from the starting checkpoint. No other process is up yet in C, so
+    // there is no lock; the backing `Mutex` is incidental.
+    seams::set_transam_variables_at_startup::set(|next_xid, next_oid| {
+        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        tv.nextXid = next_xid;
+        tv.nextOid = next_oid;
+        tv.oidCount = 0;
+    });
+
     seams::get_latest_completed_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid);
     seams::set_latest_completed_xid::set(|fxid| {
         TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid = fxid;

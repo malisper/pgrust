@@ -372,6 +372,13 @@ fn standard_planner<'mcx>(
         rtable: if rtable.is_empty() { None } else { Some(rtable) },
         unprunableRelids: unprunable_relids,
         subplans: if subplans.is_empty() { None } else { Some(subplans) },
+        // C: `result->stmt_location = parse->stmt_location; result->stmt_len =
+        // parse->stmt_len`. The owned `Query` does not yet carry the source-text
+        // span (an inherited trim, set by the rewriter from the raw parse tree),
+        // so these take the C "unknown" defaults (-1 / 0) until the Query
+        // carrier is widened. ProcessUtility threads them to DoCopy/PrepareQuery.
+        stmt_location: -1,
+        stmt_len: 0,
     };
 
     Ok(result)

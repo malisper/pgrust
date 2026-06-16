@@ -52,6 +52,18 @@ pub struct Bitmapset<'mcx> {
     pub words: PgVec<'mcx, bitmapword>,
 }
 
+impl<'mcx> Bitmapset<'mcx> {
+    /// An empty set (no words) allocated in `mcx` — the owned stand-in for the
+    /// C `NULL` `Bitmapset *` where a slot must hold a value (e.g. a
+    /// grouped_cols entry for an empty grouping set). `bms_is_empty` of this is
+    /// true.
+    pub fn empty(mcx: mcx::Mcx<'mcx>) -> types_error::PgResult<Bitmapset<'mcx>> {
+        Ok(Bitmapset {
+            words: mcx::vec_with_capacity_in(mcx, 0)?,
+        })
+    }
+}
+
 impl Bitmapset<'_> {
     /// `int nwords` — number of words in array.
     pub fn nwords(&self) -> i32 {

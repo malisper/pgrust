@@ -281,29 +281,32 @@ pub fn advance_transition_function<'mcx>(
     //   aggstate->curpertrans = NULL;
     //
     // FunctionCallInvoke + InitFunctionCallInfoData ARE ported (fmgr-core, #52)
-    // and the shared FunctionCallInfoBaseData now carries args[]/isnull/fncollation
-    // (#296). The genuine blocker is NOT the shared call frame but the nodeAgg-owned
-    // per-trans fcinfo *carrier* `AggStatePerTransData.transfn_fcinfo` (the
-    // long-lived per-trans args[]/isnull payload + the fcinfo->context back-reference
-    // to the AggState) which this crate does not yet model, plus
-    // `ExecAggCopyTransValue` (the by-ref transValue reparent/copy) owned by the
-    // not-yet-ported execExpr by-ref path. Until that per-trans fcinfo carrier +
-    // ExecAggCopyTransValue land, this path panics loudly (mirror-PG-and-panic).
+    // and `transfn_fcinfo` is now BUILT by build_pertrans_for_aggref (#324/#165
+    // construction landed). The remaining F4 RESIDUAL is the live-AggState
+    // back-reference through `fcinfo.context`: a transfn that calls
+    // AggCheckCallContext / AggGetAggref / AggStateIsShared reaches back into the
+    // AggState through `(Node *) aggstate`, but `FunctionCallInfoBaseData.context`
+    // is `Option<&Node>` and the `Node` enum carries no AggState variant. Adding
+    // one is the same erased-carrier + self-reference keystone as
+    // PlanStateNode::Agg (#324 P0/#335), not yet built — so the transfn frame is
+    // built with `context: None` and this invocation path stays seam-panicked.
+    // `ExecAggCopyTransValue` (the by-ref transValue reparent) is the secondary
+    // residual. ExecInitAgg construction itself is complete and returns a real
+    // AggStateData.
     //
     //   if (!pertrans->transtypeByVal &&
     //       DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
-    //       newVal = ExecAggCopyTransValue(aggstate, pertrans, newVal,
-    //                                      fcinfo->isnull,
-    //                                      pergroupstate->transValue,
-    //                                      pergroupstate->transValueIsNull);
+    //       newVal = ExecAggCopyTransValue(...);
     //   pergroupstate->transValue = newVal;
     //   pergroupstate->transValueIsNull = fcinfo->isnull;
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: blocked on the \
-         per-trans fcinfo carrier (AggStatePerTransData.transfn_fcinfo args/isnull \
-         payload + fcinfo->context back-reference) and ExecAggCopyTransValue \
-         (execExpr by-ref reparent); FunctionCallInvoke itself is ported (fmgr-core \
-         #52) (transtypeByVal={})",
+        "backend-executor-nodeAgg::advance_transition_function: F4 runtime residual \
+         — the transfn call-frame `fcinfo.context` cannot carry `(Node *) aggstate` \
+         (the `Node` enum has no AggState variant; same erased-carrier + \
+         self-reference keystone as PlanStateNode::Agg, #324 P0/#335), and \
+         ExecAggCopyTransValue (by-ref transValue reparent) is unported. \
+         ExecInitAgg construction is complete; the transition runtime is gated on \
+         the agg call-frame context channel keystone (transtypeByVal={})",
         pertrans.transtype_by_val
     );
 }

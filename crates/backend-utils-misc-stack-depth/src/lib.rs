@@ -258,6 +258,14 @@ pub fn get_stack_depth_rlimit() -> isize {
 pub fn init_seams() {
     backend_utils_misc_stack_depth_seams::check_stack_depth::set(check_stack_depth);
 
+    // `set_stack_base()` is declared on the tcop/postgres.c seam crate (PG18
+    // split stack_depth.c out of postgres.c, but the boot path still reaches it
+    // through the tcop seam). Its body lives here. The seam returns `()` and the
+    // C `main()` ignores the previous-base value, so discard it.
+    backend_tcop_postgres_seams::set_stack_base::set(|| {
+        let _previous_base = set_stack_base();
+    });
+
     backend_utils_misc_guc_tables::hooks::check_max_stack_depth
         .install(|newval, _extra, source| Ok(check_max_stack_depth(*newval, source)));
     backend_utils_misc_guc_tables::hooks::assign_max_stack_depth

@@ -17,6 +17,9 @@ use types_pgstat::activity_pgstat::{
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
+use types_pgstat::activity_pgstat::PgStat_Backend;
+use types_core::init::BackendType;
+use types_core::ProcNumber;
 
 seam_core::seam!(
     /// `pgstat_prepare_report_checksum_failure(dboid)` (pgstat_database.c):
@@ -248,6 +251,39 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_reset_entry(kind, dboid, objid, ts)` (`pgstat_shmem.c`) — reset
+    /// one variable-numbered stats entry to zero with an explicit reset
+    /// timestamp (the database-timestamp-free reset that
+    /// `pgstat_create_subscription` uses with `ts == 0`). `Err` carries the
+    /// `ereport(ERROR)`s reachable through `pgstat_get_entry_ref_locked`
+    /// (palloc/dsa out-of-memory, `LWLockAcquire`'s `too many LWLocks taken`).
+    pub fn pgstat_reset_entry(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        dboid: types_core::Oid,
+        objid: u64,
+        ts: types_core::TimestampTz,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_fetch_entry(kind, dboid, objid)` (`pgstat.c`) — fetch a copy of a
+    /// variable-numbered entry's `shared_data_len` stats bytes (the
+    /// fetch-consistency snapshot/cache machinery), or `None` if the entry does
+    /// not exist or is dropped. The per-kind owner decodes the bytes into its
+    /// typed stats struct, mirroring C's `(PgStat_Stat*Entry *) pgstat_fetch_entry(...)`.
+    ///
+    /// **Unported:** the variable-numbered snapshot/cache subsystem
+    /// (`pgstat_build_snapshot` / `pgStatLocal.snapshot.stats`) is not yet
+    /// ported, so this seam panics until `pgstat.c`'s variable-snapshot path
+    /// lands. `Err` carries the `palloc` / `dsa` / `LWLockAcquire` surface.
+    pub fn pgstat_fetch_entry(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        dboid: types_core::Oid,
+        objid: u64,
+    ) -> types_error::PgResult<Option<Box<[u8]>>>
+);
+
+seam_core::seam!(
     /// `(pgstat_get_kind_info(kind))->name` (`pgstat.c`) — the human-readable
     /// name of a stats kind (builtin table `pgstat_kind_builtin_infos[]` or
     /// the custom-kind registry; both hold `'static`-equivalent struct
@@ -311,4 +347,46 @@ seam_core::seam!(
     /// `pgstat_reset_wait_event_storage()` (wait_event.c): reset wait-event
     /// reporting back to the process-local word during proc teardown.
     pub fn pgstat_reset_wait_event_storage()
+);
+
+seam_core::seam!(
+    /// `pgstat_fetch_entry(PGSTAT_KIND_BACKEND, InvalidOid, procNumber)`
+    /// (`pgstat.c`), specialized to `PGSTAT_KIND_BACKEND` — fetch a copy of one
+    /// backend's variable-numbered stats body by proc number, or `None` when no
+    /// (live) entry exists. `pgstat_fetch_entry` is the variable-kind snapshot
+    /// fetch in the (not-yet-ported) `pgstat.c` core (it drives
+    /// `pgstat_build_snapshot` / the snapshot simplehash); until that lands this
+    /// is seam-and-panic. `Err` carries its `palloc` / `MemoryContextAlloc`
+    /// out-of-memory `ereport` surface.
+    pub fn pgstat_fetch_entry_backend(
+        proc_number: ProcNumber,
+    ) -> types_error::PgResult<Option<PgStat_Backend>>
+);
+
+seam_core::seam!(
+    /// The PID-resolution prefix of `pgstat_fetch_stat_backend_by_pid`:
+    /// `BackendPidGetProc(pid)` else `AuxiliaryPidGetProc(pid)` (procarray.c),
+    /// `GetNumberFromPGProc(proc)` (proc.h), then
+    /// `pgstat_get_beentry_by_proc_number(procNumber)` (backend_status.c) to read
+    /// the backend's advertised `st_backendType` / `st_procpid`. Returns
+    /// `(proc_number, st_backend_type, st_procpid)`, or `None` when the pid is
+    /// not a live (auxiliary or regular) backend with a beentry. The beentry
+    /// accessor (`pgstat_get_beentry_by_proc_number`) is unported, so this is
+    /// seam-and-panic. Shared-memory scan; cannot `ereport`.
+    pub fn pgstat_backend_pid_lookup(pid: i32) -> Option<(ProcNumber, BackendType, i32)>
+);
+
+seam_core::seam!(
+    /// `pgstat_restore_stats()` (pgstat.c:506) — at WAL startup on a clean
+    /// (non-crash) boot, read the on-disk `pg_stat/` statistics file and load it
+    /// into shared memory. Called from `StartupXLOG` (xlog.c). Fallible: the file
+    /// read / shmem-load path `ereport(ERROR)`s on corruption.
+    pub fn pgstat_restore_stats() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_discard_stats()` (pgstat.c:518) — at WAL startup on a crash boot,
+    /// throw away any stale on-disk statistics. Called from `StartupXLOG`
+    /// (xlog.c). Fallible: the unlink path `ereport(ERROR)`s.
+    pub fn pgstat_discard_stats() -> types_error::PgResult<()>
 );

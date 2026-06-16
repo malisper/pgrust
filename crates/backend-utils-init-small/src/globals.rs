@@ -164,6 +164,14 @@ scalar_global!(
     MY_START_TIMESTAMP, MyStartTimestamp, SetMyStartTimestamp, TimestampTz, 0
 );
 scalar_global!(
+    /// `TimestampTz PgStartTime;` (globals.c) — the timestamp of the
+    /// postmaster's (or, in single-user mode, the standalone backend's) start,
+    /// reported by `pg_postmaster_start_time()`. The postmaster assigns it with
+    /// `PgStartTime = GetCurrentTimestamp();` near startup; `SetPgStartTime` is
+    /// the setter the boot path uses.
+    PG_START_TIME, PgStartTime, SetPgStartTime, TimestampTz, 0
+);
+scalar_global!(
     /// `uint8 MyCancelKey[MAX_CANCEL_KEY_LENGTH];`
     MY_CANCEL_KEY, MyCancelKey, SetMyCancelKey, [uint8; MAX_CANCEL_KEY_LENGTH],
     [0; MAX_CANCEL_KEY_LENGTH]

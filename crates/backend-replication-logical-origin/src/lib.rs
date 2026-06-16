@@ -1340,6 +1340,9 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     s::replication_origin_shmem_size::set(ReplicationOriginShmemSize);
+
+    // WAL-startup entry point called once by `StartupXLOG` (xlog.c:5695).
+    s::startup_replication_origin::set(StartupReplicationOrigin);
 }
 
 #[cfg(test)]

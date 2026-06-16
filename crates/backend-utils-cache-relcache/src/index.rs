@@ -186,7 +186,7 @@ pub fn RelationInitPhysicalAddr(rd: &mut RelationData) -> PgResult<()> {
             let indexok = rd.rd_id != CLASS_OID_INDEX_ID;
             let phys = crate::build::ScanPgRelation(rd.rd_id, indexok, true)?;
             match phys {
-                Some(physrel) => {
+                Some((physrel, _reloptions)) => {
                     rd.rd_rel.reltablespace = physrel.reltablespace;
                     rd.rd_rel.relfilenode = physrel.relfilenode;
                 }
@@ -575,8 +575,8 @@ pub fn RelationReloadIndexInfo(rd: &mut RelationData) -> PgResult<()> {
     // Read the pg_class row. Don't try to use an indexscan of
     // pg_class_oid_index to reload the info for pg_class_oid_index.
     let index_ok = rd.rd_id != CLASS_OID_INDEX_ID;
-    let pg_class = match crate::build::ScanPgRelation(rd.rd_id, index_ok, false)? {
-        Some(relp) => relp,
+    let (pg_class, reloptions) = match crate::build::ScanPgRelation(rd.rd_id, index_ok, false)? {
+        Some(pair) => pair,
         None => {
             return Err(ereport(ERROR)
                 .errmsg_internal(format!("could not find pg_class tuple for index {}", rd.rd_id))
@@ -587,7 +587,7 @@ pub fn RelationReloadIndexInfo(rd: &mut RelationData) -> PgResult<()> {
     rd.rd_rel = pg_class;
     // Reload reloptions in case they changed (RelationParseRelOptions is build
     // family own logic).
-    crate::build::RelationParseRelOptions(rd)?;
+    crate::build::RelationParseRelOptions(rd, reloptions.as_deref())?;
     // We must recalculate physical address in case it changed.
     RelationInitPhysicalAddr(rd)?;
 
@@ -647,8 +647,8 @@ pub fn RelationReloadNailed(rd: &mut RelationData) -> PgResult<()> {
         // pg_class.
         rd.rd_isvalid = true;
 
-        let pg_class = match crate::build::ScanPgRelation(rd.rd_id, true, false)? {
-            Some(relp) => relp,
+        let (pg_class, _reloptions) = match crate::build::ScanPgRelation(rd.rd_id, true, false)? {
+            Some(pair) => pair,
             None => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(format!("could not find pg_class tuple for {}", rd.rd_id))

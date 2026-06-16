@@ -926,3 +926,33 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn relation_init_index_access_info(index_id: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `formrdesc`'s hardcoded `Schema_pg_*[]` `FormData_pg_attribute` rows for a
+    /// nailed bootstrap catalog, keyed by the catalog's row-type OID
+    /// (`*Relation_Rowtype_Id`, the value relcache's Phase2/3 passes).
+    ///
+    /// This is genbki-generated catalog-header bootstrap data
+    /// (`catalog/schemapg.h`), owned by the `backend-bootstrap-catalog-data`
+    /// crate; it crosses into relcache as a pure value carrier
+    /// ([`BootstrapCatalogSchema`] = the row vector plus the catalog relation OID
+    /// `formrdesc` reads for `rd_id`, which the `OwnedAttr` rows cannot carry).
+    ///
+    /// OUTWARD seam from relcache's perspective: relcache CALLS it (from
+    /// `formrdesc`'s Phase2/3 callers), the bootstrap-catalog-data owner INSTALLS
+    /// it from its `init_seams()`. Declared here (not in a separate seams crate)
+    /// to avoid a relcache→catalog-data dependency cycle. Infallible in C (a pure
+    /// static-data lookup); panics on an unknown `reltype` (a bootstrap bug).
+    pub fn catalog_schema_attrs(
+        reltype: types_core::primitive::Oid,
+    ) -> types_relcache_entry::BootstrapCatalogSchema
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitFileRemove()` (relcache.c) — unlink the relcache init
+    /// files (`global/` and each tablespace's `pg_internal.init`) at startup so
+    /// a stale cache from a previous lifecycle is not reused. Called once from
+    /// `StartupXLOG` (xlog.c:5657). The unlink path can `ereport`, carried on
+    /// `Err`.
+    pub fn relation_cache_init_file_remove() -> types_error::PgResult<()>
+);

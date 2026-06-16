@@ -2008,4 +2008,20 @@ pub fn init_seams() {
     backend_commands_async_seams::async_shmem_size::set(AsyncShmemSize);
     backend_commands_async_seams::async_shmem_init::set(AsyncShmemInit);
     backend_commands_async_seams::async_unlisten_all::set(Async_UnlistenAll);
+
+    // --- ProcessUtility dispatch arms (utility.c NOTIFY/LISTEN/UNLISTEN) -----
+    // The dispatch has already extracted the channel/payload strings from the
+    // parse tree, so these arms forward directly to async.c.
+    backend_tcop_utility_out_seams::async_notify::set(async_notify_arm);
+    backend_tcop_utility_out_seams::async_listen::set(Async_Listen);
+    backend_tcop_utility_out_seams::async_unlisten::set(Async_Unlisten);
+    backend_tcop_utility_out_seams::async_unlisten_all::set(Async_UnlistenAll);
+}
+
+/// `case T_NotifyStmt: Async_Notify(stmt->conditionname, stmt->payload)`
+/// (utility.c). The NOTIFY grammar always supplies a channel name, so the
+/// nullable seam argument is unwrapped (mirroring the never-NULL C field).
+fn async_notify_arm(conditionname: Option<&str>, payload: Option<&str>) -> PgResult<()> {
+    let channel = conditionname.expect("NOTIFY: conditionname is NULL");
+    Async_Notify(channel, payload)
 }

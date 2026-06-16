@@ -23,6 +23,7 @@ backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
 
 # outward seams to not-yet-ported (or cyclic) owners
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }

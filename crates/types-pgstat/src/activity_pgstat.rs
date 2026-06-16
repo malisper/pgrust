@@ -6,9 +6,12 @@
 //! [`LWLock`] from C's `PgStatShared_Common` header; the ported
 //! `LWLockInitialize`/`LWLockAcquire`/`LWLockRelease` operate on it directly.
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU32;
+
+use crate::pgstat_internal::PgStat_HashKey;
 
 use types_core::init::BACKEND_NUM_TYPES;
 use types_core::instrument::instr_time;
@@ -93,6 +96,7 @@ pub const fn pgstat_is_ioop_tracked_in_bytes(io_op: IOOp) -> bool {
 /// than a bare `u32` so kind ids cannot be confused with other counters; the
 /// full builtin id table lives below, values per `pgstat_kind.h`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(C)]
 pub struct PgStat_Kind(pub u32);
 
 /// `PGSTAT_KIND_MIN` — minimum ID allowed.
@@ -160,14 +164,30 @@ pub struct PgStat_PendingDroppedStatsItem {
 }
 
 /// `PgStat_TableXactStatus` (`pgstat.h`) — per-table transactional status
-/// for one (sub)transaction nesting level, trimmed to its scalar fields.
+/// for one (sub)transaction nesting level.
 ///
-/// The C `upper`/`next` links and the `parent` back-pointer into
-/// `PgStat_TableStatus` are intrusive-list/per-table mechanics owned by
-/// `pgstat_relation.c`; the same-level `next` chain is the containing
-/// [`PgStat_SubXactStatus::first`] vec, and the `upper`/`parent` references
-/// are populated (in the owner's shape) when that unit lands.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The C struct cross-links three ways:
+///
+/// * `struct PgStat_TableXactStatus *upper` — the same table's node at the
+///   next-*outer* nesting level. The per-table chain is rooted at
+///   [`PgStat_TableStatus::trans`] (the innermost level) and walks outward
+///   through `upper`. Each node owns its outer node, so the chain is modeled
+///   as an owned [`Option<Box<PgStat_TableXactStatus>>`](Box); the head box
+///   is owned by the table's pending block, exactly mirroring C's
+///   `add_tabstat_xact_level` / `AtEOSubXact_PgStat_Relations` pointer walks.
+/// * `PgStat_TableStatus *parent` — back-pointer to the owning
+///   `PgStat_TableStatus`. The table-status block is the per-kind `pending`
+///   value living in `pgstat.c`'s owner-private entry-ref hash, so this
+///   back-reference is modeled as the entry's [`PgStat_HashKey`] (the same
+///   key-lookup reconciliation used for every other shared-entry pointer in
+///   this model). The owner reaches the parent's pending block by that key.
+/// * `struct PgStat_TableXactStatus *next` — the same-level link into the
+///   containing [`PgStat_SubXactStatus`]'s table list. That intrusive list is
+///   modeled by [`PgStat_SubXactStatus::first`] carrying the per-level set of
+///   table keys (one node per table per level), so this node does not carry
+///   the `next` pointer itself: the level membership is owned by the level
+///   node, the per-table chain is owned by `trans`/`upper`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_TableXactStatus {
     /// tuples inserted in (sub)xact
     pub tuples_inserted: PgStat_Counter,
@@ -183,6 +203,13 @@ pub struct PgStat_TableXactStatus {
     pub deleted_pre_truncdrop: PgStat_Counter,
     /// subtransaction nest level
     pub nest_level: i32,
+    /// `upper` — the same table's `PgStat_TableXactStatus` at the next-outer
+    /// nesting level (`NULL`/`None` at the outermost). Owned: the per-table
+    /// chain is rooted at [`PgStat_TableStatus::trans`].
+    pub upper: Option<Box<PgStat_TableXactStatus>>,
+    /// `parent` — the owning `PgStat_TableStatus`, identified by its shared
+    /// entry's [`PgStat_HashKey`] (C: `PgStat_TableStatus *parent`).
+    pub parent: PgStat_HashKey,
 }
 
 /// `PgStat_SubXactStatus` (`utils/pgstat_internal.h`) — one node of the
@@ -200,10 +227,20 @@ pub struct PgStat_SubXactStatus {
     /// `pending_drops` dclist: stats objects created/dropped in this
     /// (sub)transaction (owned by `pgstat_xact.c`).
     pub pending_drops: VecDeque<PgStat_PendingDroppedStatsItem>,
-    /// `first`: head of the per-relation `PgStat_TableXactStatus` chain for
-    /// this level — the C same-level `next` links are this vec's order
-    /// (owned by `pgstat_relation.c`).
-    pub first: Vec<PgStat_TableXactStatus>,
+    /// `first`: the per-relation `PgStat_TableXactStatus` chain for this level
+    /// (C: `PgStat_TableXactStatus *first`, an intrusive `next`-linked list).
+    ///
+    /// The nodes themselves are owned by their tables' per-table `trans`/`upper`
+    /// chains (see [`PgStat_TableXactStatus`]); a node lives in both the C
+    /// per-level list and the per-table chain at once via raw pointers, which a
+    /// single Rust owner cannot reproduce. The owning side is the per-table
+    /// chain, so this level list carries only the *identities* of the tables
+    /// with a node at this level — their [`PgStat_HashKey`]s. There is exactly
+    /// one node per table per level, so the key plus this level's
+    /// [`nest_level`](Self::nest_level) uniquely names the node; the owner
+    /// reaches it through the pending-mutation API keyed on the parent table.
+    /// Owned by `pgstat_relation.c`.
+    pub first: Vec<PgStat_HashKey>,
 }
 
 /// `MAX_XFN_CHARS` (`postmaster/pgarch.h`): max length of an XLOG filename.
@@ -390,24 +427,32 @@ impl PgStat_TableCounts {
     }
 }
 
-/// `PgStat_TableStatus` (`pgstat.h`) — per-table status within a backend.
+/// `PgStat_TableStatus` (`pgstat.h`) — per-table status within a backend. This
+/// is the per-kind `pending` value for [`PGSTAT_KIND_RELATION`]: it lives in
+/// the owner-private entry-ref hash of `pgstat.c`, keyed by its
+/// [`PgStat_HashKey`].
 ///
 /// C's `relation` back-pointer (`Relation`) is intentionally DROPPED: the
 /// per-table entry is keyed by `(shared, id)`, and the relcache `pgstat_info`
-/// link is rebuilt from that key when the owner lands. C's `trans`
-/// (`PgStat_TableXactStatus *`, lowest subxact's counts) is the per-table head
-/// of the per-subxact chain; modeled as an index into the owner's xact-stack
-/// `PgStat_SubXactStatus::first` vec (`None` when no open subxact touches this
-/// table), the same key-lookup reconciliation used for the C pointer walks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// link is rebuilt from that key when the owner lands.
+///
+/// C's `trans` (`PgStat_TableXactStatus *`) is the head of this table's
+/// per-(sub)transaction chain — the *innermost* open level's node, walking
+/// outward through each node's [`upper`](PgStat_TableXactStatus::upper). The
+/// chain is owned through `trans`, so this field is the owning head box
+/// ([`Option<Box<PgStat_TableXactStatus>>`](Box)); `None` when no open subxact
+/// touches this table. The box's identity is stable for the node's lifetime,
+/// which is what the per-level [`PgStat_SubXactStatus::first`] key list and the
+/// `parent` back-key resolve against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_TableStatus {
     /// `id` — table's OID
     pub id: types_core::primitive::Oid,
     /// `shared` — is it a shared catalog?
     pub shared: bool,
-    /// `trans` — index of the lowest subxact's `PgStat_TableXactStatus` in the
-    /// owner xact stack (C: `struct PgStat_TableXactStatus *trans`).
-    pub trans: Option<usize>,
+    /// `trans` — owning head of the lowest-open-subxact `PgStat_TableXactStatus`
+    /// chain (C: `struct PgStat_TableXactStatus *trans`).
+    pub trans: Option<Box<PgStat_TableXactStatus>>,
     /// `counts` — event counts to be sent
     pub counts: PgStat_TableCounts,
 }

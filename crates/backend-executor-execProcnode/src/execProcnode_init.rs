@@ -304,23 +304,17 @@ pub fn exec_init_node<'mcx>(
             alloc_in(mcx, PlanStateNode::Group(s))?
         }
 
-        // case T_Agg: ExecInitAgg(...) (nodeAgg.c)
+        // case T_Agg: ExecInitAgg((Agg *) node, estate, eflags) (nodeAgg.c)
         //
-        // The `Agg` Plan variant now exists on the central `Node` enum (#330),
-        // but the matching `PlanStateNode::Agg` variant does NOT: the owner's
-        // `AggStateData` lives in `backend-executor-nodeAgg`, which sits ABOVE
-        // `types-nodes`, so `PlanStateNode` cannot name it by value without a
-        // dependency cycle. Relocating `AggStateData` (the #200/#165 keystone)
-        // is the prerequisite; until then `ExecInitAgg` (which returns an
-        // `AggStateData`) has no `PlanStateNode` arm to land in. The owner
-        // `ExecInitAgg` is ported and ready; a query containing an aggregate
-        // reaches this loud panic (mirror PG and panic).
-        Node::Agg(_) => panic!(
-            "backend-executor-nodeAgg::ExecInitAgg: ExecInitNode T_Agg arm \
-             blocked on the AggStateData-relocation keystone (#200/#165) — \
-             PlanStateNode cannot carry nodeAgg's AggStateData (crate cycle); \
-             not wirable until that keystone lands"
-        ),
+        // `AggStateData` lives in `backend-executor-nodeAgg` (ABOVE `types-nodes`),
+        // so the `PlanStateNode::Agg` variant carries it behind the owned,
+        // tag-checked erased `AggStateLive` carrier (#324/#165 keystone). The
+        // `ExecInitAgg` result is unsized into that trait object here.
+        Node::Agg(agg) => {
+            let s = backend_executor_nodeAgg::ExecInitAgg(agg, estate, eflags, mcx)?;
+            let live = backend_executor_nodeAgg::erase_agg_state(s);
+            alloc_in(mcx, PlanStateNode::Agg(live))?
+        }
 
         // case T_WindowAgg: ExecInitWindowAgg((WindowAgg *) node, estate, eflags)
         Node::WindowAgg(_) => {
@@ -374,6 +368,21 @@ pub fn exec_init_node<'mcx>(
         // node port that adds a variant adds its arm above.
         other => return Err(unrecognized_node_type(other)),
     };
+
+    // Set the `ExprState.parent` back-link on every expression this node owns.
+    //
+    // In C, `ExecInit*` builds its quals/projection with `ExecInitExpr(node,
+    // (PlanState *) state)` — `parent` is the address-stable `makeNode`'d state,
+    // available *during* the node's init. In the owned tree the concrete `*State`
+    // struct and its enclosing `PlanStateNode` enum are two separate allocations:
+    // the per-node `ExecInit*` (and the execExpr `ExecInitQual`/`ExecInitExpr`
+    // seams it drives) only sees the embedded head and leaves `parent` unset; the
+    // enum wrapper — whose address the `EEOP_GROUPING_FUNC` /
+    // `EEOP_MERGE_SUPPORT_FUNC` / SubPlan consumers need (those read
+    // `parent.as_agg_state()` / `as_modify_table_state()`, which are enum methods)
+    // — only becomes address-stable here, once `result` is boxed. So the back-link
+    // is stamped now, mirroring C's `(PlanState *) state` identity.
+    result.stamp_expr_parents();
 
     // ExecSetExecProcNode(result, result->ExecProcNode);
     //

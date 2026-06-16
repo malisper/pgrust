@@ -29,6 +29,7 @@ use types_error::{
 
 mod lockfile;
 mod process;
+mod startup_paths;
 
 pub use lockfile::{
     create_data_dir_lock_file, create_lock_file, create_socket_lock_file,
@@ -966,6 +967,18 @@ pub fn init_seams() {
     // StatementCancelHandler, FloatExceptionHandler, procsignal_sigusr1_handler)
     // live in interrupt.c / postgres.c / procsignal.c, none of which is ported.
     // It is tracked in CONTRACT_RECONCILE_PENDING + DESIGN_DEBT (provider-unported).
+
+    // ---- boot-prelude common/ startup helpers (see startup_paths.rs) ------
+    //
+    // Three tiny `common/`/`port/` functions the boot prelude reaches before
+    // anything else, whose source files have no dedicated owner crate yet.
+    // Bodied in `startup_paths` and homed here (the process-init crate the boot
+    // path already routes through). Faithful non-Windows ports.
+    common_path_seams::get_progname::set(startup_paths::get_progname);
+    backend_common_exec_seams::set_pglocale_pgservice::set(
+        startup_paths::set_pglocale_pgservice,
+    );
+    common_username_seams::get_user_name_or_exit::set(startup_paths::get_user_name_or_exit);
 }
 
 #[cfg(test)]

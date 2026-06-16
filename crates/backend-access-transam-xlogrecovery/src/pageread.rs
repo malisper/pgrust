@@ -468,6 +468,13 @@ fn close_read_file() {
     }
 }
 
+/// `if (readFile >= 0) { close(readFile); readFile = -1; }` — the orchestrators'
+/// (FinishWalRecovery / ShutdownWalRecovery) ending-segment close.
+pub(crate) fn close_read_file_pub() {
+    close_read_file();
+    READ_FILE.with(|c| c.set(-1));
+}
+
 /// Ensure `reader.readBuf` is allocated to at least `XLOG_BLCKSZ` bytes. The
 /// reader pallocs this in C (`XLogReaderAllocate`); here the recovery reader's
 /// arena owns it.

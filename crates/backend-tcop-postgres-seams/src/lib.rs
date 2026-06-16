@@ -323,3 +323,62 @@ seam_core::seam!(
     /// existing accessor; this stands in for the global read.
     pub fn progname() -> alloc::string::String
 );
+
+// ===========================================================================
+// Standalone-bootstrap callees consumed by `PostgresSingleUserMain`.
+//
+// These are owned by units that are still CATALOG `todo` (boot gaps #4/#5/#6):
+// the control-file/WAL reader (`access/transam/xlog.c`), the shared-preload /
+// shmem-request / runtime-GUC machinery (`utils/init/miscinit.c`,
+// `storage/ipc/ipci.c`, `utils/misc/guc_funcs.c`), and the `PgStartTime` global
+// (`utils/init/globals.c`). They have no seam crate of their own yet, so the
+// single-user driver declares the seams it consumes here; each panics loudly
+// until the owning unit lands and installs it. This is the faithful
+// "seam-and-panic into an unported dep" boundary — the driver structure above
+// is real and wired; only these leaf calls are stubbed by a panic.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `LocalProcessControlFile(reset)` (`access/transam/xlog.c`) — read
+    /// `pg_control` into the backend-local `ControlFile`, validating it and
+    /// pulling the WAL-derived settings it carries. `reset` requests a fresh
+    /// read. `ereport(FATAL)` on a missing/corrupt control file. Owned by the
+    /// (unported) xlog unit; boot gap #5.
+    pub fn local_process_control_file(reset: bool) -> types_error::PgResult<()>
+);
+
+// `process_shared_preload_libraries()` (miscinit.c) is ported and lives in
+// `backend-utils-init-miscinit`; single-user boot calls it directly (the
+// established direct-call pattern, like `SetProcessingMode`), so no boot-driver
+// seam is needed for it.
+
+seam_core::seam!(
+    /// `process_shmem_requests()` (`storage/ipc/ipci.c`) — run each preloaded
+    /// module's `shmem_request_hook` so it can reserve additional shared memory
+    /// before the segment is sized and created. Owned by the (unported) ipci
+    /// unit; boot gap #4 (AIO/shmem sizing).
+    pub fn process_shmem_requests() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeShmemGUCs()` (`utils/misc/guc_funcs.c`) — now that modules
+    /// have requested shared memory, compute the runtime-computed GUCs
+    /// (`shared_memory_size`, `shared_memory_size_in_huge_pages`). Owned by the
+    /// (unported) GUC-funcs unit.
+    pub fn initialize_shmem_gucs() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeWalConsistencyChecking()` (`access/transam/xlog.c`) — process
+    /// the `wal_consistency_checking` GUC now that custom resource managers are
+    /// loaded. Owned by the (unported) xlog unit; boot gap #5.
+    pub fn initialize_wal_consistency_checking() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PgStartTime = GetCurrentTimestamp()` (`utils/init/globals.c`) — record
+    /// the stand-alone backend's startup time into the `PgStartTime` global, at
+    /// roughly the same startup point the postmaster does. The global lives in
+    /// the (unported) globals.c unit, so the write is fronted by this seam.
+    pub fn set_pg_start_time(t: types_core::TimestampTz)
+);

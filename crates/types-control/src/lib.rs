@@ -80,6 +80,58 @@ pub struct CheckPoint {
     pub oldestActiveXid: TransactionId,
 }
 
+impl CheckPoint {
+    /// Deserialize a `CheckPoint` from the main-data area of a checkpoint WAL
+    /// record (`memcpy(&checkPoint, XLogRecGetData(record), sizeof(CheckPoint))`).
+    ///
+    /// Field offsets (LP64, `sizeof(CheckPoint) == 88`): redo@0,
+    /// ThisTimeLineID@8, PrevTimeLineID@12, fullPageWrites@16, wal_level@20,
+    /// nextXid@24 (FullTransactionId, u64), nextOid@32, nextMulti@36,
+    /// nextMultiOffset@40, oldestXid@44, oldestXidDB@48, oldestMulti@52,
+    /// oldestMultiDB@56, time@64 (pg_time_t, i64), oldestCommitTsXid@72,
+    /// newestCommitTsXid@76, oldestActiveXid@80. Returns `None` if `data` is too
+    /// short.
+    pub fn from_record_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 88 {
+            return None;
+        }
+        let u32_at = |off: usize| -> uint32 {
+            uint32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+        };
+        let u64_at = |off: usize| -> uint64 {
+            uint64::from_ne_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+                data[off + 4],
+                data[off + 5],
+                data[off + 6],
+                data[off + 7],
+            ])
+        };
+        Some(Self {
+            redo: u64_at(0),
+            ThisTimeLineID: u32_at(8),
+            PrevTimeLineID: u32_at(12),
+            fullPageWrites: data[16] != 0,
+            wal_level: u32_at(20) as i32,
+            nextXid: FullTransactionId { value: u64_at(24) },
+            nextOid: u32_at(32),
+            nextMulti: u32_at(36),
+            nextMultiOffset: u32_at(40),
+            oldestXid: u32_at(44),
+            oldestXidDB: u32_at(48),
+            oldestMulti: u32_at(52),
+            oldestMultiDB: u32_at(56),
+            time: u64_at(64) as pg_time_t,
+            oldestCommitTsXid: u32_at(72),
+            newestCommitTsXid: u32_at(76),
+            oldestActiveXid: u32_at(80),
+        })
+    }
+}
+
 // ===========================================================================
 // ControlFileData (catalog/pg_control.h).
 // ===========================================================================

@@ -317,7 +317,15 @@ fn finish_relcache_entries() -> PgResult<()> {
                 let relp = xunit::SearchSysCacheRelOid(oid)?;
                 let bad = with_rel_mut(rd, |r| {
                     r.rd_rel = relp;
-                    crate::build::RelationParseRelOptions(r)?;
+                    // C re-parses reloptions from the syscache htup; the
+                    // owned-model syscache form seam (search_pg_class_full_form)
+                    // does not surface the variable-length reloptions tail
+                    // column, so this phase-3 fixup reload re-parses with no
+                    // reloptions bytes (None). Widening that syscache seam to
+                    // carry reloptions is the syscache owner's lane; until then
+                    // this corrupt-initfile-entry reload path leaves rd_options
+                    // NULL rather than re-deriving it.
+                    crate::build::RelationParseRelOptions(r, None)?;
                     Ok::<bool, backend_utils_error::PgError>(r.rd_rel.relowner == InvalidOid)
                 })?;
                 if bad {
@@ -1809,17 +1817,19 @@ mod xunit {
      * -------------------------------------------------------------------- */
 
     /// The hardcoded `Schema_pg_<name>[]` `FormData_pg_attribute` rows the C
-    /// `formrdesc` is handed for a nailed catalog. This is genbki-generated
-    /// catalog-header bootstrap data (`pg_attribute.h` / `schemapg.h`), owned by
-    /// the catalog-data layer; it crosses into relcache as a pure value array.
-    /// Panics until that owner lands — "Mirror PG and panic". (No owner crate
-    /// exists yet, and the result is the entry-owned `OwnedAttr` array, so this
-    /// stays a panic rather than a cross-crate seam.)
-    pub(super) fn catalog_schema_attrs(relid: Oid) -> Vec<OwnedAttr> {
-        panic!(
-            "relcache-initfile: Schema_pg_* bootstrap attr rows for relid {relid} \
-             (genbki catalog-data owner not yet ported)"
-        )
+    /// `formrdesc` is handed for a nailed catalog, keyed by the catalog's
+    /// row-type OID (`*Relation_Rowtype_Id`). This is genbki-generated
+    /// catalog-header bootstrap data (`catalog/schemapg.h`), owned by the
+    /// `backend-bootstrap-catalog-data` crate and crossing in via the
+    /// `catalog_schema_attrs` seam as a [`BootstrapCatalogSchema`] (the rows plus
+    /// the catalog relation OID `formrdesc` reads for `rd_id`, which the
+    /// `OwnedAttr` rows cannot carry).
+    pub(super) fn catalog_schema_attrs(
+        reltype: Oid,
+    ) -> types_relcache_entry::BootstrapCatalogSchema {
+        // C: Desc_pg_* (the genbki Schema_pg_* arrays). Outward seam to the
+        // bootstrap-catalog-data owner; installed from its `init_seams()`.
+        backend_utils_cache_relcache_seams::catalog_schema_attrs::call(reltype)
     }
     /// `RelationBuildTriggers(rel)` (trigger.c): scan `pg_trigger`, build
     /// `rel->trigdesc`. Mutates the relcache entry in place; the trigger unit is

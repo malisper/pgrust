@@ -491,10 +491,26 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
         // ----- T_Aggref -----
         Expr::Aggref(aggref) => {
-            // The parent AggState->aggs accumulation is owned by nodeAgg; the
-            // owned model lends the parent explicitly. Emit the EEOP_AGGREF
-            // step (the planner-set aggno drives it); the aggs-list append is
-            // performed by the nodeAgg owner when it threads the parent.
+            // C (execExpr.c ExecInitExprRec T_Aggref):
+            //   AggState *aggstate = castNode(AggState, state->parent);
+            //   aggstate->aggs = lappend(aggstate->aggs, astate);
+            //   ... scratch.d.aggref.aggno = aggref->aggno;
+            // The parent-AggState->aggs accumulation cannot mutate the parent
+            // directly here: the parent surface is the head-only PlanStateData
+            // (and during ExecInitAgg the in-flight AggState is not yet a
+            // PlanStateNode). So the discovered Aggref is collected onto the
+            // ExprState's `found_aggs` channel; the nodeAgg owner drains it into
+            // aggstate->aggs after compilation (planner-set aggno makes the
+            // collection-order divergence behaviorally inert).
+            if state.found_aggs.is_none() {
+                state.found_aggs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+            }
+            state
+                .found_aggs
+                .as_mut()
+                .expect("found_aggs just initialized")
+                .push(aggref.clone_in(mcx)?);
+
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_AGGREF,
                 resvalue: resv,
@@ -1382,6 +1398,13 @@ pub fn exec_init_expr<'mcx>(
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    // `parent` is the embedded `PlanState` head, not the enclosing
+    // `PlanStateNode` enum. The `ExprState.parent` back-link the C
+    // `state->parent = parent` sets must point at the *enum* (its consumers —
+    // `EEOP_GROUPING_FUNC` etc. — call `parent.as_agg_state()`, an enum method),
+    // whose address is not yet stable while this node is still being built. So
+    // `parent` is back-filled by `ExecInitNode` (`PlanStateNode::stamp_expr_parents`)
+    // right after the node is boxed; the head is unused here.
     let _ = parent;
     let mcx = estate.es_query_cxt;
 
@@ -1425,6 +1448,11 @@ pub fn exec_init_qual<'mcx>(
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    // `parent` is the embedded head, not the enclosing `PlanStateNode` enum; the
+    // `ExprState.parent` back-link (consumed by `EEOP_GROUPING_FUNC` etc. via the
+    // enum method `parent.as_agg_state()`) is back-filled by `ExecInitNode`
+    // (`PlanStateNode::stamp_expr_parents`) once the node's enum is boxed and
+    // address-stable. See `exec_init_expr`.
     let _ = parent;
     let qual = match qual {
         None => return Ok(None),

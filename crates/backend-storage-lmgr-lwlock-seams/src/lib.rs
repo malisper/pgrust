@@ -44,6 +44,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LWLockConditionalAcquire(LWLock *lock, LWLockMode mode)` — try to
+    /// acquire the lock without blocking. Returns `Some(guard)` if the lock was
+    /// obtained (C `true`) and `None` if it could not be (C `false`). The guard
+    /// releases the lock on drop (or via [`LWLockGuard::release`]).
+    pub fn lwlock_conditional_acquire<'l>(
+        lock: &'l LWLock,
+        mode: LWLockMode,
+    ) -> PgResult<Option<LWLockGuard<'l>>>
+);
+
+seam_core::seam!(
     /// `LWLockRelease(LWLock *lock)`. `Err` carries the C
     /// `elog(ERROR, "lock %s is not held")`. Reached only through
     /// [`LWLockGuard`] (`release()` or `Drop`); consumers never call it

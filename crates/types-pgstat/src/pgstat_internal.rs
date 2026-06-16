@@ -45,6 +45,7 @@ pub const SLRU_NAMES: [&str; SLRU_NUM_ELEMENTS] = [
 /// `PgStat_HashKey` (`utils/pgstat_internal.h`) — key of the shared statistics
 /// hash table.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(C)]
 pub struct PgStat_HashKey {
     /// statistics entry kind
     pub kind: PgStat_Kind,
@@ -64,6 +65,7 @@ impl Default for PgStat_Kind {
 /// the `PgStatShared_*` variable-amount entries; embedded as the first member
 /// of each.
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Common {
     /// just a validity cross-check
     pub magic: u32,
@@ -120,6 +122,7 @@ pub struct PgStatShared_Function {
 
 /// `PgStatShared_Subscription` (`utils/pgstat_internal.h`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Subscription {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatSubEntry,
@@ -127,13 +130,20 @@ pub struct PgStatShared_Subscription {
 
 /// `PgStatShared_ReplSlot` (`utils/pgstat_internal.h`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_ReplSlot {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatReplSlotEntry,
 }
 
 /// `PgStatShared_Backend` (`utils/pgstat_internal.h`).
+///
+/// `#[repr(C)]` so the leading `header` is guaranteed first: the pgstat core
+/// hands out the shared stats body as a `*mut PgStatShared_Common`, and the
+/// per-kind code recovers the full struct with `(shared_stats as *mut
+/// PgStatShared_Backend)` (C's `(PgStatShared_Backend *) entry_ref->shared_stats`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Backend {
     pub header: PgStatShared_Common,
     pub stats: crate::activity_pgstat::PgStat_Backend,

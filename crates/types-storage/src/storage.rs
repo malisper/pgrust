@@ -107,6 +107,12 @@ impl pg_atomic_uint64 {
         self.value.load(Ordering::SeqCst)
     }
 
+    /// `pg_atomic_write_membarrier_u64(ptr, val)` — a write with full-barrier
+    /// semantics (`port/atomics.h`).
+    pub fn write_membarrier(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::SeqCst);
+    }
+
     /// `pg_atomic_fetch_add_u64(ptr, add_)` (`port/atomics.h`) — atomically add
     /// `add_` and return the value `*ptr` held *before* the addition.
     pub fn fetch_add(&self, add_: types_core::uint64) -> types_core::uint64 {

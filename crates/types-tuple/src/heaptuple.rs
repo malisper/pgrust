@@ -631,6 +631,54 @@ impl AttrMissing<'_> {
     }
 }
 
+/// A lifetime-free image of an attribute missing value's `Datum`, for carriers
+/// that outlive any single `'mcx` arena (the relcache entry's owned
+/// `TupleConstr`, and the genam `scan_pg_attribute` decode DTO).
+///
+/// C's `AttrMissing.am_value` is a bare `Datum` whose pointee (for a
+/// pass-by-reference value) is kept alive by heaptuple.c's file-static
+/// missing-values cache. The owned model captures the value's payload by value
+/// here — a `ByVal` machine word for a pass-by-value attribute, or the verbatim
+/// detoasted `ByRef` bytes — so it can be re-materialized into a fresh
+/// [`Datum`]`<'mcx>` whenever the entry's tuple descriptor is projected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MissingValueImage {
+    /// Pass-by-value scalar (`att->attbyval`): the machine word
+    /// ([`Datum::ByVal`]).
+    ByVal(usize),
+    /// Pass-by-reference value (`attlen == -1` varlena or `attlen > 0`
+    /// fixed-length by-ref): the verbatim detoasted bytes ([`Datum::ByRef`]).
+    ByRef(alloc::vec::Vec<u8>),
+}
+
+impl MissingValueImage {
+    /// Capture a [`Datum`]'s payload as a lifetime-free image. Mirrors the C
+    /// `array_get_element` result the relcache stores in `attrmiss[].am_value`:
+    /// either the by-value word or a copy of the by-reference bytes. Panics on
+    /// the non-flat arms (Composite/Expanded/Internal), which a stored
+    /// attribute missing value never takes (C: a missing value is a flat
+    /// `array_get_element` result).
+    pub fn from_datum(d: &Datum<'_>) -> Self {
+        match d {
+            Datum::ByVal(w) => MissingValueImage::ByVal(*w),
+            Datum::ByRef(b) => MissingValueImage::ByRef(b.as_slice().to_vec()),
+            Datum::Cstring(s) => MissingValueImage::ByRef(s.as_bytes().to_vec()),
+            Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+                panic!("MissingValueImage::from_datum on a non-flat Datum (Composite/Expanded/Internal)")
+            }
+        }
+    }
+
+    /// Re-materialize the image as a [`Datum`]`<'mcx>` in `mcx` (the by-value
+    /// word verbatim, or the by-reference bytes copied into the arena).
+    pub fn to_datum<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
+        Ok(match self {
+            MissingValueImage::ByVal(w) => Datum::ByVal(*w),
+            MissingValueImage::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompactAttribute {
     pub attcacheoff: i32,

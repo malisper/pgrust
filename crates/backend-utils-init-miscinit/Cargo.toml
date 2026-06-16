@@ -53,3 +53,5 @@ backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
 backend-postmaster-interrupt-seams = { path = "../backend-postmaster-interrupt-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-common-exec-seams = { path = "../backend-common-exec-seams" }
+common-path-seams = { path = "../common-path-seams" }
+common-username-seams = { path = "../common-username-seams" }

@@ -753,6 +753,60 @@ fn unrecognized_node_type(node: &Node) -> PgError {
 }
 
 // ===========================================================================
+// InitializeShmemGUCs (guc_funcs.c) — runtime-computed shared-memory GUCs.
+// ===========================================================================
+
+/// `InitializeShmemGUCs(void)` (guc_funcs.c). Now that all the GUCs are set,
+/// the shared-memory size has been requested by extensions, and the shared
+/// memory has been sized, compute the runtime-derived GUCs
+/// `shared_memory_size` (in MB) and `shared_memory_size_in_huge_pages`, and
+/// set them as `PGC_INTERNAL` / `PGC_S_DYNAMIC_DEFAULT` so they show in
+/// `SHOW`/`pg_settings` without being writable.
+pub fn InitializeShmemGUCs() -> PgResult<()> {
+    // Calculate the actual shared memory size required for the system.
+    // C: `size_b = CalculateShmemSize(NULL);`
+    let (size_b, _num_semaphores) =
+        backend_storage_ipc_ipci_seams::calculate_shmem_size::call()?;
+
+    // Set the shared memory size, rounded up to the nearest whole megabyte
+    // (C: `size_mb = add_size(size_b, (1024 * 1024) - 1) / (1024 * 1024);`).
+    let size_mb = size_b
+        .checked_add((1024 * 1024) - 1)
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg_internal("requested shared memory size overflows size_t")
+                .into_error()
+        })?
+        / (1024 * 1024);
+    let buf = format!("{size_mb}");
+    backend_utils_misc_guc_seams::set_config_option_internal_dynamic_default::call(
+        "shared_memory_size",
+        &buf,
+    )?;
+
+    // Calculate the number of huge pages required.
+    // C: `GetHugePageSize(&hp_size, NULL);`
+    let (hp_size, _mmap_flags) = backend_port_sysv_shmem_seams::get_huge_page_size::call();
+    if hp_size != 0 {
+        // C: `hp_required = add_size(size_b / hp_size, 1);`
+        let hp_required = (size_b / hp_size)
+            .checked_add(1)
+            .ok_or_else(|| {
+                ereport(ERROR)
+                    .errmsg_internal("requested huge page count overflows size_t")
+                    .into_error()
+            })?;
+        let buf = format!("{hp_required}");
+        backend_utils_misc_guc_seams::set_config_option_internal_dynamic_default::call(
+            "shared_memory_size_in_huge_pages",
+            &buf,
+        )?;
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
 // Seam install — this crate is guc_funcs.c's home.
 // ===========================================================================
 
@@ -772,4 +826,8 @@ pub fn init_seams() {
     backend_utils_misc_guc_seams::set_pg_variable_session_authorization_reset::set(|| {
         SetPGVariable("session_authorization", None, false)
     });
+    // `InitializeShmemGUCs()` is guc_funcs.c's own body; its standalone-boot
+    // seam is declared in `backend-tcop-postgres-seams` (the boot driver's seam
+    // crate), installed here by its true owner.
+    backend_tcop_postgres_seams::initialize_shmem_gucs::set(InitializeShmemGUCs);
 }

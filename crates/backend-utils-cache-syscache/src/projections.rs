@@ -14,15 +14,20 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_datum::Datum as KeyDatum;
 
 use crate::{
-    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheAttName,
+    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCache3,
+    SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
     LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID,
-    RULERELNAME, TYPEOID,
+    RULERELNAME, STATRELATTINH, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
+};
+use types_statistics::{
+    Anum_pg_statistic_stacoll1, Anum_pg_statistic_stadistinct, Anum_pg_statistic_stakind1,
+    Anum_pg_statistic_stanullfrac, Anum_pg_statistic_staop1,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
@@ -44,7 +49,16 @@ use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
-use types_catalog::pg_aggregate::AggRow;
+use types_catalog::pg_aggregate::{
+    AggFormData, AggRow, Anum_pg_aggregate_aggcombinefn, Anum_pg_aggregate_aggdeserialfn,
+    Anum_pg_aggregate_aggfinalextra, Anum_pg_aggregate_aggfinalfn, Anum_pg_aggregate_aggfinalmodify,
+    Anum_pg_aggregate_aggfnoid, Anum_pg_aggregate_agginitval,
+    Anum_pg_aggregate_aggmfinalextra, Anum_pg_aggregate_aggmfinalfn, Anum_pg_aggregate_aggmfinalmodify,
+    Anum_pg_aggregate_aggminitval, Anum_pg_aggregate_aggminvtransfn, Anum_pg_aggregate_aggmtransfn,
+    Anum_pg_aggregate_aggmtransspace, Anum_pg_aggregate_aggmtranstype,
+    Anum_pg_aggregate_aggserialfn, Anum_pg_aggregate_aggsortop,
+    Anum_pg_aggregate_aggtransfn, Anum_pg_aggregate_aggtransspace, Anum_pg_aggregate_aggtranstype,
+};
 use types_catalog::pg_language::FormData_pg_language;
 use types_nodes::nodes::{Node, NodePtr};
 
@@ -752,6 +766,69 @@ pub(crate) fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Opti
     };
     ReleaseSysCache(tup);
     Ok(Some(row))
+}
+
+/// `aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid));
+/// aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple)` plus the two nullable
+/// `CATALOG_VARLEN` `agginitval` / `aggminitval` `SysCacheGetAttr` text columns,
+/// projected to the full [`AggFormData`] for `ExecInitAgg`'s `fetch_agg_form`
+/// (`nodeAgg.c`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller
+/// raises its own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
+pub(crate) fn agg_form_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+) -> PgResult<Option<AggFormData>> {
+    let tuple = SearchSysCache1(mcx, AGGFNOID, SysCacheKey::Value(KeyDatum::from_oid(aggfnoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // GETSTRUCT(aggTuple) — the fixed-part Form_pg_aggregate columns.
+    let form = AggFormData {
+        aggfnoid: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfnoid as i32)?,
+        aggkind: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggkind as i32)?,
+        aggnumdirectargs: getattr_i16(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggnumdirectargs as i32)?,
+        aggtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtransfn as i32)?,
+        aggfinalfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalfn as i32)?,
+        aggcombinefn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggcombinefn as i32)?,
+        aggserialfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggserialfn as i32)?,
+        aggdeserialfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggdeserialfn as i32)?,
+        aggmtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtransfn as i32)?,
+        aggminvtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggminvtransfn as i32)?,
+        aggmfinalfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalfn as i32)?,
+        aggfinalextra: getattr_bool(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalextra as i32)?,
+        aggmfinalextra: getattr_bool(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalextra as i32)?,
+        aggfinalmodify: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalmodify as i32)?,
+        aggmfinalmodify: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalmodify as i32)?,
+        aggsortop: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggsortop as i32)?,
+        aggtranstype: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtranstype as i32)?,
+        aggtransspace: getattr_i32(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtransspace as i32)?,
+        aggmtranstype: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtranstype as i32)?,
+        aggmtransspace: getattr_i32(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtransspace as i32)?,
+        // SysCacheGetAttr(AGGFNOID, tup, Anum_pg_aggregate_agginitval, &isnull):
+        // the nullable text initial-transition-value columns.
+        agginitval: getattr_option_text(mcx, AGGFNOID, &tup, Anum_pg_aggregate_agginitval as i32)?,
+        aggminitval: getattr_option_text(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggminitval as i32)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
+/// `text = SysCacheGetAttr(cacheId, tup, attnum, &isnull)`: `None` when the
+/// column is SQL NULL, otherwise `TextDatumGetCString(text)` as an owned
+/// `String` in `mcx`.
+fn getattr_option_text(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<String>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    // TextDatumGetCString(value).
+    let s = varlena_seams::text_to_cstring_v::call(mcx, &value)?;
+    Ok(Some(String::from(s.as_str())))
 }
 
 /* ---------------------------------------------------------------------------
@@ -2248,4 +2325,220 @@ pub(crate) fn parameter_acl_by_oid<'mcx>(
     let acl = getattr_acl(mcx, PARAMETERACLOID, &tup, Anum_pg_parameter_acl_paracl)?;
     ReleaseSysCache(tup);
     Ok(Some(acl))
+}
+
+/* ===========================================================================
+ * pg_statistic syscache reads (STATRELATTINH).
+ *
+ * selfuncs.c / lsyscache.c hold a `pg_statistic` row pinned across several
+ * reads as a `HeapTuple` (`VariableStatData.statsTuple`,
+ * `get_attstatsslot`'s `statstuple`). In C that pointer lives in the syscache
+ * until `ReleaseSysCache`. The owned model returns a `FormedTuple` by value, so
+ * to honor the C "pin a tuple, read it repeatedly, then release it" contract we
+ * stash the owned tuple — alongside the `MemoryContext` its arena lives in —
+ * in a heap box and hand its address out as the [`StatsTuple`] pointer (the
+ * exact C `HeapTuple` carrier). The field-read seams reborrow it; the release
+ * seam reclaims the box (dropping the context = `ReleaseSysCache`).
+ * ========================================================================= */
+
+/// The owner-side backing of a [`StatsTuple`]: the pinned `pg_statistic`
+/// [`FormedTuple`] plus the [`MemoryContext`] whose arena holds it. Leaked to a
+/// raw pointer so the tuple survives across the selectivity code's repeated
+/// reads, exactly as the C syscache keeps the `HeapTuple` alive until
+/// `ReleaseSysCache`.
+struct StatsTupleHolder {
+    /// The arena the tuple's bytes live in. Kept alive (not dropped) for as
+    /// long as the holder is leaked; dropped on `release_stats_tuple`.
+    _ctx: MemoryContext,
+    /// The pinned `pg_statistic` tuple. Its `'static` lifetime is sound only
+    /// because `_ctx` outlives every borrow (the holder owns both, and is only
+    /// dropped wholesale in `release_stats_tuple`).
+    tuple: FormedTuple<'static>,
+}
+
+/// Reborrow the [`StatsTupleHolder`] behind a [`StatsTuple`] pointer. Safe given
+/// the contract: the pointer came from [`search_statrelattinh`] (a leaked
+/// `Box<StatsTupleHolder>`) and has not yet been passed to
+/// [`release_stats_tuple`].
+fn stats_holder<'a>(stats_tuple: types_selfuncs::StatsTuple) -> &'a StatsTupleHolder {
+    debug_assert!(!stats_tuple.ptr.is_null());
+    unsafe { &*(stats_tuple.ptr as *const StatsTupleHolder) }
+}
+
+/// `SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(relid), Int16GetDatum(attnum),
+/// BoolGetDatum(inherit))` (selfuncs.c `examine_simple_variable`, lsyscache.c
+/// `get_attstatsslot_mcv`). Pins the `pg_statistic` row and returns it as a
+/// [`StatsTuple`] (the C `HeapTuple`); the caller pairs it with
+/// [`release_stats_tuple`] (`ReleaseSysCache`). `Ok(None)` on a cache miss.
+pub(crate) fn search_statrelattinh<'mcx>(
+    _mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+    inherit: bool,
+) -> PgResult<Option<types_selfuncs::StatsTuple>> {
+    // The pinned tuple must outlive the search's transient `mcx`, so it gets its
+    // own arena (held by the leaked holder, freed in release_stats_tuple).
+    let ctx = MemoryContext::new("pg_statistic syscache pin");
+    // Extend the tuple's lifetime to `'static` as it crosses out of the search's
+    // borrow of `ctx`: it lives in `ctx`, which the holder owns and keeps alive
+    // until `release_stats_tuple`. Decoupling the borrow here also lets `ctx` be
+    // moved into the holder below.
+    let result: Option<FormedTuple<'static>> = {
+        let mcx = ctx.mcx();
+        let found = SearchSysCache3(
+            mcx,
+            STATRELATTINH,
+            SysCacheKey::Value(KeyDatum::from_oid(relid)),
+            SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+            SysCacheKey::Value(KeyDatum::from_bool(inherit)),
+        )?;
+        found.map(|tup| unsafe {
+            core::mem::transmute::<FormedTuple<'_>, FormedTuple<'static>>(tup)
+        })
+    };
+    let Some(tuple) = result else {
+        // !HeapTupleIsValid: drop the empty arena and report the miss.
+        return Ok(None);
+    };
+    let holder = Box::new(StatsTupleHolder { _ctx: ctx, tuple });
+    let ptr = Box::into_raw(holder) as *mut core::ffi::c_void;
+    Ok(Some(types_selfuncs::StatsTuple { ptr }))
+}
+
+/// `ReleaseSysCache(tuple)` for a [`StatsTuple`] from [`search_statrelattinh`]:
+/// reclaim the leaked holder (dropping its tuple and arena).
+pub(crate) fn release_stats_tuple(stats_tuple: types_selfuncs::StatsTuple) {
+    if stats_tuple.ptr.is_null() {
+        return;
+    }
+    // Reconstruct and drop the box: frees the FormedTuple and its arena.
+    let holder = unsafe { Box::from_raw(stats_tuple.ptr as *mut StatsTupleHolder) };
+    drop(holder);
+}
+
+/// `((Form_pg_statistic) GETSTRUCT(statstuple))->stanullfrac` (pg_statistic.h):
+/// the fraction of NULLs, read off the pinned `pg_statistic` tuple.
+pub(crate) fn pg_statistic_stanullfrac(stats_tuple: types_selfuncs::StatsTuple) -> f32 {
+    let holder = stats_holder(stats_tuple);
+    let scratch = MemoryContext::new("pg_statistic stanullfrac");
+    let mcx = scratch.mcx();
+    // stanullfrac is a NOT NULL fixed-width float4 column, so heap_getattr never
+    // returns null here (Form_pg_statistic GETSTRUCT in C reads it directly).
+    let (value, isnull) = getattr_with_cache_tupdesc_stats(
+        mcx,
+        &holder.tuple,
+        Anum_pg_statistic_stanullfrac as i32,
+    );
+    debug_assert!(!isnull);
+    value.as_f32()
+}
+
+/// `((Form_pg_statistic) GETSTRUCT(statstuple))->stadistinct` (pg_statistic.h):
+/// the distinct-value estimate, read off the pinned `pg_statistic` tuple.
+pub(crate) fn pg_statistic_stadistinct(stats_tuple: types_selfuncs::StatsTuple) -> f32 {
+    let holder = stats_holder(stats_tuple);
+    let scratch = MemoryContext::new("pg_statistic stadistinct");
+    let mcx = scratch.mcx();
+    let (value, isnull) = getattr_with_cache_tupdesc_stats(
+        mcx,
+        &holder.tuple,
+        Anum_pg_statistic_stadistinct as i32,
+    );
+    debug_assert!(!isnull);
+    value.as_f32()
+}
+
+/// `((Form_pg_statistic) GETSTRUCT(statstuple))` projected to the fixed-width
+/// slot metadata (`stakindN` / `staopN` / `stacollN`) for `get_attstatsslot`.
+pub(crate) fn pg_statistic_slot_meta(
+    stats_tuple: types_selfuncs::StatsTuple,
+) -> PgResult<backend_utils_cache_syscache_seams::PgStatisticSlotMeta> {
+    use backend_utils_cache_syscache_seams::{PgStatisticSlotMeta, STATISTIC_NUM_SLOTS};
+    let holder = stats_holder(stats_tuple);
+    let scratch = MemoryContext::new("pg_statistic slot meta");
+    let mcx = scratch.mcx();
+    let mut meta = PgStatisticSlotMeta::default();
+    // The stakind1..5 / staop1..5 / stacoll1..5 columns are contiguous fixed
+    // attributes; (&stats->stakind1)[i] == column Anum_pg_statistic_stakind1+i.
+    for i in 0..STATISTIC_NUM_SLOTS {
+        let (kind, kn) = getattr_with_cache_tupdesc_stats(
+            mcx,
+            &holder.tuple,
+            Anum_pg_statistic_stakind1 as i32 + i as i32,
+        );
+        let (op, on) = getattr_with_cache_tupdesc_stats(
+            mcx,
+            &holder.tuple,
+            Anum_pg_statistic_staop1 as i32 + i as i32,
+        );
+        let (coll, cn) = getattr_with_cache_tupdesc_stats(
+            mcx,
+            &holder.tuple,
+            Anum_pg_statistic_stacoll1 as i32 + i as i32,
+        );
+        debug_assert!(!kn && !on && !cn);
+        meta.stakind[i] = kind.as_i16();
+        meta.staop[i] = op.as_oid();
+        meta.stacoll[i] = coll.as_oid();
+    }
+    Ok(meta)
+}
+
+/// `SysCacheGetAttrNotNull(STATRELATTINH, statstuple, attnum)`
+/// (lsyscache.c `get_attstatsslot`): the (guaranteed non-null) `stavaluesN` /
+/// `stanumbersN` array Datum, still pointing into the pinned tuple.
+pub(crate) fn syscache_get_attr_not_null_statistic(
+    stats_tuple: types_selfuncs::StatsTuple,
+    attnum: AttrNumber,
+) -> PgResult<types_tuple::Datum<'static>> {
+    let holder = stats_holder(stats_tuple);
+    // The detoast/copy the caller performs (DatumGetArrayTypePCopy) needs the
+    // array bytes to outlive this call's scratch arena, so deform into the
+    // holder's own arena (held alive until release_stats_tuple). The borrow is
+    // promoted to `'static` because the holder is leaked for the pin's lifetime.
+    let mcx: Mcx<'static> =
+        unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(holder._ctx.mcx()) };
+    let value = SysCacheGetAttrNotNull(mcx, STATRELATTINH, &holder.tuple, attnum as i32)?;
+    Ok(value)
+}
+
+/// `heap_getattr(tup, attnum, SysCache[STATRELATTINH]->cc_tupdesc)` for a held
+/// `pg_statistic` tuple. The cache's tupdesc is initialized (phase 2) if needed,
+/// mirroring `SysCacheGetAttr`'s lazy init.
+fn getattr_with_cache_tupdesc_stats<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> (Datum<'mcx>, bool) {
+    match SysCacheGetAttr(mcx, STATRELATTINH, tup, attnum) {
+        Ok(col) => col,
+        Err(_) => (Datum::null(), true),
+    }
+}
+
+/// `SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(relid), Int16GetDatum(attnum),
+/// BoolGetDatum(false))` + `((Form_pg_statistic) GETSTRUCT(tp))->stawidth`
+/// (lsyscache.c `get_attavgwidth`): the non-inherited average stored width.
+/// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the search owns the
+/// `ReleaseSysCache`.
+pub(crate) fn pg_statistic_stawidth(
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<i32>> {
+    use types_statistics::Anum_pg_statistic_stawidth;
+    let scratch = MemoryContext::new("pg_statistic stawidth projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache3(
+        mcx,
+        STATRELATTINH,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+        SysCacheKey::Value(KeyDatum::from_bool(false)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let stawidth = getattr_i32(mcx, STATRELATTINH, &tup, Anum_pg_statistic_stawidth as i32)?;
+    ReleaseSysCache(tup);
+    Ok(Some(stawidth))
 }

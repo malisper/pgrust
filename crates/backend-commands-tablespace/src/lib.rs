@@ -1733,6 +1733,39 @@ pub fn init_seams() {
         PrepareTempTablespaces(ctx.mcx())
     });
     backend_commands_tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
+
+    // --- ProcessUtility dispatch arms (utility.c tablespace globals) ---------
+    backend_tcop_utility_out_seams::create_table_space::set(create_table_space_arm);
+    backend_tcop_utility_out_seams::drop_table_space::set(drop_table_space_arm);
+    backend_tcop_utility_out_seams::alter_table_space_options::set(alter_table_space_options_arm);
+}
+
+/// `case T_CreateTableSpaceStmt: CreateTableSpace(stmt)` (utility.c). Extract the
+/// variant from the dispatch's `&Node` and forward (the created Oid is unused by
+/// the dispatch, exactly as in C).
+fn create_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let Node::CreateTableSpaceStmt(s) = stmt else {
+        panic!("create_table_space: parse tree is not a CreateTableSpaceStmt");
+    };
+    CreateTableSpace(mcx, s)?;
+    Ok(())
+}
+
+/// `case T_DropTableSpaceStmt: DropTableSpace(stmt)` (utility.c).
+fn drop_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let Node::DropTableSpaceStmt(s) = stmt else {
+        panic!("drop_table_space: parse tree is not a DropTableSpaceStmt");
+    };
+    DropTableSpace(mcx, s)
+}
+
+/// `case T_AlterTableSpaceOptionsStmt: AlterTableSpaceOptions(stmt)` (utility.c).
+fn alter_table_space_options_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let Node::AlterTableSpaceOptionsStmt(s) = stmt else {
+        panic!("alter_table_space_options: parse tree is not an AlterTableSpaceOptionsStmt");
+    };
+    AlterTableSpaceOptions(mcx, s)?;
+    Ok(())
 }
 
 #[cfg(test)]

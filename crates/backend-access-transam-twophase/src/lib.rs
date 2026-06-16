@@ -2651,6 +2651,42 @@ pub fn init_seams() {
     files::scan_twophase_dir::set(seam_scan_twophase_dir);
     files::fsync_twophase_dir::set(seam_fsync_twophase_dir);
     files::twophase_file_exists::set(seam_twophase_file_exists);
+
+    // WAL-startup entry points called by `StartupXLOG` (xlog.c) on the clean
+    // DB_SHUTDOWNED / end-of-recovery path. `orig_next_xid` (TransamVariables->
+    // nextXid) and `transaction_xmin` (TransactionXmin) are globals in C; the
+    // WAL-startup driver reads them from their owners and threads them in. The
+    // owner wraps its private `TwoPhaseStateData` (and the `MY_LOCKED_GXACT`
+    // thread-local for the recover path) through the ambient accessor.
+    seams::restore_two_phase_data::set(|orig_next_xid, transaction_xmin, reached_consistency| {
+        with_twophase_state(|state| {
+            restore_two_phase_data(state, orig_next_xid, transaction_xmin, reached_consistency)
+        })
+    });
+    seams::prescan_prepared_transactions::set(|orig_next_xid, transaction_xmin| {
+        with_twophase_state(|state| {
+            prescan_prepared_transactions(state, orig_next_xid, transaction_xmin)
+                .map(|(oldest_active_xid, _xids)| oldest_active_xid)
+        })
+    });
+    seams::standby_recover_prepared_transactions::set(|orig_next_xid, transaction_xmin| {
+        with_twophase_state(|state| {
+            standby_recover_prepared_transactions(state, orig_next_xid, transaction_xmin)
+        })
+    });
+    seams::recover_prepared_transactions::set(|orig_next_xid, transaction_xmin, in_hot_standby| {
+        with_twophase_state(|state| {
+            MY_LOCKED_GXACT.with(|locked| {
+                recover_prepared_transactions(
+                    state,
+                    &mut locked.borrow_mut(),
+                    orig_next_xid,
+                    transaction_xmin,
+                    in_hot_standby,
+                )
+            })
+        })
+    });
 }
 
 /// Read this backend's `MyLockedGxact` slot, panicking if unset (the prepare

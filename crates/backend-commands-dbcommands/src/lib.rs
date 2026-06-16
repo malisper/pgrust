@@ -533,4 +533,73 @@ pub fn init_seams() {
     inward::get_database_oid::set(get_database_oid);
     inward::RenameDatabase::set(rename_database_seam);
     inward::AlterDatabaseOwner::set(alter_database_owner_seam);
+
+    // --- ProcessUtility dispatch arms (utility.c database globals) -----------
+    backend_tcop_utility_out_seams::createdb::set(createdb_arm);
+    backend_tcop_utility_out_seams::alter_database::set(alter_database_arm);
+    backend_tcop_utility_out_seams::alter_database_refresh_coll::set(alter_database_refresh_coll_arm);
+    backend_tcop_utility_out_seams::alter_database_set::set(alter_database_set_arm);
+    backend_tcop_utility_out_seams::drop_database::set(drop_database_arm);
+}
+
+use types_nodes::nodes::Node as UtilNode;
+use types_nodes::parsestmt::ParseState as UtilParseState;
+
+/// `case T_CreatedbStmt: createdb(pstate, stmt)` (utility.c). The dispatch carries
+/// the parse tree as `&Node` and supplies the working `mcx`; `createdb` opens its
+/// own transient context internally and returns the new Oid (unused here).
+fn createdb_arm<'mcx>(
+    _mcx: Mcx<'mcx>,
+    pstate: &mut UtilParseState<'mcx>,
+    stmt: &UtilNode<'mcx>,
+) -> PgResult<()> {
+    let UtilNode::CreatedbStmt(s) = stmt else {
+        panic!("createdb: parse tree is not a CreatedbStmt");
+    };
+    createdb(pstate, s)?;
+    Ok(())
+}
+
+/// `case T_AlterDatabaseStmt: AlterDatabase(pstate, stmt, isTopLevel)` (utility.c).
+fn alter_database_arm<'mcx>(
+    _mcx: Mcx<'mcx>,
+    pstate: &mut UtilParseState<'mcx>,
+    stmt: &UtilNode<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let UtilNode::AlterDatabaseStmt(s) = stmt else {
+        panic!("alter_database: parse tree is not an AlterDatabaseStmt");
+    };
+    AlterDatabase(pstate, s, is_top_level)?;
+    Ok(())
+}
+
+/// `case T_AlterDatabaseRefreshCollStmt: AlterDatabaseRefreshColl(stmt)` (utility.c).
+fn alter_database_refresh_coll_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &UtilNode<'mcx>) -> PgResult<()> {
+    let UtilNode::AlterDatabaseRefreshCollStmt(s) = stmt else {
+        panic!("alter_database_refresh_coll: parse tree is not an AlterDatabaseRefreshCollStmt");
+    };
+    AlterDatabaseRefreshColl(s)?;
+    Ok(())
+}
+
+/// `case T_AlterDatabaseSetStmt: AlterDatabaseSet(stmt)` (utility.c).
+fn alter_database_set_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &UtilNode<'mcx>) -> PgResult<()> {
+    let UtilNode::AlterDatabaseSetStmt(s) = stmt else {
+        panic!("alter_database_set: parse tree is not an AlterDatabaseSetStmt");
+    };
+    AlterDatabaseSet(s)?;
+    Ok(())
+}
+
+/// `case T_DropdbStmt: DropDatabase(pstate, stmt)` (utility.c).
+fn drop_database_arm<'mcx>(
+    _mcx: Mcx<'mcx>,
+    pstate: &mut UtilParseState<'mcx>,
+    stmt: &UtilNode<'mcx>,
+) -> PgResult<()> {
+    let UtilNode::DropdbStmt(s) = stmt else {
+        panic!("drop_database: parse tree is not a DropdbStmt");
+    };
+    DropDatabase(pstate, s)
 }

@@ -9,3 +9,10 @@ seam_core::seam!(
     /// cumulative stats system.
     pub fn pgstat_report_wal(force: bool)
 );
+
+seam_core::seam!(
+    /// `pgstat_flush_backend(nowait, PGSTAT_BACKEND_FLUSH_WAL)` (pgstat_backend.c)
+    /// — flush this backend's per-backend WAL stats. Returns whether some were
+    /// left unflushed. Owned by `pgstat_backend.c` (unported); seam-and-panic.
+    pub fn pgstat_flush_backend_wal(nowait: bool) -> bool
+);

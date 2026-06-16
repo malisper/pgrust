@@ -224,8 +224,13 @@ pub struct TableFunc<'mcx> {
     pub passingvalexprs: Option<PgVec<'mcx, PgBox<'mcx, Expr>>>,
     /// `Bitmapset *notnulls` — nullability flag for each output column.
     pub notnulls: Option<PgBox<'mcx, crate::bitmapset::Bitmapset<'mcx>>>,
+    /// `Node *plan` — planner-internal field; usually `NULL` (only set during
+    /// planning of a `JSON_TABLE`/`XMLTABLE`). Modeled as a generic `Node`.
+    pub plan: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `int ordinalitycol` — counts from 0; -1 if none specified.
     pub ordinalitycol: i32,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: ParseLoc,
 }
 
 impl TableFunc<'_> {
@@ -271,7 +276,12 @@ impl TableFunc<'_> {
                 Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
+            plan: match &self.plan {
+                Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
             ordinalitycol: self.ordinalitycol,
+            location: self.location,
         })
     }
 }

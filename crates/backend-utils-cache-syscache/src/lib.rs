@@ -902,6 +902,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_operator_form::set(projections::pg_operator_form);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
+    backend_utils_cache_syscache_seams::agg_form_by_oid::set(projections::agg_form_by_oid);
     backend_utils_cache_syscache_seams::foreign_data_wrapper_options::set(
         projections::foreign_data_wrapper_options,
     );
@@ -1018,5 +1019,28 @@ pub fn init_seams() {
     );
     backend_utils_cache_syscache_seams::parameter_acl_by_oid::set(
         projections::parameter_acl_by_oid,
+    );
+
+    // pg_statistic (STATRELATTINH) — the selfuncs / lsyscache statistics path.
+    backend_utils_cache_syscache_seams::search_statrelattinh::set(
+        projections::search_statrelattinh,
+    );
+    backend_utils_cache_syscache_seams::release_stats_tuple::set(
+        projections::release_stats_tuple,
+    );
+    backend_utils_cache_syscache_seams::pg_statistic_stanullfrac::set(
+        projections::pg_statistic_stanullfrac,
+    );
+    backend_utils_cache_syscache_seams::pg_statistic_stadistinct::set(
+        projections::pg_statistic_stadistinct,
+    );
+    backend_utils_cache_syscache_seams::pg_statistic_slot_meta::set(
+        projections::pg_statistic_slot_meta,
+    );
+    backend_utils_cache_syscache_seams::syscache_get_attr_not_null_statistic::set(
+        projections::syscache_get_attr_not_null_statistic,
+    );
+    backend_utils_cache_syscache_seams::pg_statistic_stawidth::set(
+        projections::pg_statistic_stawidth,
     );
 }

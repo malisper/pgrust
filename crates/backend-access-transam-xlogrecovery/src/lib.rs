@@ -42,6 +42,19 @@
 //! pending their own fill, so the loop is reachable only once the stop family
 //! lands — exactly the intra-crate seam-and-panic boundary.
 //!
+//! The **WAL-recovery orchestrator family has landed** ([`orchestrator`]):
+//! `InitWalRecovery` (+ `readRecoverySignalFile` / `validateRecoveryParameters`
+//! / `read_backup_label` / `read_tablespace_map`), `FinishWalRecovery`, and
+//! `ShutdownWalRecovery` are ported 1:1, operating on a process-lifetime
+//! backend-local recovery-state holder (C's file-static globals) and the reader
+//! holder ([`walrecovery`]). Their entry seams (`init_wal_recovery` /
+//! `finish_wal_recovery` / `shutdown_wal_recovery`) are declared in this unit's
+//! `-seams` crate and installed by `init_seams`, so xlog.c's `StartupXLOG` can
+//! seam-and-call them around the redo loop. The only seam-and-panic boundary in
+//! the family is the `tablespace_map` symlink-creation leg (the unported
+//! `tablespace.c` owner); the recovery-target-time conversion bottoms out on the
+//! unported `timestamp.c` (`recovery_target_timestamptz_in`).
+//!
 //! The **stop / desc / startupxlog families are still scaffold**: honest
 //! `panic!("blocked: … pending <family> fill")` stubs naming the unported
 //! prerequisite (the rmgr desc dispatch that needs `Mcx`/`PgString` re-signing,
@@ -65,6 +78,7 @@ extern crate alloc;
 pub mod core;
 pub mod desc;
 pub mod guc;
+pub mod orchestrator;
 pub mod pageread;
 pub mod promote;
 pub mod readrecord;
@@ -135,4 +149,21 @@ pub fn init_seams() {
     // resolve the recovery driver's `RecordRef` against the live reader, so it is
     // the installer (a sanctioned cross-crate install).
     walrecovery::init_holder_seams();
+
+    // The WAL-recovery orchestrator entry seams (InitWalRecovery /
+    // FinishWalRecovery / ShutdownWalRecovery), driven by xlog.c's StartupXLOG
+    // around the redo loop.
+    seams::init_wal_recovery::set(orchestrator::init_wal_recovery);
+    seams::finish_wal_recovery::set(orchestrator::finish_wal_recovery);
+    seams::shutdown_wal_recovery::set(orchestrator::shutdown_wal_recovery);
+
+    // `InRecovery` (the startup process's backend-local replay flag), now backed
+    // by the orchestrator's recovery-state tracking. (xlogrecovery.c global.)
+    seams::in_recovery::set(orchestrator::in_recovery_flag);
+
+    // `ArchiveRecoveryRequested` / `recoveryTargetTLI` (xlogrecovery.c globals),
+    // read by the WAL-startup driver (xlog.c `StartupXLOG`). Backed by the
+    // startup process's per-backend recovery state.
+    seams::archive_recovery_requested::set(orchestrator::archive_recovery_requested);
+    seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
 }

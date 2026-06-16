@@ -439,6 +439,17 @@ pub(crate) fn last_replayed_end_rec_ptr_unlocked() -> (XLogRecPtr, TimeLineID) {
     (ctl.lastReplayedEndRecPtr, ctl.lastReplayedTLI)
 }
 
+/// `(XLogRecoveryCtl->lastReplayedReadRecPtr, lastReplayedTLI)` — the start
+/// position of the last replayed record and its timeline, read by the startup
+/// process in `FinishWalRecovery` (xlogrecovery.c:1538-1539). The startup
+/// process is the sole writer of these fields during recovery, so this is a
+/// lock-free read, matching the C access (it is read directly without taking
+/// `info_lck` there).
+pub(crate) fn last_replayed_read_rec_ptr_tli_unlocked() -> (XLogRecPtr, TimeLineID) {
+    let ctl = ctl();
+    (ctl.lastReplayedReadRecPtr, ctl.lastReplayedTLI)
+}
+
 /// `((volatile XLogRecoveryCtlData *) XLogRecoveryCtl)->recoveryPauseState`
 /// (xlogrecovery.c:1808): the redo loop's intentionally-unlocked pause-state
 /// peek (the comment there explains why no `info_lck` is taken).

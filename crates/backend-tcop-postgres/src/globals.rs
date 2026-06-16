@@ -47,6 +47,15 @@ thread_local! {
     /// switch (use `;\n\n` as the interactive command delimiter).
     static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
 
+    /// `static bool doing_extended_query_message = false;` (postgres.c:146) —
+    /// true while `PostgresMain` is processing an extended-query-protocol
+    /// message; controls whether an error initiates skip-till-Sync.
+    static DOING_EXTENDED_QUERY_MESSAGE: Cell<bool> = const { Cell::new(false) };
+
+    /// `static bool ignore_till_sync = false;` (postgres.c:147) — true while we
+    /// are skipping messages until the next Sync after an extended-query error.
+    static IGNORE_TILL_SYNC: Cell<bool> = const { Cell::new(false) };
+
     /// `static volatile sig_atomic_t RecoveryConflictPending = false;`
     /// (postgres.c:158).
     static RECOVERY_CONFLICT_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -139,6 +148,30 @@ pub fn use_semi_newline_newline() -> bool {
 #[inline]
 pub fn set_use_semi_newline_newline(value: bool) {
     USE_SEMI_NEWLINE_NEWLINE.set(value);
+}
+
+// `doing_extended_query_message`.
+
+#[inline]
+pub fn doing_extended_query_message() -> bool {
+    DOING_EXTENDED_QUERY_MESSAGE.get()
+}
+
+#[inline]
+pub fn set_doing_extended_query_message(value: bool) {
+    DOING_EXTENDED_QUERY_MESSAGE.set(value);
+}
+
+// `ignore_till_sync`.
+
+#[inline]
+pub fn ignore_till_sync() -> bool {
+    IGNORE_TILL_SYNC.get()
+}
+
+#[inline]
+pub fn set_ignore_till_sync(value: bool) {
+    IGNORE_TILL_SYNC.set(value);
 }
 
 // `RecoveryConflictPending`.

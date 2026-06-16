@@ -1260,6 +1260,20 @@ pub struct ExprState<'mcx> {
     /// `ErrorSaveContext *escontext` — soft-error sink; NULL means throw
     /// (opaque address until the sink is threaded here).
     pub escontext: usize,
+    /// Aggref-discovery channel (compile-time only). C's `ExecInitExprRec`
+    /// `T_Aggref` arm does `aggstate->aggs = lappend(aggstate->aggs, astate)` —
+    /// it mutates the parent `AggState` directly while compiling the Agg's
+    /// quals/targetlist. In the owned model the parent surface is the
+    /// head-only `PlanStateData` (and during `ExecInitAgg` the in-flight
+    /// `AggState` is not yet a `PlanStateNode`, so its `parent` back-link cannot
+    /// point at it), so the discovered `Aggref`s are collected HERE instead and
+    /// drained into `aggstate->aggs` by the nodeAgg owner after each
+    /// `ExecInitQual`/`ExecInitExpr`/`ExecBuildProjectionInfo` call. Behaviorally
+    /// equivalent: `aggno`/`aggtransno` are planner-set, so collection order does
+    /// not affect `numaggs`/`numtrans` (the owner dedups by `aggno`). `None`
+    /// (the C NIL `aggstate->aggs` before any discovery) for every non-Agg
+    /// expression.
+    pub found_aggs: Option<PgVec<'mcx, crate::primnodes::Aggref>>,
 }
 
 impl<'mcx> Clone for ExprState<'mcx> {
@@ -1290,6 +1304,7 @@ impl<'mcx> Clone for ExprState<'mcx> {
             innermost_caseval: None,
             innermost_domainval: None,
             escontext: self.escontext,
+            found_aggs: None,
         }
     }
 }
@@ -1316,6 +1331,7 @@ impl Default for ExprState<'_> {
             innermost_caseval: None,
             innermost_domainval: None,
             escontext: 0,
+            found_aggs: None,
         }
     }
 }

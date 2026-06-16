@@ -109,6 +109,11 @@ pub fn init_seams() {
     );
     // `DatabasePath` read, reconciled to the seam's `PgResult<String>` contract.
     backend_utils_init_small_seams::database_path::set(globals::database_path_seam);
+
+    // `PgStartTime = GetCurrentTimestamp();` — the `globals.c` global lives here,
+    // so the standalone-boot seam declared in `backend-tcop-postgres-seams` is
+    // installed by its owner (globals.c) pointing at the real setter.
+    backend_tcop_postgres_seams::set_pg_start_time::set(globals::SetPgStartTime);
 }
 
 #[cfg(test)]

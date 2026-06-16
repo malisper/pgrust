@@ -56,6 +56,17 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-portal = { path = "../types-portal" }
 types-snapshot = { path = "../types-snapshot" }
 
+# F0a: the main-loop drivers' owner callees (acyclic — none deps this owner).
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
+backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+
 # Seam crates (leaf; never create cycles).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
@@ -89,6 +100,12 @@ backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-s
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+
+# F0b: the single-user standalone bootstrap (PostgresSingleUserMain) callees.
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
+backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
+backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

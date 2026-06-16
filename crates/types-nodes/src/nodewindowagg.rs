@@ -19,7 +19,7 @@
 //! mirroring nodeAgg's decision to home `AggStatePerAgg`/`PerTrans`/`PerGroup`
 //! in [`crate::nodeagg`].
 
-use mcx::{Mcx, MemoryContext, PgBox, PgVec};
+use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::PgResult;
@@ -139,6 +139,8 @@ pub use WindowAggStatus::Run as WINDOWAGG_RUN;
 pub struct WindowAgg<'mcx> {
     /// `Plan plan` — the abstract plan-node base.
     pub plan: Plan<'mcx>,
+    /// `char *winname` — name of `WindowClause` implemented by this node.
+    pub winname: Option<PgString<'mcx>>,
     /// `Index winref` — ID referenced by window functions.
     pub winref: Index,
     /// `int partNumCols` — number of columns in partition clause.
@@ -188,6 +190,10 @@ impl WindowAgg<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<WindowAgg<'b>> {
         Ok(WindowAgg {
             plan: self.plan.clone_in(mcx)?,
+            winname: match &self.winname {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
             winref: self.winref,
             partNumCols: self.partNumCols,
             partColIdx: clone_opt_vec(mcx, &self.partColIdx)?,

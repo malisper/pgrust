@@ -1618,6 +1618,35 @@ pub fn AlterTableGetRelOptionsLockLevel(def_list: &[DefElem]) -> LOCKMODE {
 // Seam installation
 // ---------------------------------------------------------------------------
 
+/// Seam target for `extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn)`
+/// driven by `RelationParseRelOptions` (relcache.c). Parses the relation's
+/// `pg_class.reloptions` into the relcache's parsed-options struct.
+///
+/// `extractRelOptions` returns the full per-relkind [`RelOptStruct`]; the
+/// relcache `rd_options` carries only the `Std` arm (`StdRdOptions`), which is
+/// what the table / toast / matview / partitioned-table relkinds produce. The
+/// view (`RelOptStruct::View`) and AM-defined index (`RelOptStruct::Bytea`)
+/// arms are not modeled by the trimmed `rd_options`, so they map to `None`
+/// (the relcache leaves `rd_options` NULL for them) — matching the model's
+/// existing reloptions trim. A scratch context holds the transient parse
+/// allocations (C parses in the caller's context and copies into
+/// `CacheMemoryContext`; the owned value is returned by value).
+fn extract_rel_options_seam(
+    relkind: u8,
+    reloptions: Option<&[u8]>,
+    amoptions: Option<types_core::Oid>,
+) -> PgResult<Option<StdRdOptions>> {
+    let scratch = mcx::MemoryContext::new("RelationParseRelOptions");
+    let input = ExtractRelOptionsInput { relkind, reloptions };
+    let parsed = extractRelOptions(scratch.mcx(), &input, amoptions)?;
+    Ok(match parsed {
+        Some(RelOptStruct::Std(s)) => Some(s),
+        // View/Attribute/TableSpace/Bytea are not carried by the trimmed
+        // rd_options (Option<StdRdOptions>); the relcache leaves rd_options NULL.
+        _ => None,
+    })
+}
+
 /// Seam target for `attribute_reloptions(reloptions, validate)`: the consumers
 /// (`attoptcache.c`) only call with a non-null datum, where C always returns a
 /// non-null bytea (the ATTRIBUTE kind always has registered options). A scratch
@@ -1747,6 +1776,7 @@ fn add_local_int_reloption_seam(
 
 /// Install every seam this crate owns.
 pub fn init_seams() {
+    backend_access_common_reloptions_seams::extract_rel_options::set(extract_rel_options_seam);
     backend_access_common_reloptions_seams::attribute_reloptions::set(attribute_reloptions_seam);
     backend_access_common_reloptions_seams::tablespace_reloptions::set(tablespace_reloptions_seam);
     backend_access_common_reloptions_seams::init_local_reloptions::set(init_local_reloptions_seam);

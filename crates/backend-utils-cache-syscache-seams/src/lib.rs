@@ -23,7 +23,7 @@ use types_cache::syscache::{
     ObjectOwnerAcl, RolePasswordLookup, TypeOwnerAcl,
 };
 use types_acl::AclItem;
-use types_catalog::pg_aggregate::AggRow;
+use types_catalog::pg_aggregate::{AggFormData, AggRow};
 use types_nodes::nodes::NodePtr;
 use types_partition::PartrelTupleData;
 
@@ -563,6 +563,23 @@ seam_core::seam!(
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises its
     /// own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
     pub fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<AggRow>>
+);
+
+seam_core::seam!(
+    /// `aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid));
+    /// aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple)` plus the two
+    /// `CATALOG_VARLEN` `agginitval` / `aggminitval` `SysCacheGetAttr` text
+    /// columns (nodeAgg.c `ExecInitAgg`'s `fetch_agg_form`). Projects the full
+    /// [`AggFormData`] (every aggregate support-function Oid + the transition
+    /// type/space columns + the `aggfinalextra`/`aggmfinalextra` flags +
+    /// `aggfinalmodify`/`aggmfinalmodify` + `aggkind` + the nullable initial-value
+    /// texts) so the executor can read it all from the one pinned tuple as the C
+    /// does. `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises
+    /// its own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
+    pub fn agg_form_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        aggfnoid: Oid,
+    ) -> PgResult<Option<AggFormData>>
 );
 
 seam_core::seam!(
@@ -1718,6 +1735,31 @@ seam_core::seam!(
         relid: Oid,
         attnum: types_core::AttrNumber,
     ) -> PgResult<Option<i32>>
+);
+
+seam_core::seam!(
+    /// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stanullfrac` (pg_statistic.h):
+    /// the fraction of NULLs in the column, read off a `pg_statistic` tuple the
+    /// selectivity code holds pinned as a [`StatsTuple`]
+    /// ([`search_statrelattinh`]). A pure fixed-area struct read (no syscache
+    /// lookup, no detoast) of the caller-supplied tuple, so it cannot miss; the
+    /// tuple stays pinned (the caller releases it via [`release_stats_tuple`]).
+    pub fn pg_statistic_stanullfrac(
+        stats_tuple: types_selfuncs::StatsTuple,
+    ) -> f32
+);
+
+seam_core::seam!(
+    /// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stadistinct` (pg_statistic.h):
+    /// the number-of-distinct-values estimate for the column (positive = an
+    /// absolute count, negative = a fraction of the row count), read off a
+    /// `pg_statistic` tuple the selectivity code holds pinned as a
+    /// [`StatsTuple`] ([`search_statrelattinh`]). A pure fixed-area struct read,
+    /// so it cannot miss; the caller releases the tuple via
+    /// [`release_stats_tuple`].
+    pub fn pg_statistic_stadistinct(
+        stats_tuple: types_selfuncs::StatsTuple,
+    ) -> f32
 );
 
 /// The `pg_type` row fields `get_typdefault` reads off `SearchSysCache1(

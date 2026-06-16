@@ -141,11 +141,12 @@ pub(crate) fn read_record(
     fetching_ckpt: bool,
     replay_tli: TimeLineID,
 ) -> Result<RecordRef, PgError> {
-    // The pass-through parameters to XLogPageRead (fetching_ckpt, emode,
-    // randAccess = (ReadRecPtr == InvalidXLogRecPtr), replayTLI) are carried into
-    // the page-read driver by the prefetcher seam; `randAccess` is computed from
-    // the reader's ReadRecPtr inside the owner.
-    let _ = (fetching_ckpt, replay_tli);
+    // Pass through parameters to XLogPageRead via the held reader's
+    // private_data (XLogPageReadPrivate), exactly as C's ReadRecord sets
+    // private->{fetching_ckpt,emode,randAccess,replayTLI} before the loop
+    // (xlogrecovery.c:3160-3163). The page-read driver reads them back from
+    // reader.private_data on each XLogPageRead call.
+    crate::walrecovery::set_page_read_private(emode, fetching_ckpt, replay_tli);
 
     // This is the first attempt to read this page.
     st.last_source_failed = false;

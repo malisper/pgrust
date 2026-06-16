@@ -148,6 +148,11 @@ pub const WAIT_EVENT_BACKEND_TERMINATION: u32 = PG_WAIT_IPC + 3;
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).
 pub const WAIT_EVENT_MESSAGE_QUEUE_INTERNAL: u32 = PG_WAIT_IPC | 33;
 
+/// `WAIT_EVENT_MESSAGE_QUEUE_PUT_MESSAGE` — "Waiting to write a protocol
+/// message to a shared message queue." 35th entry (0-based 34) of the IPC
+/// section, so `PG_WAIT_IPC | 34` (= 134217762, matching c2rust).
+pub const WAIT_EVENT_MESSAGE_QUEUE_PUT_MESSAGE: u32 = PG_WAIT_IPC | 34;
+
 /// `WAIT_EVENT_MESSAGE_QUEUE_RECEIVE` — "Waiting to receive bytes from a
 /// shared message queue." `PG_WAIT_IPC | 35` (= 134217763, matching c2rust).
 pub const WAIT_EVENT_MESSAGE_QUEUE_RECEIVE: u32 = PG_WAIT_IPC | 35;

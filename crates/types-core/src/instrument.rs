@@ -52,7 +52,17 @@ impl instr_time {
     pub fn get_millisec(self) -> f64 {
         self.ticks as f64 / NS_PER_MS as f64
     }
+
+    /// `INSTR_TIME_GET_MICROSEC(t)` — ticks (nanoseconds) to whole
+    /// microseconds (`t.ticks / NS_PER_US`, integer division as in C's
+    /// `uint64` macro).
+    pub fn get_microsec(self) -> u64 {
+        (self.ticks / NS_PER_US) as u64
+    }
 }
+
+/// `NS_PER_US` (`portability/instr_time.h`) — nanoseconds per microsecond.
+pub const NS_PER_US: i64 = 1_000;
 
 /// `BufferUsage` (`executor/instrument.h`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -41,7 +41,8 @@ pub use types_wal::wal::RecoveryPauseState;
 // ===========================================================================
 
 pub use types_wal::xlogrecovery_carriers::{
-    DecodedBlockTag, ReadRecordResult, RecordRef, XLogPageReadResult, XLogSource,
+    DecodedBlockTag, EndOfWalRecoveryInfo, InitWalRecoveryResult, ReadRecordResult, RecordRef,
+    XLogPageReadResult, XLogSource,
 };
 
 /// Human-readable names for [`XLogSource`], for debugging output.
@@ -89,32 +90,6 @@ pub enum RecoveryTargetAction {
     Pause = 0,
     Promote = 1,
     Shutdown = 2,
-}
-
-/// What [`crate::shmem`]'s `finish_wal_recovery` will return: where recovery
-/// ended, and why. (`EndOfWalRecoveryInfo`, xlogrecovery.h:91) — owned form.
-#[derive(Clone, Debug, Default)]
-pub struct EndOfWalRecoveryInfo {
-    /// start of last valid or applied record
-    pub last_rec: XLogRecPtr,
-    pub last_rec_tli: TimeLineID,
-    /// end of last valid or applied record
-    pub end_of_log: XLogRecPtr,
-    pub end_of_log_tli: TimeLineID,
-    /// LSN of the page that contains `end_of_log`
-    pub last_page_begin_ptr: XLogRecPtr,
-    /// copy of the last page, up to `end_of_log` (empty if page-aligned)
-    pub last_page: Vec<u8>,
-    /// start pointer of a broken record at end of WAL when recovery completes
-    pub aborted_rec_ptr: XLogRecPtr,
-    /// location of the first contrecord that went missing
-    pub missing_contrec_ptr: XLogRecPtr,
-    /// short human-readable string describing why recovery ended
-    pub recovery_stop_reason: String,
-    /// standby.signal file was found
-    pub standby_signal_file_found: bool,
-    /// recovery.signal file was found
-    pub recovery_signal_file_found: bool,
 }
 
 // ===========================================================================

@@ -787,3 +787,14 @@ seam_core::seam!(
         new_relfilenumber: Oid,
     ) -> PgResult<()>
 );
+
+/* ---- ALTER TABLE phase machinery outward seams (unported owners) --------- */
+
+seam_core::seam!(
+    /// `EventTriggerAlterTableRelid(Oid objectId)` (commands/event_trigger.c):
+    /// remember the relation OID currently being altered so that any
+    /// event-trigger-driven subcommands can attribute themselves to it. The
+    /// owner (`backend-commands-event-trigger`) installs this when it lands;
+    /// `AlterTableInternal` calls it before driving the phases.
+    pub fn event_trigger_alter_table_relid(object_id: Oid) -> PgResult<()>
+);

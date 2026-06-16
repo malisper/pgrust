@@ -207,6 +207,185 @@ fn read_opt_expr_box<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Expr>>
     }
 }
 
+/// `READ_NODE_FIELD` of a `List *` of `Expr` carried as `PgVec<PgBox<Expr>>`,
+/// matching `write_box_expr_list_field`: `(...)` of framed Exprs, `<>` → `None`.
+fn read_box_expr_list_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, PgBox<'mcx, Expr>>>> {
+    let _label = next_token()?;
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(None); // `<>` — NIL
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for expr list"));
+    }
+    let mut out = PgVec::new_in(mcx);
+    let mut cur = next_token()?;
+    loop {
+        if cur.bytes == b")" {
+            break;
+        }
+        let child = read::node_read(mcx, Some(cur))?;
+        match child {
+            Some(n) => match PgBox::into_inner(n) {
+                Node::Expr(e) => out.push(mcx::alloc_in(mcx, e)?),
+                other => {
+                    return Err(elog_error(alloc::format!(
+                        "expected Expr in list, got {:?}",
+                        other.node_tag()
+                    )))
+                }
+            },
+            None => return Err(elog_error("unexpected null in non-nullable expr list")),
+        }
+        cur = next_token()?;
+    }
+    Ok(Some(out))
+}
+
+/// `READ_NODE_FIELD` of a `List *` of `Expr` with NULL cells, carried as
+/// `PgVec<Option<PgBox<Expr>>>`, matching `write_opt_box_expr_list_field`:
+/// `(...)` of framed Exprs or `<>` cells; a top-level `<>` → `None`.
+fn read_opt_box_expr_list_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, Option<PgBox<'mcx, Expr>>>>> {
+    let _label = next_token()?;
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(None); // `<>` — NIL
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for nullable expr list"));
+    }
+    let mut out = PgVec::new_in(mcx);
+    let mut cur = next_token()?;
+    loop {
+        if cur.bytes == b")" {
+            break;
+        }
+        // A `<>` cell is the C NULL element.
+        let child = read::node_read(mcx, Some(cur))?;
+        match child {
+            None => out.push(None),
+            Some(n) => match PgBox::into_inner(n) {
+                Node::Expr(e) => out.push(Some(mcx::alloc_in(mcx, e)?)),
+                other => {
+                    return Err(elog_error(alloc::format!(
+                        "expected Expr in nullable list, got {:?}",
+                        other.node_tag()
+                    )))
+                }
+            },
+        }
+        cur = next_token()?;
+    }
+    Ok(Some(out))
+}
+
+/// `READ_NODE_FIELD` of a `List *` of `String` value nodes carried as
+/// `PgVec<PgString>`, matching `write_pgstring_list_field`: `("a" "b" ...)`;
+/// `<>` → `None`.
+fn read_pgstring_list_opt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgVec<'mcx, PgString<'mcx>>>> {
+    let _label = next_token()?;
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(None);
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for string list"));
+    }
+    let mut out = PgVec::new_in(mcx);
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        out.push(read_string_token(mcx, &t)?);
+    }
+    Ok(Some(out))
+}
+
+/// `READ_NODE_FIELD` of a `List *` of `String` value nodes with NULL cells,
+/// carried as `PgVec<Option<PgString>>`, matching `write_opt_pgstring_list_field`:
+/// `("a" <> ...)`; `<>` (top level) → `None`.
+fn read_opt_pgstring_list_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, Option<PgString<'mcx>>>>> {
+    let _label = next_token()?;
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(None);
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for nullable string list"));
+    }
+    let mut out = PgVec::new_in(mcx);
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        if t.bytes.is_empty() {
+            out.push(None); // `<>` cell — DEFAULT namespace
+        } else {
+            out.push(Some(read_string_token(mcx, &t)?));
+        }
+    }
+    Ok(Some(out))
+}
+
+/// `READ_NODE_FIELD` of an `Oid` scalar list as `Option` (NIL `<>` → `None`,
+/// distinguishing it from a present-but-empty `(o)` list, for byte-stability).
+fn read_oid_list_opt<'mcx>(mcx: Mcx<'mcx>, disc: u8) -> PgResult<Option<PgVec<'mcx, u32>>> {
+    let _label = next_token()?;
+    let first = next_token()?;
+    if first.bytes.is_empty() {
+        return Ok(None); // `<>` — NIL
+    }
+    if first.bytes != b"(" {
+        return Err(elog_error("expected '(' for scalar list"));
+    }
+    let d = next_token()?;
+    if d.bytes.len() != 1 || d.bytes[0] != disc {
+        return Err(elog_error("wrong scalar-list discriminator"));
+    }
+    let mut v = PgVec::new_in(mcx);
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        v.push(atoi_i64(&tok_str(&t)) as u32);
+    }
+    Ok(Some(v))
+}
+
+/// As [`read_oid_list_opt`] but yielding `Option<PgVec<i32>>` for an IntList.
+fn read_int_list_opt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgVec<'mcx, i32>>> {
+    match read_oid_list_opt(mcx, b'i')? {
+        None => Ok(None),
+        Some(raw) => {
+            let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
+            for x in raw.iter() {
+                v.push(*x as i32);
+            }
+            Ok(Some(v))
+        }
+    }
+}
+
+/// Decode a `_outString` value-node token (`"..."`, kept whole by `pg_strtok`):
+/// debackslash, then strip the surrounding quotes.
+fn read_string_token<'mcx>(mcx: Mcx<'mcx>, t: &Token<'_>) -> PgResult<PgString<'mcx>> {
+    let s = read::debackslash(t.bytes);
+    let trimmed = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(&s);
+    Ok(PgString::from_str_in(trimmed, mcx)?)
+}
+
 // ---------------------------------------------------------------------------
 // Direct-value list readers (PgVec<RangeTblEntry> / <RTEPermissionInfo> /
 // <TargetEntry>): read a node list, match each framed element's arm.
@@ -528,8 +707,9 @@ fn read_range_tbl_entry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblEntry<'mcx>> {
         }
         RTEKind::RTE_TABLEFUNC => {
             r.tablefunc = read_opt_node(mcx)?;
-            // C copies coltypes/coltypmods/colcollations from the tablefunc;
-            // TableFunc is seam-panicked here, so leave those empty (NIL).
+            // C copies coltypes/coltypmods/colcollations from the tablefunc node
+            // (a post-read derivation, not a serialized RTE field); the out side
+            // does not write them here, so leave the RTE copies empty (NIL).
         }
         RTEKind::RTE_VALUES => {
             r.values_lists = read_node_vec_field(mcx)?;
@@ -1577,6 +1757,52 @@ fn read_a_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Const<'mcx>> {
     })
 }
 
+/// `_readTableFunc` — reads the fields `out_table_func` wrote, in order.
+pub(crate) fn read_table_func<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::primnodes::TableFunc<'mcx>> {
+    use types_nodes::primnodes::TableFuncType;
+    let functype = match read_enum_field()? {
+        0 => TableFuncType::TFT_XMLTABLE,
+        _ => TableFuncType::TFT_JSON_TABLE,
+    };
+    let ns_uris = read_box_expr_list_opt(mcx)?;
+    let ns_names = read_opt_pgstring_list_opt(mcx)?;
+    let docexpr = read_opt_expr_box(mcx)?;
+    let rowexpr = read_opt_expr_box(mcx)?;
+    let colnames = read_pgstring_list_opt(mcx)?;
+    let coltypes = read_oid_list_opt(mcx, b'o')?;
+    let coltypmods = read_int_list_opt(mcx)?;
+    let colcollations = read_oid_list_opt(mcx, b'o')?;
+    let colexprs = read_opt_box_expr_list_opt(mcx)?;
+    let coldefexprs = read_opt_box_expr_list_opt(mcx)?;
+    let colvalexprs = read_opt_box_expr_list_opt(mcx)?;
+    let passingvalexprs = read_box_expr_list_opt(mcx)?;
+    let notnulls = crate::read_bitmapset_opt_field(mcx)?;
+    let plan = read_opt_node(mcx)?;
+    let ordinalitycol = read_int_field()?;
+    let location = read_location_field()?;
+    Ok(types_nodes::primnodes::TableFunc {
+        functype,
+        ns_uris,
+        ns_names,
+        docexpr,
+        rowexpr,
+        colnames,
+        coltypes,
+        coltypmods,
+        colcollations,
+        colexprs,
+        coldefexprs,
+        colvalexprs,
+        passingvalexprs,
+        notnulls,
+        plan,
+        ordinalitycol,
+        location,
+    })
+}
+
 // ===========================================================================
 // Dispatch.
 // ===========================================================================
@@ -1635,17 +1861,9 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"SELECTSTMT" => read_select_stmt(mcx).map(Node::SelectStmt),
         b"A_CONST" => read_a_const(mcx).map(Node::A_Const),
 
+        b"TABLEFUNC" => read_table_func(mcx).map(Node::TableFunc),
+
         // --- seam-panic (carrier cannot round-trip): surface the exact C error.
-        // NOTE: TableFunc carrier trims `plan` + `location` and uses Option-element
-        // typed lists (XMLTABLE/JSON_TABLE) not modeled for serialization.
-        b"TABLEFUNC" => {
-            return Some(Err(elog_error(
-                "readTableFunc: TableFunc carrier trims `plan` + `location` and uses \
-                 Option-element typed lists not modeled for serialization \
-                 (XMLTABLE/JSON_TABLE node)"
-                    .to_string(),
-            )))
-        }
         // NOTE: CommonTableExpr.search_clause is a CTESearchClause, not a Node arm.
         b"COMMONTABLEEXPR" => {
             return Some(Err(elog_error(

@@ -89,6 +89,10 @@ pub mod partition;
 pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;
+/// `AggState *` carrier — the owned, tag-checked erased trait object the central
+/// [`planstate::PlanStateNode::Agg`] variant holds (its concrete `AggStateData`
+/// lives in `backend-executor-nodeAgg`, above this crate). See the module docs.
+pub mod aggstate_carrier;
 pub mod primnodes;
 pub mod querydesc;
 pub mod queryenvironment;

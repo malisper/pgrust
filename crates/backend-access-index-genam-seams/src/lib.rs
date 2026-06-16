@@ -33,6 +33,96 @@ use types_scan::genam::SysScanDescData;
  * Panic until the genam owner installs them.
  * ======================================================================== */
 
+/// One decoded `pg_class` row as `ScanPgRelation` (relcache.c) consumes it: the
+/// `Form_pg_class` scalar columns the relcache copies into `rd_rel`, in
+/// owner-vocabulary form (no relcache types — the relcache caller marshals this
+/// into its owned `FormPgClass`). The variable-length tail columns (`relacl`,
+/// `reloptions`, `relpartbound`) are not part of the fixed-width form the
+/// relcache caches in `rd_rel`; `reloptions` is consumed separately by
+/// `RelationParseRelOptions` (its own primitive). `oid` is the row's OID
+/// (`pg_class.oid`), which the relcache uses as `rd_id`.
+#[derive(Clone, Debug)]
+pub struct ScannedPgClass {
+    pub oid: Oid,
+    pub relname: String,
+    pub relnamespace: Oid,
+    pub reltype: Oid,
+    pub reloftype: Oid,
+    pub relowner: Oid,
+    pub relam: Oid,
+    pub relfilenode: Oid,
+    pub reltablespace: Oid,
+    pub relpages: i32,
+    pub reltuples: f32,
+    pub relallvisible: i32,
+    pub reltoastrelid: Oid,
+    pub relhasindex: bool,
+    pub relisshared: bool,
+    pub relpersistence: i8,
+    pub relkind: i8,
+    pub relnatts: i16,
+    pub relchecks: i16,
+    pub relhasrules: bool,
+    pub relhastriggers: bool,
+    pub relhassubclass: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
+    pub relispopulated: bool,
+    pub relreplident: i8,
+    pub relispartition: bool,
+    pub relrewrite: Oid,
+    pub relfrozenxid: u32,
+    pub relminmxid: u32,
+    /// `text[] reloptions` — the variable-length `pg_class.reloptions` column,
+    /// as its verbatim on-disk varlena bytes (the array image
+    /// `RelationParseRelOptions` feeds to `extractRelOptions`'s
+    /// `fastgetattr(Anum_pg_class_reloptions, ...)`), or `None` for the C
+    /// `isnull` (no options). Not part of the fixed-width `Form_pg_class` the
+    /// relcache caches in `rd_rel`; carried separately so
+    /// `RelationParseRelOptions` can parse it.
+    pub reloptions: Option<Vec<u8>>,
+}
+
+/// One decoded `pg_attribute` row as `RelationBuildTupleDesc` (relcache.c)
+/// consumes it: the fixed-layout `Form_pg_attribute` columns it copies into the
+/// tuple descriptor's attribute array, in owner-vocabulary form (no relcache
+/// types — the relcache caller marshals this into its owned `OwnedAttr`). The
+/// `attmissingval` / `attacl` / `attoptions` / `attfdwoptions` / `attstattarget`
+/// tail columns are not part of the fixed descriptor data the relcache builds
+/// from here (`attmissingval` is fetched separately when `atthasmissing`).
+#[derive(Clone, Debug)]
+pub struct ScannedPgAttribute {
+    pub attname: String,
+    pub atttypid: Oid,
+    pub attlen: i16,
+    pub attnum: AttrNumber,
+    pub atttypmod: i32,
+    pub attndims: i16,
+    pub attbyval: bool,
+    pub attalign: i8,
+    pub attstorage: i8,
+    pub attcompression: i8,
+    pub attnotnull: bool,
+    pub atthasdef: bool,
+    pub atthasmissing: bool,
+    pub attidentity: i8,
+    pub attgenerated: i8,
+    pub attisdropped: bool,
+    pub attislocal: bool,
+    pub attinhcount: i16,
+    pub attcollation: Oid,
+    /// The column's "missing" value, lifetime-free, when `atthasmissing` is set
+    /// and the `attmissingval` array column is non-NULL. C's
+    /// `RelationBuildTupleDesc` does `heap_getattr(Anum_pg_attribute_attmissingval)`
+    /// then `array_get_element(missingval, 1, ...)` to pull the single element
+    /// (`Assert(!is_null)`); the genam decode performs that fetch + element
+    /// extraction and carries the resulting value's image so the relcache can
+    /// store it in `rd_att->constr->missing[attnum-1].am_value`. `None` when
+    /// `atthasmissing` is false or the `attmissingval` datum is NULL (the C
+    /// `missingNull` true: no missing value for this column).
+    pub attmissingval: Option<types_tuple::heaptuple::MissingValueImage>,
+}
+
 /// One decoded `pg_index` row as `RelationGetIndexList` consumes it: the
 /// `Form_pg_index` flags + `int2vector indkey` it needs, plus whether the
 /// `indpred` attribute is null (`heap_attisnull(Anum_pg_index_indpred)`).
@@ -104,6 +194,33 @@ pub struct ExclusionKeyInfo {
     pub proc: Oid,
     pub strat: u16,
 }
+
+seam_core::seam!(
+    /// `ScanPgRelation(targetRelId, indexOK, force_non_historic)` (relcache.c):
+    /// `table_open(RelationRelationId)`, `systable_beginscan(ClassOidIndexId,
+    /// oid = targetRelId)` then a single `systable_getnext` +
+    /// `GETSTRUCT(Form_pg_class)` deform. Returns the found row's decoded
+    /// `pg_class` form, `Ok(None)` for the C NULL (no matching row). The
+    /// relcache caller marshals this into its owned `FormPgClass` and
+    /// `rd_id`/`rd_rel`. Can `ereport(ERROR)` (catalog read failure), carried on
+    /// `Err`. (`index_ok` toggles the index-vs-heap scan; the relcache passes
+    /// it straight through to `systable_beginscan`.)
+    pub fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<ScannedPgClass>>
+);
+
+seam_core::seam!(
+    /// `RelationBuildTupleDesc(relation)`'s `pg_attribute` scan (relcache.c):
+    /// `table_open(AttributeRelationId)`, `systable_beginscan(
+    /// AttributeRelidNumIndexId, attrelid = relid, attnum > 0)` then a
+    /// `systable_getnext` loop + `GETSTRUCT(Form_pg_attribute)` deform for each
+    /// of the `natts` user columns. Returns the decoded rows (the relcache
+    /// caller marshals each into its owned `OwnedAttr`, fetches `attmissingval`
+    /// separately when `atthasmissing`, and fills the descriptor). `natts` is
+    /// `relation->rd_rel->relnatts`, used to size the scan and detect a short
+    /// catalog. Can `ereport(ERROR)` (catalog read failure / missing column),
+    /// carried on `Err`.
+    pub fn scan_pg_attribute(reloid: Oid, natts: i16) -> PgResult<Vec<ScannedPgAttribute>>
+);
 
 seam_core::seam!(
     /// `RelationGetIndexList`'s scan (relcache.c): `systable_beginscan(pg_index,

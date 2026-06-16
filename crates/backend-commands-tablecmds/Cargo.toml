@@ -22,6 +22,8 @@ types-acl = { path = "../types-acl" }
 types-cluster = { path = "../types-cluster" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+# ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
@@ -41,3 +43,15 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+types-datum = { path = "../types-datum" }
+backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
+backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
+backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-toasting = { path = "../backend-catalog-toasting" }
+backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }

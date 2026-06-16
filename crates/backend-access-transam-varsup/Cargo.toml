@@ -18,6 +18,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
 backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }

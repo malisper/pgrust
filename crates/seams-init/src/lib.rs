@@ -93,6 +93,7 @@ pub fn init_all() {
     backend_backup_throttle::init_seams();
     backend_bootstrap_bootstrap::init_seams();
     backend_bootstrap_bootparse::init_seams();
+    backend_bootstrap_catalog_data::init_seams();
     backend_catalog_catalog::init_seams();
     backend_catalog_storage::init_seams();
     backend_catalog_namespace::init_seams();
@@ -240,6 +241,7 @@ pub fn init_all() {
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
+    backend_libpq_pqmq::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
@@ -348,6 +350,7 @@ pub fn init_all() {
     backend_storage_buffer_support::init_seams();
     backend_storage_buffer_bufmgr::init_seams();
     backend_storage_aio_read_stream::init_seams();
+    backend_storage_aio_methods::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();
@@ -384,6 +387,15 @@ pub fn init_all() {
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
+    // Per-kind pgstat owner crates must register their builtin kinds BEFORE
+    // backend_utils_activity_pgstat::init_seams() seals the kind table.
+    backend_utils_activity_pgstat_io::init_seams();
+    backend_utils_activity_pgstat_wal::init_seams();
+    backend_utils_activity_pgstat_replslot::init_seams();
+    backend_utils_activity_pgstat_subscription::init_seams();
+    backend_utils_activity_pgstat_slru::init_seams();
+    backend_utils_activity_pgstat_backend::init_seams();
+    backend_utils_activity_pgstat::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
@@ -1663,40 +1675,17 @@ mod recurrence_guard {
         ("backend_commands_trigger", "RemoveTriggerById"),
         ("backend_commands_trigger", "renametrig"),
         //
-        // -- backend-access-index-genam (relcache-build scan helpers unported) --
+        // -- backend-access-index-genam (build_index_value_description unported) --
         // DESIGN_DEBT (TD-GENAM-RELCACHE-SCANS): the genam unit ported genam.c's
-        // systable_* primitive engine (begin/getnext/endscan, installed) but NOT
-        // these higher-level helpers. The 6 `relcache_*`/`scan_pg_*` seams are
-        // relcache.c's own systable scans (RelationGetIndexList /
-        // GetStatExtList / GetFKeyList / GetExclusionInfo / AttrDefaultFetch /
-        // CheckNNConstraintFetch) — relcache calls them OUTWARD, but the scan
-        // bodies (systable_beginscan over pg_index/pg_statistic_ext/pg_constraint/
-        // pg_attrdef + per-row deform + DeconstructFkConstraintRow / get_opcode /
-        // detoast) are not yet written in the genam owner (only the DTO structs
-        // exist). `build_index_value_description` (the per-key out-function +
-        // ACL-visibility render) is a genam.c function not yet bodied. Install +
-        // DELETE each as the genam unit ports the corresponding scan/render body.
-        // (`systable_inplace_update` — the buffer-locking begin/getnext retry +
-        // `heap_inplace_lock`/`heap_inplace_update_and_unlock`/`heap_inplace_unlock`
-        // loop — is now bodied + installed by the genam owner, so its allowlist
-        // entry was removed.)
-        ("backend_access_index_genam", "relcache_scan_pg_index"),
-        // `relcache_scan_pg_rewrite` (full-Query cache-ownership keystone): the
-        // `pg_rewrite` scan + per-row `Form_pg_rewrite` + `ev_qual`/`ev_action`
-        // node-string decode `RelationBuildRuleLock` now consumes to build the
-        // real value-typed `rd_rules` (RuleLock/RewriteRule with whole
-        // `Query<'static>` action trees in the CacheMemoryContext arena). Only
-        // the DTO struct (`ScannedPgRewrite`) exists in the genam owner; the
-        // scan body is not yet written, so the seam loud-panics
-        // (mirror-PG-and-panic) until genam ports it — exactly like the sibling
-        // pg_index/pg_statistic_ext/pg_constraint scans here. Install + DELETE
-        // when the genam owner adds the pg_rewrite scan-and-decode body.
-        ("backend_access_index_genam", "relcache_scan_pg_rewrite"),
-        ("backend_access_index_genam", "relcache_scan_pg_statistic_ext"),
-        ("backend_access_index_genam", "relcache_scan_pg_constraint_fkeys"),
-        ("backend_access_index_genam", "relcache_exclusion_info"),
-        ("backend_access_index_genam", "scan_pg_attrdef"),
-        ("backend_access_index_genam", "scan_pg_constraint_nncheck"),
+        // systable_* primitive engine (begin/getnext/endscan, installed) AND the
+        // relcache catalog scan-and-decode helpers (ScanPgRelation /
+        // RelationBuildTupleDesc's scan_pg_class/scan_pg_attribute +
+        // RelationGetIndexList / GetStatExtList / GetFKeyList / GetExclusionInfo /
+        // AttrDefaultFetch / CheckNNConstraintFetch — all bodied + installed in
+        // src/decode.rs, so their allowlist entries were removed). Only
+        // `build_index_value_description` (the per-key out-function +
+        // ACL-visibility render) remains a genam.c function not yet bodied;
+        // install + DELETE when the genam unit ports its render body.
         ("backend_access_index_genam", "build_index_value_description"),
         //
         // -- backend-utils-cache-relcache (FDW-routine cache slot not modeled) --
@@ -1840,7 +1829,7 @@ mod recurrence_guard {
         // DESIGN_DEBT (TD-TABLECMDS-F1F6-UNPORTED): tablecmds.c is a 22k-LOC giant
         // ported in families. Only FAMILY F0 (relation create/drop/truncate +
         // on_commit + small helpers) is landed in `backend-commands-tablecmds`
-        // (audited). The eleven seams below are tablecmds.c functions belonging to
+        // (audited). The seams below are tablecmds.c functions belonging to
         // the not-yet-ported families F1-F6 (the ALTER phase machine, column /
         // constraint / ALTER TYPE / inheritance-partition / RENAME / SET SCHEMA /
         // change-owner machinery, and the sequence-create driver). They are
@@ -1856,7 +1845,12 @@ mod recurrence_guard {
         ("backend_commands_tablecmds", "AlterTableNamespace"),
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
         ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
-        ("backend_commands_tablecmds", "at_exec_change_owner"),
+        // `at_exec_change_owner` retired from this list: the ALTER-phase spine
+        // (FAMILY F1, now landed) `::call`s it from `ATExecCmd`'s AT_ChangeOwner
+        // arm, so the guard classifies it as an OUTWARD dependency seam of
+        // tablecmds (real owner = the still-unported ATExecChangeOwner body),
+        // not an uninstalled inward contract. It loud-panics until that body
+        // lands and installs it.
         ("backend_commands_tablecmds", "rename_relation_internal"),
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
         // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's

@@ -228,6 +228,98 @@ pub(crate) fn reader_state_mut() -> &'static mut XLogReaderState<'static> {
 }
 
 // ===========================================================================
+// Orchestrator-facing reader/prefetcher accessors (InitWalRecovery /
+// FinishWalRecovery / ShutdownWalRecovery in orchestrator.rs). These mirror the
+// C `xlogreader->FIELD` / `xlogprefetcher` dereferences the orchestrators do.
+// ===========================================================================
+
+/// `xlogreader->EndRecPtr` — end+1 LSN of the last record read by the reader.
+#[inline]
+pub(crate) fn reader_end_rec_ptr() -> XLogRecPtr {
+    reader_state().EndRecPtr
+}
+
+/// `xlogreader->seg.ws_tli` — timeline of the currently open WAL segment.
+#[inline]
+pub(crate) fn reader_seg_tli() -> types_core::TimeLineID {
+    reader_state().seg.ws_tli
+}
+
+/// `memcpy(dst, xlogreader->readBuf, len)` — the first `len` bytes of the
+/// reader's current page buffer (the valid part of the last block).
+pub(crate) fn reader_read_buf_prefix(len: usize) -> alloc::vec::Vec<u8> {
+    let r = reader_state();
+    match r.readBuf.as_ref() {
+        Some(buf) => buf[..len.min(buf.len())].to_vec(),
+        None => alloc::vec::Vec::new(),
+    }
+}
+
+/// `XLogRecGetData(xlogreader)` — the main-data payload of the held reader's
+/// current decoded record.
+pub(crate) fn reader_main_data() -> alloc::vec::Vec<u8> {
+    backend_access_transam_xlogreader::XLogRecGetData(reader_state()).to_vec()
+}
+
+/// `XLogPrefetcherBeginRead(xlogprefetcher, RecPtr)` — public entry for the
+/// orchestrators (the ReadRecord loop seam variant is `prefetcher_begin_read`).
+#[inline]
+pub(crate) fn prefetcher_begin_read_pub(rec_ptr: XLogRecPtr) {
+    prefetcher().XLogPrefetcherBeginRead(rec_ptr);
+}
+
+/// Set `reader->private_data` (`XLogPageReadPrivate`) for the next page read, as
+/// C's `ReadRecord` does before the prefetcher loop (xlogrecovery.c:3160-3163):
+/// `private->fetching_ckpt/emode/randAccess/replayTLI`. `randAccess` is
+/// `(xlogreader->ReadRecPtr == InvalidXLogRecPtr)`.
+pub(crate) fn set_page_read_private(
+    emode: types_error::ErrorLevel,
+    fetching_ckpt: bool,
+    replay_tli: types_core::TimeLineID,
+) {
+    let r = reader();
+    let rand_access = r.ReadRecPtr == types_core::InvalidXLogRecPtr;
+    if let Some(any) = r.private_data.as_mut() {
+        if let Some(p) = (any.as_mut() as &mut dyn core::any::Any)
+            .downcast_mut::<crate::pageread::XLogPageReadPrivate>()
+        {
+            p.emode = emode;
+            p.fetching_ckpt = fetching_ckpt;
+            p.rand_access = rand_access;
+            p.replay_tli = replay_tli;
+        }
+    }
+}
+
+/// `XLogPrefetcherComputeStats(xlogprefetcher)` — public entry for
+/// ShutdownWalRecovery's final pg_stat_recovery_prefetch update.
+#[inline]
+pub(crate) fn prefetcher_compute_stats_pub() {
+    prefetcher().XLogPrefetcherComputeStats();
+}
+
+/// `XLogReaderFree(xlogreader); XLogPrefetcherFree(xlogprefetcher)`
+/// (ShutdownWalRecovery, xlogrecovery.c:1640-1641). The held reader/prefetcher
+/// live in process-lifetime leaked boxes (the C file-static lifetime); freeing
+/// them is dropping those boxes and clearing the holder pointers. Recovery runs
+/// once per process, so this is the genuine end-of-recovery teardown.
+pub(crate) fn free_reader_and_prefetcher() {
+    let pp = XLOGPREFETCHER.with(Cell::get);
+    if !pp.is_null() {
+        // SAFETY: `pp` came from `Box::into_raw` in init_wal_recovery_reader and
+        // the single-threaded startup process is the sole owner; drop it once.
+        drop(unsafe { Box::from_raw(pp) });
+        XLOGPREFETCHER.with(|c| c.set(core::ptr::null_mut()));
+    }
+    let rp = XLOGREADER.with(Cell::get);
+    if !rp.is_null() {
+        // SAFETY: as above for the reader box.
+        drop(unsafe { Box::from_raw(rp) });
+        XLOGREADER.with(|c| c.set(core::ptr::null_mut()));
+    }
+}
+
+// ===========================================================================
 // XLogRecGetRmid / XLogRecGetInfo / XLogRecGetTotalLen seam installs.
 //
 // The recovery driver's ReadCheckpointRecord reads the current record's header
