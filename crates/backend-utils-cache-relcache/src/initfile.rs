@@ -317,7 +317,15 @@ fn finish_relcache_entries() -> PgResult<()> {
                 let relp = xunit::SearchSysCacheRelOid(oid)?;
                 let bad = with_rel_mut(rd, |r| {
                     r.rd_rel = relp;
-                    crate::build::RelationParseRelOptions(r)?;
+                    // C re-parses reloptions from the syscache htup; the
+                    // owned-model syscache form seam (search_pg_class_full_form)
+                    // does not surface the variable-length reloptions tail
+                    // column, so this phase-3 fixup reload re-parses with no
+                    // reloptions bytes (None). Widening that syscache seam to
+                    // carry reloptions is the syscache owner's lane; until then
+                    // this corrupt-initfile-entry reload path leaves rd_options
+                    // NULL rather than re-deriving it.
+                    crate::build::RelationParseRelOptions(r, None)?;
                     Ok::<bool, backend_utils_error::PgError>(r.rd_rel.relowner == InvalidOid)
                 })?;
                 if bad {
