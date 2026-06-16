@@ -525,6 +525,54 @@ pub fn appendStringInfoStringQuoted(
     Ok(())
 }
 
+/// `check_encoding_conversion_args` (`utils/mb/mbutils.c`): validate the
+/// source/destination encodings handed to a conversion procedure. The
+/// `expected_*` parameters may be `-1` ("wildcard", any valid encoding); a
+/// `< 0` length is rejected. Encoding names for the mismatch messages come from
+/// `pg_encoding_to_char` (encnames.c). Logic/branch-order/message-text 1:1 with
+/// the C, which raises plain `elog(ERROR, ...)` (internal error, no SQLSTATE).
+pub fn check_encoding_conversion_args(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    len: i32,
+    expected_src_encoding: pg_enc,
+    expected_dest_encoding: pg_enc,
+) -> PgResult<()> {
+    if !pg_valid_encoding(src_encoding) {
+        return elog(ERROR, format!("invalid source encoding ID: {src_encoding}"));
+    }
+    if src_encoding != expected_src_encoding && expected_src_encoding >= 0 {
+        return elog(
+            ERROR,
+            format!(
+                "expected source encoding \"{}\", but got \"{}\"",
+                common_encnames_seams::pg_encoding_to_char::call(expected_src_encoding),
+                common_encnames_seams::pg_encoding_to_char::call(src_encoding)
+            ),
+        );
+    }
+    if !pg_valid_encoding(dest_encoding) {
+        return elog(
+            ERROR,
+            format!("invalid destination encoding ID: {dest_encoding}"),
+        );
+    }
+    if dest_encoding != expected_dest_encoding && expected_dest_encoding >= 0 {
+        return elog(
+            ERROR,
+            format!(
+                "expected destination encoding \"{}\", but got \"{}\"",
+                common_encnames_seams::pg_encoding_to_char::call(expected_dest_encoding),
+                common_encnames_seams::pg_encoding_to_char::call(dest_encoding)
+            ),
+        );
+    }
+    if len < 0 {
+        return elog(ERROR, "encoding conversion length must not be negative");
+    }
+    Ok(())
+}
+
 fn validate_encoding(encoding: pg_enc) -> PgResult<()> {
     if pg_valid_encoding(encoding) {
         Ok(())

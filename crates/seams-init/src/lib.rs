@@ -378,6 +378,15 @@ pub fn init_all() {
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
     backend_utils_mb_conv_string_helpers::init_seams();
+    backend_conv_utf8_and_gb18030::init_seams();
+    backend_conv_utf8_and_gbk::init_seams();
+    backend_conv_utf8_and_iso8859_1::init_seams();
+    backend_conv_utf8_and_iso8859::init_seams();
+    backend_conv_utf8_and_johab::init_seams();
+    backend_conv_utf8_and_sjis::init_seams();
+    backend_conv_utf8_and_sjis2004::init_seams();
+    backend_conv_utf8_and_uhc::init_seams();
+    backend_conv_utf8_and_win::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_guc::init_seams();
