@@ -557,17 +557,15 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
 /// `parallel_vacuum_end(pvs, istats)` (vacuumparallel.c:435) — destroy the
 /// parallel context and end parallel mode.
 ///
-/// In C this copies the per-index stats into the caller's `istats[]` first.
-/// The repo contract returns `()` and the caller already has its authoritative
-/// stats via this crate's `parallel_vacuum_get_dead_items`/per-pass reads, so
-/// the passed-in `_indstats` is the consumer's own copy and is unused here.
+/// In C this copies the per-index stats into the caller's `istats[]` first
+/// (`istats[i]` = `pvs->indstats[i].istat` when `istat_updated`, else `NULL`).
+/// The repo seam returns that array instead; the caller stores it.
 /// The teardown order matches C: destroy tidstore, destroy parallel context,
 /// then exit parallel mode (see the C comment about ExitParallelMode), and only
 /// then drop the owned state (the `pfree(pvs)` analogue).
 fn parallel_vacuum_end(
     pvs: ParallelVacuumStateHandle,
-    _indstats: Vec<Option<IndexBulkDeleteResult>>,
-) -> PgResult<()> {
+) -> PgResult<Vec<Option<IndexBulkDeleteResult>>> {
     debug_assert!(!vac::is_parallel_worker::call()?);
 
     // Remove the entry up front so the borrow is released before we call the
@@ -579,14 +577,24 @@ fn parallel_vacuum_end(
             return ereport(ERROR)
                 .errmsg("parallel vacuum state handle is not registered")
                 .finish(here("parallel_vacuum_end"))
-                .map(|()| ());
+                .map(|()| unreachable!("ereport(ERROR) does not return"));
         }
     };
 
     /*
-     * The C copies the updated statistics out of DSM into `istats[]` here; in
-     * this repo the consumer reads them elsewhere, so nothing is copied out.
+     * Copy the updated statistics. For each index, hand back the DSM-resident
+     * `istat` if it was updated, else `None` (the C `istats[i] = NULL`).
      */
+    let mut istats: Vec<Option<IndexBulkDeleteResult>> =
+        alloc::vec![None; state.nindexes as usize];
+    for i in 0..state.nindexes as usize {
+        let indstats = &state.indstats[i];
+        if indstats.istat_updated {
+            istats[i] = Some(indstats.istat);
+        } else {
+            istats[i] = None;
+        }
+    }
 
     if !state.dead_items.is_none() {
         vac::tid_store_destroy_pv::call(state.dead_items)?;
@@ -601,7 +609,7 @@ fn parallel_vacuum_end(
      * `pfree(pvs)` analogue. */
     drop(state);
 
-    Ok(())
+    Ok(istats)
 }
 
 /// `parallel_vacuum_get_dead_items(pvs, &dead_items_info)`
