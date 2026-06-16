@@ -11352,16 +11352,24 @@ dependencies = [
 name = "backend-rewrite-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-indexing-seams",
  "backend-nodes-core",
  "backend-parser-coerce",
  "backend-parser-relation",
  "backend-rewrite-rewritemanip-seams",
+ "backend-rewrite-rewritesupport-seams",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "mcx",
+ "types-cache",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
 ]
 
 [[package]]

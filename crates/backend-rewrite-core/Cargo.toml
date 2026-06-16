@@ -13,9 +13,17 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-cache = { path = "../types-cache" }
+types-datum = { path = "../types-datum" }
+types-storage = { path = "../types-storage" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+backend-rewrite-rewritesupport-seams = { path = "../backend-rewrite-rewritesupport-seams" }
