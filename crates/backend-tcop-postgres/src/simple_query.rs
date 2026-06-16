@@ -273,7 +273,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     // it for `STATEMENT:` log lines); skip the store rather than leak `'mcx`
     // into `'static`. (Re-modeling `debug_query_string` to carry an `'mcx`
     // string is a globals-owner follow-on.)
-    status_seams::pgstat_report_activity_running::call(query_string);
+    status_seams::pgstat_report_activity_running::call(query_string.into());
 
     // We use save_log_statement_stats so ShowUsage doesn't report incorrect
     // results because ResetUsage wasn't called.
@@ -493,7 +493,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
 
         // Tell client we're done with this query: exactly one EndCommand per
         // raw parsetree.
-        dest_seams::end_command::call(&qc, dest, false)?;
+        dest_seams::end_command::call(mcx, &qc, dest, false)?;
 
         // (per_parsetree_context delete — collapsed onto `mcx`.)
     } // end loop over parsetrees
@@ -504,7 +504,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
 
     // If there were no parsetrees, return EmptyQueryResponse.
     if parsetree_list.is_empty() {
-        dest_seams::null_command::call(dest);
+        dest_seams::null_command::call(dest)?;
     }
 
     // Emit duration logging if appropriate.

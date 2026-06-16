@@ -41,16 +41,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `pgstat_report_activity(STATE_RUNNING, query)` (`backend_status.c`):
-    /// mark the backend as actively running `query` (the per-statement
-    /// monitoring update `exec_simple_query`/`exec_execute_message` perform at
-    /// the top of each command). `STATE_RUNNING` is the fixed state for this
-    /// call site; the query text is the only varying argument. Owner
-    /// (`backend_status.c`) unported; scaffolded slot.
-    pub fn pgstat_report_activity_running(query: &str)
-);
-
-seam_core::seam!(
     /// `pgstat_report_query_id(query_id, force)` (`backend_status.c`): advertise
     /// the running query's jumble id on the backend status entry.
     /// `exec_simple_query` resets it to `0` (`force = true`) per parsetree.

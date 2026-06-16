@@ -1024,28 +1024,23 @@ mod recurrence_guard {
         ("backend_access_heap_heapam", "log_heap_visible"),
         ("backend_access_heap_heapam", "read_pg_type"),
         ("backend_access_heap_heapam", "scan_indisclustered"),
-        // DESIGN_DEBT (TD-DEST-COMMAND-LIFECYCLE): four dest.c/printtup.c
-        // command-lifecycle seams the tcop/postgres.c F1 simple-Query pipeline
-        // (`exec_simple_query`) `::call`s, whose real bodies are NOT in the
-        // merged dest slice yet — sanctioned mirror-pg-and-panic on a complete
-        // owner (`backend-tcop-dest`). A sibling dest/printtup lane owns the
-        // start/finish-of-command reporting + the DestRemote printtup routing:
-        //   * begin_command  — dest.c `BeginCommand` (per-parsetree start-of-
-        //     command hook; a no-op for every current CommandDest).
-        //   * end_command    — dest.c `EndCommand` (the per-parsetree
-        //     CommandComplete client report).
-        //   * null_command   — dest.c `NullCommand` (EmptyQueryResponse for an
-        //     empty query string).
-        //   * set_remote_dest_receiver_params — printtup.c
-        //     `SetRemoteDestReceiverParams`; printtup is not yet routed into the
-        //     dest router (CreateDestReceiver(DestRemote) returns the unwired
-        //     vtable), so binding the receiver to the portal has no landing.
-        // DELETE each entry when the dest/printtup command-lifecycle + DestRemote
-        // routing lands.
-        ("backend_tcop_dest", "begin_command"),
-        ("backend_tcop_dest", "end_command"),
-        ("backend_tcop_dest", "null_command"),
+        // DESIGN_DEBT (TD-DEST-COMMAND-LIFECYCLE): printtup.c's
+        // `SetRemoteDestReceiverParams`, `::call`ed by the tcop/postgres.c F1
+        // simple-Query pipeline (`exec_simple_query`) for `DestRemote`, has no
+        // body in the merged dest slice — sanctioned mirror-pg-and-panic on a
+        // complete owner (`backend-tcop-dest`). printtup is not yet routed into
+        // the dest router (`CreateDestReceiver(DestRemote)` returns the unwired
+        // vtable), so binding the receiver to the portal has no landing; the same
+        // gap makes a real `DestRemote` SELECT run panic in the receiver vtable
+        // when the executor pushes the first tuple. (BeginCommand/EndCommand/
+        // NullCommand DID land in the merged dest slice and are installed — no
+        // allowlist entry.) DELETE when printtup's DestRemote routing lands.
         ("backend_tcop_dest", "set_remote_dest_receiver_params"),
+        // (backend_status.c's pgstat_report_activity_running / _query_id /
+        // _plan_id are also `::call`ed by the F1 pipeline and uninstalled, but
+        // their owner `backend-utils-activity-status` is not a complete crate —
+        // the guard does not flag those, so no allowlist entry is needed; the
+        // debt is the unported backend_status.c owner.)
         // DESIGN_DEBT (TD-PATHNODE-CAN-CREATE-UNIQUE): pathnode.c's
         // `can_create_unique_path` is the `create_unique_path(...) != NULL` test.
         // Its body (`create_unique_path`, pathnode.c:1730) is itself genuinely
