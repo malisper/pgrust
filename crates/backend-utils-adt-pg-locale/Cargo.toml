@@ -17,6 +17,8 @@ types-cash = { path = "../types-cash" }
 types-tuple = { path = "../types-tuple" }
 common-string = { path = "../common-string" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-guc = { path = "../types-guc" }
 libc = "0.2"
 
 # Inward seams this crate owns + installs.

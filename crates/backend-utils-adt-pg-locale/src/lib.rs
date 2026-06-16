@@ -181,6 +181,45 @@ pub fn init_seams() {
     seams::regex_wc_isclass::set(regex_locale::regex_wc_isclass);
     seams::regex_wc_toupper::set(regex_locale::regex_wc_toupper);
     seams::regex_wc_tolower::set(regex_locale::regex_wc_tolower);
+
+    install_guc_hooks();
+}
+
+/// Install the `lc_messages`/`lc_monetary`/`lc_numeric`/`lc_time` GUC
+/// check/assign hooks (pg_locale.c) into the guc-tables slots. The GUC machinery
+/// fires these from InitializeGUCOptions / SET; the bodies live in
+/// [`crate::setup`].
+fn install_guc_hooks() {
+    use backend_utils_misc_guc_tables::hooks;
+    use types_guc::guc::GucSource;
+
+    hooks::check_locale_monetary.install(|newval, _extra, _source| {
+        let value = newval.as_deref().unwrap_or("");
+        setup::check_locale_monetary(value)
+    });
+    hooks::assign_locale_monetary
+        .install(|newval, _extra| setup::assign_locale_monetary(newval.unwrap_or("")));
+
+    hooks::check_locale_numeric.install(|newval, _extra, _source| {
+        let value = newval.as_deref().unwrap_or("");
+        setup::check_locale_numeric(value)
+    });
+    hooks::assign_locale_numeric
+        .install(|newval, _extra| setup::assign_locale_numeric(newval.unwrap_or("")));
+
+    hooks::check_locale_time.install(|newval, _extra, _source| {
+        let value = newval.as_deref().unwrap_or("");
+        setup::check_locale_time(value)
+    });
+    hooks::assign_locale_time
+        .install(|newval, _extra| setup::assign_locale_time(newval.unwrap_or("")));
+
+    hooks::check_locale_messages.install(|newval, _extra, source| {
+        let value = newval.as_deref().unwrap_or("");
+        setup::check_locale_messages(value, source == GucSource::PGC_S_DEFAULT)
+    });
+    hooks::assign_locale_messages
+        .install(|newval, _extra| setup::assign_locale_messages(newval.unwrap_or("")));
 }
 
 #[cfg(test)]

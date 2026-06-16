@@ -66,7 +66,7 @@ pub const PG_IO_ALIGN_SIZE: usize = 4096;
 pub const XLOG_CONTROL_FILE: &str = "global/pg_control";
 
 /// `CATALOG_VERSION_NO` (`catalog/catversion.h`, PostgreSQL 18.3).
-pub const CATALOG_VERSION_NO: u32 = 202504291;
+pub const CATALOG_VERSION_NO: u32 = 202506291;
 
 // Compile-time-fixed compatibility constants written to / checked against the
 // control file (the C `#define`s from pg_config*.h, mirrored for the codec).
