@@ -7,6 +7,14 @@
 #![allow(non_snake_case)]
 
 use types_core::primitive::{TransactionId, XLogRecPtr};
+use types_replication::walsender::WalSndState;
+
+seam_core::seam!(
+    /// `WalSndSetState(state)` (walsender.c) — set this walsender's advertised
+    /// state in shared memory (e.g. `WALSNDSTATE_BACKUP` at the start of a
+    /// `BASE_BACKUP`). Touches the per-slot spinlock-protected `WalSnd`.
+    pub fn wal_snd_set_state(state: WalSndState)
+);
 
 seam_core::seam!(
     /// `HandleWalSndInitStopping()` (walsender.c) — the

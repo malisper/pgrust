@@ -1651,4 +1651,5 @@ pub fn init_seams() {
     backend_postmaster_walsummarizer_seams::wait_for_wal_summarization::set(
         WaitForWalSummarization,
     );
+    backend_postmaster_walsummarizer_seams::summarize_wal::set(summarize_wal_enabled);
 }

@@ -77,6 +77,7 @@ pub fn init_all() {
     backend_backup_lz4::init_seams();
     backend_backup_zstd::init_seams();
     backend_backup_incremental::init_seams();
+    backend_backup_basebackup::init_seams();
     backend_backup_basebackup_target::init_seams();
     backend_backup_server::init_seams();
     backend_backup_sink::init_seams();
