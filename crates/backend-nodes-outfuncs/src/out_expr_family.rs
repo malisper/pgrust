@@ -248,16 +248,14 @@ fn out_sublink(buf: &mut String, n: &types_nodes::primnodes::SubLink, wl: bool) 
     // is always NIL; the repo trims it from the post-analysis SubLink. C still
     // writes `:operName <>`.
     buf.push_str(" :operName <>");
-    // WRITE_NODE_FIELD(subselect) — the embedded sub-Query. Not modeled as a
-    // serializable Node child here (Query serialization is the parse family's,
-    // and the carrier is PgBox<Query>, not a Node). Mirror-PG-and-panic only if
-    // present; a NULL subselect renders `<>`.
+    // WRITE_NODE_FIELD(subselect) — the embedded sub-Query. The carrier is a
+    // `PgBox<Query>` (Query is a serializable node); borrow it and emit the
+    // framed `{QUERY ...}` form through the parse family's Query writer. A NULL
+    // subselect renders `<>`.
+    buf.push_str(" :subselect ");
     match &n.subselect {
-        None => buf.push_str(" :subselect <>"),
-        Some(_) => panic!(
-            "_outSubLink: subselect (embedded Query) serialization is owned by \
-             the parse family (Query writer); not reachable from the expr family"
-        ),
+        None => buf.push_str("<>"),
+        Some(q) => crate::framed(buf, |b| crate::out_parse_family::out_query(b, q, wl)),
     }
     write_location_field(buf, "location", n.location, wl);
 }
@@ -654,7 +652,7 @@ fn write_pgbox_expr_list_field(
 /// `_outSubPlan` (outfuncs.funcs.c). `testexpr` is a single `Node *` child (an
 /// `OpExpr`/`RowCompareExpr`); `paramIds`/`setParam`/`parParam` are `IntList`s;
 /// `args` is a `List *` of `Expr`.
-fn out_subplan(buf: &mut String, n: &types_nodes::primnodes::SubPlan<'_>, wl: bool) {
+pub(crate) fn out_subplan(buf: &mut String, n: &types_nodes::primnodes::SubPlan<'_>, wl: bool) {
     buf.push_str("SUBPLAN");
     write_enum_field(buf, "subLinkType", n.subLinkType as i32);
     // testexpr: Option<PgBox<Expr>> — single Node child.
