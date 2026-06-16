@@ -2202,7 +2202,7 @@ fn perform_pullup_replace_vars<'mcx>(
     if parse.mergeJoinCondition.is_some() {
         let c = parse.mergeJoinCondition.take();
         parse.mergeJoinCondition =
-            pullup_replace_vars_opt(mcx, root, c, rvcontext, outer_has_sublinks)?;
+            pullup_replace_vars_opt_expr(mcx, root, c, rvcontext, outer_has_sublinks)?;
     }
 
     // jointree (PHV tracking by location). Take the jointree out so the
@@ -2225,7 +2225,8 @@ fn perform_pullup_replace_vars<'mcx>(
     // havingQual.
     if parse.havingQual.is_some() {
         let h = parse.havingQual.take();
-        parse.havingQual = pullup_replace_vars_opt(mcx, root, h, rvcontext, outer_has_sublinks)?;
+        parse.havingQual =
+            pullup_replace_vars_opt_expr(mcx, root, h, rvcontext, outer_has_sublinks)?;
     }
 
     // translated_vars of every appendrel.
@@ -2316,6 +2317,36 @@ fn pullup_replace_vars_opt<'mcx>(
             let newnode =
                 pullup_replace_vars(mcx, root, PgBox::into_inner(n), rvcontext, outer_has_sublinks)?;
             Ok(Some(alloc_in(mcx, newnode)?))
+        }
+    }
+}
+
+/// `pullup_replace_vars_opt` over an expression-only `Query` field that is
+/// concretely typed `Option<PgBox<Expr>>` (`havingQual` / `mergeJoinCondition`).
+/// Wrap the owned `Expr` into `Node::Expr`, run the shared driver, unwrap back.
+fn pullup_replace_vars_opt_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    node: Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr>>,
+    rvcontext: &mut PullupReplaceVarsContext<'mcx>,
+    outer_has_sublinks: &mut Option<bool>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr>>> {
+    match node {
+        None => Ok(None),
+        Some(n) => {
+            let newnode = pullup_replace_vars(
+                mcx,
+                root,
+                Node::Expr(PgBox::into_inner(n)),
+                rvcontext,
+                outer_has_sublinks,
+            )?;
+            match newnode {
+                Node::Expr(e) => Ok(Some(alloc_in(mcx, e)?)),
+                _ => Err(types_error::PgError::error(
+                    "pullup_replace_vars: expression-only Query field lowered to a non-Expr node",
+                )),
+            }
         }
     }
 }

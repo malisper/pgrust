@@ -61,7 +61,6 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
         .resolve(root.parse)
         .havingQual
         .as_deref()
-        .and_then(|n| n.as_expr())
         .cloned();
     if let Some(having_qual) = having {
         let having_vars = eqext::pull_var_clause::call(

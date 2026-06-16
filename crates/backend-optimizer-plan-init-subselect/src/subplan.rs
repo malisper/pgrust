@@ -1329,15 +1329,8 @@ fn simplify_EXISTS_query<'mcx>(
     // LIMIT with a constant positive (or NULL) value doesn't affect EXISTS.
     if query.limitCount.is_some() {
         let limit_node = query.limitCount.take().unwrap();
-        let limit_expr = match PgBox::into_inner(limit_node) {
-            Node::Expr(e) => e,
-            other => {
-                return Err(elog_error(alloc::format!(
-                    "simplify_EXISTS_query: limitCount is not an expression node: {:?}",
-                    other.node_tag()
-                )))
-            }
-        };
+        // `limitCount` is the concretely-typed `Option<PgBox<Expr>>` view.
+        let limit_expr = PgBox::into_inner(limit_node);
         // eval_const_expressions(root, query->limitCount).
         let folded = initext::eval_const_expressions_expr::call(root, limit_expr)?;
         // Might as well update the query if we simplified the clause.
@@ -1350,7 +1343,7 @@ fn simplify_EXISTS_query<'mcx>(
             _ => false,
         };
         if !keep {
-            query.limitCount = Some(alloc_in(mcx, Node::Expr(folded))?);
+            query.limitCount = Some(alloc_in(mcx, folded)?);
             return Ok(false);
         }
         // We can drop the LIMIT.

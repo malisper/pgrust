@@ -515,18 +515,11 @@ fn simplify_EXISTS_query<'mcx>(
         // 1" ... but what we'll actually see is "LIMIT int8(1::int4)", so we
         // have to fold constants or we're not going to recognize it.
         let limit = query.limitCount.take().unwrap();
-        let limit_node = PgBox::into_inner(limit);
-        let folded: Option<Expr> = match limit_node {
-            Node::Expr(e) => Some(
-                backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, e)?,
-            ),
-            // A non-Expr limit node would be a malformed parse tree; the C
-            // always sees an expression here.
-            other => panic!(
-                "simplify_EXISTS_query: limitCount is not an expression node: {:?}",
-                other.node_tag()
-            ),
-        };
+        // `limitCount` is the concretely-typed `Option<PgBox<Expr>>` view, so the
+        // owned `Expr` is in hand directly.
+        let limit_expr = PgBox::into_inner(limit);
+        let folded: Option<Expr> =
+            Some(backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, limit_expr)?);
 
         // Might as well update the query if we simplified the clause.
         let keep = match &folded {
@@ -542,7 +535,10 @@ fn simplify_EXISTS_query<'mcx>(
 
         if !keep {
             // Restore the (possibly folded) limitCount and bail.
-            query.limitCount = folded.map(|e| alloc_box(mcx, Node::Expr(e)));
+            query.limitCount = match folded {
+                Some(e) => Some(mcx::alloc_in(mcx, e)?),
+                None => None,
+            };
             return Ok(false);
         }
 

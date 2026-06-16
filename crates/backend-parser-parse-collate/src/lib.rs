@@ -191,7 +191,7 @@ pub fn assign_query_collations<'mcx>(
         assign_query_collations_walker_node(pstate, ma)?;
     }
     if let Some(mjc) = query.mergeJoinCondition.as_deref_mut() {
-        assign_query_collations_walker_node(pstate, mjc)?;
+        assign_query_collations_walker_expr(pstate, mjc)?;
     }
     for te in query.returningList.iter_mut() {
         if let Some(expr) = te.expr.as_deref_mut() {
@@ -205,13 +205,13 @@ pub fn assign_query_collations<'mcx>(
         assign_query_collations_walker_node(pstate, so)?;
     }
     if let Some(hq) = query.havingQual.as_deref_mut() {
-        assign_query_collations_walker_node(pstate, hq)?;
+        assign_query_collations_walker_expr(pstate, hq)?;
     }
     if let Some(lo) = query.limitOffset.as_deref_mut() {
-        assign_query_collations_walker_node(pstate, lo)?;
+        assign_query_collations_walker_expr(pstate, lo)?;
     }
     if let Some(lc) = query.limitCount.as_deref_mut() {
-        assign_query_collations_walker_node(pstate, lc)?;
+        assign_query_collations_walker_expr(pstate, lc)?;
     }
 
     // QTW_EXAMINE_SORTGROUP is NOT set, so the SortGroupClause lists are not

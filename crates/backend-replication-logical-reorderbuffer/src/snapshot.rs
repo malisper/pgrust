@@ -7,40 +7,18 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use std::collections::HashMap;
 
 use types_core::primitive::TransactionId;
 use types_core::xact::{CommandId, InvalidCommandId};
 use types_snapshot::SnapshotData;
-use types_storage::RelFileLocator;
-use types_tuple::ItemPointerData;
+// `ReorderBufferTupleCidKey`/`Ent` and the `TupleCidHash` alias are homed in
+// `types-logical` so snapmgr — the owner of the active `tuplecid_data` storage
+// (C `static HTAB *tuplecid_data`) — can name them without depending on this
+// crate (the dependency runs the other way). Re-exported here so existing
+// `crate::`/`pub use` consumers are unchanged.
+pub use types_logical::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
 
 use crate::{ReorderBuffer, ReorderBufferChangeData, ReorderBufferChangeType};
-
-/// `ReorderBufferTupleCidKey` (reorderbuffer.c) — `(relfilelocator, ctid)`.
-///
-/// The C struct is hashed with `HASH_BLOBS` over its raw bytes after a
-/// `memset(&key, 0, ...)`; the owned fields hash identically because the
-/// derived `Hash`/`Eq` consider exactly the same logical values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct ReorderBufferTupleCidKey {
-    /// `RelFileLocator rlocator`.
-    pub rlocator: RelFileLocator,
-    /// `ItemPointerData tid`.
-    pub tid: ItemPointerData,
-}
-
-/// `ReorderBufferTupleCidEnt` (reorderbuffer.c) — the resolved cmin/cmax for a
-/// catalog tuple seen during decoding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReorderBufferTupleCidEnt {
-    /// `CommandId cmin`.
-    pub cmin: CommandId,
-    /// `CommandId cmax`.
-    pub cmax: CommandId,
-    /// `CommandId combocid` — just for debugging.
-    pub combocid: CommandId,
-}
 
 impl ReorderBuffer {
     /// `ReorderBufferBuildTupleCidHash(rb, txn)` — build the `(relfilelocator,
@@ -56,8 +34,7 @@ impl ReorderBuffer {
         }
 
         // create the hash with the exact number of to-be-stored tuplecids.
-        let mut hash: HashMap<ReorderBufferTupleCidKey, ReorderBufferTupleCidEnt> =
-            HashMap::with_capacity(txn.ntuplecids as usize);
+        let mut hash: TupleCidHash = TupleCidHash::with_capacity(txn.ntuplecids as usize);
 
         for change in &txn.tuplecids {
             debug_assert!(change.action == ReorderBufferChangeType::InternalTupleCid);

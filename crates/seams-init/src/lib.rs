@@ -364,6 +364,7 @@ pub fn init_all() {
     backend_tcop_dest::init_seams();
     backend_executor_tstorereceiver::init_seams();
     backend_tcop_fastpath::init_seams();
+    backend_tcop_postgres::init_seams();
     backend_tcop_pquery::init_seams();
     backend_tcop_utility::init_seams();
     backend_timezone_localtime::init_seams();
@@ -1825,8 +1826,6 @@ mod recurrence_guard {
         ("backend_commands_tablecmds", "at_exec_change_owner"),
         ("backend_commands_tablecmds", "rename_relation_internal"),
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
-        ("backend_commands_tablecmds", "range_var_callback_owns_relation"),
-        ("backend_commands_tablecmds", "define_sequence_relation"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

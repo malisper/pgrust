@@ -1448,7 +1448,10 @@ pub fn parseCheckAggregates<'mcx>(
 
     // HAVING.
     if let Some(having) = qry.havingQual.take() {
-        let mut clause: Node = (*having).clone_in(mcx)?;
+        // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view; the
+        // grouping-expr helpers below operate on `Node`, so wrap the owned `Expr`
+        // into `Node::Expr` here and unwrap back to `Expr` on store-back.
+        let mut clause: Node = Node::Expr((*having).clone_in(mcx)?);
         clause = finalize_grouping_exprs(
             mcx,
             clause,
@@ -1477,7 +1480,15 @@ pub fn parseCheckAggregates<'mcx>(
             &mut func_grouped_rels,
             &mut constraint_deps,
         )?;
-        qry.havingQual = Some(mcx::alloc_in(mcx, new_having)?);
+        let new_having_expr = match new_having {
+            Node::Expr(e) => e,
+            _ => {
+                return Err(PgError::error(
+                    "parseCheckAggregates: havingQual lowered to a non-Expr node",
+                ))
+            }
+        };
+        qry.havingQual = Some(mcx::alloc_in(mcx, new_having_expr)?);
     }
 
     // Write back the (possibly extended) constraint dependency list.

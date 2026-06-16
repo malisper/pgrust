@@ -10,7 +10,10 @@ use types_nodes::nodes::{CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::rawnodes::{SelectStmt, SortBy};
 
-use crate::{cte_vec_to_nodes, elog_error, node_vec_to_pgvec, opt_expr_to_node, sgc_vec_to_nodes};
+use crate::{
+    cte_vec_to_nodes, elog_error, node_vec_to_pgvec, opt_expr_to_box, opt_expr_to_node,
+    sgc_vec_to_nodes,
+};
 
 /// Downcast a `List *` of raw `Node`s (`stmt->sortClause`) to the
 /// `Vec<SortBy>` the clause owner's `transformSortClause` consumes. The grammar
@@ -122,7 +125,7 @@ pub fn transformSelectStmt<'mcx>(
         ParseExprKind::EXPR_KIND_HAVING,
         "HAVING",
     )?;
-    qry.havingQual = opt_expr_to_node(mcx, having)?;
+    qry.havingQual = opt_expr_to_box(mcx, having)?;
 
     /*
      * Transform sorting/grouping stuff. Do ORDER BY first because both
@@ -202,8 +205,8 @@ pub fn transformSelectStmt<'mcx>(
         "LIMIT",
         stmt.limitOption,
     )?;
-    qry.limitOffset = opt_expr_to_node(mcx, limit_offset)?;
-    qry.limitCount = opt_expr_to_node(mcx, limit_count)?;
+    qry.limitOffset = opt_expr_to_box(mcx, limit_offset)?;
+    qry.limitCount = opt_expr_to_box(mcx, limit_count)?;
     qry.limitOption = stmt.limitOption;
 
     /* transform window clauses after we have seen all window functions */
@@ -480,8 +483,8 @@ pub fn transformValuesClause<'mcx>(
         "LIMIT",
         stmt.limitOption,
     )?;
-    qry.limitOffset = opt_expr_to_node(mcx, limit_offset)?;
-    qry.limitCount = opt_expr_to_node(mcx, limit_count)?;
+    qry.limitOffset = opt_expr_to_box(mcx, limit_offset)?;
+    qry.limitCount = opt_expr_to_box(mcx, limit_count)?;
     qry.limitOption = stmt.limitOption;
 
     if !stmt.lockingClause.is_empty() {

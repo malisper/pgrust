@@ -14,6 +14,14 @@ seam_core::seam!(
     pub fn auto_vac_worker_main(startup_data: &types_startup::StartupData) -> !
 );
 
+seam_core::seam!(
+    /// `AutoVacuumingActive(void)` (autovacuum.c): whether autovacuum is enabled
+    /// — true iff `autovacuum` (start daemon) and `track_counts` GUCs are both
+    /// on. Read by `index_update_stats` (catalog/index.c) to decide whether a
+    /// CREATE INDEX may update the parent's `relpages`/`reltuples` relstats.
+    pub fn auto_vacuuming_active() -> bool
+);
+
 // --- backend-utils-init-postinit consumers (autovacuum.c) ---
 
 seam_core::seam!(

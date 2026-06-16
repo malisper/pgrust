@@ -101,4 +101,5 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_size::set(shmem::AutoVacuumShmemSize);
+    backend_postmaster_autovacuum_seams::auto_vacuuming_active::set(shmem::AutoVacuumingActive);
 }

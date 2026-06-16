@@ -160,7 +160,7 @@ fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool)
     write_opt_framed(buf, "jointree", &n.jointree, wl, out_from_expr);
     write_node_vec_field(buf, "mergeActionList", &n.mergeActionList, wl);
     write_int_field(buf, "mergeTargetRelation", n.mergeTargetRelation);
-    write_opt_node_field(buf, "mergeJoinCondition", &n.mergeJoinCondition, wl);
+    write_expr_field(buf, "mergeJoinCondition", n.mergeJoinCondition.as_deref(), wl);
     write_value_vec_field(buf, "targetList", &n.targetList, wl, crate_out_targetentry);
     write_enum_field(buf, "override", n.r#override as i32);
     write_opt_framed(buf, "onConflict", &n.onConflict, wl, out_on_conflict_expr);
@@ -170,12 +170,12 @@ fn out_query(buf: &mut String, n: &types_nodes::copy_query::Query<'_>, wl: bool)
     write_node_vec_field(buf, "groupClause", &n.groupClause, wl);
     write_bool_field(buf, "groupDistinct", n.groupDistinct);
     write_node_vec_field(buf, "groupingSets", &n.groupingSets, wl);
-    write_opt_node_field(buf, "havingQual", &n.havingQual, wl);
+    write_expr_field(buf, "havingQual", n.havingQual.as_deref(), wl);
     write_node_vec_field(buf, "windowClause", &n.windowClause, wl);
     write_node_vec_field(buf, "distinctClause", &n.distinctClause, wl);
     write_node_vec_field(buf, "sortClause", &n.sortClause, wl);
-    write_opt_node_field(buf, "limitOffset", &n.limitOffset, wl);
-    write_opt_node_field(buf, "limitCount", &n.limitCount, wl);
+    write_expr_field(buf, "limitOffset", n.limitOffset.as_deref(), wl);
+    write_expr_field(buf, "limitCount", n.limitCount.as_deref(), wl);
     write_enum_field(buf, "limitOption", n.limitOption as i32);
     write_node_vec_field(buf, "rowMarks", &n.rowMarks, wl);
     write_opt_node_field(buf, "setOperations", &n.setOperations, wl);

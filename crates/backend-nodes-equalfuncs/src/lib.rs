@@ -996,7 +996,7 @@ fn equal_query(
         }
         && equal_node_list(&a.mergeActionList, &b.mergeActionList)
         && a.mergeTargetRelation == b.mergeTargetRelation
-        && equal_opt_node(a.mergeJoinCondition.as_ref(), b.mergeJoinCondition.as_ref())
+        && equal_opt_expr(a.mergeJoinCondition.as_deref(), b.mergeJoinCondition.as_deref())
         && equal_targetentry_list_impl(&a.targetList, &b.targetList)
         && a.r#override == b.r#override
         && match (a.onConflict.as_deref(), b.onConflict.as_deref()) {
@@ -1010,12 +1010,12 @@ fn equal_query(
         && equal_node_list(&a.groupClause, &b.groupClause)
         && a.groupDistinct == b.groupDistinct
         && equal_node_list(&a.groupingSets, &b.groupingSets)
-        && equal_opt_node(a.havingQual.as_ref(), b.havingQual.as_ref())
+        && equal_opt_expr(a.havingQual.as_deref(), b.havingQual.as_deref())
         && equal_node_list(&a.windowClause, &b.windowClause)
         && equal_node_list(&a.distinctClause, &b.distinctClause)
         && equal_node_list(&a.sortClause, &b.sortClause)
-        && equal_opt_node(a.limitOffset.as_ref(), b.limitOffset.as_ref())
-        && equal_opt_node(a.limitCount.as_ref(), b.limitCount.as_ref())
+        && equal_opt_expr(a.limitOffset.as_deref(), b.limitOffset.as_deref())
+        && equal_opt_expr(a.limitCount.as_deref(), b.limitCount.as_deref())
         && a.limitOption == b.limitOption
         && equal_node_list(&a.rowMarks, &b.rowMarks)
         && equal_opt_node(a.setOperations.as_ref(), b.setOperations.as_ref())

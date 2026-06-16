@@ -300,8 +300,8 @@ pub fn transformSetOperationStmt<'mcx>(
         "LIMIT",
         stmt.limitOption,
     )?;
-    qry.limitOffset = crate::opt_expr_to_node(mcx, lo)?;
-    qry.limitCount = crate::opt_expr_to_node(mcx, lc)?;
+    qry.limitOffset = crate::opt_expr_to_box(mcx, lo)?;
+    qry.limitCount = crate::opt_expr_to_box(mcx, lc)?;
     qry.limitOption = stmt.limitOption;
 
     qry.setOperations = Some(sostmt_node);

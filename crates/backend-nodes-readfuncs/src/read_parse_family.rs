@@ -189,6 +189,24 @@ fn read_opt_expr_boxed<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
     }
 }
 
+/// `READ_NODE_FIELD` of a single expression-only `Node *` field that is
+/// concretely typed `Option<PgBox<Expr>>` on the `Query` (havingQual /
+/// limitOffset / limitCount / mergeJoinCondition). The serialized form is the
+/// inner `Expr` node (the C wrote `(Node *) expr`), so unwrap `Node::Expr`.
+fn read_opt_expr_box<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Expr>>> {
+    let _label = next_token()?;
+    match read::node_read(mcx, None)? {
+        None => Ok(None),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::Expr(e) => Ok(Some(mcx::alloc_in(mcx, e)?)),
+            other => Err(elog_error(alloc::format!(
+                "expected Expr child, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Direct-value list readers (PgVec<RangeTblEntry> / <RTEPermissionInfo> /
 // <TargetEntry>): read a node list, match each framed element's arm.
@@ -426,7 +444,7 @@ fn read_query<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Query<'mcx>> {
     })?;
     q.mergeActionList = read_node_vec_field(mcx)?;
     q.mergeTargetRelation = read_int_field()?;
-    q.mergeJoinCondition = read_opt_node(mcx)?;
+    q.mergeJoinCondition = read_opt_expr_box(mcx)?;
     q.targetList = read_te_vec(mcx)?;
     q.r#override = overriding_from(read_enum_field()?);
     q.onConflict = read_opt_box(mcx, |n| match n {
@@ -440,12 +458,12 @@ fn read_query<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Query<'mcx>> {
     q.groupClause = read_node_vec_field(mcx)?;
     q.groupDistinct = read_bool_field()?;
     q.groupingSets = read_node_vec_field(mcx)?;
-    q.havingQual = read_opt_node(mcx)?;
+    q.havingQual = read_opt_expr_box(mcx)?;
     q.windowClause = read_node_vec_field(mcx)?;
     q.distinctClause = read_node_vec_field(mcx)?;
     q.sortClause = read_node_vec_field(mcx)?;
-    q.limitOffset = read_opt_node(mcx)?;
-    q.limitCount = read_opt_node(mcx)?;
+    q.limitOffset = read_opt_expr_box(mcx)?;
+    q.limitCount = read_opt_expr_box(mcx)?;
     q.limitOption = limit_option_from(read_enum_field()?);
     q.rowMarks = read_node_vec_field(mcx)?;
     q.setOperations = read_opt_node(mcx)?;

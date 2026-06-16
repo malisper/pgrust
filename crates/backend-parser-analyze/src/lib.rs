@@ -359,6 +359,19 @@ pub(crate) fn opt_expr_to_node<'mcx>(
     }
 }
 
+/// Wrap an optional `Expr` (a dep's typed clause return) into the
+/// concretely-typed `Option<PgBox<Expr>>` an expression-only `Query` field
+/// (`havingQual`/`limitOffset`/`limitCount`/`mergeJoinCondition`) carries.
+pub(crate) fn opt_expr_to_box<'mcx>(
+    mcx: Mcx<'mcx>,
+    e: Option<types_nodes::primnodes::Expr>,
+) -> PgResult<Option<PgBox<'mcx, types_nodes::primnodes::Expr>>> {
+    match e {
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, expr)?)),
+        None => Ok(None),
+    }
+}
+
 /// Wrap a `PgVec<CommonTableExpr>` (transformWithClause return) into the
 /// `cteList` (`PgVec<NodePtr>`).
 pub(crate) fn cte_vec_to_nodes<'mcx>(
