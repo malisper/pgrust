@@ -25,7 +25,9 @@
 #![allow(non_upper_case_globals)]
 
 use backend_access_gist_dispatch_seams as dispatch;
+use backend_utils_adt_network_gist_seams as inet_gist;
 use backend_utils_adt_geo_ops_seams as geo;
+use types_network::{inet_struct, GistInetKey};
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
 use types_core::geo::{Point, BOX};
@@ -62,6 +64,21 @@ pub const F_GIST_POINT_CONSISTENT: Oid = 2179;
 pub const F_GIST_POINT_DISTANCE: Oid = 3064;
 /// `gist_point_sortsupport` (pg_proc.dat oid 3435).
 pub const F_GIST_POINT_SORTSUPPORT: Oid = 3435;
+
+/// `inet_gist_consistent` (pg_proc.dat oid 3553).
+pub const F_INET_GIST_CONSISTENT: Oid = 3553;
+/// `inet_gist_union` (pg_proc.dat oid 3554).
+pub const F_INET_GIST_UNION: Oid = 3554;
+/// `inet_gist_compress` (pg_proc.dat oid 3555).
+pub const F_INET_GIST_COMPRESS: Oid = 3555;
+/// `inet_gist_penalty` (pg_proc.dat oid 3557).
+pub const F_INET_GIST_PENALTY: Oid = 3557;
+/// `inet_gist_picksplit` (pg_proc.dat oid 3558).
+pub const F_INET_GIST_PICKSPLIT: Oid = 3558;
+/// `inet_gist_same` (pg_proc.dat oid 3559).
+pub const F_INET_GIST_SAME: Oid = 3559;
+/// `inet_gist_fetch` (pg_proc.dat oid 3573).
+pub const F_INET_GIST_FETCH: Oid = 3573;
 
 // ---------------------------------------------------------------------------
 // access/stratnum.h — R-tree strategy numbers consumed below.
@@ -232,6 +249,23 @@ fn gistentryinit<'mcx>(
         offset,
         leafkey,
     }
+}
+
+/// Decode every entry key in `entryvec->vector` as a `GistInetKey`
+/// (`DatumGetInetKeyP(ent[i].key)`). Index 0 of the picksplit/union vector is
+/// the C `entryvec->vector[0]`; the inet methods only read `1..=maxoff`, but a
+/// slot must exist at index 0, so the whole vector is decoded.
+fn inet_keys_from_vec<'mcx>(entryvec: &GistEntryVector<'mcx>) -> Vec<GistInetKey> {
+    entryvec
+        .vector
+        .iter()
+        .map(|e| GistInetKey::from_datum_bytes(e.key.as_ref_bytes()))
+        .collect()
+}
+
+/// Pack a `GistInetKey` into a by-reference key `Datum` (`InetKeyPGetDatum`).
+fn inet_key_datum<'mcx>(mcx: Mcx<'mcx>, k: &GistInetKey) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &k.to_datum_bytes())?))
 }
 
 /// Wrap a `BOX` into a by-reference key [`Datum`] (`BoxPGetDatum`).
@@ -1097,6 +1131,12 @@ fn dispatch_consistent<'mcx>(
     match proc_oid {
         F_GIST_BOX_CONSISTENT => gist_box_consistent(entry, is_leaf, query, strategy),
         F_GIST_POINT_CONSISTENT => gist_point_consistent(entry, is_leaf, query, strategy),
+        F_INET_GIST_CONSISTENT => {
+            let key = GistInetKey::from_datum_bytes(entry.key.as_ref_bytes());
+            let q = inet_struct::from_datum_bytes(query.as_ref_bytes());
+            let (matched, recheck) = inet_gist::inet_gist_consistent::call(key, q, strategy, is_leaf)?;
+            Ok(GistConsistentResult { matched, recheck })
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1109,6 +1149,11 @@ fn dispatch_union<'mcx>(
 ) -> PgResult<Datum<'mcx>> {
     match proc_oid {
         F_GIST_BOX_UNION => gist_box_union(mcx, entryvec),
+        F_INET_GIST_UNION => {
+            let keys = inet_keys_from_vec(entryvec);
+            let u = inet_gist::inet_gist_union::call(keys);
+            inet_key_datum(mcx, &u)
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1121,6 +1166,26 @@ fn dispatch_compress<'mcx>(
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
     match proc_oid {
         F_GIST_POINT_COMPRESS => gist_point_compress(mcx, entry),
+        F_INET_GIST_COMPRESS => {
+            // inet_gist_compress (network_gist.c:541): only leaf keys are
+            // converted; inner entries pass through unchanged.
+            if entry.leafkey {
+                let in_ = match &entry.key {
+                    // DatumGetPointer(entry->key) != NULL
+                    Datum::ByRef(_) => Some(inet_struct::from_datum_bytes(entry.key.as_ref_bytes())),
+                    // DatumGetPointer(entry->key) == NULL
+                    Datum::ByVal(_) => None,
+                };
+                let r = inet_gist::inet_gist_compress::call(in_);
+                let key = match r {
+                    Some(k) => inet_key_datum(mcx, &k)?,
+                    None => Datum::ByVal(0),
+                };
+                let retval = gistentryinit(key, entry.rel, entry.page, entry.offset, false);
+                return mcx::alloc_in(mcx, retval);
+            }
+            mcx::alloc_in(mcx, entry.clone())
+        }
         // box/polygon/circle store boxes directly: the box opclass has no
         // compress proc (gistproc.c: "we do not need compress"). gist_poly /
         // gist_circle compress need POLYGON/CIRCLE, not yet ported.
@@ -1149,6 +1214,11 @@ fn dispatch_penalty<'mcx>(
 ) -> PgResult<f32> {
     match proc_oid {
         F_GIST_BOX_PENALTY => Ok(gist_box_penalty(origentry, newentry)),
+        F_INET_GIST_PENALTY => {
+            let orig = GistInetKey::from_datum_bytes(origentry.key.as_ref_bytes());
+            let new_ = GistInetKey::from_datum_bytes(newentry.key.as_ref_bytes());
+            Ok(inet_gist::inet_gist_penalty::call(orig, new_))
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1162,6 +1232,17 @@ fn dispatch_picksplit<'mcx>(
 ) -> PgResult<()> {
     match proc_oid {
         F_GIST_BOX_PICKSPLIT => gist_box_picksplit(mcx, entryvec, splitvec),
+        F_INET_GIST_PICKSPLIT => {
+            let keys = inet_keys_from_vec(entryvec);
+            let sv = inet_gist::inet_gist_picksplit::call(keys)?;
+            splitvec.spl_left = sv.spl_left;
+            splitvec.spl_right = sv.spl_right;
+            splitvec.spl_ldatum = Some(inet_key_datum(mcx, &sv.spl_ldatum)?);
+            splitvec.spl_ldatum_exists = false;
+            splitvec.spl_rdatum = Some(inet_key_datum(mcx, &sv.spl_rdatum)?);
+            splitvec.spl_rdatum_exists = false;
+            Ok(())
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1175,6 +1256,11 @@ fn dispatch_same<'mcx>(
 ) -> PgResult<bool> {
     match proc_oid {
         F_GIST_BOX_SAME => Ok(gist_box_same(a, b)),
+        F_INET_GIST_SAME => {
+            let left = GistInetKey::from_datum_bytes(a.as_ref_bytes());
+            let right = GistInetKey::from_datum_bytes(b.as_ref_bytes());
+            Ok(inet_gist::inet_gist_same::call(left, right))
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1204,6 +1290,18 @@ fn dispatch_fetch<'mcx>(
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
     match proc_oid {
         F_GIST_POINT_FETCH => gist_point_fetch(mcx, entry),
+        F_INET_GIST_FETCH => {
+            let key = GistInetKey::from_datum_bytes(entry.key.as_ref_bytes());
+            let dst = inet_gist::inet_gist_fetch::call(key);
+            let retval = gistentryinit(
+                Datum::ByRef(mcx::slice_in(mcx, &dst.to_datum_bytes())?),
+                entry.rel,
+                entry.page,
+                entry.offset,
+                false,
+            );
+            mcx::alloc_in(mcx, retval)
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }

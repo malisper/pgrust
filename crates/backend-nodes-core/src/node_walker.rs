@@ -92,6 +92,12 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
         // wrapped back into a `Node` for the `FnMut(&Node)` walker.
         Node::Expr(e) => walk_expr_children(e, walker),
 
+        // C `case T_List: foreach(temp, (List *) node) WALK(lfirst(temp));` —
+        // visit each element. A bare `List` node is a legitimate walker argument
+        // (e.g. recordDependencyOnSingleRelExpr is called on a `List *` of
+        // expressions).
+        Node::List(items) => list_walk!(items),
+
         // primitive parse/value node types with no expression subnodes
         Node::RangeTblRef(_)
         | Node::SortGroupClause(_)

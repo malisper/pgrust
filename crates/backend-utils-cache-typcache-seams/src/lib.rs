@@ -318,6 +318,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_LT_OPR)->lt_opr` (typcache.c) — the
+    /// "less than" btree OPERATOR oid of a type. `CreateStatistics`
+    /// (statscmds.c) calls this to reject columns/expressions whose type has no
+    /// default btree operator class. Returns `InvalidOid` (0) when the type has
+    /// no less-than operator. The trimmed `TypeCacheEntry` returned by
+    /// [`lookup_type_cache`] does not carry `lt_opr`, so this dedicated accessor
+    /// reads it from the full cache row. `Err` carries the typcache lookup
+    /// surface.
+    pub fn lookup_type_cache_lt_opr(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`
     /// (typcache.c): resolve the OID of `element_type`'s btree comparison
     /// support function (the cached `cmp_proc_finfo`), as `array_cmp` /
