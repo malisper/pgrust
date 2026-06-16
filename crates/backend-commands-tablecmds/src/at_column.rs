@@ -4,20 +4,32 @@
 //! PORTED here (faithful, 100% C logic):
 //!   - `ATExecColumnDefault` (tablecmds.c:8126) — ALTER COLUMN SET / DROP DEFAULT
 //!   - `ATExecCookedColumnDefault` (tablecmds.c:8210) — add a pre-cooked default
+//!   - `ATExecSetStatistics` (tablecmds.c:8906) — ALTER COLUMN SET STATISTICS
+//!   - `ATExecSetOptions` (tablecmds.c:9050) — ALTER COLUMN SET / RESET OPTIONS
 //!
-//! SEAM-AND-PANIC (faithful) — the column-attribute mutating families
-//! (`ATExecSetStatistics` / `ATExecSetOptions` / `ATExecSetStorage`) and the
-//! relation-level `ATExecSetRelOptions`. These C routines do
-//! `attTup = GETSTRUCT(syscache_copy_tuple); attTup->field = x;
-//! CatalogTupleUpdate(...)` (or the `heap_modify_tuple(repl_val/null/repl)`
-//! variant building a fresh `text[]`/`int` Datum). The repo's safe model has no
-//! `Form_pg_attribute` GETSTRUCT field-mutation path and no typed pg_attribute /
-//! pg_class update-row helper; faithfully landing them requires building the
-//! `heap_deform_tuple` + per-`Anum` `Datum` (re)assembly + `heap_modify_tuple`
-//! machinery (and, for STORAGE, the `SetIndexStorageProperties` index recursion;
-//! for relOPTIONS, the VIEW `check_option` validation and toast-table
-//! recursion). Those are mirrored here as loud stops rather than partial /
-//! restructured bodies — see the per-fn rationale.
+//! These last two perform the C `SearchSysCacheAttName(ATTNAME, relid, colName)`
+//! → modify the `Form_pg_attribute` field → `heap_modify_tuple(repl_val/null/repl)`
+//! → `CatalogTupleUpdate(attrelation, ...)` write, expressed over the typed
+//! [`PgAttributeUpdateRow`] carrier and the `catalog_tuple_update_pg_attribute`
+//! seam (the shared pg_attribute write leaf, owner backend-catalog-indexing).
+//!
+//! SEAM-AND-PANIC (faithful, carrier-keystone blocked) — `ATExecSetStorage` and
+//! the relation-level `ATExecSetRelOptions`:
+//!   - `ATExecSetStorage` writes `attstorage` (expressible) *and then* recurses
+//!     into index columns via `SetIndexStorageProperties`, which scans the full
+//!     `indrel->rd_index->indkey.values[0..indnatts]`. The trimmed
+//!     `types_rel::FormData_pg_index` carries only `indkey0` (the first key
+//!     column), so the index recursion cannot be written faithfully; doing the
+//!     main-table write and stopping would leave a partial mutation. Stays a
+//!     loud stop until the `indkey` array is carried (out-of-lane carrier widen).
+//!   - `ATExecSetRelOptions` writes the variable `reloptions` (`text[]`) column
+//!     of `pg_class` via `heap_modify_tuple`. The only pg_class write carrier
+//!     (`catalog_tuple_update_pg_class`) takes the fixed-length `PgClassForm`
+//!     struct, which has no `reloptions` field — there is no pg_class
+//!     variable-column write carrier. Stays a loud stop (out-of-lane carrier
+//!     keystone).
+//!
+//! [`PgAttributeUpdateRow`]: types_catalog::pg_attribute::PgAttributeUpdateRow
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
@@ -25,17 +37,29 @@
 use mcx::Mcx;
 
 use types_catalog::catalog_dependency::ObjectAddress;
+use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR};
+use types_error::{
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR, WARNING,
+};
 use types_nodes::ddlnodes::AlterTableType;
 use types_nodes::nodes::Node;
 use types_rel::Relation;
-use types_storage::lock::LOCKMODE;
+use types_storage::lock::{RowExclusiveLock, LOCKMODE};
 use types_nodes::parsenodes::DROP_RESTRICT;
-use types_tuple::access::ATTRIBUTE_GENERATED_STORED;
+use types_statistics::MAX_STATISTICS_TARGET;
+use types_tuple::access::{
+    ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_INDEX,
+    RELKIND_PARTITIONED_INDEX,
+};
+use types_tuple::backend_access_common_heaptuple::Datum;
 
+use backend_access_common_relation::relation_open;
+use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use backend_utils_cache_lsyscache::attribute::get_attnum;
+use backend_utils_cache_syscache::{SearchSysCacheAttName, ATTNAME};
 
 use backend_commands_tablecmds_seams as seam;
 
@@ -199,20 +223,234 @@ pub fn ATExecCookedColumnDefault<'mcx>(
 }
 
 // ===========================================================================
-// Unported column-attribute / relation-option families (faithful seam-panic)
+// ATExecSetStatistics (tablecmds.c:8906) — ALTER COLUMN SET STATISTICS
 // ===========================================================================
 
-/// `ATExecSetStatistics` (tablecmds.c:8906). See module docs.
+/// `ATExecSetStatistics(rel, colName, colNum, newValue, lockmode)`
+/// (tablecmds.c:8906). Writes `pg_attribute.attstattarget`.
 pub fn ATExecSetStatistics<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _colName: Option<&str>,
-    _colNum: i16,
-    _newValue: Option<&Node<'mcx>>,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: Option<&str>,
+    colNum: i16,
+    newValue: Option<&Node<'mcx>>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported("ALTER COLUMN SET STATISTICS (pg_attribute attstattarget heap_modify_tuple)");
+    // We allow referencing columns by numbers only for indexes, since table
+    // column numbers could contain gaps if columns are later dropped.
+    if rel.rd_rel.relkind != RELKIND_INDEX
+        && rel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX
+        && colName.is_none()
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("cannot refer to non-index column by number".to_string())
+            .finish(here("ATExecSetStatistics"))
+            .map(|()| unreachable!());
+    }
+
+    // -1 was used in previous versions for the default setting.
+    let mut newtarget: i32 = 0;
+    let newtarget_default;
+    match newValue {
+        Some(node) => {
+            let ival = match node {
+                Node::Integer(i) => i.ival,
+                _ => {
+                    return Err(types_error::PgError::error(
+                        "ATExecSetStatistics: SET STATISTICS value is not an Integer node",
+                    ))
+                }
+            };
+            if ival != -1 {
+                newtarget = ival;
+                newtarget_default = false;
+            } else {
+                newtarget_default = true;
+            }
+        }
+        None => newtarget_default = true,
+    }
+
+    if !newtarget_default {
+        // Limit target to a sane range.
+        if newtarget < 0 {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("statistics target {newtarget} is too low"))
+                .finish(here("ATExecSetStatistics"))
+                .map(|()| unreachable!());
+        } else if newtarget > MAX_STATISTICS_TARGET {
+            newtarget = MAX_STATISTICS_TARGET;
+            backend_utils_error::ereport(WARNING)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("lowering statistics target to {newtarget}"))
+                .finish(here("ATExecSetStatistics"))?;
+        }
+    }
+
+    // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrelation = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    let tuple = match colName {
+        Some(colname) => match SearchSysCacheAttName(mcx, rel.rd_id, colname)? {
+            Some(t) => t,
+            None => {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        colname,
+                        rel.name()
+                    ))
+                    .finish(here("ATExecSetStatistics"))
+                    .map(|()| unreachable!());
+            }
+        },
+        None => match backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, colNum)? {
+            Some(t) => t,
+            None => {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(format!(
+                        "column number {} of relation \"{}\" does not exist",
+                        colNum,
+                        rel.name()
+                    ))
+                    .finish(here("ATExecSetStatistics"))
+                    .map(|()| unreachable!());
+            }
+        },
+    };
+
+    // attrtuple = (Form_pg_attribute) GETSTRUCT(tuple); attnum = attrtuple->attnum;
+    let cache_id = if colName.is_some() { ATTNAME } else { backend_utils_cache_syscache::ATTNUM };
+    let attnum = att_field_i16(mcx, cache_id, &tuple, Anum_pg_attribute_attnum)?;
+    let attgenerated = att_field_char(mcx, cache_id, &tuple, Anum_pg_attribute_attgenerated)?;
+    let colname_for_msg = colName.unwrap_or("");
+
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{colname_for_msg}\""))
+            .finish(here("ATExecSetStatistics"))
+            .map(|()| unreachable!());
+    }
+
+    // Prevent this as long as the ANALYZE code skips virtual generated columns.
+    if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot alter statistics on virtual generated column \"{colname_for_msg}\""
+            ))
+            .finish(here("ATExecSetStatistics"))
+            .map(|()| unreachable!());
+    }
+
+    if rel.rd_rel.relkind == RELKIND_INDEX || rel.rd_rel.relkind == RELKIND_PARTITIONED_INDEX {
+        let rd_index = rel
+            .rd_index
+            .as_ref()
+            .expect("an index relation must carry rd_index");
+        if attnum > rd_index.indnkeyatts {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "cannot alter statistics on included column \"{}\" of index \"{}\"",
+                    att_name(mcx, cache_id, &tuple)?,
+                    rel.name()
+                ))
+                .finish(here("ATExecSetStatistics"))
+                .map(|()| unreachable!());
+        }
+        // C: `rel->rd_index->indkey.values[attnum - 1] != 0`. The trimmed
+        // `FormData_pg_index` carries only `indkey0` (the first key column), so
+        // for `attnum > 1` this read is not expressible. (The check fires
+        // before any write, so the loud stop is partial-write-safe.)
+        let indkey_val = if attnum == 1 {
+            rd_index.indkey0
+        } else {
+            panic!(
+                "ALTER INDEX ... ALTER COLUMN {attnum} SET STATISTICS: the trimmed \
+                 types_rel::FormData_pg_index carries only indkey0 (first key column); \
+                 indkey.values[attnum-1] for attnum>1 is not expressible \
+                 (out-of-lane carrier widen — see at_column.rs)"
+            );
+        };
+        if indkey_val != 0 {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "cannot alter statistics on non-expression column \"{}\" of index \"{}\"",
+                    att_name(mcx, cache_id, &tuple)?,
+                    rel.name()
+                ))
+                .errhint("Alter statistics on table column instead.".to_string())
+                .finish(here("ATExecSetStatistics"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    // Build new tuple: replace attstattarget only (Some(value) or SQL NULL).
+    let row = PgAttributeUpdateRow {
+        attstattarget: Some(if newtarget_default {
+            None
+        } else {
+            Some(newtarget as i16)
+        }),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum);
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    let address = object_address_subset(RelationRelationId, rel.rd_id, attnum as i32);
+
+    // table_close(attrelation, RowExclusiveLock) — RAII drop of the relation
+    // handle (lmgr lock is transaction-scoped).
+    drop(attrelation);
+
+    Ok(address)
 }
+
+// ---------------------------------------------------------------------------
+// Helpers for reading Form_pg_attribute fields off a syscache tuple (GETSTRUCT
+// reads).
+// ---------------------------------------------------------------------------
+
+use backend_access_common_heaptuple::FormedTuple;
+use types_catalog::pg_attribute::{Anum_pg_attribute_attgenerated, Anum_pg_attribute_attnum};
+
+/// `GETSTRUCT(tuple)->field` for a non-null `int2` `pg_attribute` column.
+fn att_field_i16(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i16> {
+    Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_i16())
+}
+
+/// `GETSTRUCT(tuple)->field` for a non-null `char` `pg_attribute` column.
+fn att_field_char(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i8> {
+    Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_char())
+}
+
+/// `NameStr(attrtuple->attname)` from a syscache tuple (`attname`, Anum 1).
+fn att_name(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>) -> PgResult<String> {
+    let datum = backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, 1)?;
+    match &datum {
+        Datum::ByRef(b) => {
+            // A `Name` is a fixed 64-byte NUL-padded image; read up to the NUL.
+            let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            Ok(String::from_utf8_lossy(&b[..end]).into_owned())
+        }
+        _ => Err(types_error::PgError::error(
+            "att_name: attname attribute is by-value",
+        )),
+    }
+}
+
+// ===========================================================================
+// Unported column-option / relation-option / storage families
+// (faithful keystone stop)
+// ===========================================================================
 
 /// `ATExecSetOptions` (tablecmds.c:9050). See module docs.
 pub fn ATExecSetOptions<'mcx>(
@@ -223,7 +461,14 @@ pub fn ATExecSetOptions<'mcx>(
     _isReset: bool,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported("ALTER COLUMN SET/RESET OPTIONS (pg_attribute attoptions transformRelOptions + heap_modify_tuple)");
+    unported(
+        "ALTER COLUMN SET/RESET OPTIONS — the attoptions write would store the \
+         text[] image transformRelOptions builds, but transformRelOptions (and \
+         construct_text_array) return a bare-word types_datum::Datum varlena \
+         pointer with NO safe bridge to the types_tuple::Datum ByRef-bytes lane \
+         the PgAttributeUpdateRow.attoptions carrier needs (same Datum-redesign \
+         keystone backend-commands-indexcmds documents for opclass options)",
+    );
 }
 
 /// `ATExecSetStorage` (tablecmds.c:9192). See module docs.
@@ -234,7 +479,12 @@ pub fn ATExecSetStorage<'mcx>(
     _newValue: Option<&Node<'mcx>>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported("ALTER COLUMN SET STORAGE (pg_attribute attstorage GETSTRUCT-mutate + SetIndexStorageProperties)");
+    unported(
+        "ALTER COLUMN SET STORAGE — the attstorage write is expressible, but the \
+         mandatory SetIndexStorageProperties index recursion scans \
+         indrel->rd_index->indkey.values[0..indnatts] and the trimmed \
+         types_rel::FormData_pg_index carries only indkey0 (out-of-lane carrier widen)",
+    );
 }
 
 /// `ATExecSetRelOptions` (tablecmds.c:16645). See module docs.
@@ -245,5 +495,11 @@ pub fn ATExecSetRelOptions<'mcx>(
     _operation: AlterTableType,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported("SET/RESET/REPLACE relOPTIONS (pg_class reloptions transformRelOptions + heap_modify_tuple + VIEW check_option + toast recursion)");
+    unported(
+        "SET/RESET/REPLACE relOPTIONS — writes the variable pg_class.reloptions \
+         (text[]) column via heap_modify_tuple, but the only pg_class write carrier \
+         (catalog_tuple_update_pg_class) takes the fixed-length PgClassForm struct, \
+         which has no reloptions field; no pg_class variable-column write carrier exists \
+         (out-of-lane carrier keystone)",
+    );
 }

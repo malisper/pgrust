@@ -7403,6 +7403,7 @@ dependencies = [
  "backend-catalog-dependency-seams",
  "backend-catalog-heap-seams",
  "backend-catalog-index-seams",
+ "backend-catalog-indexing-seams",
  "backend-catalog-namespace",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",
@@ -7435,6 +7436,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-statistics",
  "types-storage",
  "types-tuple",
 ]
