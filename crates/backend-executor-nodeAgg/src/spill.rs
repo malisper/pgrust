@@ -108,8 +108,7 @@ pub fn hash_agg_check_limits<'mcx>(
         .unwrap_or(0);
     let tval_mem = aggstate
         .hashcontext
-        .as_ref()
-        .map(|c| c.ecxt_per_tuple_memory.subtree_used())
+        .map(|id| estate.ecxt(id).ecxt_per_tuple_memory.subtree_used())
         .unwrap_or(0);
     let total_mem = meta_mem + entry_mem + tval_mem;
     let mut do_spill = false;
@@ -206,6 +205,7 @@ pub fn hash_agg_enter_spill_mode<'mcx>(
 /// peak-memory / disk-usage / batch-count metrics after processing a batch.
 pub fn hash_agg_update_metrics<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
     from_tape: bool,
     npartitions: i32,
 ) -> PgResult<()> {
@@ -230,8 +230,7 @@ pub fn hash_agg_update_metrics<'mcx>(
     // memory for byref transition states
     let hashkey_mem = aggstate
         .hashcontext
-        .as_ref()
-        .map(|c| c.ecxt_per_tuple_memory.subtree_used())
+        .map(|id| estate.ecxt(id).ecxt_per_tuple_memory.subtree_used())
         .unwrap_or(0);
 
     // memory for read/write tape buffers, if spilled
@@ -269,6 +268,7 @@ pub fn hash_agg_update_metrics<'mcx>(
 /// finalize every grouping set's initial spill files into read batches.
 pub fn hashagg_finish_initial_spills<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     let mut total_npartitions = 0;
@@ -286,7 +286,7 @@ pub fn hashagg_finish_initial_spills<'mcx>(
         drop(spills);
     }
 
-    hash_agg_update_metrics(aggstate, false, total_npartitions)?;
+    hash_agg_update_metrics(aggstate, estate, false, total_npartitions)?;
     aggstate.hash_spill_mode = false;
 
     Ok(())

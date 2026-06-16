@@ -104,6 +104,7 @@ backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-proc = { path = "../backend-catalog-pg-proc" }
 backend-catalog-pg-publication = { path = "../backend-catalog-pg-publication" }
+backend-commands-publicationcmds = { path = "../backend-commands-publicationcmds" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }

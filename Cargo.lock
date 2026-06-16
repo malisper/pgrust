@@ -6065,6 +6065,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-publicationcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-aclchk",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-inherits-seams",
+ "backend-catalog-pg-publication",
+ "backend-catalog-pg-publication-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-define-seams",
+ "backend-commands-event-trigger-seams",
+ "backend-commands-publicationcmds-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-read-seams",
+ "backend-parser-analyze-seams",
+ "backend-parser-clause",
+ "backend-parser-parse-collate",
+ "backend-parser-relation",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-storage-lmgr-lmgr",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-name",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "seam-core",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-relcache-entry",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-commands-publicationcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -17744,6 +17811,7 @@ dependencies = [
  "backend-commands-operatorcmds",
  "backend-commands-portalcmds",
  "backend-commands-proclang",
+ "backend-commands-publicationcmds",
  "backend-commands-schemacmds",
  "backend-commands-seclabel",
  "backend-commands-sequence",
@@ -18754,8 +18822,10 @@ dependencies = [
 name = "types-statistics"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-datum",
+ "types-tuple",
 ]
 
 [[package]]
