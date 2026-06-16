@@ -110,6 +110,7 @@ backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-statscmds = { path = "../backend-commands-statscmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
+backend-commands-createas = { path = "../backend-commands-createas" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
 backend-commands-explain = { path = "../backend-commands-explain" }

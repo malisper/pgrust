@@ -106,6 +106,7 @@ pub fn init_all() {
     backend_commands_conversioncmds::init_seams();
     backend_commands_statscmds::init_seams();
     backend_commands_copyto::init_seams();
+    backend_commands_createas::init_seams();
     backend_commands_define::init_seams();
     backend_commands_dropcmds::init_seams();
     backend_commands_explain::init_seams();

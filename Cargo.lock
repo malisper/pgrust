@@ -5098,13 +5098,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-createas"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-table-table",
+ "backend-access-table-tableam",
+ "backend-access-transam-xact",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-depend",
+ "backend-commands-createas-seams",
+ "backend-commands-matview-seams",
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-tcop-dest",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-misc-more-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-matview",
+ "types-nodes",
+ "types-portal",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-createas-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-portal",
+ "types-rel",
 ]
 
 [[package]]
@@ -17061,6 +17100,7 @@ dependencies = [
  "backend-commands-comment",
  "backend-commands-conversioncmds",
  "backend-commands-copyto",
+ "backend-commands-createas",
  "backend-commands-dbcommands",
  "backend-commands-define",
  "backend-commands-dropcmds",
