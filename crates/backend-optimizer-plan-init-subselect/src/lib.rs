@@ -37,6 +37,22 @@ pub mod outerjoin;
 pub mod quals;
 pub mod targetlist;
 
+// subselect.c (SubPlan-building half).
+pub mod correlation;
+pub mod finalize;
+pub mod subplan;
+
+/// `enable_material` (cost.h GUC) — default true. Read by
+/// `build_subplan` when deciding whether to add a `Material` node. The GUC table
+/// lives in an unported owner; mirror the boot-time default as a local read.
+pub static mut ENABLE_MATERIAL: bool = true;
+
+#[inline]
+pub fn enable_material() -> bool {
+    // SAFETY: single-threaded planner; mirrors the C global read.
+    unsafe { core::ptr::addr_of!(ENABLE_MATERIAL).read() }
+}
+
 /* ==========================================================================
  * GUC globals (optimizer.h externs) read by deconstruct_recurse.
  * ======================================================================== */
@@ -225,6 +241,13 @@ pub fn init_seams() {
     });
     jiext::restriction_is_always_false::set(|root, clause| {
         quals::restriction_is_always_false(root, clause)
+    });
+
+    /* ---- subselect.c-owned SS_attach_initplans (createplan-seams) -------- */
+    // `SS_attach_initplans(root, plan)` — createplan.c calls this at the top of
+    // `create_plan`. subselect.c owns it; install over the finalize module fn.
+    backend_optimizer_plan_createplan_seams::ss_attach_initplans::set(|mcx, root, plan| {
+        finalize::SS_attach_initplans(mcx, root, plan)
     });
 }
 
