@@ -17,6 +17,7 @@ pub mod pg_type;
 pub mod pg_inherits;
 pub mod pg_language;
 pub mod pg_range;
+pub mod pg_statistic_ext;
 pub mod pg_sequence;
 pub mod object_access;
 pub mod pg_aggregate;

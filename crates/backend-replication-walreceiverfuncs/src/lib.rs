@@ -557,6 +557,38 @@ fn wal_rcv_stopped_cv_broadcast() {
     ConditionVariableBroadcast(&wal_rcv().stopped_cv);
 }
 
+/// Seam adapter for `request_xlog_streaming` — the recovery page-read driver
+/// passes `conninfo`/`slotname` as `&str` (non-NULL `const char *` in C, where
+/// `PrimaryConnInfo`/`PrimarySlotName` are always allocated strings). Map both
+/// to `Some(bytes)`: a non-NULL empty C string copies zero bytes through
+/// `strlcpy`, which `RequestXLogStreaming`'s `Some(b"")` arm reproduces exactly.
+fn request_xlog_streaming_seam(
+    tli: TimeLineID,
+    recptr: XLogRecPtr,
+    conninfo: &str,
+    slotname: &str,
+    create_temp_slot: bool,
+) -> PgResult<()> {
+    RequestXLogStreaming(
+        tli,
+        recptr,
+        Some(conninfo.as_bytes()),
+        Some(slotname.as_bytes()),
+        create_temp_slot,
+    )
+}
+
+/// Seam adapter for `get_wal_rcv_flush_rec_ptr_full` — the C
+/// `GetWalRcvFlushRecPtr(&latestChunkStart, &receiveTLI)` returns the flush
+/// pointer and writes the two out-params; the seam hands all three back as a
+/// tuple `(flushedUpto, latestChunkStart, receiveTLI)`.
+fn get_wal_rcv_flush_rec_ptr_full_seam() -> (XLogRecPtr, XLogRecPtr, TimeLineID) {
+    let mut latest_chunk_start: XLogRecPtr = 0;
+    let mut receive_tli: TimeLineID = 0;
+    let flushed = GetWalRcvFlushRecPtr(Some(&mut latest_chunk_start), Some(&mut receive_tli));
+    (flushed, latest_chunk_start, receive_tli)
+}
+
 /// Install this unit's seams (`with_walrcv`, the atomic accessors, the shmem
 /// size/init pair, `WalRcvRunning`, and the apply-delay / transfer-latency
 /// helpers). Wired into `seams_init::init_all()`.
@@ -572,6 +604,18 @@ pub fn init_seams() {
     funcs_seams::get_replication_apply_delay::set(GetReplicationApplyDelay);
     funcs_seams::get_replication_transfer_latency::set(GetReplicationTransferLatency);
     funcs_seams::wal_rcv_running::set(WalRcvRunning);
+
+    // Streaming-control entry points consumed by the recovery page-read driver
+    // (xlogrecovery.c WaitForWALToBecomeAvailable). These are the genuine
+    // walreceiverfuncs.c routines owned here.
+    funcs_seams::wal_rcv_streaming::set(WalRcvStreaming);
+    funcs_seams::request_xlog_streaming::set(request_xlog_streaming_seam);
+    funcs_seams::get_wal_rcv_flush_rec_ptr_full::set(get_wal_rcv_flush_rec_ptr_full_seam);
+    // `ShutdownWalRcv` is the inner walreceiverfuncs.c routine; the xlog.c
+    // `XLogShutdownWalRcv` wrapper (xlog-owned) calls it via this seam. The C
+    // return is void; an `ereport(ERROR)` from the condition-variable wait loop
+    // unwinds (here: panic at the void seam boundary, matching the longjmp).
+    funcs_seams::shutdown_wal_rcv::set(|| ShutdownWalRcv().expect("ShutdownWalRcv failed"));
 
     // `GetWalRcvFlushRecPtr` is also reachable across a cycle via the
     // walreceiver-seams crate (xlog checkpoint / walsummarizer consume the

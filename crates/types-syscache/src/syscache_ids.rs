@@ -18,3 +18,5 @@ pub const DATABASEOID: SysCacheIdentifier = 21;
 pub const NAMESPACEOID: SysCacheIdentifier = 38;
 /// `RELOID`
 pub const RELOID: SysCacheIdentifier = 57;
+/// `RULERELNAME`
+pub const RULERELNAME: SysCacheIdentifier = 60;

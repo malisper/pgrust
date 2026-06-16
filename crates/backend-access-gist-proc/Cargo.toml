@@ -18,3 +18,5 @@ types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 backend-access-gist-dispatch-seams = { path = "../backend-access-gist-dispatch-seams" }
 backend-utils-adt-geo-ops-seams = { path = "../backend-utils-adt-geo-ops-seams" }
+backend-utils-adt-network-gist-seams = { path = "../backend-utils-adt-network-gist-seams" }
+types-network = { path = "../types-network" }

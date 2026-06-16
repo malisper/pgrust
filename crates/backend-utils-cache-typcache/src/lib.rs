@@ -2744,6 +2744,14 @@ fn lookup_type_cache_eq_opr(type_id: Oid) -> PgResult<Oid> {
     Ok(with_state(|st| st.entry(type_id).eq_opr))
 }
 
+/// `lookup_type_cache(type_id, TYPECACHE_LT_OPR)->lt_opr` — the "less than"
+/// btree operator oid of a type. `CreateStatistics` (statscmds.c) uses it to
+/// reject types with no default btree operator class.
+fn lookup_type_cache_lt_opr(type_id: Oid) -> PgResult<Oid> {
+    lookup_type_cache(type_id, TYPECACHE_LT_OPR)?;
+    Ok(with_state(|st| st.entry(type_id).lt_opr))
+}
+
 /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`.
 fn lookup_element_cmp_proc(element_type: Oid) -> PgResult<Oid> {
     lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)?;
@@ -2837,6 +2845,7 @@ pub fn init_seams() {
     // OID read). The array/range ADTs call these across the dep cycle.
     backend_utils_cache_typcache_seams::lookup_element_eq_opr::set(lookup_element_eq_opr);
     backend_utils_cache_typcache_seams::lookup_type_cache_eq_opr::set(lookup_type_cache_eq_opr);
+    backend_utils_cache_typcache_seams::lookup_type_cache_lt_opr::set(lookup_type_cache_lt_opr);
     backend_utils_cache_typcache_seams::lookup_element_cmp_proc::set(lookup_element_cmp_proc);
     backend_utils_cache_typcache_seams::lookup_element_hash_proc::set(lookup_element_hash_proc);
     backend_utils_cache_typcache_seams::lookup_element_hash_extended_proc::set(

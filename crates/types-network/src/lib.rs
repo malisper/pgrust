@@ -39,6 +39,30 @@ pub struct inet_struct {
     pub ipaddr: [u8; 16],
 }
 
+impl inet_struct {
+    /// Encode the `inet` payload into by-reference `Datum` bytes: family, bits,
+    /// then 16 address bytes (the `inet_struct` image; the varlena header is the
+    /// fmgr boundary's concern).
+    pub fn to_datum_bytes(&self) -> [u8; 18] {
+        let mut out = [0u8; 18];
+        out[0] = self.family;
+        out[1] = self.bits;
+        out[2..18].copy_from_slice(&self.ipaddr);
+        out
+    }
+
+    /// Decode an `inet` payload from by-reference `Datum` bytes.
+    pub fn from_datum_bytes(b: &[u8]) -> inet_struct {
+        let mut ipaddr = [0u8; 16];
+        ipaddr.copy_from_slice(&b[2..18]);
+        inet_struct {
+            family: b[0],
+            bits: b[1],
+            ipaddr,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // macaddr / macaddr8  (utils/inet.h)
 // ---------------------------------------------------------------------------
@@ -98,4 +122,84 @@ pub enum SessionEndpoint {
     Client,
     /// C: `MyProcPort->laddr` — the local (server) address.
     Server,
+}
+
+// ---------------------------------------------------------------------------
+// GiST inet_ops opclass key (network_gist.c)
+// ---------------------------------------------------------------------------
+
+use types_core::primitive::OffsetNumber;
+
+/// `GistInetKey` (network_gist.c:79) — a GiST INET/CIDR index key.
+///
+/// Not identical to INET/CIDR because it tracks the length of the common
+/// address prefix (`commonbits`) as well as the minimum netmask length
+/// (`minbits`). In C this is a 1-byte-header varlena; the varlena envelope is
+/// the fmgr/Datum boundary's concern, so this payload struct carries only the
+/// fields. `family` of zero denotes a multiple-family union.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GistInetKey {
+    /// `family` — `PGSQL_AF_INET`, `PGSQL_AF_INET6`, or zero.
+    pub family: u8,
+    /// `minbits` — minimum number of bits in netmask.
+    pub minbits: u8,
+    /// `commonbits` — number of common prefix bits in addresses.
+    pub commonbits: u8,
+    /// `ipaddr` — up to 128 bits of common address.
+    pub ipaddr: [u8; 16],
+}
+
+impl GistInetKey {
+    /// Encode the key into the bytes carried by a by-reference `Datum`
+    /// (`InetKeyPGetDatum`): family, minbits, commonbits, then 16 address bytes.
+    pub fn to_datum_bytes(&self) -> [u8; 19] {
+        let mut out = [0u8; 19];
+        out[0] = self.family;
+        out[1] = self.minbits;
+        out[2] = self.commonbits;
+        out[3..19].copy_from_slice(&self.ipaddr);
+        out
+    }
+
+    /// Decode a key from by-reference `Datum` bytes (`DatumGetInetKeyP`).
+    pub fn from_datum_bytes(b: &[u8]) -> GistInetKey {
+        let mut ipaddr = [0u8; 16];
+        ipaddr.copy_from_slice(&b[3..19]);
+        GistInetKey {
+            family: b[0],
+            minbits: b[1],
+            commonbits: b[2],
+            ipaddr,
+        }
+    }
+}
+
+/// Owned result of `inet_gist_picksplit`, mirroring the populated
+/// `GIST_SPLITVEC` (`<access/gist.h>`). Offsets are 1-based `OffsetNumber`s,
+/// exactly as written by the C `splitvec->spl_left[...] = i` assignments. The
+/// fmgr boundary copies these into the real `GIST_SPLITVEC`.
+#[derive(Clone, Debug, Default)]
+pub struct GistInetSplitVec {
+    /// `spl_left` — offsets of entries assigned to the left group.
+    pub spl_left: Vec<OffsetNumber>,
+    /// `spl_right` — offsets of entries assigned to the right group.
+    pub spl_right: Vec<OffsetNumber>,
+    /// `spl_ldatum` — union key of the left group.
+    pub spl_ldatum: GistInetKey,
+    /// `spl_rdatum` — union key of the right group.
+    pub spl_rdatum: GistInetKey,
+}
+
+impl GistInetSplitVec {
+    /// `v->spl_nleft`.
+    #[inline]
+    pub fn spl_nleft(&self) -> i32 {
+        self.spl_left.len() as i32
+    }
+
+    /// `v->spl_nright`.
+    #[inline]
+    pub fn spl_nright(&self) -> i32 {
+        self.spl_right.len() as i32
+    }
 }

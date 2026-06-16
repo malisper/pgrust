@@ -42,3 +42,9 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 types-catalog = { path = "../types-catalog" }
+
+# CreateStatistics' variable-length pg_statistic_ext columns: the char[] stxkind
+# array (construct_array) and the buildint2vector / CStringGetTextDatum image
+# bytes. arrayfuncs depends only on lsyscache-seams (no cycle).
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+types-datum = { path = "../types-datum" }

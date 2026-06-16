@@ -29,7 +29,7 @@ use core::cell::Cell;
 
 use backend_utils_error::{PgError, PgResult};
 use types_core::{pg_time_t, RmgrId, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE};
+use types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
 use types_wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
 
 use backend_storage_file_fd_seams as fd;
@@ -39,6 +39,7 @@ use backend_utils_init_small::globals;
 use backend_access_transam_xlogarchive as xlogarchive;
 use backend_postmaster_checkpointer_seams as checkpointer;
 use backend_replication_walsender_seams as walsender;
+use backend_replication_walreceiverfuncs_seams as walrcv;
 use backend_utils_adt_timestamp_seams as timestamp;
 use backend_utils_misc_guc_tables::vars;
 
@@ -896,6 +897,71 @@ fn InstallXLogFileSegment(
 
     lwlock::LWLockRelease(control_file_lock)?;
     Ok(true)
+}
+
+/// `SetInstallXLogFileSegmentActive(void)` (xlog.c:9554) — enable WAL file
+/// recycling and preallocation by setting the `XLogCtl->InstallXLogFileSegmentActive`
+/// flag under `ControlFileLock` in exclusive mode.
+pub fn SetInstallXLogFileSegmentActive() -> PgResult<()> {
+    let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+    lwlock::LWLockAcquire(control_file_lock, LW_EXCLUSIVE, globals::MyProcNumber())?;
+    // SAFETY: live shmem region; ControlFileLock held exclusively.
+    let ctl = xlog_ctl();
+    if !ctl.is_null() {
+        unsafe { (*ctl).InstallXLogFileSegmentActive = true };
+    }
+    lwlock::LWLockRelease(control_file_lock)?;
+    Ok(())
+}
+
+/// `ResetInstallXLogFileSegmentActive(void)` (xlog.c:9563) — disable WAL file
+/// recycling and preallocation by clearing the `XLogCtl->InstallXLogFileSegmentActive`
+/// flag under `ControlFileLock` in exclusive mode.
+pub fn ResetInstallXLogFileSegmentActive() -> PgResult<()> {
+    let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+    lwlock::LWLockAcquire(control_file_lock, LW_EXCLUSIVE, globals::MyProcNumber())?;
+    // SAFETY: live shmem region; ControlFileLock held exclusively.
+    let ctl = xlog_ctl();
+    if !ctl.is_null() {
+        unsafe { (*ctl).InstallXLogFileSegmentActive = false };
+    }
+    lwlock::LWLockRelease(control_file_lock)?;
+    Ok(())
+}
+
+/// `IsInstallXLogFileSegmentActive(void)` (xlog.c:9571) — read the
+/// `XLogCtl->InstallXLogFileSegmentActive` flag under `ControlFileLock` in
+/// shared mode.
+pub fn IsInstallXLogFileSegmentActive() -> bool {
+    let control_file_lock = lwlock::main_lock_ref(CONTROL_FILE_LOCK);
+    // The read seam (consumed by the recovery page-read driver) cannot return a
+    // PgResult; the lock acquire is infallible in practice here. Acquire/read/
+    // release mirroring the C exactly.
+    lwlock::LWLockAcquire(control_file_lock, LW_SHARED, globals::MyProcNumber())
+        .expect("ControlFileLock acquire failed in IsInstallXLogFileSegmentActive");
+    // SAFETY: live shmem region; ControlFileLock held in shared mode.
+    let ctl = xlog_ctl();
+    let result = if ctl.is_null() {
+        false
+    } else {
+        unsafe { (*ctl).InstallXLogFileSegmentActive }
+    };
+    lwlock::LWLockRelease(control_file_lock)
+        .expect("ControlFileLock release failed in IsInstallXLogFileSegmentActive");
+    result
+}
+
+/// `XLogShutdownWalRcv(void)` (xlog.c:9546) — a thin wrapper around
+/// `ShutdownWalRcv()` (walreceiverfuncs.c) followed by
+/// `ResetInstallXLogFileSegmentActive()`.
+///
+/// `ShutdownWalRcv` lives in the walreceiverfuncs owner; it is reached through
+/// the `shutdown_wal_rcv` seam. The `ResetInstallXLogFileSegmentActive` call
+/// touches the xlog-owned `XLogCtl` flag directly.
+pub fn XLogShutdownWalRcv() -> PgResult<()> {
+    walrcv::shutdown_wal_rcv::call();
+    ResetInstallXLogFileSegmentActive()?;
+    Ok(())
 }
 
 /// `XLogFileOpen(segno, tli)` (xlog.c:3637) — open a pre-existing segment for
