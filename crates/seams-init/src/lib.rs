@@ -112,6 +112,7 @@ pub fn init_all() {
     backend_commands_copyto::init_seams();
     backend_commands_createas::init_seams();
     backend_commands_define::init_seams();
+    backend_commands_alter::init_seams();
     backend_commands_dropcmds::init_seams();
     backend_commands_extension::init_seams();
     backend_commands_explain::init_seams();
@@ -1460,6 +1461,19 @@ mod recurrence_guard {
         // -- namespace.c (RenameSchema / AlterSchemaOwner) --
         ("backend_catalog_indexing", "rename_namespace_tuple"),
         ("backend_catalog_indexing", "update_namespace_owner_tuple"),
+        // -- alter.c (AlterObjectOwner_internal, generic catalog) --
+        // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
+        // AlterObjectOwner_internal builds the modified owner tuple for an
+        // ARBITRARY simple catalog — set the owner column and, when the catalog
+        // has an ACL column, re-serialize aclnewowner(acl, old, new) back into
+        // the aclitem[] varlena — then CatalogTupleUpdate + UnlockTuple. The
+        // generic aclitem[]-varlena re-serialization into an arbitrary tuple
+        // column has no owned-model counterpart at this layer (every other
+        // owner-change uses a per-catalog typed writer, e.g.
+        // update_namespace_owner_tuple). Declared on the indexing owner so the
+        // landed alter dispatch can call it; loud-panics until indexing's
+        // generic aclitem[] write lands. DELETE when indexing installs it.
+        ("backend_catalog_indexing", "update_object_owner_tuple"),
         // -- foreign-data catalogs (foreigncmds.c: FDW / server / table / um) --
         ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_data_wrapper"),
         ("backend_catalog_indexing", "catalog_tuple_update_pg_foreign_data_wrapper"),

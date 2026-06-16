@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 types-core = { path = "../types-core" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }

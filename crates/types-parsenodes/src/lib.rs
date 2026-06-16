@@ -279,6 +279,79 @@ pub struct CommentStmt {
     pub comment: Option<String>,
 }
 
+/// `typedef struct RenameStmt` (`nodes/parsenodes.h`) — `ALTER ... RENAME`.
+///
+/// `renameType` is the object kind; `object` / `relation` / `subname` /
+/// `newname` are the parser representations dispatched on by `ExecRenameStmt`
+/// (alter.c). `object` is opaque here (a `String` value node, a qualified-name
+/// `List *`, etc.) and is handed to `get_object_address`.
+#[derive(Clone, Debug)]
+pub struct RenameStmt {
+    /// `ObjectType renameType` — the kind of object being renamed.
+    pub renameType: ObjectType,
+    /// `ObjectType relationType` — for a column/constraint rename, the kind of
+    /// the relation that contains it.
+    pub relationType: ObjectType,
+    /// `RangeVar *relation` — the relation a column/rule/trigger/... lives in.
+    pub relation: Option<types_tuple::access::RangeVar>,
+    /// `Node *object` — the parser representation naming the object.
+    pub object: Option<Box<Node>>,
+    /// `char *subname` — the old name of the sub-object (column/constraint/...).
+    pub subname: Option<String>,
+    /// `char *newname` — the new name.
+    pub newname: Option<String>,
+    /// `DropBehavior behavior` — RESTRICT/CASCADE for renames that recurse.
+    pub behavior: DropBehavior,
+    /// `bool missing_ok` — skip the error if the object does not exist.
+    pub missing_ok: bool,
+}
+
+/// `typedef struct AlterObjectDependsStmt` (`nodes/parsenodes.h`) —
+/// `ALTER ... [NO] DEPENDS ON EXTENSION`.
+#[derive(Clone, Debug)]
+pub struct AlterObjectDependsStmt {
+    /// `ObjectType objectType`.
+    pub objectType: ObjectType,
+    /// `RangeVar *relation` — the relation a column/index/trigger/... lives in.
+    pub relation: Option<types_tuple::access::RangeVar>,
+    /// `Node *object` — the parser representation naming the object.
+    pub object: Option<Box<Node>>,
+    /// `String *extname` — the extension's name (carried as a `String` node).
+    pub extname: Option<Box<Node>>,
+    /// `bool remove` — `NO DEPENDS ON` drops the auto-extension dependency.
+    pub remove: bool,
+}
+
+/// `typedef struct AlterObjectSchemaStmt` (`nodes/parsenodes.h`) —
+/// `ALTER ... SET SCHEMA`.
+#[derive(Clone, Debug)]
+pub struct AlterObjectSchemaStmt {
+    /// `ObjectType objectType`.
+    pub objectType: ObjectType,
+    /// `RangeVar *relation` — for a table/sequence/view/... SET SCHEMA.
+    pub relation: Option<types_tuple::access::RangeVar>,
+    /// `Node *object` — the parser representation naming the object.
+    pub object: Option<Box<Node>>,
+    /// `char *newschema` — the destination schema name.
+    pub newschema: Option<String>,
+    /// `bool missing_ok` — skip the error if the object does not exist.
+    pub missing_ok: bool,
+}
+
+/// `typedef struct AlterOwnerStmt` (`nodes/parsenodes.h`) —
+/// `ALTER ... OWNER TO`.
+#[derive(Clone, Debug)]
+pub struct AlterOwnerStmt {
+    /// `ObjectType objectType`.
+    pub objectType: ObjectType,
+    /// `RangeVar *relation` — for relation-member objects.
+    pub relation: Option<types_tuple::access::RangeVar>,
+    /// `Node *object` — the parser representation naming the object.
+    pub object: Option<Box<Node>>,
+    /// `RoleSpec *newowner` — the new owning role (carried as a `RoleSpec` node).
+    pub newowner: Option<Box<Node>>,
+}
+
 /// `typedef struct DoStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug)]
 pub struct DoStmt {

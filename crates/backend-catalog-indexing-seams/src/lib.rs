@@ -330,6 +330,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AlterObjectOwner_internal`'s modified-tuple write (alter.c:1013-1046) for
+    /// an arbitrary simple catalog. On the already-open `rel` (catalog OID
+    /// `catalogId`, RowExclusiveLock) re-fetch the locked row for `object_id`
+    /// via `get_catalog_object_by_oid_extended(rel, anum_oid, object_id, true)`,
+    /// set `repl_repl[anum_owner] = true` / `repl_val[anum_owner] = new_owner`,
+    /// and when `anum_acl != InvalidAttrNumber` and `SysCacheGetAttr(anum_acl)`
+    /// is non-NULL, write `aclnewowner(acl, old_owner, new_owner)` into
+    /// `repl_val[anum_acl]`; then `heap_modify_tuple` + `CatalogTupleUpdate(rel,
+    /// &newtup->t_self, newtup)` + `UnlockTuple(rel, &oldtup->t_self,
+    /// InplaceUpdateTupleLock)`. The generic `aclitem[]` varlena re-serialization
+    /// into the modified tuple is the unported primitive this seam encapsulates
+    /// (mirroring the per-catalog typed owner-tuple writers like
+    /// `update_namespace_owner_tuple`). `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn update_object_owner_tuple(
+        rel: &RelationData<'_>,
+        anum_oid: i16,
+        object_id: Oid,
+        anum_owner: i16,
+        anum_acl: i16,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
     /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
     /// the metadata tuple from the already-chosen large-object OID, owner, and
