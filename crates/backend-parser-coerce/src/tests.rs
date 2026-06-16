@@ -30,8 +30,10 @@ fn select_common_typmod_all_match() {
             consttype: INT4OID,
             consttypmod: typmod,
             constcollid: InvalidOid,
+            constlen: 4,
             constvalue: TupleDatum::ByVal(0),
             constisnull: false,
+            constbyval: true,
             location: -1,
         })
     };

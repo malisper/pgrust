@@ -95,6 +95,7 @@ backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-operator = { path = "../backend-catalog-pg-operator" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
@@ -107,6 +108,7 @@ backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-proc = { path = "../backend-catalog-pg-proc" }
 backend-catalog-pg-publication = { path = "../backend-catalog-pg-publication" }
+backend-catalog-pg-subscription = { path = "../backend-catalog-pg-subscription" }
 backend-commands-publicationcmds = { path = "../backend-commands-publicationcmds" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
@@ -384,6 +386,9 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-cyrillic-and-mic = { path = "../backend-conv-cyrillic-and-mic" }
+backend-conv-latin-and-mic = { path = "../backend-conv-latin-and-mic" }
+backend-conv-latin2-and-win1250 = { path = "../backend-conv-latin2-and-win1250" }
 backend-conv-euc-cn-and-mic = { path = "../backend-conv-euc-cn-and-mic" }
 backend-conv-euc-jp-and-sjis = { path = "../backend-conv-euc-jp-and-sjis" }
 backend-conv-euc-kr-and-mic = { path = "../backend-conv-euc-kr-and-mic" }

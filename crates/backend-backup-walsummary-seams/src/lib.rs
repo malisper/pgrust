@@ -5,6 +5,7 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
+use types_blkreftable::BlockRefTableReaderHandle;
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::PgResult;
 use types_walsummarizer::WalSummaryFile;
@@ -46,4 +47,31 @@ seam_core::seam!(
         final_path: &str,
         bytes: &[u8],
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The `pg_wal_summary_contents` reader setup
+    /// (`OpenWalSummaryFile(&ws, false)` + `CreateBlockRefTableReader(
+    /// ReadWalSummary, &io, FilePathName(io.file), ReportWalSummaryError,
+    /// NULL)`): open the summary file identified by `ws` and wrap it in a
+    /// `BlockRefTableReader`. The `File`, the `ReadWalSummary` read callback
+    /// (over the `WalSummaryIO` cursor), and the `ReportWalSummaryError`
+    /// error callback are all walsummary/fd-owned, so the open + reader
+    /// construction is bundled into this single owner seam (it allocates the
+    /// reader in `mcx` and threads the open `File` through the reader's
+    /// callback arg). `Err` carries the file-open / reader-create
+    /// `ereport(ERROR)`.
+    pub fn wal_summary_create_reader<'mcx>(
+        mcx: Mcx<'mcx>,
+        ws: WalSummaryFile,
+    ) -> PgResult<BlockRefTableReaderHandle>
+);
+
+seam_core::seam!(
+    /// The `pg_wal_summary_contents` reader teardown: after
+    /// `DestroyBlockRefTableReader(reader)` (blkreftable-owned), `FileClose(
+    /// io.file)` closes the WAL summary file the reader was reading. The open
+    /// `File` lives in the reader's walsummary-owned callback arg, so the
+    /// close is seamed here keyed by the same reader handle. Infallible in C.
+    pub fn wal_summary_reader_file_close(reader: BlockRefTableReaderHandle)
 );

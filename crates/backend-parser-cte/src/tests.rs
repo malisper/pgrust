@@ -296,8 +296,10 @@ fn int_te<'mcx>(mcx: Mcx<'mcx>, resno: i16, name: &str) -> PgResult<TargetEntry<
         consttype: INT4OID,
         consttypmod: -1,
         constcollid: InvalidOid,
+        constlen: 4,
         constvalue: Datum::null(),
         constisnull: true,
+        constbyval: true,
         location: -1,
     });
     Ok(TargetEntry {
