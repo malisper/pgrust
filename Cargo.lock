@@ -3826,6 +3826,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-heap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "backend-utils-misc-stack-depth",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-heap-seams"
 version = "0.0.0"
 dependencies = [
