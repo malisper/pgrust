@@ -17,11 +17,19 @@ use crate::core::XLogRecoveryState;
 /// recovery) run the redo loop. Split at the `InitWalRecovery` boundary; this is
 /// the part up to the redo loop.
 pub fn startup_xlog(_st: &mut XLogRecoveryState) -> PgResult<()> {
-    panic!("decomp: xlogrecovery::startupxlog::startup_xlog not yet filled")
+    panic!(
+        "blocked: xlogrecovery::startupxlog::startup_xlog — recovery entry (control-file read, \
+         InitWalRecovery, redo loop via replay::perform_wal_recovery) + process integration \
+         (StartupProcShutdownHandler, checkpointer signaling) into unported postmaster/startup \
+         owners; pending startupxlog+replay family fill"
+    )
 }
 
 /// The post-init continuation of `StartupXLOG` (the end-of-recovery WAL action
 /// and shared-state finalization), reached after the redo loop / init work.
 pub fn startup_xlog_after_init(_st: &mut XLogRecoveryState) -> PgResult<()> {
-    panic!("decomp: xlogrecovery::startupxlog::startup_xlog_after_init not yet filled")
+    panic!(
+        "blocked: xlogrecovery::startupxlog::startup_xlog_after_init — end-of-recovery WAL action \
+         + shared-state finalization, reached after the redo loop; pending startupxlog+replay family fill"
+    )
 }
