@@ -1314,27 +1314,22 @@ mod recurrence_guard {
         // (walrecovery.rs) — the held prefetcher/reader is now allocated by the
         // landed recovery driver, so the stats call has a real body.
         //
-        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
-        // (now ported into backend-access-transam-xlogrecovery) still reaches the
-        // walreceiverfuncs streaming-control owners on its standby legs:
-        //   * walreceiverfuncs (wal_rcv_streaming / xlog_shutdown_wal_rcv /
-        //     request_xlog_streaming / set+reset_install_xlog_file_segment_active /
-        //     get_wal_rcv_flush_rec_ptr_full) — walreceiverfuncs.c is now CATALOG
-        //     `audited`, so the old "unported" blocker is gone, but these 6 stay
-        //     uninstalled: set/reset_install_xlog_file_segment_active have no body
-        //     (the segment-active flag lives in xlog's ControlFileData),
-        //     request_xlog_streaming diverges (seam `&str` recptr vs owner
-        //     `Option<&[u8]>`), and all 6 are reached ONLY from the
-        //     xlogrecovery standby streaming legs — sanctioned walreceiver-fetch
-        //     panic legs of the standby state machine.
-        // All become real installs when the ControlFileData segment-active flag +
-        // the streaming-source contract land. See DESIGN_DEBT.md.
-        ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
-        ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
-        ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),
-        ("backend_replication_walreceiverfuncs", "set_install_xlog_file_segment_active"),
-        ("backend_replication_walreceiverfuncs", "reset_install_xlog_file_segment_active"),
-        ("backend_replication_walreceiverfuncs", "get_wal_rcv_flush_rec_ptr_full"),
+        // RETIRED (walreceiverfuncs streaming-control): the 6 streaming-control
+        // seams the recovery page-read driver reaches on its standby legs are now
+        // installed with real bodies:
+        //   * wal_rcv_streaming / request_xlog_streaming /
+        //     get_wal_rcv_flush_rec_ptr_full — the genuine walreceiverfuncs.c
+        //     routines, installed by backend-replication-walreceiverfuncs'
+        //     init_seams (WalRcvStreaming / RequestXLogStreaming /
+        //     GetWalRcvFlushRecPtr). The `&str` conninfo/slotname divergence is
+        //     resolved by an in-owner adapter mapping both to `Some(bytes)`.
+        //   * xlog_shutdown_wal_rcv / set+reset_install_xlog_file_segment_active —
+        //     these are xlog.c functions touching the xlog-owned
+        //     `XLogCtl->InstallXLogFileSegmentActive` flag under ControlFileLock;
+        //     ported in backend-access-transam-xlog (write.rs) and installed from
+        //     xlog's init_seams (the real owner). XLogShutdownWalRcv reaches the
+        //     inner ShutdownWalRcv via the new `shutdown_wal_rcv` seam.
+        // Allowlist entries removed.
         // DESIGN_DEBT (TD-ANALYZE-PLANCACHE-HANDLE / #159 + TD-ANALYZE-REWRITE):
         // 19 parser/analyze.c seams `::call`ed in live consumers (chiefly
         // plancache, bootstrap) on the audited analyze owner, none installable:

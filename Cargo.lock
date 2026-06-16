@@ -3196,6 +3196,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
  "backend-postmaster-checkpointer-seams",
+ "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-shmem-seams",
