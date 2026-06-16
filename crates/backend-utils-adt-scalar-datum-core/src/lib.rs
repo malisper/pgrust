@@ -205,7 +205,11 @@ pub fn datum_copy<'mcx>(
         return Ok(match value {
             Datum::ByVal(d) => Datum::ByVal(*d),
             // A by-value type must arrive as ByVal (C: the Datum word is the value).
-            Datum::ByRef(_) => {
+            Datum::ByRef(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 panic!("datumCopy: by-value type arrived as a by-reference value")
             }
         });
@@ -323,7 +327,11 @@ pub fn datum_image_hash_bytes(
     if typ_byval {
         let d = match value {
             Datum::ByVal(d) => *d,
-            Datum::ByRef(_) => {
+            Datum::ByRef(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
                 panic!("datum_image_hash: by-value type arrived as a by-reference value")
             }
         };

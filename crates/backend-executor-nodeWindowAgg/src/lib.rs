@@ -3045,6 +3045,9 @@ impl<'mcx> DatumByValExt<'mcx> for Datum<'mcx> {
             Datum::ByRef(_) => {
                 panic!("nodeWindowAgg: clone_in_word called on a by-reference Datum")
             }
+            Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+                panic!("nodeWindowAgg: clone_in_word called on a Cstring/Composite/Expanded/Internal Datum — not yet produced — wave 2")
+            }
         }
     }
 

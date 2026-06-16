@@ -1543,7 +1543,12 @@ fn VARATT_IS_EXTERNAL(d: &Datum<'_>) -> bool {
             let bytes = d.as_ref_bytes();
             !bytes.is_empty() && bytes[0] == 0x01
         }
-        Datum::ByVal(_) => false,
+        // None of these are an on-disk external (TOAST-pointer) varlena.
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => false,
     }
 }
 

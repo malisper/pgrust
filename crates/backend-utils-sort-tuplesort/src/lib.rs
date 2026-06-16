@@ -2395,6 +2395,12 @@ fn tuple_body_space(body: &TupleBody<'_>) -> usize {
         TupleBody::Index(b) => b.len(),
         TupleBody::Datum(Datum::ByRef(b)) => b.len(),
         TupleBody::Datum(Datum::ByVal(_)) => 0,
+        TupleBody::Datum(Datum::Cstring(_))
+        | TupleBody::Datum(Datum::Composite(_))
+        | TupleBody::Datum(Datum::Expanded(_))
+        | TupleBody::Datum(Datum::Internal(_)) => {
+            panic!("tuplesort::tuple_body_space: Cstring/Composite/Expanded/Internal Datum body not yet produced — wave 2")
+        }
     }
 }
 

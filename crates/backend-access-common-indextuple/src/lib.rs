@@ -732,6 +732,9 @@ fn clone_tuple_value<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'_>) -> PgResult<Datum<
     Ok(match value {
         Datum::ByVal(d) => Datum::ByVal(*d),
         Datum::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
+        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("clone_tuple_value: non-ByVal/ByRef Datum arm not yet produced — wave 2")
+        }
     })
 }
 
