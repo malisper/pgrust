@@ -1281,6 +1281,36 @@ pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Da
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `text_array_out` — `accumArrayResult`/`makeArrayResult` over `TEXTOID`
+/// then `array_out` (the `getTypeOutputInfo(ANYARRAYOID)` +
+/// `OidOutputFunctionCall(typoutput, makeArrayResult(...))` pair).
+pub fn text_array_out<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<PgString<'mcx>> {
+    // An empty input renders the C empty-array form `{}`.
+    if elems.is_empty() {
+        return PgString::from_str_in("{}", mcx);
+    }
+
+    let mut astate: Option<ArrayBuildState> = None;
+    for elem in elems {
+        let d = cstring_to_text_datum(mcx, elem)?;
+        astate = Some(accum_array_result(
+            mcx,
+            astate.take(),
+            d,
+            false,
+            foundation::TEXTOID,
+        )?);
+    }
+    let astate = astate.expect("non-empty input builds a state");
+    let buf = make_array_result(mcx, &astate)?;
+
+    // OidOutputFunctionCall(anyarray_out, val) == array_out(val); the rendered
+    // bytes are server-encoded text (the per-element `text` output bytes).
+    let rendered = crate::io::array_out(mcx, &buf)?;
+    PgString::from_utf8(rendered)
+        .map_err(|_| PgError::error("array_out produced invalid UTF-8"))
+}
+
 /// Seam `build_text_array_nullable` — `accumArrayResult`/`makeArrayResult` over
 /// `TEXTOID`, preserving per-element NULLs (the array-build half of
 /// `text_to_array` / `text_to_array_null`, varlena.c:4771-4801).

@@ -33,12 +33,11 @@ pub fn init_all() {
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_amapi::init_seams();
+    backend_access_index_amvalidate::init_seams();
     backend_access_index_genam::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_spg_proc::init_seams();
     backend_access_spg_quadtree::init_seams();
-    backend_access_spg_text::init_seams();
-    backend_access_spg_validate::init_seams();
     backend_access_gist_proc::init_seams();
     backend_access_gist_core::init_seams();
     backend_access_nbt_dedup::init_seams();
@@ -117,6 +116,7 @@ pub fn init_all() {
     backend_executor_execScan::init_seams();
     backend_executor_execTuples::init_seams();
     backend_executor_execUtils::init_seams();
+    backend_executor_execGrouping::init_seams();
     backend_executor_spi::init_seams();
     backend_executor_instrument::init_seams();
     backend_executor_nodeAgg::init_seams();
@@ -739,35 +739,63 @@ mod recurrence_guard {
         // workspace-wide. Installing would just relocate the runtime panic into the
         // fmgr leg. Pay down once the pointer-Datum/fmgr dispatch bridge lands.
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
-        // DESIGN_DEBT (TD-GIN-EXTRACT-QUERY): `gin_extract_query` is the GIN
-        // `extractQueryFn` fmgr dispatch (`FunctionCall7Coll(...)` with by-pointer
-        // out-params) that `ginscan.c`'s `ginNewScanKey` invokes. Its real owner
-        // is the fmgr GIN-call dispatcher (still unported) — the SAME owner as the
-        // already-uninstalled `gin_extract_value` / `gin_compare_entries` /
-        // `gin_consistent_call_{bool,tri}` substrate seams. It is declared in
-        // `backend-access-gin-ginutil-seams` (the GIN substrate seam crate, the
-        // first cyclic GIN caller) so the guard attributes it to the COMPLETE
-        // `ginutil` owner; but ginutil does not call it (ginscan does), so the
-        // OUTWARD-seam exclusion that covers the sibling gin substrate seams does
-        // not fire. It is genuinely uninstalled / loud-panic (mirror-pg-and-panic)
-        // until the fmgr GIN dispatcher lands. DELETE this entry when it does.
+        // DESIGN_DEBT (TD-GIN-OPCLASS-DISPATCH): the GIN opclass support-proc
+        // dispatch family — `gin_extract_query` (extractQueryFn,
+        // `FunctionCall7Coll`, ginscan.c `ginNewScanKey`), `gin_compare_partial`
+        // (comparePartialFn, `FunctionCall4Coll`, ginget.c `collectMatchBitmap` /
+        // `matchPartialInPendingList`), plus the sibling `gin_extract_value`
+        // (extractValueFn), `gin_compare_entries` (compareFn), and
+        // `gin_consistent_call_{bool,tri}` (consistent/triConsistent) seams.
+        //
+        // CORRECTED MODEL (verified C5/#161): the faithful re-model is NOT a
+        // "generic fmgr GIN-call dispatcher" — it is TYPED per-opclass dispatch
+        // keyed on the support-proc OID (`flinfo.fn_oid`, the resolved
+        // `index_getprocinfo` row), exactly the proven BRIN
+        // (`backend-access-brin-minmax::dispatch_*` matching `F_BRIN_MINMAX_*`)
+        // and SP-GiST opclass-dispatch idiom. The natural single owner is
+        // `backend-access-gin-core-probe` (it already holds the array_ops bodies
+        // and an `init_seams()`), depending on `tsginidx` for the tsvector_ops
+        // bodies and installing all six ginutil-seams keyed on fn_oid:
+        //   array_ops    extractValue=ginarrayextract(2743/3076),
+        //                extractQuery=ginqueryarrayextract(2774),
+        //                consistent=ginarrayconsistent, tri=ginarraytriconsistent
+        //                (no comparePartial); bodies PORTED in
+        //                `backend-access-gin-core-probe::ginarrayproc`.
+        //   tsvector_ops extractValue=gin_extract_tsvector(3656/3077),
+        //                extractQuery=gin_extract_tsquery(3657/3087/3791),
+        //                comparePartial=gin_cmp_prefix(2700),
+        //                compare=gin_cmp_tslexeme(3724); bodies PORTED in
+        //                `backend-utils-adt-tsginidx`.
+        //   jsonb_ops / jsonb_path_ops: opclass bodies UNPORTED (no jsonb_gin
+        //                crate) — those OIDs loud-panic (`unported_opclass`),
+        //                the genuine residual GIN opclass port.
+        //
+        // REAL BLOCKERS (why the family is still uninstalled, not generic-fmgr):
+        //   (a) TWO-DATUM-MODEL SPLIT for array_ops extract: `ginarrayextract` /
+        //       `ginqueryarrayextract` are on the bare-word `types_datum::Datum`
+        //       (`struct Datum(usize)`) lane — they call `deconstruct_array`,
+        //       which returns `(types_datum::Datum, bool)`. The GIN scan/index
+        //       seams carry the canonical `types_tuple` `Datum` enum
+        //       (`ByVal(usize)|ByRef(PgVec<u8>)`). For by-VALUE element types the
+        //       bare word maps to `ByVal`, but for by-REFERENCE element keys
+        //       (`text[]`, etc.) the bare word is a raw pointer into array
+        //       storage with no recoverable bytes — there is NO canonical-`Datum`
+        //       `deconstruct_array` variant, so array extract cannot faithfully
+        //       produce `ByRef` keys. Keystone: a canonical-`Datum`-returning
+        //       `deconstruct_array` (part of the Datum-unification plan). The
+        //       tsvector_ops extract path is NOT so blocked — `tsginidx` works in
+        //       `PgVec<u8>` varlena bytes that map cleanly to `ByRef`.
+        //   (b) NO SINGLE FAMILY OWNER YET: all six seams are uninstalled
+        //       together (0 non-test `::set`); installing only the tsvector half
+        //       while array extract loud-panics on a complete in-tree opclass —
+        //       AND while `gin_consistent_call_{bool,tri}` (the consistent
+        //       dispatch a real scan needs) remain uninstalled — would be a
+        //       misleading "installed" shell, which the discipline rejects.
+        // Pay this down by landing the canonical-`Datum` `deconstruct_array`
+        // keystone, then the gin-core-probe opclass-dispatch owner installing all
+        // six seams keyed on fn_oid (array+tsvector arms, jsonb loud-panic).
+        // DELETE each entry as its arm lands.
         ("backend_access_gin_ginutil", "gin_extract_query"),
-        // DESIGN_DEBT (TD-GIN-COMPARE-PARTIAL): `gin_compare_partial` is the GIN
-        // `comparePartialFn` fmgr dispatch — the inline
-        // `DatumGetInt32(FunctionCall4Coll(&ginstate->comparePartialFn[attnum-1],
-        // collation, queryKey, idatum, UInt16GetDatum(strategy),
-        // PointerGetDatum(extra_data)))` that ginget.c (`collectMatchBitmap`,
-        // ginget.c:193; `matchPartialInPendingList`, ginget.c:1592) invokes. Its
-        // real owner is the fmgr GIN-call dispatcher (still unported) — the SAME
-        // owner as the already-uninstalled `gin_extract_value` /
-        // `gin_compare_entries` / `gin_extract_query` substrate seams. It is
-        // declared in `backend-access-gin-ginutil-seams` (ginutil owns
-        // `comparePartialFn` via initGinState, ginutil.c:198) so the guard
-        // attributes it to the COMPLETE `ginutil` owner; but ginutil does not
-        // call it (ginget does), so the OUTWARD-seam exclusion that covers the
-        // sibling gin substrate seams (which ginutil DOES call) does not fire. It
-        // is genuinely uninstalled / loud-panic (mirror-pg-and-panic) until the
-        // fmgr GIN dispatcher lands. DELETE this entry when it does.
         ("backend_access_gin_ginutil", "gin_compare_partial"),
         // DESIGN_DEBT (TD-GIN-RELOPTIONS-KEYSTONE): `gin_get_use_fast_update`
         // (GinGetUseFastUpdate, gin_private.h:34) and `gin_get_pending_list_cleanup_size`
@@ -894,6 +922,20 @@ mod recurrence_guard {
         // hashbuild / hashbuildempty call it; it becomes a real install once
         // heapam_handler.c lands. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "table_index_build_scan"),
+        // DESIGN_DEBT (TD-INDEXBUILDSCAN, cont.): provider-unported.
+        // `table_index_build_range_scan` (tableam.h) dispatches to the heap AM's
+        // `heapam_index_build_range_scan` (heapam_handler.c, still `todo`) — the
+        // parallel of `table_index_build_scan` above. brin (brininsert/bringetbitmap
+        // summarization, backend-access-brin-insert-vacuum) calls it; it becomes a
+        // real install once heapam_handler.c lands. It is deliberately NOT a tuple
+        // entry here: the brin consumer imports the seam fn directly
+        // (`use ...::table_index_build_range_scan;` then
+        // `table_index_build_range_scan::call(...)`), so the recurrence guard's
+        // call-site scanner reads the leading ident as the FN (lib resolves to the
+        // fn name), never attributing the call to the tableam-seams crate — the
+        // guard therefore never "fires" on it, and a tuple entry would be reported
+        // STALE. Tracked here + in DESIGN_DEBT.md as known bookkeeping; pay down
+        // with heapam_handler.c alongside `table_index_build_scan`.
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the
@@ -1156,18 +1198,33 @@ mod recurrence_guard {
         // machinery is absent. Blocked on the execExpr/execExprInterp executor-eval
         // keystone. (The sibling `domain_get_base_input_info` IS installed.)
         ("backend_utils_cache_typcache", "domain_check_input"),
+        // DESIGN_DEBT (TD-DFMGR-DYNLOADER): the dynamic-library / extension-hook
+        // surface of dfmgr.c + miscinit.c. `load_archive_module_init` is
+        // `load_external_function(filename, "_PG_archive_module_init", ...)` — it
+        // `dlopen`s an archive-module `.so` and resolves its init symbol; the
+        // dynamic loader (`load_external_function` / `load_file`) is inherently
+        // unported in an idiomatic-Rust build (no `.so` ABI surface). `shmem_request_hook`
+        // / `shmem_request_hook_present` read/invoke the `shmem_request_hook`
+        // function pointer that miscinit.c owns and ONLY a loaded extension sets
+        // (it is NULL in core PostgreSQL) — with no extension-load machinery
+        // there is no body to install and the hook is correctly absent
+        // (`_present` = false). Both are genuinely owner-unported, not a contract
+        // mismatch: loud-panic (mirror-pg-and-panic) until/unless a dynamic
+        // extension-loading subsystem lands. DELETE if that ever ports.
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
-        // DESIGN_DEBT: provider-unported. `setup_signal_handlers` is the
+        // DESIGN_DEBT: owner-unported (narrowed). `setup_signal_handlers` is the
         // slot-sync worker's `pqsignal(SIGHUP, SignalHandlerForConfigReload)`
-        // ... block (slotsync.c:1515-1522). Its handler bodies
-        // (SignalHandlerForConfigReload / StatementCancelHandler / die /
-        // FloatExceptionHandler / procsignal_sigusr1_handler) live in
-        // interrupt.c / postgres.c / procsignal.c, none of which is ported, so
-        // there is no real body to install. (The other 8 slot-sync bootstrap
-        // seams declared alongside it ARE installed in miscinit's init_seams by
-        // delegating to their now-ported owners.)
+        // ... block (slotsync.c:1515-1522). interrupt.c (SignalHandlerForConfigReload)
+        // and procsignal.c (procsignal_sigusr1_handler) are now BOTH merged, but the
+        // postgres.c handler bodies it still wires — `die` / `StatementCancelHandler`
+        // / `FloatExceptionHandler` — exist only as decls in
+        // backend-tcop-postgres-seams whose owner backend-tcop-postgres is CATALOG
+        // `todo`, so there is still no real body to install. Becomes a real install
+        // when postgres.c lands. (The other 8 slot-sync bootstrap seams declared
+        // alongside it ARE installed in miscinit's init_seams by delegating to their
+        // now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
         // RETIRED (task #161): `record_from_values` is now installed by funcapi's
         // init_seams(). The composite/record-Datum carrier bridge landed.
@@ -1215,7 +1272,7 @@ mod recurrence_guard {
         // RETIRED (drain re-sweep): the WAL page-read driver
         // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable + the prefetcher
         // recovery read-record leg) has LANDED in backend-access-transam-xlogrecovery
-        // (walreaderholder). xlogrecovery's init_seams() now cross-installs all five
+        // (walrecovery.rs). xlogrecovery's init_seams() now cross-installs all five
         // formerly-blocked seams — prefetcher_begin_read / prefetcher_read_record
         // (the read-record entry points) and xlog_rec_info / xlog_rec_rmid /
         // xlog_rec_total_len (the decoded-record accessors, now keyed off the held
@@ -1224,7 +1281,7 @@ mod recurrence_guard {
         // RETIRED (drain re-sweep): `prefetcher_compute_stats`
         // (XLogPrefetcherComputeStats) is now installed by xlogrecovery's
         // init_seams() alongside the rest of the page-read driver leg
-        // (walreaderholder) — the held prefetcher/reader is now allocated by the
+        // (walrecovery.rs) — the held prefetcher/reader is now allocated by the
         // landed recovery driver, so the stats call has a real body.
         //
         // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
@@ -1290,15 +1347,16 @@ mod recurrence_guard {
         ("backend_parser_analyze", "run_post_parse_analyze_hook"),
         ("backend_parser_analyze", "stmt_requires_parse_analysis"),
         ("backend_parser_analyze", "walk_query_sublinks_for_locks"),
-        // DESIGN_DEBT (TD-PARSETYPE-RAWGRAMMAR): parse_type.c's
-        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)`
-        // and extracts the single `TypeName` node. The owner of `raw_parser`
-        // (backend-parser-driver, audited) cannot install this seam yet because
-        // the bison grammar it drives (`base_yyparse`, gram.y) is not ported —
-        // any raw-parse call reaches the still-unported grammar and panics
-        // (mirror-pg-and-panic). Becomes a real install once gram.y lands and
-        // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
-        // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
+        // DESIGN_DEBT (TD-PARSETYPE-TYPENAME-CARRIER, narrowed): parse_type.c's
+        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)` and
+        // extracts the single `TypeName` node. The grammar IS now ported
+        // (backend-parser-gram merged; `base_yyparse` real + installed, handles
+        // MODE_TYPE_NAME) — the original "gram.y unported" blocker is gone. What
+        // remains is a TypeName carrier divergence: the seam returns an owned
+        // `types_parsenodes::TypeName` (no lifetime) while the grammar produces an
+        // arena `types_nodes::rawnodes::TypeName<'mcx>` (PgVec<'mcx, NodePtr>).
+        // Installing needs an arena->owned TypeName bridge (a contract reconcile),
+        // not a bare `::set`. See DESIGN_DEBT.md.
         ("backend_parser_driver", "raw_parse_type_name"),
     ];
 

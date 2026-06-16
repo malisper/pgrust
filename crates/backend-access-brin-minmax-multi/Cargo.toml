@@ -27,6 +27,7 @@ backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 

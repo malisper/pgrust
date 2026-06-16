@@ -43,7 +43,7 @@ use types_brin::{
 };
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::error::{
-    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
 use types_error::PgResult;
 use types_scan::scankey::ScanKeyData;
@@ -53,6 +53,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use backend_utils_error::ereport;
 
 use backend_access_index_indexam_seams as indexam;
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 
@@ -639,6 +640,132 @@ pub fn brin_minmax_multi_serialize<'mcx>(
     let s = brin_range_serialize(mcx, cmp, ranges.colloid, ranges)?;
     dst[0] = serialize_summary(mcx, &s)?;
     Ok(())
+}
+
+// ===========================================================================
+// brin_minmax_multi_options (brin_minmax_multi.c:2954) + summary type I/O.
+// ===========================================================================
+
+/// `MinMaxMultiOptions` (brin_minmax_multi.c:113): the per-attribute opclass
+/// options carrier (`PG_GET_OPCLASS_OPTIONS()`). Reached through `opts` in C;
+/// the live carrier is not yet threaded through the relcache trim, so the
+/// dispatcher passes the bare `Option<i32>` — see the module-level trim-gap
+/// note. This struct is the default-filled result of [`brin_minmax_multi_options`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MinMaxMultiOptions {
+    /// `valuesPerRange`: number of values per range (0 == unset).
+    pub values_per_range: i32,
+}
+
+/// `brin_minmax_multi_options(relopts)` (brin_minmax_multi.c:2954): register the
+/// `values_per_range` reloption on the `local_relopts`, returning the
+/// default-filled [`MinMaxMultiOptions`].
+///
+/// In C this is `init_local_reloptions(relopts, sizeof(MinMaxMultiOptions))` +
+/// `add_local_int_reloption(relopts, "values_per_range", "desc",
+/// MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE, 8, 256,
+/// offsetof(MinMaxMultiOptions, valuesPerRange))`; the default and bounds
+/// (`8 .. 256`) are reproduced here. Mirrors `brin_bloom_options`.
+pub fn brin_minmax_multi_options() -> MinMaxMultiOptions {
+    // add_local_int_reloption(relopts, "values_per_range", ...,
+    //   MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE, 8, 256, ...);
+    const MINMAX_MULTI_MIN_VALUES_PER_RANGE: i32 = 8;
+    const MINMAX_MULTI_MAX_VALUES_PER_RANGE: i32 = 256;
+    let _ = (MINMAX_MULTI_MIN_VALUES_PER_RANGE, MINMAX_MULTI_MAX_VALUES_PER_RANGE);
+    MinMaxMultiOptions {
+        values_per_range: MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE,
+    }
+}
+
+/// `brin_minmax_multi_summary_in` (brin_minmax_multi.c:2976): input is
+/// disallowed — the summary is stored in binary form and used only internally.
+pub fn brin_minmax_multi_summary_in() -> PgResult<()> {
+    Err(cannot_accept_value())
+}
+
+/// `brin_minmax_multi_summary_out` (brin_minmax_multi.c:2998): a human-readable
+/// description of the minmax-multi summary. `summary` is the detoasted on-disk
+/// byte image (`PG_DETOAST_DATUM(PG_GETARG_DATUM(0))`).
+pub fn brin_minmax_multi_summary_out<'mcx>(
+    mcx: Mcx<'mcx>,
+    summary: &[u8],
+) -> PgResult<alloc::string::String> {
+    use alloc::string::ToString;
+
+    let mut out = alloc::string::String::new();
+    out.push('{');
+
+    // Detoast to get value with full 4B header, then deserialize the ranges into
+    // easy-to-process pieces (brin_range_deserialize(ranges->maxvalues, ranges)).
+    let value = codec::slice_to_byref(mcx, summary)?;
+    let ranges = deserialize_summary(mcx, &value)?;
+
+    // lookup output func for the element type.
+    let (outfunc, _is_varlena) = lsyscache::get_type_output_info::call(ranges.typid)?;
+
+    out.push_str(&format!(
+        "nranges: {}  nvalues: {}  maxvalues: {}",
+        ranges.nranges, ranges.nvalues, ranges.maxvalues
+    ));
+
+    // serialize ranges: each range is the pair "a ... b".
+    let mut idx = 0usize;
+    let mut range_strs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    for _ in 0..ranges.nranges {
+        let a = fmgr::oid_output_function_call_datum::call(mcx, outfunc, ranges.values[idx].clone())?;
+        idx += 1;
+        let b = fmgr::oid_output_function_call_datum::call(mcx, outfunc, ranges.values[idx].clone())?;
+        idx += 1;
+        range_strs.push(format!("{} ... {}", a.as_str(), b.as_str()));
+    }
+
+    if ranges.nranges > 0 {
+        let refs: alloc::vec::Vec<&str> = range_strs.iter().map(|s| s.as_str()).collect();
+        let extval = arrayfuncs::text_array_out::call(mcx, &refs)?;
+        out.push_str(&format!(" ranges: {}", extval.as_str()));
+    }
+
+    // serialize individual values.
+    let mut value_strs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    for _ in 0..ranges.nvalues {
+        let a = fmgr::oid_output_function_call_datum::call(mcx, outfunc, ranges.values[idx].clone())?;
+        idx += 1;
+        value_strs.push(a.as_str().to_string());
+    }
+
+    if ranges.nvalues > 0 {
+        let refs: alloc::vec::Vec<&str> = value_strs.iter().map(|s| s.as_str()).collect();
+        let extval = arrayfuncs::text_array_out::call(mcx, &refs)?;
+        out.push_str(&format!(" values: {}", extval.as_str()));
+    }
+
+    out.push('}');
+    Ok(out)
+}
+
+/// `brin_minmax_multi_summary_recv` (brin_minmax_multi.c:3117): binary input is
+/// disallowed.
+pub fn brin_minmax_multi_summary_recv() -> PgResult<()> {
+    Err(cannot_accept_value())
+}
+
+/// `brin_minmax_multi_summary_send` (brin_minmax_multi.c:3134): `byteasend(fcinfo)`
+/// — the summary is serialized in a bytea value, so send it directly.
+pub fn brin_minmax_multi_summary_send(summary: alloc::vec::Vec<u8>) -> alloc::vec::Vec<u8> {
+    summary
+}
+
+/// `ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cannot accept
+/// a value of type %s", "brin_minmax_multi_summary"))`
+/// (brin_minmax_multi.c:2982 / :3124).
+fn cannot_accept_value() -> types_error::PgError {
+    ereport(ERROR)
+        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!(
+            "cannot accept a value of type {}",
+            "brin_minmax_multi_summary"
+        ))
+        .into_error()
 }
 
 /// `elog(ERROR, "invalid strategy number %d", ...)` — the `elog`-default

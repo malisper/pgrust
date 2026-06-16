@@ -228,7 +228,7 @@ pub fn deserialize_summary<'mcx>(
 }
 
 /// Copy a byte slice into an owned `Datum::ByRef` in `mcx`.
-fn slice_to_byref<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<Datum<'mcx>> {
+pub(crate) fn slice_to_byref<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<Datum<'mcx>> {
     let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, src.len())?;
     for &b in src {
         v.push(b);

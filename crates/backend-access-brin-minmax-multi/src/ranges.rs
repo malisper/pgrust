@@ -930,7 +930,98 @@ pub fn AssertCheckRanges<'mcx>(
     let base = (2 * ranges.nranges) as usize;
     AssertArrayOrder(mcx, cmp, colloid, &ranges.values[base..], ranges.nsorted)?;
 
+    // Check that none of the values are not covered by ranges (both sorted and
+    // unsorted) (brin_minmax_multi.c:322-399).
+    if ranges.nranges > 0 {
+        for i in 0..ranges.nvalues as usize {
+            let minvalue0 = &ranges.values[0];
+            let maxvalue_last = &ranges.values[(2 * ranges.nranges - 1) as usize];
+            let value = &ranges.values[base + i];
+
+            // If the value is smaller than the lower bound in the first range
+            // then it cannot possibly be in any of the ranges.
+            if call_strategy2(mcx, cmp, colloid, value, minvalue0)? {
+                continue;
+            }
+
+            // Likewise, if the value is larger than the upper bound of the final
+            // range, then it cannot possibly be inside any of the ranges.
+            if call_strategy2(mcx, cmp, colloid, maxvalue_last, value)? {
+                continue;
+            }
+
+            // bsearch the ranges to see if 'value' fits within any of them.
+            let mut start: i32 = 0;
+            let mut end: i32 = ranges.nranges - 1;
+            loop {
+                // this means we ran out of ranges in the last step
+                if start > end {
+                    break;
+                }
+                let midpoint = (start + end) / 2;
+
+                let minvalue = &ranges.values[(2 * midpoint) as usize];
+                let maxvalue = &ranges.values[(2 * midpoint + 1) as usize];
+
+                // Is the value smaller than the minval? Recurse left.
+                if call_strategy2(mcx, cmp, colloid, value, minvalue)? {
+                    end = midpoint - 1;
+                    continue;
+                }
+
+                // Is the value greater than the maxval? Recurse right.
+                if call_strategy2(mcx, cmp, colloid, maxvalue, value)? {
+                    start = midpoint + 1;
+                    continue;
+                }
+
+                // hey, we found a matching range
+                debug_assert!(false, "value unexpectedly covered by a range");
+                break;
+            }
+        }
+    }
+
+    // and values in the unsorted part must not be in the sorted part
+    // (brin_minmax_multi.c:401-417) — bsearch_arg over the sorted prefix using
+    // the range's cached compare_values context (ranges->cmp / ranges->colloid).
+    if ranges.nsorted > 0 {
+        let sorted = &ranges.values[base..base + ranges.nsorted as usize];
+        for i in ranges.nsorted as usize..ranges.nvalues as usize {
+            let value = &ranges.values[base + i];
+            let found = bsearch_compare_values(mcx, ranges.cmp, ranges.colloid, sorted, value)?;
+            debug_assert!(!found, "unsorted value unexpectedly present in the sorted part");
+        }
+    }
+
     Ok(())
+}
+
+/// `bsearch_arg(&value, sorted, nsorted, sizeof(Datum), compare_values, &cxt)`
+/// (brin_minmax_multi.c:413): binary-search a strictly-ordered `Datum` slice for
+/// `value` using [`compare_values`]; returns whether a match was found. Used only
+/// by the debug `AssertCheckRanges` invariant.
+fn bsearch_compare_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    cmp: Oid,
+    colloid: Oid,
+    sorted: &[Datum<'mcx>],
+    value: &Datum<'mcx>,
+) -> PgResult<bool> {
+    let mut lo: isize = 0;
+    let mut hi: isize = sorted.len() as isize - 1;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let r = compare_values(mcx, cmp, colloid, value, &sorted[mid as usize])?;
+        if r < 0 {
+            hi = mid - 1;
+        } else if r > 0 {
+            lo = mid + 1;
+        } else {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `AssertCheckExpandedRanges(bdesc, colloid, attno, ranges, nranges)`

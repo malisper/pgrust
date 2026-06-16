@@ -97,6 +97,26 @@ pub fn init_seams() {
     seams::tuple_n_posting::set(helpers::tuple_n_posting);
     seams::tuple_posting_tid::set(helpers::tuple_posting_tid);
 
+    // --- nbtsort.c build helpers (nbtutils.c bodies, declared in the
+    //     backend-access-nbtree-build-seams crate) (3) ---
+    // C's `BTScanInsert itup_key` is a non-null pointer; the seam carries it
+    // Option-wrapped (nbtsort stores it as such), so the install unwraps it to
+    // the `&BTScanInsertData` the in-crate `_bt_truncate` body takes — a thin
+    // marshal, mirroring insert.rs's `itup_key.as_ref().unwrap()`.
+    backend_access_nbtree_build_seams::bt_truncate::set(|mcx, rel, lastleft, firstright, itup_key| {
+        utils::bt_truncate(
+            mcx,
+            rel,
+            lastleft,
+            firstright,
+            itup_key.as_ref().expect("_bt_truncate: itup_key is NULL"),
+        )
+    });
+    backend_access_nbtree_build_seams::bt_check_third_page::set(utils::bt_check_third_page);
+    backend_access_nbtree_build_seams::bt_load_compare_index_tuples::set(
+        utils::bt_load_compare_index_tuples,
+    );
+
     // --- nbtdedup.c body, owned here as a wrapper (1) ---
     // nbtdedup owns no inward seam crate, so its `_bt_form_posting` C body is
     // installed from this unit (the cluster that includes nbtdedup's family).

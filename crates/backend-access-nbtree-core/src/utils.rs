@@ -2845,10 +2845,10 @@ fn bt_killitems_inner<'mcx>(rel: &Relation<'mcx>, so: &mut BTScanOpaqueData<'mcx
     }
 
     if !so.dropPin {
-        // _bt_unlockbuf(rel, buf): release the content lock kept by bt_lockbuf.
-        // There is no nbtpage.c-owned _bt_unlockbuf seam; bt_relbuf releases both
-        // lock and pin, but the !dropPin caller keeps its pin. Without a dedicated
-        // unlock-only seam this is a genuine gap.
+        // _bt_unlockbuf(rel, buf): release the content lock kept by bt_lockbuf
+        // without dropping the pin (bt_relbuf would drop both, but the !dropPin
+        // caller keeps its pin). nbtpage.c is in this same crate, so this calls
+        // the in-crate page::_bt_unlockbuf directly.
         bt_unlockbuf(rel, buf);
     } else {
         core_seams::bt_relbuf::call(rel, buf);
@@ -3347,6 +3347,34 @@ pub fn bt_check_natts<'mcx>(
     }
     // Pivot tuple must have at least one untruncated key attribute.
     Ok(tupnatts > 0 && tupnatts <= nkeyatts as i32)
+}
+
+// ===========================================================================
+// _bt_load comparison inner loop (build-time SortSupport)
+// ===========================================================================
+
+/// The `_bt_load` unique-index merge comparison (nbtsort.c:1201-1235): compare
+/// two build-sorted index tuples in the index's sort order across all key
+/// attributes, returning `<0`/`0`/`>0` (heap-TID tiebreak is applied by the
+/// caller).
+///
+/// C builds a per-column `SortSupport` array with `PrepareSortSupportFromIndexRel`
+/// (off `wstate->index`) once at `_bt_load` entry, then inlines `index_getattr` +
+/// `ApplySortComparator` per key. That build-time SortSupport substrate
+/// (`PrepareSortSupportFromIndexRel`) is not ported in this repo — no producer
+/// exists — so this comparison cannot be carried out faithfully and reaches an
+/// honest panic, the sanctioned mirror-and-panic for a genuinely-unported
+/// callee (never `todo!`/`unimplemented!`).
+pub fn bt_load_compare_index_tuples<'mcx>(
+    _rel: &Relation<'mcx>,
+    _itup_key: &BTScanInsert<'mcx>,
+    _itup1: &[u8],
+    _itup2: &[u8],
+) -> PgResult<i32> {
+    panic!(
+        "_bt_load comparison: PrepareSortSupportFromIndexRel build-time \
+         SortSupport substrate is not yet ported"
+    );
 }
 
 // ===========================================================================

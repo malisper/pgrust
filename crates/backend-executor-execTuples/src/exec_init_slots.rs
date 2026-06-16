@@ -491,6 +491,16 @@ fn seam_exec_copy_slot_minimal_tuple<'mcx>(
     crate::slot_ops_vtables::exec_copy_slot_minimal_tuple_ref(mcx, estate.slot_data(slot), 0)
 }
 
+/// Seam `exec_copy_slot_minimal_tuple_extra` — `ExecCopySlotMinimalTupleExtra`.
+fn seam_exec_copy_slot_minimal_tuple_extra<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    extra: usize,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_ops_vtables::exec_copy_slot_minimal_tuple_ref(mcx, estate.slot_data(slot), extra)
+}
+
 /// Seam `exec_fetch_slot_minimal_tuple` — `ExecFetchSlotMinimalTuple`.
 fn seam_exec_fetch_slot_minimal_tuple<'mcx>(
     mcx: Mcx<'mcx>,
@@ -850,6 +860,7 @@ pub fn init_seams() {
     seams::exec_fetch_slot_heap_tuple::set(seam_exec_fetch_slot_heap_tuple);
     seams::exec_force_store_minimal_tuple::set(seam_exec_force_store_minimal_tuple);
     seams::exec_copy_slot_minimal_tuple::set(seam_exec_copy_slot_minimal_tuple);
+    seams::exec_copy_slot_minimal_tuple_extra::set(seam_exec_copy_slot_minimal_tuple_extra);
     seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);
     seams::exec_fetch_slot_minimal_tuple_copy::set(seam_exec_fetch_slot_minimal_tuple_copy);
     // ExecTypeFromTL is fully owned + implemented in this crate's

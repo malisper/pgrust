@@ -160,6 +160,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `accumArrayResult`/`makeArrayResult` over `TEXTOID` followed by
+    /// `array_out` (arrayfuncs.c): build a `text[]` array from the given element
+    /// strings and render its external text form — the `getTypeOutputInfo(
+    /// ANYARRAYOID)` + `OidOutputFunctionCall(typoutput, makeArrayResult(...))`
+    /// pair that `brin_minmax_multi_summary_out` (brin_minmax_multi.c:2998) uses
+    /// to print the per-range / per-value text arrays. An empty input renders the
+    /// C empty-array form `{}`. The result string is allocated in `mcx`. `Err`
+    /// carries the element/array output `ereport(ERROR)` surface and OOM.
+    pub fn text_array_out<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[&str],
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(datums, n, INT4OID)` (arrayfuncs.c): build a
     /// 1-D `int4[]` array `Datum` from the given elements (duplicates kept, as
     /// the `pg_blocking_pids` / `pg_safe_snapshot_blocking_pids` callers
