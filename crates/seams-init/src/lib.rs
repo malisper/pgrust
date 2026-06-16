@@ -874,15 +874,10 @@ mod recurrence_guard {
         //   * index_compute_xid_horizon_for_tuples — the full index-buffer
         //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
         //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
-        //   * heap_multi_insert — heapam.c's slot-based batch heap insert (one
-        //     WAL record per page, buffer extension, toast via
-        //     heap_prepare_insert, visibility-map clears). The merged heap-AM
-        //     slice ports only the page-count helper `heap_multi_insert_pages`;
-        //     the batch engine is unwritten. `CatalogTuplesMultiInsertWithInfo`
-        //     (catalog/indexing.c, now ported in backend-catalog-indexing) is the
-        //     live consumer.
+        // (heap_multi_insert — heapam.c's page-at-a-time batch heap insert — is
+        //  now ported in backend-access-heap-heapam (insert::heap_multi_insert)
+        //  and installed from its init_seams(); its allowlist entry was removed.)
         // DELETE each entry when its driver lands in the heap-AM port.
-        ("backend_access_heap_heapam", "heap_multi_insert"),
         ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
         ("backend_access_heap_heapam", "insert_one_tuple"),
         ("backend_access_heap_heapam", "log_heap_visible"),
