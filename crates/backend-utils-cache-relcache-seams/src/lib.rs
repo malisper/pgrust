@@ -914,3 +914,15 @@ seam_core::seam!(
         reloid: types_core::primitive::Oid,
     ) -> types_error::PgResult<Option<RuleLockImage<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `RelationInitIndexAccessInfo(relation)` (relcache.c): set up the
+    /// in-memory index access information (`rd_indexcxt`, `rd_indam`,
+    /// `rd_index`/`rd_indextuple`, opclass/opfamily/support arrays) for an open
+    /// index relcache entry. `index_create` (catalog/index.c) calls this only in
+    /// bootstrap mode (otherwise the entry is rebuilt by the `sinval` flush at
+    /// `CommandCounterIncrement`). The relcache entry is registry-owned, so the
+    /// seam addresses it by OID. `Err` carries the catalog-lookup
+    /// `ereport(ERROR)`s.
+    pub fn relation_init_index_access_info(index_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);

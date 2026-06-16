@@ -55,9 +55,61 @@ seam_core::seam!(
     /// `ereport(ERROR)`s and OOM. The open `heapRelation` crosses by
     /// reference; the caller retains ownership and closes it afterward.
     pub fn index_create<'mcx>(
-        heap_relation: &types_rel::Relation<'_>,
+        heap_relation: &types_rel::Relation<'mcx>,
         args: IndexCreateArgs<'mcx>,
     ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+/// `IndexStateFlagsAction` (`catalog/index.h`) — the state transition
+/// `index_set_state_flags` applies to a `pg_index` row. Owned by this unit
+/// (catalog/index.c is its sole producer/consumer); defined here so the seam
+/// can name it without a dependency on the parsenodes crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub enum IndexStateFlagsAction {
+    /// `INDEX_CREATE_SET_READY` — set `indisready` during CREATE INDEX CONCURRENTLY.
+    SetReady = 0,
+    /// `INDEX_CREATE_SET_VALID` — set `indisvalid` during CREATE INDEX CONCURRENTLY.
+    SetValid,
+    /// `INDEX_DROP_CLEAR_VALID` — clear `indisvalid` (+ `indisclustered`/`indisreplident`).
+    DropClearValid,
+    /// `INDEX_DROP_SET_DEAD` — clear `indisready`/`indislive` during DROP INDEX CONCURRENTLY.
+    DropSetDead,
+}
+
+seam_core::seam!(
+    /// `index_constraint_create(heapRelation, indexRelationId, parentConstraintId,
+    /// indexInfo, constraintName, constraintType, constr_flags,
+    /// allow_system_table_mods, is_internal)` (catalog/index.c): register a
+    /// constraint (PRIMARY KEY / UNIQUE / EXCLUDE) for an existing index — build
+    /// the `pg_constraint` entry, its dependencies, the deferred-uniqueness
+    /// trigger (if deferrable), and optionally mark the index primary/deferred.
+    /// Returns the constraint's `ObjectAddress`. `Err` carries the
+    /// catalog-mutation `ereport(ERROR)`s.
+    pub fn index_constraint_create<'mcx>(
+        heap_relation: &types_rel::Relation<'_>,
+        index_relation_id: types_core::primitive::Oid,
+        parent_constraint_id: types_core::primitive::Oid,
+        index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+        constraint_name: &str,
+        constraint_type: i8,
+        constr_flags: u16,
+        allow_system_table_mods: bool,
+        is_internal: bool,
+    ) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `index_set_state_flags(indexId, action)` (catalog/index.c): perform a
+    /// non-transactional `pg_index` flag transition (CREATE/DROP INDEX
+    /// CONCURRENTLY). The C runs in `CurrentMemoryContext`; the owned model
+    /// threads the caller's `mcx` for the syscache copy + catalog update.
+    /// `Err` carries the catalog `ereport(ERROR)` surface.
+    pub fn index_set_state_flags<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_id: types_core::primitive::Oid,
+        action: IndexStateFlagsAction,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

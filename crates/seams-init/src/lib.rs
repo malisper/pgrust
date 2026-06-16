@@ -1839,6 +1839,34 @@ mod recurrence_guard {
         ("backend_commands_tablecmds", "at_exec_change_owner"),
         ("backend_commands_tablecmds", "rename_relation_internal"),
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
+        // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's
+        // `index_create` reaches three legs ONLY in bootstrap mode (or via the
+        // deferrable-constraint path of `index_constraint_create`) whose owners
+        // exist but cannot install the seam without a prerequisite keystone:
+        //
+        //  * `index_register` (bootstrap.c): the bootstrap owner stores the
+        //    registered index's `IndexInfo` on its no-gc list as `IndexInfo
+        //    <'static>`, but the seam crosses a per-query `IndexInfo<'mcx>`. The
+        //    owner cannot soundly promote `'mcx` -> `'static`; installing needs
+        //    the bootstrap-context lifetime keystone (a real 'static deep-copy of
+        //    IndexInfo into the bootstrap IL context). Loud-panics until then;
+        //    only reached during initdb's bootstrap, which the CREATE INDEX gate
+        //    does not exercise.
+        //  * `relation_init_index_access_info` (relcache.c): the owner's
+        //    `RelationInitIndexAccessInfo(&mut RelationData)` runs inside the
+        //    registry build with a `&mut` entry; the relcache exposes no
+        //    mutable-by-OID registry accessor a by-OID seam could use. Needs the
+        //    registry-mutable-entry keystone. Bootstrap-only leg (non-bootstrap
+        //    rebuilds the entry via the sinval flush at CommandCounterIncrement).
+        //  * `create_unique_key_recheck_trigger` (the `CreateTrigger` call in
+        //    index_constraint_create's deferrable leg): the trigger manager owner
+        //    has not ported `CreateTrigger` yet. Loud-panics until trigger.c's
+        //    CreateTrigger lands; only reached for a DEFERRABLE PK/UNIQUE.
+        //
+        // Delete each entry when its owner installs the seam.
+        ("backend_bootstrap_bootstrap", "index_register"),
+        ("backend_utils_cache_relcache", "relation_init_index_access_info"),
+        ("backend_commands_trigger", "create_unique_key_recheck_trigger"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

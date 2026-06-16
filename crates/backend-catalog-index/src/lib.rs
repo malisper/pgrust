@@ -101,47 +101,60 @@
 //!   predicate. (Reachable only once its caller `index_create` lands, hence
 //!   kept private; see the STOP boundary below.)
 //!
+//! # What IS landed: the CREATE INDEX catalog-write gate
+//!
+//! `index_create`, `index_constraint_create`, and `index_set_state_flags` are
+//! ported faithfully and INSTALLED (the DefineIndex → `index_create` →
+//! `index_build` gate that unblocks indexcmds F2):
+//!
+//! * `index_create` — full body: the parameter checks (nondeterministic-collation
+//!   pattern-ops rejection, system/catalog/shared-relation restrictions,
+//!   duplicate-name + duplicate-constraint-name checks via `get_relname_relid` /
+//!   `ConstraintNameIsUsed`), [`ConstructTupleDescriptor`], `GetNewRelFileNumber`,
+//!   `heap_create` + the AccessExclusiveLock open, `InsertPgClassTuple` (the
+//!   `relowner`/`relam`/`relispartition` fields cross via the pg_class write-field
+//!   carrier instead of scribbling the live `rd_rel`), `AppendAttributeTuples`
+//!   (+`InitializeAttributeOids`), [`UpdateIndexRelation`], the relcache
+//!   invalidation, the partition-index `StoreSingleInheritance` /
+//!   `SetRelationHasSubclass` link, the full dependency-recording surface
+//!   ([`record_object_address_dependencies`] / [`record_dependency_on`] /
+//!   [`record_dependency_on_single_rel_expr`] over the column / collation /
+//!   opclass / expression / predicate dependencies), the post-create hook,
+//!   `CommandCounterIncrement`, and the build dispatch (`index_register` in
+//!   bootstrap, `index_update_stats` for SKIP_BUILD, else `index_build`).
+//! * `index_constraint_create` — full body: `CreateConstraintEntry` over the
+//!   trimmed PK/UNIQUE/EXCLUDE arg carrier, the index→constraint internal
+//!   dependency, the partition-type dependencies, the deferrable-constraint
+//!   recheck trigger, and the optional mark-as-primary / mark-deferred pg_index
+//!   update (over the widened [`types_cluster::PgIndexForm`] carrier).
+//! * `index_set_state_flags` — full body: the four CREATE/DROP INDEX CONCURRENTLY
+//!   `pg_index` flag transitions, read-modify-written through
+//!   `SearchSysCacheCopy1(INDEXRELID)` (the `search_syscache_copy_pg_index`
+//!   producer) + `CatalogTupleUpdate` (the `catalog_tuple_update_pg_index`
+//!   consumer), over the [`types_cluster::PgIndexForm`] carrier WIDENED to carry
+//!   `indisprimary`/`indimmediate`/`indisclustered`/`indisvalid`/`indcheckxmin`/
+//!   `indisready`/`indislive`/`indisreplident`.
+//!
+//! Three outward legs `index_create` / `index_constraint_create` reach only in
+//! bootstrap mode (or via the deferrable-constraint path) seam-and-panic until a
+//! keystone lands (see `DESIGN_DEBT.md` TD-INDEXCREATE-BOOTSTRAP-LEGS): the
+//! bootstrap `index_register` (`IndexInfo<'mcx>` → `'static` promotion),
+//! `RelationInitIndexAccessInfo` (registry-mutable-by-OID entry access), and the
+//! deferrable-constraint `CreateTrigger` (trigger.c unported).
+//!
 //! # What is NOT landed in this pass (precise STOP boundaries)
 //!
-//! The full catalog-*write* drivers — `index_create`, `index_constraint_create`,
-//! the `index_concurrently_*` family, `validate_index`, `index_drop`,
-//! `index_set_state_flags`, `reindex_index`/`reindex_relation` — need a much
-//! larger outward producer surface that is not yet ported, so their inward
-//! seams (`index_create`, `reindex_relation`, `index_drop`) stay UNINSTALLED
-//! here: a call panics loudly (mirror-PG-and-panic). Concretely:
+//! The remaining catalog-*write* drivers — the `index_concurrently_*` family,
+//! `validate_index`, `index_drop`, `reindex_index`/`reindex_relation` — need a
+//! much larger outward producer surface that is not yet ported, so their inward
+//! seams (`reindex_relation`, `index_drop`) stay UNINSTALLED here: a call panics
+//! loudly (mirror-PG-and-panic). Concretely:
 //!
-//! * `index_create` still needs (and so stays seam-and-panic via the
-//!   `index_create` inward seam): `GetNewRelFileNumber`, `LockRelation`,
-//!   `get_collation_isdeterministic`, the live-relcache `rd_rel` scribbles
-//!   (`relowner`/`relam`/`relispartition` setters) on the `heap_create`d index
-//!   entry, `RelationInitIndexAccessInfo`, `index_opclass_options`,
-//!   `index_register` (bootstrap), `StoreSingleInheritance` /
-//!   `SetRelationHasSubclass` for partitions, and the
-//!   `IsSystemRelation`/`IsCatalogRelation`/`get_relname_relid`/
-//!   `ConstraintNameIsUsed` precondition checks — a ~20-callee outward surface
-//!   across unported owners. Its tupdesc-build / pg_attribute-insert /
-//!   pg_index-write halves (`ConstructTupleDescriptor` /
-//!   `AppendAttributeTuples` / `UpdateIndexRelation`) and its
-//!   dependency-recording calls ([`record_object_address_dependencies`] /
-//!   [`record_dependency_on`] / [`record_dependency_on_single_rel_expr`]) are
-//!   now all available — only the relation-create + live-relcache-mutate spine
-//!   remains.
-//! * `index_set_state_flags` and the `reindex_index` revalidation leg need a
-//!   *full* pg_index `Form` read-modify-write (`SearchSysCacheCopy1(INDEXRELID)`
-//!   → set `indisready`/`indislive`/`indisvalid`/`indisreplident`/`indcheckxmin`
-//!   → `CatalogTupleUpdate`). The only available pg_index `Form` carrier
-//!   ([`types_cluster::PgIndexForm`]) is the cluster-mark *trimmed* carrier
-//!   (only `indisclustered`/`indisvalid`); writing the other state flags through
-//!   it would silently drop them (a contract divergence). Needs a full
-//!   pg_index-`Form` update carrier first.
 //! * `index_drop` / `index_concurrently_*` / `validate_index` /
 //!   `IndexCheckExclusion` need transaction commit/start, snapshot push/pop,
 //!   `WaitForLockers`, `RelationDropStorage`, `performDeletion`, executor
 //!   table-scan + `check_exclusion_constraint`, and `tuplesort`-based TID merge —
 //!   all unported here.
-//! * `index_constraint_create` needs `CreateConstraintEntry` /
-//!   `CreateTrigger` / `deleteDependencyRecordsForClass`, none reachable as a
-//!   callable producer.
 //! * `FormIndexDatum` is NOT landed here: the `form_index_datum` inward seam's
 //!   result-array contract is the word-model `types_datum::Datum`, but the
 //!   executor eval/slot seams it must route through (`exec_prepare_expr_list` /
@@ -767,6 +780,941 @@ fn UpdateIndexRelation<'mcx>(
     // table_close(pg_index, RowExclusiveLock) — `table_close` is `relation_close`.
     table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
 
+    Ok(())
+}
+
+/* ===========================================================================
+ * index_create
+ * ========================================================================= */
+
+/// `RelationRelationId` — pg_class's OID.
+const RELATION_RELATION_ID: Oid = 1259;
+/// `CollationRelationId` — pg_collation's OID.
+const COLLATION_RELATION_ID: Oid = 3456;
+/// `OperatorClassRelationId` — pg_opclass's OID.
+const OPERATOR_CLASS_RELATION_ID: Oid = 2616;
+/// `ConstraintRelationId` — pg_constraint's OID.
+const CONSTRAINT_RELATION_ID: Oid = 2606;
+/// `GLOBALTABLESPACE_OID` (`catalog/pg_tablespace_d.h`).
+const GLOBALTABLESPACE_OID: Oid = 1664;
+/// `AccessExclusiveLock` / `ShareUpdateExclusiveLock` / `NoLock`
+/// (`storage/lockdefs.h`).
+const ACCESS_EXCLUSIVE_LOCK: i32 = 8;
+const SHARE_UPDATE_EXCLUSIVE_LOCK: i32 = 4;
+const NO_LOCK: i32 = 0;
+
+/* `catalog/index.h` `bits16 flags` bits for `index_create`. */
+const INDEX_CREATE_IS_PRIMARY: u16 = 1 << 0;
+const INDEX_CREATE_ADD_CONSTRAINT: u16 = 1 << 1;
+const INDEX_CREATE_SKIP_BUILD: u16 = 1 << 2;
+const INDEX_CREATE_CONCURRENT: u16 = 1 << 3;
+const INDEX_CREATE_IF_NOT_EXISTS: u16 = 1 << 4;
+const INDEX_CREATE_PARTITIONED: u16 = 1 << 5;
+const INDEX_CREATE_INVALID: u16 = 1 << 6;
+
+/* `catalog/index.h` `bits16 constr_flags` bits for `index_constraint_create`. */
+const INDEX_CONSTR_CREATE_MARK_AS_PRIMARY: u16 = 1 << 0;
+const INDEX_CONSTR_CREATE_DEFERRABLE: u16 = 1 << 1;
+const INDEX_CONSTR_CREATE_INIT_DEFERRED: u16 = 1 << 2;
+const INDEX_CONSTR_CREATE_UPDATE_INDEX: u16 = 1 << 3;
+const INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS: u16 = 1 << 4;
+const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 6;
+
+/* `catalog/pg_constraint.h` constraint-type codes. */
+const CONSTRAINT_PRIMARY: i8 = b'p' as i8;
+const CONSTRAINT_UNIQUE: i8 = b'u' as i8;
+const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
+
+/* `pg_opclass.dat` — the three btree pattern-ops opclasses incompatible with a
+ * nondeterministic collation. */
+const TEXT_BTREE_PATTERN_OPS_OID: Oid = 4217;
+const VARCHAR_BTREE_PATTERN_OPS_OID: Oid = 4218;
+const BPCHAR_BTREE_PATTERN_OPS_OID: Oid = 4219;
+
+use backend_catalog_catalog_seams as catalog;
+use backend_catalog_dependency_seams as dependency;
+use backend_catalog_pg_constraint_seams as pg_constraint;
+use backend_catalog_pg_inherits_seams as pg_inherits;
+use backend_commands_trigger_seams as trigger;
+use backend_catalog_objectaccess_seams as objectaccess;
+use backend_utils_cache_inval_seams as inval;
+use backend_commands_tablecmds_seams as tablecmds;
+use backend_commands_tablespace_globals_seams as tablespace;
+use backend_bootstrap_bootstrap_seams as bootstrap;
+use types_catalog::catalog_dependency::{
+    ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+    DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
+};
+use types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+
+/// `index_create(...)` (catalog/index.c): create the catalog entries for a new
+/// index relation and (unless deferred) build it. Returns the new index
+/// relation's OID.
+///
+/// Faithful to the C; see the seam doc on [`backend_catalog_index_seams::index_create`]
+/// for the parameter-carrier mapping. The `opclassOptions` / `stattargets`
+/// out-args and the `Oid *constraintId` out-param are NULL/ignored at the
+/// current call sites and are not carried (the `IndexCreateArgs` carrier omits
+/// them); the constraint OID is therefore not returned to the caller here (it is
+/// still recorded in pg_constraint by `index_constraint_create`).
+pub fn index_create<'mcx>(
+    heap_relation: &Relation<'mcx>,
+    args: backend_catalog_index_seams::IndexCreateArgs<'mcx>,
+) -> PgResult<Oid> {
+    // The carrier owns the mcx-bound IndexInfo; pull out the pieces and reborrow.
+    let mcx = args
+        .index_info
+        .ii_Context
+        .expect("index_create: IndexInfo has no owning context");
+
+    let mut index_info = args.index_info;
+    let index_relation_name = args.index_relation_name;
+    let mut index_relation_id = args.index_relation_id;
+    let parent_index_relid = args.parent_index_relid;
+    let parent_constraint_id = args.parent_constraint_id;
+    let rel_file_number = args.rel_file_number;
+    let index_col_names = args.index_col_names;
+    let access_method_id = args.access_method_id;
+    let table_space_id = args.table_space_id;
+    let collation_ids = args.collation_ids;
+    let opclass_ids = args.opclass_ids;
+    let coloptions = args.coloptions;
+    let reloptions = args.reloptions;
+    let flags = args.flags;
+    let constr_flags = args.constr_flags;
+    let allow_system_table_mods = args.allow_system_table_mods;
+    let is_internal = args.is_internal;
+
+    let heap_relation_id = heap_relation.rd_id;
+
+    let isprimary = (flags & INDEX_CREATE_IS_PRIMARY) != 0;
+    let invalid = (flags & INDEX_CREATE_INVALID) != 0;
+    let concurrent = (flags & INDEX_CREATE_CONCURRENT) != 0;
+    let partitioned = (flags & INDEX_CREATE_PARTITIONED) != 0;
+    // create_storage = !RelFileNumberIsValid(relFileNumber);
+    let create_storage = !OidIsValid(rel_file_number);
+
+    /* constraint flags can only be set when a constraint is requested */
+    debug_assert!(constr_flags == 0 || (flags & INDEX_CREATE_ADD_CONSTRAINT) != 0);
+    /* partitioned indexes must never be "built" by themselves */
+    debug_assert!(!partitioned || (flags & INDEX_CREATE_SKIP_BUILD) != 0);
+
+    let relkind = if partitioned {
+        RELKIND_PARTITIONED_INDEX
+    } else {
+        RELKIND_INDEX
+    };
+    let is_exclusion = index_info.ii_ExclusionOps.is_some();
+
+    let pg_class = table_am::table_open::call(mcx, RELATION_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+    /*
+     * The index will be in the same namespace as its parent table, and is
+     * shared across databases iff the parent is; likewise mapped; and inherits
+     * the parent's relpersistence.
+     */
+    let namespace_id = relcache::rd_rel_relnamespace::call(heap_relation)?;
+    let shared_relation = relcache::rd_rel_relisshared::call(heap_relation)?;
+    let mapped_relation = relcache::relation_is_mapped::call(heap_relation)?;
+    let relpersistence = relcache::rd_rel_relpersistence::call(heap_relation)?;
+
+    /* check parameters */
+    if index_info.ii_NumIndexAttrs < 1 {
+        return elog_error("must index at least one column".into());
+    }
+
+    if !allow_system_table_mods
+        && catalog::is_system_relation::call(heap_relation)?
+        && miscinit::is_normal_processing_mode::call()
+    {
+        return Err(PgError::error(alloc::string::String::from(
+            "user-defined indexes on system catalog tables are not supported",
+        )));
+    }
+
+    /*
+     * Refuse a btree *_pattern_ops opclass paired with a nondeterministic
+     * collation (text_eq would be incompatible with the opclass comparator).
+     */
+    for i in 0..index_info.ii_NumIndexKeyAttrs as usize {
+        let collation = collation_ids[i];
+        let opclass = opclass_ids[i];
+
+        if OidIsValid(collation)
+            && (opclass == TEXT_BTREE_PATTERN_OPS_OID
+                || opclass == VARCHAR_BTREE_PATTERN_OPS_OID
+                || opclass == BPCHAR_BTREE_PATTERN_OPS_OID)
+        {
+            let isdet = match syscache::collation_isdeterministic::call(collation)? {
+                Some(b) => b,
+                // get_collation_isdeterministic does not error on a missing
+                // collation (lsyscache caches return false); but the index.c
+                // path only reaches here for a valid collation OID.
+                None => false,
+            };
+            if !isdet {
+                // Look up the opclass name for the error message (the C
+                // SearchSysCache1(CLAOID) + NameStr(opcname)).
+                let opcname = match syscache::pg_opclass_keytype::call(mcx, opclass)? {
+                    Some((_keytype, _intype, name)) => name.as_str().to_string(),
+                    None => {
+                        return elog_error(alloc::format!(
+                            "cache lookup failed for operator class {opclass}"
+                        ))
+                    }
+                };
+                return Err(PgError::error(alloc::format!(
+                    "nondeterministic collations are not supported for operator class \"{opcname}\""
+                )));
+            }
+        }
+    }
+
+    /*
+     * Concurrent index build on a system catalog is unsafe.
+     */
+    if concurrent && catalog::is_catalog_relation::call(heap_relation) {
+        return Err(PgError::error(alloc::string::String::from(
+            "concurrent index creation on system catalog tables is not supported",
+        )));
+    }
+
+    /* Not supported: concurrent exclusion-constraint build (REINDEX-only). */
+    if concurrent && is_exclusion {
+        return Err(PgError::error(alloc::string::String::from(
+            "concurrent index creation for exclusion constraints is not supported",
+        )));
+    }
+
+    /* Cannot index a shared relation after initdb. */
+    if shared_relation && !miscinit::is_bootstrap_processing_mode::call() {
+        return Err(PgError::error(alloc::string::String::from(
+            "shared indexes cannot be created after initdb",
+        )));
+    }
+
+    /* Shared relations must be in pg_global. */
+    if shared_relation && table_space_id != GLOBALTABLESPACE_OID {
+        return elog_error("shared relations must be placed in pg_global tablespace".into());
+    }
+
+    /*
+     * Check for duplicate name (index, and the associated constraint if any).
+     */
+    if OidIsValid(lsyscache::get_relname_relid::call(&index_relation_name, namespace_id)?) {
+        if (flags & INDEX_CREATE_IF_NOT_EXISTS) != 0 {
+            // ereport(NOTICE, "relation already exists, skipping")
+            table_am::relation_close::call(pg_class.rd_id, ROW_EXCLUSIVE_LOCK)?;
+            return Ok(InvalidOid);
+        }
+        return Err(PgError::error(alloc::format!(
+            "relation \"{index_relation_name}\" already exists"
+        )));
+    }
+
+    if (flags & INDEX_CREATE_ADD_CONSTRAINT) != 0
+        && pg_constraint::constraint_name_is_used::call(
+            mcx,
+            pg_constraint::ConstraintCategory::Relation,
+            heap_relation_id,
+            &index_relation_name,
+        )?
+    {
+        return Err(PgError::error(alloc::format!(
+            "constraint \"{index_relation_name}\" for relation \"{}\" already exists",
+            heap_relation.name()
+        )));
+    }
+
+    /* construct tuple descriptor for index tuples */
+    let index_tup_desc = ConstructTupleDescriptor(
+        mcx,
+        heap_relation,
+        &index_info,
+        &index_col_names,
+        access_method_id,
+        &collation_ids,
+        &opclass_ids,
+    )?;
+
+    /*
+     * Allocate an OID for the index, unless we were told what to use. (Binary-
+     * upgrade OID/relfilenumber overrides are a separate substrate; in binary-
+     * upgrade mode index_create requires the override globals which the repo
+     * does not yet model — seam-and-panic on that leg.)
+     */
+    if !OidIsValid(index_relation_id) {
+        if tablespace::IsBinaryUpgrade::call()? {
+            // binary_upgrade_next_index_pg_class_oid / _relfilenumber globals
+            // are not modeled; the CREATE INDEX gate does not exercise this.
+            panic!(
+                "index_create: binary-upgrade OID/relfilenumber override not yet modeled"
+            );
+        } else {
+            index_relation_id = catalog::get_new_relfilenumber::call(table_space_id, relpersistence)?;
+        }
+    }
+
+    /*
+     * create the index relation's relcache entry and, if necessary, the
+     * physical disk file.
+     */
+    let heap_create_result = heap::heap_create::call(
+        mcx,
+        &index_relation_name,
+        namespace_id,
+        table_space_id,
+        index_relation_id,
+        rel_file_number,
+        access_method_id,
+        &index_tup_desc,
+        relkind,
+        relpersistence as u8,
+        shared_relation,
+        mapped_relation,
+        allow_system_table_mods,
+        create_storage,
+    )?;
+
+    debug_assert_eq!(heap_create_result.xids.relfrozenxid, 0); /* InvalidTransactionId */
+    debug_assert_eq!(heap_create_result.xids.relminmxid, 0); /* InvalidMultiXactId */
+    debug_assert_eq!(index_relation_id, heap_create_result.rel);
+
+    /*
+     * Obtain exclusive lock on it, and open the relcache entry. (C: heap_create
+     * returns the open uncataloged Relation with NoLock, then LockRelation takes
+     * AccessExclusiveLock. In the owned model the relcache entry is registry-
+     * owned; table_open with AccessExclusiveLock both pins it and takes the
+     * lock.)
+     */
+    let index_relation = table_am::table_open::call(mcx, index_relation_id, ACCESS_EXCLUSIVE_LOCK)?;
+
+    /*
+     * Fill in the index's pg_class entry fields that heap_create did not set
+     * correctly (relowner from the heap, relam, relispartition). In the owned
+     * model these cross via the InsertPgClassTuple write-field carrier rather
+     * than by scribbling on the live rd_rel (the relcache entry is rebuilt from
+     * the catalog after CommandCounterIncrement anyway). relam was already set
+     * by heap_create (accessMethodId).
+     */
+    let relowner = relcache::rd_rel_relowner::call(heap_relation)?;
+    let write = heap::PgClassWriteFields {
+        relpages: 0,
+        reltuples: -1.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: heap_create_result.xids.relfrozenxid,
+        relminmxid: heap_create_result.xids.relminmxid,
+        relowner,
+        reltype: InvalidOid, /* C: InsertPgClassTuple(..., (Datum) 0, reloptions) — no rowtype */
+        reloftype: InvalidOid,
+        relispartition: OidIsValid(parent_index_relid),
+        relrewrite: InvalidOid,
+    };
+
+    /* store index's pg_class entry */
+    heap::InsertPgClassTuple::call(
+        mcx,
+        &pg_class,
+        &index_relation,
+        index_relation_id,
+        &write,
+        None, /* relacl == (Datum) 0 */
+        reloptions_to_bytes(&reloptions),
+    )?;
+
+    /* done with pg_class */
+    table_am::relation_close::call(pg_class.rd_id, ROW_EXCLUSIVE_LOCK)?;
+
+    /*
+     * now update the object id's of all the attribute tuple forms in the index
+     * relation's tuple descriptor, and append the pg_attribute tuples.
+     * (InitializeAttributeOids runs inside AppendAttributeTuples' seam in the
+     * owned model — see AppendAttributeTuples.)
+     */
+    AppendAttributeTuples(mcx, &index_relation)?;
+
+    /*
+     * update pg_index (append INDEX tuple). Stows away "predicate".
+     */
+    UpdateIndexRelation(
+        mcx,
+        index_relation_id,
+        heap_relation_id,
+        &index_info,
+        &collation_ids,
+        &opclass_ids,
+        &coloptions,
+        isprimary,
+        is_exclusion,
+        (constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) == 0, /* immediate */
+        !concurrent && !invalid,                              /* isvalid */
+        !concurrent,                                          /* isready */
+    )?;
+
+    /*
+     * Register relcache invalidation on the index's heap relation, to maintain
+     * consistency of its index list.
+     */
+    inval::cache_invalidate_relcache::call(heap_relation_id)?;
+
+    /* update pg_inherits and the parent's relhassubclass, if needed */
+    if OidIsValid(parent_index_relid) {
+        pg_inherits::store_single_inheritance::call(index_relation_id, parent_index_relid, 1)?;
+        backend_storage_lmgr_lmgr_seams::lock_relation_oid::call(
+            parent_index_relid,
+            SHARE_UPDATE_EXCLUSIVE_LOCK,
+        )?;
+        tablecmds::set_relation_has_subclass::call(mcx, parent_index_relid, true)?;
+    }
+
+    /*
+     * Register constraint and dependencies for the index.
+     *
+     * During bootstrap we can't register any dependencies, and we don't try to
+     * make a constraint either.
+     */
+    if !miscinit::is_bootstrap_processing_mode::call() {
+        let myself = ObjectAddress {
+            classId: RELATION_RELATION_ID,
+            objectId: index_relation_id,
+            objectSubId: 0,
+        };
+
+        if (flags & INDEX_CREATE_ADD_CONSTRAINT) != 0 {
+            let constraint_type = if isprimary {
+                CONSTRAINT_PRIMARY
+            } else if index_info.ii_Unique {
+                CONSTRAINT_UNIQUE
+            } else if is_exclusion {
+                CONSTRAINT_EXCLUSION
+            } else {
+                return elog_error("constraint must be PRIMARY, UNIQUE or EXCLUDE".into());
+            };
+
+            // localaddr = index_constraint_create(...); (constraintId out-param
+            // is ignored at the current call sites — not carried).
+            let _localaddr = index_constraint_create(
+                heap_relation,
+                index_relation_id,
+                parent_constraint_id,
+                &index_info,
+                &index_relation_name,
+                constraint_type,
+                constr_flags,
+                allow_system_table_mods,
+                is_internal,
+            )?;
+        } else {
+            let mut have_simple_col = false;
+            let mut addrs = dependency::new_object_addresses::call()?;
+
+            /* Create auto dependencies on simply-referenced columns */
+            for i in 0..index_info.ii_NumIndexAttrs as usize {
+                if index_info.ii_IndexAttrNumbers[i] != 0 {
+                    let referenced = ObjectAddress {
+                        classId: RELATION_RELATION_ID,
+                        objectId: heap_relation_id,
+                        objectSubId: index_info.ii_IndexAttrNumbers[i] as i32,
+                    };
+                    dependency::add_exact_object_address::call(referenced, &mut addrs)?;
+                    have_simple_col = true;
+                }
+            }
+
+            /*
+             * If there are no simply-referenced columns, give the index an auto
+             * dependency on the whole table.
+             */
+            if !have_simple_col {
+                let referenced = ObjectAddress {
+                    classId: RELATION_RELATION_ID,
+                    objectId: heap_relation_id,
+                    objectSubId: 0,
+                };
+                dependency::add_exact_object_address::call(referenced, &mut addrs)?;
+            }
+
+            dependency::record_object_address_dependencies::call(myself, &mut addrs, DEPENDENCY_AUTO)?;
+            dependency::free_object_addresses::call(addrs)?;
+        }
+
+        /*
+         * If this is an index partition, create partition dependencies on both
+         * the parent index and the table.
+         */
+        if OidIsValid(parent_index_relid) {
+            dependency::record_dependency_on::call(
+                myself,
+                ObjectAddress {
+                    classId: RELATION_RELATION_ID,
+                    objectId: parent_index_relid,
+                    objectSubId: 0,
+                },
+                DEPENDENCY_PARTITION_PRI,
+            )?;
+            dependency::record_dependency_on::call(
+                myself,
+                ObjectAddress {
+                    classId: RELATION_RELATION_ID,
+                    objectId: heap_relation_id,
+                    objectSubId: 0,
+                },
+                DEPENDENCY_PARTITION_SEC,
+            )?;
+        }
+
+        /* placeholder for normal dependencies */
+        let mut addrs = dependency::new_object_addresses::call()?;
+
+        /* Store dependency on collations (default collation is pinned). */
+        for i in 0..index_info.ii_NumIndexKeyAttrs as usize {
+            if OidIsValid(collation_ids[i]) && collation_ids[i] != DEFAULT_COLLATION_OID {
+                let referenced = ObjectAddress {
+                    classId: COLLATION_RELATION_ID,
+                    objectId: collation_ids[i],
+                    objectSubId: 0,
+                };
+                dependency::add_exact_object_address::call(referenced, &mut addrs)?;
+            }
+        }
+
+        /* Store dependency on operator classes */
+        for i in 0..index_info.ii_NumIndexKeyAttrs as usize {
+            let referenced = ObjectAddress {
+                classId: OPERATOR_CLASS_RELATION_ID,
+                objectId: opclass_ids[i],
+                objectSubId: 0,
+            };
+            dependency::add_exact_object_address::call(referenced, &mut addrs)?;
+        }
+
+        dependency::record_object_address_dependencies::call(myself, &mut addrs, DEPENDENCY_NORMAL)?;
+        dependency::free_object_addresses::call(addrs)?;
+
+        /* Store dependencies on anything mentioned in index expressions */
+        if let Some(exprs) = &index_info.ii_Expressions {
+            if !exprs.is_empty() {
+                let node = exprs_to_list_node(mcx, exprs)?;
+                dependency::record_dependency_on_single_rel_expr::call(
+                    myself,
+                    &node,
+                    heap_relation_id,
+                    DEPENDENCY_NORMAL,
+                    DEPENDENCY_AUTO,
+                    false,
+                )?;
+            }
+        }
+
+        /* Store dependencies on anything mentioned in predicate */
+        if let Some(pred) = &index_info.ii_Predicate {
+            if !pred.is_empty() {
+                let node = exprs_to_list_node(mcx, pred)?;
+                dependency::record_dependency_on_single_rel_expr::call(
+                    myself,
+                    &node,
+                    heap_relation_id,
+                    DEPENDENCY_NORMAL,
+                    DEPENDENCY_AUTO,
+                    false,
+                )?;
+            }
+        }
+    } else {
+        /* Bootstrap mode — assert we weren't asked for constraint support */
+        debug_assert!((flags & INDEX_CREATE_ADD_CONSTRAINT) == 0);
+    }
+
+    /* Post creation hook for new index */
+    objectaccess::invoke_object_post_create_hook_arg::call(
+        RELATION_RELATION_ID,
+        index_relation_id,
+        0,
+        is_internal,
+    )?;
+
+    /*
+     * Advance the command counter so we can see the newly-entered catalog
+     * tuples for the index.
+     */
+    xact::command_counter_increment::call()?;
+
+    /*
+     * In bootstrap mode, fill in the index strategy structure from the catalogs.
+     * Otherwise the relcache entry was rebuilt by the sinval update during
+     * CommandCounterIncrement.
+     */
+    if miscinit::is_bootstrap_processing_mode::call() {
+        relcache::relation_init_index_access_info::call(index_relation_id)?;
+    }
+
+    /*
+     * C: indexRelation->rd_index->indnkeyatts = indexInfo->ii_NumIndexKeyAttrs;
+     * — a relcache-entry bookkeeping write. The relcache entry was just rebuilt
+     * from the catalog (where UpdateIndexRelation already stored indnkeyatts),
+     * so it is already correct; the trimmed cross-unit handle exposes no setter.
+     */
+
+    /* opclassOptions is NULL at the current call sites — no index_opclass_options. */
+
+    /*
+     * If bootstrap, or the caller asked to skip the build, don't fill the index
+     * now. Otherwise build it.
+     */
+    if miscinit::is_bootstrap_processing_mode::call() {
+        bootstrap::index_register::call(mcx, heap_relation_id, index_relation_id, &index_info)?;
+    } else if (flags & INDEX_CREATE_SKIP_BUILD) != 0 {
+        /*
+         * Caller fills the index later; still mark the heap as having an index.
+         */
+        index_seam::index_update_stats::call(heap_relation, true, -1.0)?;
+        xact::command_counter_increment::call()?;
+    } else {
+        index_build(mcx, heap_relation, &index_relation, &mut index_info)?;
+    }
+
+    /*
+     * Close the index; keep the lock acquired above until end of transaction.
+     * Closing the heap is the caller's responsibility.
+     */
+    table_am::relation_close::call(index_relation.rd_id, NO_LOCK)?;
+
+    Ok(index_relation_id)
+}
+
+/// `CStringGetTextDatum(NULL)` vs the `Datum reloptions` argument — in the owned
+/// model `reloptions` rides as a `types_tuple::Datum`. The C `(Datum) 0` (no
+/// WITH clause) maps to `None` for the `InsertPgClassTuple` carrier. The current
+/// CREATE INDEX call sites supply no reloptions, so this is `None`; a non-null
+/// reloptions varlena would need the Datum→bytea decode the catalog producer
+/// owns. Until a caller exercises it, a present reloptions Datum panics rather
+/// than silently dropping the WITH clause.
+fn reloptions_to_bytes(reloptions: &types_tuple::Datum<'_>) -> Option<alloc::vec::Vec<u8>> {
+    use types_tuple::Datum;
+    match reloptions {
+        // C `(Datum) 0` — no WITH clause.
+        Datum::ByVal(0) => None,
+        // A real reloptions varlena: the bytea image. The current CREATE INDEX
+        // call sites never supply WITH options, so this is unreachable; decoding
+        // it would need the bytea→reloptions-bytes path the catalog producer
+        // owns. Panic rather than silently drop the WITH clause.
+        _ => panic!(
+            "index_create: non-null reloptions Datum decode not yet modeled \
+             (no current CREATE INDEX caller supplies WITH options)"
+        ),
+    }
+}
+
+/// Wrap a `PgVec<Expr>` (the implicit-AND list the C passes as `(Node *)
+/// indexInfo->ii_Expressions` / `ii_Predicate`) into a `Node::List` of
+/// `Node::Expr` cells for `recordDependencyOnSingleRelExpr`. This is the C
+/// `(Node *) List *` cast: the dependency walker treats a `List` node as a node
+/// to scan, descending into each element.
+fn exprs_to_list_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    exprs: &mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+) -> PgResult<types_nodes::nodes::Node<'mcx>> {
+    use types_nodes::nodes::Node;
+    let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    for e in exprs.iter() {
+        cells.push(mcx::alloc_in(mcx, Node::Expr(e.clone_in(mcx)?))?);
+    }
+    Ok(Node::List(cells))
+}
+
+/* ===========================================================================
+ * index_constraint_create
+ * ========================================================================= */
+
+/// `index_constraint_create(heapRelation, indexRelationId, parentConstraintId,
+/// indexInfo, constraintName, constraintType, constr_flags,
+/// allow_system_table_mods, is_internal)` (catalog/index.c): register a
+/// constraint (PRIMARY KEY / UNIQUE / EXCLUDE) for the given index. Builds the
+/// pg_constraint entry, its dependencies, the deferred-uniqueness trigger (when
+/// deferrable), and optionally marks the index primary/deferred. Returns the
+/// constraint's `ObjectAddress`.
+#[allow(clippy::too_many_arguments)]
+pub fn index_constraint_create<'mcx>(
+    heap_relation: &Relation<'_>,
+    index_relation_id: Oid,
+    parent_constraint_id: Oid,
+    index_info: &IndexInfo<'mcx>,
+    constraint_name: &str,
+    constraint_type: i8,
+    constr_flags: u16,
+    allow_system_table_mods: bool,
+    is_internal: bool,
+) -> PgResult<ObjectAddress> {
+    let mcx = index_info
+        .ii_Context
+        .expect("index_constraint_create: IndexInfo has no owning context");
+
+    let namespace_id = relcache::rd_rel_relnamespace::call(heap_relation)?;
+    let heap_relation_id = heap_relation.rd_id;
+
+    let deferrable = (constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) != 0;
+    let initdeferred = (constr_flags & INDEX_CONSTR_CREATE_INIT_DEFERRED) != 0;
+    let mark_as_primary = (constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY) != 0;
+    let is_without_overlaps = (constr_flags & INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS) != 0;
+
+    /* constraint creation support doesn't work while bootstrapping */
+    debug_assert!(!miscinit::is_bootstrap_processing_mode::call());
+
+    /* enforce system-table restriction */
+    if !allow_system_table_mods
+        && catalog::is_system_relation::call(heap_relation)?
+        && miscinit::is_normal_processing_mode::call()
+    {
+        return Err(PgError::error(alloc::string::String::from(
+            "user-defined indexes on system catalog tables are not supported",
+        )));
+    }
+
+    /* primary/unique constraints shouldn't have any expressions */
+    if index_info
+        .ii_Expressions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+        && constraint_type != CONSTRAINT_EXCLUSION
+    {
+        return elog_error("constraints cannot have index expressions".into());
+    }
+
+    /*
+     * If we're manufacturing a constraint for a pre-existing index, get rid of
+     * the existing auto dependencies for the index.
+     */
+    if (constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS) != 0 {
+        dependency::delete_dependency_records_for_class::call(
+            RELATION_RELATION_ID,
+            index_relation_id,
+            RELATION_RELATION_ID,
+            DEPENDENCY_AUTO,
+        )?;
+    }
+
+    let (islocal, inhcount, noinherit) = if OidIsValid(parent_constraint_id) {
+        (false, 1i16, false)
+    } else {
+        (true, 0i16, true)
+    };
+
+    /*
+     * Construct a pg_constraint entry. The constraint key is the index's key
+     * attribute numbers; the exclusion operators (if any) ride along.
+     */
+    let constraint_key: alloc::vec::Vec<i16> =
+        index_info.ii_IndexAttrNumbers[..index_info.ii_NumIndexKeyAttrs as usize].to_vec();
+    let excl_op_vec: Option<alloc::vec::Vec<Oid>> =
+        index_info.ii_ExclusionOps.as_ref().map(|v| v.iter().copied().collect());
+
+    let con_oid = pg_constraint::create_constraint_entry::call(
+        mcx,
+        pg_constraint::CreateConstraintEntryArgs {
+            constraint_name,
+            constraint_namespace: namespace_id,
+            constraint_type,
+            is_deferrable: deferrable,
+            is_deferred: initdeferred,
+            parent_constr_id: parent_constraint_id,
+            rel_id: heap_relation_id,
+            constraint_key: &constraint_key,
+            constraint_n_total_keys: index_info.ii_NumIndexAttrs,
+            index_rel_id: index_relation_id,
+            excl_op: excl_op_vec.as_deref(),
+            con_is_local: islocal,
+            con_inh_count: inhcount,
+            con_no_inherit: noinherit,
+            con_period: is_without_overlaps,
+            is_internal,
+        },
+    )?;
+
+    /*
+     * Register the index as internally dependent on the constraint. (The
+     * constraint depends on the table, so no direct index→table dependency.)
+     */
+    let myself = ObjectAddress {
+        classId: CONSTRAINT_RELATION_ID,
+        objectId: con_oid,
+        objectSubId: 0,
+    };
+    let idxaddr = ObjectAddress {
+        classId: RELATION_RELATION_ID,
+        objectId: index_relation_id,
+        objectSubId: 0,
+    };
+    dependency::record_dependency_on::call(idxaddr, myself, DEPENDENCY_INTERNAL)?;
+
+    /*
+     * If a constraint on a partition, give it partition-type dependencies on
+     * the parent constraint and the table.
+     */
+    if OidIsValid(parent_constraint_id) {
+        dependency::record_dependency_on::call(
+            myself,
+            ObjectAddress {
+                classId: CONSTRAINT_RELATION_ID,
+                objectId: parent_constraint_id,
+                objectSubId: 0,
+            },
+            DEPENDENCY_PARTITION_PRI,
+        )?;
+        dependency::record_dependency_on::call(
+            myself,
+            ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: heap_relation_id,
+                objectSubId: 0,
+            },
+            DEPENDENCY_PARTITION_SEC,
+        )?;
+    }
+
+    /*
+     * If the constraint is deferrable, create the deferred uniqueness checking
+     * trigger.
+     */
+    if deferrable {
+        trigger::create_unique_key_recheck_trigger::call(
+            heap_relation_id,
+            con_oid,
+            index_relation_id,
+            constraint_type == CONSTRAINT_PRIMARY,
+            initdeferred,
+        )?;
+    }
+
+    /*
+     * If needed, mark the index as primary and/or deferred in pg_index.
+     */
+    if (constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX) != 0 && (mark_as_primary || deferrable) {
+        let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+        let Some((tid, mut form)) =
+            syscache::search_syscache_copy_pg_index::call(mcx, index_relation_id)?
+        else {
+            return elog_error(alloc::format!(
+                "cache lookup failed for index {index_relation_id}"
+            ));
+        };
+
+        let mut dirty = false;
+        let mut marked_as_primary = false;
+
+        if mark_as_primary && !form.indisprimary {
+            form.indisprimary = true;
+            dirty = true;
+            marked_as_primary = true;
+        }
+
+        if deferrable && form.indimmediate {
+            form.indimmediate = false;
+            dirty = true;
+        }
+
+        if dirty {
+            indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
+
+            /*
+             * When marking an existing index as primary, force a relcache flush
+             * on the parent table.
+             */
+            if marked_as_primary {
+                inval::cache_invalidate_relcache::call(heap_relation_id)?;
+            }
+
+            objectaccess::invoke_object_post_alter_hook_arg::call(
+                INDEX_RELATION_ID,
+                index_relation_id,
+                0,
+                InvalidOid,
+                is_internal,
+            )?;
+        }
+
+        table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
+    }
+
+    Ok(myself)
+}
+
+/* ===========================================================================
+ * index_set_state_flags
+ * ========================================================================= */
+
+/// `index_set_state_flags(indexId, action)` (catalog/index.c): perform a
+/// non-transactional update of an index's `pg_index` state flags during a
+/// CREATE / DROP INDEX CONCURRENTLY sequence.
+///
+/// This is the in-place `pg_index` flag mutation: fetch the writable
+/// `Form_pg_index` copy (`SearchSysCacheCopy1(INDEXRELID)`), apply the requested
+/// transition, and `CatalogTupleUpdate`. The fetch crosses the syscache producer
+/// seam (`search_syscache_copy_pg_index`) and the write crosses the
+/// catalog-indexing consumer seam (`catalog_tuple_update_pg_index`), over the
+/// `PgIndexForm` carrier widened to carry every flag column these transitions
+/// touch.
+pub fn index_set_state_flags<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_id: Oid,
+    action: backend_catalog_index_seams::IndexStateFlagsAction,
+) -> PgResult<()> {
+    use backend_catalog_index_seams::IndexStateFlagsAction as Action;
+
+    /* Open pg_index and fetch a writable copy of the index's tuple */
+    let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+    let Some((tid, mut form)) =
+        syscache::search_syscache_copy_pg_index::call(mcx, index_id)?
+    else {
+        return elog_error(alloc::format!("cache lookup failed for index {index_id}"));
+    };
+
+    /* Perform the requested state change on the copy */
+    match action {
+        Action::SetReady => {
+            /* Set indisready during a CREATE INDEX CONCURRENTLY sequence */
+            debug_assert!(form.indislive);
+            debug_assert!(!form.indisready);
+            debug_assert!(!form.indisvalid);
+            form.indisready = true;
+        }
+        Action::SetValid => {
+            /* Set indisvalid during a CREATE INDEX CONCURRENTLY sequence */
+            debug_assert!(form.indislive);
+            debug_assert!(form.indisready);
+            debug_assert!(!form.indisvalid);
+            form.indisvalid = true;
+        }
+        Action::DropClearValid => {
+            /*
+             * Clear indisvalid during a DROP INDEX CONCURRENTLY sequence. Also
+             * clear indisclustered (CLUSTER assumes it cannot be set on an
+             * invalid index) and, for cleanliness, indisreplident.
+             */
+            form.indisvalid = false;
+            form.indisclustered = false;
+            form.indisreplident = false;
+        }
+        Action::DropSetDead => {
+            /*
+             * Clear indisready/indislive during DROP INDEX CONCURRENTLY — stop
+             * updates and prevent any session from touching the index.
+             */
+            debug_assert!(!form.indisvalid);
+            debug_assert!(!form.indisclustered);
+            debug_assert!(!form.indisreplident);
+            form.indisready = false;
+            form.indislive = false;
+        }
+    }
+
+    /* ... and update it */
+    indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
+
+    table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
     Ok(())
 }
 
@@ -1654,6 +2602,14 @@ pub fn init_seams() {
     // build_indices) — the build / introspection core (keystones #340–#344).
     index_seam::build_index_info::set(BuildIndexInfo);
     index_seam::index_build::set(index_build);
+
+    // index_create (the CREATE INDEX gate: DefineIndex → index_create →
+    // index_build) + index_constraint_create (PK/UNIQUE/EXCLUDE constraint
+    // wiring) + index_set_state_flags (CREATE/DROP INDEX CONCURRENTLY pg_index
+    // flag transitions, over the widened PgIndexForm carrier).
+    index_seam::index_create::set(index_create);
+    index_seam::index_constraint_create::set(index_constraint_create);
+    index_seam::index_set_state_flags::set(index_set_state_flags);
 
     // BuildSpeculativeIndexInfo (ExecOpenIndices speculative; logical-rep
     // conflict detection) — the per-key unique-operator lookup over the index
