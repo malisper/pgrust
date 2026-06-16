@@ -1,0 +1,19 @@
+[package]
+name = "backend-utils-adt-float"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_float"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+common-ryu = { path = "../common-ryu" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-adt-float-seams = { path = "../backend-utils-adt-float-seams" }

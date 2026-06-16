@@ -279,7 +279,7 @@ pub fn recordMultipleDependencies(
 
         /* If slots are full, insert a batch of tuples */
         if slot_stored_count == max_slots {
-            indexing_seams::catalog_tuples_multi_insert_pg_depend::call(&dependDesc, &slot)?;
+            indexing_seams::catalog_tuples_multi_insert_pg_depend::call(dep_ctx.mcx(), &dependDesc, &slot)?;
             slot.clear();
             slot_stored_count = 0;
         }
@@ -287,7 +287,7 @@ pub fn recordMultipleDependencies(
 
     /* Insert any tuples left in the buffer */
     if slot_stored_count > 0 {
-        indexing_seams::catalog_tuples_multi_insert_pg_depend::call(&dependDesc, &slot)?;
+        indexing_seams::catalog_tuples_multi_insert_pg_depend::call(dep_ctx.mcx(), &dependDesc, &slot)?;
     }
 
     dependDesc.close(RowExclusiveLock)?;

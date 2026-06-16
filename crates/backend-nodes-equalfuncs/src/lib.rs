@@ -862,6 +862,58 @@ fn equal_cte_cycle_clause(
         && a.cycle_mark_neop == b.cycle_mark_neop
 }
 
+/// `COMPARE_NODE_FIELD` over an optional `List *` of `Expr *` (no NULL elements).
+#[inline]
+fn equal_opt_list<T>(
+    a: &Option<impl AsRef<[T]>>,
+    b: &Option<impl AsRef<[T]>>,
+    eq: impl Fn(&T, &T) -> bool,
+) -> bool {
+    match (a.as_ref(), b.as_ref()) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            let (x, y) = (x.as_ref(), y.as_ref());
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| eq(p, q))
+        }
+        _ => false,
+    }
+}
+
+/// `_equalTableFunc` (equalfuncs.funcs.c, gen_node_support). Compares every
+/// `COMPARE_*` field; `location` is `COMPARE_LOCATION_FIELD` (no-op).
+fn equal_table_func(
+    a: &types_nodes::primnodes::TableFunc<'_>,
+    b: &types_nodes::primnodes::TableFunc<'_>,
+) -> bool {
+    a.functype == b.functype
+        && equal_opt_list(&a.ns_uris, &b.ns_uris, |p, q| equal_expr(p, q))
+        && equal_opt_list(&a.ns_names, &b.ns_names, |p, q| {
+            match (p.as_ref(), q.as_ref()) {
+                (None, None) => true,
+                (Some(s), Some(t)) => s.as_str() == t.as_str(),
+                _ => false,
+            }
+        })
+        && equal_opt_expr(a.docexpr.as_deref(), b.docexpr.as_deref())
+        && equal_opt_expr(a.rowexpr.as_deref(), b.rowexpr.as_deref())
+        && equal_opt_list(&a.colnames, &b.colnames, |p, q| p.as_str() == q.as_str())
+        && equal_opt_list(&a.coltypes, &b.coltypes, |p, q| p == q)
+        && equal_opt_list(&a.coltypmods, &b.coltypmods, |p, q| p == q)
+        && equal_opt_list(&a.colcollations, &b.colcollations, |p, q| p == q)
+        && equal_opt_list(&a.colexprs, &b.colexprs, |p, q| {
+            equal_opt_expr(p.as_deref(), q.as_deref())
+        })
+        && equal_opt_list(&a.coldefexprs, &b.coldefexprs, |p, q| {
+            equal_opt_expr(p.as_deref(), q.as_deref())
+        })
+        && equal_opt_list(&a.colvalexprs, &b.colvalexprs, |p, q| {
+            equal_opt_expr(p.as_deref(), q.as_deref())
+        })
+        && equal_opt_list(&a.passingvalexprs, &b.passingvalexprs, |p, q| equal_expr(p, q))
+        && equal_bms(a.notnulls.as_deref(), b.notnulls.as_deref())
+        && a.ordinalitycol == b.ordinalitycol
+}
+
 /// `_equalCommonTableExpr` (equalfuncs.funcs.c).
 fn equal_common_table_expr(
     a: &types_nodes::rawnodes::CommonTableExpr<'_>,
@@ -876,11 +928,7 @@ fn equal_common_table_expr(
             (Some(x), Some(y)) => equal_cte_search_clause(x, y),
             _ => false,
         }
-        && match (a.cycle_clause.as_deref(), b.cycle_clause.as_deref()) {
-            (None, None) => true,
-            (Some(x), Some(y)) => equal_cte_cycle_clause(x, y),
-            _ => false,
-        }
+        && equal_opt_node(a.cycle_clause.as_ref(), b.cycle_clause.as_ref())
         // location is COMPARE_LOCATION_FIELD (no-op).
         && a.cterecursive == b.cterecursive
         && a.cterefcount == b.cterefcount
@@ -1066,6 +1114,8 @@ pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
     match (a, b) {
         (Node::Expr(x), Node::Expr(y)) => equal_expr(x, y),
         (Node::TargetEntry(x), Node::TargetEntry(y)) => equal_target_entry(x, y),
+        (Node::TableFunc(x), Node::TableFunc(y)) => equal_table_func(x, y),
+        (Node::CTECycleClause(x), Node::CTECycleClause(y)) => equal_cte_cycle_clause(x, y),
         (Node::SortGroupClause(x), Node::SortGroupClause(y)) => equal_sort_group_clause(x, y),
         // The Value leaf nodes (`_equalInteger`/`_equalFloat`/`_equalBoolean`/
         // `_equalString`/`_equalBitString`) compare by their single value field;
