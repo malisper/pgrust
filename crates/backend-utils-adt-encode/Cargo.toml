@@ -1,0 +1,15 @@
+[package]
+name = "backend-utils-adt-encode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_encode"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+backend-utils-adt-encode-seams = { path = "../backend-utils-adt-encode-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }

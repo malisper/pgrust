@@ -2,6 +2,7 @@
 //! PostgreSQL 18.3), trimmed to what the `backend-catalog-pg-enum` port reads.
 
 use types_core::primitive::Oid;
+use types_core::TransactionId;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_enum.h CATALOG / DECLARE_*).
@@ -41,6 +42,25 @@ pub struct FormData_pg_enum {
     pub enumtypid: Oid,
     pub enumsortorder: f32,
     pub enumlabel: [u8; 64],
+}
+
+/// One scanned `pg_enum` tuple as the `enum.c` ADT support functions consume
+/// it: the `(Form_pg_enum) GETSTRUCT(tup)` scalar columns enum.c reads (`oid`,
+/// `enumtypid`, `enumlabel`) plus the tuple-header facts `check_safe_enum_use`
+/// (enum.c:60) needs — `xmin_committed` (`HeapTupleHeaderXminCommitted`) and
+/// `xmin` (`HeapTupleHeaderGetXmin`, the frozen-aware effective xmin). The
+/// producer (syscache projection / `pg_enum` ordered scan) drops the cache
+/// reference / closes the scan before returning, so this is a self-contained
+/// owned copy. `enumlabel` is the 64-byte `NameData` image.
+#[derive(Clone, Copy, Debug)]
+pub struct EnumTupleData {
+    pub oid: Oid,
+    pub enumtypid: Oid,
+    pub enumlabel: [u8; 64],
+    /// `HeapTupleHeaderXminCommitted(tup->t_data)` — the committed hint bit.
+    pub xmin_committed: bool,
+    /// `HeapTupleHeaderGetXmin(tup->t_data)` — the effective (frozen-aware) xmin.
+    pub xmin: TransactionId,
 }
 
 /// The values `EnumValuesCreate` / `AddEnumLabel` build for `heap_form_tuple`

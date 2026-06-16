@@ -1035,3 +1035,20 @@ seam_core::seam!(
         progress: f64,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `DropDatabaseBuffers(dbid)` (bufmgr.c): drop every shared-buffer page
+    /// that belongs to database `dbid` from the buffer pool — the `dropdb` /
+    /// `dbase_redo` `XLOG_DBASE_DROP` cleanup. Owned by bufmgr (panic until it
+    /// installs this).
+    pub fn drop_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `FlushDatabaseBuffers(dbid)` (bufmgr.c): write out all dirty
+    /// shared-buffer pages of database `dbid` (the
+    /// `XLOG_DBASE_CREATE_FILE_COPY` "force source up-to-date for the copy"
+    /// step in `dbase_redo`/`createdb`). Owned by bufmgr. `Err` carries the
+    /// I/O `ereport(ERROR)` surface.
+    pub fn flush_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()>
+);

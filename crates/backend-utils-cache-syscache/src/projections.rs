@@ -17,9 +17,11 @@ use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
-    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPERNAME,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
+    FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, OPEROID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
+    LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
+    USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
@@ -29,7 +31,10 @@ use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
 use types_core::primitive::OidIsValid;
-use types_tuple::heaptuple::HeapTupleHeaderGetRawXmin;
+use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
+    HeapTupleHeaderXminCommitted};
+use types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
+    EnumTupleData};
 use backend_utils_cache_syscache_seams::{PgClassFullForm, PgOperatorForm, PgProcForm};
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
@@ -1353,6 +1358,60 @@ fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthI
     })
 }
 
+/// Project one `pg_enum` `FormedTuple` to an [`EnumTupleData`]: the
+/// `(Form_pg_enum) GETSTRUCT(tup)` columns enum.c reads plus the tuple-header
+/// `xmin`/`xmin_committed` `check_safe_enum_use` needs.
+fn project_enum(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>) -> PgResult<EnumTupleData> {
+    let header = tup
+        .tuple
+        .t_data
+        .as_ref()
+        .expect("pg_enum tuple has a header");
+    Ok(EnumTupleData {
+        oid: getattr_oid(mcx, cache_id, tup, Anum_pg_enum_oid as i32)?,
+        enumtypid: getattr_oid(mcx, cache_id, tup, Anum_pg_enum_enumtypid as i32)?,
+        enumlabel: getattr_namedata(mcx, cache_id, tup, Anum_pg_enum_enumlabel as i32)?,
+        xmin_committed: HeapTupleHeaderXminCommitted(header),
+        xmin: HeapTupleHeaderGetXmin(header),
+    })
+}
+
+/// `SearchSysCache1(ENUMOID, ObjectIdGetDatum(enumval))` projected to an
+/// [`EnumTupleData`].
+pub(crate) fn lookup_enum_by_oid(enumval: Oid) -> PgResult<Option<EnumTupleData>> {
+    let scratch = MemoryContext::new("syscache enum-by-oid projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, ENUMOID, SysCacheKey::Value(KeyDatum::from_oid(enumval)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_enum(mcx, ENUMOID, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache2(ENUMTYPOIDNAME, ObjectIdGetDatum(enumtypoid),
+/// CStringGetDatum(name))` projected to an [`EnumTupleData`].
+pub(crate) fn lookup_enum_by_typoid_name(
+    enumtypoid: Oid,
+    name: &str,
+) -> PgResult<Option<EnumTupleData>> {
+    let scratch = MemoryContext::new("syscache enum-by-typoid-name projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        ENUMTYPOIDNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(enumtypoid)),
+        SysCacheKey::Str(name),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_enum(mcx, ENUMTYPOIDNAME, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
 /// `SearchSysCache1(LANGOID, language_id)` projected to the language facts
 /// `fmgr_info_other_lang` / `CheckFunctionValidatorAccess` read.
 pub(crate) fn lookup_language<'mcx>(
@@ -1689,4 +1748,277 @@ pub(crate) fn search_pg_class_full_form<'mcx>(
     };
     ReleaseSysCache(tup);
     Ok(Some(form))
+}
+
+/* ===========================================================================
+ * ACL / owner catalog-row projections (the aclmask/aclcheck family in
+ * catalog/aclchk.c — the F0 keystone). Each reads the object's owner OID and
+ * its `aclitem[]` ACL off `SearchSysCache*` + `GETSTRUCT` + `SysCacheGetAttr`,
+ * decoding the ACL column into its [`AclItem`] elements (the `Acl *` /
+ * `ArrayType` payload C's `aclmask()` consumes). A SQL-null ACL column crosses
+ * as `None` (where aclchk builds the hardwired `acldefault`); a cache miss is
+ * `Ok(None)`.
+ * ======================================================================== */
+
+use types_acl::AclItem;
+use types_cache::syscache::{ClassOwnerAcl, NamespaceOwnerAcl, ObjectOwnerAcl, TypeOwnerAcl};
+
+// `catalog/pg_namespace.h` attribute numbers.
+const Anum_pg_namespace_nspowner: i32 = 3;
+const Anum_pg_namespace_nspacl: i32 = 4;
+
+// `catalog/pg_class.h` ACL attribute number.
+const Anum_pg_class_relacl: i32 = 13;
+
+// `catalog/pg_attribute.h` ACL + attisdropped attribute numbers.
+const Anum_pg_attribute_attacl: i32 = 22;
+const Anum_pg_attribute_attisdropped_acl: i32 = 17;
+
+// `catalog/pg_type.h` attribute numbers (ACL path).
+const Anum_pg_type_typowner: i32 = 4;
+const Anum_pg_type_typtype: i32 = 7;
+const Anum_pg_type_typsubscript: i32 = 13;
+const Anum_pg_type_typelem: i32 = 14;
+const Anum_pg_type_oid: i32 = 1;
+const Anum_pg_type_typacl: i32 = 32;
+
+// `catalog/pg_parameter_acl.h` ACL attribute number (`paracl[1]`).
+const Anum_pg_parameter_acl_paracl: i32 = 3;
+
+/// `TYPTYPE_MULTIRANGE` (`catalog/pg_type.h`).
+const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+/// `F_ARRAY_SUBSCRIPT_HANDLER` (`fmgroids.h`, `pg_proc.dat` oid 6179) — the
+/// `typsubscript` value that, with a valid `typelem`, marks a true array type.
+const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+
+/// `sizeof(AclItem)` (`utils/acl.h`) — 16 bytes on every platform (hardcoded in
+/// `pg_type.dat`: `aclitem` `typlen => 16`).
+const SIZEOF_ACLITEM: usize = 16;
+
+/// `IsTrueArrayType(typeForm)` (`catalog/pg_type.h`):
+/// `OidIsValid(typelem) && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER`.
+fn is_true_array_type(typelem: Oid, typsubscript: Oid) -> bool {
+    OidIsValid(typelem) && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
+}
+
+/// `DatumGetAclP(aclDatum)` then walk the `aclitem[]` elements: detoast the
+/// stored ACL varlena (C `DatumGetAclP` == `DatumGetArrayTypePCopy`), then read
+/// `ACL_NUM(acl) = ARR_DIMS(acl)[0]` fixed-16-byte items from `ACL_DAT(acl) =
+/// ARR_DATA_PTR(acl)`. A stored ACL is always a well-formed 1-D no-nulls
+/// `aclitem` array (`check_acl`); a 0-dimension/empty image yields an empty
+/// vector. Allocated in the caller's `mcx`.
+fn decode_acl<'mcx>(mcx: Mcx<'mcx>, raw: &[u8]) -> PgResult<PgVec<'mcx, AclItem>> {
+    // DatumGetArrayTypeP + ARR_NDIM/ARR_DIMS[0]/ARR_DATA_PTR (reusing the
+    // pg_constraint array-header decoder above).
+    let (arr, ndim, _hasnull, _elemtype, dim0, data_off) = detoast_array_header(mcx, raw)?;
+    let n = if ndim >= 1 { dim0.max(0) as usize } else { 0 };
+    let mut items: PgVec<'mcx, AclItem> = vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let off = data_off + i * SIZEOF_ACLITEM;
+        let b = arr.get(off..off + SIZEOF_ACLITEM).ok_or_else(|| {
+            PgError::error("syscache ACL projection: truncated aclitem array data")
+        })?;
+        // AclItem { ai_grantee: Oid, ai_grantor: Oid, ai_privs: AclMode (u64) }.
+        let ai_grantee = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+        let ai_grantor = u32::from_ne_bytes([b[4], b[5], b[6], b[7]]);
+        let ai_privs = u64::from_ne_bytes([
+            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+        ]);
+        items.push(AclItem {
+            ai_grantee,
+            ai_grantor,
+            ai_privs,
+        });
+    }
+    Ok(items)
+}
+
+/// Read an ACL column off a held tuple: `SysCacheGetAttr(cacheId, tup, attnum)`
+/// then, when not SQL-null, [`decode_acl`]. `Some(items)` for a present ACL,
+/// `None` for a SQL-null column.
+fn getattr_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<PgVec<'mcx, AclItem>>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    match &value {
+        Datum::ByRef(b) => Ok(Some(decode_acl(mcx, &b[..])?)),
+        Datum::ByVal(_) => Err(PgError::error(
+            "syscache ACL projection: aclitem[] column is by-value",
+        )),
+    }
+}
+
+/// `pg_class_aclmask_ext`'s catalog read (aclchk.c): `SearchSysCache1(RELOID,
+/// table_oid)` -> `relowner`/`relkind`/`relnamespace` + the decoded `relacl`.
+pub(crate) fn pg_class_owner_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_oid: Oid,
+) -> PgResult<Option<ClassOwnerAcl<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(table_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relowner = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relowner)?;
+    let relkind = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)?;
+    let relnamespace = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?;
+    let acl = getattr_acl(mcx, RELOID, &tup, Anum_pg_class_relacl)?;
+    ReleaseSysCache(tup);
+    Ok(Some(ClassOwnerAcl {
+        relowner,
+        relkind,
+        relnamespace,
+        acl,
+    }))
+}
+
+/// `pg_attribute_aclmask_ext`'s column read (aclchk.c): `SearchSysCache2(ATTNUM,
+/// table_oid, attnum)` -> `(attisdropped, decoded attacl)`. `Ok(None)` on a
+/// cache miss (no such pg_attribute row); the relation owner is fetched
+/// separately by the caller (`pg_class_owner_acl`).
+pub(crate) fn pg_attribute_owner_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_oid: Oid,
+    attnum: i16,
+) -> PgResult<Option<(bool, Option<PgVec<'mcx, AclItem>>)>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(table_oid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // attributeForm->attisdropped.
+    let attisdropped = getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attisdropped_acl)?;
+    let acl = getattr_acl(mcx, ATTNUM, &tup, Anum_pg_attribute_attacl)?;
+    ReleaseSysCache(tup);
+    Ok(Some((attisdropped, acl)))
+}
+
+/// `pg_namespace_aclmask_ext`'s catalog read (aclchk.c):
+/// `SearchSysCache1(NAMESPACEOID, nsp_oid)` -> `nspowner` + decoded `nspacl`.
+pub(crate) fn pg_namespace_owner_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    nsp_oid: Oid,
+) -> PgResult<Option<NamespaceOwnerAcl<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(nsp_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let nspowner = getattr_oid(mcx, NAMESPACEOID, &tup, Anum_pg_namespace_nspowner)?;
+    let acl = getattr_acl(mcx, NAMESPACEOID, &tup, Anum_pg_namespace_nspacl)?;
+    ReleaseSysCache(tup);
+    Ok(Some(NamespaceOwnerAcl { nspowner, acl }))
+}
+
+/// `pg_type_aclmask_ext`'s catalog read (aclchk.c):
+/// `SearchSysCache1(TYPEOID, type_oid)` -> `typowner`/`typacl`, resolving the
+/// true-array-element redirect (`IsTrueArrayType` -> `typelem`) and the
+/// multirange redirect (`typtype == TYPTYPE_MULTIRANGE` ->
+/// `get_multirange_range`) before projecting the effective type's `(owner,
+/// acl)`. Each redirect re-fetches by OID; a miss at any step is `Ok(None)`.
+pub(crate) fn pg_type_owner_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+) -> PgResult<Option<TypeOwnerAcl<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(type_oid)))?;
+    let Some(mut tup) = tuple else {
+        return Ok(None);
+    };
+
+    // "True" array types don't manage their own permissions; consult the
+    // element type instead.
+    let typelem = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typelem)?;
+    let typsubscript = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typsubscript)?;
+    if is_true_array_type(typelem, typsubscript) {
+        ReleaseSysCache(tup);
+        let elt = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typelem)))?;
+        let Some(elt_tup) = elt else {
+            return Ok(None);
+        };
+        tup = elt_tup;
+    }
+
+    // Likewise, multirange types consult the associated range type. (After the
+    // array step, to get the right answer for arrays of multiranges.)
+    let typtype = getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typtype)?;
+    if typtype == TYPTYPE_MULTIRANGE {
+        let oid = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_oid)?;
+        let rangetype = lsyscache_seams::get_multirange_range::call(oid)?;
+        ReleaseSysCache(tup);
+        let rng = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(rangetype)))?;
+        let Some(rng_tup) = rng else {
+            return Ok(None);
+        };
+        tup = rng_tup;
+    }
+
+    let typowner = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typowner)?;
+    let acl = getattr_acl(mcx, TYPEOID, &tup, Anum_pg_type_typacl)?;
+    ReleaseSysCache(tup);
+    Ok(Some(TypeOwnerAcl { typowner, acl }))
+}
+
+/// `object_aclmask_ext`'s generic catalog read (aclchk.c):
+/// `SearchSysCache1(cacheid, objectid)` -> `SysCacheGetAttrNotNull(owner_attnum)`
+/// (owner) + decoded `SysCacheGetAttr(acl_attnum)` (ACL). The caller resolves
+/// `cacheid`/`owner_attnum`/`acl_attnum` for its `classid`.
+pub(crate) fn object_owner_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    cacheid: i32,
+    objectid: Oid,
+    owner_attnum: i16,
+    acl_attnum: i16,
+) -> PgResult<Option<ObjectOwnerAcl<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, cacheid, SysCacheKey::Value(KeyDatum::from_oid(objectid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // ownerId = DatumGetObjectId(SysCacheGetAttrNotNull(cacheid, tuple,
+    //                            get_object_attnum_owner(classid))).
+    let owner = getattr_oid(mcx, cacheid, &tup, owner_attnum as i32)?;
+    let acl = getattr_acl(mcx, cacheid, &tup, acl_attnum as i32)?;
+    ReleaseSysCache(tup);
+    Ok(Some(ObjectOwnerAcl { owner, acl }))
+}
+
+/// `pg_parameter_aclmask`'s catalog read (aclchk.c):
+/// `SearchSysCache1(PARAMETERACLNAME, CStringGetTextDatum(parname))` -> decoded
+/// `paracl`. Outer `Option`: `None` = cache miss (no entry — the C
+/// `ACL_NO_RIGHTS` case); inner `Option`: `None` = SQL-null `paracl`.
+pub(crate) fn parameter_acl_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    parname: &str,
+) -> PgResult<Option<Option<PgVec<'mcx, AclItem>>>> {
+    let tuple = SearchSysCache1(mcx, PARAMETERACLNAME, SysCacheKey::Str(parname))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let acl = getattr_acl(mcx, PARAMETERACLNAME, &tup, Anum_pg_parameter_acl_paracl)?;
+    ReleaseSysCache(tup);
+    Ok(Some(acl))
+}
+
+/// `pg_parameter_acl_aclmask`'s catalog read (aclchk.c):
+/// `SearchSysCache1(PARAMETERACLOID, acl_oid)` -> decoded `paracl`. Outer
+/// `Option`: `None` = cache miss (caller raises "parameter ACL with OID %u does
+/// not exist"); inner `Option`: `None` = SQL-null `paracl`.
+pub(crate) fn parameter_acl_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    acl_oid: Oid,
+) -> PgResult<Option<Option<PgVec<'mcx, AclItem>>>> {
+    let tuple = SearchSysCache1(mcx, PARAMETERACLOID, SysCacheKey::Value(KeyDatum::from_oid(acl_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let acl = getattr_acl(mcx, PARAMETERACLOID, &tup, Anum_pg_parameter_acl_paracl)?;
+    ReleaseSysCache(tup);
+    Ok(Some(acl))
 }
