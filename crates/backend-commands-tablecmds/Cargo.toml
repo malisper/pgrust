@@ -22,6 +22,8 @@ types-acl = { path = "../types-acl" }
 types-cluster = { path = "../types-cluster" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+# ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }

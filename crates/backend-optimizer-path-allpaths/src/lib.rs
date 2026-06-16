@@ -865,6 +865,10 @@ pub fn init_seams() {
     costsize::compute_parallel_worker::set(compute_parallel_worker_seam);
     costsize::create_partial_bitmap_paths::set(create_partial_bitmap_paths);
     backend_geqo_all_seams::build_and_cost_join_rel::set(build_and_cost_join_rel_seam);
+    // allpaths owns `get_cheapest_fractional_path` (pathkeys.c). The seam is
+    // declared in `crate::seams` and consumed by standard_planner (planner.c)
+    // when it picks the final path off the upper rel; install our real body.
+    seams::get_cheapest_fractional_path::set(append::get_cheapest_fractional_path);
 }
 
 /// Seam adapter for `compute_parallel_worker` (the seam takes `&PlannerInfo`;

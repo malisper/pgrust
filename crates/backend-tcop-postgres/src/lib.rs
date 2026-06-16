@@ -22,18 +22,28 @@
 //!
 //! The `postgres.c` file-local globals are owned in [`globals`].
 //!
-//! NOT in this crate (planner-gated, Families F0a/F1/F2): the `PostgresMain` /
-//! `PostgresSingleUserMain` main loop, the simple-query (`exec_simple_query`)
-//! and extended-query (`exec_parse_message`/`exec_bind_message`/
-//! `exec_execute_message`/describe) pipelines, `pg_parse_query`/`pg_plan_query`/
-//! `pg_plan_queries`/the `pg_analyze_and_rewrite_*` family, `start_xact_command`/
-//! `finish_xact_command`, `InteractiveBackend`/`SocketBackend`/`ReadCommand`,
-//! and the F1/F2-coupled logging helpers `check_log_statement`,
-//! `errdetail_execute`, `errdetail_params`. Those land with the planner; the
-//! seam decls for the ones other units reference (`postgres_main`,
-//! `pg_parse_query`, `pg_plan_query`, `set_stack_base`,
-//! `install_bgworker_signal_handlers`, the lock-wait/autovac report seams) stay
-//! seam-and-panic until then.
+//! Also landed:
+//!
+//!   * **F0a — the backend main loop** ([`main_loop`]): `PostgresMain`, the
+//!     `for (;;)` ReadCommand loop with the `sigsetjmp`-equivalent
+//!     `PgResult`-recovery block, idle-state handling / `ReadyForQuery`, and the
+//!     message-tag dispatch — `'Q'`→`exec_simple_query` (landed end-to-end),
+//!     `'F'`→fastpath (landed), `'C'`/`'S'`/`'H'` ported, `'X'`/EOF terminate,
+//!     COPY-data accepted-and-ignored; the extended-query `'P'`/`'B'`/`'E'`/`'D'`
+//!     exec functions seam-panic (F2 plancache path, unported). `ReadCommand` /
+//!     `SocketBackend` / `forbidden_in_wal_sender` are here too.
+//!   * **F1 — the simple-Query pipeline** ([`simple_query`]): `exec_simple_query`
+//!     and `pg_parse_query`/`pg_analyze_and_rewrite_fixedparams`/`pg_rewrite_query`/
+//!     `pg_plan_query`/`pg_plan_queries`, `start_xact_command`/`finish_xact_command`,
+//!     `check_log_statement`, `drop_unnamed_stmt`.
+//!
+//! NOT in this crate: `PostgresSingleUserMain` (standalone single-user entry)
+//! and `InteractiveBackend` (its stdin reader); the extended-query
+//! (`exec_parse_message`/`exec_bind_message`/`exec_execute_message`/describe)
+//! pipeline (F2, plancache-gated); the F2-coupled logging helpers
+//! `errdetail_execute`/`errdetail_params`. The `pg_parse_query`/`pg_plan_query`
+//! seam decls keyed on opaque plancache handles (consumed by IMPORT FOREIGN
+//! SCHEMA / SPI) stay seam-and-panic until the handle model retires.
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
@@ -44,6 +54,7 @@ pub mod globals;
 pub mod guc;
 pub mod interrupt;
 pub mod logging;
+pub mod main_loop;
 pub mod simple_query;
 
 #[cfg(test)]
@@ -134,4 +145,9 @@ pub fn init_seams() {
     // Reference `quickdie_handler` so the `pqsigfunc`-shaped wrapper is kept and
     // available for the postmaster's SIGQUIT install (done by F0a when it lands).
     let _: fn(i32) = quickdie_handler;
+
+    // --- F0a: the backend main loop (PostgresMain). Retires the latent panic
+    // the `postgres_main` seam carried; backend-startup's BackendMain hands off
+    // here after BackendInitialize + InitProcess.
+    s::postgres_main::set(main_loop::PostgresMain);
 }

@@ -1079,9 +1079,19 @@ fn portal_run_utility(
     // the result back to the caller's &mut (None == the C qc == NULL).
     let mut local_qc = QueryCompletion::default();
     {
+        // Per-utility working context (C: `CurrentMemoryContext` during the
+        // portal's utility run — the per-message context reset after the
+        // command). `standard_ProcessUtility` allocates its `copyObject(pstmt)`
+        // deep-copy and the `make_parsestate(NULL)` parse state in it; nothing it
+        // returns escapes the context (`qc` is owned, `dest` is a handle), so a
+        // per-call scratch context dropped at the end of this block is sound and
+        // is the owned analogue of the per-message reset / `free_parsestate`.
+        let scratch = mcx::MemoryContext::new_bump("ProcessUtility");
+        let mcx = scratch.mcx();
         let p = portal.borrow();
         let stmts = p.stmts.as_deref().unwrap_or(&[]);
         utility_seam::process_utility::call(
+            mcx,
             &stmts[pstmt_idx],
             &source_text,
             read_only_tree,

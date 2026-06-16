@@ -40,6 +40,9 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 # Owner's own seam crate.
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 
+# ProcessUtility dispatch arms (installs the tablespace forwarding seams).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+
 # Seam crates for unported / cycle-breaking owners (consumed, not installed here).
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }

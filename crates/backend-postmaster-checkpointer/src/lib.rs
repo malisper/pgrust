@@ -1442,4 +1442,7 @@ pub fn init_seams() {
     backend_postmaster_checkpointer_seams::checkpoint_stats_set::set(checkpoint_stats_set_seam);
     backend_postmaster_checkpointer_seams::checkpointer_shmem_size::set(checkpointer_shmem_size_seam);
     backend_postmaster_checkpointer_seams::checkpointer_shmem_init::set(checkpointer_shmem_init_seam);
+
+    // --- ProcessUtility dispatch arm (utility.c CHECKPOINT → RequestCheckpoint) ---
+    backend_tcop_utility_out_seams::request_checkpoint::set(RequestCheckpoint);
 }

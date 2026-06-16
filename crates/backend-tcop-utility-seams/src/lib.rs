@@ -29,7 +29,17 @@ seam_core::seam!(
     /// `PlannedStmt`. The owned model drops the C `queryEnv` argument (as
     /// `QueryDesc::create` does). The receiver is the router-keyed
     /// [`DestReceiverHandle`]; `qc` is filled in place. Can `ereport(ERROR)`.
+    ///
+    /// `mcx` is the per-utility working context (C: `CurrentMemoryContext`
+    /// during the portal's utility run — the per-message context, reset after
+    /// the command). `standard_ProcessUtility` allocates the `readOnlyTree`
+    /// `copyObject(pstmt)` deep-copy and the `make_parsestate(NULL)` parse state
+    /// in it; the caller (pquery `PortalRunUtility`) owns the context and drops
+    /// it when this returns — the owned analogue of C's per-message context
+    /// reset. Nothing the dispatch returns escapes `mcx` (`qc` is owned, `dest`
+    /// is a handle), so a per-call scratch context is sound.
     pub fn process_utility<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         pstmt: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
         query_string: &str,
         read_only_tree: bool,

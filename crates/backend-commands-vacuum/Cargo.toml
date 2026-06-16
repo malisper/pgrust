@@ -26,6 +26,9 @@ backend-utils-error = { path = "../backend-utils-error" }
 # own seam crate (inward)
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 
+# ProcessUtility dispatch arm (installs the VacuumStmt forwarding seam).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+
 # owner seam crates (outward / inward-install targets)
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
