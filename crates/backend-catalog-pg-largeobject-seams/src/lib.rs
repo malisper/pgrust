@@ -6,8 +6,31 @@
 
 #![allow(non_snake_case)]
 
+use mcx::{Mcx, PgVec};
+use types_acl::AclItem;
 use types_core::Oid;
 use types_error::PgResult;
+
+seam_core::seam!(
+    /// `pg_largeobject_aclmask_snapshot`'s catalog read (aclchk.c): open
+    /// `pg_largeobject_metadata` with `AccessShareLock`,
+    /// `systable_beginscan(LargeObjectMetadataOidIndexId, snapshot, oid = loid)`,
+    /// take the first row, then `GETSTRUCT(lomowner)` +
+    /// `heap_getattr(Anum_pg_largeobject_metadata_lomacl)` (detoasted +
+    /// decoded to `aclitem[]`). pg_largeobject_metadata has *no* syscache, so
+    /// this lives in the merged pg_largeobject domain (snapshot systable scan),
+    /// not in syscache like the other ACL projections. Returns the owner OID
+    /// plus the decoded `lomacl` (`None` = SQL-null column -> aclchk builds the
+    /// hardwired `acldefault(OBJECT_LARGEOBJECT, ownerId)`). `Ok(None)` on a
+    /// missing object (the caller raises "large object %u does not exist").
+    /// `snapshot == None` is the C `NULL` (instantaneous MVCC snapshot). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn largeobject_owner_acl<'mcx>(
+        mcx: Mcx<'mcx>,
+        lobj_oid: Oid,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, AclItem>>)>>
+);
 
 seam_core::seam!(
     /// `LargeObjectExistsWithSnapshot(loid, snapshot)` (pg_largeobject.c):

@@ -294,6 +294,7 @@ pub fn init_all() {
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
+    backend_catalog_aclchk::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
@@ -1003,23 +1004,13 @@ mod recurrence_guard {
         // backend-utils-misc-guc-seams) and are installed by those merged owners'
         // init_seams(). GUCArrayAdd/Delete/Reset are now genuinely ported in
         // backend-utils-misc-guc's guc_array.rs over the Vec<String> value model.)
-        // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED, partial): aclcheck_error_type
-        // (aclchk.c) is declared in backend-commands-functioncmds-seams because
-        // functioncmds was its first consumer; its real owner (aclchk.c) is still
-        // unported, so it is not installed. objectaddress's resolution engine
-        // (#112) is a second consumer (check_object_ownership type/transform arms),
-        // making it `::call`ed in non-test code while the dir-owner functioncmds is
-        // COMPLETE — hence the allowlist. Its body must call the generic
-        // `aclcheck_error(aclerr, OBJECT_TYPE, format_type_be(...))`, whose seam
-        // (backend-catalog-aclchk-seams) is itself declared-but-uninstalled (same
-        // unported aclchk.c owner), so it cannot be honestly installed yet. It
-        // becomes a real install when aclchk.c lands (or is re-homed to
-        // aclchk-seams). (get_language_oid was RESOLVED: the mishomed
-        // functioncmds-seams decl was retired, the 3 consumers re-pointed at the
-        // correctly-homed backend-commands-proclang-seams::get_language_oid, and
-        // that seam is now installed by the merged syscache owner — proclang.c's
-        // sole logic is a LANGNAME-syscache OID lookup.)
-        ("backend_commands_functioncmds", "aclcheck_error_type"),
+        // RESOLVED (aclchk F1): `aclcheck_error_type` (aclchk.c) was re-homed off
+        // backend-commands-functioncmds-seams onto its real owner's seam crate
+        // (backend-catalog-aclchk-seams) and is now installed by the ported
+        // `backend-catalog-aclchk` owner (its body calls `get_element_type` +
+        // `format_type_be` then the generic `aclcheck_error(.., OBJECT_TYPE, ..)`).
+        // The two consumers (functioncmds, objectaddress) call the re-homed seam.
+        // Allowlist entry removed.
         // NOTE: the PARAM_EXEC `execPlan`-link seams formerly listed here under
         // backend_executor_execProcnode were RELOCATED to execMain-seams (their
         // real owner: they operate on the executor-owned `es_param_exec_vals` /
@@ -1179,17 +1170,11 @@ mod recurrence_guard {
         // (has_bypassrls_privilege RESOLVED: the acl owner now installs it — a
         // superuser_arg short-circuit + AUTHOID-syscache `rolbypassrls` read, after
         // widening the AuthIdRow projection to carry rolbypassrls.)
-        // DESIGN_DEBT: `object_ownercheck` (catalog/aclchk.c) is the dynamic
-        // per-catalog owner test: `SearchSysCache1(get_object_catcache_oid(classid),
-        // objectid)` across ~40 different syscaches (plus a systable-scan fallback
-        // for cache-less catalogs), reading `get_object_attnum_owner(classid)`, then
-        // `has_privs_of_role`. The repo's syscache seams are fixed-catalog typed
-        // projections; there is no dynamic-by-cacheid lookup nor an
-        // `object_owner(classid, objectid) -> Oid` abstraction. Installing it needs
-        // that dynamic-syscache/systable-scan dispatch in a real aclchk owner crate
-        // (backend-catalog-aclchk, still `todo`), where its sibling aclchk seam
-        // family naturally belongs. Pay down when aclchk.c lands.
-        ("backend_utils_adt_acl", "object_ownercheck"),
+        // RESOLVED (aclchk F1): `object_ownercheck` (catalog/aclchk.c) is now
+        // installed by the ported `backend-catalog-aclchk` owner crate, over the F0
+        // generic `object_owner_acl` syscache projection (the `get_object_catcache_oid`
+        // dispatch) plus a `table_open` + `systable_beginscan` + `heap_deform_tuple`
+        // fallback for cache-less catalogs (`cacheid == -1`). Allowlist entry removed.
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
         // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned
