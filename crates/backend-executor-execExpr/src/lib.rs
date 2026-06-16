@@ -119,6 +119,8 @@ pub fn init_seams() {
         execExpr_domain_agg::build_hash_projections_and_exprs,
     );
     seams::exec_build_hash32_expr::set(execExpr_domain_agg::exec_build_hash32_expr);
+    seams::exec_build_hash32_from_attrs::set(execExpr_domain_agg::exec_build_hash32_from_attrs);
+    seams::exec_build_grouping_equal::set(execExpr_domain_agg::exec_build_grouping_equal);
     seams::exec_build_param_set_equal::set(execExpr_domain_agg::exec_build_param_set_equal);
 
     // --- execExpr-modify: nodeModifyTable / execPartition leaf builders ---

@@ -169,6 +169,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheList1(CLAAMNAMENSP, ObjectIdGetDatum(amoid))` member rows
+    /// projected to `(oid, opcfamily, opcintype)` (`Form_pg_opclass`), copied
+    /// into `mcx`. amvalidate.c's `opclass_for_family_datatype` scans this list
+    /// for the opclass of an opfamily accepting a given input type.
+    pub fn search_opclass_list_by_am<'mcx>(
+        mcx: Mcx<'mcx>,
+        amoid: Oid,
+    ) -> PgResult<PgVec<'mcx, (Oid, Oid, Oid)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid))` projected to
     /// `NameStr(Form_pg_type->typname)`, copied into `mcx`. `Ok(None)` on a
     /// cache miss (`!HeapTupleIsValid`); `Err` includes OOM from the copy.
@@ -1156,6 +1167,8 @@ seam_core::seam!(
 pub struct PgOperatorForm {
     /// `oprname` — the operator's name.
     pub oprname: String,
+    /// `oprkind` — `b` (binary/infix), `l` (prefix); the raw C `char`.
+    pub oprkind: i8,
     /// `oprcanmerge` — `pg_operator.oprcanmerge`.
     pub oprcanmerge: bool,
     /// `oprcanhash` — `pg_operator.oprcanhash`.

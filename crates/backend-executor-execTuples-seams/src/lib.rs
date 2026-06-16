@@ -189,6 +189,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecCopySlotMinimalTupleExtra(slot, extra)` (tuptable.h inline): copy
+    /// the slot's tuple into a freshly-`palloc`'d `MinimalTuple` reserving
+    /// `extra` leading MAXALIGNed bytes (the `TupleHashEntryGetAdditional`
+    /// space `LookupTupleHashEntry_internal` requests). The owned model carries
+    /// the payload-bearing
+    /// [`FormedMinimalTuple`](types_tuple::backend_access_common_heaptuple::FormedMinimalTuple);
+    /// the `extra` bytes live alongside in the hash entry's `additional` field.
+    /// Targets the slot by pool id (the execGrouping driver reads it off the
+    /// EState arena). Fallible on OOM / the slot-ops `ereport(ERROR)` paths.
+    pub fn exec_copy_slot_minimal_tuple_extra<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        extra: usize,
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (tuptable.h / execTuples.c):
     /// store the `MinimalTuple` into the slot (forcing it through the slot's
     /// minimal-tuple ops), the C returning the same slot. `should_free` records

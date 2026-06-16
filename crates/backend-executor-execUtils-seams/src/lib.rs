@@ -57,6 +57,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateStandaloneExprContext()` (execUtils.c): create a standalone
+    /// `ExprContext` not tied to any `EState` — the throwaway context
+    /// `BuildTupleHashTable` makes for the hash/equality evaluations. Returns
+    /// the owned [`ExprContext`](types_nodes::execnodes::ExprContext) by value
+    /// (the caller — execGrouping — has no EState at build time and registers
+    /// it into the EState's pool on first search use). Allocates a per-tuple
+    /// child context, so fallible on OOM.
+    pub fn create_standalone_expr_context<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<types_nodes::execnodes::ExprContext<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecGetRootToChildMap(resultRelInfo, estate)` (execUtils.c): the map
     /// needed to convert the root partitioned table's tuples to the rowtype of
     /// the given child result relation (id into the EState pool), computed on
