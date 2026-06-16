@@ -120,6 +120,9 @@ pub fn init_seams() {
     backend_executor_nodeModifyTable_seams::exec_init_generated::set(
         lifecycle::ExecInitGenerated,
     );
+    backend_executor_nodeModifyTable_seams::exec_compute_stored_generated::set(
+        lifecycle::ExecComputeStoredGenerated,
+    );
 
     // The per-leaf-partition `ResultRelInfo` init blocks of
     // `ExecInitPartitionInfo` (execPartition.c) that read the `ModifyTable` plan

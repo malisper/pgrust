@@ -161,6 +161,7 @@ backend-executor-execMain = { path = "../backend-executor-execMain" }
 backend-executor-execParallel = { path = "../backend-executor-execParallel" }
 backend-executor-execPartition = { path = "../backend-executor-execPartition" }
 backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }
+backend-executor-execReplication = { path = "../backend-executor-execReplication" }
 backend-executor-execScan = { path = "../backend-executor-execScan" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }

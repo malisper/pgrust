@@ -155,6 +155,32 @@ pub struct PublicationActions {
     pub pubtruncate: bool,
 }
 
+/// `PublicationDesc` (`pg_publication.h`): the per-relation summary the
+/// relcache caches in `rd_pubdesc` (built by `RelationBuildPublicationDesc`),
+/// recording the relation's combined publish actions plus whether its row
+/// filters, column lists, and generated columns are valid for UPDATE/DELETE
+/// (i.e. fully covered by the replica identity).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PublicationDesc {
+    /// `pubactions` — the OR of all publications' publish actions for this rel.
+    pub pubactions: PublicationActions,
+    /// true if the columns referenced in row filters used for UPDATE are part
+    /// of the replica identity (or UPDATE is not published).
+    pub rf_valid_for_update: bool,
+    /// row-filter validity for DELETE.
+    pub rf_valid_for_delete: bool,
+    /// true if the column list covers the replica identity for UPDATE (or
+    /// UPDATE is not published).
+    pub cols_valid_for_update: bool,
+    /// column-list validity for DELETE.
+    pub cols_valid_for_delete: bool,
+    /// true if all generated columns that are part of the replica identity are
+    /// published for UPDATE (or UPDATE is not published).
+    pub gencols_valid_for_update: bool,
+    /// generated-column validity for DELETE.
+    pub gencols_valid_for_delete: bool,
+}
+
 /// `Publication` (`pg_publication.h`): the decoded, palloc'd publication that
 /// `GetPublication` returns. The `name` is owned in `'mcx`.
 #[derive(Debug)]

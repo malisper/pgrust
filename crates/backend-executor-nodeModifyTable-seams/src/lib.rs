@@ -21,6 +21,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecComputeStoredGenerated(resultRelInfo, estate, slot, cmdtype)`
+    /// (nodeModifyTable.c): compute the values of the relation's stored
+    /// generated columns for the tuple in `slot` (id into the EState slot
+    /// pool) and write them back into the slot. The `ResultRelInfo` is
+    /// addressed by pool id; the generated `ExprState`s are read off it. `Err`
+    /// carries the C `ereport(ERROR)`s from a generation expression and OOM.
+    pub fn exec_compute_stored_generated<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        cmdtype: types_nodes::nodes::CmdType,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `((ModifyTable *) mtstate->ps.plan)->onConflictAction`
     /// (nodeModifyTable.c view of the plan node): the ON CONFLICT action of
     /// the `ModifyTableState`'s plan node, or `ONCONFLICT_NONE` when the plan
