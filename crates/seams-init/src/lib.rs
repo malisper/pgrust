@@ -1164,11 +1164,22 @@ mod recurrence_guard {
         //     value; no backing GUC variable exists in the owner (only a doc note).
         //   * io_method_sync — the `io_method == IOMETHOD_SYNC` test; the `io_method`
         //     GUC/enum lives in the unported aio.c, not this owner.
+        //   * bgwriter_flush_after — the `bgwriter_flush_after` GUC value (a
+        //     bufmgr.c `int` global). The bgwriter loop reads it via
+        //     WritebackContextInit; like checkpoint_flush_after it has no backing
+        //     GUC variable installed in this owner (the guc-tables boot value is
+        //     seeded in the GUC store but the seam is not `::set` by the owner —
+        //     the GUC machinery installs it when it fully ports). Same class as
+        //     maintenance_io_concurrency / io_method_sync. (checkpoint_flush_after
+        //     escapes the guard only because it is `::call`ed inside this owner
+        //     crate — the OUTWARD-seam exclusion — whereas bgwriter_flush_after is
+        //     called from the bgwriter consumer.)
         // DELETE each entry as the shmem allocator + aio GUC source land.
         ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_init"),
         ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
         ("backend_storage_buffer_bufmgr", "io_method_sync"),
         ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
+        ("backend_storage_buffer_bufmgr", "bgwriter_flush_after"),
         // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
         // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
         // The latch<->proc handle spaces were unified: a `LatchHandle` is a
