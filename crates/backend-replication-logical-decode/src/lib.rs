@@ -59,7 +59,7 @@ use types_wal::xact::{
 
 use types_xlog_records::heapam_xlog::{
     xl_heap_delete, xl_heap_insert, xl_heap_multi_insert, xl_heap_new_cid, xl_heap_truncate,
-    xl_heap_update, xl_multi_insert_tuple, SizeOfHeapHeader,
+    xl_heap_update, xl_multi_insert_tuple, SizeOfHeapDelete, SizeOfHeapHeader,
     SizeOfHeapUpdate, SizeOfMultiInsertTuple, XLH_DELETE_CONTAINS_OLD_KEY,
     XLH_DELETE_CONTAINS_OLD_TUPLE, XLH_DELETE_IS_SUPER, XLH_INSERT_CONTAINS_NEW_TUPLE,
     XLH_INSERT_IS_SPECULATIVE, XLH_INSERT_LAST_IN_MULTI, XLH_INSERT_ON_TOAST_RELATION,
@@ -564,16 +564,15 @@ pub fn heap2_decode(
         }
         XLOG_HEAP2_NEW_CID => {
             /*
-             * C `case XLOG_HEAP2_NEW_CID:` only does work inside the
-             * `if (!ctx->fast_forward)` block; when `fast_forward` is set the
-             * case falls through to `XLOG_HEAP2_REWRITE` (which does nothing).
+             * `case XLOG_HEAP2_NEW_CID:` does its work only inside the
+             * `if (!ctx->fast_forward)` block; in fast_forward mode there is
+             * nothing to do.
              */
             if !ctx.fast_forward {
                 let data = rt::xlog_rec_get_main_data::call(buf.record);
                 let xlrec = xl_heap_new_cid::from_bytes(&data);
                 snapbuild::SnapBuildProcessNewCid::call(builder, xid, buf.origptr, xlrec)?;
             }
-            /* else: fall through to XLOG_HEAP2_REWRITE — no work */
         }
         XLOG_HEAP2_REWRITE => {
             /*
@@ -1151,10 +1150,12 @@ fn DecodeDelete(
 
     /* old primary key stored */
     let oldtuple = if xlrec.flags & XLH_DELETE_CONTAINS_OLD != 0 {
-        /* DecodeXLogTuple((char *) xlrec + SizeOfHeapDelete, datalen, oldtuple) */
-        let data = rt::xlog_rec_get_block_data::call(r, 0)
-            .ok_or_else(|| elog_error(format!("DecodeDelete: no block 0 data")))?;
-        Some(DecodeXLogTuple(&data))
+        /*
+         * DecodeXLogTuple((char *) xlrec + SizeOfHeapDelete, datalen, oldtuple)
+         * — the old tuple rides in the record's main data, right after the
+         * fixed `xl_heap_delete` header (NOT in a backup block).
+         */
+        Some(DecodeXLogTuple(&main_data[SizeOfHeapDelete..]))
     } else {
         None
     };
@@ -1263,9 +1264,7 @@ fn DecodeMultiInsert(
     let block_data = rt::xlog_rec_get_block_data::call(r, 0)
         .ok_or_else(|| elog_error(format!("DecodeMultiInsert: no block 0 data")))?;
 
-    let origin_id = rt::xlog_rec_get_origin::call(r);
     let xid = rt::xlog_rec_get_xid::call(r);
-    let _ = origin_id;
 
     let mut offset: usize = 0;
     let mut i: usize = 0;
