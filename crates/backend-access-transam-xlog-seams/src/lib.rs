@@ -288,6 +288,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogRecPtr GetXLogWriteRecPtr(void)` (xlog.c) — the LSN of the last byte
+    /// written to (but not necessarily flushed to disk) the WAL. Used by
+    /// `pg_get_replication_slots` to bound `safe_wal_size`.
+    pub fn get_xlog_write_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `WALAvailability GetWALAvailability(XLogRecPtr targetLSN)` (xlog.c) —
+    /// classify whether the WAL at `target_lsn` is still reserved / available.
+    pub fn get_wal_availability(target_lsn: XLogRecPtr) -> types_wal::WALAvailability
+);
+
+seam_core::seam!(
+    /// `int max_slot_wal_keep_size_mb` (xlog.c GUC) — the configured maximum WAL
+    /// size a slot may retain, in MB (`-1` == unlimited). A plain global read.
+    pub fn max_slot_wal_keep_size_mb() -> i32
+);
+
+seam_core::seam!(
+    /// `int wal_keep_size_mb` (xlog.c GUC) — the minimum WAL kept for standbys,
+    /// in MB. A plain global read.
+    pub fn wal_keep_size_mb() -> i32
+);
+
+seam_core::seam!(
     /// `XLogRecPtr LogStandbySnapshot(void)` (standby.c) — log an
     /// `xl_running_xacts` record and return the end LSN. Can `ereport(ERROR)`.
     pub fn log_standby_snapshot() -> types_error::PgResult<XLogRecPtr>

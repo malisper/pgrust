@@ -316,6 +316,184 @@ pub fn ReplicationSlotSetInactiveSince(s: &mut ReplicationSlot, ts: TimestampTz,
 }
 
 // ---------------------------------------------------------------------------
+// slotfuncs.c support: locked slot-array snapshots + `MyReplicationSlot`
+// field access used by `slotfuncs.c`. The control lock + per-slot spinlock
+// substrate is owned here (slot.c); slotfuncs.c only orchestrates over these.
+// ---------------------------------------------------------------------------
+
+/// A spinlocked snapshot of a `ReplicationSlot` (`slot_contents = *slot`),
+/// paired with the slot's array index. Mirrors the `ReplicationSlot
+/// slot_contents` stack copy that slotfuncs.c takes under the per-slot mutex.
+#[derive(Clone)]
+pub struct SlotSnapshot {
+    /// The slot's index in `ReplicationSlotCtl->replication_slots[]` (the C loop
+    /// variable, used for the `WALAVAIL_REMOVED` re-read in
+    /// `pg_get_replication_slots`).
+    pub slotno: usize,
+    pub active_pid: i32,
+    pub effective_xmin: TransactionId,
+    pub effective_catalog_xmin: TransactionId,
+    pub inactive_since: TimestampTz,
+    pub data: ReplicationSlotPersistentData,
+}
+
+impl SlotSnapshot {
+    fn capture(i: usize) -> SlotSnapshot {
+        // SAFETY: caller holds ReplicationSlotControlLock (shared).
+        let slot = unsafe { slot_ref(i) };
+        spin_acquire(slot);
+        let snap = SlotSnapshot {
+            slotno: i,
+            active_pid: slot.active_pid,
+            effective_xmin: slot.effective_xmin,
+            effective_catalog_xmin: slot.effective_catalog_xmin,
+            inactive_since: slot.inactive_since,
+            data: slot.data.clone(),
+        };
+        spin_release(slot);
+        snap
+    }
+}
+
+/// `SlotIsPhysical`/`SlotIsLogical` over a snapshot's persistent data.
+pub fn snapshot_is_physical(snap: &SlotSnapshot) -> bool {
+    slot_is_physical(&snap.data)
+}
+pub fn snapshot_is_logical(snap: &SlotSnapshot) -> bool {
+    slot_is_logical(&snap.data)
+}
+
+/// The `LWLockAcquire(ReplicationSlotControlLock, LW_SHARED)` walk over the slot
+/// array that `pg_get_replication_slots` performs: take a spinlocked snapshot of
+/// every in-use slot (`if (!slot->in_use) continue;`), in array order, then
+/// release the control lock. Returns the snapshots; the array index is carried
+/// on each so callers can re-read a single slot afterwards.
+pub fn snapshot_all_slots() -> PgResult<Vec<SlotSnapshot>> {
+    lock_control(LWLockMode::LW_SHARED)?;
+    let mut out = Vec::new();
+    for slotno in 0..max_replication_slots() as usize {
+        // SAFETY: we hold ReplicationSlotControlLock (shared).
+        let slot = unsafe { slot_ref(slotno) };
+        if !slot.in_use {
+            continue;
+        }
+        out.push(SlotSnapshot::capture(slotno));
+    }
+    unlock_control()?;
+    Ok(out)
+}
+
+/// The `WALAVAIL_REMOVED` re-read in `pg_get_replication_slots`: under the
+/// per-slot spinlock, read `(slot->active_pid, slot->data.restart_lsn)` for the
+/// slot at array index `slotno`. The caller no longer holds the control lock,
+/// matching the C which re-locks only the per-slot mutex.
+pub fn reread_slot_active_pid_and_restart_lsn(slotno: usize) -> (i32, XLogRecPtr) {
+    // SAFETY: the per-slot spinlock disciplines this read; the slot is in_use
+    // (it was when snapshotted, and slots are never freed concurrently here).
+    let slot = unsafe { slot_ref(slotno) };
+    spin_acquire(slot);
+    let pid = slot.active_pid;
+    let restart_lsn = slot.data.restart_lsn;
+    spin_release(slot);
+    (pid, restart_lsn)
+}
+
+/// `copy_replication_slot`'s source-slot search: under
+/// `ReplicationSlotControlLock` (shared), find the in-use slot named `src_name`
+/// and take a spinlocked snapshot of it, then release the control lock. `None`
+/// mirrors the C `src == NULL` (no such slot).
+pub fn snapshot_slot_by_name(src_name: &str) -> PgResult<Option<SlotSnapshot>> {
+    lock_control(LWLockMode::LW_SHARED)?;
+    let mut found = None;
+    for slotno in 0..max_replication_slots() as usize {
+        // SAFETY: we hold ReplicationSlotControlLock (shared).
+        let slot = unsafe { slot_ref(slotno) };
+        if slot.in_use && name_str_string(&slot.data.name) == src_name {
+            found = Some(SlotSnapshot::capture(slotno));
+            break;
+        }
+    }
+    unlock_control()?;
+    Ok(found)
+}
+
+/// `copy_replication_slot`'s second spinlocked read of the source slot
+/// (`SpinLockAcquire(&src->mutex); second_slot_contents = *src; ...`), by the
+/// array index recorded in the first snapshot.
+pub fn reread_slot_snapshot(slotno: usize) -> SlotSnapshot {
+    SlotSnapshot::capture(slotno)
+}
+
+/// The copied source-slot values installed into `MyReplicationSlot` by
+/// `copy_replication_slot` under the destination slot's spinlock.
+pub struct CopiedSlotValues {
+    pub effective_xmin: TransactionId,
+    pub effective_catalog_xmin: TransactionId,
+    pub xmin: TransactionId,
+    pub catalog_xmin: TransactionId,
+    pub restart_lsn: XLogRecPtr,
+    pub confirmed_flush: XLogRecPtr,
+}
+
+/// `copy_replication_slot`'s install step:
+/// ```c
+/// SpinLockAcquire(&MyReplicationSlot->mutex);
+/// MyReplicationSlot->effective_xmin = ...;
+/// ...
+/// SpinLockRelease(&MyReplicationSlot->mutex);
+/// ```
+pub fn install_my_slot_copied_values(v: &CopiedSlotValues) {
+    let slot = my_slot_mut();
+    spin_acquire(my_slot_ref());
+    slot.effective_xmin = v.effective_xmin;
+    slot.effective_catalog_xmin = v.effective_catalog_xmin;
+    slot.data.xmin = v.xmin;
+    slot.data.catalog_xmin = v.catalog_xmin;
+    slot.data.restart_lsn = v.restart_lsn;
+    slot.data.confirmed_flush = v.confirmed_flush;
+    spin_release(my_slot_ref());
+}
+
+/// `MyReplicationSlot != NULL` (`Assert(!MyReplicationSlot)` / the
+/// `OidIsValid(MyReplicationSlot->data.database)` type test sites).
+pub fn my_replication_slot_is_set() -> bool {
+    my_replication_slot().is_some()
+}
+
+/// `MyReplicationSlot->data.name` as a `NameData` (for `NameGetDatum`).
+pub fn my_slot_name() -> NameData {
+    my_slot_ref().data.name.clone()
+}
+/// `MyReplicationSlot->data.database` (`OidIsValid` type discriminator).
+pub fn my_slot_database() -> Oid {
+    my_slot_ref().data.database
+}
+/// `MyReplicationSlot->data.restart_lsn`.
+pub fn my_slot_restart_lsn() -> XLogRecPtr {
+    my_slot_ref().data.restart_lsn
+}
+/// `MyReplicationSlot->data.confirmed_flush`.
+pub fn my_slot_confirmed_flush() -> XLogRecPtr {
+    my_slot_ref().data.confirmed_flush
+}
+
+/// `create_physical_replication_slot`'s
+/// `MyReplicationSlot->data.restart_lsn = restart_lsn;` (no lock; called right
+/// after create, before the slot is published).
+pub fn set_my_slot_restart_lsn(lsn: XLogRecPtr) {
+    my_slot_mut().data.restart_lsn = lsn;
+}
+
+/// `pg_physical_replication_slot_advance`'s spinlocked
+/// `MyReplicationSlot->data.restart_lsn = moveto;`.
+pub fn set_my_slot_restart_lsn_locked(lsn: XLogRecPtr) {
+    let slot = my_slot_mut();
+    spin_acquire(my_slot_ref());
+    slot.data.restart_lsn = lsn;
+    spin_release(my_slot_ref());
+}
+
+// ---------------------------------------------------------------------------
 // On-disk format sizing arithmetic.
 // ---------------------------------------------------------------------------
 
