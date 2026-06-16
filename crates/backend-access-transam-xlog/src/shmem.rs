@@ -878,7 +878,7 @@ fn control_file_from_bytes(b: &[u8]) -> ControlFileData {
 
 /// Ensure a writable `ControlFile` image exists (a heap-Box stand-in for C's
 /// `palloc`ed local image), returning a `&mut`.
-fn control_file_mut<'a>() -> &'a mut ControlFileData {
+pub(crate) fn control_file_mut<'a>() -> &'a mut ControlFileData {
     let cur = control_file_ptr();
     if cur.is_null() {
         let boxed = std::boxed::Box::new(ControlFileData::default());

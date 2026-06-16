@@ -3334,6 +3334,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
+ "backend-access-transam-xloginsert-seams",
  "backend-postmaster-checkpointer-seams",
  "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
