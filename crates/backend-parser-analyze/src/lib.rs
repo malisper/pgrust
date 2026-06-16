@@ -46,9 +46,10 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> types_error::PgError {
 /// `parse_analyze_fixedparams(parseTree, sourceText, paramTypes, numParams,
 /// queryEnv)` — analyze a raw statement with the given fixed parameter types.
 ///
-/// In the milestone scope the COPY/PREPARE drivers pass no parameters and a
-/// `None` query environment; `setup_parse_fixed_parameters` is applied when
-/// `param_types` is non-empty (delegated to the small1 param owner).
+/// In the milestone scope the COPY/PREPARE drivers pass a `None` query
+/// environment; `setup_parse_fixed_parameters` is applied when `param_types` is
+/// non-empty (delegated to the small1 param owner, which installs the fixed
+/// paramref hook + ref-hook state on the owned `ParseState`).
 pub fn parse_analyze_fixedparams<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &RawStmt<'mcx>,
@@ -57,24 +58,15 @@ pub fn parse_analyze_fixedparams<'mcx>(
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
 
+    // Assert(sourceText != NULL); pstate->p_sourcetext = sourceText;
     pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
 
+    // if (numParams > 0) setup_parse_fixed_parameters(pstate, paramTypes, numParams);
     if !param_types.is_empty() {
-        // setup_parse_fixed_parameters(pstate, paramTypes, numParams) installs
-        // the fixed paramref hook + ref-hook state on the ParseState. small1's
-        // owned-model port returns a `FixedParamState` carrier instead of
-        // mutating the ParseState (the owned ParseState cannot hold the
-        // borrowing hook); wiring that carrier into the owned ParseState is the
-        // small1 param-hook follow-on (cf. small1's F3 var-param mirror note).
-        // No milestone consumer passes parameters (COPY/PREPARE SELECT pass an
-        // empty paramTypes), so mirror-PG-and-panic until that follow-on lands.
-        let _ = backend_parser_small1::setup_parse_fixed_parameters(param_types);
-        panic!(
-            "parse_analyze_fixedparams with parameters needs the small1 \
-             owned-model param-hook wiring (setup_parse_fixed_parameters returns \
-             a carrier, not a ParseState mutation)"
-        );
+        backend_parser_small1::setup_parse_fixed_parameters(&mut pstate, param_types);
     }
+
+    // pstate->p_queryEnv = queryEnv;  (milestone callers pass None)
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
