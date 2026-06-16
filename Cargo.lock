@@ -19164,6 +19164,8 @@ dependencies = [
  "backend-utils-misc-more-seams",
  "backend-utils-misc-superuser-seams",
  "backend-utils-misc-timeout-seams",
+ "common-path-seams",
+ "common-username-seams",
  "libc",
  "mcx",
  "types-core",
@@ -19603,6 +19605,7 @@ dependencies = [
 name = "backend-utils-misc-stack-depth"
 version = "0.0.0"
 dependencies = [
+ "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
@@ -19752,6 +19755,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-utils-cache-plancache-portal-seams",
  "backend-utils-error",
+ "backend-utils-mmgr-mcxt-seams",
  "backend-utils-mmgr-portalmem-seams",
  "backend-utils-resowner-seams",
  "backend-utils-sort-tuplestore-hold-seams",
@@ -21191,10 +21195,12 @@ dependencies = [
  "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-legacy-pqsignal",
+ "mcx",
  "port-crc32c",
  "port-pgsleep",
  "port-pqsignal",
  "probe-adt-scalar-bool",
+ "types-error",
 ]
 
 [[package]]
