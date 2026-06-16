@@ -196,6 +196,8 @@ backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
+backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }
+backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
@@ -414,6 +416,7 @@ common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
+common-scram-common = { path = "../common-scram-common" }
 common-string = { path = "../common-string" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }

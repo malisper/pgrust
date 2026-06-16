@@ -77,17 +77,32 @@ pub const clientCertCN: ClientCertName = 0;
 pub const clientCertDN: ClientCertName = 1;
 
 /// A single string token lexed from an authentication configuration file
-/// (`libpq/hba.h` `struct AuthToken`). The C struct also carries a
-/// `regex_t *regex` (the compiled RE); no port consumes it yet, so the field
-/// is trimmed until the regex-owning unit lands and defines the compiled-RE
-/// type (docs/types.md rule 3).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// (`libpq/hba.h` `struct AuthToken`).
+#[derive(Clone, Debug, Default)]
 pub struct AuthToken {
-    /// Token text (`char *string`).
+    /// Token text (`char *string`). Non-NULL after `make_auth_token`; modelled
+    /// `Option` for the `palloc0`/`Default` zero state.
     pub string: Option<String>,
     /// Whether the token was quoted.
     pub quoted: bool,
+    /// The compiled regular expression (`regex_t *regex`), present when the
+    /// token text begins with `/` and `regcomp_auth_token` ran. The carrier
+    /// `RegexCompiled` is `Clone` but not `Eq`/`PartialEq`; the C
+    /// `copy_auth_token` drops the regex, so [`Clone`] keeps it (cheap `Rc`)
+    /// while equality (hand-implemented below) compares only `string`/`quoted`.
+    pub regex: Option<types_regex::RegexCompiled>,
 }
+
+/// Equality compares only `string` / `quoted` — `RegexCompiled` carries an
+/// `Rc<dyn Any>` and is not comparable, and the C `copy_auth_token` drops the
+/// regex anyway, so it is not load-bearing for token identity.
+impl PartialEq for AuthToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.string == other.string && self.quoted == other.quoted
+    }
+}
+
+impl Eq for AuthToken {}
 
 /// Authentication line parsed from `pg_hba.conf` (`libpq/hba.h`
 /// `struct HbaLine`). `addr` / `mask` mirror the platform
@@ -151,6 +166,63 @@ pub struct HbaLine {
     pub oauth_scope: Option<String>,
     pub oauth_validator: Option<String>,
     pub oauth_skip_usermap: bool,
+}
+
+impl HbaLine {
+    /// `palloc0(sizeof(HbaLine))` — an all-zero `HbaLine`: numeric `0`,
+    /// `Option` `None`, `Vec` empty, byte arrays `[0; 128]`, bools `false`.
+    /// `Default` is not derived because the `[u8; 128]` arrays exceed the
+    /// length for which the stdlib derives `Default`.
+    pub fn new_zeroed() -> HbaLine {
+        HbaLine {
+            sourcefile: None,
+            linenumber: 0,
+            rawline: None,
+            conntype: 0,
+            databases: Vec::new(),
+            roles: Vec::new(),
+            addr: [0; 128],
+            addrlen: 0,
+            mask: [0; 128],
+            masklen: 0,
+            ip_cmp_method: 0,
+            hostname: None,
+            auth_method: 0,
+            usermap: None,
+            pamservice: None,
+            pam_use_hostname: false,
+            ldaptls: false,
+            ldapscheme: None,
+            ldapserver: None,
+            ldapport: 0,
+            ldapbinddn: None,
+            ldapbindpasswd: None,
+            ldapsearchattribute: None,
+            ldapsearchfilter: None,
+            ldapbasedn: None,
+            ldapscope: 0,
+            ldapprefix: None,
+            ldapsuffix: None,
+            clientcert: 0,
+            clientcertname: 0,
+            krb_realm: None,
+            include_realm: false,
+            compat_realm: false,
+            upn_username: false,
+            radiusservers: Vec::new(),
+            radiusservers_s: None,
+            radiussecrets: Vec::new(),
+            radiussecrets_s: None,
+            radiusidentifiers: Vec::new(),
+            radiusidentifiers_s: None,
+            radiusports: Vec::new(),
+            radiusports_s: None,
+            oauth_issuer: None,
+            oauth_scope: None,
+            oauth_validator: None,
+            oauth_skip_usermap: false,
+        }
+    }
 }
 
 /// `struct Port` (`libpq/libpq-be.h`): per-connection state passed from the

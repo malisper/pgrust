@@ -9039,12 +9039,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-fsstubs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-pg-largeobject",
+ "backend-libpq-be-fsstubs-seams",
+ "backend-storage-large-object",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-guc-tables",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-be-fsstubs-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -9100,6 +9121,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-hba"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "backend-commands-user-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-hba-seams",
+ "backend-libpq-ifaddr",
+ "backend-libpq-oauth-seams",
+ "backend-regex-core-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-network",
+ "backend-utils-adt-varlena",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-conffiles-seams",
+ "backend-utils-misc-guc",
+ "common-ip",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-net",
+ "types-nodes",
+ "types-regex",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-libpq-hba-seams"
 version = "0.0.0"
 dependencies = [
@@ -9116,6 +9173,15 @@ dependencies = [
  "libc",
  "mcx",
  "types-error",
+]
+
+[[package]]
+name = "backend-libpq-oauth-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-net",
 ]
 
 [[package]]
@@ -17778,6 +17844,15 @@ name = "common-ryu"
 version = "0.0.0"
 
 [[package]]
+name = "common-scram-common"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-auth-scram-seams",
+ "common-prng-base64",
+ "common-sha2",
+]
+
+[[package]]
 name = "common-sha2"
 version = "0.0.0"
 
@@ -18334,8 +18409,10 @@ dependencies = [
  "backend-lib-dshash",
  "backend-libpq-auth",
  "backend-libpq-auth-scram",
+ "backend-libpq-be-fsstubs",
  "backend-libpq-be-gssapi-common",
  "backend-libpq-crypt",
+ "backend-libpq-hba",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -18536,6 +18613,7 @@ dependencies = [
  "common-ip",
  "common-pglz",
  "common-prng-base64",
+ "common-scram-common",
  "common-string",
  "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-legacy-pqsignal",
@@ -18975,6 +19053,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "types-core",
+ "types-regex",
 ]
 
 [[package]]
