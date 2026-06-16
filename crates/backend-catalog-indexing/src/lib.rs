@@ -23,6 +23,7 @@
 #![allow(non_snake_case)]
 
 pub mod family1;
+pub mod family2;
 pub mod keystone;
 
 /// Install every inward seam this unit owns. Wired into `seams-init::init_all`.
@@ -43,4 +44,5 @@ pub mod keystone;
 /// ACL rewrite for the array/syscache/owner-update seams).
 pub fn init_seams() {
     family1::install();
+    family2::install();
 }
