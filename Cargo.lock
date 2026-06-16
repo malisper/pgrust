@@ -20065,6 +20065,7 @@ dependencies = [
  "backend-parser-parse-oper",
  "backend-parser-parse-target",
  "backend-parser-parse-type",
+ "backend-parser-parse-utilcmd",
  "backend-parser-relation",
  "backend-parser-small1",
  "backend-port-atomics",
