@@ -8906,6 +8906,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-auth-scram"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth",
+ "backend-libpq-auth-scram-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqformat",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "common-cryptohash-seams",
+ "common-prng-base64",
+ "common-sha2",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "seam-core",
+ "types-authid",
+ "types-control",
+ "types-crypto",
+ "types-error",
+ "types-net",
+ "types-stringinfo",
+]
+
+[[package]]
+name = "backend-libpq-auth-scram-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-libpq-auth-seams"
 version = "0.0.0"
 dependencies = [
@@ -18159,6 +18192,7 @@ dependencies = [
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-libpq-auth",
+ "backend-libpq-auth-scram",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
