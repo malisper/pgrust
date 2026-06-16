@@ -13717,6 +13717,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-like"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-formatting",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-locale",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-adt-lsn-trigfuncs"
 version = "0.0.0"
 dependencies = [
@@ -16986,6 +17005,7 @@ dependencies = [
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
  "backend-utils-adt-json",
+ "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numeric",
