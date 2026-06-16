@@ -591,7 +591,7 @@ pub fn heap_delete<'mcx>(
         )?;
     }
 
-    pgstat_seam::pgstat_count_heap_delete::call(relation.rd_id);
+    pgstat_seam::pgstat_count_heap_delete::call(relation.rd_id, relation.pgstat_enabled);
 
     // C `heap_freetuple`s old_key_tuple when it was copied; the owned
     // FormedTuple is dropped at scope end.

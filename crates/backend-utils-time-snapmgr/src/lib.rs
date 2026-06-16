@@ -1564,6 +1564,7 @@ pub fn init_seams() {
     seams::have_registered_or_active_snapshot::set(HaveRegisteredOrActiveSnapshot);
     seams::export_snapshot::set(|snapshot| ExportSnapshot(&new_handle(snapshot)));
     seams::active_snapshot_set::set(ActiveSnapshotSet);
+    seams::xid_in_mvcc_snapshot::set(XidInMVCCSnapshot);
     seams::get_latest_snapshot::set(|| Ok(GetLatestSnapshot()?.borrow().clone()));
     seams::get_transaction_snapshot::set(|| Ok(GetTransactionSnapshot()?.borrow().clone()));
     seams::invalidate_catalog_snapshot::set(|| {

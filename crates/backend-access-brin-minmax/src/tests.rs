@@ -193,6 +193,7 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
         rd_indoption: mcx::PgVec::new_in(mcx),
         rd_indcollation: mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
+        pgstat_enabled: false,
     };
     Relation::open(rd, None)
 }
