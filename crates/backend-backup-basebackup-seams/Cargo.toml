@@ -1,16 +1,16 @@
 [package]
-name = "backend-replication-walsender-seams"
+name = "backend-backup-basebackup-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_replication_walsender_seams"
+name = "backend_backup_basebackup_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-condvar = { path = "../types-condvar" }
-types-replication = { path = "../types-replication" }
+types-wal = { path = "../types-wal" }
+backend-backup-sink = { path = "../backend-backup-sink" }

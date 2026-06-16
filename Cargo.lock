@@ -3552,6 +3552,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-basebackup"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogbackup",
+ "backend-backup-basebackup-seams",
+ "backend-backup-basebackup-target",
+ "backend-backup-copy",
+ "backend-backup-gzip",
+ "backend-backup-incremental",
+ "backend-backup-lz4",
+ "backend-backup-manifest",
+ "backend-backup-sink",
+ "backend-backup-sink-support",
+ "backend-backup-throttle",
+ "backend-backup-zstd",
+ "backend-commands-define",
+ "backend-postmaster-walsummarizer-seams",
+ "backend-replication-basebackup-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-reinit",
+ "backend-storage-page",
+ "backend-storage-page-checksum",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-error",
+ "backend-utils-misc-ps-status-seams",
+ "common-checksum-helper",
+ "common-compression-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "seam-core",
+ "types-compression",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+ "types-replication",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-backup-basebackup-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-backup-basebackup-target"
 version = "0.0.0"
 dependencies = [
@@ -12934,6 +12990,7 @@ dependencies = [
  "types-condvar",
  "types-core",
  "types-error",
+ "types-replication",
 ]
 
 [[package]]
@@ -18224,6 +18281,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-compression-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-compression",
+]
+
+[[package]]
 name = "common-config-info-seams"
 version = "0.0.0"
 dependencies = [
@@ -18823,6 +18888,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-archive-shell-archive",
+ "backend-backup-basebackup",
  "backend-backup-basebackup-target",
  "backend-backup-copy",
  "backend-backup-gzip",

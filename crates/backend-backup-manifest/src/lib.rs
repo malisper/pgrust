@@ -138,8 +138,10 @@ pub struct BackupManifestInfo<'mcx> {
 }
 
 impl<'mcx> BackupManifestInfo<'mcx> {
-    /// A zeroed manifest (`memset(manifest, 0, sizeof(...))`).
-    fn zeroed() -> Self {
+    /// A zeroed manifest (`memset(manifest, 0, sizeof(...))`). The base-backup
+    /// driver creates one of these to pass to [`InitializeBackupManifest`],
+    /// which fully overwrites it; exposed publicly for that consumer.
+    pub fn zeroed() -> Self {
         Self {
             buffile: None,
             checksum_type: CHECKSUM_TYPE_NONE,

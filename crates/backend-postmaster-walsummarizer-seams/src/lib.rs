@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bool summarize_wal` (`src/backend/postmaster/walsummarizer.c` GUC) —
+    /// whether WAL summarization is enabled. Read by `parse_basebackup_options`
+    /// to reject incremental backups when summarization is off.
+    pub fn summarize_wal() -> bool
+);
+
+seam_core::seam!(
     /// `WaitForWalSummarization(lsn)` (`src/backend/postmaster/walsummarizer.c`)
     /// — block until WAL summarization has reached `lsn`, throwing an error if
     /// the summarizer appears to be stuck. If summarization is disabled while

@@ -108,6 +108,8 @@ pub fn init_seams() {
     ws::log_replication_commands::set(|| core::proc_get(|p| p.log_replication_commands));
     ws::max_wal_senders::set(|| core::proc_get(|p| p.max_wal_senders));
 
+    ws::wal_snd_set_state::set(crate::init::WalSndSetState);
+
     ws::handle_wal_snd_init_stopping::set(crate::wakeup::HandleWalSndInitStopping);
     ws::wal_snd_rqst_file_reload::set(|| {
         crate::wakeup::WalSndRqstFileReload();
