@@ -4479,6 +4479,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-operator"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-operator-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-parser-parse-oper",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
@@ -17167,6 +17201,7 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
+ "backend-catalog-pg-operator",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
  "backend-catalog-pg-type",
