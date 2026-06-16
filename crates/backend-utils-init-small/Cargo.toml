@@ -9,6 +9,7 @@ name = "backend_utils_init_small"
 path = "src/lib.rs"
 
 [dependencies]
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

@@ -1861,20 +1861,26 @@ dependencies = [
 name = "backend-access-index-genam"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam",
+ "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-index-seams",
  "backend-executor-execTuples-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-nodes",
@@ -14556,6 +14562,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-aio-methods"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-aio-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-aio-methods-seams"
 version = "0.0.0"
 dependencies = [
@@ -16023,12 +16050,15 @@ dependencies = [
  "backend-parser-driver",
  "backend-postmaster-autovacuum-seams",
  "backend-postmaster-interrupt",
+ "backend-postmaster-pmchild-seams",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-launcher-seams",
  "backend-replication-walsender-seams",
  "backend-rewrite-rewritehandler-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-ipci-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
@@ -16049,6 +16079,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc",
@@ -16088,6 +16119,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-dest",
  "types-error",
  "types-guc",
@@ -19299,6 +19331,7 @@ dependencies = [
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
@@ -19477,6 +19510,9 @@ name = "backend-utils-misc-guc-funcs"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
+ "backend-port-sysv-shmem-seams",
+ "backend-storage-ipc-ipci-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-funcs-seams",
@@ -21075,6 +21111,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
+ "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",

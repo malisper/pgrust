@@ -51,4 +51,5 @@ pub fn init_seams() {
         ipci_core::create_shared_memory_and_semaphores()
             .expect("CreateSharedMemoryAndSemaphores")
     });
+    backend_storage_ipc_ipci_seams::calculate_shmem_size::set(ipci_core::calculate_shmem_size);
 }

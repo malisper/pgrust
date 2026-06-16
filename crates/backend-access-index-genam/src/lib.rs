@@ -50,6 +50,8 @@
 
 extern crate alloc;
 
+mod decode;
+
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
@@ -132,6 +134,28 @@ pub fn init_seams() {
     seam::systable_getnext_ordered::set(systable_getnext_ordered);
     seam::systable_endscan_ordered::set(systable_endscan_ordered);
     seam::systable_inplace_update::set(systable_inplace_update);
+    // The relcache catalog scan-and-decode primitives (ScanPgRelation /
+    // RelationBuildTupleDesc / RelationGetIndexList / RelationBuildRuleLock /
+    // RelationGetStatExtList / RelationGetFKeyList / RelationGetExclusionInfo /
+    // AttrDefaultFetch / CheckNNConstraintFetch).
+    decode::init_decode_seams();
+}
+
+/// `index_open(indexOid, AccessShareLock)` for the decode primitives that need
+/// a real index relation handle (`RelationGetExclusionInfo` reads its
+/// `rd_opfamily`). Thin wrapper so `decode.rs` can stay free of the indexam
+/// import.
+pub(crate) fn indexam_index_open<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_oid: Oid,
+) -> PgResult<Relation<'mcx>> {
+    indexam::index_open(mcx, index_oid, AccessShareLock)
+}
+
+/// `index_close(indexRelation, AccessShareLock)` — the matching close for
+/// [`indexam_index_open`].
+pub(crate) fn indexam_index_close(index_rel: Relation<'_>) -> PgResult<()> {
+    indexam::index_close(index_rel, AccessShareLock)
 }
 
 // ===========================================================================

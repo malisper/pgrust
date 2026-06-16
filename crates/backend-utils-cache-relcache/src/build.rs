@@ -412,20 +412,77 @@ pub(crate) fn take_scratch() -> Option<Box<RelationData>> {
 /// NULL (no row). Seam-and-panic until the catalog-read owner lands.
 pub fn ScanPgRelation(
     targetRelId: Oid,
-    _indexOK: bool,
-    _force_non_historic: bool,
+    indexOK: bool,
+    force_non_historic: bool,
 ) -> PgResult<Option<FormPgClass>> {
     // C: must have selected a database before reading pg_class. The owned model
     // surfaces the same guard once the database-id state lands; the catalog read
     // below is the cross-unit primitive that gates this.
-    let _ = targetRelId;
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: ScanPgRelation pg_class read \
-             (table_open + systable_beginscan/getnext via genam, GETSTRUCT deform) \
-             is a cross-unit catalog primitive; owner not yet landed",
-        )
-        .into_error())
+    //
+    // The `force_non_historic` snapshot toggle (RegisterSnapshot(
+    // GetNonHistoricCatalogSnapshot)) is internal to the genam scan the seam
+    // performs; the relcache only needs it on the historic-decoding relfilenode
+    // re-read path (RelationInitPhysicalAddr). The genam seam's signature does
+    // not surface the snapshot toggle yet, so the non-historic case is not
+    // distinguished here — it falls back to the catalog-snapshot scan the seam
+    // runs. Surface it precisely when that read is genuinely exercised.
+    if force_non_historic {
+        return Err(ereport(ERROR)
+            .errmsg_internal(
+                "relcache-build: ScanPgRelation force_non_historic (non-historic \
+                 catalog-snapshot pg_class re-read for logical decoding) is not yet \
+                 surfaced by the genam scan_pg_class seam",
+            )
+            .into_error());
+    }
+
+    // table_open(RelationRelationId) + systable_beginscan(ClassOidIndexId,
+    // oid = targetRelId) + a single systable_getnext + GETSTRUCT(Form_pg_class)
+    // deform, copied out into palloc'd storage. The genam owner performs the
+    // whole scan-and-decode (forcing a heap scan when the critical relcaches
+    // are not yet built or indexOK is false) and returns the decoded row, or
+    // None for the C NULL (no matching pg_class tuple).
+    let scanned =
+        match backend_access_index_genam_seams::scan_pg_class::call(targetRelId, indexOK)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+    // Marshal the owner-vocabulary ScannedPgClass into the owned FormPgClass
+    // mirror (the C "memcpy of CLASS_TUPLE_SIZE into rd_rel"). The variable-
+    // length tail columns (relacl/reloptions/relpartbound) are not cached in
+    // rd_rel; reloptions is consumed separately by RelationParseRelOptions.
+    Ok(Some(FormPgClass {
+        relname: scanned.relname,
+        relnamespace: scanned.relnamespace,
+        reltype: scanned.reltype,
+        reloftype: scanned.reloftype,
+        relowner: scanned.relowner,
+        relam: scanned.relam,
+        relfilenode: scanned.relfilenode,
+        reltablespace: scanned.reltablespace,
+        relpages: scanned.relpages,
+        reltuples: scanned.reltuples,
+        relallvisible: scanned.relallvisible,
+        reltoastrelid: scanned.reltoastrelid,
+        relhasindex: scanned.relhasindex,
+        relisshared: scanned.relisshared,
+        relpersistence: scanned.relpersistence,
+        relkind: scanned.relkind,
+        relnatts: scanned.relnatts,
+        relchecks: scanned.relchecks,
+        relhasrules: scanned.relhasrules,
+        relhastriggers: scanned.relhastriggers,
+        relhassubclass: scanned.relhassubclass,
+        relrowsecurity: scanned.relrowsecurity,
+        relforcerowsecurity: scanned.relforcerowsecurity,
+        relispopulated: scanned.relispopulated,
+        relreplident: scanned.relreplident,
+        relispartition: scanned.relispartition,
+        relrewrite: scanned.relrewrite,
+        relfrozenxid: scanned.relfrozenxid,
+        relminmxid: scanned.relminmxid,
+    }))
 }
 
 /// `AllocateRelationDesc(relp)` (relcache.c): `palloc0` a fresh descriptor and
@@ -454,6 +511,11 @@ pub fn AllocateRelationDesc(relp: FormPgClass) -> PgResult<Box<RelationData>> {
 /// `pg_attribute` (+ attrdef/notnull constraint fetches). **Own logic**; the
 /// `pg_attribute` scan + `GETSTRUCT` deform is the seamed catalog primitive.
 pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
+    use types_tuple::access::{ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL};
+    use types_tuple::heaptuple::{
+        ATTNULLABLE_INVALID, ATTNULLABLE_UNKNOWN, ATTNULLABLE_UNRESTRICTED, ATTNULLABLE_VALID,
+    };
+
     // C sets the descriptor's composite type id/typmod first (own logic).
     relation.rd_att.tdtypeid = if relation.rd_rel.reltype != InvalidOid {
         relation.rd_rel.reltype
@@ -462,21 +524,174 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
     };
     relation.rd_att.tdtypmod = -1;
 
-    // The pg_attribute scan (table_open(AttributeRelationId) +
-    // systable_beginscan/getnext, GETSTRUCT deform into Form_pg_attribute, the
-    // heap_getattr of attmissingval) is the genuine cross-unit catalog
-    // primitive. Seam-and-panic until the genam/deform owner lands. The
-    // attribute-row assembly, has_not_null/generated accounting, the
-    // AttrDefaultFetch / CheckNNConstraintFetch dispatch and the
-    // attnullability fixup are this routine's own logic, layered on the rows
-    // the seam returns.
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: RelationBuildTupleDesc pg_attribute read \
-             (systable scan via genam + GETSTRUCT deform of Form_pg_attribute) \
-             is a cross-unit catalog primitive; owner not yet landed",
-        )
-        .into_error())
+    // Fresh TupleConstr accounting (C MemoryContextAllocZero(sizeof(TupleConstr))).
+    let mut constr = types_relcache_entry::OwnedTupleConstr::default();
+    let mut ndef: i32 = 0;
+
+    let relid = relation.rd_id;
+    let relname = relation.rd_rel.relname.clone();
+    let natts = relation.rd_rel.relnatts as i32;
+    let is_catalog =
+        backend_catalog_catalog_seams::is_catalog_relation_oid::call(relid);
+
+    // table_open(AttributeRelationId) + systable_beginscan(
+    // AttributeRelidNumIndexId, attrelid = relid, attnum > 0) +
+    // systable_getnext loop + GETSTRUCT(Form_pg_attribute) deform. The genam
+    // owner performs the whole scan-and-decode, returning the user-column rows
+    // (attnum > 0); the per-attribute assembly / accounting below is own logic.
+    let rows =
+        backend_access_index_genam_seams::scan_pg_attribute::call(relid, natts as i16)?;
+
+    // Size the descriptor's attribute array (CreateTemplateTupleDesc(relnatts)
+    // gave a blank, zero-length-attrs OwnedTupleDesc in AllocateRelationDesc;
+    // fill exactly `natts` slots, then copy each scanned row into its attnum-1
+    // slot, exactly as the C memcpy into TupleDescAttr(rd_att, attnum-1)).
+    let mut attrs: Vec<OwnedAttr> = vec![OwnedAttr::default(); natts as usize];
+    let mut filled = vec![false; natts as usize];
+    let mut need = natts;
+
+    for attp in &rows {
+        let attnum = attp.attnum;
+        if attnum <= 0 || attnum as i32 > natts {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!(
+                    "invalid attribute number {} for relation \"{}\"",
+                    attp.attnum, relname
+                ))
+                .into_error());
+        }
+
+        // The "missing" value path (attmissingval array element) is not yet
+        // representable: the owned entry's TupleConstr carries no AttrMissing
+        // array and the genam scan row does not carry the attmissingval Datum.
+        // Seam-and-panic precisely when a column actually has a missing value.
+        if attp.atthasmissing {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!(
+                    "relcache-build: RelationBuildTupleDesc attmissingval fetch \
+                     (heap_getattr(Anum_pg_attribute_attmissingval) + array_get_element \
+                     into AttrMissing) is not yet representable in the owned entry \
+                     (no AttrMissing carrier; genam scan row drops attmissingval) — \
+                     column {} of relation \"{}\"",
+                    attnum, relname
+                ))
+                .into_error());
+        }
+
+        let idx = (attnum - 1) as usize;
+        // Initial attnullability, exactly as populate_compact_attribute derives
+        // it: UNRESTRICTED when no not-null; VALID for a catalog (known valid);
+        // UNKNOWN otherwise (validity decided later by CheckNNConstraintFetch).
+        let attnullability = if !attp.attnotnull {
+            ATTNULLABLE_UNRESTRICTED
+        } else if is_catalog {
+            ATTNULLABLE_VALID
+        } else {
+            ATTNULLABLE_UNKNOWN
+        };
+        attrs[idx] = OwnedAttr {
+            attname: attp.attname.clone(),
+            atttypid: attp.atttypid,
+            attlen: attp.attlen,
+            attnum,
+            atttypmod: attp.atttypmod,
+            attbyval: attp.attbyval,
+            attalign: attp.attalign,
+            attnotnull: attp.attnotnull,
+            attidentity: attp.attidentity,
+            attgenerated: attp.attgenerated,
+            attisdropped: attp.attisdropped,
+            attcollation: attp.attcollation,
+            attnullability,
+        };
+        filled[idx] = true;
+
+        // Update constraint/default info (C: GETSTRUCT flags).
+        if attp.attnotnull {
+            constr.has_not_null = true;
+        }
+        if attp.attgenerated == ATTRIBUTE_GENERATED_STORED {
+            constr.has_generated_stored = true;
+        }
+        if attp.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+            constr.has_generated_virtual = true;
+        }
+        if attp.atthasdef {
+            ndef += 1;
+        }
+
+        need -= 1;
+        if need == 0 {
+            break;
+        }
+    }
+
+    if need != 0 {
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!(
+                "pg_attribute catalog is missing {} attribute(s) for relation OID {}",
+                need, relid
+            ))
+            .into_error());
+    }
+    debug_assert!(filled.iter().all(|&f| f));
+
+    relation.rd_att.attrs = attrs;
+    // attcacheoff of the first attribute is necessarily zero; the owned model
+    // derives attcacheoff at projection time (CreateTupleDesc), so there is no
+    // separate field to stamp here (C: TupleDescCompactAttr(rd_att,0)->attcacheoff
+    // = 0 is reproduced by the projection's compact-attr derivation).
+
+    // Set up constraint/default info.
+    if constr.has_not_null
+        || constr.has_generated_stored
+        || constr.has_generated_virtual
+        || ndef > 0
+        || relation.rd_rel.relchecks > 0
+    {
+        // Install the constr now so AttrDefaultFetch/CheckNNConstraintFetch
+        // (which get_or_insert into rd_att.constr) accumulate into this one.
+        relation.rd_att.constr = Some(constr);
+
+        if ndef > 0 {
+            AttrDefaultFetch(relation, ndef)?;
+        }
+        // (C: else constr->num_defval = 0 — the empty Vec already encodes that.)
+
+        // CHECK and NOT NULLs.
+        if relation.rd_rel.relchecks > 0
+            || (!is_catalog
+                && relation
+                    .rd_att
+                    .constr
+                    .as_ref()
+                    .is_some_and(|c| c.has_not_null))
+        {
+            CheckNNConstraintFetch(relation)?;
+        }
+
+        // Any not-null constraint not marked invalid by CheckNNConstraintFetch
+        // is necessarily valid; make it so. (C does this on the CompactAttribute
+        // array; the owned model carries attnullability per OwnedAttr row.)
+        if !is_catalog {
+            for a in relation.rd_att.attrs.iter_mut() {
+                if a.attnullability == ATTNULLABLE_UNKNOWN {
+                    a.attnullability = ATTNULLABLE_VALID;
+                } else {
+                    debug_assert!(
+                        a.attnullability == ATTNULLABLE_INVALID
+                            || a.attnullability == ATTNULLABLE_UNRESTRICTED
+                    );
+                }
+            }
+        }
+        // (C: if relchecks == 0, constr->num_check = 0 — the empty Vec encodes that.)
+    } else {
+        // No constraints/defaults: rd_att->constr = NULL.
+        relation.rd_att.constr = None;
+    }
+
+    Ok(())
 }
 
 /// `RelationParseRelOptions(relation, tuple)` (relcache.c): parse
@@ -505,14 +720,25 @@ pub fn RelationParseRelOptions(relation: &mut RelationData) -> PgResult<()> {
     // extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn): deforming the
     // pg_class.reloptions column and invoking the AM amoptions is the
     // reloptions-unit / catalog-deform cross-unit primitive. Seam-and-panic.
-    // (When reloptions are absent the C result is NULL and rd_options stays
-    // None; that no-option case is observable only after the deform, so the
-    // cross-unit read gates it.)
+    //
+    // The reloptions Datum itself is a variable-length pg_class tail column that
+    // the genam `scan_pg_class` seam does NOT carry (it returns only the fixed
+    // CLASS_TUPLE_SIZE form; `reloptions` is documented as "consumed separately
+    // by RelationParseRelOptions"). No seam yet produces the reloptions Datum
+    // for a relid, and there is no `extractRelOptions` seam (the reloptions unit
+    // exposes only the per-AM amoptions builders). So the deform input does not
+    // exist in the owned model: this is a genuinely-unported primitive, not a
+    // present-but-unwired one. (When reloptions are absent the C result is NULL
+    // and rd_options stays None; that no-option case is observable only after
+    // the deform, so the cross-unit read gates it — the nailed-catalog boot path
+    // does not reach here, formrdesc fills rd_options itself.)
     Err(ereport(ERROR)
         .errmsg_internal(
             "relcache-build: RelationParseRelOptions extractRelOptions \
-             (reloptions column deform + AM amoptions, access/common/reloptions.c) \
-             is a cross-unit primitive; owner not yet landed",
+             (pg_class.reloptions Datum is not carried by the genam scan_pg_class \
+             seam, and no extractRelOptions seam exists; reloptions deform + AM \
+             amoptions, access/common/reloptions.c) is a genuinely-unported \
+             cross-unit primitive",
         )
         .into_error())
 }
@@ -585,22 +811,56 @@ pub fn formrdesc(
     // owner carries it on `BootstrapCatalogSchema.relid`; this is the C
     // `relation->rd_id = attrs[0]->attrelid`.
     relation.rd_id = schema.relid;
-    relation.rd_rel.relfilenode = InvalidOid;
 
-    // RelationMapUpdateMap (bootstrap), RelationInitLockInfo,
-    // RelationInitPhysicalAddr, GetHeapamTableAmRoutine, and the
-    // RelationIdCache install follow. The relation-map update +
-    // heapam-table-AM-routine resolution are cross-unit (relmapper.c /
-    // heapam_handler.c); seam-and-panic until the bootstrap/AM owner lands.
+    // All relations made with formrdesc are mapped (there is no other way to
+    // know their current filenumber). In bootstrap mode, add them to the initial
+    // relation mapper data, with the initial filenumber == the OID.
+    relation.rd_rel.relfilenode = InvalidOid;
+    let is_bootstrap = backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call();
+    if is_bootstrap {
+        backend_utils_cache_relmapper_seams::relation_map_update_map::call(
+            relation.rd_id,
+            relation.rd_id,
+            isshared,
+            true,
+        )?;
+    }
+
+    // Initialize the relation lock manager information (lmgr.c).
     RelationInitLockInfo(&mut relation);
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: formrdesc tail (RelationMapUpdateMap, \
-             GetHeapamTableAmRoutine, RelationInitPhysicalAddr) crosses into \
-             relmapper.c / heapam_handler.c; owner not yet landed",
-        )
-        .into_error())
+
+    // Initialize physical addressing information for the relation.
+    crate::index::RelationInitPhysicalAddr(&mut relation)?;
+
+    // Initialize the table AM handler. C sets relam = HEAP_TABLE_AM_OID and
+    // rd_tableam = GetHeapamTableAmRoutine() directly. RelationInitTableAccessMethod
+    // takes the catalog-relation branch for every formrdesc relation (they are all
+    // nailed catalogs), which sets rd_amhandler = F_HEAP_TABLEAM_HANDLER and resolves
+    // the heap table-AM vtable — the same const heapam_methods GetHeapamTableAmRoutine
+    // returns, without any syscache lookup. Set relam first so that branch's
+    // invariant (relam == HEAP_TABLE_AM_OID) holds, mirroring C.
+    relation.rd_rel.relam = HEAP_TABLE_AM_OID;
+    crate::index::RelationInitTableAccessMethod(&mut relation)?;
+
+    // Initialize the rel-has-index flag, using hardwired knowledge: bootstrap
+    // mode has no indexes; otherwise all the rels formrdesc is used for have them.
+    relation.rd_rel.relhasindex = !is_bootstrap;
+
+    // It's fully valid. (C sets rd_isvalid = true after RelationCacheInsert on
+    // the same pointer; the owned model sets it before the move-into-store, which
+    // is equivalent since it is the same descriptor.)
+    relation.rd_isvalid = true;
+
+    // Add new reldesc to relcache (RelationCacheInsert(relation, false)).
+    let relid = relation.rd_id;
+    cache_insert(relation, false)?;
+    Ok(relid)
 }
+
+/// `HEAP_TABLE_AM_OID` (`pg_am.h`) — the built-in heap table access method,
+/// hardcoded for every `formrdesc` nailed catalog (C: `relam = HEAP_TABLE_AM_OID`
+/// before `GetHeapamTableAmRoutine()`).
+const HEAP_TABLE_AM_OID: Oid = 2;
 
 /// One deformed `pg_attrdef` row for [`AttrDefaultFetch`]: the `adnum` plus the
 /// `adbin` default-expression node-tree text (`None` is the C `isnull`). The
