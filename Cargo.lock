@@ -13955,6 +13955,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-rewritehandler"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-table-table",
+ "backend-catalog-pg-depend",
+ "backend-commands-view-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-core",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-trigger",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-rewrite-rewritehandler-seams"
 version = "0.0.0"
 dependencies = [
@@ -20458,6 +20484,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs",
  "backend-replication-walsender",
  "backend-rewrite-core",
+ "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",
