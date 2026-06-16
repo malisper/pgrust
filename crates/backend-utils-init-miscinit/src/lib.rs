@@ -94,6 +94,33 @@ thread_local! {
     static SPL_DONE: Cell<bool> = const { Cell::new(false) };
     /// `bool process_shmem_requests_in_progress = false;`
     static SHMEM_REQ_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
+
+    /// `shmem_request_hook_type shmem_request_hook = NULL;` (miscinit.c:1841) —
+    /// the optional shared-memory request hook a preloaded module registers in
+    /// its `_PG_init`. NULL (None) unless a loaded module sets it.
+    static SHMEM_REQUEST_HOOK: Cell<Option<fn() -> PgResult<()>>> = const { Cell::new(None) };
+}
+
+/// `shmem_request_hook != NULL` (miscinit.c) — whether a module has registered a
+/// shared-memory request hook.
+pub fn shmem_request_hook_present() -> bool {
+    SHMEM_REQUEST_HOOK.with(|c| c.get().is_some())
+}
+
+/// Invoke the registered `shmem_request_hook()` (miscinit.c). Panics if called
+/// with no hook registered (the caller guards with [`shmem_request_hook_present`],
+/// mirroring C's `if (shmem_request_hook)`).
+pub fn shmem_request_hook() -> PgResult<()> {
+    match SHMEM_REQUEST_HOOK.with(Cell::get) {
+        Some(hook) => hook(),
+        None => panic!("shmem_request_hook() called with no hook registered"),
+    }
+}
+
+/// Register a module's `shmem_request_hook` (the `shmem_request_hook = my_hook`
+/// assignment a preloaded module makes in `_PG_init`).
+pub fn set_shmem_request_hook(hook: fn() -> PgResult<()>) {
+    SHMEM_REQUEST_HOOK.with(|c| c.set(Some(hook)));
 }
 
 /// Owned form of `ClientConnectionInfo` (`libpq/libpq-be.h`): backend-private
@@ -790,6 +817,17 @@ pub fn init_seams() {
     s::switch_to_shared_latch::set(crate::process::SwitchToSharedLatch);
     s::switch_back_to_local_latch::set(crate::process::SwitchBackToLocalLatch);
     s::process_shmem_requests_in_progress::set(process_shmem_requests_in_progress);
+
+    // `process_shmem_requests()` lives in miscinit.c (this crate), not ipci.c;
+    // install the single-user boot-driver seam (declared in
+    // backend-tcop-postgres-seams) here, delegating to the real body.
+    backend_tcop_postgres_seams::process_shmem_requests::set(process_shmem_requests);
+
+    // `shmem_request_hook` (miscinit.c:1841) is owned here; the dfmgr-seams that
+    // front the presence-check and invocation are installed by this crate.
+    backend_utils_fmgr_dfmgr_seams::shmem_request_hook_present::set(shmem_request_hook_present);
+    backend_utils_fmgr_dfmgr_seams::shmem_request_hook::set(shmem_request_hook);
+
     s::process_shared_preload_libraries_in_progress::set(
         process_shared_preload_libraries_in_progress,
     );

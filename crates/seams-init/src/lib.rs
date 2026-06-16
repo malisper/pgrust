@@ -1409,17 +1409,12 @@ mod recurrence_guard {
         // `load_external_function(filename, "_PG_archive_module_init", ...)` — it
         // `dlopen`s an archive-module `.so` and resolves its init symbol; the
         // dynamic loader (`load_external_function` / `load_file`) is inherently
-        // unported in an idiomatic-Rust build (no `.so` ABI surface). `shmem_request_hook`
-        // / `shmem_request_hook_present` read/invoke the `shmem_request_hook`
-        // function pointer that miscinit.c owns and ONLY a loaded extension sets
-        // (it is NULL in core PostgreSQL) — with no extension-load machinery
-        // there is no body to install and the hook is correctly absent
-        // (`_present` = false). Both are genuinely owner-unported, not a contract
-        // mismatch: loud-panic (mirror-pg-and-panic) until/unless a dynamic
-        // extension-loading subsystem lands. DELETE if that ever ports.
+        // unported in an idiomatic-Rust build (no `.so` ABI surface). The
+        // `shmem_request_hook` / `shmem_request_hook_present` seams are now
+        // installed by backend-utils-init-miscinit (which owns the
+        // `shmem_request_hook` pointer, NULL in core PG); only the dynamic-loader
+        // leg below remains owner-unported.
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
-        ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
-        ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
         // DESIGN_DEBT: owner-unported (narrowed). `setup_signal_handlers` is the
         // slot-sync worker's `pqsignal(SIGHUP, SignalHandlerForConfigReload)`
         // ... block (slotsync.c:1515-1522). interrupt.c (SignalHandlerForConfigReload)
