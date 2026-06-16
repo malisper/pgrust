@@ -902,6 +902,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_operator_form::set(projections::pg_operator_form);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
+    backend_utils_cache_syscache_seams::agg_form_by_oid::set(projections::agg_form_by_oid);
     backend_utils_cache_syscache_seams::foreign_data_wrapper_options::set(
         projections::foreign_data_wrapper_options,
     );

@@ -115,6 +115,73 @@ pub struct FormData_pg_aggregate {
     pub aggmtransspace: i32,
 }
 
+/// The full `Form_pg_aggregate` projection (`GETSTRUCT(SearchSysCache1(AGGFNOID,
+/// aggfnoid))`) plus the two trailing `CATALOG_VARLEN` text columns, deserialized
+/// to owned strings. This is what `ExecInitAgg`'s `fetch_agg_form`
+/// (`nodeAgg.c:3490`) reads while the `aggTuple` is pinned: every aggregate
+/// support-function Oid (`aggtransfn`/`aggfinalfn`/`aggcombinefn`/`aggserialfn`/
+/// `aggdeserialfn` + the moving-aggregate `aggmtransfn`/`aggminvtransfn`/
+/// `aggmfinalfn`), the `aggfinalextra`/`aggmfinalextra` flags, the
+/// `aggfinalmodify`/`aggmfinalmodify` chars, `aggkind`, the transition-type and
+/// space columns, and the (nullable) `agginitval`/`aggminitval` text initial
+/// values. Carried as one value because the C holds the syscache tuple pinned
+/// across all of these reads.
+///
+/// `regproc`/`Oid` columns are `Oid`; the `char` columns are `i8`; the
+/// `int16`/`int32` columns are `i16`/`i32`; the `bool` columns are `bool`. The
+/// two `CATALOG_VARLEN` `text` columns are `Option<String>` (`None` when SQL
+/// NULL, matching the C `isnull` from `SysCacheGetAttr`); the caller deserializes
+/// the present text via the type's input function (`GetAggInitVal`).
+#[derive(Clone, Debug)]
+pub struct AggFormData {
+    /// `aggform->aggfnoid` — the aggregate's pg_proc OID (the search key).
+    pub aggfnoid: Oid,
+    /// `aggform->aggkind` — the raw C `char` (`AGGKIND_*`).
+    pub aggkind: i8,
+    /// `aggform->aggnumdirectargs` — count of ordered-set direct arguments.
+    pub aggnumdirectargs: i16,
+    /// `aggform->aggtransfn` — the state transition function.
+    pub aggtransfn: Oid,
+    /// `aggform->aggfinalfn` — the final function (or `InvalidOid`).
+    pub aggfinalfn: Oid,
+    /// `aggform->aggcombinefn` — the combine function (or `InvalidOid`).
+    pub aggcombinefn: Oid,
+    /// `aggform->aggserialfn` — the serialization function (or `InvalidOid`).
+    pub aggserialfn: Oid,
+    /// `aggform->aggdeserialfn` — the deserialization function (or `InvalidOid`).
+    pub aggdeserialfn: Oid,
+    /// `aggform->aggmtransfn` — the moving-aggregate transition function.
+    pub aggmtransfn: Oid,
+    /// `aggform->aggminvtransfn` — the moving-aggregate inverse transition fn.
+    pub aggminvtransfn: Oid,
+    /// `aggform->aggmfinalfn` — the moving-aggregate final function.
+    pub aggmfinalfn: Oid,
+    /// `aggform->aggfinalextra` — pass extra dummy args to the final fn.
+    pub aggfinalextra: bool,
+    /// `aggform->aggmfinalextra` — same, for the moving-aggregate final fn.
+    pub aggmfinalextra: bool,
+    /// `aggform->aggfinalmodify` — final-fn modify behaviour (`AGGMODIFY_*`).
+    pub aggfinalmodify: i8,
+    /// `aggform->aggmfinalmodify` — same, for the moving-aggregate final fn.
+    pub aggmfinalmodify: i8,
+    /// `aggform->aggsortop` — the associated sort operator (or `InvalidOid`).
+    pub aggsortop: Oid,
+    /// `aggform->aggtranstype` — the transition (state) data type.
+    pub aggtranstype: Oid,
+    /// `aggform->aggtransspace` — declared transition-value size estimate.
+    pub aggtransspace: i32,
+    /// `aggform->aggmtranstype` — the moving-aggregate transition data type.
+    pub aggmtranstype: Oid,
+    /// `aggform->aggmtransspace` — moving-aggregate transition size estimate.
+    pub aggmtransspace: i32,
+    /// `SysCacheGetAttr(AGGFNOID, .., Anum_pg_aggregate_agginitval, &isnull)` —
+    /// the initial transition value text (`None` when SQL NULL).
+    pub agginitval: Option<String>,
+    /// `SysCacheGetAttr(AGGFNOID, .., Anum_pg_aggregate_aggminitval, &isnull)` —
+    /// the moving-aggregate initial value text (`None` when SQL NULL).
+    pub aggminitval: Option<String>,
+}
+
 /// The `values[]` / `nulls[]` arrays `AggregateCreate` builds for
 /// `heap_form_tuple` / `heap_modify_tuple`. The fixed columns are the
 /// [`FormData_pg_aggregate`]; `agginitval` / `aggminitval` are the two nullable

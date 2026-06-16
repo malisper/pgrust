@@ -44,7 +44,16 @@ use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
-use types_catalog::pg_aggregate::AggRow;
+use types_catalog::pg_aggregate::{
+    AggFormData, AggRow, Anum_pg_aggregate_aggcombinefn, Anum_pg_aggregate_aggdeserialfn,
+    Anum_pg_aggregate_aggfinalextra, Anum_pg_aggregate_aggfinalfn, Anum_pg_aggregate_aggfinalmodify,
+    Anum_pg_aggregate_aggfnoid, Anum_pg_aggregate_agginitval,
+    Anum_pg_aggregate_aggmfinalextra, Anum_pg_aggregate_aggmfinalfn, Anum_pg_aggregate_aggmfinalmodify,
+    Anum_pg_aggregate_aggminitval, Anum_pg_aggregate_aggminvtransfn, Anum_pg_aggregate_aggmtransfn,
+    Anum_pg_aggregate_aggmtransspace, Anum_pg_aggregate_aggmtranstype,
+    Anum_pg_aggregate_aggserialfn, Anum_pg_aggregate_aggsortop,
+    Anum_pg_aggregate_aggtransfn, Anum_pg_aggregate_aggtransspace, Anum_pg_aggregate_aggtranstype,
+};
 use types_catalog::pg_language::FormData_pg_language;
 use types_nodes::nodes::{Node, NodePtr};
 
@@ -752,6 +761,69 @@ pub(crate) fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Opti
     };
     ReleaseSysCache(tup);
     Ok(Some(row))
+}
+
+/// `aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid));
+/// aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple)` plus the two nullable
+/// `CATALOG_VARLEN` `agginitval` / `aggminitval` `SysCacheGetAttr` text columns,
+/// projected to the full [`AggFormData`] for `ExecInitAgg`'s `fetch_agg_form`
+/// (`nodeAgg.c`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller
+/// raises its own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
+pub(crate) fn agg_form_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+) -> PgResult<Option<AggFormData>> {
+    let tuple = SearchSysCache1(mcx, AGGFNOID, SysCacheKey::Value(KeyDatum::from_oid(aggfnoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // GETSTRUCT(aggTuple) — the fixed-part Form_pg_aggregate columns.
+    let form = AggFormData {
+        aggfnoid: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfnoid as i32)?,
+        aggkind: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggkind as i32)?,
+        aggnumdirectargs: getattr_i16(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggnumdirectargs as i32)?,
+        aggtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtransfn as i32)?,
+        aggfinalfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalfn as i32)?,
+        aggcombinefn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggcombinefn as i32)?,
+        aggserialfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggserialfn as i32)?,
+        aggdeserialfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggdeserialfn as i32)?,
+        aggmtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtransfn as i32)?,
+        aggminvtransfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggminvtransfn as i32)?,
+        aggmfinalfn: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalfn as i32)?,
+        aggfinalextra: getattr_bool(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalextra as i32)?,
+        aggmfinalextra: getattr_bool(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalextra as i32)?,
+        aggfinalmodify: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggfinalmodify as i32)?,
+        aggmfinalmodify: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmfinalmodify as i32)?,
+        aggsortop: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggsortop as i32)?,
+        aggtranstype: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtranstype as i32)?,
+        aggtransspace: getattr_i32(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggtransspace as i32)?,
+        aggmtranstype: getattr_oid(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtranstype as i32)?,
+        aggmtransspace: getattr_i32(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggmtransspace as i32)?,
+        // SysCacheGetAttr(AGGFNOID, tup, Anum_pg_aggregate_agginitval, &isnull):
+        // the nullable text initial-transition-value columns.
+        agginitval: getattr_option_text(mcx, AGGFNOID, &tup, Anum_pg_aggregate_agginitval as i32)?,
+        aggminitval: getattr_option_text(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggminitval as i32)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
+/// `text = SysCacheGetAttr(cacheId, tup, attnum, &isnull)`: `None` when the
+/// column is SQL NULL, otherwise `TextDatumGetCString(text)` as an owned
+/// `String` in `mcx`.
+fn getattr_option_text(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<String>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    // TextDatumGetCString(value).
+    let s = varlena_seams::text_to_cstring_v::call(mcx, &value)?;
+    Ok(Some(String::from(s.as_str())))
 }
 
 /* ---------------------------------------------------------------------------
