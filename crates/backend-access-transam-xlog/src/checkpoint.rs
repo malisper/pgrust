@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use backend_utils_error::{PgError, PgResult};
 
 use types_control::{CheckPoint, ControlFileData, DBState};
-use types_core::{FullTransactionId, InvalidTransactionId, TimestampTz, XLogRecPtr};
+use types_core::{FullTransactionId, InvalidTransactionId, TimeLineID, TimestampTz, XLogRecPtr};
 use types_wal::xlog_consts::{
     CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IS_SHUTDOWN, DELAY_CHKPT_COMPLETE,
     DELAY_CHKPT_START, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD,
@@ -449,6 +449,14 @@ pub fn CreateRestartPoint(st: &mut CheckpointState, flags: i32) -> PgResult<bool
 // ===========================================================================
 // Local helpers mirroring the inline file-scope macros / setters.
 // ===========================================================================
+
+/// `PreallocXlogFiles(endptr, tli)` (xlog.c) — the WAL-startup driver
+/// (`StartupXLOG`, xlog.c:6094) preallocates additional log files. The body is a
+/// still-deferred checkpoint-deps leg (`ext::PreallocXlogFiles`); reached here
+/// only post-recovery (after the unported `StartupReorderBuffer` wall).
+pub(crate) fn prealloc_xlog_files(endptr: XLogRecPtr, tli: TimeLineID) {
+    ext::PreallocXlogFiles(endptr, tli);
+}
 
 /// `LocalSetXLogInsertAllowed()` (xlog.c) — set `LocalXLogInsertAllowed = 1`,
 /// returning the old value.

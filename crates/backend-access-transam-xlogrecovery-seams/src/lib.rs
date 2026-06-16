@@ -164,6 +164,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `recoveryTargetTLI` (xlogrecovery.c global `TimeLineID`): the timeline the
+    /// startup process is recovering toward (the latest active timeline per
+    /// `pg_control`, or the configured recovery-target timeline). Read by
+    /// `StartupXLOG` (xlog.c) for `restoreTimeLineHistoryFiles` /
+    /// `findNewestTimeLine` / `writeTimeLineHistory`. Pure read of the owner's
+    /// per-backend recovery state.
+    pub fn recovery_target_tli() -> TimeLineID
+);
+
+seam_core::seam!(
     /// `recoveryRestoreCommand` (xlogrecovery.c global) — the configured
     /// `restore_command`, or `None`/empty when unset (standby mode may omit it).
     /// Returned charged to `mcx` (the `pstrdup` analog).

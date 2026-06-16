@@ -945,6 +945,23 @@ pub(crate) fn in_recovery_flag() -> bool {
     IN_RECOVERY.with(Cell::get)
 }
 
+/// `ArchiveRecoveryRequested` read for the `archive_recovery_requested` seam
+/// install (the startup process's per-backend recovery state).
+pub(crate) fn archive_recovery_requested() -> bool {
+    if !recovery_state_is_set() {
+        return false;
+    }
+    recovery_state_mut().archive_recovery_requested
+}
+
+/// `recoveryTargetTLI` read for the `recovery_target_tli` seam install.
+pub(crate) fn recovery_target_tli() -> TimeLineID {
+    if !recovery_state_is_set() {
+        return 0;
+    }
+    recovery_state_mut().recovery_target_tli
+}
+
 // --- File-system helpers (the C stat/unlink/AllocateFile/pg_fsync/durable_rename
 //     calls), routed through the fd unit's seams. ---
 
