@@ -375,6 +375,7 @@ backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
