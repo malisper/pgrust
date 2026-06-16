@@ -53,6 +53,14 @@ pub const RM_MULTIXACT_ID: RmgrId = 5;
 /// `RM_RELMAP_ID` — the RelMap resource manager (rmgrlist.h entry 7).
 pub const RM_RELMAP_ID: RmgrId = 7;
 
+/// `RM_LOGICALMSG_ID` — the LogicalMessage resource manager (rmgrlist.h entry
+/// 21).
+pub const RM_LOGICALMSG_ID: RmgrId = 21;
+
+/// `XLOG_LOGICAL_MESSAGE` (replication/message.h) — the single logical-message
+/// rmgr opcode (`info & ~XLR_INFO_MASK`).
+pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
+
 /// `BKPBLOCK_WILL_INIT` (access/xlogrecord.h) — redo will re-init the page.
 pub const BKPBLOCK_WILL_INIT: uint8 = 0x40;
 

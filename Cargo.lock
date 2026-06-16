@@ -12633,6 +12633,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-message"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact",
+ "backend-access-transam-xlog",
+ "backend-access-transam-xloginsert",
+ "backend-replication-logical-message-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-replication-logical-message-seams"
 version = "0.0.0"
 dependencies = [
@@ -19398,6 +19413,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
+ "backend-replication-logical-message",
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",
  "backend-replication-logical-reorderbuffer",

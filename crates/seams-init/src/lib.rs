@@ -49,6 +49,7 @@ pub fn init_all() {
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_brin_xlog::init_seams();
+    backend_replication_logical_message::init_seams();
     backend_access_spgist_core::init_seams();
     backend_access_brin_insert_vacuum::init_seams();
     backend_access_brin_minmax::init_seams();
