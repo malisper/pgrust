@@ -291,6 +291,7 @@ pub fn init_all() {
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
+    backend_utils_adt_float::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();

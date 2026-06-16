@@ -12844,6 +12844,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-float"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-float-seams",
+ "backend-utils-error",
+ "common-ryu",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-float-seams"
 version = "0.0.0"
 dependencies = [
@@ -16061,6 +16075,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-float",
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
