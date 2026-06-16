@@ -355,6 +355,7 @@ backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
 backend-storage-buffer-bufmgr = { path = "../backend-storage-buffer-bufmgr" }
 backend-storage-aio-read-stream = { path = "../backend-storage-aio-read-stream" }
+backend-storage-aio-methods = { path = "../backend-storage-aio-methods" }
 backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
 backend-storage-ipc-procarray = { path = "../backend-storage-ipc-procarray" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }

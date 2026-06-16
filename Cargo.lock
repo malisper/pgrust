@@ -14542,6 +14542,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-aio-methods"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-aio-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-aio-methods-seams"
 version = "0.0.0"
 dependencies = [
@@ -21060,6 +21081,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
+ "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
