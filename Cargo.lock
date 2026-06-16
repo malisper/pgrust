@@ -14170,7 +14170,28 @@ name = "backend-utils-adt-network-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-datum",
+ "types-error",
  "types-network",
+]
+
+[[package]]
+name = "backend-utils-adt-network-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-network",
+ "backend-utils-adt-network-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-network",
+ "types-nodes",
+ "types-pathnodes",
+ "types-selfuncs",
 ]
 
 [[package]]
@@ -17293,6 +17314,7 @@ dependencies = [
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-network-gist",
+ "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",

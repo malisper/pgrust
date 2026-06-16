@@ -319,6 +319,7 @@ backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-network-gist = { path = "../backend-utils-adt-network-gist" }
+backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
