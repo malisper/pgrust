@@ -167,6 +167,7 @@ pub fn init_all() {
     backend_executor_nodeNamedtuplestorescan::init_seams();
     backend_executor_nodeResult::init_seams();
     backend_executor_nodeSamplescan::init_seams();
+    backend_access_tablesample_core::init_seams();
     backend_executor_nodeSeqscan::init_seams();
     backend_executor_nodeSetOp::init_seams();
     backend_executor_nodeSubqueryscan::init_seams();
