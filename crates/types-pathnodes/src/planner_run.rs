@@ -39,11 +39,12 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Index;
 use types_nodes::copy_query::Query;
+use types_nodes::nodes::Node;
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::FromExpr;
 
-use crate::{PlannerInfo, QueryId, RangeTblEntryId};
+use crate::{PathId, PlanId, PlannerInfo, QueryId, RangeTblEntryId};
 
 /// The query store for one planner invocation — the resolver behind every
 /// [`QueryId`].
@@ -69,6 +70,30 @@ pub struct PlannerRun<'mcx> {
     /// [`RangeTblEntryId`] in `simple_rte_array` keyed by RT index, exactly as C
     /// fills `simple_rte_array[rti] = rt_fetch(rti, parse->rtable)`.
     rtes: PgVec<'mcx, RangeTblEntry<'mcx>>,
+    /// Backing store for every SubPlan's owned `Plan` tree — the value resolver
+    /// behind `PlannerGlobal::subplans` (the C `List *subplans` of `Plan *`). A
+    /// [`PlanId`] indexes here; `build_subplan`/`SS_process_ctes`/
+    /// `SS_make_initplan_from_plan` intern the freshly built plan tree (an owned
+    /// [`Node`] embedding its `Plan` base) and append the returned [`PlanId`] to
+    /// `glob->subplans`, setting `splan->plan_id = subplans.len()` (1-based).
+    /// `finalize_plan` reads back through [`planner_subplan_get_plan`] to compute
+    /// each init/regular SubPlan's `extParam`.
+    subplans: PgVec<'mcx, Node<'mcx>>,
+    /// Backing store for every SubPlan's owned `PlannerInfo` (`glob->subroots`,
+    /// C `List *subroots` of `PlannerInfo *`). Parallel to [`subplans`]: the
+    /// `PlanId` from interning a subplan also keys its subroot. [`PlannerInfo`]
+    /// is lifetime-free, so this could live on `glob` directly, but it is kept
+    /// beside the subplan store so the parallel three-list structure interns
+    /// atomically (and `glob` stays `Clone`/`Default`, which a `Vec<PlannerInfo>`
+    /// would break — `PlannerInfo` is not `Clone`).
+    ///
+    /// [`subplans`]: Self::intern_subplan
+    subroots: PgVec<'mcx, PlannerInfo>,
+    /// Per-subplan source-path handle (`glob->subpaths`, C `List *subpaths` of
+    /// `Path *`). Parallel to [`subplans`]; element `i` is the [`PathId`] (in the
+    /// matching `subroots[i]`'s `path_arena`) the subplan's `Plan` was created
+    /// from. C only ever appends this list; the handle is carried for fidelity.
+    subpaths: PgVec<'mcx, PathId>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -78,6 +103,9 @@ impl<'mcx> PlannerRun<'mcx> {
         PlannerRun {
             queries: PgVec::new_in(mcx),
             rtes: PgVec::new_in(mcx),
+            subplans: PgVec::new_in(mcx),
+            subroots: PgVec::new_in(mcx),
+            subpaths: PgVec::new_in(mcx),
         }
     }
 
@@ -218,6 +246,87 @@ impl<'mcx> PlannerRun<'mcx> {
     pub fn rte_len(&self) -> usize {
         self.rtes.len()
     }
+
+    /* --------------------------------------------------------------------
+     * SubPlan stores — the value resolver behind `PlannerGlobal::subplans` /
+     * `subroots` / `subpaths`. C keeps three parallel `glob` lists of owned
+     * `Plan *` / `PlannerInfo *` / `Path *`; a `SubPlan`'s 1-based `plan_id`
+     * indexes all three. Those owned values pin to `'mcx`, but `PlannerGlobal`
+     * is lifetime-free — so the values live here and `glob` carries `PlanId`
+     * handles, exactly the intern/resolve shape of the RTE store above.
+     * ------------------------------------------------------------------ */
+
+    /// Intern one SubPlan's three parallel values — the freshly built `Plan`
+    /// tree (`plan`, an owned [`Node`]), its per-subplan `subroot`
+    /// ([`PlannerInfo`]), and the `subpath` [`PathId`] it was made from —
+    /// returning the [`PlanId`] handle that keys all three.
+    ///
+    /// The producer path (subselect.c `build_subplan`): after `create_plan`
+    /// yields the subquery's plan, C does
+    /// `glob->subplans = lappend(glob->subplans, plan); glob->subroots =
+    /// lappend(glob->subroots, subroot); glob->subpaths = lappend(...);
+    /// splan->plan_id = list_length(glob->subplans);`. Here the caller interns
+    /// the three values, pushes the returned [`PlanId`] onto `glob.subplans`
+    /// (and `subroots`/`subpaths`), and sets the `SubPlan`'s 1-based
+    /// `plan_id = glob.subplans.len()` (== `PlanId + 1`).
+    #[inline]
+    pub fn intern_subplan(
+        &mut self,
+        plan: Node<'mcx>,
+        subroot: PlannerInfo,
+        subpath: PathId,
+    ) -> PlanId {
+        let id = PlanId(self.subplans.len() as u32);
+        self.subplans.push(plan);
+        self.subroots.push(subroot);
+        self.subpaths.push(subpath);
+        id
+    }
+
+    /// Resolve a [`PlanId`] to its owned `Plan` tree — the safe-Rust rendering
+    /// of `list_nth(glob->subplans, plan_id - 1)`. Panics on an out-of-range
+    /// handle (a handle never produced by [`intern_subplan`](Self::intern_subplan)
+    /// is a planner bug).
+    #[inline]
+    pub fn resolve_subplan(&self, id: PlanId) -> &Node<'mcx> {
+        &self.subplans[id.0 as usize]
+    }
+
+    /// Resolve a [`PlanId`] to its owned `Plan` tree for mutation (setrefs.c
+    /// `set_plan_references` rewrites the subplan in place; `finalize_plan`
+    /// stores back the computed `extParam`/`allParam`).
+    #[inline]
+    pub fn resolve_subplan_mut(&mut self, id: PlanId) -> &mut Node<'mcx> {
+        &mut self.subplans[id.0 as usize]
+    }
+
+    /// Resolve a [`PlanId`] to its per-subplan `subroot` [`PlannerInfo`]
+    /// (`list_nth(glob->subroots, plan_id - 1)`). `SS_finalize_plan` reads each
+    /// subplan's subroot while finalizing.
+    #[inline]
+    pub fn resolve_subroot(&self, id: PlanId) -> &PlannerInfo {
+        &self.subroots[id.0 as usize]
+    }
+
+    /// Resolve a [`PlanId`] to its per-subplan `subroot` for mutation.
+    #[inline]
+    pub fn resolve_subroot_mut(&mut self, id: PlanId) -> &mut PlannerInfo {
+        &mut self.subroots[id.0 as usize]
+    }
+
+    /// Resolve a [`PlanId`] to the `subpath` [`PathId`] the subplan was made
+    /// from (`list_nth(glob->subpaths, plan_id - 1)`).
+    #[inline]
+    pub fn resolve_subpath(&self, id: PlanId) -> PathId {
+        self.subpaths[id.0 as usize]
+    }
+
+    /// Number of interned subplans (== `list_length(glob->subplans)`; the next
+    /// `SubPlan`'s 1-based `plan_id`).
+    #[inline]
+    pub fn subplan_len(&self) -> usize {
+        self.subplans.len()
+    }
 }
 
 /// `planner_rt_fetch(rti, root)` (pathnodes.h:594) — fetch the
@@ -255,6 +364,39 @@ pub fn planner_rt_fetch<'a, 'mcx>(
         // rt_fetch fallback: list_nth(parse->rtable, rti-1).
         &run.rtable(root.parse)[(rti as usize) - 1]
     }
+}
+
+/// `planner_subplan_get_plan(root, subplan)` (subselect.c) — fetch the owned
+/// `Plan` tree a [`SubPlan`](types_nodes::primnodes::SubPlan) refers to.
+///
+/// C inline:
+/// ```c
+/// static inline Plan *
+/// planner_subplan_get_plan(PlannerInfo *root, SubPlan *subplan)
+/// {
+///     return (Plan *) list_nth(root->glob->subplans, subplan->plan_id - 1);
+/// }
+/// ```
+///
+/// `finalize_plan` / `SS_finalize_plan` call this to walk a child SubPlan's plan
+/// tree and OR its `extParam` into the parent's. The `SubPlan`'s `plan_id` is
+/// 1-based; `glob->subplans` carries [`PlanId`] handles into the run's owned
+/// subplan store, so this projects `glob.subplans[plan_id - 1]` to its [`PlanId`]
+/// and resolves the owned [`Node`] through the run. Panics on an out-of-range
+/// `plan_id` (an unset/garbage `plan_id` is a planner bug, like the C
+/// `list_nth` past the list end).
+#[inline]
+pub fn planner_subplan_get_plan<'a, 'mcx>(
+    run: &'a PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    plan_id: i32,
+) -> &'a Node<'mcx> {
+    let glob = root
+        .glob
+        .as_ref()
+        .expect("planner_subplan_get_plan: root->glob is NULL");
+    let id = glob.subplans[(plan_id as usize) - 1];
+    run.resolve_subplan(id)
 }
 
 #[cfg(test)]
@@ -378,6 +520,60 @@ mod tests {
         // A scan converter fetches its RT index's RTE through the run store.
         let fetched = planner_rt_fetch(&run, &root, 1);
         assert_eq!(fetched.rtekind, RTEKind::RTE_FUNCTION);
+    }
+
+    #[test]
+    fn subplan_intern_resolve_and_get_plan() {
+        // glob->subplans is the owned-Plan list a SubPlan's 1-based plan_id
+        // indexes; build_subplan interns the plan tree + subroot + subpath,
+        // appends the PlanId to glob.subplans, and sets plan_id = len. finalize
+        // reads it back through planner_subplan_get_plan.
+        use types_nodes::noderesult::Result as ResultPlan;
+
+        let cx = MemoryContext::new("planner-run");
+        let mut run = PlannerRun::new(cx.mcx());
+        assert_eq!(run.subplan_len(), 0);
+
+        // A built subquery plan tree (a Result node, plan_node_id tagged so we
+        // can recognize it after resolution).
+        let mut r = ResultPlan::default();
+        r.plan.plan_node_id = 42;
+        let plan = Node::Result(r);
+
+        let subroot = crate::PlannerInfo::default();
+        let id = run.intern_subplan(plan, subroot, crate::PathId(7));
+        assert_eq!(id, crate::PlanId(0));
+        assert_eq!(run.subplan_len(), 1);
+
+        // The producer pushes the handle onto glob.subplans and sets the
+        // SubPlan's 1-based plan_id.
+        let mut glob = crate::PlannerGlobal::default();
+        glob.subplans.push(id);
+        glob.subroots.push(id);
+        glob.subpaths.push(id);
+        let plan_id = glob.subplans.len() as i32; // == 1
+
+        let mut root = crate::PlannerInfo::default();
+        root.glob = Some(alloc::boxed::Box::new(glob));
+
+        // finalize_plan's deref: planner_subplan_get_plan(root, plan_id) ->
+        // &Node, the owned plan tree.
+        let fetched = planner_subplan_get_plan(&run, &root, plan_id);
+        match fetched {
+            Node::Result(res) => assert_eq!(res.plan.plan_node_id, 42),
+            _ => panic!("expected the interned Result plan"),
+        }
+
+        // Parallel stores resolve off the same PlanId.
+        assert_eq!(run.resolve_subpath(id), crate::PathId(7));
+        let _ = run.resolve_subroot(id);
+        // resolve_subplan_mut threads back (setrefs rewrites in place).
+        if let Node::Result(res) = run.resolve_subplan_mut(id) {
+            res.plan.plan_node_id = 99;
+        }
+        if let Node::Result(res) = run.resolve_subplan(id) {
+            assert_eq!(res.plan.plan_node_id, 99);
+        }
     }
 
     #[test]

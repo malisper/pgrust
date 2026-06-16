@@ -332,6 +332,23 @@ pub struct NodeId(pub u32);
 #[repr(transparent)]
 pub struct PhInfoId(pub u32);
 
+/// Handle into the planner-run subplan stores — the index-addressable analogue
+/// of a `glob->subplans` / `glob->subroots` / `glob->subpaths` list element.
+///
+/// In C a `SubPlan`'s `plan_id` is a 1-based index into the three parallel
+/// `glob` lists (`list_nth(glob->subplans, plan_id - 1)` etc.). Those lists hold
+/// owned `Plan *` / `PlannerInfo *` / `Path *` values that pin to `'mcx`, but
+/// [`PlannerGlobal`] is deliberately lifetime-free — so the owned values live in
+/// the [`planner_run::PlannerRun`] subplan stores and [`PlannerGlobal::subplans`]
+/// / `subroots` / `subpaths` carry these handles, exactly as
+/// [`PlannerInfo::simple_rte_array`] carries [`RangeTblEntryId`] handles into the
+/// run's RTE store. A [`PlanId`] is **0-based** here (the dense intern index);
+/// the C `plan_id` is `PlanId + 1`. Resolve through
+/// [`planner_run::planner_subplan_get_plan`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct PlanId(pub u32);
+
 /// A node of the planner's "joinlist" (`deconstruct_jointree` output): either a
 /// leaf range-table reference (`RangeTblRef`, by 1-based rtindex) or a nested
 /// sub-joinlist (`List`). This is the owned analogue of the C `List *joinlist`
@@ -462,16 +479,34 @@ pub struct RangeTblEntryId(pub u32);
 /// `PlannerGlobal` — global information for one planner run.
 #[derive(Clone, Debug, Default)]
 pub struct PlannerGlobal {
-    /// `List *subplans` — Plans for SubPlan nodes (opaque node handles).
-    pub subplans: Vec<NodeId>,
-    /// `List *subpaths` — Paths the SubPlan Plans were made from.
-    pub subpaths: Vec<NodeId>,
-    /// `List *subroots` — PlannerInfos for SubPlan nodes.
-    pub subroots: Vec<NodeId>,
+    /// `List *subplans` — Plans for SubPlan nodes. C holds owned `Plan *`; the
+    /// owned plan trees live in the [`planner_run::PlannerRun`] subplan store and
+    /// this list carries the [`PlanId`] handles. A `SubPlan`'s 1-based
+    /// `plan_id == subplans-index + 1`; resolve back through
+    /// [`planner_run::planner_subplan_get_plan`] (the C
+    /// `list_nth(glob->subplans, plan_id - 1)` deref that `finalize_plan` uses to
+    /// read a child plan's `extParam`).
+    pub subplans: Vec<PlanId>,
+    /// `List *subpaths` — Paths the SubPlan Plans were made from. C holds owned
+    /// `Path *`; the owned paths live in the run's subpath store, this list
+    /// carries the [`PlanId`] handles (parallel to `subplans`).
+    pub subpaths: Vec<PlanId>,
+    /// `List *subroots` — PlannerInfos for SubPlan nodes. C holds owned
+    /// `PlannerInfo *`; the owned per-subplan roots live in the run's subroot
+    /// store, this list carries the [`PlanId`] handles (parallel to `subplans`).
+    pub subroots: Vec<PlanId>,
     /// `Bitmapset *rewindPlanIDs`.
     pub rewind_plan_ids: Relids,
-    /// `List *finalrtable`.
-    pub finalrtable: Vec<NodeId>,
+    /// `List *finalrtable` — the flattened, range-table for the finished plan
+    /// (`set_plan_references` → `add_rtes_to_flat_rtable`). C holds owned
+    /// `RangeTblEntry *`; setrefs flat-copies each RTE and appends it here, then
+    /// renumbers every plan `Var` by `rtoffset = list_length(finalrtable)`. The
+    /// owned flat-copied RTEs live in the [`planner_run::PlannerRun`] RTE store
+    /// (same store as `simple_rte_array` resolves through); this list carries the
+    /// [`RangeTblEntryId`] handles, resolved with
+    /// [`planner_run::PlannerRun::resolve_rte`]. (Was `Vec<NodeId>`, the wrong
+    /// id-space — an RTE is not a `node_arena` `Expr`.)
+    pub finalrtable: Vec<RangeTblEntryId>,
     /// `Bitmapset *allRelids`.
     pub all_relids: Relids,
     /// `Bitmapset *prunableRelids`.
