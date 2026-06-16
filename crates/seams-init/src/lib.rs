@@ -90,6 +90,7 @@ pub fn init_all() {
     backend_backup_sink_support::init_seams();
     backend_backup_throttle::init_seams();
     backend_bootstrap_bootstrap::init_seams();
+    backend_bootstrap_bootparse::init_seams();
     backend_catalog_catalog::init_seams();
     backend_catalog_storage::init_seams();
     backend_catalog_namespace::init_seams();

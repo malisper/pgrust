@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-amapi = { path = "../types-amapi" }
+types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }

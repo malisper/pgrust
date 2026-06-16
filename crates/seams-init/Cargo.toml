@@ -93,6 +93,7 @@ backend-backup-walsummary = { path = "../backend-backup-walsummary" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-backup-sink-support = { path = "../backend-backup-sink-support" }
 backend-backup-throttle = { path = "../backend-backup-throttle" }
+backend-bootstrap-bootparse = { path = "../backend-bootstrap-bootparse" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-storage = { path = "../backend-catalog-storage" }
