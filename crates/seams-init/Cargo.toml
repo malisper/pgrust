@@ -97,6 +97,7 @@ backend-catalog-storage = { path = "../backend-catalog-storage" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-partition = { path = "../backend-catalog-partition" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-catalog-index = { path = "../backend-catalog-index" }
@@ -157,6 +158,7 @@ backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-tsearchcmds = { path = "../backend-commands-tsearchcmds" }
 backend-commands-typecmds = { path = "../backend-commands-typecmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execCurrent = { path = "../backend-executor-execCurrent" }

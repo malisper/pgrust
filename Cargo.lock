@@ -4470,6 +4470,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-partition"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-next",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-partition-seams",
+ "backend-nodes-core",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-partition-seams"
 version = "0.0.0"
 dependencies = [
@@ -7021,6 +7053,36 @@ dependencies = [
  "types-rel",
  "types-ri-triggers",
  "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-tsearchcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-parser-func",
+ "backend-parser-parse-func-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
  "types-tuple",
 ]
 
@@ -10767,13 +10829,18 @@ dependencies = [
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-small-seams",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache-seams",
  "mcx",
@@ -10782,6 +10849,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -19496,6 +19564,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
+ "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
@@ -19549,6 +19618,7 @@ dependencies = [
  "backend-commands-statscmds",
  "backend-commands-tablespace",
  "backend-commands-trigger",
+ "backend-commands-tsearchcmds",
  "backend-commands-typecmds",
  "backend-commands-vacuum",
  "backend-commands-vacuumparallel",
