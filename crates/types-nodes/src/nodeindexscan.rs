@@ -382,6 +382,14 @@ pub struct PlannedStmt<'mcx> {
     /// elements can be `NULL` (hence the inner `Option`). `InitPlan` walks this
     /// to build `es_subplanstates`. `None` = the C `NIL`.
     pub subplans: Option<PgVec<'mcx, Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>>>,
+    /// `int stmt_location` — the start location, or -1 if unknown, of the
+    /// statement's source text within the overall query string (set by the
+    /// rewriter from the originating `Query`). `ProcessUtility` threads it to
+    /// `DoCopy` / `PrepareQuery` so they can record the precise statement text.
+    pub stmt_location: i32,
+    /// `int stmt_len` — the length in bytes of the statement's source text, or 0
+    /// if unknown/unset.
+    pub stmt_len: i32,
 }
 
 impl PlannedStmt<'_> {
@@ -487,6 +495,8 @@ impl PlannedStmt<'_> {
                 None => None,
             },
             subplans,
+            stmt_location: self.stmt_location,
+            stmt_len: self.stmt_len,
         })
     }
 }

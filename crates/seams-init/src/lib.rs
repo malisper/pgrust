@@ -240,6 +240,7 @@ pub fn init_all() {
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
+    backend_libpq_pqmq::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
