@@ -15,19 +15,35 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
 
 seam_core::seam!(
     /// `create_index_paths(root, rel)` (indxpath.c:241) — generate all index
     /// paths (plain + bitmap) for the relation and submit them to the rel's
     /// pathlist. Allocates paths (can OOM), hence `PgResult`.
-    pub fn create_index_paths(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+    ///
+    /// Threads the planner-run resolver (`run`): the body reads RTE fields
+    /// through the re-signed `rte_*`/path-builder seams that take
+    /// `&PlannerRun<'mcx>`.
+    pub fn create_index_paths<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        rel: RelId,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `check_index_predicates(root, rel)` (indxpath.c:3943) — set each index's
     /// `predOK` / `indrestrictinfo` predicate-derived fields for the rel.
-    pub fn check_index_predicates(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+    ///
+    /// Threads the planner-run resolver (`run`): the body reaches the re-signed
+    /// `generate_join_implied_equalities` seam that takes `&PlannerRun<'mcx>`.
+    pub fn check_index_predicates<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        rel: RelId,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

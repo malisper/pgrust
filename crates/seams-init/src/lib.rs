@@ -82,6 +82,7 @@ pub fn init_all() {
     backend_catalog_objectaddress::init_seams();
     backend_catalog_indexing::init_seams();
     backend_catalog_heap::init_seams();
+    backend_catalog_index::init_seams();
     backend_catalog_pg_cast::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_conversion::init_seams();
@@ -204,6 +205,7 @@ pub fn init_all() {
     backend_access_hashfunc::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_rte_seams::init_seams();
     backend_optimizer_path_allpaths::init_seams();
     backend_optimizer_path_indxpath::init_seams();
     backend_optimizer_path_joinrels::init_seams();

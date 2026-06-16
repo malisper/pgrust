@@ -30,8 +30,9 @@ seam_core::seam!(
     /// `create_partial_bitmap_paths(root, rel, bitmapqual)` (costsize.c) — build
     /// the partial (parallel) BitmapHeapPath(s) for the rel and `add_partial_path`
     /// them. The bitmapqual crosses as its `PathId` arena handle.
-    pub fn create_partial_bitmap_paths(
+    pub fn create_partial_bitmap_paths<'mcx>(
         root: &mut IxPlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: IxRelId,
         bitmapqual: IxPathId,
     ) -> PgResult<()>

@@ -15,6 +15,7 @@ use crate::pool::{alloc_chromo, alloc_pool, random_init_pool, sort_pool, spread_
 use crate::random::geqo_set_seed;
 use crate::selection::geqo_selection;
 use crate::{GeqoPrivateData, Operator};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId};
 
 /* Configuration option bounds / defaults (geqo.h). */
@@ -80,6 +81,7 @@ impl GeqoConfig {
 /// `config` supplies the GEQO GUC values (file-globals in C).
 pub fn geqo(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'_>,
     number_of_rels: i32,
     initial_rels: alloc::vec::Vec<RelId>,
     config: &GeqoConfig,
@@ -101,7 +103,7 @@ pub fn geqo(
     let mut pool = alloc_pool(pool_size, number_of_rels);
 
     /* random initialization of the pool */
-    random_init_pool(root, &mut private, &mut pool);
+    random_init_pool(root, run, &mut private, &mut pool);
 
     /*
      * sort the pool according to cheapest path as fitness. We have to do it
@@ -164,7 +166,7 @@ pub fn geqo(
                  */
                 edge_failures += gimme_tour(&mut private, et, &mut momma.string, pool.string_length);
 
-                momma.worth = geqo_eval(root, &mut private, &momma.string, pool.string_length);
+                momma.worth = geqo_eval(root, run, &mut private, &momma.string, pool.string_length);
                 kid_worth = momma.worth;
                 spread_chromo(&momma, &mut pool);
             }
@@ -177,7 +179,7 @@ pub fn geqo(
                     pool.string_length,
                 );
                 kid_storage.worth =
-                    geqo_eval(root, &mut private, &kid_storage.string, pool.string_length);
+                    geqo_eval(root, run, &mut private, &kid_storage.string, pool.string_length);
                 kid_worth = kid_storage.worth;
                 spread_chromo(&kid_storage, &mut pool);
             }
@@ -200,7 +202,7 @@ pub fn geqo(
                     );
                 }
                 kid_storage.worth =
-                    geqo_eval(root, &mut private, &kid_storage.string, pool.string_length);
+                    geqo_eval(root, run, &mut private, &kid_storage.string, pool.string_length);
                 kid_worth = kid_storage.worth;
                 spread_chromo(&kid_storage, &mut pool);
             }
@@ -215,7 +217,7 @@ pub fn geqo(
                     ct,
                 );
                 kid_storage.worth =
-                    geqo_eval(root, &mut private, &kid_storage.string, pool.string_length);
+                    geqo_eval(root, run, &mut private, &kid_storage.string, pool.string_length);
                 kid_worth = kid_storage.worth;
                 spread_chromo(&kid_storage, &mut pool);
             }
@@ -230,7 +232,7 @@ pub fn geqo(
                     ct,
                 );
                 kid_storage.worth =
-                    geqo_eval(root, &mut private, &kid_storage.string, pool.string_length);
+                    geqo_eval(root, run, &mut private, &kid_storage.string, pool.string_length);
                 kid_worth = kid_storage.worth;
                 spread_chromo(&kid_storage, &mut pool);
             }
@@ -245,7 +247,7 @@ pub fn geqo(
                     ct,
                 );
                 kid_storage.worth =
-                    geqo_eval(root, &mut private, &kid_storage.string, pool.string_length);
+                    geqo_eval(root, run, &mut private, &kid_storage.string, pool.string_length);
                 kid_worth = kid_storage.worth;
                 spread_chromo(&kid_storage, &mut pool);
             }
@@ -263,7 +265,7 @@ pub fn geqo(
      */
     let best_tour = &pool.data[0].string;
 
-    let best_rel = gimme_tree(root, &mut private, best_tour, pool.string_length);
+    let best_rel = gimme_tree(root, run, &mut private, best_tour, pool.string_length);
 
     let best_rel = match best_rel {
         Some(rel) => rel,

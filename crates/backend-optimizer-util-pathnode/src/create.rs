@@ -26,6 +26,7 @@ use types_pathnodes::{
 };
 
 use backend_optimizer_util_pathnode_seams as seam;
+use types_pathnodes::planner_run::PlannerRun;
 use backend_optimizer_util_pathnode_seams::AggClauseCostsLite;
 use backend_optimizer_util_relnode_seams as bms;
 
@@ -178,14 +179,15 @@ fn pathtarget_width(p: &Path) -> i32 {
  * ======================================================================== */
 
 /// `create_seqscan_path(root, rel, required_outer, parallel_workers)`.
-pub fn create_seqscan_path(
+pub fn create_seqscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
     parallel_workers: i32,
 ) -> PgResult<PathId> {
     let mut pathnode = base_path(T_PATH, T_SEQ_SCAN, rel, rel_reltarget(root, rel));
-    pathnode.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    pathnode.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     pathnode.parallel_aware = parallel_workers > 0;
     pathnode.parallel_safe = root.rel(rel).consider_parallel;
     pathnode.parallel_workers = parallel_workers;
@@ -196,13 +198,14 @@ pub fn create_seqscan_path(
 }
 
 /// `create_samplescan_path(root, rel, required_outer)` (pathnode.c:1010).
-pub fn create_samplescan_path(
+pub fn create_samplescan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut pathnode = base_path(T_PATH, T_SAMPLE_SCAN, rel, rel_reltarget(root, rel));
-    pathnode.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    pathnode.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     pathnode.parallel_aware = false;
     pathnode.parallel_safe = root.rel(rel).consider_parallel;
     pathnode.parallel_workers = 0;
@@ -213,8 +216,9 @@ pub fn create_samplescan_path(
 }
 
 /// `create_index_path(...)` (pathnode.c:1051).
-pub fn create_index_path(
+pub fn create_index_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     index: Box<IndexOptInfo>,
     indexclauses: Vec<IndexClause>,
     indexorderbys: Vec<NodeId>,
@@ -229,7 +233,7 @@ pub fn create_index_path(
     let rel = index.rel.ok_or_else(|| PgError::error("IndexOptInfo.rel must be set"))?;
     let pathtype = if indexonly { T_INDEX_ONLY_SCAN } else { T_INDEX_SCAN };
     let mut path = base_path(T_INDEX_PATH, pathtype, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -250,8 +254,9 @@ pub fn create_index_path(
 }
 
 /// `create_bitmap_heap_path(...)` (pathnode.c:1100).
-pub fn create_bitmap_heap_path(
+pub fn create_bitmap_heap_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     bitmapqual: PathId,
     required_outer: &Relids,
@@ -259,7 +264,7 @@ pub fn create_bitmap_heap_path(
     parallel_degree: i32,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_BITMAP_HEAP_PATH, T_BITMAP_HEAP_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = parallel_degree > 0;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = parallel_degree;
@@ -273,8 +278,9 @@ pub fn create_bitmap_heap_path(
 }
 
 /// `create_bitmap_and_path(root, rel, bitmapquals)` (pathnode.c:1133).
-pub fn create_bitmap_and_path(
+pub fn create_bitmap_and_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     bitmapquals: Vec<PathId>,
 ) -> PgResult<PathId> {
@@ -284,7 +290,7 @@ pub fn create_bitmap_and_path(
         let child = root.path(bq).base();
         required_outer = seam::relids_add_members::call(required_outer, &path_req_outer(child));
     }
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, &required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, &required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -300,8 +306,9 @@ pub fn create_bitmap_and_path(
 }
 
 /// `create_bitmap_or_path(root, rel, bitmapquals)` (pathnode.c:1185).
-pub fn create_bitmap_or_path(
+pub fn create_bitmap_or_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     bitmapquals: Vec<PathId>,
 ) -> PgResult<PathId> {
@@ -311,7 +318,7 @@ pub fn create_bitmap_or_path(
         let child = root.path(bq).base();
         required_outer = seam::relids_add_members::call(required_outer, &path_req_outer(child));
     }
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, &required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, &required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -327,14 +334,15 @@ pub fn create_bitmap_or_path(
 }
 
 /// `create_tidscan_path(root, rel, tidquals, required_outer)` (pathnode.c:1237).
-pub fn create_tidscan_path(
+pub fn create_tidscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     tidquals: Vec<NodeId>,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_TID_PATH, T_TID_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -353,14 +361,15 @@ fn tidquals_of(root: &PlannerInfo, id: PathId) -> Vec<NodeId> {
 }
 
 /// `create_tidrangescan_path(...)` (pathnode.c:1266).
-pub fn create_tidrangescan_path(
+pub fn create_tidrangescan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     tidrangequals: Vec<NodeId>,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_TID_RANGE_PATH, T_TID_RANGE_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -380,8 +389,9 @@ pub fn create_tidrangescan_path(
 
 /// `create_append_path(...)` (pathnode.c:1302). `have_root=false` is C
 /// `root == NULL`; `rows < 0` means "compute from subpaths".
-pub fn create_append_path(
+pub fn create_append_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     have_root: bool,
     rel: RelId,
     subpaths: Vec<PathId>,
@@ -398,7 +408,7 @@ pub fn create_append_path(
 
     let reloptkind = root.rel(rel).reloptkind;
     if reloptkind == RELOPT_BASEREL && have_root && !subpaths.is_empty() {
-        path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+        path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     } else {
         path.param_info = seam::get_appendrel_parampathinfo::call(root, rel, required_outer);
     }
@@ -685,8 +695,9 @@ pub fn create_memoize_path(
  * ======================================================================== */
 
 /// `create_gather_merge_path(...)` (pathnode.c:2097).
-pub fn create_gather_merge_path(
+pub fn create_gather_merge_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     subpath: PathId,
     target: Option<Box<PathTarget>>,
@@ -704,7 +715,7 @@ pub fn create_gather_merge_path(
 
     let pathtarget = target.or_else(|| rel_reltarget(root, rel));
     let mut path = base_path(T_GATHER_MERGE_PATH, T_GATHER_MERGE, rel, pathtarget);
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.pathkeys = pathkeys;
 
@@ -729,8 +740,9 @@ pub fn create_gather_merge_path(
 }
 
 /// `create_gather_path(...)` (pathnode.c:2179).
-pub fn create_gather_path(
+pub fn create_gather_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     subpath: PathId,
     target: Option<Box<PathTarget>>,
@@ -741,7 +753,7 @@ pub fn create_gather_path(
     debug_assert!(sp.parallel_safe);
 
     let mut path = base_path(T_GATHER_PATH, T_GATHER, rel, target);
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = false;
     path.parallel_workers = 0;
@@ -771,8 +783,9 @@ pub fn create_gather_path(
  * ======================================================================== */
 
 /// `create_subqueryscan_path(...)` (pathnode.c:2223).
-pub fn create_subqueryscan_path(
+pub fn create_subqueryscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     subpath: PathId,
     trivial_pathtarget: bool,
@@ -781,7 +794,7 @@ pub fn create_subqueryscan_path(
 ) -> PgResult<PathId> {
     let sp: Path = root.path(subpath).base().clone();
     let mut path = base_path(T_SUBQUERY_SCAN_PATH, T_SUBQUERY_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel && sp.parallel_safe;
     path.parallel_workers = sp.parallel_workers;
@@ -795,14 +808,15 @@ pub fn create_subqueryscan_path(
 }
 
 /// `create_functionscan_path(...)` (pathnode.c:2253).
-pub fn create_functionscan_path(
+pub fn create_functionscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     pathkeys: Vec<PathKey>,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_FUNCTION_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -813,13 +827,14 @@ pub fn create_functionscan_path(
 }
 
 /// `create_tablefuncscan_path(...)` (pathnode.c:2279).
-pub fn create_tablefuncscan_path(
+pub fn create_tablefuncscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_TABLE_FUNC_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -830,13 +845,14 @@ pub fn create_tablefuncscan_path(
 }
 
 /// `create_valuesscan_path(...)` (pathnode.c:2305).
-pub fn create_valuesscan_path(
+pub fn create_valuesscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_VALUES_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -847,14 +863,15 @@ pub fn create_valuesscan_path(
 }
 
 /// `create_ctescan_path(...)` (pathnode.c:2331).
-pub fn create_ctescan_path(
+pub fn create_ctescan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     pathkeys: Vec<PathKey>,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_CTE_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -865,13 +882,14 @@ pub fn create_ctescan_path(
 }
 
 /// `create_namedtuplestorescan_path(...)` (pathnode.c:2357).
-pub fn create_namedtuplestorescan_path(
+pub fn create_namedtuplestorescan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_NAMED_TUPLESTORE_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -882,13 +900,14 @@ pub fn create_namedtuplestorescan_path(
 }
 
 /// `create_resultscan_path(...)` (pathnode.c:2383).
-pub fn create_resultscan_path(
+pub fn create_resultscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_RESULT, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -899,13 +918,14 @@ pub fn create_resultscan_path(
 }
 
 /// `create_worktablescan_path(...)` (pathnode.c:2409). Cost = CTE scan.
-pub fn create_worktablescan_path(
+pub fn create_worktablescan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<PathId> {
     let mut path = base_path(T_PATH, T_WORK_TABLE_SCAN, rel, rel_reltarget(root, rel));
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -920,8 +940,9 @@ pub fn create_worktablescan_path(
  * ======================================================================== */
 
 /// `create_foreignscan_path(...)` (pathnode.c:2442).
-pub fn create_foreignscan_path(
+pub fn create_foreignscan_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     target: Option<Box<PathTarget>>,
     rows: f64,
@@ -936,7 +957,7 @@ pub fn create_foreignscan_path(
 ) -> PgResult<PathId> {
     let pathtarget = target.or_else(|| rel_reltarget(root, rel));
     let mut path = base_path(T_FOREIGN_PATH, T_FOREIGN_SCAN, rel, pathtarget);
-    path.param_info = seam::get_baserel_parampathinfo::call(root, rel, required_outer);
+    path.param_info = seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = root.rel(rel).consider_parallel;
     path.parallel_workers = 0;
@@ -1059,8 +1080,9 @@ pub fn calc_non_nestloop_required_outer(
  * ======================================================================== */
 
 /// `create_nestloop_path(...)` (pathnode.c:2670).
-pub fn create_nestloop_path(
+pub fn create_nestloop_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     jointype: JoinType,
     workspace: &JoinCostWorkspace,
@@ -1104,6 +1126,7 @@ pub fn create_nestloop_path(
         .unwrap_or_else(default_sjinfo);
     let (ppi, restrict_clauses) = seam::get_joinrel_parampathinfo::call(
         root,
+        run,
         joinrel,
         outer_path,
         inner_path,
@@ -1135,8 +1158,9 @@ pub fn create_nestloop_path(
 }
 
 /// `create_mergejoin_path(...)` (pathnode.c:2767).
-pub fn create_mergejoin_path(
+pub fn create_mergejoin_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     jointype: JoinType,
     workspace: &JoinCostWorkspace,
@@ -1162,6 +1186,7 @@ pub fn create_mergejoin_path(
         .unwrap_or_else(default_sjinfo);
     let (ppi, restrict_clauses) = seam::get_joinrel_parampathinfo::call(
         root,
+        run,
         joinrel,
         outer_path,
         inner_path,
@@ -1199,8 +1224,9 @@ pub fn create_mergejoin_path(
 }
 
 /// `create_hashjoin_path(...)` (pathnode.c:2835).
-pub fn create_hashjoin_path(
+pub fn create_hashjoin_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinrel: RelId,
     jointype: JoinType,
     workspace: &JoinCostWorkspace,
@@ -1223,6 +1249,7 @@ pub fn create_hashjoin_path(
         .unwrap_or_else(default_sjinfo);
     let (ppi, restrict_clauses) = seam::get_joinrel_parampathinfo::call(
         root,
+        run,
         joinrel,
         outer_path,
         inner_path,
@@ -2249,7 +2276,11 @@ pub fn create_unique_path(
 /// The `MemoryContextSwitchTo(GetMemoryChunkContext(rel))` dance around the C body
 /// is a no-op in the arena/`PlannerInfo` model (paths live in the planner arena,
 /// not a per-rel chunk context), so it is dropped behaviour-preservingly.
-pub fn install_dummy_append_path(root: &mut PlannerInfo, rel: RelId) -> PgResult<()> {
+pub fn install_dummy_append_path<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<()> {
     // Set dummy size estimate.
     root.rel_mut(rel).rows = 0.0;
 
@@ -2261,6 +2292,7 @@ pub fn install_dummy_append_path(root: &mut PlannerInfo, rel: RelId) -> PgResult
     let lateral_relids = root.rel(rel).lateral_relids.clone();
     let dummy = create_append_path(
         root,
+        run,
         /* have_root = */ false,
         rel,
         Vec::new(),

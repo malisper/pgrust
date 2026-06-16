@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     EcId, EmId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
@@ -28,8 +29,9 @@ use crate::relevance::{
 
 /// `create_join_clause(root, ec, opno, leftem, rightem, parent_ec)`
 /// (equivclass.c:1983).
-pub fn create_join_clause(
+pub fn create_join_clause<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     ec: EcId,
     opno: Oid,
     leftem: EmId,
@@ -46,7 +48,7 @@ pub fn create_join_clause(
     if root.em(leftem).em_is_child || root.em(rightem).em_is_child {
         let leftp = root.em(leftem).em_parent.unwrap_or(leftem);
         let rightp = root.em(rightem).em_parent.unwrap_or(rightem);
-        parent_rinfo = Some(create_join_clause(root, ec, opno, leftp, rightp, parent_ec)?);
+        parent_rinfo = Some(create_join_clause(root, run, ec, opno, leftp, rightp, parent_ec)?);
     }
 
     let item1 = em_expr(root, leftem);
@@ -59,6 +61,7 @@ pub fn create_join_clause(
     );
 
     let rinfo = ec_seam::build_implied_join_equality::call(
+        run,
         root,
         opno,
         collation,
@@ -108,8 +111,9 @@ pub fn create_join_clause(
 
 /// `generate_join_implied_equalities(root, join_relids, outer_relids,
 /// inner_rel, sjinfo)` (equivclass.c:1550).
-pub fn generate_join_implied_equalities(
+pub fn generate_join_implied_equalities<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     join_relids: Relids,
     outer_relids: Relids,
     inner_rel: RelId,
@@ -159,6 +163,7 @@ pub fn generate_join_implied_equalities(
         let mut sublist = if !root.ec(ec).ec_broken {
             generate_join_implied_equalities_normal(
                 root,
+                run,
                 ec,
                 &join_relids,
                 &outer_relids,
@@ -189,8 +194,9 @@ pub fn generate_join_implied_equalities(
 
 /// `generate_join_implied_equalities_for_ecs(root, eclasses, join_relids,
 /// outer_relids, inner_rel)` (equivclass.c:1650). Assumes sjinfo == NULL.
-pub fn generate_join_implied_equalities_for_ecs(
+pub fn generate_join_implied_equalities_for_ecs<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     eclasses: Vec<EcId>,
     join_relids: Relids,
     outer_relids: Relids,
@@ -222,6 +228,7 @@ pub fn generate_join_implied_equalities_for_ecs(
         let mut sublist = if !root.ec(ec).ec_broken {
             generate_join_implied_equalities_normal(
                 root,
+                run,
                 ec,
                 &join_relids,
                 &outer_relids,
@@ -258,8 +265,9 @@ fn em_expr_is_var_shaped(root: &PlannerInfo, em: EmId) -> bool {
             .unwrap_or(false)
 }
 
-fn generate_join_implied_equalities_normal(
+fn generate_join_implied_equalities_normal<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     ec: EcId,
     join_relids: &Relids,
     outer_relids: &Relids,
@@ -332,6 +340,7 @@ fn generate_join_implied_equalities_normal(
         /* set parent_ec to mark redundant */
         let rinfo = create_join_clause(
             root,
+            run,
             ec,
             best_eq_op,
             best_outer_em.expect("best outer em"),
@@ -363,7 +372,7 @@ fn generate_join_implied_equalities_normal(
                     return Ok(Vec::new());
                 }
                 /* do NOT set parent_ec, not redundant */
-                let rinfo = create_join_clause(root, ec, eq_op, prev, cur_em, None)?;
+                let rinfo = create_join_clause(root, run, ec, eq_op, prev, cur_em, None)?;
                 result.push(rinfo);
             }
             prev_em = Some(cur_em);
@@ -419,8 +428,9 @@ pub type EcMatchesCallback<'a> = dyn FnMut(&PlannerInfo, RelId, EcId, EmId) -> b
 
 /// `generate_implied_equalities_for_column(root, rel, callback, callback_arg,
 /// prohibited_rels)` (equivclass.c:3239).
-pub fn generate_implied_equalities_for_column(
+pub fn generate_implied_equalities_for_column<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     callback: &mut EcMatchesCallback<'_>,
     prohibited_rels: &Relids,
@@ -501,7 +511,7 @@ pub fn generate_implied_equalities_for_column(
                 continue;
             }
             /* set parent_ec to mark redundant */
-            let rinfo = create_join_clause(root, ec, eq_op, cur_em, other_em, Some(ec))?;
+            let rinfo = create_join_clause(root, run, ec, eq_op, cur_em, other_em, Some(ec))?;
             result.push(rinfo);
         }
 
@@ -518,7 +528,10 @@ pub fn generate_implied_equalities_for_column(
  * ==================================================================== */
 
 /// `reconsider_outer_join_clauses(root)` (equivclass.c:2135).
-pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn reconsider_outer_join_clauses<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+) -> PgResult<()> {
     /* outer loop repeats until no more deductions */
     loop {
         let mut found = false;
@@ -527,10 +540,10 @@ pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()> {
         let mut idx = 0;
         while idx < root.left_join_clauses.len() {
             let ojcinfo = root.left_join_clauses[idx].clone();
-            if reconsider_outer_join_clause(root, &ojcinfo, true)? {
+            if reconsider_outer_join_clause(root, run, &ojcinfo, true)? {
                 found = true;
                 root.left_join_clauses.remove(idx);
-                throw_back_dummy(root, ojcinfo.rinfo)?;
+                throw_back_dummy(root, run, ojcinfo.rinfo)?;
             } else {
                 idx += 1;
             }
@@ -540,10 +553,10 @@ pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()> {
         let mut idx = 0;
         while idx < root.right_join_clauses.len() {
             let ojcinfo = root.right_join_clauses[idx].clone();
-            if reconsider_outer_join_clause(root, &ojcinfo, false)? {
+            if reconsider_outer_join_clause(root, run, &ojcinfo, false)? {
                 found = true;
                 root.right_join_clauses.remove(idx);
-                throw_back_dummy(root, ojcinfo.rinfo)?;
+                throw_back_dummy(root, run, ojcinfo.rinfo)?;
             } else {
                 idx += 1;
             }
@@ -553,10 +566,10 @@ pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()> {
         let mut idx = 0;
         while idx < root.full_join_clauses.len() {
             let ojcinfo = root.full_join_clauses[idx].clone();
-            if reconsider_full_join_clause(root, &ojcinfo)? {
+            if reconsider_full_join_clause(root, run, &ojcinfo)? {
                 found = true;
                 root.full_join_clauses.remove(idx);
-                throw_back_dummy(root, ojcinfo.rinfo)?;
+                throw_back_dummy(root, run, ojcinfo.rinfo)?;
             } else {
                 idx += 1;
             }
@@ -576,14 +589,18 @@ pub fn reconsider_outer_join_clauses(root: &mut PlannerInfo) -> PgResult<()> {
         .map(|o| o.rinfo)
         .collect();
     for rinfo in remaining {
-        ec_seam::distribute_restrictinfo_to_rels::call(root, rinfo)?;
+        ec_seam::distribute_restrictinfo_to_rels::call(run, root, rinfo)?;
     }
     Ok(())
 }
 
 /// throw back a dummy constant-TRUE replacement clause (the "see notes above"
 /// path in `reconsider_outer_join_clauses`).
-fn throw_back_dummy(root: &mut PlannerInfo, rinfo: RinfoId) -> PgResult<()> {
+fn throw_back_dummy<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rinfo: RinfoId,
+) -> PgResult<()> {
     let ri = root.rinfo(rinfo).clone();
     let bool_true = ec_seam::make_bool_const::call(true, false);
     let dummy = ec_seam::make_restrictinfo::call(
@@ -598,13 +615,14 @@ fn throw_back_dummy(root: &mut PlannerInfo, rinfo: RinfoId) -> PgResult<()> {
         ri.incompatible_relids.clone(),
         ri.outer_relids.clone(),
     )?;
-    ec_seam::distribute_restrictinfo_to_rels::call(root, dummy)
+    ec_seam::distribute_restrictinfo_to_rels::call(run, root, dummy)
 }
 
 /* ----- reconsider_outer_join_clause (equivclass.c:2257) -------------- */
 
-fn reconsider_outer_join_clause(
+fn reconsider_outer_join_clause<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     ojcinfo: &types_pathnodes::OuterJoinClauseInfo,
     outer_on_left: bool,
 ) -> PgResult<bool> {
@@ -677,6 +695,7 @@ fn reconsider_outer_join_clause(
             let const_expr = em_expr(root, cur_em);
             let inner_relids_copy = bms::relids_copy::call(&inner_relids);
             let newrinfo = ec_seam::build_implied_join_equality::call(
+                run,
                 root,
                 eq_op,
                 collation,
@@ -706,8 +725,9 @@ fn reconsider_outer_join_clause(
 
 /* ----- reconsider_full_join_clause (equivclass.c:2384) -------------- */
 
-fn reconsider_full_join_clause(
+fn reconsider_full_join_clause<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     ojcinfo: &types_pathnodes::OuterJoinClauseInfo,
 ) -> PgResult<bool> {
     let rinfo = ojcinfo.rinfo;
@@ -794,7 +814,7 @@ fn reconsider_full_join_clause(
                 let const_expr = em_expr(root, cur_em);
                 let lr = bms::relids_copy::call(&left_relids);
                 let newrinfo = ec_seam::build_implied_join_equality::call(
-                    root, eq_op, collation, leftvar.clone(), const_expr, lr, min_security,
+                    run, root, eq_op, collation, leftvar.clone(), const_expr, lr, min_security,
                 )?;
                 let jdomain = find_join_domain(root, &sjinfo.syn_lefthand).jd_relids;
                 let (ok, _ri) = process_equivalence(root, newrinfo, jdomain)?;
@@ -810,7 +830,7 @@ fn reconsider_full_join_clause(
                 let const_expr = em_expr(root, cur_em);
                 let rr = bms::relids_copy::call(&right_relids);
                 let newrinfo = ec_seam::build_implied_join_equality::call(
-                    root, eq_op, collation, rightvar.clone(), const_expr, rr, min_security,
+                    run, root, eq_op, collation, rightvar.clone(), const_expr, rr, min_security,
                 )?;
                 let jdomain = find_join_domain(root, &sjinfo.syn_righthand).jd_relids;
                 let (ok, _ri) = process_equivalence(root, newrinfo, jdomain)?;

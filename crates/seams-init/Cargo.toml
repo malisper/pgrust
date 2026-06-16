@@ -85,6 +85,7 @@ backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
+backend-catalog-index = { path = "../backend-catalog-index" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-conversion = { path = "../backend-catalog-pg-conversion" }
@@ -210,6 +211,7 @@ backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-commands-async = { path = "../backend-commands-async" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
+backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
 backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }

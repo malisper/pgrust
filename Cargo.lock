@@ -3889,6 +3889,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-index"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-index-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-index-seams"
 version = "0.0.0"
 dependencies = [
@@ -9905,6 +9918,7 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-pathnodes",
@@ -18072,6 +18086,7 @@ dependencies = [
  "backend-catalog-catalog",
  "backend-catalog-dependency",
  "backend-catalog-heap",
+ "backend-catalog-index",
  "backend-catalog-indexing",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
@@ -18211,6 +18226,7 @@ dependencies = [
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
+ "backend-optimizer-rte-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",

@@ -157,8 +157,8 @@ pub fn init_seams() {
     use backend_optimizer_util_joininfo_ext_seams as jiext;
 
     /* ---- planmain.c entry points (plan-small-seams) ------------------- */
-    psmall::add_base_rels_to_query::set(|root, jtnode| {
-        baserels::add_base_rels_to_query(root, jtnode).expect("add_base_rels_to_query")
+    psmall::add_base_rels_to_query::set(|root, run, jtnode| {
+        baserels::add_base_rels_to_query(root, run, jtnode).expect("add_base_rels_to_query")
     });
     psmall::remove_useless_groupby_columns::set(|root, run| {
         groupby::remove_useless_groupby_columns(root, run)
@@ -189,20 +189,20 @@ pub fn init_seams() {
     eqext::add_vars_to_attr_needed::set(|root, vars, where_needed| {
         targetlist::add_vars_to_attr_needed(root, vars, where_needed)
     });
-    eqext::distribute_restrictinfo_to_rels::set(|root, restrictinfo| {
-        quals::distribute_restrictinfo_to_rels(root, restrictinfo)
+    eqext::distribute_restrictinfo_to_rels::set(|run, root, restrictinfo| {
+        quals::distribute_restrictinfo_to_rels(run, root, restrictinfo)
     });
     eqext::process_implied_equality::set(
-        |root, opno, collation, item1, item2, qualscope, security_level, both_const| {
+        |run, root, opno, collation, item1, item2, qualscope, security_level, both_const| {
             quals::process_implied_equality(
-                root, opno, collation, &item1, &item2, &qualscope, security_level, both_const,
+                run, root, opno, collation, &item1, &item2, &qualscope, security_level, both_const,
             )
         },
     );
     eqext::build_implied_join_equality::set(
-        |root, opno, collation, item1, item2, qualscope, security_level| {
+        |run, root, opno, collation, item1, item2, qualscope, security_level| {
             quals::build_implied_join_equality(
-                root, opno, collation, &item1, &item2, &qualscope, security_level,
+                run, root, opno, collation, &item1, &item2, &qualscope, security_level,
             )
         },
     );

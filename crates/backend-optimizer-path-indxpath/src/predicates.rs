@@ -80,9 +80,10 @@ pub fn check_index_only(
 /// `check_index_predicates(root, rel)` (indxpath.c:3943) — set the
 /// predicate-derived `predOK` / `indrestrictinfo` fields for each index of the
 /// relation.
-pub fn check_index_predicates(
-    _mcx: Mcx<'_>,
+pub fn check_index_predicates<'mcx>(
+    _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
 ) -> Result<(), types_error::PgError> {
     // Initialize indrestrictinfo to baserestrictinfo and detect partial indexes.
@@ -138,7 +139,7 @@ pub fn check_index_predicates(
         // sjinfo here (check_index_predicates, indxpath.c:4010).
         let generated =
             backend_optimizer_path_equivclass_seams::generate_join_implied_equalities::call(
-                root, joinrelids, otherrels, rel, None,
+                root, run, joinrelids, otherrels, rel, None,
             )?;
         for ri in generated {
             clauselist.push(root.rinfo(ri).clause);

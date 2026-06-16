@@ -1170,6 +1170,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` projected to
+    /// `Form_pg_index.indrelid` (`catalog/index.c` `IndexGetRelation`). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`) so the caller decides between
+    /// `InvalidOid` (`missing_ok`) and the `elog(ERROR, "cache lookup failed for
+    /// index %u")`. The scalar `indrelid` is returned by value (no allocation),
+    /// mirroring the C that returns a bare `Oid`; the installer owns the
+    /// `ReleaseSysCache`. The C `Assert(index->indexrelid == indexId)` lives in
+    /// the installer.
+    pub fn index_get_relid(index_oid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid))` +
     /// `GETSTRUCT(Form_pg_type)` (`utils/cache/lsyscache.c` reads). Returns the
     /// fixed-length `pg_type` columns by value (every field through

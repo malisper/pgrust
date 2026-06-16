@@ -1107,9 +1107,10 @@ pub fn match_join_clauses_to_index(
 /// look for EquivalenceClasses that can generate join clauses matching the
 /// index, via `generate_implied_equalities_for_column` (whose per-member callback
 /// is `ec_member_matches_indexcol`, ported in [`crate::unique`]).
-pub fn match_eclass_clauses_to_index(
-    mcx: Mcx<'_>,
+pub fn match_eclass_clauses_to_index<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     index: &IndexOptInfo,
     clauseset: &mut IndexClauseSet,
 ) -> PgResult<()> {
@@ -1147,6 +1148,7 @@ pub fn match_eclass_clauses_to_index(
         let clauses =
             backend_optimizer_path_equivclass::join::generate_implied_equalities_for_column(
                 root,
+                run,
                 rel,
                 &mut callback,
                 &prohibited_rels,

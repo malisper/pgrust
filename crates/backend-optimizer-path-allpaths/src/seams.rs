@@ -21,6 +21,7 @@
 
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PathId, PlannerInfo, RelId};
 
 seam_core::seam!(
@@ -28,7 +29,15 @@ seam_core::seam!(
     /// is identified by its 1-based range-table index. Takes `&mut PlannerInfo`
     /// because the C body allocates constraint expressions into the arena and may
     /// set `rel->partition_qual` via `set_baserel_partition_constraint`.
-    pub fn relation_excluded_by_constraints(root: &mut PlannerInfo, rel: RelId, rti: Index) -> bool
+    ///
+    /// Threads the planner-run resolver (`run`): the body reads RTE fields
+    /// through the re-signed `rte_*` seams that now take `&PlannerRun<'mcx>`.
+    pub fn relation_excluded_by_constraints<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        rel: RelId,
+        rti: Index,
+    ) -> bool
 );
 
 seam_core::seam!(
