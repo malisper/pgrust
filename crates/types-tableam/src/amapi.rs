@@ -20,6 +20,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::boxed::Box;
+use std::string::String;
 use std::vec::Vec;
 
 use mcx::Mcx;
@@ -89,6 +90,23 @@ pub struct IndexBuildResult {
     pub index_tuples: f64,
 }
 
+/// The five output estimates `amcostestimate` writes through its
+/// `*indexStartupCost` / `*indexTotalCost` / `*indexSelectivity` /
+/// `*indexCorrelation` / `*indexPages` pointer arguments, returned as a value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AmCostEstimate {
+    /// `*indexStartupCost`
+    pub index_startup_cost: Cost,
+    /// `*indexTotalCost`
+    pub index_total_cost: Cost,
+    /// `*indexSelectivity`
+    pub index_selectivity: Selectivity,
+    /// `*indexCorrelation` (`double`)
+    pub index_correlation: f64,
+    /// `*indexPages` (`double`)
+    pub index_pages: f64,
+}
+
 /// `amtranslate_strategy` callback (`access/amapi.h`).
 pub type IndexAmTranslateStrategy = fn(StrategyNumber, Oid) -> CompareType;
 /// `amtranslate_cmptype` callback (`access/amapi.h`).
@@ -104,6 +122,80 @@ pub type IndexAmValidate = fn(Oid) -> bool;
 /// as a type-erased payload so the AM callback can downcast it.
 pub struct IndexInfo {
     pub payload: Option<Box<dyn core::any::Any>>,
+}
+
+/// `struct PlannerInfo` (`nodes/pathnodes.h`) — opaque to `types-tableam`
+/// (which sits below `types-nodes` and cannot name the planner structs).
+/// `amcostestimate` only forwards it to the AM's cost routine; carried as a
+/// type-erased payload the AM callback can downcast.
+pub struct PlannerInfo {
+    pub payload: Option<Box<dyn core::any::Any>>,
+}
+
+/// `struct IndexPath` (`nodes/pathnodes.h`) — opaque to `types-tableam`; see
+/// [`PlannerInfo`]. Forwarded to the AM's `amcostestimate` callback.
+pub struct IndexPath {
+    pub payload: Option<Box<dyn core::any::Any>>,
+}
+
+/// `Cost` (`nodes/nodes.h`) — `typedef double Cost`.
+pub type Cost = f64;
+/// `Selectivity` (`nodes/nodes.h`) — `typedef double Selectivity`.
+pub type Selectivity = f64;
+
+/// `IndexAMProperty` (`access/amapi.h`) — the index-AM property codes passed to
+/// an AM's `amproperty` callback. Discriminants match the C enum.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexAMProperty {
+    /// anything not known to core code
+    AMPROP_UNKNOWN = 0,
+    /// column properties
+    AMPROP_ASC,
+    AMPROP_DESC,
+    AMPROP_NULLS_FIRST,
+    AMPROP_NULLS_LAST,
+    AMPROP_ORDERABLE,
+    AMPROP_DISTANCE_ORDERABLE,
+    AMPROP_RETURNABLE,
+    AMPROP_SEARCH_ARRAY,
+    AMPROP_SEARCH_NULLS,
+    /// index properties
+    AMPROP_CLUSTERABLE,
+    AMPROP_INDEX_SCAN,
+    AMPROP_BITMAP_SCAN,
+    AMPROP_BACKWARD_SCAN,
+    /// AM properties
+    AMPROP_CAN_ORDER,
+    AMPROP_CAN_UNIQUE,
+    AMPROP_CAN_MULTI_COL,
+    AMPROP_CAN_EXCLUDE,
+    AMPROP_CAN_INCLUDE,
+}
+
+/// `OpFamilyMember` (`access/amapi.h`) — tracks an operator or support function
+/// while building/adding to an opclass or opfamily. `amadjustmembers` receives
+/// lists of these and may alter the `ref` fields.
+#[derive(Clone, Copy, Debug)]
+pub struct OpFamilyMember {
+    /// is this an operator, or support func?
+    pub is_func: bool,
+    /// operator or support func's OID
+    pub object: Oid,
+    /// strategy or support func number
+    pub number: i32,
+    /// lefttype
+    pub lefttype: Oid,
+    /// righttype
+    pub righttype: Oid,
+    /// ordering operator's sort opfamily, or 0
+    pub sortfamily: Oid,
+    /// hard or soft dependency?
+    pub ref_is_hard: bool,
+    /// is dependency on opclass or opfamily?
+    pub ref_is_family: bool,
+    /// OID of opclass or opfamily
+    pub refobjid: Oid,
 }
 
 /// `TIDBitmap` (`nodes/tidbitmap.h`) — opaque to the index-AM dispatch layer:
@@ -180,6 +272,21 @@ pub struct IndexAmRoutine {
     pub amvalidate: Option<IndexAmValidate>,
 
     /* ---- required interface functions invoked by indexam.c ---- */
+    /// `ambuild(heapRelation, indexRelation, indexInfo)` — build a new index.
+    /// `indexInfo` is the type-erased [`IndexInfo`] carrier (the dispatch layer
+    /// cannot name `types_nodes::execnodes::IndexInfo`); the AM adapter
+    /// downcasts it.
+    pub ambuild: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        heap_relation: &Relation<'mcx>,
+        index_relation: &Relation<'mcx>,
+        index_info: &mut IndexInfo,
+    ) -> PgResult<IndexBuildResult>,
+
+    /// `ambuildempty(indexRelation)` — build an empty index for the init fork.
+    pub ambuildempty:
+        for<'mcx> fn(mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()>,
+
     /// `aminsert(indexRelation, values, isnull, heap_tid, heapRelation,
     /// checkUnique, indexUnchanged, indexInfo)`.
     #[allow(clippy::type_complexity)]
@@ -247,6 +354,64 @@ pub struct IndexAmRoutine {
     /// `amcanreturn(indexRelation, attno)` — does the AM support index-only
     /// scans for the given column?
     pub amcanreturn: Option<fn(index_relation: &Relation<'_>, attno: i32) -> PgResult<bool>>,
+
+    /* ---- planning / build-time interface functions ---- */
+    /// `amcostestimate(root, path, loop_count, *indexStartupCost,
+    /// *indexTotalCost, *indexSelectivity, *indexCorrelation, *indexPages)` —
+    /// estimate the cost of an index scan. `root`/`path` are the type-erased
+    /// planner carriers ([`PlannerInfo`]/[`IndexPath`]); the output estimates
+    /// the C writes through pointers are returned in the tuple. Required (the
+    /// C field is not marked `can be NULL`).
+    #[allow(clippy::type_complexity)]
+    pub amcostestimate: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        path: &mut IndexPath,
+        loop_count: f64,
+    ) -> PgResult<AmCostEstimate>,
+
+    /// `amgettreeheight(rel)` — estimate height of a tree-structured index.
+    /// `/* can be NULL */`.
+    pub amgettreeheight: Option<for<'mcx> fn(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<i32>>,
+
+    /// `amoptions(reloptions, validate)` — parse index reloptions, returning the
+    /// packed `bytea` options blob (`None` for the C `NULL`).
+    pub amoptions:
+        for<'mcx> fn(mcx: Mcx<'mcx>, reloptions: Datum<'mcx>, validate: bool) -> PgResult<Option<Vec<u8>>>,
+
+    /// `amproperty(index_oid, attno, prop, propname, *res, *isnull)` — report
+    /// an AM/index/column property. Returns `true` if the property was handled
+    /// (writing `res`/`isnull`), `false` to punt to generic code.
+    /// `/* can be NULL */`.
+    #[allow(clippy::type_complexity)]
+    pub amproperty: Option<
+        fn(
+            index_oid: Oid,
+            attno: i32,
+            prop: IndexAMProperty,
+            propname: &str,
+            res: &mut bool,
+            isnull: &mut bool,
+        ) -> PgResult<bool>,
+    >,
+
+    /// `ambuildphasename(phasenum)` — name of a build phase for progress
+    /// reporting, or `None` (C `NULL`). `/* can be NULL */`.
+    pub ambuildphasename: Option<fn(phasenum: i64) -> Option<String>>,
+
+    /// `amadjustmembers(opfamilyoid, opclassoid, operators, functions)` —
+    /// validate operators/support functions being added to an opclass/family
+    /// and adjust their dependency `ref` fields in place. `/* can be NULL */`.
+    #[allow(clippy::type_complexity)]
+    pub amadjustmembers: Option<
+        for<'mcx> fn(
+            mcx: Mcx<'mcx>,
+            opfamilyoid: Oid,
+            opclassoid: Oid,
+            operators: &mut Vec<OpFamilyMember>,
+            functions: &mut Vec<OpFamilyMember>,
+        ) -> PgResult<()>,
+    >,
 
     /// `amgettuple(scan, direction)` — next valid tuple (TID into
     /// `scan->xs_heaptid`).

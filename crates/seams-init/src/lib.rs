@@ -134,6 +134,13 @@ pub fn init_all() {
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_typecmds::init_seams();
+    backend_conv_utf8_and_big5::init_seams();
+    backend_conv_utf8_and_cyrillic::init_seams();
+    backend_conv_utf8_and_euc2004::init_seams();
+    backend_conv_utf8_and_euc_cn::init_seams();
+    backend_conv_utf8_and_euc_jp::init_seams();
+    backend_conv_utf8_and_euc_kr::init_seams();
+    backend_conv_utf8_and_euc_tw::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execCurrent::init_seams();
     backend_executor_execExpr::init_seams();
@@ -192,6 +199,8 @@ pub fn init_all() {
     backend_lib_dshash::init_seams();
     backend_main_main::init_seams();
     backend_libpq_auth::init_seams();
+    backend_libpq_be_fsstubs::init_seams();
+    backend_libpq_hba::init_seams();
     backend_libpq_be_gssapi_common::init_seams();
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
@@ -408,6 +417,7 @@ pub fn init_all() {
     common_ip::init_seams();
     common_pglz::init_seams();
     common_prng_base64::init_seams();
+    common_scram_common::init_seams();
     common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();

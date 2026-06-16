@@ -12,8 +12,11 @@
 
 use mcx::Mcx;
 
-use types_amapi::{IndexAmRoutine, T_IndexAmRoutine};
-use types_core::primitive::InvalidOid;
+use types_amapi::{
+    AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
+    IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
+};
+use types_core::primitive::{InvalidOid, Oid};
 use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
@@ -27,8 +30,8 @@ use types_error::PgResult;
 
 use crate::spgscan::so;
 use crate::{
-    spgbeginscan, spgbulkdelete, spgcanreturn, spgendscan, spggetbitmap, spggettuple, spginsert,
-    spgrescan, spgvacuumcleanup,
+    spgbeginscan, spgbuildempty, spgbulkdelete, spgcanreturn, spgendscan, spggetbitmap,
+    spggettuple, spginsert, spgproperty, spgrescan, spgvacuumcleanup, IndexAMProperty,
 };
 
 /// `VACUUM_OPTION_PARALLEL_BULKDEL` (`commands/vacuum.h`): `1 << 0`.
@@ -73,6 +76,23 @@ pub fn spghandler() -> IndexAmRoutine {
         amtranslatestrategy: None,
         amtranslatecmptype: None,
 
+        // Build / options / plan-time callbacks (#340). `spgbuildempty` and
+        // `spgproperty` are this crate's own fns (wired directly; `spgproperty`
+        // builds a transient cache context like `spgcanreturn_am`). `spgbuild`
+        // needs the real `IndexInfo` (erased carrier can't supply it),
+        // `spgoptions` needs the reloptions `Datum` detoast the #341 dispatch
+        // does, `spgcostestimate` (selfuncs.c) and `spgadjustmembers`
+        // (spg-validate) are not reachable from here — sanctioned panic legs
+        // reached via #341. SP-GiST has no gettreeheight/buildphasename (NULL).
+        ambuild: spgbuild_am,
+        ambuildempty: spgbuildempty_am,
+        amcostestimate: spgcostestimate_am,
+        amgettreeheight: None,
+        amoptions: spgoptions_am,
+        amproperty: Some(spgproperty_am),
+        ambuildphasename: None,
+        amadjustmembers: Some(spgadjustmembers_am),
+
         // Insert / vacuum callbacks (F1/F4).
         aminsert: spginsert_am,
         aminsertcleanup: None,
@@ -94,6 +114,87 @@ pub fn spghandler() -> IndexAmRoutine {
         aminitparallelscan: None,
         amparallelrescan: None,
     }
+}
+
+// ===========================================================================
+// Build / options / plan-time vtable adapters (#340). See the doc comment in
+// `spghandler` for why the build / cross-crate slots are sanctioned panic legs
+// (reached via the #341 index.c dispatch).
+// ===========================================================================
+
+/// `ambuild` adapter — `spgbuild` needs the real `IndexInfo`, which the erased
+/// `IndexInfo` carrier cannot supply; reached via the #341 dispatch.
+fn spgbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &Relation<'mcx>,
+    _index_relation: &Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!(
+        "spgbuild: index.c build dispatch (#341) not yet ported — \
+         needs the real types_nodes::execnodes::IndexInfo"
+    )
+}
+
+/// `ambuildempty` adapter — wires this crate's `spgbuildempty`.
+fn spgbuildempty_am<'mcx>(mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()> {
+    spgbuildempty(mcx, index_relation)
+}
+
+/// `amcostestimate` adapter — `spgcostestimate` (selfuncs.c) not reachable;
+/// reached via the #341 dispatch.
+fn spgcostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("spgcostestimate: index cost estimation (selfuncs.c) not yet reachable from spgist (#341)")
+}
+
+/// `amoptions` adapter — `spgoptions` takes the parsed reloptions byte image,
+/// which needs the reloptions `Datum` detoast the #341 dispatch performs.
+fn spgoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    panic!("spgoptions: needs the reloptions Datum detoast done by the index.c dispatch (#341)")
+}
+
+/// `amproperty` adapter — wires this crate's `spgproperty`, mapping the
+/// canonical `IndexAMProperty` to SP-GiST's local enum. `spgproperty` needs an
+/// `Mcx` for the opclass-cache lookup; build a transient context (mirrors
+/// `spgcanreturn_am`).
+fn spgproperty_am(
+    index_oid: Oid,
+    attno: i32,
+    prop: AmIndexAMProperty,
+    _propname: &str,
+    res: &mut bool,
+    isnull: &mut bool,
+) -> PgResult<bool> {
+    let sprop = match prop {
+        AmIndexAMProperty::AMPROP_DISTANCE_ORDERABLE => IndexAMProperty::DistanceOrderable,
+        _ => IndexAMProperty::Other,
+    };
+    let cx = mcx::MemoryContext::new("SP-GiST amproperty temporary context");
+    let (handled, r, n) = spgproperty(cx.mcx(), index_oid, attno, sprop)?;
+    *res = r;
+    *isnull = n;
+    Ok(handled)
+}
+
+/// `amadjustmembers` adapter — `spgadjustmembers` (spg-validate) not reachable
+/// from this crate; reached via the #341 dispatch.
+fn spgadjustmembers_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _opfamilyoid: Oid,
+    _opclassoid: Oid,
+    _operators: &mut alloc::vec::Vec<OpFamilyMember>,
+    _functions: &mut alloc::vec::Vec<OpFamilyMember>,
+) -> PgResult<()> {
+    panic!("spgadjustmembers: opclass member adjust (spg-validate) not yet reachable from spgist-core (#341)")
 }
 
 // ===========================================================================

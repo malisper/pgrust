@@ -29,7 +29,8 @@ use types_amapi::{
 };
 // Vtable-facing types (F2/F3): unified descriptor + erased AM-opaque carrier (A0).
 use types_tableam::amapi::{
-    IndexInfo, IndexUniqueCheck as AmIndexUniqueCheck, TIDBitmap as AmTIDBitmap,
+    AmCostEstimate, IndexInfo, IndexPath, IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember,
+    PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
 use types_tableam::genam::{
     IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
@@ -171,6 +172,23 @@ pub fn hashhandler() -> IndexAmRoutine {
         // cannot be the raw `fn(Oid) -> bool` ABI pointer; it is reached by
         // name (mirrors nbtree).
         amvalidate: None,
+
+        // Build / options / plan-time callbacks (#340). `hashbuildempty` is
+        // this crate's own fn (wired directly). `hashbuild` lives here too but
+        // needs the real `types_nodes::execnodes::IndexInfo<'mcx>` which the
+        // erased `IndexInfo` carrier cannot supply; `hashoptions` (hash-core),
+        // `hashcostestimate` (selfuncs.c) and `hashadjustmembers`
+        // (hashvalidate.c) are not reachable from here. Those slots are
+        // sanctioned panic legs reached only via the #341 index.c dispatch.
+        // Hash has no gettreeheight/property/buildphasename (NULL in C).
+        ambuild: hashbuild_am,
+        ambuildempty: hashbuildempty_am,
+        amcostestimate: hashcostestimate_am,
+        amgettreeheight: None,
+        amoptions: hashoptions_am,
+        amproperty: None,
+        ambuildphasename: None,
+        amadjustmembers: Some(hashadjustmembers_am),
 
         // Scan / insert / vacuum callbacks (F3): thin adapters translating the
         // unified descriptor <-> hash's `HashScan` working state (downcast from
@@ -518,6 +536,63 @@ pub fn hashbuild<'mcx>(
 pub fn hashbuildempty(index: &types_rel::Relation) -> PgResult<()> {
     core::_hash_init(index, 0.0, ForkNumber::INIT_FORKNUM)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Build / options / plan-time vtable adapters (#340). See the doc comment in
+// `hashhandler` for why the `IndexInfo`-carrying / cross-crate slots are
+// sanctioned panic legs (reached via the #341 index.c dispatch).
+
+/// `ambuild` adapter — `hashbuild` needs the real `IndexInfo`, which the erased
+/// `IndexInfo` carrier cannot supply; reached via the #341 dispatch.
+fn hashbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &types_rel::Relation<'mcx>,
+    _index_relation: &types_rel::Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!(
+        "hashbuild: index.c build dispatch (#341) not yet ported — \
+         needs the real types_nodes::execnodes::IndexInfo"
+    )
+}
+
+/// `ambuildempty` adapter — wires this crate's `hashbuildempty`.
+fn hashbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, index_relation: &types_rel::Relation<'mcx>) -> PgResult<()> {
+    hashbuildempty(index_relation)
+}
+
+/// `amcostestimate` adapter — `hashcostestimate` (selfuncs.c) not reachable
+/// from this crate; reached via the #341 dispatch.
+fn hashcostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("hashcostestimate: index cost estimation (selfuncs.c) not yet reachable from hash (#341)")
+}
+
+/// `amoptions` adapter — `hashoptions` (hash-core) not reachable from this
+/// crate; reached via the #341 dispatch.
+fn hashoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    panic!("hashoptions: reloptions parse (hash-core::hashoptions) not yet reachable from hash (#341)")
+}
+
+/// `amadjustmembers` adapter — `hashadjustmembers` (hashvalidate.c) not
+/// reachable from this crate; reached via the #341 dispatch.
+fn hashadjustmembers_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _opfamilyoid: Oid,
+    _opclassoid: Oid,
+    _operators: &mut Vec<OpFamilyMember>,
+    _functions: &mut Vec<OpFamilyMember>,
+) -> PgResult<()> {
+    panic!("hashadjustmembers: opclass member adjust (hashvalidate.c) not yet reachable from hash (#341)")
 }
 
 /// `hashbuildCallback()` — per-tuple callback for `table_index_build_scan`.

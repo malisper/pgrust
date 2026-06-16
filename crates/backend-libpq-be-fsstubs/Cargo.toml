@@ -1,0 +1,26 @@
+[package]
+name = "backend-libpq-be-fsstubs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_libpq_be_fsstubs"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-catalog = { path = "../types-catalog" }
+types-snapshot = { path = "../types-snapshot" }
+types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-storage-large-object = { path = "../backend-storage-large-object" }
+backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-libpq-be-fsstubs-seams = { path = "../backend-libpq-be-fsstubs-seams" }
