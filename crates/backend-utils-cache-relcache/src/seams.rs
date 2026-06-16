@@ -75,7 +75,14 @@ pub fn init_seams() {
     sx::rd_index_indrelid::set(rd_index_indrelid);
     sx::rd_index_indisvalid::set(rd_index_indisvalid);
     sx::rd_index_has_indpred::set(rd_index_has_indpred);
+    sx::relation_build_local_relation::set(crate::initfile::RelationBuildLocalRelation);
     sx::rd_index_indkey::set(rd_index_indkey);
+    sx::rd_index_indnatts::set(rd_index_indnatts);
+    sx::rd_index_indnkeyatts::set(rd_index_indnkeyatts);
+    sx::rd_index_indisunique::set(rd_index_indisunique);
+    sx::rd_index_indisprimary::set(rd_index_indisprimary);
+    sx::rd_index_indisexclusion::set(rd_index_indisexclusion);
+    sx::rd_index_indisready::set(rd_index_indisready);
     sx::rd_indam_amclusterable::set(rd_indam_amclusterable);
     sx::relation_is_mapped::set(relation_is_mapped);
     sx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
@@ -564,6 +571,34 @@ fn rd_index_has_indpred(index: &types_rel::Relation<'_>) -> PgResult<bool> {
 fn rd_index_indkey(index: &types_rel::Relation<'_>) -> PgResult<Option<std::vec::Vec<types_core::primitive::AttrNumber>>> {
     with_entry(index.rd_id, |rd| {
         rd.rd_index.as_ref().map(|i| i.indkey.clone())
+    })
+}
+fn rd_index_indnatts(index: &types_rel::Relation<'_>) -> PgResult<Option<i16>> {
+    with_entry(index.rd_id, |rd| rd.rd_index.as_ref().map(|i| i.indnatts))
+}
+fn rd_index_indnkeyatts(index: &types_rel::Relation<'_>) -> PgResult<Option<i16>> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().map(|i| i.indnkeyatts)
+    })
+}
+fn rd_index_indisunique(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indisunique)
+    })
+}
+fn rd_index_indisprimary(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indisprimary)
+    })
+}
+fn rd_index_indisexclusion(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indisexclusion)
+    })
+}
+fn rd_index_indisready(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indisready)
     })
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {

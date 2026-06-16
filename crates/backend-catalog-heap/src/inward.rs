@@ -58,4 +58,9 @@ fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResul
 /// the workspace `seams-init` aggregator.
 pub fn init_seams() {
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
+    // Low-level relation-create seams `index_create` (catalog/index.c) calls
+    // directly. Their owner signatures match the seam signatures exactly, so
+    // they install without a wrapper.
+    backend_catalog_heap_seams::heap_create::set(crate::heap_create);
+    backend_catalog_heap_seams::InsertPgClassTuple::set(crate::create::InsertPgClassTuple);
 }
