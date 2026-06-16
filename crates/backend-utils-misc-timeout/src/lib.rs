@@ -19,6 +19,7 @@
 pub mod conffiles;
 pub mod injection_point;
 pub mod pg_config;
+pub mod read_tz_file;
 pub mod tzparser;
 
 use std::cell::{Cell, RefCell};
@@ -781,4 +782,8 @@ pub fn init_seams() {
     backend_storage_ipc_injection_point_seams::injection_point_shmem_init::set(
         injection_point::injection_point_shmem_init,
     );
+
+    // tzparser.c: the file-access half of ParseTzFile (get_share_path +
+    // AllocateFile + dir probe + line read).
+    port_path_seams::read_tz_file::set(read_tz_file::read_tz_file);
 }

@@ -30,6 +30,7 @@ const MAXPGPATH: usize = 1024;
 
 const DEFAULT_PGBINDIR: &str = "/usr/local/pgsql/bin";
 const DEFAULT_PKGLIBDIR: &str = "/usr/local/pgsql/lib";
+const DEFAULT_PGSHAREDIR: &str = "/usr/local/pgsql/share";
 
 #[inline]
 fn configured_pgbindir() -> &'static str {
@@ -39,6 +40,11 @@ fn configured_pgbindir() -> &'static str {
 #[inline]
 fn configured_pkglibdir() -> &'static str {
     option_env!("PGRUST_PKGLIBDIR").unwrap_or(DEFAULT_PKGLIBDIR)
+}
+
+#[inline]
+fn configured_sharedir() -> &'static str {
+    option_env!("PGRUST_PGSHAREDIR").unwrap_or(DEFAULT_PGSHAREDIR)
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +421,14 @@ fn make_relative_path(target_path: &str, bin_path: &str, my_exec_path: &str) -> 
 /// `make_relative_path(ret_path, PKGLIBDIR, PGBINDIR, my_exec_path)`.
 fn get_pkglib_path(my_exec_path: &str) -> String {
     make_relative_path(configured_pkglibdir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_share_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, PGSHAREDIR, PGBINDIR, my_exec_path)`. Derives
+/// the installation's `share` directory from the running executable so a
+/// relocated install still finds its data files (timezonesets, the tzdb, etc.).
+pub fn get_share_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_sharedir(), configured_pgbindir(), my_exec_path)
 }
 
 // ---------------------------------------------------------------------------

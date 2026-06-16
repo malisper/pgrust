@@ -40,6 +40,10 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 # Ported owners this unit's adapter seams delegate to in init_seams().
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
+# timezone_abbreviations: load_tzoffsets (tzparser.c) + InstallTimeZoneAbbrevs
+# (datetime.c) — fused into the load_and_install_tz_abbrevs owner seam.
+backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 state-pgtz = { path = "../state-pgtz" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }

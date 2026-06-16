@@ -974,6 +974,9 @@ pub fn init_seams() {
     // Bodied in `startup_paths` and homed here (the process-init crate the boot
     // path already routes through). Faithful non-Windows ports.
     common_path_seams::get_progname::set(startup_paths::get_progname);
+    // get_share_path(my_exec_path) (common/path.c): the share-dir derivation the
+    // tzdb (pgtz) and timezonesets (tzparser) reads resolve against.
+    common_path_seams::get_share_path::set(boot_paths::get_share_path);
     backend_common_exec_seams::set_pglocale_pgservice::set(
         startup_paths::set_pglocale_pgservice,
     );

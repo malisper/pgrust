@@ -61,6 +61,9 @@ pub mod convert;
 // RegexCollationResolver), used only for the runtime abbreviation-table leg of
 // DecodeTimezoneAbbrev.  Not a seam (no algorithm here, just a provider hook).
 pub mod tz_resolver;
+// InstallTimeZoneAbbrevs (datetime.c) + the production TimezoneResolver over the
+// runtime abbreviation table loaded from the timezone_abbreviations GUC.
+pub mod tz_abbrev_install;
 // The date/time decode engine (datetime.c): ParseDateTime + DecodeDateTime /
 // DecodeTimeOnly / DecodeInterval / DecodeISO8601Interval + the numeric/time/tz
 // field decoders, datebsearch, and the DetermineTimeZoneOffset family.  Wires

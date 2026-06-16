@@ -1179,8 +1179,42 @@ mod install {
         own::clear_time_zone_abbrev_cache::set(|| {
             panic!("ClearTimeZoneAbbrevCache (datetime.c) not yet ported")
         });
-        own::load_and_install_tz_abbrevs::set(|_filename| {
-            panic!("load_tzoffsets/InstallTimeZoneAbbrevs (tzparser.c/datetime.c) not yet ported")
+        own::load_and_install_tz_abbrevs::set(|filename| {
+            // C: check_timezone_abbreviations -> load_tzoffsets(filename), then
+            // assign_timezone_abbreviations -> InstallTimeZoneAbbrevs(tbl). The
+            // table is not value-shippable through *extra here, so the load and
+            // install are fused: load_tzoffsets parses the file into the owned
+            // TimeZoneAbbrevTable, then install_time_zone_abbrevs makes it the
+            // active runtime abbreviation table.
+            use backend_utils_misc_guc::{
+                GUC_check_errdetail, GUC_check_errhint, GUC_check_errmsg,
+            };
+            match backend_utils_misc_timeout::tzparser::load_tzoffsets(&filename) {
+                Ok(table) => {
+                    // InstallTimeZoneAbbrevs(tbl).
+                    backend_utils_adt_datetime::tz_abbrev_install::install_time_zone_abbrevs(
+                        table,
+                    );
+                    Ok(true)
+                }
+                // C: load_tzoffsets returned NULL after reporting via
+                // GUC_check_errmsg/errdetail/errhint; mirror that "soft" failure
+                // (return false), re-emitting the recorded diagnostics. An empty
+                // message is the depth-0 "let guc.c's own invalid-value message
+                // stand" case (no GUC_check_errmsg).
+                Err(err) => {
+                    if !err.message.is_empty() {
+                        GUC_check_errmsg(err.message);
+                    }
+                    if let Some(detail) = err.detail {
+                        GUC_check_errdetail(detail);
+                    }
+                    if let Some(hint) = err.hint {
+                        GUC_check_errhint(hint);
+                    }
+                    Ok(false)
+                }
+            }
         });
 
         // -------- guc.c (merged) — delegate --------
