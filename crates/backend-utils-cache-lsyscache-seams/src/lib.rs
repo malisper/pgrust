@@ -910,16 +910,17 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `getSubscriptingRoutines(typid, &typelem)` (lsyscache.c): the type's
-    /// subscripting routines pointer (the `OidFunctionCall0` result, kept opaque
-    /// — see the fmgr `oid_function_call0` seam) and its `typelem`. `None` means
-    /// the type is not subscriptable (the C NULL). `Datum` carries the
-    /// `const SubscriptRoutines *`.
+    /// subscripting routines struct and its `typelem`. `None` means the type is
+    /// not subscriptable (the C NULL).
     ///
-    /// BARE-WORD EDGE (Datum unification): this `Datum` is an opaque
-    /// `const SubscriptRoutines *` pointer, NOT a SQL value, so it stays the
-    /// bare machine word — it has no by-value/by-reference shape to carry on the
-    /// canonical `Datum<'mcx>` enum and forging one would invent opacity.
-    pub fn get_subscripting_routines(typid: Oid) -> PgResult<Option<(Datum, Oid)>>
+    /// In C this returns a `const SubscriptRoutines *` obtained by
+    /// `OidFunctionCall0(typsubscript)` (the SQL handler returns a pointer to a
+    /// `static const SubscriptRoutines`). The owned model returns the real
+    /// [`types_nodes::execexpr::SubscriptRoutines`] value resolved from the
+    /// handler OID — no opaque pointer.
+    pub fn get_subscripting_routines(
+        typid: Oid,
+    ) -> PgResult<Option<(types_nodes::execexpr::SubscriptRoutines, Oid)>>
 );
 
 seam_core::seam!(

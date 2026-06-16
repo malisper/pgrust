@@ -2412,6 +2412,7 @@ dependencies = [
  "backend-access-spg-proc-seams",
  "backend-access-spg-text",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-adt-network-spgist",
  "mcx",
  "types-core",
  "types-error",
@@ -3196,6 +3197,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
  "backend-postmaster-checkpointer-seams",
+ "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-shmem-seams",
@@ -6367,6 +6369,7 @@ dependencies = [
  "backend-executor-nodeAgg",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
@@ -11456,6 +11459,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-rewriteDefine"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-dependency",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-objectaddress",
+ "backend-catalog-pg-class",
+ "backend-catalog-pg-depend",
+ "backend-nodes-core",
+ "backend-nodes-outfuncs",
+ "backend-parser-parse-utilcmd-seams",
+ "backend-rewrite-core",
+ "backend-rewrite-rewritesupport-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -11537,6 +11577,28 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-statistics-core-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-statistics",
+]
+
+[[package]]
+name = "backend-statistics-dependencies"
+version = "0.0.0"
+dependencies = [
+ "backend-statistics-core-seams",
+ "backend-utils-adt-varlena",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-statistics",
 ]
 
 [[package]]
@@ -14183,6 +14245,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-network-spgist"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-network",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-network",
+ "types-scan",
+ "types-spgist",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
@@ -16317,6 +16394,9 @@ name = "backend-utils-sort-tuplesort"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-indextuple-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-nbtree-core-seams",
  "backend-storage-file-buffile-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-sortsupport-seams",
@@ -16330,6 +16410,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-slot",
  "types-sortsupport",
  "types-storage",
@@ -18104,6 +18185,13 @@ name = "types-startup"
 version = "0.0.0"
 dependencies = [
  "types-bgworker",
+ "types-core",
+]
+
+[[package]]
+name = "types-statistics"
+version = "0.0.0"
+dependencies = [
  "types-core",
 ]
 

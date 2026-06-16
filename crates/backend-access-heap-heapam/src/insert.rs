@@ -16,14 +16,14 @@
 //! `bufmgr-seams` / `vacuumlazy-seams` slots; the WAL record body is built and
 //! inserted via `xloginsert-seams`.
 //!
-//! `heap_multi_insert` is **not** ported in this family: it takes
-//! `TupleTableSlot **slots` and fetches each slot's heap tuple via
-//! `ExecFetchSlotHeapTuple`, but this repo's executor slot model keys slots by
-//! `SlotId` into the `EState` slot pool and the slot-payload-in-pool model (the
-//! pending executor keystone, tasks #113/#169) does not yet expose a
-//! fetch-heap-tuple-from-slot seam — there is no faithful way to obtain the
-//! per-slot `FormedTuple` without inventing slot opacity.  Its pure page-count
-//! helper [`heap_multi_insert_pages`] is ported and tested here.
+//! `heap_multi_insert` is ported here over the owned-`FormedTuple` batch model:
+//! C takes `TupleTableSlot **slots` and fetches each slot's heap tuple via
+//! `ExecFetchSlotHeapTuple`, but the repo carries the heap tuples as owned
+//! [`FormedTuple`] values, so the batch crosses by value (the slot fetch is the
+//! caller's job) and the stamped heaptuples are returned in input order — the
+//! page-at-a-time fill, one `XLOG_HEAP2_MULTI_INSERT` per page, and the t_self
+//! writeback all preserved. Its pure page-count helper
+//! [`heap_multi_insert_pages`] is ported and tested here.
 
 use mcx::Mcx;
 use types_core::primitive::{BlockNumber, OffsetNumber, Size, TransactionId};
@@ -55,12 +55,15 @@ use types_storage::bufpage::SizeofHeapTupleHeader;
 use types_wal::wal::XLOG_INCLUDE_ORIGIN;
 use types_wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use backend_rmgrdesc_next::heapdesc::{XLOG_HEAP_INIT_PAGE, XLOG_HEAP_INSERT};
-use types_wal::wal::RM_HEAP_ID;
+use backend_rmgrdesc_next::heapdesc::{
+    XLOG_HEAP2_MULTI_INSERT, XLOG_HEAP_INIT_PAGE, XLOG_HEAP_INSERT,
+};
+use types_wal::wal::{RM_HEAP2_ID, RM_HEAP_ID};
 use types_xlog_records::heapam_xlog::{
-    xl_heap_header, xl_heap_insert, SizeOfHeapHeader, SizeOfHeapInsert,
+    xl_heap_header, xl_heap_insert, xl_heap_multi_insert, xl_multi_insert_tuple, SizeOfHeapHeader,
+    SizeOfHeapInsert, SizeOfHeapMultiInsert, XLH_INSERT_ALL_FROZEN_SET,
     XLH_INSERT_ALL_VISIBLE_CLEARED, XLH_INSERT_CONTAINS_NEW_TUPLE, XLH_INSERT_IS_SPECULATIVE,
-    XLH_INSERT_ON_TOAST_RELATION,
+    XLH_INSERT_LAST_IN_MULTI, XLH_INSERT_ON_TOAST_RELATION,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +89,11 @@ const RELKIND_MATVIEW: u8 = b'm';
 /// `VISIBILITYMAP_VALID_BITS` (access/visibilitymapdefs.h) == ALL_VISIBLE |
 /// ALL_FROZEN.
 const VISIBILITYMAP_VALID_BITS: u8 = 0x03;
+
+/// `VISIBILITYMAP_ALL_VISIBLE` (access/visibilitymapdefs.h).
+const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
+/// `VISIBILITYMAP_ALL_FROZEN` (access/visibilitymapdefs.h).
+const VISIBILITYMAP_ALL_FROZEN: u8 = 0x02;
 
 /// `FirstOffsetNumber` (storage/off.h).
 const FirstOffsetNumber: OffsetNumber = types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
@@ -415,6 +423,420 @@ pub fn heap_multi_insert_pages(
 }
 
 // ===========================================================================
+// heap_multi_insert — insert multiple tuples into a heap (heapam.c).
+// ===========================================================================
+
+/// `heap_multi_insert(relation, slots, ntuples, cid, options, bistate)`
+/// (heapam.c) — insert multiple tuples into a heap in one operation, filling a
+/// page at a time and emitting one `XLOG_HEAP2_MULTI_INSERT` WAL record per
+/// page (with the page content-locked once).
+///
+/// C takes `TupleTableSlot **slots`, fetches each slot's heap tuple
+/// (`ExecFetchSlotHeapTuple`), stamps `slots[i]->tts_tableOid`, then writes the
+/// stored TID back into `slots[i]->tts_tid`. The repo carries the heap tuples
+/// as owned [`FormedTuple`] values, so the batch is taken by value (`tuples`)
+/// and the inserted tuples — the toasted copy where `heap_prepare_insert`
+/// produced one, else the caller's tuple, each with its `t_self`/`t_tableOid`
+/// stamped — are returned in input order. That is exactly C's `heaptuples[]`
+/// array (the tuples it `CacheInvalidateHeapTuple`s and whose `t_self` it copies
+/// back), which is the information the caller
+/// (`CatalogTuplesMultiInsertWithInfo`) feeds to `CatalogIndexInsert`.
+pub fn heap_multi_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'_>,
+    tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>>,
+    cid: CommandId,
+    options: i32,
+    mut bistate: Option<&mut crate::BulkInsertState>,
+) -> PgResult<mcx::PgVec<'mcx, FormedTuple<'mcx>>> {
+    let xid = xact_seam::get_current_transaction_id::call()?;
+    let ntuples = tuples.len();
+    let mut vmbuffer: Buffer = InvalidBuffer;
+    // C passes NULL for vmbuffer_other; the port threads an unused local
+    // (RelationGetBufferForTuple takes &mut Buffer, not Option).
+    let mut vmbuffer_other: Buffer = InvalidBuffer;
+    // need_tuple_data = RelationIsLogicallyLogged(relation);
+    let need_tuple_data = relation_is_logically_logged(relation);
+    // need_cids = RelationIsAccessibleInLogicalDecoding(relation);
+    let need_cids = relation_is_accessible_in_logical_decoding(relation);
+
+    /* currently not needed (thus unsupported) for heap_multi_insert() */
+    debug_assert_eq!(options & HEAP_INSERT_NO_LOGICAL, 0);
+
+    // AssertHasSnapshotForToast(relation) — debug-only snapshot assertion; no
+    // state to mirror in the owned model.
+
+    // needwal = RelationNeedsWAL(relation);
+    let needwal = relcache_seam::relation_needs_wal::call(relation);
+    // saveFreeSpace = RelationGetTargetPageFreeSpace(relation,
+    //                                                HEAP_DEFAULT_FILLFACTOR);
+    let save_free_space: Size = backend_access_heap_hio_seams::relation_get_target_page_free_space::call(
+        relation.rd_id,
+        HEAP_DEFAULT_FILLFACTOR,
+    )?;
+
+    /* Toast and set header data in all the slots */
+    // heaptuples = palloc(ntuples * sizeof(HeapTuple));
+    // for (i = 0; i < ntuples; i++) {
+    //     tuple = ExecFetchSlotHeapTuple(slots[i], true, NULL);
+    //     slots[i]->tts_tableOid = RelationGetRelid(relation);
+    //     tuple->t_tableOid = slots[i]->tts_tableOid;
+    //     heaptuples[i] = heap_prepare_insert(relation, tuple, xid, cid, options);
+    // }
+    //
+    // The owned batch already holds each tuple (the slot fetch is the caller's
+    // job); `heap_prepare_insert` stamps the header (and `t_tableOid`) in place
+    // and, when it toasts, returns a separate copy. `heaptuples[i]` is that copy
+    // when present, else the caller's tuple — so we take ownership of each input
+    // tuple and store whichever one `heap_prepare_insert` selects.
+    let mut heaptuples: Vec<FormedTuple<'mcx>> = Vec::with_capacity(ntuples);
+    for mut tuple in tuples.into_iter() {
+        // tuple->t_tableOid = RelationGetRelid(relation); — heap_prepare_insert
+        // sets this too, but C also assigns it explicitly via the slot.
+        tuple.tuple.t_tableOid = relation.rd_id;
+        let toasted = heap_prepare_insert(mcx, relation, &mut tuple, xid, cid, options)?;
+        match toasted {
+            Some(t) => heaptuples.push(t),
+            None => heaptuples.push(tuple),
+        }
+    }
+
+    /*
+     * We're about to do the actual inserts -- but check for conflict first, to
+     * minimize the possibility of having to roll back work we've just done.
+     *
+     * For heap inserts, we only need to check for table-level SSI locks.
+     */
+    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+
+    let mut ndone: usize = 0;
+    let mut starting_with_empty_page = false;
+    let mut npages: i32 = 0;
+    let mut npages_used: i32 = 0;
+    while ndone < ntuples {
+        let mut all_visible_cleared = false;
+        let mut all_frozen_set = false;
+
+        // CHECK_FOR_INTERRUPTS();
+        page_seam::check_for_interrupts::call()?;
+
+        /*
+         * Compute number of pages needed to fit the to-be-inserted tuples in
+         * the worst case, to size the relation extension. If we filled a prior
+         * page from scratch we can update the last computation; if we started
+         * with a partially filled page, recompute from scratch.
+         */
+        if ndone == 0 || !starting_with_empty_page {
+            npages = heap_multi_insert_pages(&heaptuples, ndone, ntuples, save_free_space);
+            npages_used = 0;
+        } else {
+            npages_used += 1;
+        }
+
+        /*
+         * Find buffer where at least the next tuple will fit. If the page is
+         * all-visible this also pins the requisite visibility map page (and the
+         * COPY FREEZE empty-page case).
+         */
+        let buffer = RelationGetBufferForTuple(
+            relation,
+            heaptuples[ndone].tuple.t_len as Size,
+            InvalidBuffer,
+            options,
+            bistate.as_deref_mut(),
+            &mut vmbuffer,
+            &mut vmbuffer_other,
+            npages - npages_used,
+        )?;
+
+        // starting_with_empty_page = PageGetMaxOffsetNumber(page) == 0;
+        starting_with_empty_page =
+            page_seam::page_get_max_offset_number::call(buffer)? == 0;
+
+        if starting_with_empty_page && (options & HEAP_INSERT_FROZEN) != 0 {
+            all_frozen_set = true;
+        }
+
+        /* NO EREPORT(ERROR) from here till changes are logged */
+        // START_CRIT_SECTION();
+
+        /*
+         * RelationGetBufferForTuple has ensured the first tuple fits. Put that
+         * on the page, then as many others as fit.
+         */
+        RelationPutHeapTuple(relation, buffer, &mut heaptuples[ndone].tuple, false)?;
+
+        /* For logical decoding we need combo CIDs to properly decode the catalog. */
+        if needwal && need_cids {
+            crate::log_heap_new_cid(relation, &heaptuples[ndone].tuple)?;
+        }
+
+        let mut nthispage: usize = 1;
+        while ndone + nthispage < ntuples {
+            // if (PageGetHeapFreeSpace(page) < MAXALIGN(heaptup->t_len) +
+            //     saveFreeSpace) break;
+            let need =
+                maxalign(heaptuples[ndone + nthispage].tuple.t_len as usize) + save_free_space;
+            if page_seam::page_get_heap_free_space::call(buffer)? < need {
+                break;
+            }
+
+            RelationPutHeapTuple(
+                relation,
+                buffer,
+                &mut heaptuples[ndone + nthispage].tuple,
+                false,
+            )?;
+
+            if needwal && need_cids {
+                crate::log_heap_new_cid(relation, &heaptuples[ndone + nthispage].tuple)?;
+            }
+
+            nthispage += 1;
+        }
+
+        /*
+         * If the page is all visible, clear that unless we're only adding frozen
+         * rows. If we're only adding already frozen rows to a previously empty
+         * page, mark it all-visible.
+         */
+        if page_seam::page_is_all_visible::call(buffer)? && (options & HEAP_INSERT_FROZEN) == 0 {
+            all_visible_cleared = true;
+            page_seam::page_clear_all_visible::call(buffer)?;
+            visibilitymap_clear(
+                relation,
+                page_seam::buffer_get_block_number::call(buffer)?,
+                vmbuffer,
+                VISIBILITYMAP_VALID_BITS,
+            )?;
+        } else if all_frozen_set {
+            page_seam::page_set_all_visible::call(buffer)?;
+        }
+
+        /*
+         * XXX Should we set PageSetPrunable on this page ? (See heap_insert().)
+         */
+
+        page_seam::mark_buffer_dirty::call(buffer)?;
+
+        /* XLOG stuff */
+        if needwal {
+            // info = XLOG_HEAP2_MULTI_INSERT;
+            let mut info: u8 = XLOG_HEAP2_MULTI_INSERT;
+            let mut bufflags: u8 = 0;
+
+            /*
+             * If the page was previously empty, we can reinit the page instead
+             * of restoring the whole thing.
+             */
+            let init = starting_with_empty_page;
+
+            /* check that the mutually exclusive flags are not both set */
+            debug_assert!(!(all_visible_cleared && all_frozen_set));
+
+            let mut flags: u8 = 0;
+            if all_visible_cleared {
+                flags = XLH_INSERT_ALL_VISIBLE_CLEARED;
+            }
+            if all_frozen_set {
+                flags = XLH_INSERT_ALL_FROZEN_SET;
+            }
+
+            /*
+             * Build the scratch area exactly as C lays it out in scratch.data:
+             *   [xl_heap_multi_insert header (SizeOfHeapMultiInsert)]
+             *   [offsets[nthispage] (2 bytes each), only when !init]
+             *   then per tuple, SHORTALIGN'd at the absolute scratch offset:
+             *     [xl_multi_insert_tuple (SizeOfMultiInsertTuple)] [tuple data]
+             * `tupledata` marks the start of the per-tuple area. C registers
+             * `scratch.data .. tupledata` as XLogRegisterData and
+             * `tupledata .. scratchptr` as XLogRegisterBufData.
+             */
+            let mut scratch: Vec<u8> = Vec::new();
+
+            // xlrec = (xl_heap_multi_insert *) scratchptr; scratchptr += Size...
+            // (flags/ntuples are patched into the final header below.)
+            scratch.extend_from_slice(&[0u8; SizeOfHeapMultiInsert]);
+
+            // if (!init) scratchptr += nthispage * sizeof(OffsetNumber);
+            let offsets_off = scratch.len();
+            if !init {
+                scratch.resize(scratch.len() + nthispage * 2, 0);
+            }
+
+            // tupledata = scratchptr;
+            let tupledata_off = scratch.len();
+
+            // Write out an xl_multi_insert_tuple and the tuple data for each.
+            for i in 0..nthispage {
+                let heaptup = &heaptuples[ndone + i];
+
+                // if (!init) xlrec->offsets[i] = ItemPointerGetOffsetNumber(&t_self);
+                if !init {
+                    let off = heaptup.tuple.t_self.ip_posid;
+                    let pos = offsets_off + i * 2;
+                    scratch[pos..pos + 2].copy_from_slice(&off.to_ne_bytes());
+                }
+
+                // tuphdr = (xl_multi_insert_tuple *) SHORTALIGN(scratchptr);
+                let aligned = shortalign(scratch.len());
+                if aligned > scratch.len() {
+                    scratch.resize(aligned, 0);
+                }
+
+                // datalen = heaptup->t_len - SizeofHeapTupleHeader;
+                let hdr = heaptup
+                    .tuple
+                    .t_data
+                    .as_ref()
+                    .expect("heap_multi_insert: tuple has no t_data header");
+                // The contiguous on-disk image; data = img[SizeofHeapTupleHeader..].
+                let img = heap_tuple_to_disk_image(mcx, heaptup)?;
+                let data = &img[SizeofHeapTupleHeader..];
+                let datalen = data.len();
+                debug_assert_eq!(
+                    datalen,
+                    heaptup.tuple.t_len as usize - SizeofHeapTupleHeader
+                );
+
+                let tuphdr = xl_multi_insert_tuple {
+                    datalen: datalen as u16,
+                    t_infomask2: hdr.t_infomask2,
+                    t_infomask: hdr.t_infomask,
+                    t_hoff: hdr.t_hoff,
+                };
+                scratch.extend_from_slice(&tuphdr.to_bytes());
+                /* write bitmap [+ padding] [+ oid] + data */
+                scratch.extend_from_slice(data);
+            }
+            // totaldatalen = scratchptr - tupledata;
+            let totaldatalen = scratch.len() - tupledata_off;
+            debug_assert!(scratch.len() < types_core::primitive::BLCKSZ);
+
+            if need_tuple_data {
+                flags |= XLH_INSERT_CONTAINS_NEW_TUPLE;
+            }
+
+            /*
+             * Signal that this is the last xl_heap_multi_insert record emitted
+             * by this call (needed for logical decoding cleanup).
+             */
+            if ndone + nthispage == ntuples {
+                flags |= XLH_INSERT_LAST_IN_MULTI;
+            }
+
+            if init {
+                info |= XLOG_HEAP_INIT_PAGE;
+                bufflags |= REGBUF_WILL_INIT;
+            }
+
+            /*
+             * For logical decoding, include the new tuple data even if we take a
+             * full-page image of the page.
+             */
+            if need_tuple_data {
+                bufflags |= REGBUF_KEEP_DATA;
+            }
+
+            // Patch the xl_heap_multi_insert header (flags + ntuples) in place.
+            let xlrec = xl_heap_multi_insert {
+                flags,
+                ntuples: nthispage as u16,
+            };
+            scratch[..SizeOfHeapMultiInsert].copy_from_slice(&xlrec.to_bytes());
+
+            xloginsert_seam::xlog_begin_insert::call()?;
+            // XLogRegisterData(xlrec, tupledata - scratch.data);
+            xloginsert_seam::xlog_register_data::call(&scratch[..tupledata_off])?;
+            xloginsert_seam::xlog_register_buffer::call(0, buffer, REGBUF_STANDARD | bufflags)?;
+            // XLogRegisterBufData(0, tupledata, totaldatalen);
+            xloginsert_seam::xlog_register_buf_data::call(
+                0,
+                &scratch[tupledata_off..tupledata_off + totaldatalen],
+            )?;
+
+            /* filtering by origin on a row level is much more efficient */
+            xloginsert_seam::xlog_set_record_flags::call(XLOG_INCLUDE_ORIGIN);
+
+            let recptr = xloginsert_seam::xlog_insert_record::call(RM_HEAP2_ID, info)?;
+
+            bufmgr_seam::page_set_lsn::call(buffer, recptr)?;
+        }
+
+        // END_CRIT_SECTION();
+
+        /*
+         * If we've frozen everything on the page, update the visibilitymap.
+         * We're already holding pin on the vmbuffer.
+         */
+        if all_frozen_set {
+            // visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
+            //                   InvalidXLogRecPtr, vmbuffer, InvalidTransactionId,
+            //                   VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
+            page_seam::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
+                rel: relation.rd_id,
+                heap_blk: page_seam::buffer_get_block_number::call(buffer)?,
+                heap_buf: buffer,
+                rec_ptr: types_core::InvalidXLogRecPtr,
+                vm_buf: vmbuffer,
+                cutoff_xid: 0, /* InvalidTransactionId */
+                flags: VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
+            })?;
+        }
+
+        page_seam::unlock_release_buffer::call(buffer)?;
+        ndone += nthispage;
+
+        /*
+         * NB: Only release vmbuffer after inserting all tuples — it's likely
+         * we'll insert into subsequent heap pages using the same vm page.
+         */
+    }
+
+    /* We're done with inserting all tuples, so release the last vmbuffer. */
+    if vmbuffer != InvalidBuffer {
+        page_seam::release_buffer::call(vmbuffer)?;
+    }
+
+    /*
+     * We're done with the actual inserts. Check for conflicts again, to ensure
+     * that all rw-conflicts in to these inserts are detected.
+     */
+    predicate_seam::check_for_serializable_conflict_in::call(relation.rd_id)?;
+
+    /*
+     * If tuples are cachable, mark them for invalidation from the caches in case
+     * we abort. OK to do after releasing the buffer (the heaptuples data is all
+     * in local memory).
+     */
+    if catalog_seam::is_catalog_relation::call(relation) {
+        for tuple in heaptuples.iter() {
+            cache_invalidate_heap_tuple(relation, &tuple.tuple)?;
+        }
+    }
+
+    /* copy t_self fields back to the caller's slots */
+    // for (i = 0; i < ntuples; i++) slots[i]->tts_tid = heaptuples[i]->t_self;
+    // The owned model returns the stamped heaptuples directly (in input order),
+    // which carry the stored t_self — exactly what the caller would read back
+    // from the slots' tts_tid.
+
+    pgstat_seam::pgstat_count_heap_insert::call(
+        relation.rd_id,
+        relation.pgstat_enabled,
+        ntuples as i64,
+    );
+
+    // Return the stamped heaptuples (toasted copy or caller's tuple), in order.
+    let mut out: mcx::PgVec<'mcx, FormedTuple<'mcx>> = mcx::PgVec::new_in(mcx);
+    out.reserve(heaptuples.len());
+    for t in heaptuples {
+        out.push(t);
+    }
+    Ok(out)
+}
+
+// ===========================================================================
 // simple_heap_insert — insert a tuple with a default command id (heapam.c).
 // ===========================================================================
 
@@ -485,6 +907,12 @@ fn RelationGetNumberOfAttributes(relation: &RelationData<'_>) -> i32 {
 fn maxalign(len: usize) -> usize {
     const MAXIMUM_ALIGNOF: usize = 8;
     (len.wrapping_add(MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
+}
+
+/// `SHORTALIGN(LEN)` — round up to `ALIGNOF_SHORT` (2).
+fn shortalign(len: usize) -> usize {
+    const ALIGNOF_SHORT: usize = 2;
+    (len.wrapping_add(ALIGNOF_SHORT - 1)) & !(ALIGNOF_SHORT - 1)
 }
 
 /// `RelationIsAccessibleInLogicalDecoding(relation)` (utils/rel.h), expanded as
