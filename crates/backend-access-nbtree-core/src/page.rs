@@ -890,14 +890,16 @@ fn _bt_allocbuf<'mcx>(
     _heaprel: &Relation<'mcx>,
 ) -> PgResult<Buffer> {
     /*
-     * _bt_allocbuf first consults the FSM (GetFreeIndexPage), conditionally
-     * locks candidate pages (ConditionalLockBuffer), reclaims new/recyclable
-     * ones, and otherwise extends the relation with ExtendBufferedRel(...,
-     * EB_LOCK_FIRST).  None of GetFreeIndexPage / ConditionalLockBuffer /
-     * ExtendBufferedRel(EB_LOCK_FIRST) are exposed as seams yet, so this
-     * allocation primitive is not portable in isolation.
+     * GetFreeIndexPage (freespace) and ConditionalLockBuffer (bufmgr) now have
+     * seams, but the extend-the-relation tail uses ExtendBufferedRel(BMR_REL,
+     * MAIN_FORKNUM, NULL, EB_LOCK_FIRST) — WITHOUT EB_SKIP_EXTENSION_LOCK, so it
+     * takes the relation-extension lock.  The only ExtendBufferedRel seam bakes
+     * in EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK (the _hash_getnewbuf variant),
+     * which would skip the extension lock nbtree requires; faithfully porting
+     * this needs an EB_LOCK_FIRST-only (extension-lock-taking) ExtendBufferedRel
+     * seam, which does not exist yet.
      */
-    panic!("_bt_allocbuf: GetFreeIndexPage / ConditionalLockBuffer / ExtendBufferedRel(EB_LOCK_FIRST) not yet ported")
+    panic!("_bt_allocbuf: ExtendBufferedRel(EB_LOCK_FIRST, extension-lock-taking) seam not yet ported")
 }
 
 /// `_bt_relandgetbuf(rel, obuf, blkno, access)` — release `obuf`, get `blkno`.
@@ -964,9 +966,15 @@ pub(crate) fn _bt_unlockbuf<'mcx>(_rel: &Relation<'_>, buf: Buffer) {
 
 /// `_bt_conditionallockbuf(rel, buf)` — conditionally BT_WRITE-lock pinned buf.
 #[allow(dead_code)]
-fn _bt_conditionallockbuf<'mcx>(_rel: &Relation<'mcx>, _buf: Buffer) -> bool {
-    /* ConditionalLockBuffer() has no seam yet. */
-    panic!("_bt_conditionallockbuf: ConditionalLockBuffer not yet ported")
+fn _bt_conditionallockbuf<'mcx>(_rel: &Relation<'mcx>, buf: Buffer) -> bool {
+    // ConditionalLockBuffer() asserts the pin is held by this backend; the C
+    // wrapper has no error path beyond that should-not-happen, so surface a
+    // lock-manager error as a panic. (The !RelationUsesLocalBuffers valgrind
+    // client request is debug-only and not modeled.)
+    match bufmgr::conditional_lock_buffer::call(buf) {
+        Ok(got) => got,
+        Err(e) => panic!("_bt_conditionallockbuf: ConditionalLockBuffer failed: {e:?}"),
+    }
 }
 
 /// `_bt_upgradelockbufcleanup(rel, buf)` — upgrade read lock to a cleanup lock.
