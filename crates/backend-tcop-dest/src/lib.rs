@@ -298,6 +298,16 @@ pub fn register_dest_receiver(
     })
 }
 
+/// Return the owner-supplied `state` token a receiver was registered with (the
+/// `(DR_xxx *) self` stand-in). An owner whose post-construction setup
+/// (`SetRemoteDestReceiverParams`) is handed the router [`DestReceiverHandle`]
+/// rather than its own token uses this to recover the token and reach its
+/// per-receiver state — the owned-model equivalent of the C `(DR_xxx *) self`
+/// downcast done from the bare `DestReceiver *`.
+pub fn dest_receiver_state_token(dest: DestReceiverHandle) -> u64 {
+    lookup(dest).state
+}
+
 // ===========================================================================
 // CreateDestReceiver (dest.c) — return the appropriate receiver for `dest`.
 // ===========================================================================
@@ -322,9 +332,15 @@ pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
         // its real vtable into this router and returns the resulting handle.
         CommandDest::CopyOut => backend_commands_copyto_seams::create_copy_dest_receiver::call(),
 
-        // DestRemote / DestRemoteExecute       -> printtup_create_DR        (printtup.c)
+        // DestRemote / DestRemoteExecute / DestDebug -> printtup_create_DR
+        // (printtup.c): the owner registers its real vtable into this router
+        // (the same delegation copyto uses), so a SELECT to a wire client emits
+        // RowDescription + DataRow messages through `printtup`'s receiveSlot.
+        CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::Debug => {
+            backend_access_common_printtup_seams::printtup_create_dr::call(dest)
+        }
+
         // DestRemoteSimple                     -> printsimpleDR             (printsimple.c)
-        // DestDebug                            -> debugtupDR                (printtup.c)
         // DestSPI                              -> spi_printtupDR            (spi.c)
         // DestTuplestore                       -> CreateTuplestoreDestReceiver  (tstoreReceiver.c)
         // DestIntoRel                          -> CreateIntoRelDestReceiver (createas.c)

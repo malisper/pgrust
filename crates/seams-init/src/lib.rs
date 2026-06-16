@@ -14,6 +14,7 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
     backend_access_common_next::init_seams();
+    backend_access_common_printtup::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
     backend_access_common_tidstore::init_seams();
@@ -1027,18 +1028,12 @@ mod recurrence_guard {
         ("backend_access_heap_heapam", "log_heap_visible"),
         ("backend_access_heap_heapam", "read_pg_type"),
         ("backend_access_heap_heapam", "scan_indisclustered"),
-        // DESIGN_DEBT (TD-DEST-COMMAND-LIFECYCLE): printtup.c's
-        // `SetRemoteDestReceiverParams`, `::call`ed by the tcop/postgres.c F1
-        // simple-Query pipeline (`exec_simple_query`) for `DestRemote`, has no
-        // body in the merged dest slice — sanctioned mirror-pg-and-panic on a
-        // complete owner (`backend-tcop-dest`). printtup is not yet routed into
-        // the dest router (`CreateDestReceiver(DestRemote)` returns the unwired
-        // vtable), so binding the receiver to the portal has no landing; the same
-        // gap makes a real `DestRemote` SELECT run panic in the receiver vtable
-        // when the executor pushes the first tuple. (BeginCommand/EndCommand/
-        // NullCommand DID land in the merged dest slice and are installed — no
-        // allowlist entry.) DELETE when printtup's DestRemote routing lands.
-        ("backend_tcop_dest", "set_remote_dest_receiver_params"),
+        // (TD-DEST-COMMAND-LIFECYCLE RETIRED: printtup.c's
+        // `SetRemoteDestReceiverParams` + the `DestRemote`/`DestRemoteExecute`/
+        // `DestDebug` receiver routing now land — `backend-access-common-printtup`
+        // installs `set_remote_dest_receiver_params` and registers `printtup`'s
+        // real vtable into the tcop-dest router via the `printtup_create_dr` seam,
+        // so a `DestRemote` SELECT emits RowDescription + DataRow over the wire.)
         // (backend_status.c's pgstat_report_activity_running / _query_id /
         // _plan_id are also `::call`ed by the F1 pipeline and uninstalled, but
         // their owner `backend-utils-activity-status` is not a complete crate —

@@ -350,17 +350,36 @@ pub fn printtup<'mcx>(
     typeinfo: &TupleDescData,
     formats: Option<&[i16]>,
 ) -> PgResult<bool> {
+    // Make sure the tuple is fully deconstructed. (C: slot_getallattrs(slot);
+    // then reads slot->tts_values[i] / slot->tts_isnull[i].) The seam returns
+    // the deformed per-attribute (value, isnull) columns directly. Done before
+    // `printtup_emit` so the slot's mutable borrow does not overlap a borrow of
+    // the slot's own descriptor in the router callback; functionally identical
+    // to the C order (prepare_info reads only `typeinfo`/`formats`, never the
+    // deformed values).
+    let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
+    printtup_emit(myState, mcx, buf, typeinfo, formats, &columns)
+}
+
+/// The prepare-info + DataRow emit half of C's `printtup`, taking the
+/// already-deformed per-attribute `(value, isnull)` columns. Split out from
+/// [`printtup`] so the dest-router `receiveSlot` callback can deform the slot
+/// (mutable borrow) and then read the slot's descriptor (immutable borrow)
+/// without overlapping borrows.
+pub fn printtup_emit<'mcx>(
+    myState: &mut DR_printtup,
+    mcx: Mcx<'mcx>,
+    buf: &mut StringInfo<'mcx>,
+    typeinfo: &TupleDescData,
+    formats: Option<&[i16]>,
+    columns: &[types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>],
+) -> PgResult<bool> {
     let natts = typeinfo.natts;
 
     // Set or update my derived attribute info, if needed.
     if !myState.attrinfo_matches(typeinfo) || myState.nattrs != natts {
         printtup_prepare_info(myState, mcx, typeinfo, formats, natts)?;
     }
-
-    // Make sure the tuple is fully deconstructed. (C: slot_getallattrs(slot);
-    // then reads slot->tts_values[i] / slot->tts_isnull[i].) The seam returns
-    // the deformed per-attribute (value, isnull) columns directly.
-    let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
 
     // Prepare a DataRow message (note buffer is in per-query context).
     pq_beginmessage_reuse(buf, PqMsg_DataRow);
@@ -505,9 +524,261 @@ pub fn debugtup<'mcx>(
     Ok((out, true))
 }
 
-/// This crate owns no inward seams (its externals are reached through their
-/// owners' `-seams` crates), so `init_seams` is empty.
-pub fn init_seams() {}
+// ===========================================================================
+// DestReceiver router wiring (printtup.c's DR_printtup, routed into tcop-dest)
+// ===========================================================================
+//
+// `tcop/dest.c`'s `CreateDestReceiver` switch builds the receiver for the
+// `DestRemote` / `DestRemoteExecute` / `DestDebug` kinds by calling
+// `printtup_create_DR` — which in C installs `printtup` as `receiveSlot` plus
+// the `printtup_startup` / `printtup_shutdown` lifecycle hooks on a fresh
+// `DR_printtup` struct, and returns the receiver. The owned model carries a
+// receiver behind a [`DestReceiverHandle`] in the *one* tcop-dest router; the
+// per-receiver `DR_printtup` state (the C `(DR_printtup *) self`) lives here in
+// a `thread_local` registry keyed by the router's `state` token, mirroring
+// copyto's `CreateCopyDestReceiver` exactly.
+//
+// The vtable callbacks get `(mcx, state, …)`: `mcx` is the per-query arena
+// threaded per dispatch (the message I/O buffer is created in it), `state` is
+// the registry index recovering this receiver's `DR_printtup` + the portal's
+// `targetlist`/`formats` (bound by `set_remote_dest_receiver_params`).
+//
+// C reuses one `StringInfo buf` across rows purely for speed (the pre-reserve
+// step is an explicit optimisation — see the module docs); the owned model
+// charges a fresh `StringInfo` to the threaded per-query `mcx` per message,
+// which is functionally identical and keeps the receiver state lifetime-free
+// (no `'mcx` smuggled into the `'static` registry, no `unsafe`).
+
+use core::cell::RefCell;
+use types_nodes::nodes::CmdType;
+use types_nodes::parsestmt::DestReceiverHandle;
+
+/// One printtup receiver's owned state: the `DR_printtup` bookkeeping plus the
+/// portal-supplied target-list projection and result formats. This is the
+/// owned-model body of C's `DR_printtup` (the `(DR_printtup *) self` the
+/// lifecycle hooks downcast to), held in the `RECEIVERS` registry and recovered
+/// by the router's `state` token.
+struct ReceiverState {
+    dr: DR_printtup,
+    /// `FetchPortalTargetList(portal)` projected to printtup's fields
+    /// (empty for a NIL list / utility statement). Bound by
+    /// `set_remote_dest_receiver_params`.
+    targetlist: Vec<TargetEntryInfo>,
+    /// `portal->formats` (`None` = the C NULL array — Describe on a prepared
+    /// stmt). Bound by `set_remote_dest_receiver_params`.
+    formats: Option<Vec<i16>>,
+}
+
+thread_local! {
+    static RECEIVERS: RefCell<Vec<Option<ReceiverState>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Allocate a fresh receiver slot holding a new `DR_printtup` for `dest`,
+/// returning its 1-based registry index (the router `state` token; 0 is never
+/// handed out, matching copyto's convention and the C NULL sentinel).
+fn receiver_register(dest: CommandDest) -> u64 {
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        let st = ReceiverState {
+            dr: DR_printtup::printtup_create_DR(dest),
+            targetlist: Vec::new(),
+            formats: None,
+        };
+        if let Some(i) = reg.iter().position(Option::is_none) {
+            reg[i] = Some(st);
+            (i + 1) as u64
+        } else {
+            reg.push(Some(st));
+            reg.len() as u64
+        }
+    })
+}
+
+/// Run `f` against the live `ReceiverState` for `state` (the router token).
+fn with_receiver<R>(state: u64, f: impl FnOnce(&mut ReceiverState) -> R) -> R {
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        let slot = reg
+            .get_mut((state - 1) as usize)
+            .and_then(Option::as_mut)
+            .expect("backend-access-common-printtup: dispatch on an unregistered receiver");
+        f(slot)
+    })
+}
+
+/// `printtup_create_DR(CommandDest dest)` (printtup.c:81) routed into the
+/// tcop-dest router: allocate the `DR_printtup` state and install the
+/// `printtup_startup` / `printtup` / `printtup_shutdown` callbacks as the
+/// receiver's vtable, returning the [`DestReceiverHandle`] that names it.
+/// `tcop/dest.c`'s `CreateDestReceiver` reaches this through the
+/// `printtup_create_dr` seam, exactly as it reaches copyto's
+/// `CreateCopyDestReceiver`.
+pub fn printtup_create_dr_routed(dest: CommandDest) -> DestReceiverHandle {
+    let state = receiver_register(dest);
+    backend_tcop_dest::register_dest_receiver(
+        dest,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: printtup_dest_startup,
+            receiveSlot: printtup_dest_receive,
+            rShutdown: printtup_dest_shutdown,
+        },
+        state,
+    )
+}
+
+/// `SetRemoteDestReceiverParams(DestReceiver *self, Portal portal)`
+/// (printtup.c:121) routed into the dest router: record the portal's result
+/// `formats` and the `FetchPortalTargetList(portal)` projection on this
+/// receiver's state so the lifecycle hooks can read them, asserting the same
+/// `mydest` precondition the C code does. `exec_simple_query` calls this for
+/// `DestRemote` after `CreateDestReceiver`.
+///
+/// The target list is the primary (canSetTag) statement's plan target list
+/// (`FetchPortalTargetList` → `PortalGetPrimaryStmt` → `planTree->targetlist`);
+/// it is NIL when the portal returns no tuples or is a utility statement, in
+/// which case `SendRowDescriptionMessage` sends zeroes for `resorigtbl` /
+/// `resorigcol`.
+pub fn set_remote_dest_receiver_params_routed(
+    receiver: DestReceiverHandle,
+    portal: &types_portal::Portal,
+) -> PgResult<()> {
+    let state = backend_tcop_dest::dest_receiver_state_token(receiver);
+
+    // C: Assert(myState->mydest == DestRemote || ... == DestRemoteExecute).
+    // (DestDebug uses debugStartup/debugtup and never reaches here.)
+    with_receiver(state, |st| {
+        SetRemoteDestReceiverParams(&st.dr);
+    });
+
+    // portal->formats (the int16 array; empty Vec is the C NULL array).
+    // FetchPortalTargetList(portal): the primary statement's plan target list,
+    // projected to the fields printtup reads.
+    let (targetlist, formats) = {
+        let p = portal.borrow();
+        let formats: Option<Vec<i16>> = if p.formats.is_empty() {
+            None
+        } else {
+            Some(p.formats.clone())
+        };
+        let targetlist = portal_target_list_info(&p);
+        (targetlist, formats)
+    };
+
+    with_receiver(state, |st| {
+        st.targetlist = targetlist;
+        st.formats = formats;
+    });
+    Ok(())
+}
+
+/// `FetchPortalTargetList(portal)` (pquery.c:327) projected to printtup's
+/// fields. Returns the primary (canSetTag) statement's plan target-list
+/// entries' `(resjunk, resorigtbl, resorigcol)` triples, or an empty Vec for a
+/// NIL list (utility statement / non-tuple-returning portal).
+fn portal_target_list_info(p: &types_portal::PortalData) -> Vec<TargetEntryInfo> {
+    let stmts = match p.stmts.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    // PortalGetPrimaryStmt: the first canSetTag statement.
+    let primary = match stmts.iter().find(|s| s.canSetTag) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let tlist = match primary.planTree.as_deref() {
+        Some(node) => match node.plan_head().targetlist.as_ref() {
+            Some(t) => t,
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+    tlist
+        .iter()
+        .map(|tle| TargetEntryInfo {
+            resjunk: tle.resjunk,
+            resorigtbl: tle.resorigtbl,
+            resorigcol: tle.resorigcol as i16,
+        })
+        .collect()
+}
+
+/// The dest-router `rStartup` slot for `DR_printtup` — C's `printtup_startup`
+/// reached through the router. Builds the RowDescription message in the threaded
+/// `mcx` (the I/O buffer) and emits it when `sendDescrip`.
+fn printtup_dest_startup<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    operation: CmdType,
+    typeinfo: &TupleDescData<'mcx>,
+) -> PgResult<()> {
+    with_receiver(state, |st| {
+        // C: printtup_startup(self, operation, typeinfo) creates the reusable
+        // I/O buffer and sends RowDescription when sendDescrip. The buffer is
+        // returned (and discarded) here — a fresh StringInfo is charged per
+        // message, see the section docs.
+        let _buf = printtup_startup(
+            &st.dr,
+            mcx,
+            operation as i32,
+            typeinfo,
+            &st.targetlist,
+            st.formats.as_deref(),
+        )?;
+        Ok(())
+    })
+}
+
+/// The dest-router `receiveSlot` slot for `DR_printtup` — C's `printtup`
+/// reached through the router. Re-derives attr info if the descriptor changed,
+/// deforms the slot, and emits the DataRow message in a fresh `mcx` buffer.
+fn printtup_dest_receive<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // C: printtup(slot, self). Deform the slot first (mutable borrow), then read
+    // the slot's descriptor (immutable borrow) for `printtup_emit` — the same
+    // split the `printtup`/`printtup_emit` refactor enforces. The descriptor
+    // identity caching in DR_printtup still drives the once-per-run
+    // re-derivation (the slot's descriptor pointer is stable across a run).
+    let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
+    let typeinfo = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_deref()
+        .expect("printtup: slot has no tuple descriptor");
+    with_receiver(state, |st| {
+        let mut buf = StringInfo::new_in(mcx);
+        let formats = st.formats.clone();
+        printtup_emit(
+            &mut st.dr,
+            mcx,
+            &mut buf,
+            typeinfo,
+            formats.as_deref(),
+            &columns,
+        )
+    })
+}
+
+/// The dest-router `rShutdown` slot for `DR_printtup` — C's `printtup_shutdown`
+/// reached through the router. Frees the cached attr info / receiver
+/// bookkeeping.
+fn printtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
+    with_receiver(state, |st| {
+        printtup_shutdown(&mut st.dr);
+    });
+    Ok(())
+}
+
+/// Install this crate's inward seams (the printtup dest-router constructor and
+/// `SetRemoteDestReceiverParams`). Wired into `seams-init`.
+pub fn init_seams() {
+    backend_access_common_printtup_seams::printtup_create_dr::set(printtup_create_dr_routed);
+    backend_tcop_dest_seams::set_remote_dest_receiver_params::set(
+        set_remote_dest_receiver_params_routed,
+    );
+}
 
 #[cfg(test)]
 mod tests;

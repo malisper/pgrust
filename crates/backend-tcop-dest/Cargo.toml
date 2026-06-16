@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-commands-copyto-seams = { path = "../backend-commands-copyto-seams" }
+backend-access-common-printtup-seams = { path = "../backend-access-common-printtup-seams" }
 mcx = { path = "../mcx" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 types-dest = { path = "../types-dest" }
