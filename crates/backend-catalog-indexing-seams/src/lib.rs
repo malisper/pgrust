@@ -760,3 +760,20 @@ seam_core::seam!(
         setconfig: Vec<String>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CreateStatistics`'s tuple build + insert (commands/statscmds.c +
+    /// catalog/indexing.c): `GetNewOidWithIndex(rel, StatisticExtOidIndexId,
+    /// Anum_pg_statistic_ext_oid)` + the `values[]`/`nulls[]` fill — including
+    /// `buildint2vector(stxkeys)`, `construct_array_builtin(stxkind, CHAROID)`,
+    /// and `CStringGetTextDatum(stxexprs)` for the variable-length columns,
+    /// `stxstattarget` left NULL — + `heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)`. Returns the
+    /// freshly-allocated statistics-object OID. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_statistic_ext<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
+    ) -> PgResult<Oid>
+);
