@@ -524,6 +524,27 @@ fn restrict_search_path() -> PgResult<()> {
     .map(|_| ())
 }
 
+/// `set_config_option("search_path", value, PGC_USERSET, PGC_S_SESSION,
+/// GUC_ACTION_SAVE, changeVal=true, elevel=0, is_reload=false)`
+/// (schemacmds.c `CreateSchemaCommand`). The C `set_config_option` (8-arg,
+/// guc.c:3342) derives `srole` from the source: `PGC_S_SESSION >=
+/// PGC_S_INTERACTIVE`, so `srole = GetUserId()`.
+fn set_search_path_save(value: &str) -> PgResult<()> {
+    let srole = backend_utils_init_miscinit_seams::get_user_id::call();
+    set_config_option_global(
+        "search_path",
+        Some(value),
+        types_guc::PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        srole,
+        GUC_ACTION_SAVE,
+        true,
+        types_error::ErrorLevel(0),
+        false,
+    )
+    .map(|_| ())
+}
+
 /// Install every seam declared in `backend-utils-misc-guc-seams`.
 pub fn init_seams() {
     use backend_utils_misc_guc_seams as s;
@@ -586,6 +607,7 @@ pub fn init_seams() {
 
     // --- RestrictSearchPath (guc.c:2246; mis-homed seam re-homed here). ---
     s::restrict_search_path::set(restrict_search_path);
+    s::set_search_path_save::set(set_search_path_save);
 
     // --- Sub-features owned by separate, not-yet-ported units. Installed here
     //     (guc.c is their home) but each loud-panics into the unported sub-unit

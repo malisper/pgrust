@@ -46,8 +46,9 @@ seam_core::seam!(
     /// is per-batch here rather than spanning batches, which is
     /// logic-invisible. `Err` carries the heap/index-mutation
     /// `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_depend(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_depend<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         forms: &[FormData_pg_depend],
     ) -> PgResult<()>
 );
@@ -127,8 +128,9 @@ seam_core::seam!(
     /// keeps the C batching (`MAX_CATALOG_MULTI_INSERT_BYTES`); the index-state
     /// lifecycle is per-batch here, which is logic-invisible. `Err` carries the
     /// heap/index-mutation `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_shdepend(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_shdepend<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         forms: &[FormData_pg_shdepend],
     ) -> PgResult<()>
 );
@@ -238,6 +240,33 @@ seam_core::seam!(
         nspowner: Oid,
         nspacl: Option<types_array::ArrayType>,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RenameSchema`'s tuple write (schemacmds.c): `table_open(NamespaceRelationId,
+    /// RowExclusiveLock)` + `SearchSysCacheCopy1(NAMESPACEOID, nspoid)`,
+    /// `namestrcpy(&nspform->nspname, newname)`, `CatalogTupleUpdate(rel,
+    /// &tup->t_self, tup)`, `table_close(rel, NoLock)`, `heap_freetuple(tup)`.
+    /// The caller has already verified `nspoid` exists and resolved the new
+    /// name; the cache-miss path is unreachable here. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn rename_namespace_tuple(nspoid: Oid, newname: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterSchemaOwner_internal`'s tuple write (schemacmds.c): `table_open(
+    /// NamespaceRelationId, RowExclusiveLock)` + `SearchSysCacheCopy1(
+    /// NAMESPACEOID, nspoid)`, set `repl_repl[nspowner] = true` /
+    /// `repl_val[nspowner] = new_owner`, and when `SysCacheGetAttr(nspacl)` is
+    /// non-NULL `aclnewowner(nspacl, old_owner, new_owner)` into
+    /// `repl_val[nspacl]`, then `heap_modify_tuple` + `CatalogTupleUpdate` +
+    /// `heap_freetuple` + `table_close(rel, RowExclusiveLock)`. `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn update_namespace_owner_tuple(
+        nspoid: Oid,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -515,8 +544,9 @@ seam_core::seam!(
     /// caller-supplied row's `oid` is pre-allocated (the even-OID +
     /// wraparound-sort logic lives in the port). `Err` carries the heap/index
     /// mutation `ereport(ERROR)`s.
-    pub fn catalog_tuples_multi_insert_pg_enum(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuples_multi_insert_pg_enum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         rows: &[types_catalog::pg_enum::PgEnumInsertRow],
     ) -> PgResult<()>
 );

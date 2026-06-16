@@ -143,7 +143,25 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
                 || walk_opt!(wc.endOffset.as_ref())
         }
 
-        Node::CommonTableExpr(cte) => walk_opt!(cte.ctequery.as_ref()),
+        // C: WALK(ctequery) || WALK(search_clause) || WALK(cycle_clause).
+        // search_clause (CTESearchClause) has no expression subnodes (C's
+        // expression_tree_walker handles T_CTESearchClause as a no-op-break),
+        // so it adds nothing; cycle_clause dispatches to the CTECycleClause arm
+        // which recurses cycle_mark_value/cycle_mark_default.
+        Node::CommonTableExpr(cte) => {
+            walk_opt!(cte.ctequery.as_ref()) || walk_opt!(cte.cycle_clause.as_ref())
+        }
+
+        // C `T_CTECycleClause`: WALK(cycle_mark_value) || WALK(cycle_mark_default).
+        Node::CTECycleClause(cc) => {
+            walk_opt!(cc.cycle_mark_value.as_ref()) || walk_opt!(cc.cycle_mark_default.as_ref())
+        }
+
+        // C `T_TableFunc`: walk ns_uris, docexpr, rowexpr, colexprs, coldefexprs,
+        // colvalexprs, passingvalexprs (all `Expr`-list/`Expr` children, wrapped
+        // back into `Node::Expr` for the `FnMut(&Node)` walker; the lists may
+        // hold NULL elements).
+        Node::TableFunc(tf) => walk_table_func(tf, walker),
 
         Node::SetOperationStmt(setop) => {
             walk_opt!(setop.larg.as_ref()) || walk_opt!(setop.rarg.as_ref())
@@ -188,6 +206,56 @@ fn walk_expr_children(e: &Expr, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     };
     crate::nodefuncs::expression_tree_walker(Some(e), &mut child_walker);
     aborted
+}
+
+/// C `T_TableFunc` arm of `expression_tree_walker` (nodeFuncs.c:2647): WALK
+/// each of ns_uris, docexpr, rowexpr, colexprs, coldefexprs, colvalexprs,
+/// passingvalexprs in that order. The owned `TableFunc` carries these as
+/// `Expr`/`PgVec<PgBox<Expr>>`/`PgVec<Option<PgBox<Expr>>>`; each `&Expr` is
+/// re-wrapped as a `Node::Expr` clone for the `FnMut(&Node)` walker (same
+/// clone-wrap as [`walk_expr_children`]).
+fn walk_table_func(tf: &types_nodes::primnodes::TableFunc, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+    // `List *` of `Expr *` (no NULL elements).
+    fn list(
+        l: &Option<mcx::PgVec<'_, mcx::PgBox<'_, Expr>>>,
+        walker: &mut dyn FnMut(&Node) -> bool,
+    ) -> bool {
+        if let Some(v) = l {
+            for e in v.iter() {
+                if walker(&Node::Expr((**e).clone())) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    // `List *` of `Expr *` allowing NULL elements.
+    fn list_opt(
+        l: &Option<mcx::PgVec<'_, Option<mcx::PgBox<'_, Expr>>>>,
+        walker: &mut dyn FnMut(&Node) -> bool,
+    ) -> bool {
+        if let Some(v) = l {
+            for e in v.iter().flatten() {
+                if walker(&Node::Expr((**e).clone())) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn opt(e: &Option<mcx::PgBox<'_, Expr>>, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+        match e.as_deref() {
+            Some(e) => walker(&Node::Expr(e.clone())),
+            None => false,
+        }
+    }
+    list(&tf.ns_uris, walker)
+        || opt(&tf.docexpr, walker)
+        || opt(&tf.rowexpr, walker)
+        || list_opt(&tf.colexprs, walker)
+        || list_opt(&tf.coldefexprs, walker)
+        || list_opt(&tf.colvalexprs, walker)
+        || list(&tf.passingvalexprs, walker)
 }
 
 /// C default arm of `expression_tree_walker`: `elog(ERROR, "unrecognized node
@@ -293,7 +361,15 @@ pub fn expression_tree_walker_mut(
                 || walk_opt!(wc.endOffset.as_mut())
         }
 
-        Node::CommonTableExpr(cte) => walk_opt!(cte.ctequery.as_mut()),
+        Node::CommonTableExpr(cte) => {
+            walk_opt!(cte.ctequery.as_mut()) || walk_opt!(cte.cycle_clause.as_mut())
+        }
+
+        Node::CTECycleClause(cc) => {
+            walk_opt!(cc.cycle_mark_value.as_mut()) || walk_opt!(cc.cycle_mark_default.as_mut())
+        }
+
+        Node::TableFunc(tf) => walk_table_func_mut(tf, walker),
 
         Node::SetOperationStmt(setop) => {
             walk_opt!(setop.larg.as_mut()) || walk_opt!(setop.rarg.as_mut())
@@ -307,6 +383,61 @@ pub fn expression_tree_walker_mut(
 
         _ => unrecognized_expression_node(node),
     }
+}
+
+/// In-place analogue of [`walk_table_func`]: walk each `Expr` child as a wrapped
+/// `Node::Expr`, writing the (possibly mutated) child back into its field.
+fn walk_table_func_mut(
+    tf: &mut types_nodes::primnodes::TableFunc,
+    walker: &mut dyn FnMut(&mut Node) -> bool,
+) -> bool {
+    fn one(e: &mut Expr, walker: &mut dyn FnMut(&mut Node) -> bool) -> bool {
+        let mut wrapped = Node::Expr(e.clone());
+        let aborted = walker(&mut wrapped);
+        if let Node::Expr(ne) = wrapped {
+            *e = ne;
+        }
+        aborted
+    }
+    fn list(
+        l: &mut Option<mcx::PgVec<'_, mcx::PgBox<'_, Expr>>>,
+        walker: &mut dyn FnMut(&mut Node) -> bool,
+    ) -> bool {
+        if let Some(v) = l {
+            for e in v.iter_mut() {
+                if one(e, walker) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn list_opt(
+        l: &mut Option<mcx::PgVec<'_, Option<mcx::PgBox<'_, Expr>>>>,
+        walker: &mut dyn FnMut(&mut Node) -> bool,
+    ) -> bool {
+        if let Some(v) = l {
+            for e in v.iter_mut().flatten() {
+                if one(e, walker) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn opt(e: &mut Option<mcx::PgBox<'_, Expr>>, walker: &mut dyn FnMut(&mut Node) -> bool) -> bool {
+        match e.as_deref_mut() {
+            Some(e) => one(e, walker),
+            None => false,
+        }
+    }
+    list(&mut tf.ns_uris, walker)
+        || opt(&mut tf.docexpr, walker)
+        || opt(&mut tf.rowexpr, walker)
+        || list_opt(&mut tf.colexprs, walker)
+        || list_opt(&mut tf.coldefexprs, walker)
+        || list_opt(&mut tf.colvalexprs, walker)
+        || list(&mut tf.passingvalexprs, walker)
 }
 
 /// In-place analogue of [`walk_expr_children`]: walk each `Expr` child as a

@@ -419,6 +419,57 @@ pub fn CatalogTupleInsertWithInfo<'mcx>(
     CatalogIndexInsert(indstate, tup, TU_UpdateIndexes::TU_All, mcx)
 }
 
+/// `CatalogTuplesMultiInsertWithInfo(heapRel, slot, ntuples, indstate)`
+/// (indexing.c): insert multiple tuples into the given catalog relation at
+/// once, with an amortized cost of `CatalogOpenIndexes`.
+///
+/// `heap_multi_insert(heapRel, slot, ntuples, GetCurrentCommandId(true), 0,
+/// NULL)` then, because there is no equivalent of `heap_multi_insert` for the
+/// catalog indexes, a loop over the inserted tuples running
+/// `CatalogIndexInsert(indstate, tuple, TU_All)` for each. C re-fetches each
+/// tuple from its slot (`ExecFetchSlotHeapTuple`) and stamps
+/// `tuple->t_tableOid = slot[i]->tts_tableOid` (which `heap_multi_insert` set
+/// to `RelationGetRelid(heapRel)`); the repo's `heap_multi_insert` seam returns
+/// the inserted tuples already stamped with `t_self` and `t_tableOid`, so the
+/// loop indexes them directly.
+///
+/// The C `ntuples <= 0` fast path is the empty-`tuples` case here.
+#[allow(non_snake_case)]
+pub fn CatalogTuplesMultiInsertWithInfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>>,
+    indstate: &mut CatalogIndexState<'mcx>,
+) -> PgResult<()> {
+    // /* Nothing to do */
+    // if (ntuples <= 0) return;
+    if tuples.is_empty() {
+        return Ok(());
+    }
+
+    // heap_multi_insert(heapRel, slot, ntuples, GetCurrentCommandId(true), 0,
+    //                   NULL);
+    // The repo's seam consumes the owned formed tuples and returns them with
+    // t_self / t_tableOid stamped (the C writes the TIDs back into the slots).
+    let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
+    let inserted = backend_access_heap_heapam_seams::heap_multi_insert::call(
+        mcx, heap_rel, tuples, cid, 0, None,
+    )?;
+
+    // There is no equivalent to heap_multi_insert for the catalog indexes, so
+    // we must loop over and insert individually.
+    // for (int i = 0; i < ntuples; i++) {
+    //     tuple = ExecFetchSlotHeapTuple(slot[i], true, &should_free);
+    //     tuple->t_tableOid = slot[i]->tts_tableOid;
+    //     CatalogIndexInsert(indstate, tuple, TU_All);
+    //     if (should_free) heap_freetuple(tuple);
+    // }
+    for tuple in inserted.iter() {
+        CatalogIndexInsert(indstate, tuple, TU_UpdateIndexes::TU_All, mcx)?;
+    }
+    Ok(())
+}
+
 /// `CatalogTupleUpdate(heapRel, otid, tup)` (indexing.c): the single-tuple
 /// convenience updater. `CatalogTupleCheckConstraints` → `CatalogOpenIndexes`
 /// → `simple_heap_update` (returning `*update_indexes`) →
