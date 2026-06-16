@@ -561,7 +561,9 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
 /// seclabel across a cycle yet. The outward seams it consumes are installed by
 /// their owners (objectaddress, varlena, the pg_seclabel/pg_shseclabel catalog
 /// owner), not here.
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_commands_seclabel_seams::DeleteSecurityLabel::set(DeleteSecurityLabel);
+}
 
 #[cfg(test)]
 mod tests {

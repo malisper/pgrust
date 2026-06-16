@@ -494,6 +494,7 @@ pub fn init_seams() {
     });
     s::invoke_object_post_alter_hook_arg::set(invoke_object_post_alter_hook);
     s::invoke_function_execute_hook::set(invoke_function_execute_hook);
+    s::InvokeObjectDropHookArg::set(invoke_object_drop_hook);
 }
 
 use types_core::primitive::InvalidOid;

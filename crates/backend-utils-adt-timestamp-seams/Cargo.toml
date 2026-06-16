@@ -14,3 +14,5 @@ types-core = { path = "../types-core" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+types-datetime = { path = "../types-datetime" }
+types-pgtime = { path = "../types-pgtime" }

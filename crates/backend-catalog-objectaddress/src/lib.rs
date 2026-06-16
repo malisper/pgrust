@@ -51,4 +51,8 @@ pub fn init_seams() {
     seams::check_object_ownership::set(resolve::check_object_ownership);
     seams::get_object_description::set(description::get_object_description);
     seams::get_relkind_objtype::set(resolve::get_relkind_objtype);
+    seams::get_object_catcache_oid::set(properties::get_object_catcache_oid);
+    seams::get_object_attnum_oid::set(properties::get_object_attnum_oid);
+    seams::get_object_oid_index::set(properties::get_object_oid_index);
+    seams::get_object_class_descr::set(properties::get_object_class_descr);
 }

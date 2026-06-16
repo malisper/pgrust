@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use types_core::Oid;
 use types_error::PgResult;
 
@@ -95,4 +97,18 @@ seam_core::seam!(
     /// `tcop/fastpath.c`'s `HandleFunctionRequest` after the `ACL_EXECUTE`
     /// check. The hook may raise, carried on `Err`.
     pub fn invoke_function_execute_hook(object_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InvokeObjectDropHookArg(classId, objectId, subId, dropflags)`
+    /// (objectaccess.h macro / `RunObjectDropHook`): fire the object-access drop
+    /// hook for an object dependency.c is about to delete, passing the
+    /// `PERFORM_DELETION_*` drop flags. A no-op when no hook is installed. The
+    /// hook may `ereport(ERROR)`, carried on `Err`.
+    pub fn InvokeObjectDropHookArg(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        drop_flags: i32,
+    ) -> PgResult<()>
 );

@@ -68,6 +68,9 @@ fn install_tuplestore_seams() {
     seams::tuplestore_gettupleslot::set(|state, forward, copy, slot, estate| {
         tuplestore::tuplestore_gettupleslot(state, forward, copy, slot, estate)
     });
+    seams::tuplestore_gettupleslot_standalone::set(|mcx, state, forward, copy, slot| {
+        tuplestore::tuplestore_gettupleslot_standalone(mcx, state, forward, copy, slot)
+    });
     seams::tuplestore_puttupleslot::set(|state, slot, estate| {
         tuplestore::tuplestore_puttupleslot(state, slot, estate)
     });

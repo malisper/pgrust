@@ -7,6 +7,8 @@
 //! `currentEventTriggerState` command list (the unported owner's backend
 //! state); they no-op when no event-trigger collection is in progress.
 
+#![allow(non_snake_case)]
+
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
@@ -61,5 +63,33 @@ seam_core::seam!(
         address: ObjectAddress,
         secondary_object: ObjectAddress,
         stmt: &CreateOpFamilyStmt,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `trackDroppedObjectsNeeded()` (event_trigger.c): whether any
+    /// `ddl_command_end`/`sql_drop` event trigger (or the affected-object
+    /// statistics) is interested in dropped objects, so dependency.c knows
+    /// whether to track them. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn trackDroppedObjectsNeeded() -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `EventTriggerSupportsObject(object)` (event_trigger.c): whether the
+    /// given object's class participates in event-trigger / SQL-drop reporting.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn EventTriggerSupportsObject(object: &ObjectAddress) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `EventTriggerSQLDropAddObject(object, original, normal)`
+    /// (event_trigger.c): record a dropped object in the current
+    /// `sql_drop` event-trigger collection state. `original`/`normal` mirror
+    /// the C flags distinguishing user-named vs dependency-implied drops. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn EventTriggerSQLDropAddObject(
+        object: &ObjectAddress,
+        original: bool,
+        normal: bool,
     ) -> PgResult<()>
 );

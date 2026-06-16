@@ -4,8 +4,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use mcx::{Mcx, PgVec};
 use types_cache::DefElemString;
+use types_core::Oid;
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -21,4 +24,12 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         txt: &[u8],
     ) -> PgResult<PgVec<'mcx, DefElemString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RemoveTSConfigurationById(cfgId)` (commands/tsearchcmds.c): the
+    /// per-class `OCLASS_TSCONFIG` drop handler dependency.c's `doDeletion`
+    /// invokes for a `pg_ts_config` object. Removes the text-search
+    /// configuration's catalog rows. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveTSConfigurationById(cfgId: Oid) -> PgResult<()>
 );

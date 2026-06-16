@@ -117,7 +117,7 @@ seam_core::seam!(
     /// `no_error = false` it raises. The descriptor is owned in `mcx`.
     pub fn get_expr_result_tupdesc<'mcx>(
         mcx: Mcx<'mcx>,
-        expr: &types_nodes::primnodes::Expr,
+        expr: Option<&types_nodes::nodes::Node<'mcx>>,
         no_error: bool,
     ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );

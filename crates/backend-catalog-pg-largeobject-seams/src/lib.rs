@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 use types_core::Oid;
 use types_error::PgResult;
 
@@ -25,4 +27,12 @@ seam_core::seam!(
     /// state (the `LargeObjectExistsWithSnapshot(loid, NULL)` wrapper). Can
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn large_object_exists(loid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `LargeObjectDrop(loid)` (catalog/pg_largeobject.c): the per-class
+    /// `OCLASS_LARGEOBJECT` drop handler dependency.c's `doDeletion` invokes for
+    /// a large-object metadata object. Removes the `pg_largeobject_metadata`
+    /// row and the object's data pages. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn LargeObjectDrop(loid: Oid) -> PgResult<()>
 );

@@ -131,3 +131,15 @@ seam_core::seam!(
     /// `IndexGetRelation(indexId, missing_ok)` (index.c).
     pub fn index_get_relation(index_id: types_core::Oid, missing_ok: bool) -> types_error::PgResult<types_core::Oid>
 );
+
+seam_core::seam!(
+    /// `index_drop(indexId, concurrent, concurrent_lock_mode)` (catalog/index.c):
+    /// the per-class index drop handler dependency.c's `doDeletion` invokes for
+    /// `RelationRelationId` objects that are indexes. Removes the index relation
+    /// and its catalog rows. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn index_drop(
+        index_id: types_core::Oid,
+        concurrent: bool,
+        concurrent_lock_mode: bool,
+    ) -> types_error::PgResult<()>
+);

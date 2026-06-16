@@ -45,6 +45,7 @@ use types_storage::file::File;
 use types_storage::fileset::{FileSet, FILESET_MAX_TABLESPACES};
 
 mod seams;
+pub mod sharedfileset;
 pub use seams::init_seams;
 
 /// `InvalidOid` (`postgres_ext.h`).

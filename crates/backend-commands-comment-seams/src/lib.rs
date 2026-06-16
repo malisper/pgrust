@@ -214,3 +214,12 @@ seam!(
         classoid: Oid,
     ) -> PgResult<()>
 );
+
+seam!(
+    /// `DeleteComments(oid, classoid, subid)` (commands/comment.c): remove all
+    /// comment(s) on the object `{oid, classoid, subid}` (subid 0 = the whole
+    /// object). dependency.c's `deleteObjectsInList` calls this to clean up
+    /// `pg_description`/`pg_shdescription` rows for a dropped object. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()>
+);
