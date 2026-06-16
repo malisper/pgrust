@@ -98,6 +98,8 @@ pub fn init_all() {
     backend_catalog_pg_range::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
+    backend_catalog_pg_proc::init_seams();
+    backend_catalog_pg_publication::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
@@ -111,6 +113,7 @@ pub fn init_all() {
     backend_commands_copyto::init_seams();
     backend_commands_createas::init_seams();
     backend_commands_define::init_seams();
+    backend_commands_alter::init_seams();
     backend_commands_dropcmds::init_seams();
     backend_commands_extension::init_seams();
     backend_commands_explain::init_seams();
@@ -171,6 +174,7 @@ pub fn init_all() {
     backend_executor_nodeNamedtuplestorescan::init_seams();
     backend_executor_nodeResult::init_seams();
     backend_executor_nodeSamplescan::init_seams();
+    backend_access_tablesample_core::init_seams();
     backend_executor_nodeSeqscan::init_seams();
     backend_executor_nodeSetOp::init_seams();
     backend_executor_nodeSubqueryscan::init_seams();
@@ -1406,6 +1410,88 @@ mod recurrence_guard {
         // DESIGN_DEBT.md. DELETE when bufmgr installs them.
         ("backend_storage_buffer_bufmgr", "drop_database_buffers"),
         ("backend_storage_buffer_bufmgr", "flush_database_buffers"),
+        // DESIGN_DEBT (TD-INDEXING-PERCATALOG-OWNERS): backend-catalog-indexing
+        // is `merged` (its keystone engine — CatalogOpenIndexes/CatalogTupleInsert/
+        // Update/Delete + the F1 substrate-present per-catalog inserts — landed),
+        // but the seams below are owner-side per-catalog mutation bodies whose
+        // OWNING catalog .c unit is unported. Unlike the installed F1 family
+        // (mcx + open `rel` passed in, pure heap_form_tuple), these contracts
+        // encode logic that needs UNPORTED infrastructure — `table_open` by
+        // catalog OID, `SearchSysCacheCopy1` full-tuple copies, multi-insert
+        // batching, or per-catalog column-forming bodies that live in the
+        // not-yet-landed owner (pg_type.c, pg_constraint.c, foreign.c,
+        // namespace.c, sequence.c, large_object, db-role-setting, shdepend,
+        // cluster). They loud-panic until the respective owner lands; install
+        // (move the body into backend-catalog-indexing's family*.rs init_seams)
+        // when it does. DELETE each entry as its owner ports.
+        //
+        // -- generic catalog mutators consumed by unported callers --
+        ("backend_catalog_indexing", "catalog_open_indexes"),
+        ("backend_catalog_indexing", "catalog_close_indexes"),
+        ("backend_catalog_indexing", "catalog_tuple_delete"),
+        ("backend_catalog_indexing", "get_catalog_object_by_oid"),
+        // -- pg_type (pg_type.c TypeCreate/TypeShellMake/RenameTypeInternal) --
+        ("backend_catalog_indexing", "get_new_oid_with_index_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_type"),
+        ("backend_catalog_indexing", "catalog_tuple_update_typname_pg_type"),
+        // -- pg_constraint (heap.c/index.c CreateConstraintEntry + rename) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_constraint"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_constraint"),
+        // -- pg_depend update (dependency.c changeDependencyFor*) --
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_depend"),
+        // -- pg_shdepend (pg_shdepend.c shdepChangeDep/recordSharedDependency) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_shdepend"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_shdepend"),
+        // -- pg_sequence (sequence.c DefineSequence/AlterSequence/Delete) --
+        ("backend_catalog_indexing", "catalog_insert_pg_sequence"),
+        ("backend_catalog_indexing", "catalog_update_pg_sequence"),
+        ("backend_catalog_indexing", "catalog_delete_pg_sequence"),
+        // -- pg_class / pg_index updates (cluster.c, index.c) --
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_class"),
+        ("backend_catalog_indexing", "catalog_tuple_update_with_info_pg_class"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_index"),
+        // -- pg_largeobject (inv_api.c large-object page writes) --
+        ("backend_catalog_indexing", "deform_lo_page"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_with_info_pg_largeobject"),
+        ("backend_catalog_indexing", "catalog_tuple_update_with_info_pg_largeobject"),
+        // -- pg_db_role_setting (pg_db_role_setting.c AlterSetting) --
+        ("backend_catalog_indexing", "decode_db_role_setting_setconfig"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_db_role_setting"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_db_role_setting"),
+        // -- namespace.c (RenameSchema / AlterSchemaOwner) --
+        ("backend_catalog_indexing", "rename_namespace_tuple"),
+        ("backend_catalog_indexing", "update_namespace_owner_tuple"),
+        // -- alter.c (AlterObjectOwner_internal, generic catalog) --
+        // DESIGN_DEBT (TD-ALTER-GENERIC-OWNER-TUPLE): commands/alter.c's
+        // AlterObjectOwner_internal builds the modified owner tuple for an
+        // ARBITRARY simple catalog — set the owner column and, when the catalog
+        // has an ACL column, re-serialize aclnewowner(acl, old, new) back into
+        // the aclitem[] varlena — then CatalogTupleUpdate + UnlockTuple. The
+        // generic aclitem[]-varlena re-serialization into an arbitrary tuple
+        // column has no owned-model counterpart at this layer (every other
+        // owner-change uses a per-catalog typed writer, e.g.
+        // update_namespace_owner_tuple). Declared on the indexing owner so the
+        // landed alter dispatch can call it; loud-panics until indexing's
+        // generic aclitem[] write lands. DELETE when indexing installs it.
+        ("backend_catalog_indexing", "update_object_owner_tuple"),
+        // -- foreign-data catalogs (foreigncmds.c: FDW / server / table / um) --
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_update_owner_pg_foreign_data_wrapper"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_update_owner_pg_foreign_server"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_foreign_table"),
+        ("backend_catalog_indexing", "catalog_tuple_insert_pg_user_mapping"),
+        ("backend_catalog_indexing", "catalog_tuple_update_pg_user_mapping"),
+        // -- class-(B): blocked on the trimmed-PgClassForm cannot-reform keystone.
+        // The field write + invalidation must run on the owner's full syscache
+        // copy because Form_pg_class is a trimmed projection that cannot
+        // losslessly reform the on-disk tuple (rewriteSupport.c / toasting.c).
+        ("backend_catalog_indexing", "set_relation_rule_status"),
+        ("backend_catalog_indexing", "set_pg_class_reltoastrelid"),
+        ("backend_catalog_indexing", "set_pg_class_reltoastrelid_inplace"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

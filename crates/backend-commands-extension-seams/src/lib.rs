@@ -53,3 +53,15 @@ seam_core::seam!(
 // only as an extern). Its seam is owned by `backend-catalog-pg-depend-seams`
 // (`checkMembershipInCurrentExtension`, installed by `backend-catalog-pg-depend`);
 // consumers (sequence.c, …) call it there. It was mis-homed here previously.
+
+seam_core::seam!(
+    /// `AlterExtensionNamespace(const char *extensionName, const char
+    /// *newschema, Oid *oldschema)` (extension.c) — ALTER EXTENSION SET SCHEMA.
+    /// When `want_oldschema` is true the previous schema OID rides the tuple's
+    /// second slot (the C `*oldschema` out-parameter).
+    pub fn AlterExtensionNamespace(
+        extension_name: &str,
+        newschema: &str,
+        want_oldschema: bool,
+    ) -> PgResult<(types_catalog::catalog_dependency::ObjectAddress, Oid)>
+);

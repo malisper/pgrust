@@ -39,3 +39,19 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn RemovePublicationSchemaById(psoid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AlterPublicationOwner(const char *name, Oid newOwnerId)`
+    /// (publicationcmds.c) — ALTER PUBLICATION ... OWNER TO.
+    pub fn AlterPublicationOwner(
+        name: &str,
+        new_owner_id: Oid,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `InvalidatePubRelSyncCache(Oid pubid, bool puballtables)`
+    /// (publicationcmds.c) — invalidate the relsync cache entries for a renamed
+    /// publication.
+    pub fn InvalidatePubRelSyncCache(pubid: Oid, puballtables: bool) -> PgResult<()>
+);

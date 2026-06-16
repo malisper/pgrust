@@ -134,3 +134,10 @@ seam_core::seam!(
     /// is still initializing; gates the session-level `LockReleaseAll` on exit.
     pub fn initializing_apply_worker() -> bool
 );
+
+seam_core::seam!(
+    /// `LogicalRepWorkersWakeupAtCommit(Oid subid)` (worker.c) — schedule a
+    /// wakeup of the apply workers for subscription `subid` at the next
+    /// transaction commit, so a rename takes effect quickly.
+    pub fn LogicalRepWorkersWakeupAtCommit(subid: types_core::Oid) -> types_error::PgResult<()>
+);

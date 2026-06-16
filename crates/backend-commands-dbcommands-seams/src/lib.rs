@@ -42,3 +42,22 @@ seam_core::seam!(
     /// `InvalidOid`.
     pub fn get_database_oid(dbname: &str, missing_ok: bool) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `RenameDatabase(const char *oldname, const char *newname)`
+    /// (dbcommands.c) — ALTER DATABASE RENAME TO. Returns the database's
+    /// [`ObjectAddress`](types_catalog::catalog_dependency::ObjectAddress).
+    pub fn RenameDatabase(
+        oldname: &str,
+        newname: &str,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `AlterDatabaseOwner(const char *dbname, Oid newOwnerId)` (dbcommands.c)
+    /// — ALTER DATABASE OWNER TO.
+    pub fn AlterDatabaseOwner(
+        dbname: &str,
+        new_owner_id: Oid,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);

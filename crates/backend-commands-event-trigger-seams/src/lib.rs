@@ -105,3 +105,12 @@ seam_core::seam!(
         normal: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AlterEventTriggerOwner(const char *name, Oid newOwnerId)`
+    /// (event_trigger.c) — ALTER EVENT TRIGGER ... OWNER TO.
+    pub fn AlterEventTriggerOwner(
+        name: &str,
+        new_owner_id: Oid,
+    ) -> PgResult<ObjectAddress>
+);

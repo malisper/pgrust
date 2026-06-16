@@ -330,6 +330,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AlterObjectOwner_internal`'s modified-tuple write (alter.c:1013-1046) for
+    /// an arbitrary simple catalog. On the already-open `rel` (catalog OID
+    /// `catalogId`, RowExclusiveLock) re-fetch the locked row for `object_id`
+    /// via `get_catalog_object_by_oid_extended(rel, anum_oid, object_id, true)`,
+    /// set `repl_repl[anum_owner] = true` / `repl_val[anum_owner] = new_owner`,
+    /// and when `anum_acl != InvalidAttrNumber` and `SysCacheGetAttr(anum_acl)`
+    /// is non-NULL, write `aclnewowner(acl, old_owner, new_owner)` into
+    /// `repl_val[anum_acl]`; then `heap_modify_tuple` + `CatalogTupleUpdate(rel,
+    /// &newtup->t_self, newtup)` + `UnlockTuple(rel, &oldtup->t_self,
+    /// InplaceUpdateTupleLock)`. The generic `aclitem[]` varlena re-serialization
+    /// into the modified tuple is the unported primitive this seam encapsulates
+    /// (mirroring the per-catalog typed owner-tuple writers like
+    /// `update_namespace_owner_tuple`). `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn update_object_owner_tuple(
+        rel: &RelationData<'_>,
+        anum_oid: i16,
+        object_id: Oid,
+        anum_owner: i16,
+        anum_acl: i16,
+        old_owner: Oid,
+        new_owner: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
     /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
     /// the metadata tuple from the already-chosen large-object OID, owner, and
@@ -916,6 +942,51 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
         new_name: &str,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_proc, ProcedureOidIndexId, Anum_pg_proc_oid)`
+    /// (catalog/catalog.c): allocate a fresh `pg_proc` row OID that does not
+    /// collide with any existing row, verified against `ProcedureOidIndexId`.
+    /// Returned to the `pg_proc.c` port (`ProcedureCreate`'s new-row branch) so
+    /// the OID-assignment decision stays in the owner. `Err` carries the
+    /// index-probe error surface.
+    pub fn get_new_oid_with_index_pg_proc<'mcx>(rel: &types_rel::Relation<'mcx>) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `ProcedureCreate`'s new-row path: `heap_form_tuple(RelationGetDescr(rel),
+    /// values, nulls)` + `CatalogTupleInsert(rel, tup)` + `heap_freetuple` for
+    /// one `pg_proc` row (catalog/indexing.c + heapam). The fixed columns plus
+    /// the `oidvector` `proargtypes`, the `CATALOG_VARLEN` columns
+    /// (`proallargtypes`/`proargmodes`/`proargnames`/`proargdefaults`/
+    /// `protrftypes`/`probin`/`prosqlbody`/`proconfig`/`proacl`) cross as the
+    /// deformed [`PgProcInsertRow`]; `None` for a varlen column is
+    /// `nulls[Anum_pg_proc_* - 1] = true`. The owner has already assigned
+    /// `row.fields.oid`. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_proc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_proc::PgProcInsertRow,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcedureCreate`'s replace path: `heap_modify_tuple(oldtup,
+    /// RelationGetDescr(rel), values, nulls, replaces)` with every column
+    /// replaced *except* `oid`/`proowner`/`proacl`
+    /// (`replaces[Anum_pg_proc_{oid,proowner,proacl} - 1] = false`,
+    /// pg_proc.c:580-585), then `CatalogTupleUpdate(rel, &tup->t_self, tup)`
+    /// (catalog/indexing.c + heapam). The replacement columns cross as the
+    /// deformed [`PgProcInsertRow`]; the held `oldtup` supplies the
+    /// not-replaced columns and the `t_self` update target. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_proc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        oldtup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        row: &types_catalog::pg_proc::PgProcInsertRow,
     ) -> PgResult<()>
 );
 
