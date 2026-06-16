@@ -70,6 +70,34 @@ seam_core::seam!(
     pub fn be_tls_get_cipher_bits(port: &mut types_net::Port) -> i32
 );
 
+seam_core::seam!(
+    /// `void be_tls_get_peer_subject_name(Port *port, char *ptr, size_t len)`
+    /// (`libpq/be-secure.c`) — the peer certificate's subject distinguished name
+    /// (empty if none), recorded by `backend_status.c`'s `pgstat_bestart_security`.
+    pub fn be_tls_get_peer_subject_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `void be_tls_get_peer_serial(Port *port, char *ptr, size_t len)`
+    /// (`libpq/be-secure.c`) — the peer certificate's serial number string.
+    pub fn be_tls_get_peer_serial<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `void be_tls_get_peer_issuer_name(Port *port, char *ptr, size_t len)`
+    /// (`libpq/be-secure.c`) — the peer certificate's issuer distinguished name.
+    pub fn be_tls_get_peer_issuer_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
 // ---------------------------------------------------------------------------
 //  Negotiation guards + handshake openers (backend_startup.c crossings).
 // ---------------------------------------------------------------------------

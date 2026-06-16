@@ -402,6 +402,7 @@ backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity
 backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-slru" }
 backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }

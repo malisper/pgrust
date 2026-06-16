@@ -135,7 +135,7 @@ fn PerformAuthentication(mcx: Mcx<'_>) -> PgResult<()> {
 
     // Capture authentication start time for logging.
     let auth_start = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
-    backend_utils_activity_status_seams::set_conn_timing_auth_start::call(auth_start);
+    backend_tcop_backend_startup_seams::set_conn_timing_auth_start::call(auth_start);
 
     // Set up a timeout in case a buggy or malicious client fails to respond
     // during authentication. Since we're inside a transaction and might do
@@ -155,7 +155,7 @@ fn PerformAuthentication(mcx: Mcx<'_>) -> PgResult<()> {
 
     // Capture authentication end time for logging.
     let auth_end = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
-    backend_utils_activity_status_seams::set_conn_timing_auth_end::call(auth_end);
+    backend_tcop_backend_startup_seams::set_conn_timing_auth_end::call(auth_end);
 
     if backend_libpq_auth_seams::log_connection_authorization::call() {
         // Assemble the message verbatim, mirroring the C StringInfoData logmsg

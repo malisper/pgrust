@@ -68,4 +68,9 @@ pub fn install_seams() {
             .map(|ki| ki.info.name)
             .unwrap_or("???")
     });
+
+    // pgstat_restore_stats() / pgstat_discard_stats(): WAL-startup stats-file
+    // restore-on-clean-shutdown / discard-on-crash (StartupXLOG).
+    pgstat_seam::pgstat_restore_stats::set(pgcore::pgstat_restore_stats);
+    pgstat_seam::pgstat_discard_stats::set(pgcore::pgstat_discard_stats);
 }

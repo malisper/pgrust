@@ -1111,6 +1111,8 @@ pub fn assign_log_connections(extra: u32) {
 pub fn init_seams() {
     backend_tcop_backend_startup_seams::backend_main::set(backend_main);
     backend_tcop_backend_startup_seams::set_conn_timing_child::set(set_conn_timing_child);
+    backend_tcop_backend_startup_seams::set_conn_timing_auth_start::set(globals::conn_timing::set_auth_start);
+    backend_tcop_backend_startup_seams::set_conn_timing_auth_end::set(globals::conn_timing::set_auth_end);
 }
 
 /// `set_conn_timing_child` (the inward seam): transfer launch timings into the

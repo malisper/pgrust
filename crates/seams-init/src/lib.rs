@@ -387,6 +387,7 @@ pub fn init_all() {
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
+    backend_utils_activity_status::init_seams();
     // Per-kind pgstat owner crates must register their builtin kinds BEFORE
     // backend_utils_activity_pgstat::init_seams() seals the kind table.
     backend_utils_activity_pgstat_io::init_seams();

@@ -17,6 +17,7 @@ use types_core::{Oid, TimestampTz};
 use types_error::PgResult;
 use types_pgstat::activity_pgstat::{
     PgStat_FetchConsistency, PgStat_Kind, PGSTAT_KIND_BUILTIN_MAX, PGSTAT_KIND_BUILTIN_MIN,
+    PGSTAT_KIND_MAX, PGSTAT_KIND_MIN,
 };
 use types_pgstat::pgstat_internal::{PgStat_HashKey, PgStatShared_Common, PgStatShared_HashEntry};
 
@@ -702,6 +703,127 @@ pub fn pgstat_reset_entry(
     // Release the content lock.
     shmem::pgstat_unlock_entry(er)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// startup: restore / discard the on-disk stats file.
+// ---------------------------------------------------------------------------
+
+/// `PGSTAT_STAT_PERMANENT_FILENAME` (`pgstat.h`) — the permanent statistics file
+/// written at a clean shutdown and read back at startup.
+const PGSTAT_STAT_PERMANENT_FILENAME: &str = "pg_stat/pgstat.stat";
+
+/// `pgstat_reset_after_failure()` (`pgstat.c`) — reset/drop all stats after a
+/// crash, or after restoring stats from disk failed. Resets every
+/// fixed-numbered kind to the current time through its `reset_all_cb`, then drops
+/// all variable-numbered entries.
+fn pgstat_reset_after_failure() -> PgResult<()> {
+    let ts = timestamp::get_current_timestamp::call();
+
+    // Reset fixed-numbered stats.
+    let mut kind = PGSTAT_KIND_MIN.0;
+    while kind <= PGSTAT_KIND_MAX.0 {
+        let k = PgStat_Kind(kind);
+        kind += 1;
+
+        let kind_info = match registry::pgstat_get_kind_info(k) {
+            Some(ki) => ki,
+            None => continue,
+        };
+        if !kind_info.info.fixed_amount {
+            continue;
+        }
+        if let Some(cb) = &kind_info.cb.reset_all_cb {
+            // reset_all_cb(ts): the adapter projects the field of the shared
+            // control block.
+            local::with_local(|l| -> PgResult<()> {
+                if let Some(ctl) = l.shmem.as_deref_mut() {
+                    cb(ctl, ts)?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    // And drop the variable-numbered ones.
+    shmem::pgstat_drop_all_entries()
+}
+
+/// `pgstat_read_statsfile()` (`pgstat.c`) — read the permanent on-disk stats file
+/// into shared memory at server start. Called only by the startup process / in
+/// single-user mode, so no locking is required.
+///
+/// When the file does not exist (`ENOENT` — stats collection was disabled, or no
+/// clean shutdown has yet written it) statistics simply start from scratch:
+/// `pgstat_reset_after_failure()` resets the fixed kinds and returns. This is the
+/// path a clean boot of a freshly-initialized cluster always takes, and the path
+/// this port always takes (`pgstat_before_server_shutdown` does not yet write the
+/// permanent file — the on-disk codec, below, is unported).
+///
+/// # What stays seam-panic
+///
+/// The actual file-decode loop (`PGSTAT_FILE_ENTRY_FIXED` / `_HASH` / `_NAME`
+/// entries) `memcpy`s `info->shared_data_len` raw bytes into
+/// `(char *) shmem + info->shared_ctl_off + info->shared_data_off` for fixed
+/// kinds, and `pgstat_get_entry_data(kind, header)` for variable kinds. The
+/// idiomatic model stores fixed-kind stats in *typed fields* of
+/// `PgStat_ShmemControl` (the per-kind crates register `shared_ctl_off ==
+/// shared_data_off == 0`), so there is no byte-addressable shared region to
+/// `memcpy` into — the on-disk byte-offset format is unmodeled in this port (its
+/// symmetric writer, `pgstat_write_statsfile`, is likewise unported). Decoding a
+/// non-empty stats file therefore panics loudly rather than silently mis-loading
+/// counters. This branch is unreachable on the clean boot path, where the file
+/// is always absent.
+fn pgstat_read_statsfile() -> PgResult<()> {
+    let statfile = PGSTAT_STAT_PERMANENT_FILENAME;
+
+    // Try to open the stats file. If it doesn't exist (ENOENT), statistics
+    // start from scratch with empty counters. `allocate_file_read` returns
+    // `None` for ENOENT (any other open failure is carried on `Err`, mirroring
+    // C's `ereport(LOG)` + `pgstat_reset_after_failure`).
+    let bytes = match backend_storage_file_fd_seams::allocate_file_read::call(statfile) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            // ENOENT: nothing to restore.
+            return pgstat_reset_after_failure();
+        }
+        Err(_) => {
+            // could not open statistics file: reset and start fresh.
+            return pgstat_reset_after_failure();
+        }
+    };
+
+    // We found an existing statistics file. Decoding it requires the on-disk
+    // byte-offset format that this port does not model (see the doc comment).
+    let _ = bytes;
+    panic!(
+        "pgstat_read_statsfile: decode of an existing permanent stats file is not modeled \
+         (the on-disk byte-offset format over the typed PgStat_ShmemControl is unported; \
+         its symmetric writer pgstat_write_statsfile is likewise unported)"
+    );
+}
+
+/// `pgstat_restore_stats()` (`pgstat.c`) — read on-disk stats into memory at
+/// server start (clean shutdown path). Called only by the startup process / in
+/// single-user mode.
+pub fn pgstat_restore_stats() -> PgResult<()> {
+    pgstat_read_statsfile()
+}
+
+/// `pgstat_discard_stats()` (`pgstat.c`) — remove the permanent stats file. Used
+/// only when WAL recovery is needed after a crash. Unlinks the file (a missing
+/// file is fine) then resets all stats contents.
+pub fn pgstat_discard_stats() -> PgResult<()> {
+    // NB: this needs to be done even in single user mode.
+    let ret = backend_storage_file_fd_seams::unlink_file::call(PGSTAT_STAT_PERMANENT_FILENAME);
+    // C distinguishes ENOENT (DEBUG2 "didn't need to unlink") from other errno
+    // (ereport LOG); both are non-fatal and merely logged, so a failed unlink
+    // does not affect the reset that follows.
+    let _ = ret;
+
+    // Reset stats contents. This sets reset timestamps of fixed-numbered stats
+    // to the current time (no variable stats exist yet at startup).
+    pgstat_reset_after_failure()
 }
 
 // ---------------------------------------------------------------------------

@@ -973,4 +973,5 @@ pub fn init_seams() {
     seams::count_user_backends::set(CountUserBackends);
     seams::cancel_db_backends::set(CancelDBBackends);
     seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
+    seams::proc_number_get_transaction_ids::set(ProcNumberGetTransactionIds);
 }

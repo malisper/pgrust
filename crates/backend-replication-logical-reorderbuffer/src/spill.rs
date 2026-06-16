@@ -569,6 +569,35 @@ impl ReorderBuffer {
     }
 }
 
+/// `StartupReorderBuffer(void)` (reorderbuffer.c:4907) — at WAL startup, delete
+/// all logical-decoding data spilled to disk by a previous (crashed or
+/// restarted) run. Iterate `pg_replslot`, and for every entry that is a valid
+/// surviving logical slot, delete everything starting with `xid-*` via
+/// [`ReorderBuffer::cleanup_serialized_txns`]. Called unconditionally by the
+/// WAL-startup driver (`StartupXLOG`).
+pub fn startup_reorder_buffer() -> types_error::PgResult<()> {
+    // logical_dir = AllocateDir(PG_REPLSLOT_DIR); while (ReadDir(...))
+    // `read_dir_names` already excludes the C `strcmp(d_name, ".") / ".."`
+    // entries the loop skips.
+    let names = backend_storage_file_fd_seams::read_dir_names::call(PG_REPLSLOT_DIR)?;
+    for name in names {
+        // if it cannot be a slot, skip the directory. C passes DEBUG2 as the
+        // elevel; a name failing validation simply logs at DEBUG2 and returns
+        // false (never raises), so the boolean validity is all that matters
+        // here.
+        if backend_replication_slot_seams::replication_slot_validate_name_internal::call(&name)
+            .is_err()
+        {
+            continue;
+        }
+
+        // ok, has to be a surviving logical slot, iterate and delete
+        // everything starting with xid-*
+        ReorderBuffer::cleanup_serialized_txns(&name);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Pure per-change logical encode / decode (the on-disk image, sans the
 // length-prefix the record carries on disk).
