@@ -120,6 +120,7 @@ backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
 backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-schemacmds = { path = "../backend-commands-schemacmds" }
+backend-commands-alter = { path = "../backend-commands-alter" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-sequence = { path = "../backend-commands-sequence" }

@@ -58,3 +58,15 @@ seam_core::seam!(
         object: &types_catalog::catalog_dependency::ObjectAddress,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AlterExtensionNamespace(const char *extensionName, const char
+    /// *newschema, Oid *oldschema)` (extension.c) — ALTER EXTENSION SET SCHEMA.
+    /// When `want_oldschema` is true the previous schema OID rides the tuple's
+    /// second slot (the C `*oldschema` out-parameter).
+    pub fn AlterExtensionNamespace(
+        extension_name: &str,
+        newschema: &str,
+        want_oldschema: bool,
+    ) -> PgResult<(types_catalog::catalog_dependency::ObjectAddress, Oid)>
+);

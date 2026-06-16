@@ -37,3 +37,11 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn RemovePolicyById(policy_id: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `rename_policy(RenameStmt *stmt)` (policy.c) — ALTER POLICY ... RENAME TO.
+    pub fn rename_policy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_parsenodes::RenameStmt,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
