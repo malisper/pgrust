@@ -3587,6 +3587,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-gzip"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-gzip-seams",
+ "backend-backup-sink",
+ "backend-utils-error",
+ "mcx",
+ "types-compression",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-backup-gzip-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-backup-lz4"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-lz4-seams",
+ "backend-backup-sink",
+ "backend-utils-error",
+ "mcx",
+ "types-compression",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-backup-lz4-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-backup-manifest"
 version = "0.0.0"
 dependencies = [
@@ -3685,6 +3725,26 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-walsummarizer",
+]
+
+[[package]]
+name = "backend-backup-zstd"
+version = "0.0.0"
+dependencies = [
+ "backend-backup-sink",
+ "backend-backup-zstd-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-compression",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-backup-zstd-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -18686,9 +18746,12 @@ dependencies = [
  "backend-archive-shell-archive",
  "backend-backup-basebackup-target",
  "backend-backup-copy",
+ "backend-backup-gzip",
+ "backend-backup-lz4",
  "backend-backup-server",
  "backend-backup-sink",
  "backend-backup-sink-support",
+ "backend-backup-zstd",
  "backend-bootstrap-bootstrap",
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
@@ -19201,6 +19264,10 @@ dependencies = [
  "types-tuple",
  "types-vacuum",
 ]
+
+[[package]]
+name = "types-compression"
+version = "0.0.0"
 
 [[package]]
 name = "types-condvar"
