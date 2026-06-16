@@ -1374,6 +1374,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-spccache",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
@@ -19753,6 +19754,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
  "types-snapshot",
  "types-tuple",
 ]

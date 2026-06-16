@@ -44,6 +44,7 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-access-heap-hio = { path = "../backend-access-heap-hio" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
