@@ -69,4 +69,30 @@ pub fn init_seams() {
     seam::pre_commit_on_commit_actions::set(oncommit::pre_commit_on_commit_actions);
     seam::at_eoxact_on_commit_actions::set(oncommit::at_eoxact_on_commit_actions);
     seam::at_eosubxact_on_commit_actions::set(oncommit::at_eosubxact_on_commit_actions);
+
+    // --- ProcessUtility dispatch arms (utility.c TRUNCATE + DROP relations) ---
+    backend_tcop_utility_out_seams::execute_truncate::set(execute_truncate_arm);
+    backend_tcop_utility_out_seams::remove_relations::set(remove_relations_arm);
+}
+
+use mcx::Mcx;
+use types_error::PgResult;
+use types_nodes::nodes::Node;
+
+/// `case T_TruncateStmt: ExecuteTruncate(stmt)` (utility.c). The dispatch carries
+/// the parse tree as `&Node`; extract the `TruncateStmt` variant and forward.
+fn execute_truncate_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let Node::TruncateStmt(s) = stmt else {
+        panic!("execute_truncate: parse tree is not a TruncateStmt");
+    };
+    truncate::execute_truncate(mcx, s)
+}
+
+/// `ExecDropStmt → RemoveRelations(stmt)` (utility.c) for the relation removeType
+/// legs (TABLE/SEQUENCE/VIEW/MATVIEW/FOREIGN TABLE/INDEX).
+fn remove_relations_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let Node::DropStmt(s) = stmt else {
+        panic!("remove_relations: parse tree is not a DropStmt");
+    };
+    drop::remove_relations(mcx, s)
 }

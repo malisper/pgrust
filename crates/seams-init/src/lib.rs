@@ -240,6 +240,7 @@ pub fn init_all() {
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();
+    backend_libpq_pqmq::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_nodes_copyfuncs::init_seams();
@@ -384,6 +385,7 @@ pub fn init_all() {
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
+    backend_utils_activity_pgstat::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
