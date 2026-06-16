@@ -1,0 +1,21 @@
+[package]
+name = "backend-utils-adt-jsonpath-gram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_jsonpath_gram"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-jsonpath = { path = "../types-jsonpath" }
+types-regex = { path = "../types-regex" }
+mcx = { path = "../mcx" }
+backend-utils-adt-jsonpath-scan = { path = "../backend-utils-adt-jsonpath-scan" }
+backend-utils-adt-jsonpath-gram-seams = { path = "../backend-utils-adt-jsonpath-gram-seams" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+backend-utils-mb-fgram = { path = "../backend-utils-mb-fgram" }
+backend-regex-core = { path = "../backend-regex-core" }
