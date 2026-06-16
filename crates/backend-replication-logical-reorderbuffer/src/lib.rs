@@ -95,6 +95,9 @@ pub const RBTXN_IS_COMMITTED: u32 = 0x0400;
 pub const RBTXN_IS_ABORTED: u32 = 0x0800;
 /// `RBTXN_DISTR_INVAL_OVERFLOWED`.
 pub const RBTXN_DISTR_INVAL_OVERFLOWED: u32 = 0x1000;
+/// `RBTXN_PREPARE_STATUS_MASK` — the prepare-state flag group.
+pub const RBTXN_PREPARE_STATUS_MASK: u32 =
+    RBTXN_IS_PREPARED | RBTXN_SKIPPED_PREPARE | RBTXN_SENT_PREPARE;
 
 // ---------------------------------------------------------------------------
 // ReorderBufferChange (reorderbuffer.h)
@@ -652,7 +655,7 @@ impl ReorderBuffer {
     /// are reached through their crate-internal entry points, which panic until
     /// that family lands. The foundational queueing — the abort short-circuit,
     /// streamable-change flag, list append and entry counters — is ported here.
-    fn queue_change(
+    pub(crate) fn queue_change(
         &mut self,
         xid: TransactionId,
         lsn: XLogRecPtr,
@@ -832,6 +835,318 @@ impl ReorderBuffer {
 
         // Queue the invalidation messages into the transaction.
         self.queue_invalidations(xid, lsn, &msgs);
+    }
+
+    // -----------------------------------------------------------------------
+    // Public change-replay entry points (consumed by decode.c)
+    // -----------------------------------------------------------------------
+
+    /// `ReorderBufferQueueChange(rb, xid, lsn, change, toast_insert)` for a
+    /// decoded heap `tp` change. decode.c can't construct the owner-private
+    /// `ReorderBufferChange`, so the seam conveys the change discriminant, the
+    /// relation locator and the decoded old/new tuple images; this method
+    /// assembles the change and forwards to the internal queueing path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn queue_decoded_change(
+        &mut self,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        kind: backend_replication_logical_reorderbuffer_seams::DecodedChangeKind,
+        rlocator: RelFileLocator,
+        oldtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+        newtuple: Option<backend_replication_logical_reorderbuffer_seams::DecodedTuple>,
+        toast_insert: bool,
+    ) {
+        use backend_replication_logical_reorderbuffer_seams::DecodedChangeKind as K;
+        let action = match kind {
+            K::Insert => ReorderBufferChangeType::Insert,
+            K::Update => ReorderBufferChangeType::Update,
+            K::Delete => ReorderBufferChangeType::Delete,
+            K::SpecInsert => ReorderBufferChangeType::InternalSpecInsert,
+            K::SpecConfirm => ReorderBufferChangeType::InternalSpecConfirm,
+            K::SpecAbort => ReorderBufferChangeType::InternalSpecAbort,
+            K::Truncate => ReorderBufferChangeType::Truncate,
+        };
+        // C `clear_toast_afterwards` defaults to true: ReorderBufferToastReplace
+        // resets it for the toast assembly chain. The toast family owns that
+        // reset; the foundational image keeps the C default.
+        let mut change = ReorderBufferChange::alloc();
+        change.action = action;
+        change.data = ReorderBufferChangeData::Tp {
+            rlocator,
+            clear_toast_afterwards: true,
+            oldtuple: oldtuple.map(decoded_tuple_to_buf),
+            newtuple: newtuple.map(decoded_tuple_to_buf),
+        };
+        self.queue_change(xid, lsn, change, toast_insert);
+    }
+
+    /// `ReorderBufferQueueChange(rb, xid, lsn, change, false)` for a
+    /// `REORDER_BUFFER_CHANGE_TRUNCATE` change (decode.c:DecodeTruncate builds
+    /// the `truncate` payload and queues it). Separate seam because the payload
+    /// is shaped differently from the per-tuple `tp` change.
+    pub(crate) fn queue_truncate(
+        &mut self,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        cascade: bool,
+        restart_seqs: bool,
+        relids: Vec<types_core::Oid>,
+    ) {
+        let mut change = ReorderBufferChange::alloc();
+        change.action = ReorderBufferChangeType::Truncate;
+        change.data = ReorderBufferChangeData::Truncate {
+            cascade,
+            restart_seqs,
+            relids,
+        };
+        self.queue_change(xid, lsn, change, false);
+    }
+
+    /// `ReorderBufferQueueMessage(rb, xid, snap, lsn, transactional, prefix,
+    /// message_size, message)`. The transactional message is queued to be
+    /// processed on commit; the non-transactional path replays the message
+    /// immediately through the output plugin's `message` callback under a
+    /// historic snapshot.
+    pub(crate) fn queue_message(
+        &mut self,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        transactional: bool,
+        prefix: Vec<u8>,
+        message: Vec<u8>,
+    ) {
+        if transactional {
+            debug_assert!(xid != InvalidTransactionId);
+            let mut change = ReorderBufferChange::alloc();
+            change.action = ReorderBufferChangeType::Message;
+            change.data = ReorderBufferChangeData::Msg { prefix, message };
+            self.queue_change(xid, lsn, change, false);
+        } else {
+            // Non-transactional changes require a valid snapshot and are
+            // replayed immediately through the output plugin `message`
+            // callback (rb->message) under SetupHistoricSnapshot. The seam
+            // doesn't carry the snapshot and the output-plugin dispatch is
+            // unported (logical.c handle facade), so this path panics.
+            let _ = (xid, lsn, prefix, message);
+            panic!(
+                "ReorderBufferQueueMessage non-transactional path: rb->message \
+                 output-plugin callback dispatch + SetupHistoricSnapshot(snap) \
+                 not yet modeled (logical.c handle facade)"
+            );
+        }
+    }
+
+    /// `ReorderBufferAddInvalidations(rb, xid, lsn, nmsgs, msgs)` — accumulate
+    /// the txn's cache invalidations under its top transaction and queue them.
+    pub(crate) fn add_invalidations(
+        &mut self,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        msgs: Vec<SharedInvalidationMessage>,
+    ) {
+        let txn_xid = self
+            .txn_by_xid(xid, true, &mut None, lsn, true)
+            .expect("create == true yields a txn");
+
+        // Collect all invalidations under the top transaction.
+        let top = self.toptxn_xid(txn_xid);
+        debug_assert!(!msgs.is_empty(), "nmsgs > 0");
+
+        self.with_txn(top, |t| {
+            accumulate_invalidations(&mut t.invalidations, &msgs);
+        });
+
+        self.queue_invalidations(xid, lsn, &msgs);
+    }
+
+    /// `ReorderBufferImmediateInvalidation(rb, ninvalidations, invalidations)`
+    /// — execute cache invalidations outside the context of a decoded
+    /// transaction (xid-less commits, or uninteresting transactions via
+    /// `ReorderBufferForget`). Invalidations are forced to happen outside a
+    /// valid transaction so entries are just marked invalid without catalog
+    /// access.
+    pub(crate) fn immediate_invalidation(&mut self, invalidations: &[SharedInvalidationMessage]) {
+        let use_subtxn =
+            backend_access_transam_xact_seams::is_transaction_or_transaction_block::call();
+
+        if use_subtxn {
+            backend_access_transam_xact_seams::begin_internal_sub_transaction::call(Some("replay"))
+                .expect("BeginInternalSubTransaction(\"replay\")");
+        }
+
+        // Force invalidations to happen outside of a valid transaction.
+        if use_subtxn {
+            backend_access_transam_xact_seams::abort_current_transaction::call()
+                .expect("AbortCurrentTransaction");
+        }
+
+        for msg in invalidations {
+            backend_utils_cache_inval_seams::local_execute_invalidation_message::call(msg)
+                .expect("LocalExecuteInvalidationMessage");
+        }
+
+        if use_subtxn {
+            backend_access_transam_xact_seams::rollback_and_release_current_sub_transaction::call()
+                .expect("RollbackAndReleaseCurrentSubTransaction");
+        }
+    }
+
+    /// `ReorderBufferAbort(rb, xid, lsn, abort_time)` — abort a transaction and
+    /// its subtransactions.
+    pub(crate) fn abort(
+        &mut self,
+        xid: TransactionId,
+        lsn: XLogRecPtr,
+        abort_time: TimestampTz,
+    ) {
+        let txn_xid =
+            match self.txn_by_xid(xid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return, // unknown, nothing to remove
+                Some(x) => x,
+            };
+
+        self.with_txn(txn_xid, |t| t.xact_time = abort_time);
+
+        // For streamed transactions notify the remote node about the abort.
+        if self.with_txn(txn_xid, |t| t.is_streamed()) {
+            self.stream_abort_output(txn_xid, lsn);
+
+            // Execute the inval messages so future transactions don't reuse
+            // this txn's (possibly DDL-poisoned) cache entries.
+            let ninval = self.with_txn(txn_xid, |t| t.invalidations.len());
+            if ninval > 0 {
+                let msgs = self.with_txn(txn_xid, |t| t.invalidations.clone());
+                self.immediate_invalidation(&msgs);
+            }
+        }
+
+        // cosmetic...
+        self.with_txn(txn_xid, |t| t.final_lsn = lsn);
+
+        // remove potential on-disk data, and deallocate
+        self.cleanup_txn(txn_xid);
+    }
+
+    /// `ReorderBufferAbortOld(rb, oldestRunningXid)` — abort all toplevel txns
+    /// older than `oldest_running_xid` (server crash/immediate restart cleanup;
+    /// no invalidation handling here).
+    pub(crate) fn abort_old(&mut self, oldest_running_xid: TransactionId) {
+        // Iterate toplevel txns in LSN order, aborting all older than what can
+        // possibly still be running; stop at the first live one.
+        let candidates: Vec<TransactionId> = self.toplevel_by_lsn.clone();
+        for txn_xid in candidates {
+            // The toplevel list holds xids; resolve to the live txn.
+            if self.by_txn_get(txn_xid).is_none() {
+                continue;
+            }
+            if transaction_id_precedes(txn_xid, oldest_running_xid) {
+                // Notify the remote node about the crash/immediate restart.
+                if self.with_txn(txn_xid, |t| t.is_streamed()) {
+                    self.stream_abort_output(txn_xid, InvalidXLogRecPtr);
+                }
+                self.cleanup_txn(txn_xid);
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// `ReorderBufferForget(rb, xid, lsn)` — discard a transaction we aren't
+    /// interested in (committed but uninteresting), still applying its cache
+    /// invalidations. Must be called after the commit record is read.
+    pub(crate) fn forget(&mut self, xid: TransactionId, lsn: XLogRecPtr) {
+        let txn_xid =
+            match self.txn_by_xid(xid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return, // unknown, nothing to forget
+                Some(x) => x,
+            };
+
+        // this transaction mustn't be streamed
+        debug_assert!(!self.with_txn(txn_xid, |t| t.is_streamed()));
+
+        // cosmetic...
+        self.with_txn(txn_xid, |t| t.final_lsn = lsn);
+
+        // Process only cache invalidation messages (the txn could have
+        // manipulated the catalog).
+        let (has_base, ninval) =
+            self.with_txn(txn_xid, |t| (t.base_snapshot.is_some(), t.invalidations.len()));
+        if has_base && ninval > 0 {
+            let msgs = self.with_txn(txn_xid, |t| t.invalidations.clone());
+            self.immediate_invalidation(&msgs);
+        } else {
+            debug_assert!(ninval == 0);
+        }
+
+        // remove potential on-disk data, and deallocate
+        self.cleanup_txn(txn_xid);
+    }
+
+    /// `ReorderBufferInvalidate(rb, xid, lsn)` — execute the txn's accumulated
+    /// cache invalidations without replaying its changes and *without* cleaning
+    /// up the txn (a prepared txn we decided to skip, see `DecodePrepare`).
+    pub(crate) fn invalidate(&mut self, xid: TransactionId, _lsn: XLogRecPtr) {
+        let txn_xid =
+            match self.txn_by_xid(xid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return, // unknown, nothing to do
+                Some(x) => x,
+            };
+
+        let (has_base, ninval) =
+            self.with_txn(txn_xid, |t| (t.base_snapshot.is_some(), t.invalidations.len()));
+        if has_base && ninval > 0 {
+            let msgs = self.with_txn(txn_xid, |t| t.invalidations.clone());
+            self.immediate_invalidation(&msgs);
+        } else {
+            debug_assert!(ninval == 0);
+        }
+    }
+
+    /// `ReorderBufferRememberPrepareInfo(rb, xid, prepare_lsn, end_lsn,
+    /// prepare_time, origin_id, origin_lsn)` — stash the metadata needed to
+    /// later replay the prepared transaction's commit/abort. Returns whether
+    /// the prepare should proceed (false if the txn is unknown).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn remember_prepare_info(
+        &mut self,
+        xid: TransactionId,
+        prepare_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        prepare_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+    ) -> bool {
+        let txn_xid =
+            match self.txn_by_xid(xid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return false, // unknown transaction, nothing to do
+                Some(x) => x,
+            };
+
+        self.with_txn(txn_xid, |t| {
+            t.final_lsn = prepare_lsn;
+            t.end_lsn = end_lsn;
+            t.xact_time = prepare_time;
+            t.origin_id = origin_id;
+            t.origin_lsn = origin_lsn;
+            debug_assert!(t.txn_flags & RBTXN_PREPARE_STATUS_MASK == 0);
+            t.txn_flags |= RBTXN_IS_PREPARED;
+        });
+        true
+    }
+
+    /// `ReorderBufferSkipPrepare(rb, xid)` — mark that the prepare for `xid`
+    /// was skipped (the plugin's `filter_prepare_cb` returned true).
+    pub(crate) fn skip_prepare(&mut self, xid: TransactionId) {
+        let txn_xid =
+            match self.txn_by_xid(xid, false, &mut None, InvalidXLogRecPtr, false) {
+                None => return, // unknown transaction, nothing to do
+                Some(x) => x,
+            };
+        self.with_txn(txn_xid, |t| {
+            debug_assert!(t.txn_flags & RBTXN_PREPARE_STATUS_MASK == RBTXN_IS_PREPARED);
+            t.txn_flags |= RBTXN_SKIPPED_PREPARE;
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1236,6 +1551,13 @@ impl ReorderBuffer {
         panic!("ReorderBuffer stream_start callback: logical.c dispatch not yet modeled");
     }
 
+    /// `rb->stream_abort(rb, txn, abort_lsn)` — notify the remote node of a
+    /// streamed transaction's abort (reached from `ReorderBufferAbort` /
+    /// `ReorderBufferAbortOld` only for already-streamed txns).
+    pub(crate) fn stream_abort_output(&mut self, _xid: TransactionId, _abort_lsn: XLogRecPtr) {
+        panic!("ReorderBuffer stream_abort callback: logical.c dispatch not yet modeled");
+    }
+
     /// `rb->stream_stop(rb, txn, last_lsn)`.
     pub(crate) fn stream_stop_output(&mut self, _xid: TransactionId, _last_lsn: XLogRecPtr) {
         panic!("ReorderBuffer stream_stop callback: logical.c dispatch not yet modeled");
@@ -1282,48 +1604,6 @@ impl ReorderBuffer {
         backend_utils_time_snapmgr_seams::setup_historic_snapshot::call(snapshot.clone(), tuplecids);
     }
 
-    /// The INTERNAL_SNAPSHOT change branch of `ReorderBufferProcessTXN`
-    /// (teardown/copy/setup of the historic snapshot).
-    ///
-    /// The snapmgr historic-snapshot ABI (`TeardownHistoricSnapshot` /
-    /// `SetupHistoricSnapshot`) is now modeled and reachable via the seams; the
-    /// remaining blocker is the change-replay local `snapshot_now`: this branch
-    /// reassigns it (`ReorderBufferFreeSnap` / `ReorderBufferCopySnap` of
-    /// `change->data.snapshot`) and the enclosing `process_txn` must thread that
-    /// mutable local through the change loop — part of the change-replay family
-    /// (#126 F2/F5), not this keystone. Seam-panic until that lands.
-    pub(crate) fn handle_internal_snapshot(
-        &mut self,
-        _xid: TransactionId,
-        _change: &ReorderBufferChange,
-        _command_id: CommandId,
-    ) {
-        panic!(
-            "ReorderBuffer INTERNAL_SNAPSHOT replay: change-replay snapshot_now \
-             threading (FreeSnap/CopySnap of change snapshot) not yet modeled \
-             (snapmgr Teardown/SetupHistoricSnapshot ABI is available)"
-        );
-    }
-
-    /// The INTERNAL_COMMAND_ID change branch of `ReorderBufferProcessTXN`.
-    ///
-    /// As with INTERNAL_SNAPSHOT, the snapmgr Teardown/SetupHistoricSnapshot ABI
-    /// is now available; this branch still needs the change-replay local
-    /// `snapshot_now`/`command_id` threading (bump `command_id`, `CopySnap`,
-    /// set `curcid`) which lands with the change-replay family. Seam-panic.
-    pub(crate) fn handle_internal_command_id(
-        &mut self,
-        _xid: TransactionId,
-        _change_cid: CommandId,
-        _command_id: CommandId,
-    ) {
-        panic!(
-            "ReorderBuffer INTERNAL_COMMAND_ID replay: change-replay \
-             snapshot_now/command_id threading not yet modeled (snapmgr \
-             Teardown/SetupHistoricSnapshot ABI is available)"
-        );
-    }
-
     /// The commit-time tail of `ReorderBufferProcessTXN` (totals, commit/prepare
     /// callback, teardown, AbortCurrentTransaction, execute invalidations,
     /// cleanup/truncate). Reached only after the change loop, which already hits
@@ -1340,6 +1620,38 @@ impl ReorderBuffer {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+/// Convert a [`DecodedTuple`](backend_replication_logical_reorderbuffer_seams::DecodedTuple)
+/// image conveyed over the queue seam into the owner's
+/// [`ReorderBufferTupleBuf`]. decode.c `DecodeXLogTuple`s the WAL tuple bytes
+/// into the reorder buffer's own context; both sides carry the same fields.
+fn decoded_tuple_to_buf(
+    t: backend_replication_logical_reorderbuffer_seams::DecodedTuple,
+) -> ReorderBufferTupleBuf {
+    ReorderBufferTupleBuf {
+        t_len: t.t_len,
+        t_self: t.t_self,
+        t_table_oid: t.t_table_oid,
+        data: t.data,
+    }
+}
+
+/// `TransactionIdPrecedes(id1, id2)` (transam.c) — `id1` is logically earlier
+/// than `id2`, accounting for xid wraparound. Special-cased for the non-normal
+/// (bootstrap/frozen) xids exactly as the C does. Inlined here to avoid a
+/// transam dependency for the single `ReorderBufferAbortOld` call.
+fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> bool {
+    // If either ID is a permanent XID then we can just do unsigned comparison.
+    const FIRST_NORMAL_TRANSACTION_ID: TransactionId = 3;
+    let normal1 = id1 >= FIRST_NORMAL_TRANSACTION_ID;
+    let normal2 = id2 >= FIRST_NORMAL_TRANSACTION_ID;
+    if !normal1 || !normal2 {
+        return id1 < id2;
+    }
+    // Wraparound-aware comparison: cast the difference to signed.
+    let diff = id1.wrapping_sub(id2) as i32;
+    diff < 0
+}
 
 /// `ReorderBufferChangeSize(change)` — bytes attributed to a change for memory
 /// accounting. Only the foundational change kinds are sized exactly; the tuple

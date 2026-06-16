@@ -151,6 +151,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BeginInternalSubTransaction(name)` (xact.c): start an internal
+    /// subtransaction (the `name` is the C `const char *name`, `NULL` modeled as
+    /// `None`). Used by reorder-buffer invalidation replay to isolate catalog
+    /// cache invalidations. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn begin_internal_sub_transaction(name: Option<&str>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RollbackAndReleaseCurrentSubTransaction()` (xact.c): roll back and
+    /// release the current (internal) subtransaction. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn rollback_and_release_current_sub_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `BeginTransactionBlock()` (xact.c): begin a transaction block (the
     /// `BEGIN`/`START TRANSACTION` driver). Can `ereport(ERROR)`/`WARNING`,
     /// carried on `Err`.
