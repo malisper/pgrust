@@ -95,7 +95,7 @@ const JSONBOID: u32 = 3802;
 
 /// C: `struct JsObject` (jsonfuncs.c:309), working form. The binary arm borrows
 /// the container bytes; the text arm owns its field map.
-enum JsObjectW<'a> {
+pub(crate) enum JsObjectW<'a> {
     /// `HTAB *json_hash` — the field-name -> entry map the text path builds.
     /// `None` is the C NULL pointer (a non-object / failed parse).
     JsonHash(Option<BTreeMap<Vec<u8>, JsonHashEntry>>),
@@ -814,7 +814,7 @@ fn js_value_to_js_object<'a>(
 /// descriptor for a composite type. The repo `lookup_rowtype_tupdesc` already
 /// hands back an owned, constraint-stripped copy (the C
 /// `CreateTupleDescCopy` of the typcache descriptor), so it is cached directly.
-fn update_cached_tupdesc<'mcx>(
+pub(crate) fn update_cached_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     io: &mut CompositeIOData<'mcx>,
 ) -> PgResult<()> {
@@ -1088,7 +1088,7 @@ fn domain_check_safe<'mcx>(
 /// `prepare_column_cache` (jsonfuncs.c:3250): prepare the column metadata cache
 /// for the given type. `need_scalar` forces scalar_io lookup even for
 /// non-scalars (the json-string hack in `populate_record_field`).
-fn prepare_column_cache<'mcx>(
+pub(crate) fn prepare_column_cache<'mcx>(
     mcx: Mcx<'mcx>,
     column: &mut ColumnIOData<'mcx>,
     typid: u32,
@@ -1325,7 +1325,7 @@ fn js_object_get_field(obj: &JsObjectW<'_>, field: &[u8]) -> PgResult<(JsValue, 
 /// `populate_record` (jsonfuncs.c:3519): populate a record tuple from a
 /// json/jsonb object. Returns the formed tuple plus the (allocated/updated)
 /// `RecordIOData` cache to thread back into the [`CompositeIOData`].
-fn populate_record<'mcx>(
+pub(crate) fn populate_record<'mcx>(
     mcx: Mcx<'mcx>,
     tupdesc: &TupleDescData<'mcx>,
     record_p: Option<Box<RecordIOData<'mcx>>>,
@@ -1463,7 +1463,7 @@ struct JHashState {
 
 /// `get_json_object_as_hash` (jsonfuncs.c:3810): decompose a json object into a
 /// field hash. Returns `None` (and a recorded soft error) on a parse failure.
-fn get_json_object_as_hash(
+pub(crate) fn get_json_object_as_hash(
     json: &[u8],
     funcname: &'static str,
     escontext: &mut Option<&mut SoftErrorContext>,
@@ -1643,16 +1643,16 @@ fn hash_scalar(
 /// no `fn_extra` slot, so the cache is rebuilt each call (a behaviour-preserving
 /// loss of the cross-call memoization — every field's IO metadata is re-derived,
 /// exactly as the C first-call path does). It is materialized here as a local.
-struct PopulateRecordCacheLocal<'mcx> {
+pub(crate) struct PopulateRecordCacheLocal<'mcx> {
     /// `Oid argtype`.
-    argtype: u32,
+    pub(crate) argtype: u32,
     /// `ColumnIOData c`.
-    c: ColumnIOData<'mcx>,
+    pub(crate) c: ColumnIOData<'mcx>,
 }
 
 /// `get_record_type_from_argument` (jsonfuncs.c:3635): result type = first
 /// argument's declared type (unless it's `null::record`, handled later).
-fn get_record_type_from_argument<'mcx>(
+pub(crate) fn get_record_type_from_argument<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     funcname: &str,
@@ -1676,7 +1676,7 @@ fn get_record_type_from_argument<'mcx>(
 
 /// `get_record_type_from_query` (jsonfuncs.c:3661): result type is specified by
 /// the calling query (`get_call_result_type`).
-fn get_record_type_from_query<'mcx>(
+pub(crate) fn get_record_type_from_query<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
     funcname: &str,
