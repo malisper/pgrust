@@ -1242,6 +1242,7 @@ pub fn init_seams() {
     inward::conditional_lock_tuple::set(seam_conditional_lock_tuple);
     inward::conditional_xact_lock_table_wait::set(ConditionalXactLockTableWait);
     inward::xact_lock_table_wait::set(seam_xact_lock_table_wait);
+    inward::speculative_insertion_wait::set(SpeculativeInsertionWait);
     // Session-level apply-transaction locks (parallel-apply deadlock detection).
     inward::lock_apply_transaction_for_session::set(LockApplyTransactionForSession);
     inward::unlock_apply_transaction_for_session::set(UnlockApplyTransactionForSession);

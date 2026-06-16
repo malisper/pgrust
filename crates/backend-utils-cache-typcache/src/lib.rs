@@ -2666,6 +2666,12 @@ pub fn type_cache_typtype(type_id: Oid) -> i8 {
     with_state(|st| st.entry(type_id).typtype)
 }
 
+/// Seam `type_cache_typtype` — `lookup_type_cache(atttypid, 0)->typtype`
+/// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`).
+pub fn type_cache_typtype_seam(type_id: Oid) -> types_error::PgResult<i8> {
+    Ok(type_cache_typtype(type_id))
+}
+
 /* --------------------------------------------------------------------------
  * Element-type support-function lookups (typcache.c surface used by array /
  * range ADTs). Each is the C idiom
@@ -2834,6 +2840,7 @@ fn sort_group_operators(argtype: Oid, want_hashable: bool) -> PgResult<(Oid, Oid
 
 pub fn init_seams() {
     backend_utils_cache_typcache_seams::compare_values_of_enum::set(compare_values_of_enum);
+    backend_utils_cache_typcache_seams::type_cache_typtype::set(type_cache_typtype_seam);
     backend_utils_cache_typcache_seams::sort_group_operators::set(sort_group_operators);
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(lookup_rowtype_tupdesc);
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);

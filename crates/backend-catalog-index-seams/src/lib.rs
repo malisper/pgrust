@@ -223,3 +223,17 @@ seam_core::seam!(
         concurrent_lock_mode: bool,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `BuildSpeculativeIndexInfo(index, ii)` (catalog/index.c): add to a
+    /// unique-index `IndexInfo` the extra information speculative insertion
+    /// (INSERT ... ON CONFLICT) needs — the per-key equality operators and
+    /// their support procs/strategies (`ii_UniqueOps` / `ii_UniqueProcs` /
+    /// `ii_UniqueStrats`), looked up from the index opclasses. Mutates
+    /// `index_info` in place. Reached from `ExecOpenIndices(..., speculative)`.
+    /// `Err` carries the opclass-lookup `ereport(ERROR)` surface.
+    pub fn build_speculative_index_info<'mcx>(
+        index: &types_rel::Relation<'mcx>,
+        index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
+    ) -> types_error::PgResult<()>
+);

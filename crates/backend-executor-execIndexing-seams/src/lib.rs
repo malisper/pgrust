@@ -36,3 +36,19 @@ seam_core::seam!(
         only_summarizing: bool,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, types_core::Oid>>
 );
+
+seam_core::seam!(
+    /// `ExecCheckIndexConstraints(resultRelInfo, slot, estate, conflictTid,
+    /// tupleid, arbiterIndexes)` (execIndexing.c): non-conclusively check for a
+    /// conflict in the arbiter indexes for ON CONFLICT. Returns `true` when no
+    /// conflict was found; on `false` it sets `*conflict_tid` to the TID of the
+    /// (possibly) conflicting tuple. Index AM work can `ereport(ERROR)`.
+    pub fn exec_check_index_constraints<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        conflict_tid: &mut types_tuple::heaptuple::ItemPointerData,
+        tupleid: &types_tuple::heaptuple::ItemPointerData,
+        arbiter_indexes: &[types_core::Oid],
+    ) -> types_error::PgResult<bool>
+);

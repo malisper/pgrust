@@ -54,6 +54,7 @@ pub fn init_seams() {
 
     seams::multirange_get_typcache::set(typcache_io::multirange_get_typcache);
     seams::datum_get_multirange_type_p::set(typcache_io::datum_get_multirange_type_p);
+    seams::multirange_is_empty::set(typcache_io::multirange_is_empty_seam);
     seams::make_multirange::set(serialize_core::make_multirange);
     seams::multirange_get_bounds::set(serialize_core::multirange_get_bounds);
 }

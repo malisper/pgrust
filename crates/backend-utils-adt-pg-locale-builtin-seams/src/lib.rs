@@ -8,9 +8,11 @@
 //! owning crate installs the implementations from its `init_seams()`.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
+use types_core::primitive::{Oid, PgWChar};
 use types_error::PgResult;
 use types_locale::{PgLocale, PgLocaleStruct};
+
+pub use backend_utils_adt_pg_locale_seams::RegexWcClass;
 
 seam_core::seam!(
     /// `create_pg_locale_builtin(collid, context)` (`pg_locale_builtin.c`):
@@ -71,4 +73,24 @@ seam_core::seam!(
         src: &[u8],
         locale: &PgLocaleStruct,
     ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_wc_is*` BUILTIN strategy (`regc_pg_locale.c`): the builtin Unicode
+    /// ctype predicate (`pg_u_isalpha`/…) for wide character `c`. Locale-
+    /// independent (the builtin tables carry no per-collation state), so no
+    /// collation/locale argument. Owner: the builtin unit (`unicode_*`).
+    pub fn regex_wc_isclass_builtin(class: RegexWcClass, c: PgWChar) -> bool
+);
+
+seam_core::seam!(
+    /// `pg_wc_toupper` BUILTIN strategy (`regc_pg_locale.c:558`):
+    /// `unicode_uppercase_simple(c)`.
+    pub fn regex_wc_toupper_builtin(c: PgWChar) -> PgWChar
+);
+
+seam_core::seam!(
+    /// `pg_wc_tolower` BUILTIN strategy (`regc_pg_locale.c:590`):
+    /// `unicode_lowercase_simple(c)`.
+    pub fn regex_wc_tolower_builtin(c: PgWChar) -> PgWChar
 );

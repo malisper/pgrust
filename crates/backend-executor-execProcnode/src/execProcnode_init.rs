@@ -275,7 +275,14 @@ pub fn exec_init_node<'mcx>(
             alloc_in(mcx, PlanStateNode::Sort(s))?
         }
 
-        // case T_IncrementalSort: ExecInitIncrementalSort(...) (nodeIncrementalsort.c)
+        // case T_IncrementalSort:
+        //   ExecInitIncrementalSort((IncrementalSort *) node, estate, eflags)
+        Node::IncrementalSort(_) => {
+            let s = backend_executor_nodeIncrementalSort::ExecInitIncrementalSort(
+                node, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::IncrementalSort(s))?
+        }
 
         // case T_Memoize: ExecInitMemoize((Memoize *) node, estate, eflags)
         //

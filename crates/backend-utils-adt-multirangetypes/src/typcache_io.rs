@@ -197,6 +197,14 @@ pub fn datum_get_multirange_type_p<'mcx>(
     })
 }
 
+/// Seam `multirange_is_empty` — `MultirangeIsEmpty(DatumGetMultirangeTypeP(attval))`
+/// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`): detoast the by-reference
+/// multirange value and report whether it has zero member ranges.
+pub fn multirange_is_empty_seam<'mcx>(mcx: Mcx<'mcx>, attval: Datum) -> PgResult<bool> {
+    let mr = datum_get_multirange_type_p(mcx, attval)?;
+    Ok(mr.range_count() == 0)
+}
+
 /// `VARSIZE_ANY(PTR)` (varatt.h): total length of a varlena regardless of header
 /// kind. Mirrors the `VARATT_IS_*` dispatch the toast macros expand to.
 ///

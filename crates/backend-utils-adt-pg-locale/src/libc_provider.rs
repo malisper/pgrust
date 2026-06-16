@@ -45,6 +45,121 @@ extern "C" {
         loc: libc::locale_t,
     ) -> libc::size_t;
     fn tolower_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+
+    // Single-byte ctype `_l` family (`<ctype.h>`, regc_pg_locale.c LIBC_1BYTE).
+    fn isalpha_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isdigit_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isalnum_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isupper_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn islower_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isgraph_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isprint_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn ispunct_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn isspace_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+    fn toupper_l(c: libc::c_int, loc: libc::locale_t) -> libc::c_int;
+
+    // Wide ctype `_l` family (`<wctype.h>`, regc_pg_locale.c LIBC_WIDE).
+    fn iswalpha_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswdigit_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswalnum_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswupper_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswlower_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswgraph_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswprint_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswpunct_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn iswspace_l(c: u32, loc: libc::locale_t) -> libc::c_int;
+    fn towupper_l(c: u32, loc: libc::locale_t) -> u32;
+    fn towlower_l(c: u32, loc: libc::locale_t) -> u32;
+}
+
+/// The `RegexWcClass` ctype predicates, single-byte (`PG_REGEX_STRATEGY_LIBC_1BYTE`).
+use backend_utils_adt_pg_locale_seams::RegexWcClass;
+
+/// `iswXXX_l((wint_t) c, info.lt)` — wide ctype predicate
+/// (`PG_REGEX_STRATEGY_LIBC_WIDE`).
+fn libc_iswclass(class: RegexWcClass, c: u32, lt: libc::locale_t) -> bool {
+    let w = c;
+    // SAFETY: the wide ctype `_l` functions accept any wint_t; lt is owned.
+    let r = unsafe {
+        match class {
+            RegexWcClass::Alpha => iswalpha_l(w, lt),
+            RegexWcClass::Digit => iswdigit_l(w, lt),
+            RegexWcClass::Alnum => iswalnum_l(w, lt),
+            RegexWcClass::Upper => iswupper_l(w, lt),
+            RegexWcClass::Lower => iswlower_l(w, lt),
+            RegexWcClass::Graph => iswgraph_l(w, lt),
+            RegexWcClass::Print => iswprint_l(w, lt),
+            RegexWcClass::Punct => iswpunct_l(w, lt),
+            RegexWcClass::Space => iswspace_l(w, lt),
+        }
+    };
+    r != 0
+}
+
+/// `isXXX_l((unsigned char) c, info.lt)` — single-byte ctype predicate
+/// (`PG_REGEX_STRATEGY_LIBC_1BYTE`).
+fn libc_isclass_sb(class: RegexWcClass, c: u32, lt: libc::locale_t) -> bool {
+    let b = c as libc::c_int;
+    // SAFETY: the ctype `_l` functions accept any int; lt is owned.
+    let r = unsafe {
+        match class {
+            RegexWcClass::Alpha => isalpha_l(b, lt),
+            RegexWcClass::Digit => isdigit_l(b, lt),
+            RegexWcClass::Alnum => isalnum_l(b, lt),
+            RegexWcClass::Upper => isupper_l(b, lt),
+            RegexWcClass::Lower => islower_l(b, lt),
+            RegexWcClass::Graph => isgraph_l(b, lt),
+            RegexWcClass::Print => isprint_l(b, lt),
+            RegexWcClass::Punct => ispunct_l(b, lt),
+            RegexWcClass::Space => isspace_l(b, lt),
+        }
+    };
+    r != 0
+}
+
+/// `pg_wc_is*` LIBC strategy (`regc_pg_locale.c`): evaluate a ctype predicate for
+/// wide character `c`. `wide` selects the `LIBC_WIDE` (`<wctype.h>`) vs
+/// `LIBC_1BYTE` (`<ctype.h>`) strategy (chosen from the database encoding's max
+/// length). The C-strategy + ICU/builtin are handled by the caller; this is the
+/// libc-only `info.lt` reach.
+pub fn regex_wc_isclass_libc(locale: &LibcLocale, class: RegexWcClass, c: u32, wide: bool) -> bool {
+    let lt = locale.handle();
+    // PG_REGEX_STRATEGY_LIBC_WIDE: if sizeof(wchar_t) >= 4 || c <= 0xFFFF use the
+    // wide predicate; else FALL THRU to the 1-byte predicate.
+    if wide && (core::mem::size_of::<libc::wchar_t>() >= 4 || c <= 0xFFFF) {
+        return libc_iswclass(class, c, lt);
+    }
+    // PG_REGEX_STRATEGY_LIBC_1BYTE (and the WIDE fall-through): c <= UCHAR_MAX.
+    c <= u8::MAX as u32 && libc_isclass_sb(class, c, lt)
+}
+
+/// `pg_wc_toupper` LIBC strategy (`regc_pg_locale.c:551`). The engine handles the
+/// C-strategy and the `is_default` ASCII-forcing before the seam.
+pub fn regex_wc_toupper_libc(locale: &LibcLocale, c: u32, wide: bool) -> u32 {
+    let lt = locale.handle();
+    if wide && (core::mem::size_of::<libc::wchar_t>() >= 4 || c <= 0xFFFF) {
+        // SAFETY: towupper_l accepts any wint_t; lt is owned.
+        return unsafe { towupper_l(c, lt) };
+    }
+    if c <= u8::MAX as u32 {
+        // SAFETY: toupper_l accepts any int; lt is owned.
+        return unsafe { toupper_l(c as libc::c_int, lt) as u32 };
+    }
+    c
+}
+
+/// `pg_wc_tolower` LIBC strategy (`regc_pg_locale.c:583`).
+pub fn regex_wc_tolower_libc(locale: &LibcLocale, c: u32, wide: bool) -> u32 {
+    let lt = locale.handle();
+    if wide && (core::mem::size_of::<libc::wchar_t>() >= 4 || c <= 0xFFFF) {
+        // SAFETY: towlower_l accepts any wint_t; lt is owned.
+        return unsafe { towlower_l(c, lt) };
+    }
+    if c <= u8::MAX as u32 {
+        // SAFETY: tolower_l accepts any int; lt is owned.
+        return unsafe { tolower_l(c as libc::c_int, lt) as u32 };
+    }
+    c
 }
 
 /// An owned libc `locale_t` (the C `info.lt`). NULL/`0` means the C/POSIX

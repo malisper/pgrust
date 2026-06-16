@@ -14,7 +14,7 @@
 
 use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
-use types_nodes::{TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
+use types_nodes::{SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -150,6 +150,48 @@ seam_core::seam!(
         forward: bool,
         copy: bool,
     ) -> PgResult<(bool, Datum<'mcx>, bool)>
+);
+
+seam_core::seam!(
+    /// `tuplesort_reset(state)` (tuplesort.c): reset the sort state to its
+    /// initial empty condition, freeing any in-progress sort but keeping the
+    /// allocated sort metadata so a fresh batch can be loaded (the incremental
+    /// sort's per-group reuse). Releasing temp files can `elog(ERROR)`, carried
+    /// on `Err`.
+    pub fn tuplesort_reset<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_used_bound(state)` (tuplesort.c): true if the sort actually
+    /// switched into bounded (top-N heapsort) mode, so only the top-N tuples
+    /// were retained. Infallible (a flag read).
+    pub fn tuplesort_used_bound<'mcx>(state: &Tuplesortstate<'mcx>) -> bool
+);
+
+seam_core::seam!(
+    /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c) for a
+    /// standalone slot (`MakeSingleTupleTableSlot`, not in `es_tupleTable`) held
+    /// as the payload-bearing [`SlotData`] — the incremental-sort `group_pivot`/
+    /// `transfer_tuple` form. (The `&TupleTableSlot` variant above is the same C
+    /// op reached through a pool slot's header; this carries the standalone
+    /// slot's full payload.) Allocates the stored tuple, fallible on OOM.
+    pub fn tuplesort_puttupleslot_standalone<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        slot: &SlotData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev=NULL)`
+    /// (tuplesortvariants.c) into a standalone [`SlotData`] (the incremental
+    /// sort's `transfer_tuple`). Returns `false` (and stores an empty slot) at
+    /// end of sort. Can detoast/allocate, fallible.
+    pub fn tuplesort_gettupleslot_standalone<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+        copy: bool,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

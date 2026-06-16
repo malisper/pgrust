@@ -14,3 +14,4 @@ types-error = { path = "../types-error" }
 types-core = { path = "../types-core" }
 types-locale = { path = "../types-locale" }
 mcx = { path = "../mcx" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }

@@ -54,3 +54,13 @@ seam_core::seam!(
         d: Datum,
     ) -> PgResult<MultirangeTypeP<'mcx>>
 );
+
+seam_core::seam!(
+    /// `MultirangeIsEmpty(DatumGetMultirangeTypeP(attval))` (multirangetypes.h
+    /// / multirangetypes.c): detoast the by-reference multirange value and
+    /// report whether it has zero ranges. Used by `ExecWithoutOverlapsNotEmpty`
+    /// (execIndexing.c) to forbid empty multiranges in a WITHOUT OVERLAPS key.
+    /// The value crosses as the AM's raw index-input word (`FormIndexDatum`
+    /// output). `Err` carries the detoast `ereport(ERROR)` surface.
+    pub fn multirange_is_empty<'mcx>(mcx: Mcx<'mcx>, attval: Datum) -> PgResult<bool>
+);

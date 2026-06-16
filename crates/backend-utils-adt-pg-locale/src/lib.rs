@@ -44,6 +44,7 @@ pub mod cache;
 pub mod dispatch;
 pub mod libc_provider;
 pub mod localeconv;
+pub mod regex_locale;
 pub mod setup;
 pub mod version;
 
@@ -173,10 +174,13 @@ pub fn init_seams() {
     seams::localized_full_days::set(localeconv::localized_full_days);
     seams::localized_abbrev_days::set(localeconv::localized_abbrev_days);
 
-    // The regex `pg_wc_*` probe seams belong to `regc_pg_locale.c` (the regex
-    // engine owns the strategy + the C-locale table); they are NOT pg_locale.c
-    // functions, so this crate does not install regex_wc_isclass / _toupper /
-    // _tolower. (They are installed by the regex unit.)
+    // The `pg_wc_*` probe seams (regc_pg_locale.c) reach the locale's provider
+    // `info` union, which this crate's permanent cache owns; the regex engine
+    // keeps only the C-strategy hard-wired. Install the non-C-strategy legs here
+    // (libc bound to OS FFI, builtin/ICU delegated to their owners).
+    seams::regex_wc_isclass::set(regex_locale::regex_wc_isclass);
+    seams::regex_wc_toupper::set(regex_locale::regex_wc_toupper);
+    seams::regex_wc_tolower::set(regex_locale::regex_wc_tolower);
 }
 
 #[cfg(test)]

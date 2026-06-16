@@ -268,6 +268,11 @@ pub fn exec_end_node<'mcx>(
         }
         // case T_SortState: ExecEndSort((SortState *) node);
         PlanStateNode::Sort(state) => backend_executor_nodeSort::ExecEndSort(state, estate),
+        // case T_IncrementalSortState:
+        //   ExecEndIncrementalSort((IncrementalSortState *) node);
+        PlanStateNode::IncrementalSort(state) => {
+            backend_executor_nodeIncrementalSort::ExecEndIncrementalSort(state, estate)
+        }
         // case T_TableFuncScanState: ExecEndTableFuncScan((TableFuncScanState *) node);
         //
         // `ExecEndTableFuncScan` releases only the node's own tuplestore and
@@ -415,9 +420,9 @@ pub fn exec_end_node<'mcx>(
 /// Any other node type stops propagation (no descent), the C fall-through.
 ///
 /// Only the node-state variants whose executor units have landed
-/// (`SortState`/`AppendState`/`MergeAppendState`) are present in the
-/// `#[non_exhaustive]` `PlanStateNode` enum, so the remaining C `IsA` arms
-/// (`IncrementalSortState`/`ResultState`/`SubqueryScanState`/`GatherState`/
+/// (`SortState`/`IncrementalSortState`/`AppendState`/`MergeAppendState`) are
+/// present in the `#[non_exhaustive]` `PlanStateNode` enum, so the remaining C
+/// `IsA` arms (`ResultState`/`SubqueryScanState`/`GatherState`/
 /// `GatherMergeState`) cannot occur yet; they are added here as their units
 /// land. Every other tag is the C final fall-through (a no-op).
 pub fn exec_set_tuple_bound<'mcx>(
@@ -431,6 +436,19 @@ pub fn exec_set_tuple_bound<'mcx>(
     match child_node {
         // if (IsA(child_node, SortState))
         PlanStateNode::Sort(sort_state) => {
+            if tuples_needed < 0 {
+                // make sure flag gets reset if needed upon rescan
+                sort_state.bounded = false;
+            } else {
+                sort_state.bounded = true;
+                sort_state.bound = tuples_needed;
+            }
+        }
+        // else if (IsA(child_node, IncrementalSortState))
+        // If it is an IncrementalSort node, notify it that it can use bounded
+        // sort. (It is nodeIncrementalSort.c's responsibility to react properly
+        // to changes of these parameters.)
+        PlanStateNode::IncrementalSort(sort_state) => {
             if tuples_needed < 0 {
                 // make sure flag gets reset if needed upon rescan
                 sort_state.bounded = false;

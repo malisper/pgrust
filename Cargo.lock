@@ -7423,6 +7423,7 @@ dependencies = [
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIncrementalSort",
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
@@ -7614,6 +7615,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execIndexing"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-tableam",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-index-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execIndexing-seams",
+ "backend-executor-execUtils",
+ "backend-nodes-core",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-multirangetypes-seams",
+ "backend-utils-adt-rangetypes-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execIndexing-seams"
 version = "0.0.0"
 dependencies = [
@@ -7622,6 +7660,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7811,6 +7850,7 @@ dependencies = [
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIncrementalSort",
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
@@ -8478,6 +8518,31 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeIncrementalSort"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeIncrementalSort-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-execparallel",
  "types-nodes",
@@ -10411,13 +10476,18 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
  "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-joininfo-ext-seams",
  "backend-optimizer-util-relnode",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",
@@ -16066,6 +16136,7 @@ dependencies = [
 name = "backend-utils-adt-pg-locale-builtin-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-pg-locale-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -16342,6 +16413,25 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-util-clauses-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-selfuncs",
 ]
 
 [[package]]
@@ -19084,6 +19174,7 @@ dependencies = [
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execGrouping",
+ "backend-executor-execIndexing",
  "backend-executor-execJunk",
  "backend-executor-execMain",
  "backend-executor-execParallel",
@@ -19107,6 +19198,7 @@ dependencies = [
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIncrementalSort",
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
@@ -19291,6 +19383,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-selfuncs",
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",

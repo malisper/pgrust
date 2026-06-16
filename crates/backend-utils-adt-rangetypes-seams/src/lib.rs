@@ -326,3 +326,13 @@ seam_core::seam!(
     /// `VARSIZE - VARHDRSZ`). `Err` carries the send proc's `ereport(ERROR)`s.
     pub fn range_send(range: RangeTypeP<'_>) -> PgResult<Vec<u8>>
 );
+
+seam_core::seam!(
+    /// `RangeIsEmpty(DatumGetRangeTypeP(attval))` (rangetypes.h /
+    /// rangetypes.c): detoast the by-reference range value and report whether
+    /// it is the empty range. Used by `ExecWithoutOverlapsNotEmpty`
+    /// (execIndexing.c) to forbid empty ranges in a WITHOUT OVERLAPS key. The
+    /// value crosses as the AM's raw index-input word (`FormIndexDatum`
+    /// output). `Err` carries the detoast `ereport(ERROR)` surface.
+    pub fn range_is_empty<'mcx>(mcx: Mcx<'mcx>, attval: Datum) -> PgResult<bool>
+);

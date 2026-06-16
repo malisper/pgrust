@@ -28,3 +28,8 @@ backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-join
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-optimizer-plan-small-seams = { path = "../backend-optimizer-plan-small-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

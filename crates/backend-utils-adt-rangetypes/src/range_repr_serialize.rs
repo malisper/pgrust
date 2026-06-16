@@ -319,6 +319,14 @@ fn range_is_empty(range: RangeTypeP<'_>) -> bool {
     (range_get_flags(range) & RANGE_EMPTY) != 0
 }
 
+/// Seam `range_is_empty` — `RangeIsEmpty(DatumGetRangeTypeP(attval))`
+/// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`): detoast the by-reference
+/// range value and report whether it is the empty range.
+pub fn range_is_empty_seam<'mcx>(mcx: Mcx<'mcx>, attval: Datum) -> PgResult<bool> {
+    let r = datum_get_range_type_p(mcx, attval)?;
+    Ok(range_is_empty(r))
+}
+
 /// `palloc0(size)` returning MAXALIGN(8)-aligned, zero-filled context memory
 /// (C: `palloc0` always returns MAXALIGN'd storage). The block lives for the
 /// context's lifetime, like palloc'd memory freed at context reset.

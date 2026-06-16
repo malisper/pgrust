@@ -35,21 +35,9 @@ use backend_commands_trigger_seams::{
     exec_ar_insert_triggers, exec_br_insert_triggers, exec_ir_insert_triggers,
 };
 
-seam_core::seam!(
-    /// `ExecCheckIndexConstraints(resultRelInfo, slot, estate, conflictTid,
-    /// tupleid, arbiterIndexes)` (execIndexing.c): non-conclusively check for a
-    /// conflict in the arbiter indexes for ON CONFLICT. Returns `true` when no
-    /// conflict was found; on `false` it sets `*conflict_tid` to the TID of the
-    /// (possibly) conflicting tuple. Index AM work can `ereport(ERROR)`.
-    pub fn exec_check_index_constraints<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        slot: SlotId,
-        conflict_tid: &mut ItemPointerData,
-        tupleid: &ItemPointerData,
-        arbiter_indexes: &[types_core::Oid],
-    ) -> PgResult<bool>
-);
+// `ExecCheckIndexConstraints` is owned by execIndexing; its seam is declared in
+// `backend-executor-execIndexing-seams` and called through that path below.
+use backend_executor_execIndexing_seams::exec_check_index_constraints;
 
 seam_core::seam!(
     /// `GetCurrentTransactionId()` then

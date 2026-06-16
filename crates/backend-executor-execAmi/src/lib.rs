@@ -53,6 +53,7 @@ use backend_executor_nodeResult as nodeResult;
 use backend_executor_nodeSeqscan as nodeSeqscan;
 use backend_executor_nodeSetOp as nodeSetOp;
 use backend_executor_nodeSort as nodeSort;
+use backend_executor_nodeIncrementalSort as nodeIncrementalSort;
 use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
 use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
 use backend_executor_nodeTidscan as nodeTidscan;
@@ -300,6 +301,11 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::Memoize(m) => nodeMemoize::ExecReScanMemoize(m, estate)?,
             // case T_SortState: ExecReScanSort((SortState *) node);
             PlanStateNode::Sort(m) => nodeSort::ExecReScanSort(m, estate)?,
+            // case T_IncrementalSortState:
+            //   ExecReScanIncrementalSort((IncrementalSortState *) node);
+            PlanStateNode::IncrementalSort(m) => {
+                nodeIncrementalSort::ExecReScanIncrementalSort(m, estate)?
+            }
             // case T_GroupState: ExecReScanGroup((GroupState *) node);
             PlanStateNode::Group(m) => nodeGroup::ExecReScanGroup(m, estate)?,
             // case T_WindowAggState: ExecReScanWindowAgg((WindowAggState *) node);
@@ -314,9 +320,9 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
 
             // The remaining C arms (T_SampleScanState/T_TidRangeScanState/
-            // T_FunctionScanState/T_IncrementalSortState/T_AggState/
-            // T_LockRowsState) operate on node-state variants not yet
-            // present in PlanStateNode, so their tags cannot occur. C default:
+            // T_FunctionScanState/T_AggState/T_LockRowsState) operate on
+            // node-state variants not yet present in PlanStateNode, so their
+            // tags cannot occur. C default:
             //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
             other => return Err(unrecognized_node_type(other.tag())),
         }
