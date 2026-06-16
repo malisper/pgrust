@@ -45,12 +45,12 @@ use alloc::string::String;
 use backend_utils_error::{PgError, PgResult};
 
 use types_core::{
-    pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID,
+    FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID,
     TransactionId, XLogRecPtr, XLogSegNo,
 };
 use types_tuple::Datum;
 use types_wal::xlog_consts::{
-    ArchiveMode, RecoveryState, WALAvailability, WalCompression, WalLevel, WalSyncMethod,
+    ArchiveMode, WALAvailability, WalCompression, WalLevel, WalSyncMethod,
     DEFAULT_XLOG_SEG_SIZE, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, WAL_SEG_MAX_SIZE,
     WAL_SEG_MIN_SIZE, XLOGDIR, XLOG_BLCKSZ, XLOG_FNAME_LEN,
 };
@@ -83,6 +83,15 @@ pub use write::{
     issue_xlog_fsync, IsInstallXLogFileSegmentActive, ResetInstallXLogFileSegmentActive,
     SetInstallXLogFileSegmentActive, XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush,
     XLogShutdownWalRcv,
+};
+
+pub mod driver;
+pub use driver::{
+    CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
+    GetLastSegSwitchData, GetOldestRestartPoint, GetRecoveryState, GetWALInsertionTimeLine,
+    GetXLogWriteRecPtr, SetWalWriterSleeping, XLogGetLastRemovedSegno,
+    XLogGetOldestSegno, XLogGetReplicationSlotMinimumLSN, XLogNeedsFlush, XLogSetAsyncXactLSN,
+    XLogSetReplicationSlotMinimumLSN,
 };
 
 /// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
@@ -624,9 +633,14 @@ macro_rules! xlog_driver_deferred {
 // `XLogFlush`, `XLogBackgroundFlush`, `XLogFileInit`, `XLogFileOpen` are now
 // REAL: ported in [`crate::write`] and re-exported above. They are no longer in
 // the deferred-driver list.
+// Newly REAL in [`crate::driver`] (re-exported above), removed from the
+// deferred list: `XLogNeedsFlush`, `CheckXLogRemoved`, `SetWalWriterSleeping`,
+// `GetXLogWriteRecPtr`, `GetLastImportantRecPtr`, `GetWALInsertionTimeLine`,
+// `GetFullPageWriteInfo`, `GetRecoveryState`, `GetFakeLSNForUnloggedRel`,
+// `XLogGetLastRemovedSegno`, `XLogGetOldestSegno`, `GetLastSegSwitchData`,
+// `GetOldestRestartPoint`, `XLogGetReplicationSlotMinimumLSN`,
+// `XLogSetReplicationSlotMinimumLSN`, `XLogSetAsyncXactLSN`.
 xlog_driver_deferred! {
-    /// `XLogNeedsFlush(record)` — whether `record` still needs flushing.
-    pub fn XLogNeedsFlush(record: XLogRecPtr) -> bool;
     /// `StartupXLOG()` — the recovery + WAL-engine startup driver.
     pub fn StartupXLOG();
     /// `ShutdownXLOG(code, arg)` — the WAL-engine shutdown driver.
@@ -639,40 +653,9 @@ xlog_driver_deferred! {
     pub fn XLogRestorePoint(rp_name: &str) -> XLogRecPtr;
     /// `UpdateFullPageWrites()` — toggle full-page-writes, logging the change.
     pub fn UpdateFullPageWrites();
-    /// `CheckXLogRemoved(segno, tli)` — error if a needed segment was removed.
-    pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID);
-    /// `SetWalWriterSleeping(sleeping)` — publish the walwriter idle state.
-    pub fn SetWalWriterSleeping(sleeping: bool);
 
-    // --- XLogCtl shmem READ accessors ---
-    /// `GetXLogWriteRecPtr()` — last written (not flushed) position.
-    pub fn GetXLogWriteRecPtr() -> XLogRecPtr;
-    /// `GetLastImportantRecPtr()` — start of the last important WAL record.
-    pub fn GetLastImportantRecPtr() -> XLogRecPtr;
-    /// `GetWALInsertionTimeLine()` — the WAL insertion timeline (shmem read).
-    pub fn GetWALInsertionTimeLine() -> TimeLineID;
-    /// `GetFullPageWriteInfo(*RedoRecPtr_p, *doPageWrites_p)` (shmem read).
-    pub fn GetFullPageWriteInfo() -> (XLogRecPtr, bool);
-    /// `GetRecoveryState()` — crash / archive / done recovery state.
-    pub fn GetRecoveryState() -> RecoveryState;
-    /// `GetFakeLSNForUnloggedRel()` — a monotonically-increasing fake LSN.
-    pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr;
-    /// `XLogGetLastRemovedSegno()` — highest WAL segment removed so far.
-    pub fn XLogGetLastRemovedSegno() -> XLogSegNo;
-    /// `XLogGetOldestSegno(tli)` — oldest WAL segment still present on `tli`.
-    pub fn XLogGetOldestSegno(tli: TimeLineID) -> XLogSegNo;
-    /// `GetLastSegSwitchData(*lastSwitchLSN)` — time + LSN of last seg switch.
-    pub fn GetLastSegSwitchData() -> (pg_time_t, XLogRecPtr);
-    /// `GetOldestRestartPoint(*oldrecptr, *oldtli)` — the oldest restartpoint.
-    pub fn GetOldestRestartPoint() -> (XLogRecPtr, TimeLineID);
     /// `GetActiveWalLevelOnStandby()` — the wal_level a standby replays with.
     pub fn GetActiveWalLevelOnStandby() -> WalLevel;
-    /// `XLogGetReplicationSlotMinimumLSN()` — the slots' minimum required LSN.
-    pub fn XLogGetReplicationSlotMinimumLSN() -> XLogRecPtr;
-    /// `XLogSetReplicationSlotMinimumLSN(lsn)` — publish the slots' minimum LSN.
-    pub fn XLogSetReplicationSlotMinimumLSN(lsn: XLogRecPtr);
-    /// `XLogSetAsyncXactLSN(asyncXactLSN)` — record an async commit's LSN.
-    pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr);
     /// `LocalProcessControlFile(reset)` — read+process `global/pg_control`.
     pub fn LocalProcessControlFile(reset: bool);
     /// `InitializeWalConsistencyChecking()` — finalise the deferred GUC.
@@ -760,7 +743,7 @@ pub fn init_seams() {
     // info), plus the WAL-compression / consistency-checking GUC reads its
     // XLogRecordAssemble consults.
     s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
-    s::get_full_page_write_info::set(GetFullPageWriteInfo);
+    s::get_full_page_write_info::set(driver::GetFullPageWriteInfo);
     s::wal_compression::set(write::wal_compression);
     s::wal_consistency_checking::set(write::wal_consistency_checking);
     s::proc_last_rec_ptr::set(insert::proc_last_rec_ptr);
@@ -784,6 +767,20 @@ pub fn init_seams() {
     // the lwlock/condvar `ereport(ERROR)` unwinds (here: PgError -> panic at the
     // void seam boundary, matching the longjmp).
     s::is_install_xlog_file_segment_active::set(write::IsInstallXLogFileSegmentActive);
+
+    // XLogCtl shmem READ accessors + small in-memory setters (xlog.c), now
+    // REAL in [`crate::driver`]. These front the checkpointer / bgwriter /
+    // walwriter / xlogfuncs consumers.
+    s::xlog_needs_flush::set(driver::XLogNeedsFlush);
+    s::xlog_set_async_xact_lsn::set(driver::XLogSetAsyncXactLSN);
+    s::xlog_set_replication_slot_minimum_lsn::set(driver::XLogSetReplicationSlotMinimumLSN);
+    s::xlog_get_replication_slot_minimum_lsn::set(driver::XLogGetReplicationSlotMinimumLSN);
+    s::xlog_get_last_removed_segno::set(driver::XLogGetLastRemovedSegno);
+    s::xlog_get_oldest_segno::set(driver::XLogGetOldestSegno);
+    s::get_xlog_write_rec_ptr::set(driver::GetXLogWriteRecPtr);
+    s::get_fake_lsn_for_unlogged_rel::set(driver::GetFakeLSNForUnloggedRel);
+    s::get_last_seg_switch_data::set(driver::GetLastSegSwitchData);
+    s::get_last_important_rec_ptr::set(driver::GetLastImportantRecPtr);
     {
         use backend_replication_walreceiverfuncs_seams as wf;
         wf::set_install_xlog_file_segment_active::set(|| {

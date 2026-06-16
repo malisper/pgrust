@@ -30,6 +30,7 @@ pub mod each;
 pub mod elements;
 pub mod getfield;
 pub mod iterate;
+pub mod json_render;
 pub mod keys;
 pub mod length;
 pub mod lex;

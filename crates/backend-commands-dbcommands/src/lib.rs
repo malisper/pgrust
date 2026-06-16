@@ -35,14 +35,31 @@
 //!    barrier / slot / xlog-relcache primitives through their owners' seams.
 //!
 //! The createdb / dropdb / RenameDatabase / movedb / AlterDatabase* family
-//! (the ~2000-LOC heavy half of dbcommands.c) is **not** ported in this unit:
-//! its entry points are not yet reachable from any landed consumer, and the
-//! port pulls in a large cross-subsystem surface (smgr/relmapper/checkpoint
-//! barriers, the createdb file-copy strategies, replication-slot/subscription
-//! counts, pgstat, ACL/role rewrite) that is a separate decomposition. See the
-//! module-level STOP note in the source.
+//! (the heavy half of dbcommands.c) is ported in [`mod@heavy`]:
+//!  * [`createdb`] (both WAL_LOG and FILE_COPY strategies, with
+//!    `CreateDirAndVersionFile` / `check_encoding_locale_matches` /
+//!    `createdb_failure_callback`);
+//!  * [`dropdb`] / [`DropDatabase`];
+//!  * [`RenameDatabase`]; [`AlterDatabaseOwner`];
+//!  * `movedb` (ALTER DATABASE SET TABLESPACE) + `movedb_failure_callback`;
+//!  * [`AlterDatabase`] / [`AlterDatabaseRefreshColl`] / [`AlterDatabaseSet`];
+//!  * [`pg_database_collation_actual_version`];
+//!  * `remove_dbtablespaces` / `check_db_file_conflict`.
+//!
+//! The cross-subsystem surface (smgr/relmapper/checkpoint barriers, the
+//! createdb file-copy engine, replication-slot/subscription counts, pgstat,
+//! ACL/role rewrite, GUC settings, the tablespace catalog scan) is reached
+//! through each owner's real fns or seams; the pg_database catalog writes go
+//! through the landed `backend-catalog-pg-database` mutate seams.
 
 extern crate alloc;
+
+mod heavy;
+pub use heavy::{
+    createdb, check_encoding_locale_matches, dropdb, AlterDatabase, AlterDatabaseOwner,
+    AlterDatabaseRefreshColl, AlterDatabaseSet, DropDatabase, RenameDatabase,
+    pg_database_collation_actual_version,
+};
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -76,7 +93,7 @@ const XLOG_DBASE_DROP: u8 = 0x20;
 const HotStandbyDropLock: LOCKMODE = AccessExclusiveLock;
 
 /// `ErrorLocation` helper — dbcommands.c is `src/backend/commands/dbcommands.c`.
-fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
+pub(crate) fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/commands/dbcommands.c", lineno, funcname)
 }
 
@@ -477,7 +494,7 @@ pub fn dbase_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
 /// yielding the parent directory.  A path with no slash becomes `"."` (C leaves
 /// an empty string, which `stat` treats as the current directory — we keep the
 /// behaviour-preserving `"."`).
-fn get_parent_directory(path: &str) -> String {
+pub(crate) fn get_parent_directory(path: &str) -> String {
     match path.rfind('/') {
         Some(0) => "/".to_string(),
         Some(idx) => path[..idx].to_string(),
@@ -489,10 +506,31 @@ fn get_parent_directory(path: &str) -> String {
 // Seam wiring.
 // ===========================================================================
 
-/// Install the four inward seams this unit owns.
+/// `RenameDatabase` inward-seam shape (the landed consumer passes no `Mcx`): run
+/// the rename in a transient context. Only the `ObjectAddress` (Copy) escapes.
+fn rename_database_seam(
+    oldname: &str,
+    newname: &str,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = mcx::MemoryContext::new("RenameDatabase");
+    heavy::RenameDatabase(ctx.mcx(), oldname, newname)
+}
+
+/// `AlterDatabaseOwner` inward-seam shape (no `Mcx`): run in a transient context.
+fn alter_database_owner_seam(
+    dbname: &str,
+    new_owner_id: Oid,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = mcx::MemoryContext::new("AlterDatabaseOwner");
+    heavy::AlterDatabaseOwner(ctx.mcx(), dbname, new_owner_id)
+}
+
+/// Install the inward seams this unit owns.
 pub fn init_seams() {
     inward::dbase_redo::set(dbase_redo);
     inward::get_database_name::set(get_database_name);
     inward::database_is_invalid_form::set(database_is_invalid_form);
     inward::get_database_oid::set(get_database_oid);
+    inward::RenameDatabase::set(rename_database_seam);
+    inward::AlterDatabaseOwner::set(alter_database_owner_seam);
 }

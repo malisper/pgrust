@@ -53,6 +53,15 @@
 
 extern crate alloc;
 
+// Per-family `_out<Type>` writer modules. Each exposes a `try_out(buf, node,
+// write_loc) -> bool` dispatcher that handles its own `Node` arms (returning
+// `true`) or declines (`false`). `out_node_inner` walks the chain. This keeps
+// the families independently editable (no shared central `match` to collide on).
+pub(crate) mod out_expr_family;
+pub(crate) mod out_parse_family;
+pub(crate) mod out_plan_family;
+pub(crate) mod out_ddl_family;
+
 use alloc::string::String;
 
 use core::fmt::Write as _;
@@ -75,7 +84,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 /// * a ` `, `\n`, `\t`, `(`, `)`, `{`, `}`, or `\` anywhere is backslashed.
 ///
 /// NULL is handled by the caller (it emits `<>`); this never receives NULL.
-fn out_token(buf: &mut String, s: &str) {
+pub(crate) fn out_token(buf: &mut String, s: &str) {
     // C: if (s == NULL) { appendStringInfoString(str, "<>"); return; }
     // The NULL case is handled by the caller's Option dispatch; here s is a
     // real (possibly empty) string.
@@ -157,38 +166,38 @@ fn out_bit_string(buf: &mut String, n: &types_nodes::value::BitString<'_>) {
 // ---------------------------------------------------------------------------
 
 /// `WRITE_INT_FIELD` — ` :fld %d`.
-fn write_int_field(buf: &mut String, name: &str, val: i32) {
+pub(crate) fn write_int_field(buf: &mut String, name: &str, val: i32) {
     let _ = write!(buf, " :{} {}", name, val);
 }
 
 /// `WRITE_UINT_FIELD` — ` :fld %u`.
-fn write_uint_field(buf: &mut String, name: &str, val: u32) {
+pub(crate) fn write_uint_field(buf: &mut String, name: &str, val: u32) {
     let _ = write!(buf, " :{} {}", name, val);
 }
 
 /// `WRITE_OID_FIELD` — ` :fld %u` (OID printed as unsigned).
-fn write_oid_field(buf: &mut String, name: &str, val: u32) {
+pub(crate) fn write_oid_field(buf: &mut String, name: &str, val: u32) {
     let _ = write!(buf, " :{} {}", name, val);
 }
 
 /// `WRITE_BOOL_FIELD` — ` :fld true|false` (`booltostr`).
-fn write_bool_field(buf: &mut String, name: &str, val: bool) {
+pub(crate) fn write_bool_field(buf: &mut String, name: &str, val: bool) {
     let _ = write!(buf, " :{} {}", name, if val { "true" } else { "false" });
 }
 
 /// `WRITE_ENUM_FIELD` — ` :fld %d` (the enum's integer code).
-fn write_enum_field(buf: &mut String, name: &str, code: i32) {
+pub(crate) fn write_enum_field(buf: &mut String, name: &str, code: i32) {
     let _ = write!(buf, " :{} {}", name, code);
 }
 
 /// `WRITE_LOCATION_FIELD` — ` :fld %d`, rendering `-1` unless location fields are
 /// being written (the `write_location_fields` static).
-fn write_location_field(buf: &mut String, name: &str, val: i32, write_loc: bool) {
+pub(crate) fn write_location_field(buf: &mut String, name: &str, val: i32, write_loc: bool) {
     let _ = write!(buf, " :{} {}", name, if write_loc { val } else { -1 });
 }
 
 /// `WRITE_STRING_FIELD` — ` :fld ` + `outToken` (a NULL string renders `<>`).
-fn write_string_field(buf: &mut String, name: &str, val: Option<&str>) {
+pub(crate) fn write_string_field(buf: &mut String, name: &str, val: Option<&str>) {
     let _ = write!(buf, " :{} ", name);
     match val {
         None => buf.push_str("<>"),
@@ -199,7 +208,7 @@ fn write_string_field(buf: &mut String, name: &str, val: Option<&str>) {
 /// `outBitmapset(str, bms)` (outfuncs.c) — `(b m1 m2 ...)`, the members in
 /// ascending order. The empty/NULL set is `(b)`. Operates on the
 /// [`ExprRelids`]-style word storage carried by `Var.varnullingrels`.
-fn out_bitmapset_words(buf: &mut String, words: &[u64]) {
+pub(crate) fn out_bitmapset_words(buf: &mut String, words: &[u64]) {
     buf.push('(');
     buf.push('b');
     for (wi, &w) in words.iter().enumerate() {
@@ -218,16 +227,164 @@ fn out_bitmapset_words(buf: &mut String, words: &[u64]) {
 }
 
 /// `WRITE_BITMAPSET_FIELD` — ` :fld ` + `outBitmapset`.
-fn write_bitmapset_field(buf: &mut String, name: &str, words: &[u64]) {
+pub(crate) fn write_bitmapset_field(buf: &mut String, name: &str, words: &[u64]) {
     let _ = write!(buf, " :{} ", name);
     out_bitmapset_words(buf, words);
+}
+
+/// `WRITE_BITMAPSET_FIELD` over an optional `Bitmapset *` (the C `NULL` set —
+/// `None` — renders as `(b)`, the empty set, exactly like `outBitmapset(NULL)`).
+pub(crate) fn write_bitmapset_opt_field(
+    buf: &mut String,
+    name: &str,
+    bms: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
+) {
+    let _ = write!(buf, " :{} ", name);
+    out_bitmapset(buf, bms);
+}
+
+/// `outBitmapset(str, bms)` (bitmapset.c) over an optional `Bitmapset *`:
+/// `(b m1 m2 ...)`, members ascending; the NULL set is `(b)`.
+pub(crate) fn out_bitmapset(buf: &mut String, bms: Option<&types_nodes::bitmapset::Bitmapset<'_>>) {
+    match bms {
+        None => buf.push_str("(b)"),
+        Some(b) => out_bitmapset_words(buf, &b.words),
+    }
+}
+
+/// `WRITE_INT64_FIELD` — ` :fld %ld`.
+pub(crate) fn write_int64_field(buf: &mut String, name: &str, val: i64) {
+    let _ = write!(buf, " :{} {}", name, val);
+}
+
+/// `WRITE_UINT64_FIELD` — ` :fld %llu`.
+pub(crate) fn write_uint64_field(buf: &mut String, name: &str, val: u64) {
+    let _ = write!(buf, " :{} {}", name, val);
+}
+
+/// `WRITE_LONG_FIELD` — ` :fld %ld`.
+pub(crate) fn write_long_field(buf: &mut String, name: &str, val: i64) {
+    let _ = write!(buf, " :{} {}", name, val);
+}
+
+/// `outDouble(str, d)` (outfuncs.c:217) — the shortest round-trippable decimal
+/// of `d` (C uses Ryū `double_to_shortest_decimal_buf`). Rust's `{}` `f64`
+/// formatter likewise emits the shortest decimal that round-trips, giving a
+/// byte-stable serialize→parse→serialize cycle.
+pub(crate) fn out_double(buf: &mut String, d: f64) {
+    let _ = write!(buf, "{}", d);
+}
+
+/// `WRITE_FLOAT_FIELD` — ` :fld ` + `outDouble`.
+pub(crate) fn write_float_field(buf: &mut String, name: &str, val: f64) {
+    let _ = write!(buf, " :{} ", name);
+    out_double(buf, val);
+}
+
+/// `outChar(str, c)` (outfuncs.c) — `\0` becomes `<>`, otherwise the single
+/// character through `outToken`.
+pub(crate) fn out_char(buf: &mut String, c: u8) {
+    if c == 0 {
+        buf.push_str("<>");
+        return;
+    }
+    let s = [c];
+    out_token(buf, core::str::from_utf8(&s).unwrap_or("?"));
+}
+
+/// `WRITE_CHAR_FIELD` — ` :fld ` + `outChar`.
+pub(crate) fn write_char_field(buf: &mut String, name: &str, c: u8) {
+    let _ = write!(buf, " :{} ", name);
+    out_char(buf, c);
+}
+
+/// `WRITE_NODE_FIELD` over a single optional child `Node *` (C: `outNode`; a
+/// NULL pointer renders `<>` via `outNode`'s leading NULL check).
+pub(crate) fn write_node_field(buf: &mut String, name: &str, child: Option<&Node<'_>>, write_loc: bool) {
+    let _ = write!(buf, " :{} ", name);
+    match child {
+        None => buf.push_str("<>"),
+        Some(n) => out_node_inner(buf, n, write_loc),
+    }
+}
+
+/// `WRITE_NODE_FIELD` over a single optional child `Expr *` carried as the
+/// `Node::Expr` cast (C: `outNode`; NULL renders `<>`).
+pub(crate) fn write_expr_field(buf: &mut String, name: &str, child: Option<&Expr>, write_loc: bool) {
+    let _ = write!(buf, " :{} ", name);
+    match child {
+        None => buf.push_str("<>"),
+        Some(e) => out_expr(buf, e, write_loc),
+    }
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of node pointers (C: `outNode` of the
+/// `List`, which renders the bare `(child child ...)` form). `None`/empty list
+/// → `<>` (C `NIL` is a NULL `List *`, and `outNode(NULL)` is `<>`).
+fn write_node_list_field<T>(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[T]>,
+    write_loc: bool,
+    mut each: impl FnMut(&mut String, &T, bool),
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(elems) => {
+            buf.push('(');
+            let mut first = true;
+            for e in elems {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                each(buf, e, write_loc);
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// A `List *` of `int` (`_outList` for `T_IntList`): `(i v1 v2 ...)`. `None`/NIL
+/// → `<>`.
+pub(crate) fn write_int_list_field(buf: &mut String, name: &str, list: Option<&[i32]>) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(vals) => {
+            buf.push('(');
+            buf.push('i');
+            for v in vals {
+                let _ = write!(buf, " {}", v);
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// A `List *` of `Oid` (`_outList` for `T_OidList`): `(o v1 v2 ...)`. `None`/NIL
+/// → `<>`.
+pub(crate) fn write_oid_list_field(buf: &mut String, name: &str, list: Option<&[u32]>) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(vals) => {
+            buf.push('(');
+            buf.push('o');
+            for v in vals {
+                let _ = write!(buf, " {}", v);
+            }
+            buf.push(')');
+        }
+    }
 }
 
 /// `WRITE_NODE_FIELD` over a `List *args` of `Expr` (C: `outNode` of the list).
 /// Renders the bare `(child child ...)` list form (`_outList` for `T_List`),
 /// each child an `Expr` written through [`out_expr`]. An empty list is `()`,
 /// matching `_outList`.
-fn write_expr_list_field(buf: &mut String, name: &str, args: &[Expr], write_loc: bool) {
+pub(crate) fn write_expr_list_field(buf: &mut String, name: &str, args: &[Expr], write_loc: bool) {
     let _ = write!(buf, " :{} ", name);
     buf.push('(');
     let mut first = true;
@@ -285,7 +442,7 @@ fn out_param(buf: &mut String, node: &Param, write_loc: bool) {
 /// remaining `Datum` arms (`Cstring`/`Composite`/`Expanded`/`Internal`) cannot
 /// reach a `Const.constvalue` — `make_const` rejects them — so they are an
 /// unreachable carrier shape here.
-fn out_datum(buf: &mut String, value: &Datum<'_>, typlen: i32, typbyval: bool) {
+pub(crate) fn out_datum(buf: &mut String, value: &Datum<'_>, typlen: i32, typbyval: bool) {
     if typbyval {
         // s = (char *) (&value); print typlen as the length, then the 8 native
         // bytes of the Datum word.
@@ -411,7 +568,7 @@ fn out_targetentry(buf: &mut String, node: &TargetEntry<'_>, write_loc: bool) {
 /// closes `}`. Only the common primitive-expression families are ported; any
 /// other `Expr` variant `mirror-pg-and-panic`s with its tag (so a partial dump
 /// is never produced — the unported per-node writer is the explicit signal).
-fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
+pub(crate) fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
     buf.push('{');
     match e {
         Expr::Var(v) => out_var(buf, v, write_loc),
@@ -422,11 +579,17 @@ fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
         Expr::NullIfExpr(o) => out_opexpr(buf, "NULLIFEXPR", o, write_loc),
         Expr::FuncExpr(f) => out_funcexpr(buf, f, write_loc),
         Expr::BoolExpr(b) => out_boolexpr(buf, b, write_loc),
-        other => panic!(
-            "outNode: no _out<Type> writer ported for Expr variant {:?} \
-             (common primitive-expression families Var/Const/Param/Op/Func/Bool serialize so far)",
-            core::mem::discriminant(other)
-        ),
+        other => {
+            // The remaining post-analysis `Expr` arms are written by the expr
+            // family's body writer (label + fields, no framing — the `{`/`}` is
+            // ours). A variant no family claims `mirror-pg-and-panic`s.
+            if !out_expr_family::out_expr_body(buf, other, write_loc) {
+                panic!(
+                    "outNode: no _out<Type> writer ported for Expr variant {:?}",
+                    core::mem::discriminant(other)
+                );
+            }
+        }
     }
     buf.push('}');
 }
@@ -466,7 +629,7 @@ pub fn out_node(buf: &mut String, obj: &Node<'_>) {
 }
 
 /// `outNode` with the `write_location_fields` flag threaded (outfuncs.c:730-772).
-fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) {
+pub(crate) fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) {
     match obj {
         // _outList — bare `(...)` token (nodeRead does not want `{}`).
         Node::List(elements) => out_list(buf, elements.as_slice()),
@@ -480,21 +643,36 @@ fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) {
         // nodeTag, framed by `{`...`}`. The common primitive-expression family
         // (carried as `Node::Expr`) and `TargetEntry` are ported field-for-field.
         Node::Expr(e) => out_expr(buf, e, write_loc),
-        Node::TargetEntry(te) => {
-            buf.push('{');
-            out_targetentry(buf, te, write_loc);
-            buf.push('}');
+        // `_outTargetEntry` (lib-owned writer; the parse family does not claim it).
+        Node::TargetEntry(te) => framed(buf, |b| out_targetentry(b, te, write_loc)),
+        // The remaining framed `{LABEL ...}` node tags are dispatched through
+        // the per-family `try_out` chain (each opens `{`, runs the per-node
+        // `_out<Type>`, closes `}`). A tag no family claims `mirror-pg-and-panic`s
+        // rather than emit a partial / empty `{}` dump (C's `default:` WARNING +
+        // empty `{}`).
+        other => {
+            if out_expr_family::try_out(buf, other, write_loc)
+                || out_parse_family::try_out(buf, other, write_loc)
+                || out_plan_family::try_out(buf, other, write_loc)
+                || out_ddl_family::try_out(buf, other, write_loc)
+            {
+                return;
+            }
+            panic!(
+                "outNode: no _out<Type> writer ported for node tag {:?}",
+                other.node_tag()
+            )
         }
-        // Every other node tag's per-node `_out<Type>` writer is not ported into
-        // this enum's serialization stage yet — `mirror-pg-and-panic` rather than
-        // emit a partial / empty `{}` dump (C's `default:` WARNING + empty `{}`).
-        other => panic!(
-            "outNode: no _out<Type> writer ported for node tag {:?} \
-             (value/list leaves, the common Expr family Var/Param/Op/Func/Bool, \
-             and TargetEntry serialize so far)",
-            other.node_tag()
-        ),
     }
+}
+
+/// Open `{`, run a per-node writer body, close `}`. The framing every framed
+/// `_out<Type>` shares (`outNode`'s `{`-switch); the body writes the LABEL then
+/// its `WRITE_*_FIELD`s.
+pub(crate) fn framed(buf: &mut String, body: impl FnOnce(&mut String)) {
+    buf.push('{');
+    body(buf);
+    buf.push('}');
 }
 
 /// `nodeToStringInternal(obj, write_loc_fields)` (outfuncs.c:783-799).

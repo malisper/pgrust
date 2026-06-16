@@ -54,10 +54,19 @@ fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResul
     )
 }
 
+/// Seam body for `heap_drop_with_catalog(relid)` (dependency.c's `doDeletion`
+/// `OCLASS_CLASS` relation arm). The inward seam carries no `mcx`, so allocate
+/// a scratch context for the catalog scans / deletes.
+fn heap_drop_with_catalog_seam(relid: types_core::Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("heap_drop_with_catalog");
+    crate::heap_drop_with_catalog(ctx.mcx(), relid)
+}
+
 /// `init_seams()` — install the heap.c inward seams this crate owns. Wired into
 /// the workspace `seams-init` aggregator.
 pub fn init_seams() {
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
+    backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls
     // directly. Their owner signatures match the seam signatures exactly, so
     // they install without a wrapper.

@@ -56,3 +56,7 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-catalog-partition = { path = "../backend-catalog-partition" }
+backend-catalog-pg-subscription-seams = { path = "../backend-catalog-pg-subscription-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
