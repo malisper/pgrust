@@ -11364,6 +11364,7 @@ dependencies = [
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-plan-setrefs",
  "backend-optimizer-plan-small",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepagg",
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepjointree-seams",

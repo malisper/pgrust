@@ -406,18 +406,13 @@ fn subquery_planner<'mcx>(
     // Top-level join domain (C:710).
     root.join_domains.push(JoinDomain { jd_relids: None });
 
-    // SS_process_ctes if cteList (C:716-717).
+    // SS_process_ctes if cteList (C:716-717). CTEs are converted to
+    // RTE_SUBQUERY or initplan SubPlans. The owner (init-subselect subplan.rs)
+    // threads (&mut root, &mut run) and recurses into each CTE's ctequery.
     {
-        let parse = run.resolve(root.parse);
-        if !parse.cteList.is_empty() {
-            // SS_process_ctes(root) — ctes are converted to RTE_SUBQUERY or
-            // initplan SubPlans. The owner (init-subselect subplan.rs) takes the
-            // CTE list; threading it requires the full CTE recursion the simple
-            // SELECT path does not exercise. Mirror PG and panic.
-            panic!(
-                "subquery_planner: SS_process_ctes (subselect.c) for a WITH list \
-                 is not wired over the value model yet"
-            );
+        let has_ctes = !run.resolve(root.parse).cteList.is_empty();
+        if has_ctes {
+            backend_optimizer_plan_init_subselect::subplan::SS_process_ctes(mcx, &mut root, run)?;
         }
     }
 
@@ -433,22 +428,13 @@ fn subquery_planner<'mcx>(
         // For non-MERGE, transform_MERGE_to_join is a no-op, so nothing to do.
     }
 
-    // replace_empty_jointree(parse) (C:728). No reachable ported owner of the
-    // dummy RTE_RESULT injection. On a query that already has a non-empty
-    // FROM, this is a no-op; only an empty-FROM query (e.g. `SELECT 1`) needs
-    // it. Faithfully skip when fromlist is non-empty, else panic precisely.
+    // replace_empty_jointree(parse) (C:728). If the Query's jointree is empty,
+    // inject a dummy RTE_RESULT relation (so e.g. `SELECT 1` plans). The owner
+    // (prepjointree.c, ported in subselect-pullup) no-ops if the fromlist is
+    // already non-empty or if this is the top of a setop tree.
     {
-        let parse = run.resolve(root.parse);
-        let empty_fromlist = match &parse.jointree {
-            Some(jt) => jt.fromlist.is_empty(),
-            None => true,
-        };
-        if empty_fromlist {
-            panic!(
-                "subquery_planner: replace_empty_jointree (subselect.c) needed for \
-                 an empty FROM clause is not reachable over the owned Query model"
-            );
-        }
+        let parse = run.resolve_mut(root.parse);
+        backend_optimizer_plan_subselect_pullup::replace_empty_jointree(mcx, parse)?;
     }
 
     // pull_up_sublinks if hasSubLinks (C:736-737).
