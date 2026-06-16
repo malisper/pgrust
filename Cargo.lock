@@ -16300,6 +16300,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-tupdesc",
  "backend-parser-coerce-seams",
@@ -16337,6 +16338,7 @@ dependencies = [
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

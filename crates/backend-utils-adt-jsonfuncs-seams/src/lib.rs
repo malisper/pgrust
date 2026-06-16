@@ -35,22 +35,32 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `OidOutputFunctionCall(outfuncoid, val)` — the resolved type output
-    /// function's text representation of `val` (NUL-excluded bytes).
-    pub fn output_function_call<'mcx>(outfuncoid: Oid, val: &Datum<'mcx>) -> PgResult<Vec<u8>>
+    /// function's text representation of `val` (NUL-excluded bytes). Allocates
+    /// in `mcx` (the fmgr call and the result bytes), so it carries the context.
+    pub fn output_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        outfuncoid: Oid,
+        val: &Datum<'mcx>,
+    ) -> PgResult<Vec<u8>>
 );
 
 seam_core::seam!(
     /// `OidFunctionCall1(outfuncoid, val)` for `JSONTYPE_CAST`, then
     /// `VARDATA_ANY`/`VARSIZE_ANY_EXHDR` — the explicit cast-to-json function's
-    /// text result bytes (already JSON).
-    pub fn cast_function_call<'mcx>(outfuncoid: Oid, val: &Datum<'mcx>) -> PgResult<Vec<u8>>
+    /// text result bytes (already JSON). Allocates in `mcx`.
+    pub fn cast_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        outfuncoid: Oid,
+        val: &Datum<'mcx>,
+    ) -> PgResult<Vec<u8>>
 );
 
 seam_core::seam!(
     /// The special-case text output (`F_TEXTOUT`/`F_VARCHAROUT`/`F_BPCHAROUT`)
     /// in `datum_to_json_internal`'s default arm — the detoasted text payload
     /// bytes of `val`, which the caller escapes via `escape_json_with_len`.
-    pub fn text_datum_bytes<'mcx>(val: &Datum<'mcx>) -> PgResult<Vec<u8>>
+    /// Detoasts into `mcx`.
+    pub fn text_datum_bytes<'mcx>(mcx: mcx::Mcx<'mcx>, val: &Datum<'mcx>) -> PgResult<Vec<u8>>
 );
 
 seam_core::seam!(
@@ -64,8 +74,12 @@ seam_core::seam!(
     /// `get_typlenbyvalalign` + `json_categorize_type(element_type, ...)` +
     /// `deconstruct_array`. Returns the element classification and the flat
     /// element/null vectors plus dimensionality; the structural `[ ... ]`
-    /// assembly (`array_dim_to_json`) stays in-crate.
-    pub fn deconstruct_array<'mcx>(array: &Datum<'mcx>) -> PgResult<ArrayForJson<'mcx>>
+    /// assembly (`array_dim_to_json`) stays in-crate. Allocates in `mcx` (the
+    /// detoasted array image and the element/null vectors).
+    pub fn deconstruct_array<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        array: &Datum<'mcx>,
+    ) -> PgResult<ArrayForJson<'mcx>>
 );
 
 seam_core::seam!(
@@ -73,6 +87,10 @@ seam_core::seam!(
     /// per-attribute `heap_getattr`, and the per-attribute
     /// `json_categorize_type`. Returns one entry per *non-dropped* attribute
     /// (dropped attributes already skipped, matching the C `continue`); the
-    /// `{ ... }` assembly stays in-crate.
-    pub fn walk_composite<'mcx>(composite: &Datum<'mcx>) -> PgResult<Vec<CompositeFieldForJson<'mcx>>>
+    /// `{ ... }` assembly stays in-crate. Allocates in `mcx` (the looked-up
+    /// tuple descriptor work and the per-attribute value Datums).
+    pub fn walk_composite<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        composite: &Datum<'mcx>,
+    ) -> PgResult<Vec<CompositeFieldForJson<'mcx>>>
 );

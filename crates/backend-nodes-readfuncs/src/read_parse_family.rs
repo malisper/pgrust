@@ -1,0 +1,1736 @@
+//! `_read<Type>` readers for the read_parse_family node arms. Each reader reads its fields in
+//! the exact order the OUT side wrote them. `try_read` returns `Some(result)`
+//! iff this family owns `label`.
+//!
+//! Mirror of `out_parse_family` — see that module's header for the covered/
+//! seam-panicked node inventory. `TABLEFUNC` and `COMMONTABLEEXPR` return the
+//! C `elog(ERROR, ...)` (mirror-pg-and-panic, surfaced as the exact error)
+//! because their carriers cannot round-trip.
+
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use mcx::{Mcx, PgBox, PgString, PgVec};
+use types_error::PgResult;
+use types_nodes::copy_query::{Query, QuerySource};
+use types_nodes::jointype::JoinType;
+use types_nodes::modifytable::{MergeMatchKind, OverridingKind};
+use types_nodes::nodelimit::LimitOption;
+use types_nodes::nodes::{CmdType, Node, OnConflictAction};
+use types_nodes::nodesamplescan::TableSampleClause;
+use types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+use types_nodes::primnodes::Expr;
+use types_nodes::rawnodes::{
+    A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, Alias,
+    CTECycleClause, CollateClause, ColumnDef, ColumnRef, DeleteStmt, FromExpr,
+    FuncCall, GroupingSet, GroupingSetKind, InferClause, InsertStmt, JoinExpr, LockClauseStrength,
+    LockWaitPolicy, LockingClause, MergeAction, MergeStmt, MergeWhenClause, MultiAssignRef,
+    OnConflictClause, OnConflictExpr, ParamRef, RangeFunction, RangeSubselect, RangeTableSample,
+    RangeTblFunction, RangeTblRef, RangeVar, ResTarget, ReturningClause, RowMarkClause,
+    SelectStmt, SetOperation, SetOperationStmt, SortBy, SortByDir, SortByNulls, SortGroupClause,
+    TypeCast, TypeName, UpdateStmt, WCOKind, WindowClause, WindowDef, WithCheckOption, WithClause,
+};
+
+use crate::{
+    atoi_i64, elog_error, read_bool_field, read_char_field, read_enum_field,
+    read_float_field, read_int_field, read_location_field, read_node_field, read_node_list_field,
+    read_oid_field, read_uint64_field, read_uint_field, tok_str,
+};
+use backend_nodes_core::read::{self, Token};
+
+type NodePtr<'mcx> = PgBox<'mcx, Node<'mcx>>;
+
+// ---------------------------------------------------------------------------
+// Local primitives (the lib's `next_token`/`read_string_field`/expr-list
+// helpers are private; replicate them here over the public `read::` cursor).
+// ---------------------------------------------------------------------------
+
+/// Pull the next token off the shared cursor, erroring on premature EOF.
+fn next_token<'a>() -> PgResult<Token<'a>> {
+    read::pg_strtok().ok_or_else(|| elog_error("unexpected end of node string"))
+}
+
+/// `READ_STRING_FIELD` (`nullable_string`): `<>` (length 0) → C NULL (`None`);
+/// `""` → empty string; otherwise `debackslash`.
+fn read_string_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgString<'mcx>>> {
+    let _label = next_token()?;
+    let v = next_token()?;
+    if v.bytes.is_empty() {
+        return Ok(None);
+    }
+    if v.bytes == b"\"\"" {
+        return Ok(Some(PgString::from_str_in("", mcx)?));
+    }
+    let s = read::debackslash(v.bytes);
+    Ok(Some(PgString::from_str_in(&s, mcx)?))
+}
+
+/// `READ_NODE_FIELD` of a `List *` of nodes into an owned `PgVec<NodePtr>`.
+fn read_node_vec_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    let items = read_node_list_field(mcx)?;
+    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    for it in items {
+        v.push(it);
+    }
+    Ok(v)
+}
+
+/// `READ_NODE_FIELD` of an `Oid` scalar list `(o ...)` (or `<>` for NIL). The
+/// core `node_read` errors on a top-level `(o ...)`, so consume the tokens
+/// directly: skip the `:label`, then read either `<>` or `( o num... )`.
+fn read_oid_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
+    read_scalar_list_u32(mcx, b'o')
+}
+
+/// `READ_NODE_FIELD` of an `int` scalar list `(i ...)` (or `<>` for NIL).
+fn read_int_scalar_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, i32>> {
+    let raw = read_scalar_list_u32(mcx, b'i')?;
+    let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
+    for x in raw.iter() {
+        v.push(*x as i32);
+    }
+    Ok(v)
+}
+
+/// Shared scalar-list reader. `disc` is the expected discriminator byte
+/// (`o`/`i`/`x`). Reads the `:label`, then `<>` (empty) or `( <disc> n... )`.
+/// The numbers are parsed as i64 then truncated to u32 (signed ints round-trip
+/// through their two's-complement u32 image).
+fn read_scalar_list_u32<'mcx>(mcx: Mcx<'mcx>, disc: u8) -> PgResult<PgVec<'mcx, u32>> {
+    let _label = next_token()?; // :fldname
+    let first = next_token()?;
+    if first.bytes.is_empty() {
+        // `<>` — C NIL.
+        return Ok(PgVec::new_in(mcx));
+    }
+    if first.bytes != b"(" {
+        return Err(elog_error("unrecognized token: expected '(' for scalar list"));
+    }
+    let d = next_token()?;
+    if d.bytes.len() != 1 || d.bytes[0] != disc {
+        return Err(elog_error("unrecognized token: wrong scalar-list discriminator"));
+    }
+    let mut v = PgVec::new_in(mcx);
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        let n = atoi_i64(&tok_str(&t));
+        v.push(n as u32);
+    }
+    Ok(v)
+}
+
+/// `READ_NODE_FIELD` of an optional framed child whose struct is NOT a `Node`
+/// arm: read the node, match the expected arm, unwrap into an `mcx` box.
+/// `<>` → `None`.
+fn read_opt_box<'mcx, T>(
+    mcx: Mcx<'mcx>,
+    extract: impl FnOnce(Node<'mcx>) -> Option<T>,
+) -> PgResult<Option<PgBox<'mcx, T>>> {
+    match read_node_field(mcx)? {
+        None => Ok(None),
+        Some(n) => match extract(PgBox::into_inner(n)) {
+            Some(v) => Ok(Some(mcx::alloc_in(mcx, v)?)),
+            None => Err(elog_error("unexpected node type for framed child field")),
+        },
+    }
+}
+
+/// `READ_NODE_FIELD` of an `Option<NodePtr>` (`Node *`): the child or `None`.
+fn read_opt_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<NodePtr<'mcx>>> {
+    read_node_field(mcx)
+}
+
+/// `READ_NODE_FIELD` of a `List *` of `Expr` (`(expr ...)` or `<>`). The core
+/// `node_read` rebuilds it as a `Node::List` of `Node::Expr`.
+fn read_expr_list<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
+    let _label = next_token()?;
+    match read::node_read(mcx, None)? {
+        None => Ok(Vec::new()),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::List(elements) => {
+                let mut out = Vec::with_capacity(elements.len());
+                for cell in elements {
+                    match PgBox::into_inner(cell) {
+                        Node::Expr(e) => out.push(e),
+                        other => {
+                            return Err(elog_error(alloc::format!(
+                                "expected Expr element in arg list, got {:?}",
+                                other.node_tag()
+                            )))
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(elog_error(alloc::format!(
+                "expected List for expr-list field, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
+/// `READ_NODE_FIELD` of a single `Expr *` (`{...}` or `<>`).
+fn read_opt_expr_boxed<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
+    let _label = next_token()?;
+    match read::node_read(mcx, None)? {
+        None => Ok(None),
+        Some(n) => match PgBox::into_inner(n) {
+            Node::Expr(e) => Ok(Some(Box::new(e))),
+            other => Err(elog_error(alloc::format!(
+                "expected Expr child, got {:?}",
+                other.node_tag()
+            ))),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct-value list readers (PgVec<RangeTblEntry> / <RTEPermissionInfo> /
+// <TargetEntry>): read a node list, match each framed element's arm.
+// ---------------------------------------------------------------------------
+
+fn read_rte_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RangeTblEntry<'mcx>>> {
+    let items = read_node_list_field(mcx)?;
+    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    for it in items {
+        match PgBox::into_inner(it) {
+            Node::RangeTblEntry(r) => v.push(r),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "expected RangeTblEntry in rtable, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        }
+    }
+    Ok(v)
+}
+
+fn read_rteperminfo_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RTEPermissionInfo<'mcx>>> {
+    let items = read_node_list_field(mcx)?;
+    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    for it in items {
+        match PgBox::into_inner(it) {
+            Node::RTEPermissionInfo(p) => v.push(p),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "expected RTEPermissionInfo in rteperminfos, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        }
+    }
+    Ok(v)
+}
+
+fn read_te_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
+    let items = read_node_list_field(mcx)?;
+    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    for it in items {
+        match PgBox::into_inner(it) {
+            Node::TargetEntry(t) => v.push(t),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "expected TargetEntry in targetList, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        }
+    }
+    Ok(v)
+}
+
+// ---------------------------------------------------------------------------
+// Enum decoders.
+// ---------------------------------------------------------------------------
+
+fn cmd_type_from(c: i32) -> CmdType {
+    match c {
+        0 => CmdType::CMD_UNKNOWN,
+        1 => CmdType::CMD_SELECT,
+        2 => CmdType::CMD_UPDATE,
+        3 => CmdType::CMD_INSERT,
+        4 => CmdType::CMD_DELETE,
+        5 => CmdType::CMD_MERGE,
+        6 => CmdType::CMD_UTILITY,
+        _ => CmdType::CMD_NOTHING,
+    }
+}
+
+fn query_source_from(c: i32) -> QuerySource {
+    match c {
+        0 => QuerySource::QSRC_ORIGINAL,
+        1 => QuerySource::QSRC_PARSER,
+        2 => QuerySource::QSRC_INSTEAD_RULE,
+        3 => QuerySource::QSRC_QUAL_INSTEAD_RULE,
+        _ => QuerySource::QSRC_NON_INSTEAD_RULE,
+    }
+}
+
+fn overriding_from(c: i32) -> OverridingKind {
+    match c {
+        0 => OverridingKind::OVERRIDING_NOT_SET,
+        1 => OverridingKind::OVERRIDING_USER_VALUE,
+        _ => OverridingKind::OVERRIDING_SYSTEM_VALUE,
+    }
+}
+
+fn limit_option_from(c: i32) -> LimitOption {
+    match c {
+        1 => LimitOption::LIMIT_OPTION_WITH_TIES,
+        _ => LimitOption::LIMIT_OPTION_COUNT,
+    }
+}
+
+fn join_type_from(c: i32) -> JoinType {
+    match c {
+        0 => JoinType::JOIN_INNER,
+        1 => JoinType::JOIN_LEFT,
+        2 => JoinType::JOIN_FULL,
+        3 => JoinType::JOIN_RIGHT,
+        4 => JoinType::JOIN_SEMI,
+        5 => JoinType::JOIN_ANTI,
+        6 => JoinType::JOIN_RIGHT_SEMI,
+        7 => JoinType::JOIN_RIGHT_ANTI,
+        8 => JoinType::JOIN_UNIQUE_OUTER,
+        _ => JoinType::JOIN_UNIQUE_INNER,
+    }
+}
+
+fn set_operation_from(c: i32) -> SetOperation {
+    match c {
+        0 => SetOperation::SETOP_NONE,
+        1 => SetOperation::SETOP_UNION,
+        2 => SetOperation::SETOP_INTERSECT,
+        _ => SetOperation::SETOP_EXCEPT,
+    }
+}
+
+fn grouping_set_kind_from(c: i32) -> GroupingSetKind {
+    match c {
+        0 => GroupingSetKind::GROUPING_SET_EMPTY,
+        1 => GroupingSetKind::GROUPING_SET_SIMPLE,
+        2 => GroupingSetKind::GROUPING_SET_ROLLUP,
+        3 => GroupingSetKind::GROUPING_SET_CUBE,
+        _ => GroupingSetKind::GROUPING_SET_SETS,
+    }
+}
+
+fn wco_kind_from(c: i32) -> WCOKind {
+    match c {
+        0 => WCOKind::WCO_VIEW_CHECK,
+        1 => WCOKind::WCO_RLS_INSERT_CHECK,
+        2 => WCOKind::WCO_RLS_UPDATE_CHECK,
+        3 => WCOKind::WCO_RLS_CONFLICT_CHECK,
+        4 => WCOKind::WCO_RLS_MERGE_UPDATE_CHECK,
+        _ => WCOKind::WCO_RLS_MERGE_DELETE_CHECK,
+    }
+}
+
+fn lock_strength_from(c: i32) -> LockClauseStrength {
+    match c {
+        0 => LockClauseStrength::LCS_NONE,
+        1 => LockClauseStrength::LCS_FORKEYSHARE,
+        2 => LockClauseStrength::LCS_FORSHARE,
+        3 => LockClauseStrength::LCS_FORNOKEYUPDATE,
+        _ => LockClauseStrength::LCS_FORUPDATE,
+    }
+}
+
+fn lock_wait_from(c: i32) -> LockWaitPolicy {
+    match c {
+        0 => LockWaitPolicy::LockWaitBlock,
+        1 => LockWaitPolicy::LockWaitSkip,
+        _ => LockWaitPolicy::LockWaitError,
+    }
+}
+
+fn sortby_dir_from(c: i32) -> SortByDir {
+    match c {
+        0 => SortByDir::SORTBY_DEFAULT,
+        1 => SortByDir::SORTBY_ASC,
+        2 => SortByDir::SORTBY_DESC,
+        _ => SortByDir::SORTBY_USING,
+    }
+}
+
+fn sortby_nulls_from(c: i32) -> SortByNulls {
+    match c {
+        0 => SortByNulls::SORTBY_NULLS_DEFAULT,
+        1 => SortByNulls::SORTBY_NULLS_FIRST,
+        _ => SortByNulls::SORTBY_NULLS_LAST,
+    }
+}
+
+fn on_conflict_action_from(c: i32) -> OnConflictAction {
+    match c {
+        0 => OnConflictAction::ONCONFLICT_NONE,
+        1 => OnConflictAction::ONCONFLICT_NOTHING,
+        _ => OnConflictAction::ONCONFLICT_UPDATE,
+    }
+}
+
+fn merge_match_kind_from(c: i32) -> MergeMatchKind {
+    match c {
+        0 => MergeMatchKind::MERGE_WHEN_MATCHED,
+        1 => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+        _ => MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET,
+    }
+}
+
+fn coercion_form_from(c: i32) -> types_nodes::primnodes::CoercionForm {
+    use types_nodes::primnodes::CoercionForm;
+    match c {
+        0 => CoercionForm::COERCE_EXPLICIT_CALL,
+        1 => CoercionForm::COERCE_EXPLICIT_CAST,
+        2 => CoercionForm::COERCE_IMPLICIT_CAST,
+        _ => CoercionForm::COERCE_SQL_SYNTAX,
+    }
+}
+
+// ===========================================================================
+// _readQuery
+// ===========================================================================
+
+fn read_query<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Query<'mcx>> {
+    let mut q = Query::new(mcx);
+    q.commandType = cmd_type_from(read_enum_field()?);
+    q.querySource = query_source_from(read_enum_field()?);
+    q.canSetTag = read_bool_field()?;
+    q.utilityStmt = read_opt_node(mcx)?;
+    q.resultRelation = read_int_field()?;
+    q.hasAggs = read_bool_field()?;
+    q.hasWindowFuncs = read_bool_field()?;
+    q.hasTargetSRFs = read_bool_field()?;
+    q.hasSubLinks = read_bool_field()?;
+    q.hasDistinctOn = read_bool_field()?;
+    q.hasRecursive = read_bool_field()?;
+    q.hasModifyingCTE = read_bool_field()?;
+    q.hasForUpdate = read_bool_field()?;
+    q.hasRowSecurity = read_bool_field()?;
+    q.hasGroupRTE = read_bool_field()?;
+    q.isReturn = read_bool_field()?;
+    q.cteList = read_node_vec_field(mcx)?;
+    q.rtable = read_rte_vec(mcx)?;
+    q.rteperminfos = read_rteperminfo_vec(mcx)?;
+    q.jointree = read_opt_box(mcx, |n| match n {
+        Node::FromExpr(f) => Some(f),
+        _ => None,
+    })?;
+    q.mergeActionList = read_node_vec_field(mcx)?;
+    q.mergeTargetRelation = read_int_field()?;
+    q.mergeJoinCondition = read_opt_node(mcx)?;
+    q.targetList = read_te_vec(mcx)?;
+    q.r#override = overriding_from(read_enum_field()?);
+    q.onConflict = read_opt_box(mcx, |n| match n {
+        Node::OnConflictExpr(o) => Some(o),
+        _ => None,
+    })?;
+    q.returningOldAlias = read_string_field(mcx)?;
+    q.returningNewAlias = read_string_field(mcx)?;
+    q.returningList = read_te_vec(mcx)?;
+    q.has_returning_list = !q.returningList.is_empty();
+    q.groupClause = read_node_vec_field(mcx)?;
+    q.groupDistinct = read_bool_field()?;
+    q.groupingSets = read_node_vec_field(mcx)?;
+    q.havingQual = read_opt_node(mcx)?;
+    q.windowClause = read_node_vec_field(mcx)?;
+    q.distinctClause = read_node_vec_field(mcx)?;
+    q.sortClause = read_node_vec_field(mcx)?;
+    q.limitOffset = read_opt_node(mcx)?;
+    q.limitCount = read_opt_node(mcx)?;
+    q.limitOption = limit_option_from(read_enum_field()?);
+    q.rowMarks = read_node_vec_field(mcx)?;
+    q.setOperations = read_opt_node(mcx)?;
+    q.constraintDeps = read_oid_list_field(mcx)?;
+    q.withCheckOptions = read_node_vec_field(mcx)?;
+    q.stmt_location = read_location_field()?;
+    q.stmt_len = read_location_field()?;
+    Ok(q)
+}
+
+// ===========================================================================
+// _readRangeTblEntry — custom, switch on rtekind.
+// ===========================================================================
+
+fn read_range_tbl_entry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblEntry<'mcx>> {
+    let mut r = RangeTblEntry::new_in(mcx);
+    r.alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    r.eref = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    r.rtekind = rtekind_from(read_enum_field()?);
+
+    match r.rtekind {
+        RTEKind::RTE_RELATION => {
+            r.relid = read_oid_field()?;
+            r.inh = read_bool_field()?;
+            r.relkind = read_char_field()? as i8;
+            r.rellockmode = read_int_field()?;
+            r.perminfoindex = read_uint_field()?;
+            r.tablesample = read_opt_node(mcx)?;
+        }
+        RTEKind::RTE_SUBQUERY => {
+            r.subquery = read_opt_box(mcx, |n| match n {
+                Node::Query(q) => Some(q),
+                _ => None,
+            })?;
+            r.security_barrier = read_bool_field()?;
+            r.relid = read_oid_field()?;
+            r.inh = read_bool_field()?;
+            r.relkind = read_char_field()? as i8;
+            r.rellockmode = read_int_field()?;
+            r.perminfoindex = read_uint_field()?;
+        }
+        RTEKind::RTE_JOIN => {
+            r.jointype = join_type_from(read_enum_field()?);
+            r.joinmergedcols = read_int_field()?;
+            r.joinaliasvars = read_node_vec_field(mcx)?;
+            r.joinleftcols = read_int_scalar_list_field(mcx)?;
+            r.joinrightcols = read_int_scalar_list_field(mcx)?;
+            r.join_using_alias = read_opt_box(mcx, |n| match n {
+                Node::Alias(a) => Some(a),
+                _ => None,
+            })?;
+        }
+        RTEKind::RTE_FUNCTION => {
+            r.functions = read_node_vec_field(mcx)?;
+            r.funcordinality = read_bool_field()?;
+        }
+        RTEKind::RTE_TABLEFUNC => {
+            r.tablefunc = read_opt_node(mcx)?;
+            // C copies coltypes/coltypmods/colcollations from the tablefunc;
+            // TableFunc is seam-panicked here, so leave those empty (NIL).
+        }
+        RTEKind::RTE_VALUES => {
+            r.values_lists = read_node_vec_field(mcx)?;
+            r.coltypes = read_oid_list_field(mcx)?;
+            r.coltypmods = read_int_scalar_list_field(mcx)?;
+            r.colcollations = read_oid_list_field(mcx)?;
+        }
+        RTEKind::RTE_CTE => {
+            r.ctename = read_string_field(mcx)?;
+            r.ctelevelsup = read_uint_field()?;
+            r.self_reference = read_bool_field()?;
+            r.coltypes = read_oid_list_field(mcx)?;
+            r.coltypmods = read_int_scalar_list_field(mcx)?;
+            r.colcollations = read_oid_list_field(mcx)?;
+        }
+        RTEKind::RTE_NAMEDTUPLESTORE => {
+            r.enrname = read_string_field(mcx)?;
+            r.enrtuples = read_float_field()?;
+            r.coltypes = read_oid_list_field(mcx)?;
+            r.coltypmods = read_int_scalar_list_field(mcx)?;
+            r.colcollations = read_oid_list_field(mcx)?;
+            r.relid = read_oid_field()?;
+        }
+        RTEKind::RTE_RESULT => {
+            // nothing
+        }
+        RTEKind::RTE_GROUP => {
+            r.groupexprs = read_node_vec_field(mcx)?;
+        }
+    }
+
+    r.lateral = read_bool_field()?;
+    r.inFromCl = read_bool_field()?;
+    r.securityQuals = read_node_vec_field(mcx)?;
+    Ok(r)
+}
+
+fn rtekind_from(c: i32) -> RTEKind {
+    match c {
+        0 => RTEKind::RTE_RELATION,
+        1 => RTEKind::RTE_SUBQUERY,
+        2 => RTEKind::RTE_JOIN,
+        3 => RTEKind::RTE_FUNCTION,
+        4 => RTEKind::RTE_TABLEFUNC,
+        5 => RTEKind::RTE_VALUES,
+        6 => RTEKind::RTE_CTE,
+        7 => RTEKind::RTE_NAMEDTUPLESTORE,
+        8 => RTEKind::RTE_RESULT,
+        _ => RTEKind::RTE_GROUP,
+    }
+}
+
+// ===========================================================================
+// _readRTEPermissionInfo
+// ===========================================================================
+
+fn read_rte_perm_info<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RTEPermissionInfo<'mcx>> {
+    let relid = read_oid_field()?;
+    let inh = read_bool_field()?;
+    let requiredPerms = read_uint64_field()?;
+    let checkAsUser = read_oid_field()?;
+    let selectedCols = crate::read_bitmapset_opt_field(mcx)?;
+    let insertedCols = crate::read_bitmapset_opt_field(mcx)?;
+    let updatedCols = crate::read_bitmapset_opt_field(mcx)?;
+    Ok(RTEPermissionInfo {
+        relid,
+        inh,
+        requiredPerms,
+        checkAsUser,
+        selectedCols,
+        insertedCols,
+        updatedCols,
+    })
+}
+
+// ===========================================================================
+// _readRangeTblFunction
+// ===========================================================================
+
+fn read_range_tbl_function<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblFunction<'mcx>> {
+    let funcexpr = read_opt_node(mcx)?;
+    let funccolcount = read_int_field()?;
+    let funccolnames = read_node_vec_field(mcx)?;
+    let funccoltypes = read_oid_list_field(mcx)?;
+    let funccoltypmods = read_int_scalar_list_field(mcx)?;
+    let funccolcollations = read_oid_list_field(mcx)?;
+    let funcparams = crate::read_bitmapset_opt_field(mcx)?;
+    Ok(RangeTblFunction {
+        funcexpr,
+        funccolcount,
+        funccolnames,
+        funccoltypes,
+        funccoltypmods,
+        funccolcollations,
+        funcparams,
+    })
+}
+
+// ===========================================================================
+// _readTableSampleClause
+// ===========================================================================
+
+fn read_table_sample_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TableSampleClause<'mcx>> {
+    let tsmhandler = read_oid_field()?;
+    let args_vec = read_expr_list(mcx)?;
+    let args = {
+        let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, args_vec.len())?;
+        for a in args_vec {
+            out.push(a);
+        }
+        Some(out)
+    };
+    let repeatable = read_opt_expr_boxed(mcx)?;
+    Ok(TableSampleClause {
+        tsmhandler,
+        args,
+        repeatable,
+        ..Default::default()
+    })
+}
+
+// ===========================================================================
+// _readSortGroupClause
+// ===========================================================================
+
+fn read_sort_group_clause() -> PgResult<SortGroupClause> {
+    let tleSortGroupRef = read_uint_field()?;
+    let eqop = read_oid_field()?;
+    let sortop = read_oid_field()?;
+    let reverse_sort = read_bool_field()?;
+    let nulls_first = read_bool_field()?;
+    let hashable = read_bool_field()?;
+    Ok(SortGroupClause {
+        tleSortGroupRef,
+        eqop,
+        sortop,
+        reverse_sort,
+        nulls_first,
+        hashable,
+    })
+}
+
+// ===========================================================================
+// _readGroupingSet
+// ===========================================================================
+
+fn read_grouping_set<'mcx>(mcx: Mcx<'mcx>) -> PgResult<GroupingSet<'mcx>> {
+    let kind = grouping_set_kind_from(read_enum_field()?);
+    let content = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(GroupingSet {
+        kind,
+        content,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readWindowClause
+// ===========================================================================
+
+fn read_window_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WindowClause<'mcx>> {
+    let name = read_string_field(mcx)?;
+    let refname = read_string_field(mcx)?;
+    let partitionClause = read_node_vec_field(mcx)?;
+    let orderClause = read_node_vec_field(mcx)?;
+    let frameOptions = read_int_field()?;
+    let startOffset = read_opt_node(mcx)?;
+    let endOffset = read_opt_node(mcx)?;
+    let startInRangeFunc = read_oid_field()?;
+    let endInRangeFunc = read_oid_field()?;
+    let inRangeColl = read_oid_field()?;
+    let inRangeAsc = read_bool_field()?;
+    let inRangeNullsFirst = read_bool_field()?;
+    let winref = read_uint_field()?;
+    let copiedOrder = read_bool_field()?;
+    Ok(WindowClause {
+        name,
+        refname,
+        partitionClause,
+        orderClause,
+        frameOptions,
+        startOffset,
+        endOffset,
+        startInRangeFunc,
+        endInRangeFunc,
+        inRangeColl,
+        inRangeAsc,
+        inRangeNullsFirst,
+        winref,
+        copiedOrder,
+    })
+}
+
+// ===========================================================================
+// _readRowMarkClause
+// ===========================================================================
+
+fn read_row_mark_clause() -> PgResult<RowMarkClause> {
+    let rti = read_uint_field()?;
+    let strength = lock_strength_from(read_enum_field()?);
+    let waitPolicy = lock_wait_from(read_enum_field()?);
+    let pushedDown = read_bool_field()?;
+    Ok(RowMarkClause {
+        rti,
+        strength,
+        waitPolicy,
+        pushedDown,
+    })
+}
+
+// ===========================================================================
+// _readWithCheckOption
+// ===========================================================================
+
+fn read_with_check_option<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WithCheckOption<'mcx>> {
+    let kind = wco_kind_from(read_enum_field()?);
+    let relname = read_string_field(mcx)?;
+    let polname = read_string_field(mcx)?;
+    let qual = read_opt_node(mcx)?;
+    let cascaded = read_bool_field()?;
+    Ok(WithCheckOption {
+        kind,
+        relname,
+        polname,
+        qual,
+        cascaded,
+    })
+}
+
+// ===========================================================================
+// _readCTECycleClause
+// ===========================================================================
+
+fn read_cte_cycle_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CTECycleClause<'mcx>> {
+    let cycle_col_list = read_node_vec_field(mcx)?;
+    let cycle_mark_column = read_string_field(mcx)?;
+    let cycle_mark_value = read_opt_node(mcx)?;
+    let cycle_mark_default = read_opt_node(mcx)?;
+    let cycle_path_column = read_string_field(mcx)?;
+    let location = read_location_field()?;
+    let cycle_mark_type = read_oid_field()?;
+    let cycle_mark_typmod = read_int_field()?;
+    let cycle_mark_collation = read_oid_field()?;
+    let cycle_mark_neop = read_oid_field()?;
+    Ok(CTECycleClause {
+        cycle_col_list,
+        cycle_mark_column,
+        cycle_mark_value,
+        cycle_mark_default,
+        cycle_path_column,
+        location,
+        cycle_mark_type,
+        cycle_mark_typmod,
+        cycle_mark_collation,
+        cycle_mark_neop,
+    })
+}
+
+// ===========================================================================
+// _readSetOperationStmt
+// ===========================================================================
+
+fn read_set_operation_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SetOperationStmt<'mcx>> {
+    let op = set_operation_from(read_enum_field()?);
+    let all = read_bool_field()?;
+    let larg = read_opt_node(mcx)?;
+    let rarg = read_opt_node(mcx)?;
+    let colTypes = read_oid_list_field(mcx)?;
+    let colTypmods = read_int_scalar_list_field(mcx)?;
+    let colCollations = read_oid_list_field(mcx)?;
+    let groupClauses = read_node_vec_field(mcx)?;
+    Ok(SetOperationStmt {
+        op,
+        all,
+        larg,
+        rarg,
+        colTypes,
+        colTypmods,
+        colCollations,
+        groupClauses,
+    })
+}
+
+// ===========================================================================
+// _readAlias / _readRangeVar / _readTypeName / _readColumnDef
+// ===========================================================================
+
+fn read_alias<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Alias<'mcx>> {
+    let aliasname = read_string_field(mcx)?;
+    let colnames = read_node_vec_field(mcx)?;
+    Ok(Alias {
+        aliasname,
+        colnames,
+    })
+}
+
+fn read_range_var<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeVar<'mcx>> {
+    let catalogname = read_string_field(mcx)?;
+    let schemaname = read_string_field(mcx)?;
+    let relname = read_string_field(mcx)?;
+    let inh = read_bool_field()?;
+    let relpersistence = read_char_field()? as i8;
+    let alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    let location = read_location_field()?;
+    Ok(RangeVar {
+        catalogname,
+        schemaname,
+        relname,
+        inh,
+        relpersistence,
+        alias,
+        location,
+    })
+}
+
+fn read_type_name<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TypeName<'mcx>> {
+    let names = read_node_vec_field(mcx)?;
+    let typeOid = read_oid_field()?;
+    let setof = read_bool_field()?;
+    let pct_type = read_bool_field()?;
+    let typmods = read_node_vec_field(mcx)?;
+    let typemod = read_int_field()?;
+    let arrayBounds = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(TypeName {
+        names,
+        typeOid,
+        setof,
+        pct_type,
+        typmods,
+        typemod,
+        arrayBounds,
+        location,
+    })
+}
+
+fn read_column_def<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ColumnDef<'mcx>> {
+    let colname = read_string_field(mcx)?;
+    let typeName = read_opt_box(mcx, |n| match n {
+        Node::TypeName(t) => Some(t),
+        _ => None,
+    })?;
+    let compression = read_string_field(mcx)?;
+    let inhcount = read_int_field()? as i16;
+    let is_local = read_bool_field()?;
+    let is_not_null = read_bool_field()?;
+    let is_from_type = read_bool_field()?;
+    let storage = read_char_field()? as i8;
+    let storage_name = read_string_field(mcx)?;
+    let raw_default = read_opt_node(mcx)?;
+    let cooked_default = read_opt_node(mcx)?;
+    let identity = read_char_field()? as i8;
+    let identitySequence = read_opt_box(mcx, |n| match n {
+        Node::RangeVar(r) => Some(r),
+        _ => None,
+    })?;
+    let generated = read_char_field()? as i8;
+    let collClause = read_opt_box(mcx, |n| match n {
+        Node::CollateClause(c) => Some(c),
+        _ => None,
+    })?;
+    let collOid = read_oid_field()?;
+    let constraints = read_node_vec_field(mcx)?;
+    let fdwoptions = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(ColumnDef {
+        colname,
+        typeName,
+        compression,
+        inhcount,
+        is_local,
+        is_not_null,
+        is_from_type,
+        storage,
+        storage_name,
+        raw_default,
+        cooked_default,
+        identity,
+        identitySequence,
+        generated,
+        collClause,
+        collOid,
+        constraints,
+        fdwoptions,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readRangeTblRef / _readJoinExpr / _readFromExpr / _readOnConflictExpr
+// ===========================================================================
+
+fn read_range_tbl_ref() -> PgResult<RangeTblRef> {
+    let rtindex = read_int_field()?;
+    Ok(RangeTblRef { rtindex })
+}
+
+fn read_join_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<JoinExpr<'mcx>> {
+    let jointype = join_type_from(read_enum_field()?);
+    let isNatural = read_bool_field()?;
+    let larg = read_opt_node(mcx)?;
+    let rarg = read_opt_node(mcx)?;
+    let usingClause = read_node_vec_field(mcx)?;
+    let join_using_alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    let quals = read_opt_node(mcx)?;
+    let alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    let rtindex = read_int_field()?;
+    Ok(JoinExpr {
+        jointype,
+        isNatural,
+        larg,
+        rarg,
+        usingClause,
+        join_using_alias,
+        quals,
+        alias,
+        rtindex,
+    })
+}
+
+fn read_from_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FromExpr<'mcx>> {
+    let fromlist = read_node_vec_field(mcx)?;
+    let quals = read_opt_node(mcx)?;
+    Ok(FromExpr { fromlist, quals })
+}
+
+fn read_on_conflict_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<OnConflictExpr<'mcx>> {
+    let action = on_conflict_action_from(read_enum_field()?);
+    let arbiterElems = read_node_vec_field(mcx)?;
+    let arbiterWhere = read_opt_node(mcx)?;
+    let constraint = read_oid_field()?;
+    let onConflictSet = read_node_vec_field(mcx)?;
+    let onConflictWhere = read_opt_node(mcx)?;
+    let exclRelIndex = read_int_field()?;
+    let exclRelTlist = read_node_vec_field(mcx)?;
+    Ok(OnConflictExpr {
+        action,
+        arbiterElems,
+        arbiterWhere,
+        constraint,
+        onConflictSet,
+        onConflictWhere,
+        exclRelIndex,
+        exclRelTlist,
+    })
+}
+
+// ===========================================================================
+// _readMergeAction / _readLockingClause
+// ===========================================================================
+
+fn read_merge_action<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MergeAction<'mcx>> {
+    let matchKind = merge_match_kind_from(read_enum_field()?);
+    let commandType = cmd_type_from(read_enum_field()?);
+    let r#override = overriding_from(read_enum_field()?);
+    let qual = read_opt_node(mcx)?;
+    let targetList = read_node_vec_field(mcx)?;
+    let updateColnos = read_int_scalar_list_field(mcx)?;
+    Ok(MergeAction {
+        matchKind,
+        commandType,
+        r#override,
+        qual,
+        targetList,
+        updateColnos,
+    })
+}
+
+fn read_locking_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<LockingClause<'mcx>> {
+    let lockedRels = read_node_vec_field(mcx)?;
+    let strength = lock_strength_from(read_enum_field()?);
+    let waitPolicy = lock_wait_from(read_enum_field()?);
+    Ok(LockingClause {
+        lockedRels,
+        strength,
+        waitPolicy,
+    })
+}
+
+// ===========================================================================
+// _readColumnRef / _readParamRef / _readA_Expr / _readFuncCall
+// ===========================================================================
+
+fn read_column_ref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ColumnRef<'mcx>> {
+    let fields = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(ColumnRef { fields, location })
+}
+
+fn read_param_ref() -> PgResult<ParamRef> {
+    let number = read_int_field()?;
+    let location = read_location_field()?;
+    Ok(ParamRef { number, location })
+}
+
+fn read_a_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Expr<'mcx>> {
+    // Peek the first token: an operator keyword chooses the kind (and the next
+    // thing is `:name <list>`); a `:name` label means AEXPR_OP (and we read the
+    // value directly).
+    let tok = next_token()?;
+    let (kind, name): (A_Expr_Kind, PgVec<'mcx, NodePtr<'mcx>>) = match tok.bytes {
+        b"ANY" => (A_Expr_Kind::AEXPR_OP_ANY, read_node_vec_field(mcx)?),
+        b"ALL" => (A_Expr_Kind::AEXPR_OP_ALL, read_node_vec_field(mcx)?),
+        b"DISTINCT" => (A_Expr_Kind::AEXPR_DISTINCT, read_node_vec_field(mcx)?),
+        b"NOT_DISTINCT" => (A_Expr_Kind::AEXPR_NOT_DISTINCT, read_node_vec_field(mcx)?),
+        b"NULLIF" => (A_Expr_Kind::AEXPR_NULLIF, read_node_vec_field(mcx)?),
+        b"IN" => (A_Expr_Kind::AEXPR_IN, read_node_vec_field(mcx)?),
+        b"LIKE" => (A_Expr_Kind::AEXPR_LIKE, read_node_vec_field(mcx)?),
+        b"ILIKE" => (A_Expr_Kind::AEXPR_ILIKE, read_node_vec_field(mcx)?),
+        b"SIMILAR" => (A_Expr_Kind::AEXPR_SIMILAR, read_node_vec_field(mcx)?),
+        b"BETWEEN" => (A_Expr_Kind::AEXPR_BETWEEN, read_node_vec_field(mcx)?),
+        b"NOT_BETWEEN" => (A_Expr_Kind::AEXPR_NOT_BETWEEN, read_node_vec_field(mcx)?),
+        b"BETWEEN_SYM" => (A_Expr_Kind::AEXPR_BETWEEN_SYM, read_node_vec_field(mcx)?),
+        b"NOT_BETWEEN_SYM" => (A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM, read_node_vec_field(mcx)?),
+        b":name" => {
+            // AEXPR_OP: the peeked token WAS the :name label, so read the value
+            // (a `(...)` list of String nodes) directly via node_read.
+            let name = match read::node_read(mcx, None)? {
+                None => PgVec::new_in(mcx),
+                Some(n) => match PgBox::into_inner(n) {
+                    Node::List(elements) => {
+                        let mut v = mcx::vec_with_capacity_in(mcx, elements.len())?;
+                        for c in elements {
+                            v.push(c);
+                        }
+                        v
+                    }
+                    other => mcx::vec_with_capacity_in(mcx, 1).map(|mut v| {
+                        v.push(mcx::alloc_in(mcx, other).unwrap());
+                        v
+                    })?,
+                },
+            };
+            (A_Expr_Kind::AEXPR_OP, name)
+        }
+        other => {
+            return Err(elog_error(alloc::format!(
+                "unrecognized A_Expr discriminator token: {:?}",
+                String::from_utf8_lossy(other)
+            )))
+        }
+    };
+    let lexpr = read_opt_node(mcx)?;
+    let rexpr = read_opt_node(mcx)?;
+    let rexpr_list_start = read_location_field()?;
+    let rexpr_list_end = read_location_field()?;
+    let location = read_location_field()?;
+    Ok(A_Expr {
+        kind,
+        name,
+        lexpr,
+        rexpr,
+        rexpr_list_start,
+        rexpr_list_end,
+        location,
+    })
+}
+
+fn read_func_call<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FuncCall<'mcx>> {
+    let funcname = read_node_vec_field(mcx)?;
+    let args = read_node_vec_field(mcx)?;
+    let agg_order = read_node_vec_field(mcx)?;
+    let agg_filter = read_opt_node(mcx)?;
+    let over = read_opt_box(mcx, |n| match n {
+        Node::WindowDef(w) => Some(w),
+        _ => None,
+    })?;
+    let agg_within_group = read_bool_field()?;
+    let agg_star = read_bool_field()?;
+    let agg_distinct = read_bool_field()?;
+    let func_variadic = read_bool_field()?;
+    let funcformat = coercion_form_from(read_enum_field()?);
+    let location = read_location_field()?;
+    Ok(FuncCall {
+        funcname,
+        args,
+        agg_order,
+        agg_filter,
+        over,
+        agg_within_group,
+        agg_star,
+        agg_distinct,
+        func_variadic,
+        funcformat,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readA_Star / _readA_Indices / _readA_Indirection / _readA_ArrayExpr
+// ===========================================================================
+
+fn read_a_star() -> PgResult<A_Star> {
+    Ok(A_Star)
+}
+
+fn read_a_indices<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Indices<'mcx>> {
+    let is_slice = read_bool_field()?;
+    let lidx = read_opt_node(mcx)?;
+    let uidx = read_opt_node(mcx)?;
+    Ok(A_Indices {
+        is_slice,
+        lidx,
+        uidx,
+    })
+}
+
+fn read_a_indirection<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Indirection<'mcx>> {
+    let arg = read_opt_node(mcx)?;
+    let indirection = read_node_vec_field(mcx)?;
+    Ok(A_Indirection { arg, indirection })
+}
+
+fn read_a_array_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_ArrayExpr<'mcx>> {
+    let elements = read_node_vec_field(mcx)?;
+    let list_start = read_location_field()?;
+    let list_end = read_location_field()?;
+    let location = read_location_field()?;
+    Ok(A_ArrayExpr {
+        elements,
+        list_start,
+        list_end,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readResTarget / _readMultiAssignRef / _readTypeCast / _readCollateClause
+// ===========================================================================
+
+fn read_res_target<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ResTarget<'mcx>> {
+    let name = read_string_field(mcx)?;
+    let indirection = read_node_vec_field(mcx)?;
+    let val = read_opt_node(mcx)?;
+    let location = read_location_field()?;
+    Ok(ResTarget {
+        name,
+        indirection,
+        val,
+        location,
+    })
+}
+
+fn read_multi_assign_ref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MultiAssignRef<'mcx>> {
+    let source = read_opt_node(mcx)?;
+    let colno = read_int_field()?;
+    let ncolumns = read_int_field()?;
+    Ok(MultiAssignRef {
+        source,
+        colno,
+        ncolumns,
+    })
+}
+
+fn read_type_cast<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TypeCast<'mcx>> {
+    let arg = read_opt_node(mcx)?;
+    let typeName = read_opt_box(mcx, |n| match n {
+        Node::TypeName(t) => Some(t),
+        _ => None,
+    })?;
+    let location = read_location_field()?;
+    Ok(TypeCast {
+        arg,
+        typeName,
+        location,
+    })
+}
+
+fn read_collate_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CollateClause<'mcx>> {
+    let arg = read_opt_node(mcx)?;
+    let collname = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(CollateClause {
+        arg,
+        collname,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readSortBy / _readWindowDef
+// ===========================================================================
+
+fn read_sort_by<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SortBy<'mcx>> {
+    let node = read_opt_node(mcx)?;
+    let sortby_dir = sortby_dir_from(read_enum_field()?);
+    let sortby_nulls = sortby_nulls_from(read_enum_field()?);
+    let useOp = read_node_vec_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(SortBy {
+        node,
+        sortby_dir,
+        sortby_nulls,
+        useOp,
+        location,
+    })
+}
+
+fn read_window_def<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WindowDef<'mcx>> {
+    let name = read_string_field(mcx)?;
+    let refname = read_string_field(mcx)?;
+    let partitionClause = read_node_vec_field(mcx)?;
+    let orderClause = read_node_vec_field(mcx)?;
+    let frameOptions = read_int_field()?;
+    let startOffset = read_opt_node(mcx)?;
+    let endOffset = read_opt_node(mcx)?;
+    let location = read_location_field()?;
+    Ok(WindowDef {
+        name,
+        refname,
+        partitionClause,
+        orderClause,
+        frameOptions,
+        startOffset,
+        endOffset,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readRangeSubselect / _readRangeFunction / _readRangeTableSample
+// ===========================================================================
+
+fn read_range_subselect<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeSubselect<'mcx>> {
+    let lateral = read_bool_field()?;
+    let subquery = read_opt_node(mcx)?;
+    let alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    Ok(RangeSubselect {
+        lateral,
+        subquery,
+        alias,
+    })
+}
+
+fn read_range_function<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeFunction<'mcx>> {
+    let lateral = read_bool_field()?;
+    let ordinality = read_bool_field()?;
+    let is_rowsfrom = read_bool_field()?;
+    let functions = read_node_vec_field(mcx)?;
+    let alias = read_opt_box(mcx, |n| match n {
+        Node::Alias(a) => Some(a),
+        _ => None,
+    })?;
+    let coldeflist = read_node_vec_field(mcx)?;
+    Ok(RangeFunction {
+        lateral,
+        ordinality,
+        is_rowsfrom,
+        functions,
+        alias,
+        coldeflist,
+    })
+}
+
+fn read_range_table_sample<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTableSample<'mcx>> {
+    let relation = read_opt_node(mcx)?;
+    let method = read_node_vec_field(mcx)?;
+    let args = read_node_vec_field(mcx)?;
+    let repeatable = read_opt_node(mcx)?;
+    let location = read_location_field()?;
+    Ok(RangeTableSample {
+        relation,
+        method,
+        args,
+        repeatable,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readWithClause / _readInferClause / _readOnConflictClause
+// ===========================================================================
+
+fn read_with_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WithClause<'mcx>> {
+    let ctes = read_node_vec_field(mcx)?;
+    let recursive = read_bool_field()?;
+    let location = read_location_field()?;
+    Ok(WithClause {
+        ctes,
+        recursive,
+        location,
+    })
+}
+
+fn read_infer_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<InferClause<'mcx>> {
+    let indexElems = read_node_vec_field(mcx)?;
+    let whereClause = read_opt_node(mcx)?;
+    let conname = read_string_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(InferClause {
+        indexElems,
+        whereClause,
+        conname,
+        location,
+    })
+}
+
+fn read_on_conflict_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<OnConflictClause<'mcx>> {
+    let action = on_conflict_action_from(read_enum_field()?);
+    let infer = read_opt_box(mcx, |n| match n {
+        Node::InferClause(i) => Some(i),
+        _ => None,
+    })?;
+    let targetList = read_node_vec_field(mcx)?;
+    let whereClause = read_opt_node(mcx)?;
+    let location = read_location_field()?;
+    Ok(OnConflictClause {
+        action,
+        infer,
+        targetList,
+        whereClause,
+        location,
+    })
+}
+
+// ===========================================================================
+// _readMergeWhenClause / _readReturningClause
+// ===========================================================================
+
+fn read_merge_when_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MergeWhenClause<'mcx>> {
+    let matchKind = merge_match_kind_from(read_enum_field()?);
+    let commandType = cmd_type_from(read_enum_field()?);
+    let r#override = overriding_from(read_enum_field()?);
+    let condition = read_opt_node(mcx)?;
+    let targetList = read_node_vec_field(mcx)?;
+    let values = read_node_vec_field(mcx)?;
+    Ok(MergeWhenClause {
+        matchKind,
+        commandType,
+        r#override,
+        condition,
+        targetList,
+        values,
+    })
+}
+
+fn read_returning_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ReturningClause<'mcx>> {
+    let options = read_node_vec_field(mcx)?;
+    let exprs = read_node_vec_field(mcx)?;
+    Ok(ReturningClause { options, exprs })
+}
+
+// ===========================================================================
+// _readInsertStmt / _readDeleteStmt / _readUpdateStmt / _readMergeStmt
+// ===========================================================================
+
+fn read_insert_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<InsertStmt<'mcx>> {
+    let relation = read_opt_box(mcx, |n| match n {
+        Node::RangeVar(r) => Some(r),
+        _ => None,
+    })?;
+    let cols = read_node_vec_field(mcx)?;
+    let selectStmt = read_opt_node(mcx)?;
+    let onConflictClause = read_opt_box(mcx, |n| match n {
+        Node::OnConflictClause(o) => Some(o),
+        _ => None,
+    })?;
+    let returningClause = read_opt_box(mcx, |n| match n {
+        Node::ReturningClause(r) => Some(r),
+        _ => None,
+    })?;
+    let withClause = read_opt_box(mcx, |n| match n {
+        Node::WithClause(w) => Some(w),
+        _ => None,
+    })?;
+    let r#override = overriding_from(read_enum_field()?);
+    Ok(InsertStmt {
+        relation,
+        cols,
+        selectStmt,
+        onConflictClause,
+        returningClause,
+        withClause,
+        r#override,
+    })
+}
+
+fn read_delete_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DeleteStmt<'mcx>> {
+    let relation = read_opt_box(mcx, |n| match n {
+        Node::RangeVar(r) => Some(r),
+        _ => None,
+    })?;
+    let usingClause = read_node_vec_field(mcx)?;
+    let whereClause = read_opt_node(mcx)?;
+    let returningClause = read_opt_box(mcx, |n| match n {
+        Node::ReturningClause(r) => Some(r),
+        _ => None,
+    })?;
+    let withClause = read_opt_box(mcx, |n| match n {
+        Node::WithClause(w) => Some(w),
+        _ => None,
+    })?;
+    Ok(DeleteStmt {
+        relation,
+        usingClause,
+        whereClause,
+        returningClause,
+        withClause,
+    })
+}
+
+fn read_update_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<UpdateStmt<'mcx>> {
+    let relation = read_opt_box(mcx, |n| match n {
+        Node::RangeVar(r) => Some(r),
+        _ => None,
+    })?;
+    let targetList = read_node_vec_field(mcx)?;
+    let whereClause = read_opt_node(mcx)?;
+    let fromClause = read_node_vec_field(mcx)?;
+    let returningClause = read_opt_box(mcx, |n| match n {
+        Node::ReturningClause(r) => Some(r),
+        _ => None,
+    })?;
+    let withClause = read_opt_box(mcx, |n| match n {
+        Node::WithClause(w) => Some(w),
+        _ => None,
+    })?;
+    Ok(UpdateStmt {
+        relation,
+        targetList,
+        whereClause,
+        fromClause,
+        returningClause,
+        withClause,
+    })
+}
+
+fn read_merge_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MergeStmt<'mcx>> {
+    let relation = read_opt_box(mcx, |n| match n {
+        Node::RangeVar(r) => Some(r),
+        _ => None,
+    })?;
+    let sourceRelation = read_opt_node(mcx)?;
+    let joinCondition = read_opt_node(mcx)?;
+    let mergeWhenClauses = read_node_vec_field(mcx)?;
+    let returningClause = read_opt_box(mcx, |n| match n {
+        Node::ReturningClause(r) => Some(r),
+        _ => None,
+    })?;
+    let withClause = read_opt_box(mcx, |n| match n {
+        Node::WithClause(w) => Some(w),
+        _ => None,
+    })?;
+    Ok(MergeStmt {
+        relation,
+        sourceRelation,
+        joinCondition,
+        mergeWhenClauses,
+        returningClause,
+        withClause,
+    })
+}
+
+// ===========================================================================
+// _readSelectStmt
+// ===========================================================================
+
+fn read_select_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SelectStmt<'mcx>> {
+    let distinctClause = read_node_vec_field(mcx)?;
+    let intoClause = read_opt_node(mcx)?;
+    let targetList = read_node_vec_field(mcx)?;
+    let fromClause = read_node_vec_field(mcx)?;
+    let whereClause = read_opt_node(mcx)?;
+    let groupClause = read_node_vec_field(mcx)?;
+    let groupDistinct = read_bool_field()?;
+    let havingClause = read_opt_node(mcx)?;
+    let windowClause = read_node_vec_field(mcx)?;
+    let valuesLists = read_node_vec_field(mcx)?;
+    let sortClause = read_node_vec_field(mcx)?;
+    let limitOffset = read_opt_node(mcx)?;
+    let limitCount = read_opt_node(mcx)?;
+    let limitOption = limit_option_from(read_enum_field()?);
+    let lockingClause = read_node_vec_field(mcx)?;
+    let withClause = read_opt_box(mcx, |n| match n {
+        Node::WithClause(w) => Some(w),
+        _ => None,
+    })?;
+    let op = set_operation_from(read_enum_field()?);
+    let all = read_bool_field()?;
+    let larg = read_opt_box(mcx, |n| match n {
+        Node::SelectStmt(s) => Some(s),
+        _ => None,
+    })?;
+    let rarg = read_opt_box(mcx, |n| match n {
+        Node::SelectStmt(s) => Some(s),
+        _ => None,
+    })?;
+    Ok(SelectStmt {
+        distinctClause,
+        intoClause,
+        targetList,
+        fromClause,
+        whereClause,
+        groupClause,
+        groupDistinct,
+        havingClause,
+        windowClause,
+        valuesLists,
+        sortClause,
+        limitOffset,
+        limitCount,
+        limitOption,
+        lockingClause,
+        withClause,
+        op,
+        all,
+        larg,
+        rarg,
+    })
+}
+
+// ===========================================================================
+// _readA_Const — custom.
+// ===========================================================================
+
+fn read_a_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Const<'mcx>> {
+    // Peek the first token: "NULL" → isnull; else it is the ":val" label and
+    // the value node follows.
+    let tok = next_token()?;
+    let (val, isnull) = if tok.bytes == b"NULL" {
+        (None, true)
+    } else {
+        // tok was the ":val" label; read the value node directly.
+        let v = read::node_read(mcx, None)?;
+        (v, false)
+    };
+    let location = read_location_field()?;
+    Ok(A_Const {
+        val,
+        isnull,
+        location,
+    })
+}
+
+// ===========================================================================
+// Dispatch.
+// ===========================================================================
+
+/// Dispatch the read_parse_family LABELs this module owns.
+pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
+    let r: PgResult<Node<'mcx>> = match label {
+        b"QUERY" => read_query(mcx).map(Node::Query),
+        b"RANGETBLENTRY" => read_range_tbl_entry(mcx).map(Node::RangeTblEntry),
+        b"RTEPERMISSIONINFO" => read_rte_perm_info(mcx).map(Node::RTEPermissionInfo),
+        b"RANGETBLFUNCTION" => read_range_tbl_function(mcx).map(Node::RangeTblFunction),
+        b"TABLESAMPLECLAUSE" => read_table_sample_clause(mcx).map(Node::TableSampleClause),
+        b"SORTGROUPCLAUSE" => read_sort_group_clause().map(Node::SortGroupClause),
+        b"GROUPINGSET" => read_grouping_set(mcx).map(Node::GroupingSet),
+        b"WINDOWCLAUSE" => read_window_clause(mcx).map(Node::WindowClause),
+        b"ROWMARKCLAUSE" => read_row_mark_clause().map(Node::RowMarkClause),
+        b"WITHCHECKOPTION" => read_with_check_option(mcx).map(Node::WithCheckOption),
+        b"CTECYCLECLAUSE" => read_cte_cycle_clause(mcx).map(Node::CTECycleClause),
+        b"SETOPERATIONSTMT" => read_set_operation_stmt(mcx).map(Node::SetOperationStmt),
+        b"ALIAS" => read_alias(mcx).map(Node::Alias),
+        b"RANGEVAR" => read_range_var(mcx).map(Node::RangeVar),
+        b"TYPENAME" => read_type_name(mcx).map(Node::TypeName),
+        b"COLUMNDEF" => read_column_def(mcx).map(Node::ColumnDef),
+        b"RANGETBLREF" => read_range_tbl_ref().map(Node::RangeTblRef),
+        b"JOINEXPR" => read_join_expr(mcx).map(Node::JoinExpr),
+        b"FROMEXPR" => read_from_expr(mcx).map(Node::FromExpr),
+        b"ONCONFLICTEXPR" => read_on_conflict_expr(mcx).map(Node::OnConflictExpr),
+        b"MERGEACTION" => read_merge_action(mcx).map(Node::MergeAction),
+        b"LOCKINGCLAUSE" => read_locking_clause(mcx).map(Node::LockingClause),
+        b"COLUMNREF" => read_column_ref(mcx).map(Node::ColumnRef),
+        b"PARAMREF" => read_param_ref().map(Node::ParamRef),
+        b"A_EXPR" => read_a_expr(mcx).map(Node::A_Expr),
+        b"FUNCCALL" => read_func_call(mcx).map(Node::FuncCall),
+        b"A_STAR" => read_a_star().map(Node::A_Star),
+        b"A_INDICES" => read_a_indices(mcx).map(Node::A_Indices),
+        b"A_INDIRECTION" => read_a_indirection(mcx).map(Node::A_Indirection),
+        b"A_ARRAYEXPR" => read_a_array_expr(mcx).map(Node::A_ArrayExpr),
+        b"RESTARGET" => read_res_target(mcx).map(Node::ResTarget),
+        b"MULTIASSIGNREF" => read_multi_assign_ref(mcx).map(Node::MultiAssignRef),
+        b"TYPECAST" => read_type_cast(mcx).map(Node::TypeCast),
+        b"COLLATECLAUSE" => read_collate_clause(mcx).map(Node::CollateClause),
+        b"SORTBY" => read_sort_by(mcx).map(Node::SortBy),
+        b"WINDOWDEF" => read_window_def(mcx).map(Node::WindowDef),
+        b"RANGESUBSELECT" => read_range_subselect(mcx).map(Node::RangeSubselect),
+        b"RANGEFUNCTION" => read_range_function(mcx).map(Node::RangeFunction),
+        b"RANGETABLESAMPLE" => read_range_table_sample(mcx).map(Node::RangeTableSample),
+        b"WITHCLAUSE" => read_with_clause(mcx).map(Node::WithClause),
+        b"INFERCLAUSE" => read_infer_clause(mcx).map(Node::InferClause),
+        b"ONCONFLICTCLAUSE" => read_on_conflict_clause(mcx).map(Node::OnConflictClause),
+        b"MERGEWHENCLAUSE" => read_merge_when_clause(mcx).map(Node::MergeWhenClause),
+        b"RETURNINGCLAUSE" => read_returning_clause(mcx).map(Node::ReturningClause),
+        b"INSERTSTMT" => read_insert_stmt(mcx).map(Node::InsertStmt),
+        b"DELETESTMT" => read_delete_stmt(mcx).map(Node::DeleteStmt),
+        b"UPDATESTMT" => read_update_stmt(mcx).map(Node::UpdateStmt),
+        b"MERGESTMT" => read_merge_stmt(mcx).map(Node::MergeStmt),
+        b"SELECTSTMT" => read_select_stmt(mcx).map(Node::SelectStmt),
+        b"A_CONST" => read_a_const(mcx).map(Node::A_Const),
+
+        // --- seam-panic (carrier cannot round-trip): surface the exact C error.
+        // NOTE: TableFunc carrier trims `plan` + `location` and uses Option-element
+        // typed lists (XMLTABLE/JSON_TABLE) not modeled for serialization.
+        b"TABLEFUNC" => {
+            return Some(Err(elog_error(
+                "readTableFunc: TableFunc carrier trims `plan` + `location` and uses \
+                 Option-element typed lists not modeled for serialization \
+                 (XMLTABLE/JSON_TABLE node)"
+                    .to_string(),
+            )))
+        }
+        // NOTE: CommonTableExpr.search_clause is a CTESearchClause, not a Node arm.
+        b"COMMONTABLEEXPR" => {
+            return Some(Err(elog_error(
+                "readCommonTableExpr: search_clause is a CTESearchClause, which is not a \
+                 Node enum variant — cannot reconstruct search_clause"
+                    .to_string(),
+            )))
+        }
+
+        _ => return None,
+    };
+    Some(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ensure_seams_for_tests as ensure_seams;
+    use backend_nodes_core::read::string_to_node;
+    use backend_nodes_outfuncs::nodeToString;
+    use mcx::MemoryContext;
+    use types_nodes::primnodes::VarReturningType;
+
+    fn assert_framed_round_trip(node: &Node<'_>) -> String {
+        ensure_seams();
+        let ctx = MemoryContext::new("parse-framed-roundtrip");
+        let mcx = ctx.mcx();
+        let text = nodeToString(mcx, node).expect("nodeToString");
+        let parsed = string_to_node(mcx, text.as_str()).expect("string_to_node");
+        let text2 = nodeToString(mcx, &parsed).expect("re-serialize");
+        assert_eq!(text.as_str(), text2.as_str(), "framed re-serialize stable");
+        text.as_str().to_string()
+    }
+
+    #[test]
+    fn rangevar_round_trips() {
+        ensure_seams();
+        let ctx = MemoryContext::new("rv");
+        let mcx = ctx.mcx();
+        let rv = RangeVar {
+            catalogname: None,
+            schemaname: Some(PgString::from_str_in("public", mcx).unwrap()),
+            relname: Some(PgString::from_str_in("t", mcx).unwrap()),
+            inh: true,
+            relpersistence: b'p' as i8,
+            alias: None,
+            location: 5,
+        };
+        let text = assert_framed_round_trip(&Node::RangeVar(rv));
+        assert!(text.starts_with("{RANGEVAR :catalogname <>"), "{text}");
+        assert!(text.contains(":relname t"), "{text}");
+        assert!(text.contains(":relpersistence p"), "{text}");
+    }
+
+    #[test]
+    fn alias_round_trips() {
+        ensure_seams();
+        let ctx = MemoryContext::new("al");
+        let mcx = ctx.mcx();
+        let a = Alias {
+            aliasname: Some(PgString::from_str_in("a", mcx).unwrap()),
+            colnames: PgVec::new_in(mcx),
+        };
+        let text = assert_framed_round_trip(&Node::Alias(a));
+        assert!(text.starts_with("{ALIAS :aliasname a :colnames <>"), "{text}");
+    }
+
+    #[test]
+    fn sort_group_clause_round_trips() {
+        let s = SortGroupClause {
+            tleSortGroupRef: 3,
+            eqop: 96,
+            sortop: 97,
+            reverse_sort: true,
+            nulls_first: false,
+            hashable: true,
+        };
+        let text = assert_framed_round_trip(&Node::SortGroupClause(s));
+        assert!(text.starts_with("{SORTGROUPCLAUSE :tleSortGroupRef 3 :eqop 96"), "{text}");
+        assert!(text.contains(":reverse_sort true"), "{text}");
+        assert!(text.ends_with(":hashable true}"), "{text}");
+    }
+
+    #[test]
+    fn rte_relation_round_trips() {
+        ensure_seams();
+        let ctx = MemoryContext::new("rte");
+        let mcx = ctx.mcx();
+        let mut r = RangeTblEntry::new_in(mcx);
+        r.rtekind = RTEKind::RTE_RELATION;
+        r.relid = 16384;
+        r.inh = true;
+        r.relkind = b'r' as i8;
+        r.rellockmode = 1;
+        r.perminfoindex = 1;
+        r.lateral = false;
+        r.inFromCl = true;
+        let text = assert_framed_round_trip(&Node::RangeTblEntry(r));
+        assert!(text.starts_with("{RANGETBLENTRY :alias <> :eref <> :rtekind 0"), "{text}");
+        assert!(text.contains(":relid 16384"), "{text}");
+        assert!(text.contains(":relkind r"), "{text}");
+        assert!(text.contains(":inFromCl true"), "{text}");
+        // touch VarReturningType so the import is used (mirrors lib-test style).
+        let _ = VarReturningType::VAR_RETURNING_DEFAULT;
+    }
+}
