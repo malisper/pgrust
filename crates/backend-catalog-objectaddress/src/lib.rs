@@ -16,7 +16,10 @@
 //!   identity helpers.
 //! - **F4** ([`fmgr_sql`]): the SQL-callable leg (`pg_get_object_address` /
 //!   `pg_describe_object` / `pg_identify_object[_as_address]` / `pg_get_acl`)
-//!   + the `text[]`↔`List` bridges, gated on the Datum/ArrayType value lane.
+//!   + the `text[]`↔`List` bridges. `pg_get_acl` reads the object's
+//!   `aclitem[]` column through the indexing owner's `get_acl_datum` seam
+//!   (the catalog-tuple read + value lane); the remaining bridges are still
+//!   gated on the Datum/ArrayType value lane.
 //!
 //! Every function body is scaffolded as `panic!("decomp: <fn> not yet
 //! filled")`; the fill stages replace them with the faithful C logic.
