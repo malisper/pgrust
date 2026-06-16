@@ -47,6 +47,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `typeTypeId(LookupTypeName(NULL, typeName, NULL, false))` (parse_type.c):
+    /// resolve a `TypeName` to its type OID, raising `"type \"%s\" does not
+    /// exist"` only when no row exists. Unlike [`typename_type_id`], a *shell*
+    /// type is returned (not rejected), matching the `LookupTypeName` path
+    /// `AlterTypeOwner` (typecmds.c) uses so shell types can be reassigned.
+    /// `Err` carries that `ereport(ERROR)` surface.
+    pub fn lookup_type_name_oid_from_names(type_name: &TypeName) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `TypeNameToString(typeName)` (parse_type.c): the type name rendered for
     /// an error message, palloc'd in the caller's current context (`mcx`).
     /// `Err` includes OOM from the construction.

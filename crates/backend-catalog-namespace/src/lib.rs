@@ -127,6 +127,10 @@ use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
 /// Install this crate's seam implementations (`backend-catalog-namespace-seams`).
 pub fn init_seams() {
+    backend_catalog_namespace_seams::check_set_namespace::set(|old_nsp, nsp| {
+        let scratch = MemoryContext::new("CheckSetNamespace seam");
+        crate::CheckSetNamespace(scratch.mcx(), old_nsp, nsp)
+    });
     backend_catalog_namespace_seams::get_namespace_oid::set(crate::get_namespace_oid);
     backend_catalog_namespace_seams::range_var_get_relid::set(crate::RangeVarGetRelid);
     backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(

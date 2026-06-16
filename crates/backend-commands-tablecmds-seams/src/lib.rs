@@ -93,3 +93,17 @@ seam_core::seam!(
         seq: &types_nodes::ddlnodes::CreateSeqStmt<'_>,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );
+
+seam_core::seam!(
+    /// `AlterRelationNamespaceInternal(classRel, relOid, oldNspOid, newNspOid,
+    /// hasDependEntry, objsMoved)` (tablecmds.c): move a pg_class entry to a new
+    /// schema (the composite-type rel path of `AlterTypeNamespaceInternal`,
+    /// typecmds.c:4250). PANICS until tablecmds.c is ported (no owner crate yet).
+    pub fn alter_relation_namespace_internal(
+        rel_oid: Oid,
+        old_nsp_oid: Oid,
+        new_nsp_oid: Oid,
+        has_depend_entry: bool,
+        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    ) -> PgResult<()>
+);

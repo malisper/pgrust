@@ -868,3 +868,73 @@ seam_core::seam!(
         row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
     ) -> PgResult<Oid>
 );
+
+/* ---- pg_type narrow single-column mutators (commands/typecmds.c F3/F4) ----
+ *
+ * These mirror `catalog_tuple_update_typname_pg_type`: the owner re-fetches the
+ * held tuple (`SearchSysCacheCopy1(TYPEOID, type_oid)`), sets only the targeted
+ * `replaces[]` columns (leaving every varlen column intact, exactly like C),
+ * `heap_modify_tuple`, then `CatalogTupleUpdate(rel, &tup->t_self, tup)`. The
+ * `GenerateTypeDependencies`/hook calls stay on the pg_type owner side.
+ * UNINSTALLED until the catalog-indexing decomp owner lands (panic = sanctioned,
+ * consistent with the sibling `catalog_tuple_{insert,update}_pg_type`).
+ */
+
+seam_core::seam!(
+    /// `AlterTypeOwnerInternal`'s single-row write (typecmds.c:3985): set
+    /// `typowner = new_owner_id` and, when the row's `typacl` is non-NULL,
+    /// `typacl = aclnewowner(old_acl, old_owner, new_owner)`, then
+    /// `CatalogTupleUpdate`. The owner reads the held tuple's old owner/ACL.
+    pub fn catalog_tuple_update_typowner_typacl_pg_type(
+        rel: &types_rel::RelationData<'_>,
+        type_oid: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterTypeNamespaceInternal`'s single-row write (typecmds.c:4233): set
+    /// `typnamespace = nsp_oid` on the held tuple, then `CatalogTupleUpdate`.
+    pub fn catalog_tuple_update_typnamespace_pg_type(
+        rel: &types_rel::RelationData<'_>,
+        type_oid: Oid,
+        nsp_oid: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterDomainNotNull` / `AlterDomainAddConstraint` / `AlterDomainDropConstraint`
+    /// single-row write (typecmds.c:2806/3014/2885): set `typnotnull = not_null`
+    /// on the held tuple, then `CatalogTupleUpdate`.
+    pub fn catalog_tuple_update_typnotnull_pg_type(
+        rel: &types_rel::RelationData<'_>,
+        type_oid: Oid,
+        not_null: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterDomainDefault`'s pg_type write (typecmds.c:2707): replace `typdefault`
+    /// (text) and `typdefaultbin` (text) on the held tuple — `None` for either
+    /// sets `nulls[Anum_pg_type_* - 1] = true` (the ALTER ... DROP DEFAULT and
+    /// NULL-constant arms) — then `CatalogTupleUpdate`.
+    pub fn catalog_tuple_update_typdefault_pg_type(
+        rel: &types_rel::RelationData<'_>,
+        type_oid: Oid,
+        default_value: Option<String>,
+        default_bin: Option<String>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AlterTypeRecurse`'s per-row update (typecmds.c:4618): build `replaces[]`
+    /// from the [`TypeAttrUpdate`] gates (`typstorage`/`typreceive`/`typsend`/
+    /// `typmodin`/`typmodout`/`typanalyze`/`typsubscript`), `heap_modify_tuple`,
+    /// `CatalogTupleUpdate`. Returns the row's `typarray` OID so the caller can
+    /// recurse to the array type.
+    pub fn catalog_tuple_update_attrs_pg_type(
+        rel: &types_rel::RelationData<'_>,
+        type_oid: Oid,
+        attr: types_catalog::pg_type::TypeAttrUpdate,
+    ) -> PgResult<Oid>
+);
