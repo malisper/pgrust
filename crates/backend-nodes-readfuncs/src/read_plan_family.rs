@@ -586,6 +586,33 @@ fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodeseqscan::SeqS
 /// `node_read` → `Node::TableSampleClause`, unwrapped to the typed boxed
 /// carrier; a `NULL` field gives `None`). Reads in the exact order
 /// `_outSampleScan` wrote.
+/// `_readTableFuncScan` — scan fields then the framed `tablefunc` child.
+fn read_tablefuncscan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodetablefuncscan::TableFuncScan<'mcx>> {
+    let scan = read_scan_fields(mcx)?;
+    // READ_NODE_FIELD(tablefunc): a framed TABLEFUNC node (never NULL in a
+    // serialized plan).
+    let _label = next_tok()?;
+    let tablefunc = match read::node_read(mcx, None)? {
+        Some(n) => match PgBox::into_inner(n) {
+            Node::TableFunc(tf) => alloc_in(mcx, tf)?,
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "_readTableFuncScan: expected TableFunc for tablefunc, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        },
+        None => {
+            return Err(elog_error(
+                "_readTableFuncScan: tablefunc is NULL (unexpected for a TableFuncScan)",
+            ))
+        }
+    };
+    Ok(types_nodes::nodetablefuncscan::TableFuncScan { scan, tablefunc })
+}
+
 fn read_samplescan<'mcx>(
     mcx: Mcx<'mcx>,
 ) -> PgResult<types_nodes::nodesamplescan::SampleScan<'mcx>> {
@@ -987,6 +1014,58 @@ fn read_agg<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodeagg::Agg<'mcx>> {
     })
 }
 
+/// `_readWindowAgg` — reads the fields `out_windowagg` wrote, in order.
+fn read_windowagg<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodewindowagg::WindowAgg<'mcx>> {
+    let plan = read_plan_fields(mcx)?;
+    let winname = read_string(mcx)?;
+    let winref = read_uint_field()?;
+    let partNumCols = read_int_field()?;
+    let partColIdx = into_pgvec_opt(mcx, read_attrnumber_cols(partNumCols as usize)?)?;
+    let partOperators = into_pgvec_opt(mcx, read_oid_cols(partNumCols as usize)?)?;
+    let partCollations = into_pgvec_opt(mcx, read_oid_cols(partNumCols as usize)?)?;
+    let ordNumCols = read_int_field()?;
+    let ordColIdx = into_pgvec_opt(mcx, read_attrnumber_cols(ordNumCols as usize)?)?;
+    let ordOperators = into_pgvec_opt(mcx, read_oid_cols(ordNumCols as usize)?)?;
+    let ordCollations = into_pgvec_opt(mcx, read_oid_cols(ordNumCols as usize)?)?;
+    let frameOptions = read_int_field()?;
+    let startOffset = read_expr_box_opt(mcx)?;
+    let endOffset = read_expr_box_opt(mcx)?;
+    let runCondition = read_expr_pgvec_opt(mcx)?;
+    let runConditionOrig = read_expr_pgvec_opt(mcx)?;
+    let startInRangeFunc = read_oid_field()?;
+    let endInRangeFunc = read_oid_field()?;
+    let inRangeColl = read_oid_field()?;
+    let inRangeAsc = read_bool_field()?;
+    let inRangeNullsFirst = read_bool_field()?;
+    let topWindow = read_bool_field()?;
+    Ok(types_nodes::nodewindowagg::WindowAgg {
+        plan,
+        winname,
+        winref,
+        partNumCols,
+        partColIdx,
+        partOperators,
+        partCollations,
+        ordNumCols,
+        ordColIdx,
+        ordOperators,
+        ordCollations,
+        frameOptions,
+        startOffset,
+        endOffset,
+        runCondition,
+        runConditionOrig,
+        startInRangeFunc,
+        endInRangeFunc,
+        inRangeColl,
+        inRangeAsc,
+        inRangeNullsFirst,
+        topWindow,
+    })
+}
+
 fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodenestloop::NestLoop<'mcx>> {
     let join = read_join_fields(mcx)?;
     // nestParams: the OUT side emits `<>` only (NestLoopParam unmodeled);
@@ -1335,6 +1414,8 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"FOREIGNSCAN" => read_foreignscan(mcx).map(Node::ForeignScan),
         b"FUNCTIONSCAN" => read_functionscan(mcx).map(Node::FunctionScan),
         b"SAMPLESCAN" => read_samplescan(mcx).map(Node::SampleScan),
+        b"WINDOWAGG" => read_windowagg(mcx).map(Node::WindowAgg),
+        b"TABLEFUNCSCAN" => read_tablefuncscan(mcx).map(Node::TableFuncScan),
         _ => return None,
     };
     Some(r)
@@ -1375,6 +1456,63 @@ mod tests {
         assert!(text.starts_with("{SEQSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":scan.plan.targetlist <>"), "{text}");
         assert!(text.ends_with(":scan.scanrelid 3}"), "{text}");
+    }
+
+    #[test]
+    fn windowagg_round_trips() {
+        // A WindowAgg with winname set and the part/ord count-paired arrays —
+        // exercises the now-filled WRITE_STRING_FIELD(winname) and the arrays.
+        let ctx = MemoryContext::new("windowagg");
+        let mcx = ctx.mcx();
+        let mut w = types_nodes::nodewindowagg::WindowAgg::default();
+        w.winname = Some(mcx::PgString::from_str_in("w", mcx).unwrap());
+        w.winref = 1;
+        w.partNumCols = 1;
+        let mut pc = PgVec::new_in(mcx);
+        pc.push(2i16);
+        w.partColIdx = Some(pc);
+        let mut po = PgVec::new_in(mcx);
+        po.push(96u32);
+        w.partOperators = Some(po);
+        let mut pco = PgVec::new_in(mcx);
+        pco.push(0u32);
+        w.partCollations = Some(pco);
+        w.topWindow = true;
+        let text = assert_framed_round_trip(&Node::WindowAgg(w));
+        assert!(text.starts_with("{WINDOWAGG :plan.disabled_nodes 0"), "{text}");
+        assert!(text.contains(":winname w "), "{text}");
+        assert!(text.ends_with(":topWindow true}"), "{text}");
+    }
+
+    #[test]
+    fn tablefuncscan_round_trips() {
+        // A TableFuncScan whose tablefunc carries colnames/coltypes and the
+        // now-modeled plan(NULL)+location fields — exercises the framed
+        // {TABLEFUNC ...} child round-trip through both families.
+        let ctx = MemoryContext::new("tablefuncscan");
+        let mcx = ctx.mcx();
+        let mut tf = types_nodes::primnodes::TableFunc::default();
+        tf.functype = types_nodes::primnodes::TableFuncType::TFT_XMLTABLE;
+        let mut names = PgVec::new_in(mcx);
+        names.push(mcx::PgString::from_str_in("c1", mcx).unwrap());
+        tf.colnames = Some(names);
+        let mut types = PgVec::new_in(mcx);
+        types.push(23u32);
+        tf.coltypes = Some(types);
+        tf.ordinalitycol = -1;
+        tf.location = 7;
+        let mut s = types_nodes::nodetablefuncscan::TableFuncScan {
+            scan: types_nodes::nodeindexscan::Scan::default(),
+            tablefunc: alloc_in(mcx, tf).unwrap(),
+        };
+        s.scan.scanrelid = 4;
+        let text = assert_framed_round_trip(&Node::TableFuncScan(s));
+        assert!(text.starts_with("{TABLEFUNCSCAN :scan.plan.disabled_nodes 0"), "{text}");
+        assert!(text.contains(":tablefunc {TABLEFUNC :functype 0"), "{text}");
+        assert!(text.contains(":colnames (\"c1\")"), "{text}");
+        assert!(text.contains(":plan <>"), "{text}");
+        // nodeToString writes locations as -1 (write_location_fields off).
+        assert!(text.contains(":location -1"), "{text}");
     }
 
     #[test]
