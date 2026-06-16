@@ -781,4 +781,7 @@ pub fn init_seams() {
     backend_optimizer_prep_prepjointree_seams::expand_virtual_generated_columns::set(
         pullup::expand_virtual_generated_columns,
     );
+    backend_optimizer_prep_prepjointree_seams::get_relids_for_join::set(
+        result_rtes::get_relids_for_join,
+    );
 }
