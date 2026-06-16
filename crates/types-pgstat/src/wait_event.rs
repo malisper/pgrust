@@ -88,6 +88,14 @@ pub const WAIT_EVENT_CHECKPOINT_DONE: u32 = PG_WAIT_IPC + 11;
 /// 134217740).
 pub const WAIT_EVENT_CHECKPOINT_START: u32 = PG_WAIT_IPC + 12;
 
+/// `WAIT_EVENT_BASE_BACKUP_THROTTLE` — "Waiting during base backup when
+/// throttling activity." 1st entry (0-based 0) of the `WaitEventTimeout`
+/// section of `wait_event_names.txt` (BASE_BACKUP_THROTTLE=0,
+/// CHECKPOINT_WRITE_DELAY=1, PG_SLEEP=2, ...), so the generated enum value is
+/// `PG_WAIT_TIMEOUT | 0` (= 0x09000000). `basebackup_throttle.c` sleeps on
+/// `MyLatch` with this wait event when the transfer rate exceeds the limit.
+pub const WAIT_EVENT_BASE_BACKUP_THROTTLE: u32 = PG_WAIT_TIMEOUT | 0;
+
 /// `WAIT_EVENT_CHECKPOINT_WRITE_DELAY` — "Waiting between writes while
 /// performing a checkpoint." Timeout section entry, `PG_WAIT_TIMEOUT + 1`
 /// (= 0x09000001, matching c2rust's 150994945).
