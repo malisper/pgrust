@@ -16,10 +16,10 @@
 //! `InsertStmt`, `DeleteStmt`, `UpdateStmt`, `MergeStmt`, `SelectStmt`,
 //! `A_Const` (custom).
 //!
+//! `TableFunc` is fully serialized here (`_outTableFunc`, with its `plan` +
+//! `location` fields and the XMLTABLE/JSON_TABLE Option-cell typed lists).
+//!
 //! Seam-panicked (carrier cannot round-trip):
-//!   * `TableFunc` — the repo struct trims the C `plan` + `location` fields and
-//!     uses Option-typed/typed element lists (XMLTABLE/JSON_TABLE), not modeled
-//!     for serialization.
 //!   * `CommonTableExpr` — `search_clause` is `CTESearchClause`, which is NOT a
 //!     `Node` enum variant, so it cannot be framed/round-tripped.
 
@@ -130,6 +130,152 @@ fn write_value_vec_field<T>(
         framed(buf, |b| body(b, e, wl));
     }
     buf.push(')');
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of `Expr` carried as `PgVec<PgBox<Expr>>`:
+/// `({EXPR ...} ...)`, or `<>` for a NIL (`None`) list.
+fn write_box_expr_list_field(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[PgBox<'_, Expr>]>,
+    wl: bool,
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(v) => {
+            buf.push('(');
+            let mut first = true;
+            for e in v {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                out_expr(buf, &**e, wl);
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of `Expr` with NULL cells allowed, carried
+/// as `PgVec<Option<PgBox<Expr>>>`: `({EXPR ...} <> ...)`, or `<>` for a NIL
+/// (`None`) list.
+fn write_opt_box_expr_list_field(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[Option<PgBox<'_, Expr>>]>,
+    wl: bool,
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(v) => {
+            buf.push('(');
+            let mut first = true;
+            for e in v {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                match e {
+                    None => buf.push_str("<>"),
+                    Some(b) => out_expr(buf, &**b, wl),
+                }
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of `String` value nodes carried as
+/// `PgVec<PgString>` (`colnames`): `("a" "b" ...)`; NIL (`None`) → `<>`.
+fn write_pgstring_list_field(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[mcx::PgString<'_>]>,
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(v) => {
+            buf.push('(');
+            let mut first = true;
+            for s in v {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                buf.push('"');
+                if !s.as_str().is_empty() {
+                    crate::out_token(buf, s.as_str());
+                }
+                buf.push('"');
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// `WRITE_NODE_FIELD` over a `List *` of `String` value nodes with NULL cells
+/// allowed (`ns_names`, the DEFAULT namespace being a NULL `String *`), carried
+/// as `PgVec<Option<PgString>>`: `("a" <> ...)`; NIL (`None`) → `<>`.
+fn write_opt_pgstring_list_field(
+    buf: &mut String,
+    name: &str,
+    list: Option<&[Option<mcx::PgString<'_>>]>,
+) {
+    let _ = write!(buf, " :{} ", name);
+    match list {
+        None => buf.push_str("<>"),
+        Some(v) => {
+            buf.push('(');
+            let mut first = true;
+            for s in v {
+                if !first {
+                    buf.push(' ');
+                }
+                first = false;
+                match s {
+                    None => buf.push_str("<>"),
+                    Some(s) => {
+                        buf.push('"');
+                        if !s.as_str().is_empty() {
+                            crate::out_token(buf, s.as_str());
+                        }
+                        buf.push('"');
+                    }
+                }
+            }
+            buf.push(')');
+        }
+    }
+}
+
+/// `_outTableFunc` (outfuncs.funcs.c) — every field in struct order.
+pub(crate) fn out_table_func(
+    buf: &mut String,
+    n: &types_nodes::primnodes::TableFunc<'_>,
+    wl: bool,
+) {
+    buf.push_str("TABLEFUNC");
+    write_enum_field(buf, "functype", n.functype as i32);
+    write_box_expr_list_field(buf, "ns_uris", n.ns_uris.as_deref(), wl);
+    write_opt_pgstring_list_field(buf, "ns_names", n.ns_names.as_deref());
+    write_expr_field(buf, "docexpr", n.docexpr.as_deref(), wl);
+    write_expr_field(buf, "rowexpr", n.rowexpr.as_deref(), wl);
+    write_pgstring_list_field(buf, "colnames", n.colnames.as_deref());
+    write_oid_list_field(buf, "coltypes", n.coltypes.as_deref());
+    write_int_list_field(buf, "coltypmods", n.coltypmods.as_deref());
+    write_oid_list_field(buf, "colcollations", n.colcollations.as_deref());
+    write_opt_box_expr_list_field(buf, "colexprs", n.colexprs.as_deref(), wl);
+    write_opt_box_expr_list_field(buf, "coldefexprs", n.coldefexprs.as_deref(), wl);
+    write_opt_box_expr_list_field(buf, "colvalexprs", n.colvalexprs.as_deref(), wl);
+    write_box_expr_list_field(buf, "passingvalexprs", n.passingvalexprs.as_deref(), wl);
+    write_bitmapset_opt_field(buf, "notnulls", n.notnulls.as_deref());
+    write_opt_node_field(buf, "plan", &n.plan, wl);
+    write_int_field(buf, "ordinalitycol", n.ordinalitycol);
+    write_location_field(buf, "location", n.location, wl);
 }
 
 // ===========================================================================
@@ -1033,15 +1179,9 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
         Node::SelectStmt(n) => framed(buf, |b| out_select_stmt(b, n, wl)),
         Node::A_Const(n) => framed(buf, |b| out_a_const(b, n, wl)),
 
+        Node::TableFunc(n) => framed(buf, |b| out_table_func(b, n, wl)),
+
         // --- seam-panic: carrier cannot round-trip ---
-        // NOTE: TableFunc carrier trims the C `plan` + `location` fields and uses
-        // Option-element typed lists (XMLTABLE/JSON_TABLE) not modeled for
-        // serialization (mirror-pg-and-panic).
-        Node::TableFunc(_) => panic!(
-            "_outTableFunc: TableFunc carrier trims `plan` + `location` and uses \
-             Option-element typed lists (ns_uris/ns_names) not modeled for \
-             serialization (XMLTABLE/JSON_TABLE node)"
-        ),
         // NOTE: CommonTableExpr.search_clause is a CTESearchClause, which is NOT a
         // `Node` enum variant — it cannot be framed/round-tripped.
         Node::CommonTableExpr(_) => panic!(
