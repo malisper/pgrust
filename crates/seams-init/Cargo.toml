@@ -408,6 +408,7 @@ common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
+common-scram-common = { path = "../common-scram-common" }
 common-string = { path = "../common-string" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }
