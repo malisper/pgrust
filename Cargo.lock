@@ -1904,6 +1904,7 @@ dependencies = [
  "types-error",
  "types-hash",
  "types-nbtree",
+ "types-opclass",
 ]
 
 [[package]]

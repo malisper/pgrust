@@ -380,24 +380,9 @@ pub fn gistvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
 // ===========================================================================
 
 /// `OpFamilyMember` (`amapi.h`), mutated in place by [`gistadjustmembers`].
-/// Mirrors the sibling `backend-access-nbt-validate` local definition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OpFamilyMember {
-    /// is this an operator, or support func?
-    pub is_func: bool,
-    /// strategy or support func number
-    pub number: i16,
-    /// lefttype
-    pub lefttype: Oid,
-    /// righttype
-    pub righttype: Oid,
-    /// OID of opclass or opfamily the dependency refers to
-    pub refobjid: Oid,
-    /// hard or soft dependency?
-    pub ref_is_hard: bool,
-    /// is dependency on opclass or opfamily?
-    pub ref_is_family: bool,
-}
+/// Canonical definition lives in `types_opclass`; re-exported here so this
+/// crate names the same type (no duplicate definition).
+pub use types_opclass::OpFamilyMember;
 
 /// `gistadjustmembers(opfamilyoid, opclassoid, operators, functions)` —
 /// prechecking function for adding operators/functions to a GiST opfamily.

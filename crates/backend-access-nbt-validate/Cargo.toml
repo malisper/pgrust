@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nbtree = { path = "../types-nbtree" }
+types-opclass = { path = "../types-opclass" }
 types-amvalidate = { path = "../types-amvalidate" }
 types-hash = { path = "../types-hash" }
 backend-access-index-amvalidate-seams = { path = "../backend-access-index-amvalidate-seams" }

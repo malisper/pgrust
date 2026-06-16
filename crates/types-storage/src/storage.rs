@@ -581,6 +581,44 @@ pub struct RelFileLocator {
     pub relNumber: RelFileNumber,
 }
 
+impl RelFileLocator {
+    pub const fn new(spcOid: Oid, dbOid: Oid, relNumber: RelFileNumber) -> Self {
+        Self {
+            spcOid,
+            dbOid,
+            relNumber,
+        }
+    }
+
+    /// Bounds-checked read at the C `#[repr(C)]` offsets (three `Oid`s, no
+    /// padding — the header requires that for hashtable keys): spcOid@0,
+    /// dbOid@4, relNumber@8. `None` when fewer than 12 bytes are present.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let word = |off: usize| -> Option<types_core::uint32> {
+            Some(types_core::uint32::from_ne_bytes(
+                data.get(off..off + 4)?.try_into().ok()?,
+            ))
+        };
+        Some(Self {
+            spcOid: word(0)?,
+            dbOid: word(4)?,
+            relNumber: word(8)?,
+        })
+    }
+
+    pub const fn spc_oid(&self) -> Oid {
+        self.spcOid
+    }
+
+    pub const fn db_oid(&self) -> Oid {
+        self.dbOid
+    }
+
+    pub const fn rel_number(&self) -> RelFileNumber {
+        self.relNumber
+    }
+}
+
 /// `ReadBufferMode` (`storage/bufmgr.h`) — mirrors the C enum exactly,
 /// including discriminant order, so it round-trips byte-for-byte across seams.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,28 +642,10 @@ pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
     a == b
 }
 
-/// `VirtualTransactionId` (`storage/lock.h`).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct VirtualTransactionId {
-    pub procNumber: ProcNumber,
-    pub localTransactionId: types_core::LocalTransactionId,
-}
-
-impl VirtualTransactionId {
-    /// `SetInvalidVirtualTransactionId(vxid)`.
-    pub const fn invalid() -> Self {
-        Self {
-            procNumber: INVALID_PROC_NUMBER,
-            localTransactionId: 0,
-        }
-    }
-
-    /// `VirtualTransactionIdIsValid(vxid)` —
-    /// `LocalTransactionIdIsValid((vxid).localTransactionId)`.
-    pub const fn is_valid(self) -> bool {
-        self.localTransactionId != 0
-    }
-}
+/// `VirtualTransactionId` (`storage/lock.h`). Canonical definition lives in
+/// `types_core`; re-exported here so `types_storage::VirtualTransactionId`
+/// names the same type (no duplicate definition).
+pub use types_core::VirtualTransactionId;
 
 // ---------------------------------------------------------------------------
 // `storage/standby.h` / `storage/procarray.h` running-xacts vocabulary.

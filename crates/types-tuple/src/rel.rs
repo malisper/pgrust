@@ -15,6 +15,12 @@ use crate::heaptuple::TupleDesc;
 
 /// `FormData_pg_class` (`catalog/pg_class.h`) as held in `rd_rel`, trimmed to
 /// the fields ported consumers read.
+///
+/// NOTE: the richer ~12-field `FormData_pg_class` lives in `types-rel`, but
+/// `types-rel` depends on `types-tuple` (not the reverse), so this trim cannot
+/// re-export the canonical without a dependency cycle. The two structs share
+/// the same field names/types for the fields present here (no drift); this is a
+/// deliberate layering trim, not an accidental duplicate.
 #[derive(Debug)]
 pub struct FormData_pg_class<'mcx> {
     /// `NameData relname` — the relation name.
