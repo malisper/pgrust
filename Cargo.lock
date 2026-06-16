@@ -4420,7 +4420,6 @@ name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -14230,6 +14229,25 @@ dependencies = [
  "types-error",
  "types-stringinfo",
  "types-uuid",
+]
+
+[[package]]
+name = "backend-utils-adt-varchar"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-arrayutils",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-mb-mbutils-seams",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-sortsupport",
+ "types-stringinfo",
 ]
 
 [[package]]
