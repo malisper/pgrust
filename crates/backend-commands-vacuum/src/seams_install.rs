@@ -52,6 +52,28 @@ pub fn init_seams() {
     vacuumlazy::set_vacuum_failsafe_active::set(crate::set_vacuum_failsafe_active_impl);
     vacuumlazy::set_vacuum_cost_active::set(crate::set_vacuum_cost_active_impl);
     vacuumlazy::set_vacuum_cost_balance::set(crate::set_vacuum_cost_balance_impl);
+
+    // --- ProcessUtility dispatch arm (utility.c VacuumStmt → ExecVacuum) ------
+    backend_tcop_utility_out_seams::exec_vacuum::set(exec_vacuum_arm);
+}
+
+use mcx::Mcx;
+use types_nodes::nodes::Node;
+use types_nodes::parsestmt::ParseState;
+
+/// `case T_VacuumStmt: ExecVacuum(pstate, stmt, isTopLevel)` (utility.c). The
+/// dispatch carries the parse tree as `&Node`; extract the `VacuumStmt` variant
+/// and forward to the real entry point.
+fn exec_vacuum_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &Node<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let Node::VacuumStmt(vacstmt) = stmt else {
+        panic!("exec_vacuum: parse tree is not a VacuumStmt");
+    };
+    crate::ExecVacuum(pstate, vacstmt, is_top_level, mcx)
 }
 
 // --- signature adapters: the vacuumlazy-seams shapes differ slightly from the

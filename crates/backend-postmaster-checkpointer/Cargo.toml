@@ -30,6 +30,9 @@ backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 # Its own inward seams (installed by init_seams).
 backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
 
+# ProcessUtility dispatch arm (installs the CHECKPOINT forwarding seam).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+
 # Outward owner seam crates.
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
