@@ -2412,6 +2412,7 @@ dependencies = [
  "backend-access-spg-proc-seams",
  "backend-access-spg-text",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-adt-network-spgist",
  "mcx",
  "types-core",
  "types-error",
@@ -14171,6 +14172,21 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-network",
+]
+
+[[package]]
+name = "backend-utils-adt-network-spgist"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-network",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-network",
+ "types-scan",
+ "types-spgist",
+ "types-tuple",
 ]
 
 [[package]]
