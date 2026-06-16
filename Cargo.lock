@@ -15892,6 +15892,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-parser-coerce-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-typcache",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-misc-stack-depth-seams",
+ "backend-utils-sort-storage",
+ "common-jsonapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-jsonfuncs",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -20060,6 +20091,7 @@ name = "types-json"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -20068,6 +20100,19 @@ name = "types-jsonb"
 version = "0.0.0"
 dependencies = [
  "types-datum",
+]
+
+[[package]]
+name = "types-jsonfuncs"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-fmgr",
+ "types-json",
+ "types-jsonb",
+ "types-tuple",
 ]
 
 [[package]]
