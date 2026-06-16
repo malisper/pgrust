@@ -4193,6 +4193,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-attrdef"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-attrdef-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-attrdef-seams"
 version = "0.0.0"
 dependencies = [
@@ -18350,6 +18376,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
  "backend-catalog-pg-aggregate",
+ "backend-catalog-pg-attrdef",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",

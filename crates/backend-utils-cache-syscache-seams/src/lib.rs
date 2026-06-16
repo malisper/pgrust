@@ -2258,6 +2258,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `StoreAttrDefault`'s pg_attribute update (pg_attrdef.c):
+    /// `table_open(AttributeRelationId, RowExclusiveLock)` +
+    /// `SearchSysCacheCopy2(ATTNUM, relid, attnum)` (error
+    /// `cache lookup failed for attribute %d of relation %u` via `Ok(None)`),
+    /// read `attStruct->attgenerated`, then `heap_modify_tuple` setting
+    /// `atthasdef = true` + `CatalogTupleUpdate` + `table_close`. Returns the
+    /// pre-existing `attgenerated` so the caller can choose the dependency type
+    /// (the C `attgenerated ? DEPENDENCY_INTERNAL : DEPENDENCY_AUTO`).
+    /// `Ok(None)` on the cache miss; `Err` carries the heap-mutation
+    /// `ereport(ERROR)`s.
+    pub fn set_attribute_has_default(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Option<i8>>
+);
+
+seam_core::seam!(
+    /// `RemoveAttrDefaultById`'s pg_attribute reset (pg_attrdef.c):
+    /// `table_open(AttributeRelationId, RowExclusiveLock)` +
+    /// `SearchSysCacheCopy2(ATTNUM, myrelid, myattnum)` (error
+    /// `cache lookup failed for attribute %d of relation %u` via `Ok(false)`),
+    /// then `((Form_pg_attribute) GETSTRUCT(tuple))->atthasdef = false` +
+    /// `CatalogTupleUpdate` + `table_close`. Returns `false` on the cache miss
+    /// (the C "shouldn't happen" elog); `Err` carries the heap-mutation
+    /// `ereport(ERROR)`s.
+    pub fn clear_attribute_has_default(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SysCacheGetAttrNotNull(CONSTROID, constrTup, Anum_pg_constraint_conkey)`
     /// + `DatumGetArrayTypeP` (heaptuple/array detoast): the `conkey` 1-D
     /// smallint array of a not-null constraint tuple, with the validated
