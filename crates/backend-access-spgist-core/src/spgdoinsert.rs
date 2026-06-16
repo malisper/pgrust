@@ -213,7 +213,7 @@ pub(crate) fn lt_tupstate(tup: &[u8]) -> u32 {
 /// A leaf/dead/inner tuple's `size`. For leaf/dead: `bits >> 2`. For an inner
 /// tuple the size is the separate uint16 @4; callers pick the right accessor.
 #[inline]
-fn lt_size(tup: &[u8]) -> usize {
+pub(crate) fn lt_size(tup: &[u8]) -> usize {
     (u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]) >> 2) as usize
 }
 
@@ -221,7 +221,7 @@ fn lt_size(tup: &[u8]) -> usize {
 
 /// An inner tuple's `size` (the uint16 @4).
 #[inline]
-fn it_size(tup: &[u8]) -> usize {
+pub(crate) fn it_size(tup: &[u8]) -> usize {
     u16::from_ne_bytes([tup[4], tup[5]]) as usize
 }
 /// An inner tuple's `nNodes:13`.

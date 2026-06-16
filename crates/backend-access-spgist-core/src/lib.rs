@@ -1604,7 +1604,14 @@ fn elog_internal(level: types_error::ErrorLevel, msg: alloc::string::String) -> 
 /// SP-GiST core seam crate, installed by relcache/plancat later), and
 /// `opfamily_can_sort_type` (lsyscache). So `init_seams()` is empty, like
 /// `backend-access-gin-ginutil`'s.
-pub fn init_seams() {}
+/// Install the rmgr-table WAL-redo callbacks this unit owns (`spgxlog.c`):
+/// `spg_redo` / `spg_xlog_startup` / `spg_xlog_cleanup` / `spg_mask`.
+pub fn init_seams() {
+    backend_access_spg_xlog_seams::spg_redo::set(spgxlog::spg_redo);
+    backend_access_spg_xlog_seams::spg_xlog_startup::set(spgxlog::spg_xlog_startup);
+    backend_access_spg_xlog_seams::spg_xlog_cleanup::set(spgxlog::spg_xlog_cleanup);
+    backend_access_spg_xlog_seams::spg_mask::set(spgxlog::spg_mask);
+}
 
 pub mod spgdoinsert;
 pub use spgdoinsert::{spgPageIndexMultiDelete, spgUpdateNodeLink, spgdoinsert};
@@ -1620,6 +1627,11 @@ pub use spginsert::{spgbuild, spgbuildempty, spginsert};
 
 pub mod spgvacuum;
 pub use spgvacuum::{spgbulkdelete, spgvacuumcleanup, IndexBulkDeleteCallback};
+
+pub mod spgxlog;
+
+pub mod spghandler;
+pub use spghandler::spghandler;
 
 #[cfg(test)]
 mod tests;
