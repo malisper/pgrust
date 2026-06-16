@@ -8971,6 +8971,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-gssapi-common"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-gssapi-common-seams",
+ "backend-utils-error",
+ "types-error",
+]
+
+[[package]]
+name = "backend-libpq-be-gssapi-common-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-seams"
 version = "0.0.0"
 dependencies = [
@@ -18279,6 +18295,7 @@ dependencies = [
  "backend-lib-dshash",
  "backend-libpq-auth",
  "backend-libpq-auth-scram",
+ "backend-libpq-be-gssapi-common",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",
