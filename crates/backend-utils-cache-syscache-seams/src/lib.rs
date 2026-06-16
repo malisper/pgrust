@@ -1737,6 +1737,31 @@ seam_core::seam!(
     ) -> PgResult<Option<i32>>
 );
 
+seam_core::seam!(
+    /// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stanullfrac` (pg_statistic.h):
+    /// the fraction of NULLs in the column, read off a `pg_statistic` tuple the
+    /// selectivity code holds pinned as a [`StatsTuple`]
+    /// ([`search_statrelattinh`]). A pure fixed-area struct read (no syscache
+    /// lookup, no detoast) of the caller-supplied tuple, so it cannot miss; the
+    /// tuple stays pinned (the caller releases it via [`release_stats_tuple`]).
+    pub fn pg_statistic_stanullfrac(
+        stats_tuple: types_selfuncs::StatsTuple,
+    ) -> f32
+);
+
+seam_core::seam!(
+    /// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stadistinct` (pg_statistic.h):
+    /// the number-of-distinct-values estimate for the column (positive = an
+    /// absolute count, negative = a fraction of the row count), read off a
+    /// `pg_statistic` tuple the selectivity code holds pinned as a
+    /// [`StatsTuple`] ([`search_statrelattinh`]). A pure fixed-area struct read,
+    /// so it cannot miss; the caller releases the tuple via
+    /// [`release_stats_tuple`].
+    pub fn pg_statistic_stadistinct(
+        stats_tuple: types_selfuncs::StatsTuple,
+    ) -> f32
+);
+
 /// The `pg_type` row fields `get_typdefault` reads off `SearchSysCache1(
 /// TYPEOID, ...)`: the two potentially-null default columns
 /// (`SysCacheGetAttr` + `text_to_cstring`, folded into owned `String`s) plus

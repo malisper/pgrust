@@ -33,31 +33,20 @@ use crate::{
  * yet acquire a real statsTuple, so these are never reached with a live tuple.
  * ------------------------------------------------------------------------- */
 
-/// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stanullfrac` (pg_statistic.h).
-///
-/// Reading the `Form_pg_statistic` fixed area requires `GETSTRUCT` over the
-/// syscache-pinned `HeapTuple` that [`crate::examine::examine_simple_variable`]
-/// would have produced; that acquisition is keystone-blocked, so no live
-/// `StatsTuple` ever reaches here. Panics per mirror-PG-and-panic.
+/// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stanullfrac` (pg_statistic.h):
+/// the fraction of NULLs in the column. The `Form_pg_statistic` fixed area is
+/// read off the syscache-pinned `pg_statistic` tuple
+/// ([`crate::examine::examine_simple_variable`] obtained it via
+/// `search_statrelattinh`); the projection is owned by the syscache unit.
 pub(crate) fn stats_tuple_stanullfrac(stats_tuple: StatsTuple) -> f32 {
-    let _ = stats_tuple;
-    panic!(
-        "selfuncs: Form_pg_statistic GETSTRUCT(statsTuple)->stanullfrac is keystone-blocked \
-         (pg_statistic syscache tuple acquisition in examine_simple_variable is unported; \
-         no live StatsTuple can reach this read)"
-    )
+    backend_utils_cache_syscache_seams::pg_statistic_stanullfrac::call(stats_tuple)
 }
 
 /// `((Form_pg_statistic) GETSTRUCT(statsTuple))->stadistinct` (pg_statistic.h),
-/// used by [`get_variable_numdistinct`]. Same keystone block as
-/// [`stats_tuple_stanullfrac`].
+/// used by [`get_variable_numdistinct`]. Read off the syscache-pinned
+/// `pg_statistic` tuple via the syscache unit's projection.
 pub(crate) fn stats_tuple_stadistinct(stats_tuple: StatsTuple) -> f32 {
-    let _ = stats_tuple;
-    panic!(
-        "selfuncs: Form_pg_statistic GETSTRUCT(statsTuple)->stadistinct is keystone-blocked \
-         (pg_statistic syscache tuple acquisition in examine_simple_variable is unported; \
-         no live StatsTuple can reach this read)"
-    )
+    backend_utils_cache_syscache_seams::pg_statistic_stadistinct::call(stats_tuple)
 }
 
 /// Seam body for `stats_tuple_stanullfrac`.

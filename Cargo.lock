@@ -18855,6 +18855,8 @@ dependencies = [
  "types-hash",
  "types-nodes",
  "types-rel",
+ "types-selfuncs",
+ "types-statistics",
  "types-storage",
  "types-tuple",
 ]
