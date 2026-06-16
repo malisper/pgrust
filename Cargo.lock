@@ -7033,18 +7033,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-tablecmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation",
+ "backend-access-common-tupdesc",
+ "backend-access-table-table-seams",
+ "backend-access-transam-xact",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-heap-seams",
+ "backend-catalog-index-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-partition-seams",
+ "backend-catalog-pg-inherits-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-commands-tablespace-seams",
+ "backend-storage-lmgr-lmgr",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-tablecmds-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
  "types-rel",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20034,6 +20073,7 @@ dependencies = [
  "backend-commands-seclabel",
  "backend-commands-sequence",
  "backend-commands-statscmds",
+ "backend-commands-tablecmds",
  "backend-commands-tablespace",
  "backend-commands-trigger",
  "backend-commands-tsearchcmds",
