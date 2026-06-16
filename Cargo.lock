@@ -2233,6 +2233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-replorigindesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-replorigindesc-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-replorigindesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2270,6 +2281,19 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-rmgrdesc-smgrdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-smgrdesc-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
  "types-wal",
 ]
 
@@ -2341,6 +2365,18 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-rmgrdesc-xlogdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xlogdesc-seams",
+ "backend-utils-adt-timestamp-seams",
+ "mcx",
+ "types-core",
+ "types-error",
  "types-wal",
 ]
 
@@ -19246,8 +19282,11 @@ dependencies = [
  "backend-access-nbtree-core",
  "backend-access-nbtree-nbtree",
  "backend-access-nbtree-nbtsort",
+ "backend-access-rmgrdesc-replorigindesc",
  "backend-access-rmgrdesc-small",
+ "backend-access-rmgrdesc-smgrdesc",
  "backend-access-rmgrdesc-xactdesc",
+ "backend-access-rmgrdesc-xlogdesc",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
  "backend-access-spgist-core",

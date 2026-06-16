@@ -47,8 +47,11 @@ backend-access-gist-core = { path = "../backend-access-gist-core" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
 backend-access-nbt-xlog = { path = "../backend-access-nbt-xlog" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
+backend-access-rmgrdesc-replorigindesc = { path = "../backend-access-rmgrdesc-replorigindesc" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
+backend-access-rmgrdesc-smgrdesc = { path = "../backend-access-rmgrdesc-smgrdesc" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
+backend-access-rmgrdesc-xlogdesc = { path = "../backend-access-rmgrdesc-xlogdesc" }
 backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
 backend-replication-logical-message = { path = "../backend-replication-logical-message" }
 backend-access-spgist-core = { path = "../backend-access-spgist-core" }

@@ -44,8 +44,11 @@ pub fn init_all() {
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
+    backend_access_rmgrdesc_replorigindesc::init_seams();
     backend_access_rmgrdesc_small::init_seams();
+    backend_access_rmgrdesc_smgrdesc::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();
+    backend_access_rmgrdesc_xlogdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_brin_xlog::init_seams();
