@@ -4420,6 +4420,7 @@ name = "backend-catalog-pg-operator-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
