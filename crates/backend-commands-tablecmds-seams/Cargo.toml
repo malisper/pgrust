@@ -16,4 +16,5 @@ types-storage = { path = "../types-storage" }
 mcx = { path = "../mcx" }
 types-rel = { path = "../types-rel" }
 types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
 types-catalog = { path = "../types-catalog" }

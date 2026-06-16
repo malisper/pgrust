@@ -9,6 +9,8 @@ name = "backend_commands_trigger_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-parsenodes = { path = "../types-parsenodes" }
+types-catalog = { path = "../types-catalog" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
