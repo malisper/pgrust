@@ -619,6 +619,33 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_for_procno::set(set_latch_for_procno);
     backend_storage_ipc_latch_seams::set_latch_by_proc_number::set(set_latch_by_proc_number);
     backend_storage_ipc_latch_seams::set_latch_for_proc_pid::set(set_latch_for_proc_pid);
+    // Latch field accessors consumed by waiteventset.c's wait loop.
+    backend_storage_ipc_latch_seams::latch_is_set::set(latch_is_set);
+    backend_storage_ipc_latch_seams::latch_maybe_sleeping::set(latch_maybe_sleeping);
+    backend_storage_ipc_latch_seams::set_latch_maybe_sleeping::set(set_latch_maybe_sleeping);
+    backend_storage_ipc_latch_seams::latch_owner_pid::set(latch_owner_pid);
+}
+
+/// `latch->is_set` — read the latch's set flag.
+fn latch_is_set(latch: LatchHandle) -> bool {
+    with_latch(latch, |l| l.is_set.load(SeqCst) != 0)
+}
+
+/// `latch->maybe_sleeping` — read the maybe-sleeping hint.
+fn latch_maybe_sleeping(latch: LatchHandle) -> bool {
+    with_latch(latch, |l| l.maybe_sleeping.load(SeqCst) != 0)
+}
+
+/// `latch->maybe_sleeping = value` — write the maybe-sleeping hint.
+fn set_latch_maybe_sleeping(latch: LatchHandle, value: bool) {
+    with_latch(latch, |l| {
+        l.maybe_sleeping.store(value as i32, SeqCst);
+    });
+}
+
+/// `latch->owner_pid` — read the owning process PID.
+fn latch_owner_pid(latch: LatchHandle) -> i32 {
+    with_latch(latch, |l| l.owner_pid.load(SeqCst))
 }
 
 #[cfg(test)]

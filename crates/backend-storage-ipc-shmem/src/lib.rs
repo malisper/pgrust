@@ -852,6 +852,9 @@ pub fn init_seams() {
         InitShmemAllocation().expect("InitShmemAllocation failed")
     });
     backend_storage_ipc_shmem_seams::init_shmem_index::set(InitShmemIndex);
+    backend_storage_ipc_shmem_seams::shmem_alloc_unlocked::set(|size| {
+        ShmemAllocUnlocked(size).map(|p| p.as_ptr())
+    });
 }
 
 #[cfg(test)]

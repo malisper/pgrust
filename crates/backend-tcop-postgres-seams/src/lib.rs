@@ -29,6 +29,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `void ProcessClientReadInterrupt(bool blocked)` (tcop/postgres.c) —
+    /// process any interrupt that arrived while waiting to read from the
+    /// client. `blocked` is true when called from the blocking-wait path in
+    /// `secure_read` (it then services `ProcessInterrupts` / latch-set
+    /// interrupts; when false it only notes a recheck). A query-cancel /
+    /// termination surfaces as `Err` (the C `ereport(ERROR/FATAL)` longjmp).
+    pub fn process_client_read_interrupt(blocked: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `void ProcessClientWriteInterrupt(bool blocked)` (tcop/postgres.c) —
+    /// process any interrupt that arrived while waiting to write to the client
+    /// (the write-side analog of [`process_client_read_interrupt`]). `Err`
+    /// carries the cancel/termination `ereport`.
+    pub fn process_client_write_interrupt(blocked: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `check_stack_depth()` (tcop/postgres.c): raise
     /// `ERRCODE_STATEMENT_TOO_COMPLEX` (the C `ereport(ERROR)`) when the stack
     /// is too deep. The recursive tsearch engines call this at every recursion

@@ -72,6 +72,9 @@ pub fn init_seams() {
     backend_storage_ipc_dsm_core_seams::check_on_shmem_exit_lists_are_empty::set(
         ipc::check_on_shmem_exit_lists_are_empty,
     );
+    backend_storage_ipc_dsm_core_seams::dsm_cleanup_using_control_segment::set(
+        dsm::dsm_cleanup_using_control_segment,
+    );
 
     option_sets::dynamic_shared_memory_options.install(dsm_impl::DYNAMIC_SHARED_MEMORY_OPTIONS);
     vars::dynamic_shared_memory_type.install(GucVarAccessors {

@@ -4871,6 +4871,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -6026,33 +6027,69 @@ dependencies = [
 name = "backend-commands-dbcommands"
 version = "0.0.0"
 dependencies = [
+ "backend-access-table-table",
+ "backend-access-transam-xact",
+ "backend-access-transam-xlog",
+ "backend-access-transam-xloginsert",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils",
+ "backend-catalog-aclchk",
+ "backend-catalog-catalog",
+ "backend-catalog-objectaccess",
  "backend-catalog-pg-authid-seams",
  "backend-catalog-pg-database-seams",
+ "backend-catalog-pg-db-role-setting",
+ "backend-catalog-pg-db-role-setting-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-catalog-pg-subscription-seams",
+ "backend-catalog-pg-tablespace-seams",
+ "backend-catalog-storage-seams",
+ "backend-commands-collationcmds-seams",
+ "backend-commands-comment",
  "backend-commands-dbcommands-seams",
+ "backend-commands-seclabel",
+ "backend-commands-tablespace",
  "backend-commands-tablespace-globals-seams",
  "backend-common-relpath",
+ "backend-postmaster-checkpointer",
  "backend-replication-slot",
+ "backend-replication-slot-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-copydir",
+ "backend-storage-file-fd",
  "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-smgr-md",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-pg-locale",
+ "backend-utils-adt-pg-locale-env-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-relmapper",
  "backend-utils-error",
+ "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
  "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr",
+ "common-extra-encnames-fgram",
+ "libc",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
  "types-storage",
  "types-tuple",
  "types-wal",
+ "types-wchar",
 ]
 
 [[package]]
@@ -10065,6 +10102,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-openssl",
+ "backend-libpq-be-secure-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-net",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-common"
 version = "0.0.0"
 dependencies = [
@@ -10087,6 +10143,30 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-openssl"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-common-seams",
+ "backend-libpq-be-secure-openssl-ffi-seams",
+ "backend-libpq-be-secure-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-net",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-libpq-be-secure-openssl-ffi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -12147,6 +12227,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-sysv-sema"
+version = "0.0.0"
+dependencies = [
+ "backend-port-pg-sema-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-port-sysv-shmem"
+version = "0.0.0"
+dependencies = [
+ "backend-port-sysv-shmem-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-port-sysv-shmem-seams"
 version = "0.0.0"
 dependencies = [
@@ -12713,6 +12825,21 @@ dependencies = [
  "types-core",
  "types-error",
  "types-replication",
+]
+
+[[package]]
+name = "backend-replication-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-utils-error",
+ "interfaces-libpq-fe-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+ "types-pgstat",
+ "types-walreceiver",
 ]
 
 [[package]]
@@ -13654,6 +13781,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-snowball-dict-snowball"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-snowball-dict-snowball-seams",
+ "backend-snowball-runtime",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-dict-snowball-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-snowball-runtime"
+version = "0.0.0"
+
+[[package]]
 name = "backend-statistics-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -14540,6 +14699,27 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+]
+
+[[package]]
+name = "backend-storage-ipc-waiteventset"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqsignal-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-error",
+ "types-signal",
+ "types-storage",
 ]
 
 [[package]]
@@ -19335,6 +19515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interfaces-libpq-fe-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+]
+
+[[package]]
 name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -19800,7 +19990,9 @@ dependencies = [
  "backend-libpq-auth-scram",
  "backend-libpq-be-fsstubs",
  "backend-libpq-be-gssapi-common",
+ "backend-libpq-be-secure",
  "backend-libpq-be-secure-common",
+ "backend-libpq-be-secure-openssl",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",
@@ -19850,6 +20042,8 @@ dependencies = [
  "backend-parser-relation",
  "backend-parser-small1",
  "backend-port-atomics",
+ "backend-port-sysv-sema",
+ "backend-port-sysv-shmem",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
  "backend-postmaster-bgwriter",
@@ -19862,6 +20056,7 @@ dependencies = [
  "backend-postmaster-walsummarizer",
  "backend-postmaster-walwriter",
  "backend-regex-core",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
  "backend-replication-logical-launcher",
@@ -19880,6 +20075,7 @@ dependencies = [
  "backend-replication-walsender",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
+ "backend-snowball-dict-snowball",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
@@ -19899,6 +20095,7 @@ dependencies = [
  "backend-storage-ipc-shmem",
  "backend-storage-ipc-sinval",
  "backend-storage-ipc-standby",
+ "backend-storage-ipc-waiteventset",
  "backend-storage-large-object",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
@@ -20422,6 +20619,13 @@ version = "0.0.0"
 dependencies = [
  "types-datum",
  "types-jsonb",
+]
+
+[[package]]
+name = "types-libpqwalreceiver"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

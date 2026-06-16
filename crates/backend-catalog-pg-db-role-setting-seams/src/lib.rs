@@ -12,6 +12,25 @@
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_nodes::nodes::Node;
+
+seam_core::seam!(
+    /// `AlterSetting(databaseid, roleid, setstmt)` (pg_db_role_setting.c),
+    /// reached from `AlterDatabaseSet` (dbcommands.c) for `ALTER DATABASE name
+    /// SET ...`. The `setstmt` is the canonical `VariableSetStmt` parse node (an
+    /// arm of [`Node`]); the owning unit converts it to the
+    /// `pg_db_role_setting` owner's `types_parsenodes::VariableSetStmt` model
+    /// (the two parse-node models — the `'mcx` arena layer and the owned-`String`
+    /// layer — meet only here) and runs the catalog read-modify-write. `Err`
+    /// carries `AlterSetting`'s GUC-parse / catalog-mutation `ereport(ERROR)`
+    /// surface.
+    pub fn alter_database_setting<'mcx>(
+        mcx: Mcx<'mcx>,
+        databaseid: Oid,
+        roleid: Oid,
+        setstmt: &Node<'mcx>,
+    ) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// postinit.c `process_settings`, batched: the

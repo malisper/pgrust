@@ -817,6 +817,7 @@ pub fn init_seams() {
     s::check_data_dir::set(crate::process::checkDataDir);
     s::change_to_data_dir::set(crate::process::ChangeToDataDir);
     s::create_data_dir_lock_file::set(crate::lockfile::create_data_dir_lock_file);
+    s::add_to_data_dir_lock_file::set(crate::lockfile::AddToDataDirLockFile);
     s::set_processing_mode_bootstrap::set(|| {
         SetProcessingMode(ProcessingMode::BootstrapProcessing)
     });
