@@ -1656,6 +1656,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-tuple",
  "types-vacuum",
 ]
 
@@ -3826,6 +3827,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-heap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-scankey",
+ "backend-access-common-tupdesc",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-access-table-tableam-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-binary-upgrade-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-dependency",
+ "backend-catalog-heap-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess",
+ "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-catalog-pg-type",
+ "backend-catalog-storage-seams",
+ "backend-commands-tablecmds-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-commands-typecmds",
+ "backend-storage-lmgr-lmgr",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-relcache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-stack-depth",
+ "mcx",
+ "types-array",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-heap-seams"
 version = "0.0.0"
 dependencies = [
@@ -5080,6 +5129,18 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-analyze-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -6560,14 +6621,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-vacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-commands-analyze-seams",
+ "backend-commands-define-seams",
+ "backend-commands-vacuum-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-commands-vacuum-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
  "seam-core",
  "types-cluster",
+ "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
  "types-tuple",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -8791,6 +8880,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-auth"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-libpq-auth-seams",
+ "backend-libpq-pqcomm",
+ "backend-libpq-pqformat",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small-seams",
+ "common-ip",
+ "libc",
+ "mcx",
+ "port-pg-strong-random-seams",
+ "types-authid",
+ "types-core",
+ "types-error",
+ "types-net",
+ "types-network",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-libpq-auth-seams"
 version = "0.0.0"
 dependencies = [
@@ -10880,6 +10995,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-bgwriter"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-bgwriter-seams",
+ "backend-postmaster-checkpointer",
+ "backend-postmaster-interrupt",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-small",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-resowner-seams",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-postmaster-bgwriter-seams"
 version = "0.0.0"
 dependencies = [
@@ -11235,6 +11385,39 @@ dependencies = [
  "types-core",
  "types-error",
  "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-walwriter"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-interrupt",
+ "backend-postmaster-walwriter-seams",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-resowner-seams",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+ "types-wal",
 ]
 
 [[package]]
@@ -12157,6 +12340,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12182,6 +12366,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]
@@ -13645,6 +13830,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-utility"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-utility-out-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-utility-fc-seams"
 version = "0.0.0"
 dependencies = [
@@ -13652,6 +13851,16 @@ dependencies = [
  "types-error",
  "types-foreigncmds",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-tcop-utility-out-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -17836,6 +18045,7 @@ dependencies = [
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
  "backend-catalog-dependency",
+ "backend-catalog-heap",
  "backend-catalog-indexing",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
@@ -17890,6 +18100,7 @@ dependencies = [
  "backend-commands-tablespace",
  "backend-commands-trigger",
  "backend-commands-typecmds",
+ "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
  "backend-executor-execAmi",
@@ -17947,6 +18158,7 @@ dependencies = [
  "backend-jit-jit",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-libpq-auth",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -17995,6 +18207,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
+ "backend-postmaster-bgwriter",
  "backend-postmaster-checkpointer",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
@@ -18002,6 +18215,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-postmaster-walsummarizer",
+ "backend-postmaster-walwriter",
  "backend-regex-core",
  "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
@@ -18055,6 +18269,7 @@ dependencies = [
  "backend-tcop-dest",
  "backend-tcop-fastpath",
  "backend-tcop-pquery",
+ "backend-tcop-utility",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",

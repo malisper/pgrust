@@ -234,6 +234,15 @@ seam_core::seam!(
     /// `TidStoreEndIterate(iter)`.
     pub fn tidstore_end_iterate(iter: TidStoreIterHandle) -> PgResult<()>
 );
+seam_core::seam!(
+    /// `TidStoreIsMember(ts, tid)` — membership probe used by VACUUM's
+    /// `vac_tid_reaped` index-bulkdelete callback. Outward call into
+    /// `access/tidstore.c` (not yet ported); panics until that owner lands.
+    pub fn tidstore_is_member(
+        ts: TidStore,
+        tid: types_tuple::heaptuple::ItemPointerData,
+    ) -> PgResult<bool>
+);
 
 // =======================================================================
 // access/visibilitymap.h — the per-block visibility map.
