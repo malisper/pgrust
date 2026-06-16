@@ -54,3 +54,18 @@ backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-adt-lsn-trigfuncs = { path = "../backend-utils-adt-lsn-trigfuncs" }
+
+# Replay family (replay.rs): the rmgr redo-dispatch table + the cross-owner
+# seams the redo loop drives (varsup nextXid advance, standby/procarray
+# KnownAssignedXids, xlogutils invalid-page check, pmsignal recovery signals,
+# walsender wakeup, ipc proc_exit, variable-seams prefetch reconfigure,
+# tablespace allow_in_place GUC, pg_rusage timing).
+backend-access-transam-rmgr = { path = "../backend-access-transam-rmgr" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
+backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-commands-variable-seams = { path = "../backend-commands-variable-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }

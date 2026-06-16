@@ -28,13 +28,26 @@
 //! reader/prefetcher holder ([`walrecovery`]). The backend-local model
 //! ([`core`]) and carrier types are real.
 //!
-//! The **replay / stop / desc / startupxlog families are still scaffold**: their
-//! function bodies are honest `panic!("blocked: … pending <family> fill")` stubs
-//! that name the specific unported prerequisite (the replay redo loop + per-AM
-//! redo dispatch, `getRecordTimestamp` xact-record decode, the rmgr desc dispatch
-//! that needs `Mcx`/`PgString` re-signing, and the `StartupXLOG` process
-//! integration into the unported postmaster/startup owners). The crate is CATALOG
-//! `in-progress` until those families land; see `audits/`.
+//! The **replay family is filled** ([`replay`]): `PerformWalRecovery` (the main
+//! redo loop), `ApplyWalRecord` (the per-AM `GetRmgr(rmid).rm_redo` dispatch over
+//! the held reader), `xlogrecovery_redo` (the RM_XLOG_ID handler),
+//! `CheckRecoveryConsistency`, `checkTimeLineSwitch`, `getRecordTimestamp` (xact
+//! / restore-point record decode), and `verifyBackupPageConsistency` are ported
+//! 1:1 and drive the real rmgr dispatch table. Unported cross-subsystem owners
+//! are reached through precise seam-and-panic boundaries (the WAL-driver legs of
+//! xlog.c — `ReachedEndOfBackup`/`RemoveNonParentXlogFiles`/
+//! `AllowCascadeReplication`, all `needs-decomp` #111). The redo loop calls into
+//! the **stop family** ([`stop`]) helpers (`recoveryStopsBefore/After`,
+//! `recoveryApplyDelay`, `recoveryPausesHere`), which remain honest panic-stubs
+//! pending their own fill, so the loop is reachable only once the stop family
+//! lands — exactly the intra-crate seam-and-panic boundary.
+//!
+//! The **stop / desc / startupxlog families are still scaffold**: honest
+//! `panic!("blocked: … pending <family> fill")` stubs naming the unported
+//! prerequisite (the rmgr desc dispatch that needs `Mcx`/`PgString` re-signing,
+//! the recovery-pause CV sleep, and the `StartupXLOG` process integration into
+//! the unported postmaster/startup owners). The crate is CATALOG `in-progress`
+//! until those families land; see `audits/`.
 //!
 //! Ported from `src/backend/access/transam/xlogrecovery.c`.
 

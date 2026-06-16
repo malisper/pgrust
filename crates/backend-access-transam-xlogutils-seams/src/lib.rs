@@ -102,3 +102,11 @@ seam_core::seam!(
         blkno: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<Buffer>
 );
+
+seam_core::seam!(
+    /// `XLogCheckInvalidPages(void)` (xlogutils.c) — at the point recovery
+    /// reaches consistency, verify that the invalid-page hash table is empty;
+    /// `elog(PANIC)` (via the table's per-entry report) if any unresolved
+    /// references to uninitialized pages remain. Owner is xlogutils.c.
+    pub fn xlog_check_invalid_pages() -> types_error::PgResult<()>
+);
