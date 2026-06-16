@@ -22,6 +22,7 @@
 
 #![allow(non_snake_case)]
 
+pub mod family1;
 pub mod keystone;
 
 /// Install every inward seam this unit owns. Wired into `seams-init::init_all`.
@@ -30,6 +31,12 @@ pub mod keystone;
 /// `pub` functions, and the per-catalog typed seams declared by
 /// `backend-catalog-indexing-seams` are installed by the F1 family fills (which
 /// form the heap tuple from their crossed `FormData_*` row before calling the
-/// engine here). This empty body keeps the `seams-init` recurrence guard happy
-/// (a crate with no owned inward seams has an empty `init_seams`).
-pub fn init_seams() {}
+/// engine here). [`family1::install`] sets the F1 seams whose substrate is
+/// fully present (pure `heap_form_tuple` + engine + `GetNewOidWithIndex`); the
+/// rest stay uninstalled (mirror-pg-and-panic) until their substrate lands
+/// (`heap_multi_insert` for the multi-insert seams,
+/// `construct_array_builtin`/`SearchSysCacheCopy1`/ACL rewrite for the
+/// array/syscache/owner-update seams).
+pub fn init_seams() {
+    family1::install();
+}

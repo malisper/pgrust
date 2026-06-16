@@ -21,6 +21,7 @@ seam_core::seam!(
     /// `CatalogTupleDelete(rel, tid)` (catalog/indexing.c): delete the
     /// addressed tuple from a catalog relation (`simple_heap_delete`). `Err`
     /// carries the heap-mutation `ereport(ERROR)`s.
+    ///
     pub fn catalog_tuple_delete(rel: &RelationData<'_>, tid: ItemPointerData) -> PgResult<()>
 );
 
@@ -380,8 +381,9 @@ seam_core::seam!(
     /// rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` (catalog/
     /// indexing.c + heapam). Returns the freshly-allocated cast OID. `Err`
     /// carries the heap/index mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_pg_cast(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_pg_cast<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_cast::PgCastInsertRow,
     ) -> PgResult<Oid>
 );
@@ -392,8 +394,9 @@ seam_core::seam!(
     /// (catalog/indexing.c + heapam). `pg_inherits` has no OID column, so
     /// nothing is returned. `Err` carries the heap/index mutation
     /// `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_pg_inherits(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_pg_inherits<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_inherits::PgInheritsInsertRow,
     ) -> PgResult<()>
 );
@@ -405,8 +408,9 @@ seam_core::seam!(
     /// `CatalogTupleInsert(rel, tup)` (catalog/indexing.c + heapam). Returns the
     /// freshly-allocated conversion OID. `Err` carries the heap/index mutation
     /// `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_pg_conversion(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_pg_conversion<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_conversion::PgConversionInsertRow,
     ) -> PgResult<Oid>
 );
@@ -416,8 +420,9 @@ seam_core::seam!(
     /// rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` (catalog/
     /// indexing.c + heapam). `pg_range` has no OID column, so nothing is
     /// returned. `Err` carries the heap/index mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_pg_range(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_pg_range<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_range::PgRangeInsertRow,
     ) -> PgResult<()>
 );
@@ -428,8 +433,9 @@ seam_core::seam!(
     /// (catalog/indexing.c + heapam). The caller has already allocated `row.oid`
     /// (the even/odd OID-selection logic lives in the port). `Err` carries the
     /// heap/index mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_insert_pg_enum(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_insert_pg_enum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         row: &types_catalog::pg_enum::PgEnumInsertRow,
     ) -> PgResult<()>
 );
@@ -441,7 +447,7 @@ seam_core::seam!(
     /// the port so its even/odd-OID sort-order selection logic (`EnumValuesCreate`
     /// / `AddEnumLabel`) can inspect the candidate before forming the tuple.
     /// `Err` carries the index-probe error surface.
-    pub fn get_new_oid_with_index_pg_enum(rel: &RelationData<'_>) -> PgResult<Oid>
+    pub fn get_new_oid_with_index_pg_enum<'mcx>(rel: &types_rel::Relation<'mcx>) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -464,8 +470,9 @@ seam_core::seam!(
     /// `RenumberEnumType` rewrites `enumsortorder`): the owner re-forms the
     /// tuple addressed by `tid` from the supplied row and stores it (catalog/
     /// indexing.c). `Err` carries the heap/index mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_update_pg_enum(
-        rel: &RelationData<'_>,
+    pub fn catalog_tuple_update_pg_enum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
         tid: ItemPointerData,
         row: &types_catalog::pg_enum::PgEnumInsertRow,
     ) -> PgResult<()>

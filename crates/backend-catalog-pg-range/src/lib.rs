@@ -87,7 +87,7 @@ pub fn RangeCreate(
         rngcanonical: rangeCanonical,
         rngsubdiff: rangeSubDiff,
     };
-    indexing_seams::catalog_tuple_insert_pg_range::call(&pg_range, &row)?;
+    indexing_seams::catalog_tuple_insert_pg_range::call(range_ctx.mcx(), &pg_range, &row)?;
 
     /* record type's dependencies on range-related items */
     let addrs = dependency_seams::new_object_addresses::call()?;

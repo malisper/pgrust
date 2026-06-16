@@ -3696,14 +3696,17 @@ dependencies = [
 name = "backend-catalog-indexing"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-heap-heapam-seams",
  "backend-access-index-indexam",
+ "backend-catalog-catalog",
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
  "backend-executor-execTuples",
  "backend-utils-cache-relcache-seams",
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-nodes",
@@ -15675,6 +15678,7 @@ dependencies = [
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
  "backend-catalog-catalog",
+ "backend-catalog-indexing",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
