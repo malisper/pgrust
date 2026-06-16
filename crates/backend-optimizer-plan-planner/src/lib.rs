@@ -589,40 +589,241 @@ fn subquery_planner<'mcx>(
         root.hasHavingQual = has_having;
     }
 
-    // Expression-preprocessing block (C:903-1056). This block runs
-    // `preprocess_expression` over `parse->targetList`, the WCO/returning lists,
-    // jointree quals, havingQual, windowClause offsets, limit{Offset,Count},
-    // onConflict, mergeActionList, mergeJoinCondition, append_rel_list, and every
-    // RTE expression list, plus `flatten_join_alias_vars` cleanup and
-    // `flatten_group_exprs`. The `Query` carries these as `NodePtr<'mcx>` /
-    // `PgVec<NodePtr>`, while `preprocess_expression`'s core (`eval_const_expressions`
-    // / `canonicalize_qual` / `SS_process_sublinks`) operates on the arena `Expr`
-    // model — there is no `Node`↔arena-`Expr` bridge for these `Query` fields in
-    // this repo, and `flatten_join_alias_vars` / `flatten_group_exprs` /
-    // `expand_grouping_sets` have no ported owner. Mirror PG and panic precisely
-    // at the start of the block (the C performs it unconditionally for every
-    // query).
-    panic!(
-        "subquery_planner: expression-preprocessing block (planner.c:903-1056) is \
-         not expressible — Query expression fields are NodePtr<Node> with no bridge \
-         to the arena Expr model that preprocess_expression/eval_const_expressions \
-         (clauses.c) operate on, and flatten_join_alias_vars (rewriteManip.c) / \
-         flatten_group_exprs (clauses.c) / expand_grouping_sets (parse_agg.c) have \
-         no ported owner. The downstream HAVING→WHERE transfer, reduce_outer_joins, \
-         remove_useless_result_rtes, grouping_planner, SS_identify_outer_params, \
-         SS_charge_for_initplans, and set_cheapest (C:1199-1243) follow this block \
-         and are gated on it."
-    );
-
-    // ---- Everything below mirrors planner.c:1199-1245 and is unreachable
-    // ---- past the expression-preprocessing panic above. It is kept here as the
-    // ---- faithful continuation so the spine is documented; it does not compile-
-    // ---- gate the simple-SELECT entry, which panics in the block above.
-    #[allow(unreachable_code)]
+    // Expression-preprocessing block (C:903-1056). Run `preprocess_expression`
+    // over the querytree's expressions. The expression-only `Query` fields are
+    // now concretely typed (`targetList`/`returningList` as `Vec<TargetEntry>`,
+    // `havingQual`/`limitOffset`/`limitCount`/`mergeJoinCondition` as
+    // `Option<PgBox<Expr>>`, jointree quals via `preprocess_qual_conditions`), so
+    // each owned `Expr` is handed to `preprocess_expression` (eval_const_expressions
+    // / canonicalize_qual / convert_saop_to_hashed_saop) and stored back. Paths
+    // with no ported owner (`flatten_join_alias_vars` when `hasJoinRTEs`,
+    // `SS_process_sublinks` when `hasSubLinks`, `flatten_group_exprs` /
+    // `expand_grouping_sets` for grouping queries) panic precisely inside the
+    // helpers, exactly where the C performs them.
     {
-        // newHaving HAVING→WHERE transfer loop (C:1154-1199): needs the arena
-        // Expr bridge (above). reduce_outer_joins / remove_useless_result_rtes
-        // (C:1206-1216):
+        // parse->targetList = preprocess_expression(..., EXPRKIND_TARGET) (C:903).
+        // The C casts the whole `List *` to a Node and processes it; in the
+        // value model each TargetEntry's `expr` is preprocessed in place.
+        {
+            let n = run.resolve(root.parse).targetList.len();
+            for i in 0..n {
+                let e = run.resolve_mut(root.parse).targetList[i].expr.take();
+                let e = match e {
+                    Some(b) => Some(mcx::PgBox::into_inner(b)),
+                    None => None,
+                };
+                let processed = preprocess_expression(mcx, &root, e, EXPRKIND_TARGET)?;
+                run.resolve_mut(root.parse).targetList[i].expr = match processed {
+                    Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                    None => None,
+                };
+            }
+        }
+
+        // withCheckOptions (C:907-916): each WithCheckOption's qual is an
+        // EXPRKIND_QUAL expression; the WCOs whose qual reduces to NULL are
+        // dropped. WCOs are only produced by the rewriter for RLS/updatable
+        // views; a plain table SELECT has none. Panic precisely if present.
+        if !run.resolve(root.parse).withCheckOptions.is_empty() {
+            panic!(
+                "subquery_planner: withCheckOptions expression preprocessing \
+                 (planner.c:907-916) is not wired over the owned Query model \
+                 (the qual lives as a NodePtr on the WithCheckOption node)"
+            );
+        }
+
+        // parse->returningList = preprocess_expression(..., EXPRKIND_TARGET)
+        // (C:918-920). Same per-TargetEntry handling as targetList.
+        {
+            let n = run.resolve(root.parse).returningList.len();
+            for i in 0..n {
+                let e = run.resolve_mut(root.parse).returningList[i].expr.take();
+                let e = match e {
+                    Some(b) => Some(mcx::PgBox::into_inner(b)),
+                    None => None,
+                };
+                let processed = preprocess_expression(mcx, &root, e, EXPRKIND_TARGET)?;
+                run.resolve_mut(root.parse).returningList[i].expr = match processed {
+                    Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                    None => None,
+                };
+            }
+        }
+
+        // preprocess_qual_conditions(root, (Node *) parse->jointree) (C:922).
+        preprocess_qual_conditions_query(mcx, &root, run)?;
+
+        // parse->havingQual = preprocess_expression(..., EXPRKIND_QUAL) (C:924).
+        {
+            let h = run.resolve_mut(root.parse).havingQual.take();
+            let h = h.map(mcx::PgBox::into_inner);
+            let processed = preprocess_expression(mcx, &root, h, EXPRKIND_QUAL)?;
+            run.resolve_mut(root.parse).havingQual = match processed {
+                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                None => None,
+            };
+        }
+
+        // windowClause start/end offsets (C:927-936). The windowClause is a
+        // `PgVec<NodePtr>` of WindowClause nodes; the offsets live on those nodes.
+        // A plain SELECT has none. Panic precisely if present.
+        if !run.resolve(root.parse).windowClause.is_empty() {
+            panic!(
+                "subquery_planner: windowClause offset preprocessing \
+                 (planner.c:927-936) is not wired over the owned Query model \
+                 (windowClause is a NodePtr list of WindowClause nodes)"
+            );
+        }
+
+        // parse->limitOffset / parse->limitCount = preprocess_expression(...,
+        // EXPRKIND_LIMIT) (C:938-941).
+        {
+            let lo = run.resolve_mut(root.parse).limitOffset.take();
+            let lo = lo.map(mcx::PgBox::into_inner);
+            let processed = preprocess_expression(mcx, &root, lo, EXPRKIND_LIMIT)?;
+            run.resolve_mut(root.parse).limitOffset = match processed {
+                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                None => None,
+            };
+        }
+        {
+            let lc = run.resolve_mut(root.parse).limitCount.take();
+            let lc = lc.map(mcx::PgBox::into_inner);
+            let processed = preprocess_expression(mcx, &root, lc, EXPRKIND_LIMIT)?;
+            run.resolve_mut(root.parse).limitCount = match processed {
+                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                None => None,
+            };
+        }
+
+        // onConflict expression lists (C:943-963). onConflict is only present for
+        // INSERT ... ON CONFLICT; a SELECT has none. Panic precisely if present.
+        if run.resolve(root.parse).onConflict.is_some() {
+            panic!(
+                "subquery_planner: onConflict expression preprocessing \
+                 (planner.c:943-963) is not wired over the owned Query model"
+            );
+        }
+
+        // mergeActionList (C:965-978). MERGE-only; a SELECT has none.
+        if !run.resolve(root.parse).mergeActionList.is_empty() {
+            panic!(
+                "subquery_planner: mergeActionList expression preprocessing \
+                 (planner.c:965-978) is not wired over the owned Query model"
+            );
+        }
+
+        // parse->mergeJoinCondition = preprocess_expression(..., EXPRKIND_QUAL)
+        // (C:980-981).
+        {
+            let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
+            let c = c.map(mcx::PgBox::into_inner);
+            let processed = preprocess_expression(mcx, &root, c, EXPRKIND_QUAL)?;
+            run.resolve_mut(root.parse).mergeJoinCondition = match processed {
+                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                None => None,
+            };
+        }
+
+        // root->append_rel_list = preprocess_expression(..., EXPRKIND_APPINFO)
+        // (C:983-985). append_rel_list is empty until inheritance/UNION-ALL
+        // expansion, which the simple SELECT path does not produce. Panic
+        // precisely if present (its AppendRelInfo translated_vars would need the
+        // EXPRKIND_APPINFO walk).
+        if !root.append_rel_list.is_empty() {
+            panic!(
+                "subquery_planner: append_rel_list expression preprocessing \
+                 (planner.c:983-985) is not wired over the owned model"
+            );
+        }
+
+        // Preprocess expressions within RTEs (C:987-1054): tablesample / subquery
+        // join-alias flattening / function / tablefunc / values / groupexprs, plus
+        // per-element securityQuals. A plain RTE_RELATION SELECT has none of these
+        // (no TABLESAMPLE, no function/values/group RTEs, no securityQuals); scan
+        // and panic precisely if any present.
+        {
+            use types_nodes::parsenodes::RTEKind;
+            let n = run.resolve(root.parse).rtable.len();
+            for i in 0..n {
+                let parse = run.resolve(root.parse);
+                let rte = &parse.rtable[i];
+                let needs = match rte.rtekind {
+                    RTEKind::RTE_RELATION => rte.tablesample.is_some(),
+                    RTEKind::RTE_SUBQUERY => rte.lateral && root.hasJoinRTEs,
+                    RTEKind::RTE_FUNCTION
+                    | RTEKind::RTE_TABLEFUNC
+                    | RTEKind::RTE_VALUES
+                    | RTEKind::RTE_GROUP => true,
+                    _ => false,
+                };
+                let has_secquals = !rte.securityQuals.is_empty();
+                if needs || has_secquals {
+                    panic!(
+                        "subquery_planner: per-RTE expression preprocessing \
+                         (planner.c:987-1054) for rtekind {:?} (tablesample/\
+                         function/tablefunc/values/groupexprs/securityQuals/\
+                         lateral-subquery alias flattening) is not wired over the \
+                         owned RTE model",
+                        rte.rtekind
+                    );
+                }
+            }
+        }
+
+        // Drop joinaliasvars lists once flattening is done (C:1067-1078). Only
+        // relevant when hasJoinRTEs; the simple SELECT path has no join RTEs.
+        if root.hasJoinRTEs {
+            panic!(
+                "subquery_planner: joinaliasvars cleanup (planner.c:1067-1078) is \
+                 reached only with join RTEs, whose flatten_join_alias_vars path \
+                 is unported"
+            );
+        }
+
+        // flatten_group_exprs over targetList + havingQual (C:1088-1095). GROUP-RTE
+        // only; a non-grouped SELECT has hasGroupRTE == false.
+        if run.resolve(root.parse).hasGroupRTE {
+            panic!(
+                "subquery_planner: flatten_group_exprs (clauses.c) over targetList/\
+                 havingQual (planner.c:1088-1095) has no ported owner; reached \
+                 because parse->hasGroupRTE is set"
+            );
+        }
+
+        // hasTargetSRFs re-check (C:1098-1099). Constant-folding can remove all
+        // SRFs; recompute via expression_returns_set over the targetList. Only
+        // relevant when hasTargetSRFs is set; a plain scalar SELECT has none.
+        if run.resolve(root.parse).hasTargetSRFs {
+            panic!(
+                "subquery_planner: hasTargetSRFs re-check via expression_returns_set \
+                 (planner.c:1098-1099) over the targetList is not wired"
+            );
+        }
+
+        // expand_grouping_sets (C:1107-1110). GROUPING SETS only.
+        if !run.resolve(root.parse).groupingSets.is_empty() {
+            panic!(
+                "subquery_planner: expand_grouping_sets (parse_agg.c) \
+                 (planner.c:1107-1110) has no ported owner; reached because \
+                 parse->groupingSets is non-empty"
+            );
+        }
+
+        // newHaving HAVING→WHERE transfer loop (C:1154-1199). Runs only when there
+        // is a havingQual; a SELECT without HAVING skips it entirely.
+        if run.resolve(root.parse).havingQual.is_some() {
+            panic!(
+                "subquery_planner: HAVING→WHERE transfer loop (planner.c:1154-1199) \
+                 needs contain_agg_clause/contain_volatile_functions/contain_subplans/\
+                 pull_varnos over the HAVING clause and list_concat into jointree \
+                 quals; not yet wired over the owned model"
+            );
+        }
+    }
+
+    // reduce_outer_joins / remove_useless_result_rtes (C:1206-1216):
+    {
         if has_outer_joins {
             let parse = run.resolve_mut(root.parse);
             backend_optimizer_prep_prepjointree::reduce_outer_joins(mcx, &mut root, parse)?;
@@ -803,24 +1004,99 @@ fn run_parse_has_sublinks(_root: &PlannerInfo) -> bool {
 // preprocess_qual_conditions()  (planner.c:1356)
 // ===========================================================================
 
-/// `preprocess_qual_conditions(root, jtnode)` (planner.c:1356). Recursively
-/// scans the jointree `FromExpr`/`JoinExpr` quals and preprocesses each.
-///
-/// The jointree lives on the `Query` as `PgBox<FromExpr<'mcx>>` (a `Node`-typed
-/// tree), while `preprocess_expression` operates on the arena `Expr`. Bridging
-/// the jointree quals to the arena requires the `Node`↔`Expr` bridge that the
-/// whole expression-preprocessing block is gated on. The recursion structure is
-/// ported; the per-node qual preprocessing is the gated step.
-pub fn preprocess_qual_conditions<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _root: &PlannerInfo,
-    _jtnode: Option<&Node<'mcx>>,
+/// Drive `preprocess_qual_conditions` over `parse->jointree` (C:922). The
+/// jointree lives on the `Query` as `Option<PgBox<FromExpr>>`; take it out of the
+/// run (so `preprocess_expression`'s `&root` borrow doesn't alias the `&mut`
+/// Query), recurse, and store it back.
+fn preprocess_qual_conditions_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "preprocess_qual_conditions (planner.c:1356) requires the Node-jointree → \
-         arena-Expr bridge that the whole expression-preprocessing block is gated \
-         on (preprocess_expression over FromExpr/JoinExpr quals)"
-    );
+    let jt = run.resolve_mut(root.parse).jointree.take();
+    if let Some(jt) = jt {
+        let mut node = Node::FromExpr(mcx::PgBox::into_inner(jt));
+        preprocess_qual_conditions(mcx, root, &mut node)?;
+        let f = match node {
+            Node::FromExpr(f) => f,
+            _ => unreachable!("jointree top stays a FromExpr"),
+        };
+        run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
+    }
+    Ok(())
+}
+
+/// `preprocess_qual_conditions(root, jtnode)` (planner.c:1356). Recursively
+/// scans the jointree `FromExpr`/`JoinExpr` quals and preprocesses each via
+/// `preprocess_expression(..., EXPRKIND_QUAL)`.
+///
+/// The jointree node's `quals` is carried as `Option<NodePtr>` holding the
+/// post-analysis `Node::Expr(e)`; this unwraps it to the owned `Expr`, runs
+/// `preprocess_expression`, and re-wraps. Nested `JoinExpr`/`FromExpr` in the
+/// fromlist (only produced by explicit JOIN syntax, which sets `hasJoinRTEs`)
+/// recurse; a `RangeTblRef` leaf has nothing to do.
+pub fn preprocess_qual_conditions<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    jtnode: &mut Node<'mcx>,
+) -> PgResult<()> {
+    match jtnode {
+        Node::RangeTblRef(_) => {
+            // nothing to do here (C:1362).
+        }
+        Node::FromExpr(f) => {
+            for i in 0..f.fromlist.len() {
+                preprocess_qual_conditions(mcx, root, &mut f.fromlist[i])?;
+            }
+            preprocess_jointree_quals(mcx, root, &mut f.quals)?;
+        }
+        Node::JoinExpr(j) => {
+            if let Some(larg) = j.larg.as_deref_mut() {
+                preprocess_qual_conditions(mcx, root, larg)?;
+            }
+            if let Some(rarg) = j.rarg.as_deref_mut() {
+                preprocess_qual_conditions(mcx, root, rarg)?;
+            }
+            preprocess_jointree_quals(mcx, root, &mut j.quals)?;
+        }
+        other => {
+            return Err(PgError::error(alloc::format!(
+                "preprocess_qual_conditions: unrecognized jointree node type: {:?}",
+                other.node_tag()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `f->quals = preprocess_expression(root, f->quals, EXPRKIND_QUAL)` for a
+/// jointree node's `quals` (`Option<NodePtr>` holding `Node::Expr`).
+fn preprocess_jointree_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    quals: &mut Option<types_nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<()> {
+    // The C field is `Node *quals`; in the analyzed jointree it is `Node::Expr`.
+    // Take ownership, unwrap to `Expr`, preprocess, re-wrap.
+    let taken = quals.take();
+    let expr = match taken {
+        None => None,
+        Some(n) => match mcx::PgBox::into_inner(n) {
+            Node::Expr(e) => Some(e),
+            other => {
+                return Err(PgError::error(alloc::format!(
+                    "preprocess_qual_conditions: jointree quals is a non-Expr node: {:?}",
+                    other.node_tag()
+                )));
+            }
+        },
+    };
+    let processed = preprocess_expression(mcx, root, expr, EXPRKIND_QUAL)?;
+    *quals = match processed {
+        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        None => None,
+    };
+    Ok(())
 }
 
 // ===========================================================================
@@ -929,15 +1205,16 @@ fn grouping_planner<'mcx>(
                 let cloned = root.node(expr_id).clone_in(mcx)?;
                 backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &cloned)?;
             }
-            // havingQual: parse->havingQual is a NodePtr<Node> with no bridge to
-            // the arena `Expr` model (same gate as the expression-preprocessing
-            // block above). Mirror PG and panic precisely if present.
-            if run.resolve(root.parse).havingQual.is_some() {
-                panic!(
-                    "grouping_planner: preprocess_aggrefs over parse->havingQual \
-                     (planner.c:1580) is gated on the arena-Expr bridge for the \
-                     Query.havingQual NodePtr<Node> field"
-                );
+            // preprocess_aggrefs(root, (Node *) parse->havingQual) (C:1580).
+            // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view;
+            // clone the owned `Expr` and walk it, mirroring the processed_tlist
+            // handling above.
+            let having: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
+                Some(e) => Some(e.clone_in(mcx)?),
+                None => None,
+            };
+            if let Some(having) = having {
+                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &having)?;
             }
         }
     }
@@ -1255,7 +1532,7 @@ fn preprocess_limit<'mcx>(
 /// `limit_needed(parse)` (planner.c:2762).
 pub fn limit_needed(parse: &Query) -> bool {
     // limitCount (C:2766-2777).
-    if let Some(node) = parse.limitCount.as_ref() {
+    if let Some(node) = parse.limitCount.as_deref() {
         match nodeptr_as_const_isnull_value(node) {
             Some((isnull, _)) => {
                 if !isnull {
@@ -1267,7 +1544,7 @@ pub fn limit_needed(parse: &Query) -> bool {
     }
 
     // limitOffset (C:2779-2795).
-    if let Some(node) = parse.limitOffset.as_ref() {
+    if let Some(node) = parse.limitOffset.as_deref() {
         match nodeptr_as_const_isnull_value(node) {
             Some((isnull, value)) => {
                 if !isnull && value != 0 {
@@ -1366,33 +1643,23 @@ fn expr_from_nodeptr<'mcx, F>(
     pick: F,
 ) -> PgResult<Option<Expr>>
 where
-    F: for<'a> Fn(&'a Query<'mcx>) -> Option<&'a types_nodes::nodes::NodePtr<'mcx>>,
+    F: for<'a> Fn(&'a Query<'mcx>) -> Option<&'a mcx::PgBox<'mcx, Expr>>,
 {
     let parse = run.resolve(root.parse);
     match pick(parse) {
         None => Ok(None),
-        Some(node) => Ok(Some(node_to_expr(node)?)),
+        // `limitCount` / `limitOffset` are the concretely-typed
+        // `Option<PgBox<Expr>>` view; the owned `Expr` is in hand directly.
+        Some(e) => Ok(Some((**e).clone())),
     }
 }
 
-/// Extract the arena `Expr` carried by a `Node`. The limit/offset expressions
-/// are `Expr`-kind nodes; this is the `Node`→`Expr` projection for the scalar
-/// limit path. Unsupported `Node` kinds here would be a parser/planner bug.
-fn node_to_expr<'mcx>(node: &Node<'mcx>) -> PgResult<Expr> {
-    match node.as_expr() {
-        Some(e) => Ok(e.clone()),
-        None => Err(PgError::error(
-            "planner: LIMIT/OFFSET expression Node does not carry an Expr",
-        )),
-    }
-}
-
-/// `((Const *) node)->constisnull` / `DatumGetInt64(constvalue)` over a
-/// `NodePtr` that may hold a `Const`. Returns `Some((isnull, value))` if the
-/// node is a `Const`, else `None` (non-constant).
-fn nodeptr_as_const_isnull_value<'mcx>(node: &Node<'mcx>) -> Option<(bool, i64)> {
-    match node.as_expr() {
-        Some(Expr::Const(c)) => Some((c.constisnull, datum_get_int64(c))),
+/// `((Const *) node)->constisnull` / `DatumGetInt64(constvalue)` over a limit/
+/// offset `Expr` that may be a `Const`. Returns `Some((isnull, value))` if the
+/// expression is a `Const`, else `None` (non-constant).
+fn nodeptr_as_const_isnull_value(expr: &Expr) -> Option<(bool, i64)> {
+    match expr {
+        Expr::Const(c) => Some((c.constisnull, datum_get_int64(c))),
         _ => None,
     }
 }
@@ -1418,3 +1685,6 @@ pub fn init_seams() {
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
 }
+
+#[cfg(test)]
+mod tests;

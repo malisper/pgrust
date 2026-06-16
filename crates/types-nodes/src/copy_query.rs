@@ -11,7 +11,7 @@ use types_error::PgResult;
 use crate::nodelimit::LimitOption;
 use crate::nodes::{CmdType, NodePtr};
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
-use crate::primnodes::TargetEntry;
+use crate::primnodes::{Expr, TargetEntry};
 use crate::rawnodes::{FromExpr, OnConflictExpr};
 
 /// `CURSOR_OPT_PARALLEL_OK` (`nodes/parsenodes.h`) — parallel mode OK.
@@ -109,7 +109,10 @@ pub struct Query<'mcx> {
     /// `int mergeTargetRelation` — rtable index of MERGE source target rel.
     pub mergeTargetRelation: i32,
     /// `Node *mergeJoinCondition` — join condition source/target for MERGE.
-    pub mergeJoinCondition: Option<NodePtr<'mcx>>,
+    /// Although C types it `Node *`, it only ever holds an expression, so this
+    /// is the concretely-typed `Option<PgBox<Expr>>` view (matching `targetList`
+    /// and the jointree, which are already concretely typed).
+    pub mergeJoinCondition: Option<PgBox<'mcx, Expr>>,
     /// `List *targetList` — target list (of `TargetEntry`).
     pub targetList: PgVec<'mcx, TargetEntry<'mcx>>,
     /// `OverridingKind override` — OVERRIDING clause.
@@ -131,18 +134,21 @@ pub struct Query<'mcx> {
     pub groupDistinct: bool,
     /// `List *groupingSets` — a list of `GroupingSet`'s if present.
     pub groupingSets: PgVec<'mcx, NodePtr<'mcx>>,
-    /// `Node *havingQual` — qualifications applied to groups.
-    pub havingQual: Option<NodePtr<'mcx>>,
+    /// `Node *havingQual` — qualifications applied to groups. C types it
+    /// `Node *`, but it only ever holds an expression; concretely typed here.
+    pub havingQual: Option<PgBox<'mcx, Expr>>,
     /// `List *windowClause` — a list of `WindowClause`'s.
     pub windowClause: PgVec<'mcx, NodePtr<'mcx>>,
     /// `List *distinctClause` — a list of `SortGroupClause`'s.
     pub distinctClause: PgVec<'mcx, NodePtr<'mcx>>,
     /// `List *sortClause` — a list of `SortGroupClause`'s.
     pub sortClause: PgVec<'mcx, NodePtr<'mcx>>,
-    /// `Node *limitOffset` — # of result tuples to skip (int8 expr).
-    pub limitOffset: Option<NodePtr<'mcx>>,
-    /// `Node *limitCount` — # of result tuples to return (int8 expr).
-    pub limitCount: Option<NodePtr<'mcx>>,
+    /// `Node *limitOffset` — # of result tuples to skip (int8 expr). C types it
+    /// `Node *`, but it only ever holds an expression; concretely typed here.
+    pub limitOffset: Option<PgBox<'mcx, Expr>>,
+    /// `Node *limitCount` — # of result tuples to return (int8 expr). C types it
+    /// `Node *`, but it only ever holds an expression; concretely typed here.
+    pub limitCount: Option<PgBox<'mcx, Expr>>,
     /// `LimitOption limitOption` — limit type.
     pub limitOption: LimitOption,
     /// `List *rowMarks` — a list of `RowMarkClause`'s.
@@ -265,7 +271,7 @@ impl<'mcx> Query<'mcx> {
             },
             mergeActionList: copy_node_vec(&self.mergeActionList, mcx)?,
             mergeTargetRelation: self.mergeTargetRelation,
-            mergeJoinCondition: copy_opt_node(&self.mergeJoinCondition, mcx)?,
+            mergeJoinCondition: copy_opt_expr(&self.mergeJoinCondition, mcx)?,
             targetList: copy_te_vec(&self.targetList, mcx)?,
             r#override: self.r#override,
             onConflict: match &self.onConflict {
@@ -285,12 +291,12 @@ impl<'mcx> Query<'mcx> {
             groupClause: copy_node_vec(&self.groupClause, mcx)?,
             groupDistinct: self.groupDistinct,
             groupingSets: copy_node_vec(&self.groupingSets, mcx)?,
-            havingQual: copy_opt_node(&self.havingQual, mcx)?,
+            havingQual: copy_opt_expr(&self.havingQual, mcx)?,
             windowClause: copy_node_vec(&self.windowClause, mcx)?,
             distinctClause: copy_node_vec(&self.distinctClause, mcx)?,
             sortClause: copy_node_vec(&self.sortClause, mcx)?,
-            limitOffset: copy_opt_node(&self.limitOffset, mcx)?,
-            limitCount: copy_opt_node(&self.limitCount, mcx)?,
+            limitOffset: copy_opt_expr(&self.limitOffset, mcx)?,
+            limitCount: copy_opt_expr(&self.limitCount, mcx)?,
             limitOption: self.limitOption,
             rowMarks: copy_node_vec(&self.rowMarks, mcx)?,
             setOperations: copy_opt_node(&self.setOperations, mcx)?,
@@ -316,6 +322,18 @@ fn copy_opt_node<'b>(
 ) -> PgResult<Option<NodePtr<'b>>> {
     match n {
         Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// Deep-copy an `Option<PgBox<Expr>>` (an expression-only `Node *` field) into
+/// `mcx`.
+fn copy_opt_expr<'b>(
+    e: &Option<PgBox<'_, Expr>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<PgBox<'b, Expr>>> {
+    match e {
+        Some(e) => Ok(Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }

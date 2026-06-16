@@ -861,6 +861,20 @@ pub fn query_tree_walker(
         }};
     }
 
+    // Expression-only `Query` fields (havingQual/limitOffset/limitCount/
+    // mergeJoinCondition) are concretely typed `Option<PgBox<Expr>>`; like a
+    // TargetEntry's expr they cannot be re-wrapped into a `Node` without an
+    // allocator, so WALK the expression directly as `Node::Expr` (the same child
+    // the C reaches). The lifetime-free `Expr` clone is total.
+    macro_rules! walk_opt_expr {
+        ($opt:expr) => {
+            match $opt {
+                Some(e) => walker(&Node::Expr((**e).clone())),
+                None => false,
+            }
+        };
+    }
+
     // targetList / returningList are `Vec<TargetEntry>` (typed), wrapped per-elem.
     if walk_targetentry_list(&query.targetList, walker) {
         return true;
@@ -881,19 +895,19 @@ pub fn query_tree_walker(
     if list_walk!(query.mergeActionList) {
         return true;
     }
-    if walk_opt!(query.mergeJoinCondition.as_ref()) {
+    if walk_opt_expr!(query.mergeJoinCondition.as_ref()) {
         return true;
     }
     if list_walk!(query.windowClause) {
         return true;
     }
-    if walk_opt!(query.havingQual.as_ref()) {
+    if walk_opt_expr!(query.havingQual.as_ref()) {
         return true;
     }
-    if walk_opt!(query.limitOffset.as_ref()) {
+    if walk_opt_expr!(query.limitOffset.as_ref()) {
         return true;
     }
-    if walk_opt!(query.limitCount.as_ref()) {
+    if walk_opt_expr!(query.limitCount.as_ref()) {
         return true;
     }
     if list_walk!(query.withCheckOptions) {
@@ -1058,6 +1072,25 @@ pub fn query_tree_mutator(
         }};
     }
 
+    // Expression-only `Query` fields are concretely typed `Option<PgBox<Expr>>`;
+    // MUTATE the expression through a `Node::Expr` wrapper and write back, exactly
+    // as `mutate_targetentry_list` does for a TargetEntry's expr.
+    macro_rules! mutate_opt_expr {
+        ($opt:expr) => {
+            match $opt {
+                Some(e) => {
+                    let mut wrapped = Node::Expr((**e).clone());
+                    let aborted = mutator(&mut wrapped);
+                    if let Node::Expr(ne) = wrapped {
+                        **e = ne;
+                    }
+                    aborted
+                }
+                None => false,
+            }
+        };
+    }
+
     if mutate_targetentry_list(&mut query.targetList, mutator) {
         return true;
     }
@@ -1072,19 +1105,19 @@ pub fn query_tree_mutator(
     if list_walk!(query.mergeActionList) {
         return true;
     }
-    if walk_opt!(query.mergeJoinCondition.as_mut()) {
+    if mutate_opt_expr!(query.mergeJoinCondition.as_mut()) {
         return true;
     }
     if list_walk!(query.windowClause) {
         return true;
     }
-    if walk_opt!(query.havingQual.as_mut()) {
+    if mutate_opt_expr!(query.havingQual.as_mut()) {
         return true;
     }
-    if walk_opt!(query.limitOffset.as_mut()) {
+    if mutate_opt_expr!(query.limitOffset.as_mut()) {
         return true;
     }
-    if walk_opt!(query.limitCount.as_mut()) {
+    if mutate_opt_expr!(query.limitCount.as_mut()) {
         return true;
     }
     if list_walk!(query.withCheckOptions) {
