@@ -27,6 +27,14 @@ pub const STATS_DEPS_MAGIC: u32 = 0xB454_9A2C;
 /// serialization type.
 pub const STATS_DEPS_TYPE_BASIC: u32 = 1;
 
+/// `STATS_NDISTINCT_MAGIC` (`statistics/statistics.h`): magic number identifying
+/// a serialized `MVNDistinct` blob (`0xA352BFA4`).
+pub const STATS_NDISTINCT_MAGIC: u32 = 0xA352_BFA4;
+
+/// `STATS_NDISTINCT_TYPE_BASIC` (`statistics/statistics.h`): the only ndistinct
+/// serialization type.
+pub const STATS_NDISTINCT_TYPE_BASIC: u32 = 1;
+
 /// `STATS_EXT_DEPENDENCIES` (`catalog/pg_statistic_ext.h`): the 'f' kind char.
 pub const STATS_EXT_DEPENDENCIES: i8 = b'f' as i8;
 
@@ -104,4 +112,48 @@ pub struct MVDependencies {
     pub ndeps: u32,
     /// dependencies (boxed, mirroring the C array of pointers)
     pub deps: Vec<Box<MVDependency>>,
+}
+
+/// `MVNDistinctItem` (`statistics/statistics.h`).
+///
+/// C is a flexible-array struct:
+/// ```c
+/// typedef struct MVNDistinctItem {
+///     double      ndistinct;       /* ndistinct value for this combination */
+///     int         nattributes;     /* number of attributes */
+///     AttrNumber *attributes;      /* attribute numbers */
+/// } MVNDistinctItem;
+/// ```
+/// (In C the `attributes` are `palloc`'d separately, not a FAM.) The owned mirror
+/// replaces the pointer with an owned `Vec`; the invariant `attributes.len() ==
+/// nattributes` is upheld by the (de)serializers and the build loop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MVNDistinctItem {
+    /// ndistinct value for this combination
+    pub ndistinct: f64,
+    /// attribute numbers (`nattributes == attributes.len()`)
+    pub attributes: Vec<AttrNumber>,
+}
+
+/// `MVNDistinct` (`statistics/statistics.h`).
+///
+/// C is a flexible-array struct:
+/// ```c
+/// typedef struct MVNDistinct {
+///     uint32              magic;   /* magic constant marker */
+///     uint32              type;    /* type of ndistinct (BASIC) */
+///     uint32              nitems;  /* number of items in the statistic */
+///     MVNDistinctItem     items[FLEXIBLE_ARRAY_MEMBER]; /* array of items */
+/// } MVNDistinct;
+/// ```
+/// The owned mirror replaces the FAM with an owned `Vec`; the invariant
+/// `items.len() == nitems` is upheld by the (de)serializers and the build loop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MVNDistinct {
+    /// magic constant marker
+    pub magic: u32,
+    /// type of ndistinct (BASIC)
+    pub r#type: u32,
+    /// array of items (length is the C `nitems`)
+    pub items: Vec<MVNDistinctItem>,
 }

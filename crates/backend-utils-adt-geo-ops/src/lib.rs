@@ -79,6 +79,57 @@ impl Polygon {
     pub fn npts(&self) -> i32 {
         self.points.len() as i32
     }
+
+    /// `DatumGetPolygonP(datum)` analogue: decode the in-memory `POLYGON`
+    /// varlena image into the owned value. The image layout matches the C
+    /// `struct POLYGON` (geo_decls.h:151): a 4-byte `vl_len_` varlena header,
+    /// then `int32 npts`, then `BOX boundbox` (32 bytes), then `Point p[npts]`
+    /// (16 bytes each) — `POLYGON_HEADER_SIZE` (40) is `offsetof(POLYGON, p)`
+    /// from the start of the struct (including the 4-byte length word and 4
+    /// bytes of `npts`).
+    ///
+    /// Panics on a too-short image — a caller bug, exactly as C would misread a
+    /// truncated detoasted pointer.
+    pub fn from_datum_image(bytes: &[u8]) -> Polygon {
+        // Skip the 4-byte varlena length word; read npts (int32, native order).
+        let mut npts_b = [0u8; 4];
+        npts_b.copy_from_slice(&bytes[4..8]);
+        let npts = i32::from_ne_bytes(npts_b) as usize;
+
+        // boundbox: BOX (32 bytes) at offset 8.
+        let boundbox = BOX::from_datum_bytes(&bytes[8..40]);
+
+        // points: npts * Point (16 bytes each) starting at offset 40
+        // (= POLYGON_HEADER_SIZE).
+        let mut points: Vec<Point> = Vec::with_capacity(npts);
+        let base = types_core::geo::POLYGON_HEADER_SIZE;
+        for i in 0..npts {
+            let off = base + i * 16;
+            points.push(Point::from_datum_bytes(&bytes[off..off + 16]));
+        }
+        Polygon { boundbox, points }
+    }
+
+    /// `PolygonPGetDatum(poly)` analogue: serialize this polygon to its in-memory
+    /// `POLYGON` varlena image (4-byte `vl_len_` length word, `int32 npts`,
+    /// `BOX boundbox`, then `Point p[npts]`). The caller wraps the bytes in a
+    /// `Datum::ByRef`.
+    pub fn to_datum_image(&self) -> Vec<u8> {
+        let npts = self.points.len();
+        let total = types_core::geo::POLYGON_HEADER_SIZE + npts * 16;
+        let mut out = vec![0u8; total];
+        // vl_len_: the standard 4-byte varlena length word (length << 2, lowest
+        // bits clear). Mirrors `SET_VARSIZE(poly, total)`.
+        out[0..4].copy_from_slice(&((total as u32) << 2).to_ne_bytes());
+        out[4..8].copy_from_slice(&(npts as i32).to_ne_bytes());
+        out[8..40].copy_from_slice(&self.boundbox.to_datum_bytes());
+        let base = types_core::geo::POLYGON_HEADER_SIZE;
+        for (i, p) in self.points.iter().enumerate() {
+            let off = base + i * 16;
+            out[off..off + 16].copy_from_slice(&p.to_datum_bytes());
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +587,10 @@ pub fn init_seams() {
     seams::point_eq::set(point_eq);
 
     seams::box_contain_pt::set(box_contain_pt);
+
+    seams::poly_query_boundbox::set(poly_query_boundbox);
+    seams::poly_contain_pt_image::set(poly_contain_pt_image);
+    seams::circle_contain_pt::set(circle_contain_pt);
 }
 
 #[cfg(test)]
@@ -559,6 +614,32 @@ mod tests {
 
     fn p(x: f64, y: f64) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn polygon_datum_image_roundtrip() {
+        // Triangle; boundbox recomputed on decode via from_datum_image carries
+        // the serialized boundbox bytes.
+        let mut poly = Polygon {
+            boundbox: BOX::default(),
+            points: vec![p(0.0, 0.0), p(4.0, 0.0), p(2.0, 3.0)],
+        };
+        make_bound_box(&mut poly);
+
+        let image = poly.to_datum_image();
+        // POLYGON_HEADER_SIZE (40) + 3 points * 16 bytes.
+        assert_eq!(image.len(), 40 + 3 * 16);
+
+        let back = Polygon::from_datum_image(&image);
+        assert_eq!(back.points, poly.points);
+        assert_eq!(back.boundbox, poly.boundbox);
+
+        // The boundbox extracted directly from the image matches.
+        assert_eq!(poly_query_boundbox(&image), poly.boundbox);
+        // poly_contain_pt_image: an interior point is contained, an exterior is not.
+        setup();
+        assert!(poly_contain_pt_image(&image, &p(2.0, 1.0)).unwrap());
+        assert!(!poly_contain_pt_image(&image, &p(10.0, 10.0)).unwrap());
     }
 
     #[test]
