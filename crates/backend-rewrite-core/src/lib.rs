@@ -66,6 +66,7 @@ extern crate alloc;
 
 pub mod change;
 pub mod increment;
+pub mod insert_select;
 pub mod nulling;
 pub mod offset;
 pub mod relids;
@@ -81,6 +82,7 @@ pub use change::{
     ChangeVarNodesWalkExpression,
 };
 pub use increment::{IncrementVarSublevelsUp, IncrementVarSublevelsUp_rtable, SetVarReturningType};
+pub use insert_select::getInsertSelectQuery;
 pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
 pub use offset::OffsetVarNodes;
 pub use replace::{
