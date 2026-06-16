@@ -16433,6 +16433,7 @@ dependencies = [
  "backend-utils-activity-shmem-seams",
  "backend-utils-activity-small",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-dsa-seams",
  "types-core",
  "types-dsa",

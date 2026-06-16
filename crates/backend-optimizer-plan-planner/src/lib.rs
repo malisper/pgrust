@@ -1263,22 +1263,36 @@ fn grouping_planner<'mcx>(
     let _ = setops;
 
     // query_planner(root, standard_qp_callback, &qp_extra) (C:1654).
-    let mut qp_callback = |root: &mut PlannerInfo| -> PgResult<()> {
-        standard_qp_callback(run_ptr_hack(), root)
+    //
+    // The qp_callback signature (`&mut dyn FnMut(&mut PlannerInfo)`) cannot reach
+    // `run`, so any clause data the callback needs from the `Query` must be
+    // resolved *before* `query_planner` and captured by the closure. On the
+    // ORDER-BY path the only `Query`-resident input `standard_qp_callback` reads
+    // is `parse->sortClause`; GROUP BY / DISTINCT / window / set-op / grouping
+    // sets are gated out above and below (each loud-panics at its C site). We
+    // bridge `parse->sortClause` (a `List *` of `SortGroupClause` values carried
+    // as `NodePtr`) into the planner node arena up front (`alloc_sortgroupclause`),
+    // mirroring the C `List *` of `SortGroupClause *`, and the captured handles
+    // are everything the callback needs. The remaining inputs
+    // (`root->processed_tlist`, `root->processed_groupClause`,
+    // `root->processed_distinctClause`) already live on `root`.
+    let sort_clause_ids: Vec<types_pathnodes::NodeId> = {
+        let sort_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+            .resolve(root.parse)
+            .sortClause
+            .iter()
+            .map(|np| sortgroupclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        sort_clauses
+            .into_iter()
+            .map(|sgc| root.alloc_sortgroupclause(sgc))
+            .collect()
     };
-    // The qp_callback needs `run` to resolve sort/group clauses; but the closure
-    // can't capture `run` mutably while query_planner also borrows `run` mutably.
-    // standard_qp_callback for the simple case sets query_pathkeys/sort_pathkeys
-    // from sortClause/group; this needs the Query, hence `run`. The owner
-    // query_planner threads only `&mut PlannerInfo` into the callback, so the
-    // callback cannot reach `run`. This is the documented qp_callback boundary:
-    // for a query with no sort/group/distinct clause the pathkeys are all empty
-    // and the callback is a no-op; we port that case. A query *with* a
-    // sort/group/distinct clause needs the Query in the callback, which is not
-    // expressible here.
-    let _ = &mut qp_callback;
-    let mut noop_callback = standard_qp_callback_pathkeys_empty;
-    let current_rel = backend_optimizer_plan_small::query_planner(mcx, run, root, &mut noop_callback)?;
+    let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
+        standard_qp_callback(root, &sort_clause_ids)
+    };
+    let mut current_rel =
+        backend_optimizer_plan_small::query_planner(mcx, run, root, &mut qp_callback)?;
 
     // create_pathtarget(root, root->processed_tlist) (C:1665) =
     // set_pathtarget_cost_width(root, make_pathtarget_from_tlist(processed_tlist)).
@@ -1311,23 +1325,23 @@ fn grouping_planner<'mcx>(
         )
     };
 
-    // ORDER BY post-sort projection (C:1672-1686). Unsupported here: a
-    // sortClause needs make_sort_input_target + create_ordered_paths over the
-    // unported upper-sort path machinery. Panic precisely before computing
-    // sort_input_target.
-    if has_sort {
-        panic!(
-            "grouping_planner: ORDER BY needs make_sort_input_target + \
-             create_ordered_paths (planner.c:1674/1852) — the upper-sort path \
-             machinery is not ported"
-        );
-    }
-    // With no sortClause, sort_input_target = final_target (C:1683-1685).
+    // ORDER BY post-sort projection (C:1672-1686). If ORDER BY was given,
+    // consider whether a post-sort projection is worthwhile and compute the
+    // adjusted target for the preceding steps; otherwise sort_input_target =
+    // final_target.
+    let mut have_postponed_srfs = false;
+    let (sort_input_target, sort_input_target_parallel_safe) = if has_sort {
+        let sit = make_sort_input_target(run, root, &final_target, &mut have_postponed_srfs)?;
+        let safe = is_target_exprs_parallel_safe(root, &sit.exprs);
+        (sit, safe)
+    } else {
+        (final_target.clone(), final_target_parallel_safe)
+    };
 
     // Window functions were already rejected above (C:1588-1609 panic); assert.
     debug_assert!(!has_window);
-    // With no activeWindows, grouping_target = sort_input_target = final_target
-    // (C:1703-1705).
+    // With no activeWindows, grouping_target = sort_input_target (C:1703-1705).
+    let grouping_target = sort_input_target.clone();
 
     // Grouping/aggregation (C:1709-1726). have_grouping = groupClause ||
     // groupingSets || hasAggs || hasHavingQual. The hasAggs / groupingSets
@@ -1362,10 +1376,11 @@ fn grouping_planner<'mcx>(
         );
     }
 
-    // No SRFs: scanjoin_targets = list_make1(scanjoin_target) (C:1764-1767).
-    // scanjoin_target == final_target on this simple path.
-    let scanjoin_target = final_target;
-    let scanjoin_target_parallel_safe = final_target_parallel_safe;
+    // No grouping / window: scanjoin_target = grouping_target = sort_input_target
+    // (C:1722-1725). No SRFs: scanjoin_targets = list_make1(scanjoin_target)
+    // (C:1764-1767).
+    let scanjoin_target = grouping_target.clone();
+    let scanjoin_target_parallel_safe = sort_input_target_parallel_safe;
 
     // scanjoin_target_same_exprs = list_length(scanjoin_targets) == 1
     //   && equal(scanjoin_target->exprs, current_rel->reltarget->exprs) (C:1771).
@@ -1390,20 +1405,39 @@ fn grouping_planner<'mcx>(
         scanjoin_target_same_exprs,
     )?;
 
-    // Save the upper-rel PathTargets into root.upper_targets[] (C:1785-1791).
-    // On this simple path final_target == sort_input_target == grouping_target,
-    // so every saved target is `scanjoin_target` (= final_target). The core
-    // code does not read these; they are a convenience for extensions.
-    root.upper_targets[UPPERREL_FINAL as usize] = Some(Box::new(scanjoin_target.clone()));
-    root.upper_targets[UPPERREL_ORDERED as usize] = Some(Box::new(scanjoin_target.clone()));
-    root.upper_targets[UPPERREL_DISTINCT as usize] = Some(Box::new(scanjoin_target.clone()));
+    // Save the upper-rel PathTargets into root.upper_targets[] (C:1785-1790).
+    // FINAL/ORDERED = final_target; DISTINCT/PARTIAL_DISTINCT/WINDOW =
+    // sort_input_target; GROUP_AGG = grouping_target. The core code does not read
+    // these; they are a convenience for extensions.
+    root.upper_targets[UPPERREL_FINAL as usize] = Some(Box::new(final_target.clone()));
+    root.upper_targets[UPPERREL_ORDERED as usize] = Some(Box::new(final_target.clone()));
+    root.upper_targets[UPPERREL_DISTINCT as usize] = Some(Box::new(sort_input_target.clone()));
     root.upper_targets[UPPERREL_PARTIAL_DISTINCT as usize] =
-        Some(Box::new(scanjoin_target.clone()));
-    root.upper_targets[UPPERREL_WINDOW as usize] = Some(Box::new(scanjoin_target.clone()));
-    root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(Box::new(scanjoin_target.clone()));
+        Some(Box::new(sort_input_target.clone()));
+    root.upper_targets[UPPERREL_WINDOW as usize] = Some(Box::new(sort_input_target.clone()));
+    root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(Box::new(grouping_target.clone()));
 
-    // No grouping / window / distinct / ordered upper rels on this path
-    // (C:1797-1864 all guarded out). current_rel is unchanged.
+    // No grouping / window / distinct upper rels on this path (C:1797-1841 all
+    // guarded out). current_rel is unchanged so far.
+
+    // If ORDER BY was given, generate a new upperrel of paths that emit the
+    // correct ordering and project final_target (C:1849-1866). We can apply the
+    // limit_tuples bound in sort costing only if there are no postponed SRFs.
+    if has_sort {
+        let limit_for_sort = if have_postponed_srfs { -1.0 } else { limit_tuples };
+        let ordered_rel = create_ordered_paths(
+            root,
+            current_rel,
+            &final_target,
+            final_target_parallel_safe,
+            limit_for_sort,
+        )?;
+        // adjust_paths_for_srfs when final_target contains SRFs (C:1860-1862) is
+        // gated out: hasTargetSRFs loud-panics above before this point.
+        debug_assert!(!has_target_srfs);
+        // current_rel becomes the ordered upperrel for the final-output build.
+        current_rel = ordered_rel;
+    }
 
     // Now build the final-output upperrel (C:1868).
     let final_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_FINAL, &None);
@@ -1641,42 +1675,360 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     Ok(())
 }
 
-/// Hack placeholder — see `grouping_planner`'s qp_callback note. Not called.
-#[inline]
-fn run_ptr_hack<'mcx>() -> &'mcx mut PlannerRun<'mcx> {
-    unreachable!("run_ptr_hack is never invoked")
-}
+/// `standard_qp_callback(root, extra)` (planner.c:3453) — the
+/// `query_pathkeys_callback` upcall, computing the grouping/ordering pathkeys
+/// once EquivalenceClasses are canonical.
+///
+/// `sort_clause_ids` are the `parse->sortClause` `SortGroupClause`s bridged into
+/// the planner node arena by `grouping_planner` (the only `Query`-resident input
+/// the callback needs; the `query_planner` callback signature cannot reach
+/// `run`). GROUP BY / DISTINCT / window / set-op / grouping-sets / ordered-aggs
+/// are gated out by `grouping_planner`'s upstream loud-panics, so on this path:
+///
+///  * `group_pathkeys` / `window_pathkeys` / `distinct_pathkeys` /
+///    `setop_pathkeys` are all NIL (their producing clauses are empty here), and
+///  * `sort_pathkeys = make_pathkeys_for_sortclauses(parse->sortClause, tlist)`.
+///
+/// The `query_pathkeys` selection then reduces (group/window/distinct/setop all
+/// empty) to `sort_pathkeys` when ORDER BY is present, else NIL — exactly the C
+/// cascade (planner.c:3630-3642).
+fn standard_qp_callback(
+    root: &mut PlannerInfo,
+    sort_clause_ids: &[types_pathnodes::NodeId],
+) -> PgResult<()> {
+    // tlist = root->processed_tlist (C:3457).
+    let tlist = root.processed_tlist.clone();
 
-/// `standard_qp_callback` (planner.c) reduced to the no-clause case: with no
-/// sort/group/distinct/window clauses, all of `query_pathkeys` /
-/// `sort_pathkeys` / `group_pathkeys` / `distinct_pathkeys` / `setop_pathkeys`
-/// are empty (NIL), so the callback leaves them at their `Default` (empty) and
-/// returns. A query with such clauses needs the owned Query inside the callback
-/// (`make_pathkeys_for_sortclauses` over `parse->sortClause` /
-/// `root->processed_*Clause`), which the value-model `query_planner` callback
-/// signature (`&mut dyn FnMut(&mut PlannerInfo)`) cannot reach (no `run`); that
-/// is the documented boundary in `grouping_planner`.
-fn standard_qp_callback_pathkeys_empty(root: &mut PlannerInfo) -> PgResult<()> {
-    // query_pathkeys = NIL on the no-clause path.
-    root.query_pathkeys = Vec::new();
-    root.sort_pathkeys = Vec::new();
+    // GROUP BY / window / DISTINCT / set-op pathkeys are all NIL on this path
+    // (their clauses are gated out upstream). Mirror the C else-branches that
+    // assign NIL.
     root.group_pathkeys = Vec::new();
+    root.num_groupby_pathkeys = 0;
+    root.window_pathkeys = Vec::new();
     root.distinct_pathkeys = Vec::new();
     root.setop_pathkeys = Vec::new();
+
+    // root->sort_pathkeys =
+    //   make_pathkeys_for_sortclauses(root, parse->sortClause, tlist) (C:3583).
+    root.sort_pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
+        root,
+        sort_clause_ids,
+        &tlist,
+    );
+
+    // query_pathkeys cascade (C:3630-3642): group/window empty, distinct empty
+    // (so its length 0 is not > sort_pathkeys length), so query_pathkeys =
+    // sort_pathkeys if non-empty, else (setop empty) NIL.
+    root.query_pathkeys = if !root.group_pathkeys.is_empty() {
+        root.group_pathkeys.clone()
+    } else if !root.window_pathkeys.is_empty() {
+        root.window_pathkeys.clone()
+    } else if root.distinct_pathkeys.len() > root.sort_pathkeys.len() {
+        root.distinct_pathkeys.clone()
+    } else if !root.sort_pathkeys.is_empty() {
+        root.sort_pathkeys.clone()
+    } else if !root.setop_pathkeys.is_empty() {
+        root.setop_pathkeys.clone()
+    } else {
+        Vec::new()
+    };
+
     Ok(())
 }
 
-/// Full-fidelity `standard_qp_callback` (kept for documentation; not wired —
-/// see the `grouping_planner` qp_callback note). It needs the owned `Query`,
-/// which the value-model callback signature cannot carry.
-#[allow(dead_code)]
-fn standard_qp_callback(_run: &mut PlannerRun<'_>, _root: &mut PlannerInfo) -> PgResult<()> {
-    panic!(
-        "standard_qp_callback: the full callback (make_pathkeys_for_sortclauses over \
-         parse->sortClause / processed_groupClause / processed_distinctClause) needs \
-         the owned Query inside the callback, which the query_planner callback \
-         signature (&mut dyn FnMut(&mut PlannerInfo)) cannot reach"
+/// Read a `parse->sortClause` element (a `SortGroupClause` carried as
+/// `NodePtr<Node>`) as a plain (`Copy`) [`types_nodes::rawnodes::SortGroupClause`]
+/// value for interning into the planner node arena. A `sortClause` element is
+/// always a `SortGroupClause` (parser invariant); any other node is a bug.
+fn sortgroupclause_from_node(
+    np: &mcx::PgBox<'_, Node<'_>>,
+) -> PgResult<types_nodes::rawnodes::SortGroupClause> {
+    match &**np {
+        Node::SortGroupClause(sgc) => Ok(*sgc),
+        other => panic!(
+            "grouping_planner: sortClause element is not a SortGroupClause (got {:?})",
+            other.tag()
+        ),
+    }
+}
+
+/// `enable_incremental_sort` GUC, read through the guc-tables slot.
+fn enable_incremental_sort() -> bool {
+    backend_utils_misc_guc_tables::vars::enable_incremental_sort.read()
+}
+
+/// `get_pathtarget_sortgroupref(target, i)` (pathnodes.h macro) — the i'th
+/// sortgroupref, or 0 if the target carries no sortgrouprefs array / the slot is
+/// unset.
+#[inline]
+fn get_pathtarget_sortgroupref(target: &PathTarget, i: usize) -> u32 {
+    target.sortgrouprefs.get(i).copied().unwrap_or(0)
+}
+
+/// `make_sort_input_target(root, final_target, &have_postponed_srfs)`
+/// (planner.c:6441).
+///
+/// Decide whether a post-sort projection is worthwhile and, if so, build the
+/// PathTarget to be computed by the plan node immediately below the Sort (and
+/// any Distinct) step. Returns `final_target` unchanged when no projection helps;
+/// sets `*have_postponed_srfs` per the C contract.
+fn make_sort_input_target<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    final_target: &PathTarget,
+    have_postponed_srfs: &mut bool,
+) -> PgResult<PathTarget> {
+    // Shouldn't get here unless query has ORDER BY (C:6460).
+    debug_assert!(!run.resolve(root.parse).sortClause.is_empty());
+
+    *have_postponed_srfs = false; // default result.
+
+    let has_target_srfs = run.resolve(root.parse).hasTargetSRFs;
+    let tuple_fraction = root.tuple_fraction;
+    let has_limit_count = run.resolve(root.parse).limitCount.is_some();
+
+    // Inspect tlist and collect per-column information (C:6463-6535).
+    let ncols = final_target.exprs.len();
+    let mut col_is_srf = alloc::vec![false; ncols];
+    let mut postpone_col = alloc::vec![false; ncols];
+    let mut have_srf = false;
+    let mut have_volatile = false;
+    let mut have_expensive = false;
+    let mut have_srf_sortcols = false;
+
+    let cpu_op_cost = backend_optimizer_path_costsize::CPU_OPERATOR_COST;
+
+    for i in 0..ncols {
+        let expr_id = final_target.exprs[i];
+
+        if get_pathtarget_sortgroupref(final_target, i) == 0 {
+            // Check for SRF or volatile functions. SRF first (we must know
+            // whether we have any postponed SRFs) (C:6486-6491).
+            let returns_set = has_target_srfs
+                && backend_nodes_core::nodefuncs::expression_returns_set(Some(root.node(expr_id)));
+            if returns_set {
+                col_is_srf[i] = true;
+                have_srf = true;
+            } else if backend_optimizer_util_clauses::contain_volatile_functions(Some(
+                root.node(expr_id),
+            ))? {
+                // Unconditionally postpone (C:6493-6498).
+                postpone_col[i] = true;
+                have_volatile = true;
+            } else {
+                // Else check the cost (C:6500-6519).
+                let cost = backend_optimizer_path_costsize::cost_qual_eval_node(root, expr_id);
+                // "expensive" = more than 10X cpu_operator_cost.
+                if cost.per_tuple > 10.0 * cpu_op_cost {
+                    postpone_col[i] = true;
+                    have_expensive = true;
+                }
+            }
+        } else {
+            // For sortgroupref cols, just check if any contain SRFs (C:6522-6529).
+            if !have_srf_sortcols
+                && has_target_srfs
+                && backend_nodes_core::nodefuncs::expression_returns_set(Some(root.node(expr_id)))
+            {
+                have_srf_sortcols = true;
+            }
+        }
+    }
+
+    // We can postpone SRFs if we have some but none are in sortgroupref cols
+    // (C:6538).
+    let postpone_srfs = have_srf && !have_srf_sortcols;
+
+    // If we don't need a post-sort projection, just return final_target
+    // (C:6543-6546).
+    if !(postpone_srfs
+        || have_volatile
+        || (have_expensive && (has_limit_count || tuple_fraction > 0.0)))
+    {
+        return Ok(final_target.clone());
+    }
+
+    // Report whether the post-sort projection contains SRFs (C:6554).
+    *have_postponed_srfs = postpone_srfs;
+
+    // Construct the sort-input target: all non-postponable columns, then add
+    // Vars/PHVs/Aggrefs/WindowFuncs found in the postponable ones (C:6560-6583).
+    let mut input_target = backend_optimizer_util_vars::tlist::create_empty_pathtarget();
+    let mut postponable_cols: Vec<types_pathnodes::NodeId> = Vec::new();
+
+    for i in 0..ncols {
+        let expr_id = final_target.exprs[i];
+        if postpone_col[i] || (postpone_srfs && col_is_srf[i]) {
+            postponable_cols.push(expr_id);
+        } else {
+            backend_optimizer_util_vars::tlist::add_column_to_pathtarget(
+                &mut input_target,
+                expr_id,
+                get_pathtarget_sortgroupref(final_target, i),
+            );
+        }
+    }
+
+    // Pull out all Vars/Aggrefs/WindowFuncs/PHVs in postponable columns and add
+    // them to the sort-input target if not already present (C:6590-6595). We
+    // mustn't deconstruct Aggrefs or WindowFuncs (use the INCLUDE flags).
+    let pvc_flags = backend_optimizer_util_vars::PVC_INCLUDE_AGGREGATES
+        | backend_optimizer_util_vars::PVC_INCLUDE_WINDOWFUNCS
+        | backend_optimizer_util_vars::PVC_INCLUDE_PLACEHOLDERS;
+    // pull_var_clause operates over a `Node`; run it per postponable column
+    // (equivalent to walking the C `List *` of postponable exprs), interning each
+    // pulled Var/Aggref/WindowFunc/PHV into the arena to obtain its handle.
+    let mut postponable_vars: Vec<types_pathnodes::NodeId> = Vec::new();
+    for &col in &postponable_cols {
+        let node = Node::Expr(root.node(col).clone());
+        for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
+            postponable_vars.push(root.alloc_node(v));
+        }
+    }
+    backend_optimizer_util_vars::tlist::add_new_columns_to_pathtarget(
+        root,
+        &mut input_target,
+        &postponable_vars,
     );
+
+    // set_pathtarget_cost_width(root, input_target) (C:6603).
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut input_target);
+    Ok(input_target)
+}
+
+/// `create_ordered_paths(root, input_rel, target, target_parallel_safe,
+/// limit_tuples)` (planner.c:5308).
+///
+/// Build a new `UPPERREL_ORDERED` upperrel whose Paths satisfy `root->sort_pathkeys`
+/// and project `target`. Considers an explicit full sort and an incremental sort
+/// over the cheapest-total existing path; the partial-path / Gather-Merge block
+/// is reached only when the input rel is parallel-safe.
+fn create_ordered_paths<'mcx>(
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    target: &PathTarget,
+    target_parallel_safe: bool,
+    limit_tuples: f64,
+) -> PgResult<RelId> {
+    let cheapest_input_path = root
+        .rel(input_rel)
+        .cheapest_total_path
+        .expect("create_ordered_paths: input_rel has no cheapest_total_path");
+
+    // For now, do all work in the (ORDERED, NULL) upperrel (C:5318).
+    let ordered_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_ORDERED, &None);
+
+    // consider_parallel propagation (C:5325-5326).
+    let input_consider_parallel = root.rel(input_rel).consider_parallel;
+    if input_consider_parallel && target_parallel_safe {
+        root.rel_mut(ordered_rel).consider_parallel = true;
+    }
+
+    // If the input rel belongs to a single FDW, so does ordered_rel (C:5331-5335).
+    {
+        let (serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let ir = root.rel(input_rel);
+            (ir.serverid, ir.userid, ir.useridiscurrent, ir.has_fdwroutine)
+        };
+        let or = root.rel_mut(ordered_rel);
+        or.serverid = serverid;
+        or.userid = userid;
+        or.useridiscurrent = useridiscurrent;
+        or.has_fdwroutine = has_fdwroutine;
+    }
+
+    let sort_pathkeys = root.sort_pathkeys.clone();
+
+    // foreach(lc, input_rel->pathlist) (C:5337).
+    let pathlist = root.rel(input_rel).pathlist.clone();
+    for input_path in pathlist {
+        let input_pathkeys = root.path(input_path).base().pathkeys.clone();
+        let (is_sorted, presorted_keys) = backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+            &sort_pathkeys,
+            &input_pathkeys,
+        );
+
+        let mut sorted_path = if is_sorted {
+            input_path
+        } else {
+            // Try at least sorting the cheapest path and also incrementally
+            // sorting any partially-sorted path (C:5352-5379).
+            if input_path != cheapest_input_path
+                && (presorted_keys == 0 || !enable_incremental_sort())
+            {
+                continue;
+            }
+            if presorted_keys == 0 || !enable_incremental_sort() {
+                backend_optimizer_util_pathnode::create::create_sort_path(
+                    root,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys.clone(),
+                    limit_tuples,
+                )?
+            } else {
+                backend_optimizer_util_pathnode::create::create_incremental_sort_path(
+                    root,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys.clone(),
+                    presorted_keys,
+                    limit_tuples,
+                )?
+            }
+        };
+
+        // If the result path's pathtarget differs from `target`, project
+        // (C:5384-5387).
+        if !pathtarget_exprs_equal(root, sorted_path, target) {
+            sorted_path = backend_optimizer_util_pathnode::create::apply_projection_to_path(
+                root,
+                ordered_rel,
+                sorted_path,
+                Box::new(target.clone()),
+            )?;
+        }
+
+        backend_optimizer_util_pathnode::add_path(root, ordered_rel, sorted_path)?;
+    }
+
+    // Partial-path + Gather-Merge block (C:5400-5470). Only reachable when
+    // ordered_rel is parallel-safe and there are partial paths; on the
+    // non-parallel SELECT path this is skipped. Mirror the C precisely; the
+    // Gather-Merge construction here needs the PlannerRun (for parampathinfo),
+    // which create_ordered_paths is not threaded with, so a genuinely-reached
+    // parallel ORDER BY plan loud-panics at this exact site rather than dropping
+    // the parallel paths.
+    let ordered_consider_parallel = root.rel(ordered_rel).consider_parallel;
+    let input_has_partials = !root.rel(input_rel).partial_pathlist.is_empty();
+    if ordered_consider_parallel && !sort_pathkeys.is_empty() && input_has_partials {
+        panic!(
+            "create_ordered_paths: parallel ORDER BY (create_gather_merge_path over \
+             input_rel->partial_pathlist, planner.c:5400-5470) needs the PlannerRun \
+             for get_baserel_parampathinfo, which is not threaded into \
+             create_ordered_paths"
+        );
+    }
+
+    // GetForeignUpperPaths (C:5475-5481): no FDW upper-path routine modeled.
+    // create_upper_paths_hook (C:5484-5486): no hook.
+
+    // set_cheapest is not needed here (grouping_planner doesn't require it).
+    debug_assert!(!root.rel(ordered_rel).pathlist.is_empty());
+    Ok(ordered_rel)
+}
+
+/// `equal(path->pathtarget->exprs, target->exprs)` over a path's PathTarget and
+/// a target. A path always has a non-NULL pathtarget here.
+fn pathtarget_exprs_equal(root: &PlannerInfo, path: PathId, target: &PathTarget) -> bool {
+    let path_exprs: Vec<types_pathnodes::NodeId> = root
+        .path(path)
+        .base()
+        .pathtarget
+        .as_ref()
+        .map(|t| t.exprs.clone())
+        .unwrap_or_default();
+    equal_expr_handle_lists(root, &path_exprs, &target.exprs)
 }
 
 // ===========================================================================

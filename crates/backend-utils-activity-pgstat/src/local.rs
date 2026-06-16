@@ -11,14 +11,64 @@
 //! model (matching C's "only the owning backend touches its `pgStatLocal`").
 
 use core::cell::RefCell;
+use std::collections::HashMap;
+
+use types_pgstat::pgstat_internal::PgStat_HashKey;
 
 use crate::entry_ref::{PgStat_LocalState, PgStat_PendingState};
+
+/// The variable-numbered half of `PgStat_Snapshot` that `types-pgstat`
+/// deliberately omits as owner-internal: C's `pgstat_snapshot_hash *stats`
+/// (the simplehash of per-entry snapshot copies) and the `MemoryContext
+/// context` they are bulk-freed from.
+///
+/// In C `stats` is a simplehash keyed by [`PgStat_HashKey`] whose values carry a
+/// `void *data` (the copied stats body), and `context` is the arena all those
+/// copies are allocated in and reset together. The idiomatic model collapses
+/// both into one owning `HashMap`: the value is the `Option<Box<[u8]>>` copy of
+/// the entry's `shared_data_len` stats bytes (the box *is* the arena allocation;
+/// the map *is* the context, reset by clearing it). `None` is C's
+/// `entry->data == NULL` negative-cache marker that
+/// `PGSTAT_FETCH_CONSISTENCY_CACHE` inserts for a missing/dropped entry.
+///
+/// `prepared` mirrors `pgStatLocal.snapshot.stats != NULL`: the hash exists once
+/// `pgstat_prep_snapshot` has run for the current snapshot lifetime, and is
+/// torn down by `pgstat_clear_snapshot`.
+pub struct PgStat_SnapshotStats {
+    /// `pgStatLocal.snapshot.stats != NULL` — whether the snapshot hash is live.
+    pub prepared: bool,
+    /// C's `pgstat_snapshot_hash *stats` + the `context` arena: each value is the
+    /// snapshot copy of one variable-numbered entry's stats bytes (`None` ==
+    /// C's `entry->data == NULL` negative-cache marker).
+    pub stats: HashMap<PgStat_HashKey, Option<Box<[u8]>>>,
+}
+
+impl PgStat_SnapshotStats {
+    pub fn new() -> Self {
+        PgStat_SnapshotStats {
+            prepared: false,
+            stats: HashMap::new(),
+        }
+    }
+}
+
+impl Default for PgStat_SnapshotStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 thread_local! {
     /// `PgStat_LocalState pgStatLocal` (`pgstat.c`) — this backend's cumulative
     /// statistics control block (shared-control pointer, DSA area, shared hash,
     /// snapshot).
     static PG_STAT_LOCAL: RefCell<PgStat_LocalState> = RefCell::new(PgStat_LocalState::new());
+
+    /// The owner-internal variable-numbered snapshot hash + its arena (the half
+    /// of `PgStat_Snapshot` that `types-pgstat` omits). See
+    /// [`PgStat_SnapshotStats`].
+    static PG_STAT_SNAPSHOT_STATS: RefCell<PgStat_SnapshotStats> =
+        RefCell::new(PgStat_SnapshotStats::new());
 
     /// `dlist_head pgStatPending` + `pgstat_entry_ref_hash_hash *pgStatEntryRefHash`
     /// (`pgstat_shmem.c`) — this backend's pending-flush list and entry-ref
@@ -48,6 +98,12 @@ pub fn with_local<R>(f: impl FnOnce(&mut PgStat_LocalState) -> R) -> R {
 /// Borrow the pending-flush bookkeeping mutably for the duration of `f`.
 pub(crate) fn with_pending<R>(f: impl FnOnce(&mut PgStat_PendingState) -> R) -> R {
     PG_STAT_PENDING.with(|p| f(&mut p.borrow_mut()))
+}
+
+/// Borrow the variable-numbered snapshot hash + arena mutably for the duration
+/// of `f` (the owner-internal half of `pgStatLocal.snapshot`).
+pub(crate) fn with_snapshot_stats<R>(f: impl FnOnce(&mut PgStat_SnapshotStats) -> R) -> R {
+    PG_STAT_SNAPSHOT_STATS.with(|s| f(&mut s.borrow_mut()))
 }
 
 /// `pgstat_is_initialized`.

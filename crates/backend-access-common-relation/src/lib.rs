@@ -91,7 +91,7 @@ fn finish_open<'mcx>(
     // relcache's `strong_count == 1` eviction now gates on open handles
     // (`relation_close`/`Drop` frees the cell). The `Deref` target stays the
     // trimmed copy, so consumers are untouched.
-    let r = Relation::open_with_cell(cell, data, Some(relation_closer));
+    let mut r = Relation::open_with_cell(cell, data, Some(relation_closer));
 
     // If we didn't get the lock ourselves, assert that caller holds one
     // (except, for relation_open, in bootstrap mode where no locks are used).
@@ -117,7 +117,19 @@ fn finish_open<'mcx>(
         backend_access_transam_xact_seams::set_xact_accessed_temp_namespace::call();
     }
 
-    backend_utils_activity_pgstat_seams::pgstat_init_relation::call(r.rd_id)?;
+    // pgstat_init_relation(r) (pgstat_relation.c): decide whether this
+    // relation's cumulative stats should be counted and store the bit onto the
+    // open relation, mirroring C's `rel->pgstat_enabled = ...`. The pgstat
+    // owner reads `rel->rd_rel->relkind` and the `pgstat_track_counts` GUC; we
+    // pass the relkind off the freshly built descriptor and store the returned
+    // bit so every later `pgstat_count_*` gate (which passes
+    // `relation.pgstat_enabled`) sees the right value. C runs this last in
+    // `relation_open`, after the temp-namespace flag.
+    let pgstat_enabled = backend_utils_activity_pgstat_seams::pgstat_init_relation::call(
+        r.rd_id,
+        r.rd_rel.relkind,
+    );
+    r.set_pgstat_enabled(pgstat_enabled);
 
     Ok(r)
 }

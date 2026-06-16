@@ -2396,6 +2396,11 @@ pub enum ArenaNode {
     /// A `NestLoopParam` node — `PlannerInfo::curOuterParams` stores these as
     /// `Node *` handles in the same id-space.
     NestLoopParam(NestLoopParamNode),
+    /// A `SortGroupClause` node — `root->processed_groupClause`,
+    /// `root->processed_distinctClause`, and the sort-clause handle lists fed to
+    /// `make_pathkeys_for_sortclauses` store these as `Node *` handles in the
+    /// same id-space. The payload is the plain (`Copy`) parsenode value.
+    SortGroupClause(types_nodes::rawnodes::SortGroupClause),
 }
 
 /// `NestLoopParam` (nodes/plannodes.h) as carried in `root->curOuterParams`
@@ -2718,6 +2723,37 @@ impl PlannerInfo {
         }
     }
 
+    /// Resolve a [`NodeId`] to its [`types_nodes::rawnodes::SortGroupClause`]
+    /// (an element of a clause handle list, e.g. `processed_groupClause` /
+    /// `processed_distinctClause` / a sort-clause list). Panics if the handle
+    /// does not resolve to a `SortGroupClause` (mirrors C, where a `NodeId` used
+    /// in a sort/group-clause context is always a `SortGroupClause`).
+    #[inline]
+    pub fn sortgroupclause(&self, id: NodeId) -> &types_nodes::rawnodes::SortGroupClause {
+        match &self.node_arena[id.index()] {
+            ArenaNode::SortGroupClause(sgc) => sgc,
+            _ => panic!(
+                "PlannerInfo::sortgroupclause: NodeId {} does not resolve to a SortGroupClause",
+                id.0
+            ),
+        }
+    }
+
+    /// Resolve a [`NodeId`] to its [`SortGroupClause`] for mutation.
+    #[inline]
+    pub fn sortgroupclause_mut(
+        &mut self,
+        id: NodeId,
+    ) -> &mut types_nodes::rawnodes::SortGroupClause {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::SortGroupClause(sgc) => sgc,
+            _ => panic!(
+                "PlannerInfo::sortgroupclause_mut: NodeId {} does not resolve to a SortGroupClause",
+                id.0
+            ),
+        }
+    }
+
     /// Resolve a [`NodeId`] to its [`ForeignKeyOptInfo`] (a `root->fkey_list`
     /// element).
     #[inline]
@@ -2882,6 +2918,21 @@ impl PlannerInfo {
     pub fn alloc_targetentry(&mut self, te: TargetEntryNode) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::TargetEntry(te));
+        id
+    }
+    /// Intern a [`types_nodes::rawnodes::SortGroupClause`] into the node store,
+    /// returning its [`NodeId`] handle. Producers: `grouping_planner` bridges
+    /// `parse->sortClause` / `processed_groupClause` / `processed_distinctClause`
+    /// (parse-tree `SortGroupClause` values) into the arena so the pathkeys
+    /// machinery (`make_pathkeys_for_sortclauses`) can `sortgroupclause()`-resolve
+    /// each handle, mirroring the C `List *` of `SortGroupClause *`.
+    #[inline]
+    pub fn alloc_sortgroupclause(
+        &mut self,
+        sgc: types_nodes::rawnodes::SortGroupClause,
+    ) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::SortGroupClause(sgc));
         id
     }
     /// Intern a [`ForeignKeyOptInfo`] into the node store, returning its

@@ -1522,11 +1522,76 @@ pub fn init_seams() {
     seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
     seams::expr_input_collation_node::set(seam_expr_input_collation_node);
     seams::targetentry_info::set(seam_targetentry_info);
+    seams::sortgroupclause_info::set(seam_sortgroupclause_info);
+    seams::get_sortgroupref_tle::set(seam_get_sortgroupref_tle);
+    seams::get_sortgroupclause_expr::set(seam_get_sortgroupclause_expr);
+    seams::get_sortgroupref_clause_noerr::set(seam_get_sortgroupref_clause_noerr);
     // `get_expr_result_type_node` reaches into funcapi/tupdesc catalog machinery
     // owned by backend-utils-fmgr-funcapi (CreateTemplateTupleDesc /
     // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
     // lookup spine is not part of this pure-node-inspection family, so the seam
     // stays installed by its real owner. Not set here.
+}
+
+/// `sortgroupclause_info(root, sortcl)` seam — read the `SortGroupClause` fields
+/// pathkeys needs off a `NodeId` resolving to a `SortGroupClause` in the planner
+/// node arena. Infallible: a plain arena resolve (mirrors C field reads off a
+/// `SortGroupClause *`).
+fn seam_sortgroupclause_info(
+    root: &types_pathnodes::PlannerInfo,
+    sortcl: types_pathnodes::NodeId,
+) -> backend_nodes_nodeFuncs_seams::SortGroupClauseInfo {
+    let sgc = root.sortgroupclause(sortcl);
+    backend_nodes_nodeFuncs_seams::SortGroupClauseInfo {
+        tle_sort_group_ref: sgc.tleSortGroupRef,
+        sortop: sgc.sortop,
+        reverse_sort: sgc.reverse_sort,
+        nulls_first: sgc.nulls_first,
+    }
+}
+
+/// `get_sortgroupref_tle(root, sortref, target_list)` seam (tlist.c) — the
+/// `TargetEntry` `NodeId` in `target_list` whose `ressortgroupref == sortref`.
+/// The C `elog(ERROR, ...)` is surfaced as a loud panic.
+fn seam_get_sortgroupref_tle(
+    root: &types_pathnodes::PlannerInfo,
+    sortref: u32,
+    target_list: &[types_pathnodes::NodeId],
+) -> types_pathnodes::NodeId {
+    for &tle in target_list {
+        if root.targetentry(tle).ressortgroupref == sortref {
+            return tle;
+        }
+    }
+    panic!("get_sortgroupref_tle: ORDER/GROUP BY expression not found in targetlist");
+}
+
+/// `get_sortgroupclause_expr(root, sortcl, target_list)` seam (tlist.c) — the
+/// `expr` `NodeId` of the `TargetEntry` referenced by the `SortGroupClause`'s
+/// `tleSortGroupRef`.
+fn seam_get_sortgroupclause_expr(
+    root: &types_pathnodes::PlannerInfo,
+    sortcl: types_pathnodes::NodeId,
+    target_list: &[types_pathnodes::NodeId],
+) -> types_pathnodes::NodeId {
+    let sortref = root.sortgroupclause(sortcl).tleSortGroupRef;
+    let tle = seam_get_sortgroupref_tle(root, sortref, target_list);
+    root.targetentry(tle).expr
+}
+
+/// `get_sortgroupref_clause_noerr(root, sortref, clauses)` seam (tlist.c) — the
+/// `SortGroupClause` `NodeId` in `clauses` whose `tleSortGroupRef == sortref`,
+/// or `None` (the `_noerr` variant). `clauses` entries are `SortGroupClause`
+/// `NodeId`s.
+fn seam_get_sortgroupref_clause_noerr(
+    root: &types_pathnodes::PlannerInfo,
+    sortref: u32,
+    clauses: &[types_pathnodes::NodeId],
+) -> Option<types_pathnodes::NodeId> {
+    clauses
+        .iter()
+        .copied()
+        .find(|&cl| root.sortgroupclause(cl).tleSortGroupRef == sortref)
 }
 
 /// `targetentry_info(root, tle)` seam — read the `TargetEntry` fields pathkeys

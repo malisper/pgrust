@@ -437,6 +437,18 @@ impl<'mcx> Relation<'mcx> {
         Some(f(&guard))
     }
 
+    /// Store the `pgstat_init_relation` decision onto this freshly opened
+    /// relation's trimmed copy (C's `rel->pgstat_enabled = ...`). Called by the
+    /// opener right after `pgstat_init_relation`, while this handle is the sole
+    /// holder of the trimmed `RelationData` (it was just `Rc::new`'d and no
+    /// alias has been taken), so the in-place mutation is sound. Panics only if
+    /// invoked after the copy was shared — which the open path never does.
+    pub fn set_pgstat_enabled(&mut self, enabled: bool) {
+        Rc::get_mut(&mut self.data)
+            .expect("set_pgstat_enabled on a shared relation copy")
+            .pgstat_enabled = enabled;
+    }
+
     /// `relation_close(relation, lockmode)` / `table_close(...)`: release
     /// the relcache reference and, if `lockmode` is not `NoLock`, the lock.
     /// On a handle without release authority this is a no-op (the C close of
