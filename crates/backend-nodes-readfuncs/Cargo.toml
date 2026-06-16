@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
 # The tokenizer / nodeRead driver lives in the `read` family of
 # `backend-nodes-core` (`read.c`): `parseNodeString` reads the node body off the
 # shared `pg_strtok` cursor and recurses back through `node_read` for sub-fields.

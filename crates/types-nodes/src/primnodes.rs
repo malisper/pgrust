@@ -417,6 +417,11 @@ pub struct Const {
     /// Read/assigned by `exprCollation`/`exprSetCollation`/`applyRelabelType`
     /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
     pub constcollid: Oid,
+    /// `int constlen` — typlen of the constant's type (the width of a fixed-
+    /// length type, or -1/-2 for varlena/cstring). Copied from
+    /// `get_typlenbyval` at construction. Read by `outDatum` (outfuncs.c) to
+    /// serialize `constvalue`. Added field-for-field vs primnodes.h.
+    pub constlen: i32,
     /// `Datum constvalue` — the constant's value (undefined if `constisnull`).
     ///
     /// A `Const` lives in its plan node's long-lived context (it is not
@@ -426,6 +431,10 @@ pub struct Const {
     pub constvalue: Datum<'static>,
     /// `bool constisnull` — whether the constant is null.
     pub constisnull: bool,
+    /// `bool constbyval` — whether the type is pass-by-value. Copied from
+    /// `get_typlenbyval` at construction. Read by `outDatum` (outfuncs.c) to
+    /// serialize `constvalue`. Added field-for-field vs primnodes.h.
+    pub constbyval: bool,
     /// `ParseLoc location` — token location, or -1 if unknown. Set by the
     /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
     /// primnodes.h.
@@ -438,8 +447,10 @@ impl Default for Const {
             consttype: Default::default(),
             consttypmod: 0,
             constcollid: Default::default(),
+            constlen: 0,
             constvalue: Datum::null(),
             constisnull: false,
+            constbyval: false,
             location: -1,
         }
     }
