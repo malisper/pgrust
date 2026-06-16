@@ -525,3 +525,12 @@ seam_core::seam!(
     /// page-read driver to assert it is OFF before restoring from archive).
     pub fn is_install_xlog_file_segment_active() -> bool
 );
+
+seam_core::seam!(
+    /// `GetFakeLSNForUnloggedRel()` (xlog.c) — hand out a monotonically
+    /// increasing fake LSN for an unlogged relation (advances the shmem
+    /// `unloggedLSN` atomic). Reached by `gistGetFakeLSN`'s unlogged-relation
+    /// branch; the shmem `unloggedLSN` accessor is still an extern in the xlog
+    /// owner, so this panics until xlog installs it.
+    pub fn get_fake_lsn_for_unlogged_rel() -> XLogRecPtr
+);
