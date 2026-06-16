@@ -251,6 +251,39 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_reset_entry(kind, dboid, objid, ts)` (`pgstat_shmem.c`) — reset
+    /// one variable-numbered stats entry to zero with an explicit reset
+    /// timestamp (the database-timestamp-free reset that
+    /// `pgstat_create_subscription` uses with `ts == 0`). `Err` carries the
+    /// `ereport(ERROR)`s reachable through `pgstat_get_entry_ref_locked`
+    /// (palloc/dsa out-of-memory, `LWLockAcquire`'s `too many LWLocks taken`).
+    pub fn pgstat_reset_entry(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        dboid: types_core::Oid,
+        objid: u64,
+        ts: types_core::TimestampTz,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_fetch_entry(kind, dboid, objid)` (`pgstat.c`) — fetch a copy of a
+    /// variable-numbered entry's `shared_data_len` stats bytes (the
+    /// fetch-consistency snapshot/cache machinery), or `None` if the entry does
+    /// not exist or is dropped. The per-kind owner decodes the bytes into its
+    /// typed stats struct, mirroring C's `(PgStat_Stat*Entry *) pgstat_fetch_entry(...)`.
+    ///
+    /// **Unported:** the variable-numbered snapshot/cache subsystem
+    /// (`pgstat_build_snapshot` / `pgStatLocal.snapshot.stats`) is not yet
+    /// ported, so this seam panics until `pgstat.c`'s variable-snapshot path
+    /// lands. `Err` carries the `palloc` / `dsa` / `LWLockAcquire` surface.
+    pub fn pgstat_fetch_entry(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        dboid: types_core::Oid,
+        objid: u64,
+    ) -> types_error::PgResult<Option<Box<[u8]>>>
+);
+
+seam_core::seam!(
     /// `(pgstat_get_kind_info(kind))->name` (`pgstat.c`) — the human-readable
     /// name of a stats kind (builtin table `pgstat_kind_builtin_infos[]` or
     /// the custom-kind registry; both hold `'static`-equivalent struct
