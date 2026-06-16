@@ -1135,11 +1135,13 @@ version = "0.0.0"
 dependencies = [
  "backend-access-gist-dispatch-seams",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-adt-network-gist-seams",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-gist",
+ "types-network",
  "types-sortsupport",
  "types-tuple",
 ]
@@ -13998,6 +14000,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-network-gist"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-network",
+ "backend-utils-adt-network-gist-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-network",
+]
+
+[[package]]
+name = "backend-utils-adt-network-gist-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-network",
+]
+
+[[package]]
 name = "backend-utils-adt-network-seams"
 version = "0.0.0"
 dependencies = [
@@ -17119,6 +17142,7 @@ dependencies = [
  "backend-utils-adt-like",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
+ "backend-utils-adt-network-gist",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",
@@ -17618,6 +17642,9 @@ dependencies = [
 [[package]]
 name = "types-network"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-nodes"
