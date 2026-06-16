@@ -14087,6 +14087,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-xml"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-datetime",
+ "backend-utils-adt-xml-libxml-seams",
+ "backend-utils-adt-xml-seams",
+ "backend-utils-error-elog-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datetime",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-pgtime",
+ "types-tuple",
+ "types-wchar",
+ "types-xml",
+]
+
+[[package]]
+name = "backend-utils-adt-xml-libxml-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-xml",
+]
+
+[[package]]
 name = "backend-utils-adt-xml-seams"
 version = "0.0.0"
 dependencies = [
@@ -16599,6 +16632,7 @@ dependencies = [
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
+ "backend-utils-adt-xml",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-evtcache",
@@ -17530,6 +17564,13 @@ dependencies = [
  "types-core",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-xml"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
