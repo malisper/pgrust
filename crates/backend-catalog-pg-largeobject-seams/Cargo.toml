@@ -13,3 +13,5 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-snapshot = { path = "../types-snapshot" }
+types-acl = { path = "../types-acl" }
+mcx = { path = "../mcx" }

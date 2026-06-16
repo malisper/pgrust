@@ -180,10 +180,10 @@ seam_core::seam!(
     pub fn aclcheck_error_function(aclresult: AclResult, objname: String) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `aclcheck_error_type(aclresult, typeId)` — always raises.
-    pub fn aclcheck_error_type(aclresult: AclResult, type_id: Oid) -> PgResult<()>
-);
+// NOTE: `aclcheck_error_type` (aclchk.c) was RE-HOMED to
+// `backend-catalog-aclchk-seams` (its real owner is aclchk.c, which now has a
+// ported owner crate; functioncmds was merely its first consumer). Consumers
+// (functioncmds, objectaddress) call `backend_catalog_aclchk_seams::aclcheck_error_type`.
 
 seam_core::seam!(
     /// `typenameTypeId(NULL, typeName)`.

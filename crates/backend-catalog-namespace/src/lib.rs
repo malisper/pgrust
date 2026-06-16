@@ -170,6 +170,7 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_ts_parser_oid::set(seam_get_ts_parser_oid);
     backend_catalog_namespace_seams::get_ts_template_oid::set(seam_get_ts_template_oid);
     backend_catalog_namespace_seams::get_statistics_object_oid::set(seam_get_statistics_object_oid);
+    backend_catalog_namespace_seams::fetch_search_path::set(crate::fetch_search_path);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`

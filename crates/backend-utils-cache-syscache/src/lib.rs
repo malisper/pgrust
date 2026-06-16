@@ -909,9 +909,14 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::foreign_data_wrapper_oid_by_name::set(
         projections::foreign_data_wrapper_oid_by_name,
     );
-    // proclang.c's `get_language_oid` is a pure LANGNAME-syscache OID lookup; the
-    // unported proclang owner delegates it to this merged syscache owner.
-    backend_commands_proclang_seams::get_language_oid::set(projections::get_language_oid);
+    // proclang.c's syscache legs: the LANGNAME OID-by-name lookup and the
+    // writable LANGNAME tuple for the create-vs-replace decision. The
+    // `get_language_oid` wrapper (with the missing-language error) lives in the
+    // proclang owner.
+    backend_utils_cache_syscache_seams::language_oid_by_name::set(projections::language_oid_by_name);
+    backend_utils_cache_syscache_seams::language_tuple_by_name::set(
+        projections::language_tuple_by_name,
+    );
     backend_utils_cache_syscache_seams::foreign_server_oid_by_name::set(
         projections::foreign_server_oid_by_name,
     );
