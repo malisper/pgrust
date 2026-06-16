@@ -70,6 +70,7 @@ pub mod nulling;
 pub mod offset;
 pub mod relids;
 pub mod replace;
+pub mod support;
 pub mod walkers;
 
 #[cfg(test)]
@@ -86,15 +87,19 @@ pub use replace::{
     map_variable_attnos, replace_rte_variables, ReplaceVarFromTargetList, ReplaceVarsFromTargetList,
     ReplaceVarsNoMatchOption,
 };
+pub use support::{get_rewrite_oid, IsDefinedRewriteRule, SetRelationRuleStatus};
 pub use walkers::{
     checkExprHasSubLink, contain_aggs_of_level, contain_windowfuncs, contains_multiexpr_param,
     locate_agg_of_level, locate_windowfunc, rangeTableEntry_used,
 };
 
-/// Install the rewriteManip.c-owned seams.
+/// Install the rewriteManip.c- and rewriteSupport.c-owned seams.
 pub fn init_seams() {
     use backend_rewrite_rewritemanip_seams as s;
     s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
     s::locate_windowfunc::set(|node| walkers::locate_windowfunc(node));
     s::locate_agg_of_level::set(|node, levelsup| walkers::locate_agg_of_level(node, levelsup));
+
+    // rewriteSupport.c
+    backend_rewrite_rewritesupport_seams::get_rewrite_oid::set(support::get_rewrite_oid);
 }

@@ -456,6 +456,11 @@ pub fn init_seams() {
     heapam_seam::simple_heap_insert::set(|mcx, rel, tup| {
         insert::simple_heap_insert(mcx, rel, tup)
     });
+    // F2 INSERT — the multi-row heap-insert entry point (consumed by
+    // catalog/indexing.c's `CatalogTuplesMultiInsertWithInfo`).
+    heapam_seam::heap_multi_insert::set(|mcx, rel, tuples, cid, options, bistate| {
+        insert::heap_multi_insert(mcx, rel, tuples, cid, options, bistate)
+    });
 
     // F4 LOCK — the lock-wait primitives F0 declared as owned by this family.
     heapam_seam::heap_acquire_tuplock::set(|relation, tid, mode, wait_policy, have_tuple_lock| {
