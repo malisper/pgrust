@@ -5334,12 +5334,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-extension"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-indexing",
+ "backend-commands-extension-seams",
+ "backend-storage-file-fd-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-tables",
+ "common-extra-encnames-fgram",
+ "common-path-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-extension-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -5810,9 +5842,9 @@ dependencies = [
  "backend-catalog-dependency-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-catalog-storage-seams",
  "backend-commands-define-seams",
- "backend-commands-extension-seams",
  "backend-commands-sequence-seams",
  "backend-commands-tablecmds-seams",
  "backend-parser-parse-type-seams",
@@ -14213,7 +14245,28 @@ name = "backend-utils-adt-network-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-datum",
+ "types-error",
  "types-network",
+]
+
+[[package]]
+name = "backend-utils-adt-network-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-network",
+ "backend-utils-adt-network-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-network",
+ "types-nodes",
+ "types-pathnodes",
+ "types-selfuncs",
 ]
 
 [[package]]
@@ -17150,6 +17203,7 @@ dependencies = [
  "backend-commands-define",
  "backend-commands-dropcmds",
  "backend-commands-explain",
+ "backend-commands-extension",
  "backend-commands-foreigncmds",
  "backend-commands-functioncmds",
  "backend-commands-lockcmds",
@@ -17351,6 +17405,7 @@ dependencies = [
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-network-gist",
+ "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",
