@@ -67,6 +67,33 @@ pub struct ScannedFkInfo {
     pub conoid: Oid,
 }
 
+/// One decoded `pg_rewrite` row as `RelationBuildRuleLock` consumes it: the
+/// `Form_pg_rewrite` scalar fields plus the two node-string `text` columns
+/// (`ev_qual`/`ev_action`), returned as their raw `nodeToString` text so the
+/// relcache builder can `stringToNode` them into the process-lifetime
+/// CacheMemoryContext arena (keeping the cached `Query` trees in cache memory,
+/// not in the catalog-scan `mcx`). The scan order is the
+/// `RewriteRelRulesIndexId` order (by `rulename`).
+#[derive(Clone, Debug)]
+pub struct ScannedPgRewrite {
+    /// `Form_pg_rewrite.oid` — the rule OID (`RewriteRule.ruleId`).
+    pub ruleid: Oid,
+    /// `char ev_type` — `'1'`..`'4'`; `RelationBuildRuleLock` does
+    /// `rule->event = ev_type - '0'` to get the `CmdType`.
+    pub ev_type: u8,
+    /// `char ev_enabled` — `'O'`/`'D'`/`'R'`/`'A'` (`RewriteRule.enabled`).
+    pub ev_enabled: u8,
+    /// `bool is_instead` (`RewriteRule.isInstead`).
+    pub is_instead: bool,
+    /// `text ev_qual` — the rule qualification's `nodeToString` text, or `None`
+    /// if the attribute is NULL (`heap_attisnull`). `stringToNode`'d by the
+    /// relcache builder into the cache arena.
+    pub ev_qual: Option<String>,
+    /// `text ev_action` — the action `List<Query>`'s `nodeToString` text, or
+    /// `None` if NULL. `stringToNode`'d into the cache arena.
+    pub ev_action: Option<String>,
+}
+
 /// One key column's resolved exclusion info as `RelationGetExclusionInfo`
 /// consumes it: the operator OID (`conexclop`), its underlying procedure OID
 /// (`get_opcode`), and its opfamily strategy number
@@ -84,6 +111,18 @@ seam_core::seam!(
     /// `GETSTRUCT(Form_pg_index)` for each row. Returns every matching decoded
     /// row. Can `ereport(ERROR)` (catalog read failure), carried on `Err`.
     pub fn relcache_scan_pg_index(relid: Oid) -> PgResult<Vec<ScannedPgIndex>>
+);
+
+seam_core::seam!(
+    /// `RelationBuildRuleLock`'s scan (relcache.c):
+    /// `systable_beginscan(pg_rewrite, RewriteRelRulesIndexId, ev_class =
+    /// relid)` then `systable_getnext` + `GETSTRUCT(Form_pg_rewrite)` and the
+    /// two `heap_getattr` node-string columns (`ev_qual`/`ev_action`) for each
+    /// row. Returns every matching decoded row in scan (`rulename`) order; the
+    /// relcache builder `stringToNode`s the node strings into the cache arena
+    /// and sorts the rules by `ruleId`. Can `ereport(ERROR)` (catalog read
+    /// failure), carried on `Err`.
+    pub fn relcache_scan_pg_rewrite(relid: Oid) -> PgResult<Vec<ScannedPgRewrite>>
 );
 
 seam_core::seam!(

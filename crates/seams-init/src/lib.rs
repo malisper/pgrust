@@ -1658,6 +1658,17 @@ mod recurrence_guard {
         // functions not yet bodied. Install + DELETE each as the genam unit
         // ports the corresponding scan/update/render body.
         ("backend_access_index_genam", "relcache_scan_pg_index"),
+        // `relcache_scan_pg_rewrite` (full-Query cache-ownership keystone): the
+        // `pg_rewrite` scan + per-row `Form_pg_rewrite` + `ev_qual`/`ev_action`
+        // node-string decode `RelationBuildRuleLock` now consumes to build the
+        // real value-typed `rd_rules` (RuleLock/RewriteRule with whole
+        // `Query<'static>` action trees in the CacheMemoryContext arena). Only
+        // the DTO struct (`ScannedPgRewrite`) exists in the genam owner; the
+        // scan body is not yet written, so the seam loud-panics
+        // (mirror-PG-and-panic) until genam ports it — exactly like the sibling
+        // pg_index/pg_statistic_ext/pg_constraint scans here. Install + DELETE
+        // when the genam owner adds the pg_rewrite scan-and-decode body.
+        ("backend_access_index_genam", "relcache_scan_pg_rewrite"),
         ("backend_access_index_genam", "relcache_scan_pg_statistic_ext"),
         ("backend_access_index_genam", "relcache_scan_pg_constraint_fkeys"),
         ("backend_access_index_genam", "relcache_exclusion_info"),

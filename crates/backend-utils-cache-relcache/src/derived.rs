@@ -18,16 +18,19 @@
 //! is real and operates on the owned [`RelationData`] store.
 
 use backend_access_index_genam_seams as genam_seam;
+use backend_nodes_read_seams as read_seam;
 use backend_utils_cache_relcache_nodexform_seams as nodexform_seam;
-use backend_utils_error::PgResult;
+use backend_utils_error::{ereport, PgResult};
+use mcx::{Mcx, MemoryContext};
 use types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{InvalidOid, OidIsValid};
+use types_error::ERROR;
 use types_tuple::{
     FirstLowInvalidHeapAttributeNumber, RELKIND_PARTITIONED_TABLE, REPLICA_IDENTITY_DEFAULT,
     REPLICA_IDENTITY_INDEX,
 };
 
-use crate::core_entry_store::entry::{FormPgIndex, RelationData};
+use crate::core_entry_store::entry::{FormPgIndex, RelationData, RewriteRule, RuleLock};
 use crate::core_entry_store::{with_rel, with_rel_mut};
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute-bitmap to fetch.
@@ -598,10 +601,134 @@ pub fn RelationBuildPublicationDesc(relation: Oid) -> PgResult<()> {
 }
 
 /// `RelationBuildRuleLock(relation)` (relcache.c): build `rd_rules` from
-/// `pg_rewrite` (rewrite/node vocabulary — seamed where unported). Called during
-/// build on the not-yet-inserted descriptor, so it takes `&mut RelationData`.
+/// `pg_rewrite`. Called during build on the not-yet-inserted descriptor, so it
+/// takes `&mut RelationData`.
+///
+/// The full-Query cache-ownership keystone made this REAL. C builds the rule
+/// tree in a `rd_rulescxt` child of `CacheMemoryContext` (process-lifetime) and
+/// `stringToNode`s each rule's `ev_qual`/`ev_action` into it; the relcache entry
+/// (`rd_rules`) then owns whole `Query` trees for the backend's life. Here the
+/// orchestration is OWN logic: the `pg_rewrite` scan + per-row `Form` decode is
+/// the genuine genam cross-unit primitive (`relcache_scan_pg_rewrite` seam,
+/// returning the raw node-string columns), and `stringToNode` is the read.c
+/// cross-unit primitive (`string_to_node` seam). The reconstructed `Query`/`Node`
+/// trees are allocated in the process-lifetime [`cache_memory_context`] arena —
+/// the faithful `CacheMemoryContext` rendering — so they live for the entry's
+/// (backend's) lifetime exactly as in C, with no `'mcx` borrow and no registry.
+///
+/// Mirrors `relcache.c`: scan `pg_rewrite` by `ev_class = rd_id`
+/// (`RewriteRelRulesIndexId`), build one [`RewriteRule`] per row
+/// (`ruleId`/`event = ev_type - '0'`/`enabled = ev_enabled`/`isInstead`/
+/// `qual = stringToNode(ev_qual)`/`actions = stringToNode(ev_action)`), then
+/// `qsort` the rules by `ruleId` (`RewriteRuleCompare`) and store the
+/// [`RuleLock`] on the entry. An empty scan stores `None` (C `rd_rules = NULL`).
 pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
-    rule_lock_seam(relation.rd_id)
+    use types_nodes::nodes::{CmdType, Node};
+
+    let cache_mcx = cache_memory_context();
+
+    // `systable_beginscan(pg_rewrite, RewriteRelRulesIndexId, ev_class = rd_id)`
+    // + per-row `GETSTRUCT(Form_pg_rewrite)` + the two node-string columns
+    // (`ev_qual`/`ev_action`), all genam-owned catalog vocabulary.
+    let scanned = scan_pg_rewrite_seam(relation.rd_id)?;
+
+    // Build the rule list, `stringToNode`-ing the node strings into the cache
+    // arena so the resulting `Query`/`Node` trees live for the entry's lifetime.
+    let mut rules: mcx::PgVec<'static, RewriteRule> = mcx::PgVec::new_in(cache_mcx);
+    rules.try_reserve(scanned.len()).map_err(|_| cache_mcx.oom(scanned.len()))?;
+
+    for row in scanned {
+        // `rule->event = ev_type - '0'` — map the `pg_rewrite.ev_type` char to a
+        // `CmdType` (`'1'`=SELECT, `'2'`=UPDATE, `'3'`=INSERT, `'4'`=DELETE).
+        let event = match row.ev_type {
+            b'1' => CmdType::CMD_SELECT,
+            b'2' => CmdType::CMD_UPDATE,
+            b'3' => CmdType::CMD_INSERT,
+            b'4' => CmdType::CMD_DELETE,
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "invalid ev_type '{}' in pg_rewrite for relation {}",
+                        other as char, relation.rd_id
+                    ))
+                    .into_error());
+            }
+        };
+
+        // `rule->qual = (Node *) stringToNode(ev_qual)` — a single expression
+        // node, or NULL for an unconditional rule.
+        let qual = match row.ev_qual {
+            Some(text) => Some(read_seam::string_to_node::call(cache_mcx, text.as_str())?),
+            None => None,
+        };
+
+        // `rule->actions = (List *) stringToNode(ev_action)` — a list of whole
+        // `Query` trees. Reconstruct the `List` node, then move each element's
+        // `Query` payload into the rule's `actions` (each lives in the cache
+        // arena). C keeps a `List *`; the owned model keeps the `Query` values.
+        let mut actions: mcx::PgVec<'static, types_nodes::copy_query::Query<'static>> =
+            mcx::PgVec::new_in(cache_mcx);
+        if let Some(text) = row.ev_action {
+            let action_node = read_seam::string_to_node::call(cache_mcx, text.as_str())?;
+            // `ev_action` deserializes to a `List` of `Query` (the C
+            // `List *actions`). An empty action list is a valid INSTEAD NOTHING
+            // rule.
+            match mcx::PgBox::into_inner(action_node) {
+                Node::List(elems) => {
+                    actions.try_reserve(elems.len()).map_err(|_| cache_mcx.oom(elems.len()))?;
+                    for elem in elems {
+                        match mcx::PgBox::into_inner(elem) {
+                            Node::Query(q) => actions.push(q),
+                            other => {
+                                return Err(ereport(ERROR)
+                                .errmsg_internal(format!(
+                                    "pg_rewrite ev_action element is {:?}, expected Query \
+                                     (relation {})",
+                                    other.tag(),
+                                    relation.rd_id
+                                ))
+                                .into_error());
+                            }
+                        }
+                    }
+                }
+                other => {
+                    return Err(ereport(ERROR)
+                        .errmsg_internal(format!(
+                            "pg_rewrite ev_action is {:?}, expected a List (relation {})",
+                            other.tag(),
+                            relation.rd_id
+                        ))
+                        .into_error());
+                }
+            }
+        }
+
+        rules.push(RewriteRule {
+            ruleId: row.ruleid,
+            event,
+            enabled: row.ev_enabled,
+            isInstead: row.is_instead,
+            qual,
+            actions,
+        });
+    }
+
+    if rules.is_empty() {
+        // C: an empty scan leaves `rd_rules = NULL` (and the caller flips
+        // `relhasrules` off when this happens).
+        relation.rd_rules = None;
+        return Ok(());
+    }
+
+    // `qsort(rules->rules, numlocks, ..., RewriteRuleCompare)` — sort by ruleId
+    // so the rule order is stable across rebuilds regardless of scan order.
+    rules.sort_by_key(|r| r.ruleId);
+
+    let lock =
+        mcx::alloc_in(cache_mcx, RuleLock { rules }).map_err(|_| cache_mcx.oom(0))?;
+    relation.rd_rules = Some(lock);
+    Ok(())
 }
 
 /* ==========================================================================
@@ -783,10 +910,50 @@ fn publication_desc_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::publication_desc::call(relid)
 }
 
-/// `RelationBuildRuleLock`'s `pg_rewrite` scan + rule-tree build (rewrite/node
-/// owner): build `rd_rules`.
-fn rule_lock_seam(relid: Oid) -> PgResult<()> {
-    nodexform_seam::rule_lock::call(relid)
+/// `RelationBuildRuleLock`'s `pg_rewrite` scan (genam owner):
+/// `systable_beginscan(pg_rewrite, RewriteRelRulesIndexId, ev_class = relid)` +
+/// per-row `GETSTRUCT(Form_pg_rewrite)` + the `ev_qual`/`ev_action` node-string
+/// columns. Returns the raw decoded rows; the relcache builder
+/// `stringToNode`s the node strings into the cache arena itself (so the cached
+/// trees live in `CacheMemoryContext`, not the scan `mcx`).
+fn scan_pg_rewrite_seam(relid: Oid) -> PgResult<Vec<genam_seam::ScannedPgRewrite>> {
+    genam_seam::relcache_scan_pg_rewrite::call(relid)
+}
+
+/* ==========================================================================
+ * CacheMemoryContext arena (the full-Query cache-ownership keystone).
+ *
+ * C's `CacheMemoryContext` is a process-lifetime memory context; the relcache
+ * copies cached node trees (rules, index expressions, partition keys, ...) into
+ * it (or into children of it) so a long-lived cache entry can own them past any
+ * single query. The faithful Rust rendering is a leaked, never-freed
+ * `MemoryContext` whose `Mcx<'static>` handle can be cloned freely — exactly the
+ * established `TopMemoryContext` pattern (backend-utils-init-postinit leaks its
+ * context the same way). Trees allocated here are `'static`: they borrow nothing
+ * from a per-query `'mcx`, so a lifetime-free `RelationData` entry may own them.
+ *
+ * This is NOT a registry or an invented handle — it is the C `CacheMemoryContext`
+ * value, leaked once per backend, exactly as the C context is created once and
+ * never destroyed for the backend's life.
+ * ======================================================================== */
+
+thread_local! {
+    /// The process-lifetime `CacheMemoryContext` (`utils/cache/relcache.c` —
+    /// `CreateCacheMemoryContext`). Leaked once per backend so the resulting
+    /// `Mcx<'static>` outlives every query's `'mcx` arena, exactly like C's
+    /// never-freed `CacheMemoryContext`. The relcache entry's owned node trees
+    /// (`rd_rules` and, as later campaigns land them, the other node payloads)
+    /// allocate here.
+    static CACHE_MEMORY_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("CacheMemoryContext")));
+}
+
+/// The process-lifetime `Mcx<'static>` standing in for C's `CacheMemoryContext`.
+/// Node trees cached on a relcache entry (which outlives any single query)
+/// allocate here so they are `'static` — borrowing nothing from a per-query
+/// arena, exactly the C `CacheMemoryContext` lifetime invariant.
+pub fn cache_memory_context() -> Mcx<'static> {
+    CACHE_MEMORY_CONTEXT.with(|ctx| ctx.mcx())
 }
 
 /// `RelationGetIndexAttOptions(relation, copy)` (relcache.c): get/parse the
@@ -839,3 +1006,74 @@ pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResul
 /// recursing through the pg_attribute index before the critical relcaches are
 /// built.
 const ATTRIBUTE_RELID_NUM_INDEX_ID: Oid = 2659;
+
+#[cfg(test)]
+mod cache_ownership_keystone_tests {
+    //! The full-Query cache-ownership keystone: prove a lifetime-free, long-lived
+    //! cache entry can OWN whole `Query` trees by allocating them in the
+    //! process-lifetime `cache_memory_context()` arena. The point of the
+    //! keystone is that the cached trees are `'static` — they borrow nothing from
+    //! any per-query `'mcx`, so a `RelationData` (which has no lifetime) may hold
+    //! them for the backend's life, exactly as C copies rule trees into
+    //! `CacheMemoryContext`.
+
+    use super::cache_memory_context;
+    use crate::core_entry_store::entry::{RewriteRule, RuleLock};
+    use types_nodes::copy_query::Query;
+    use types_nodes::nodes::CmdType;
+
+    /// The cache arena hands out an `Mcx<'static>`: a `Query` built in it is
+    /// `Query<'static>` and can be returned out of the building scope (it does
+    /// not borrow any local). This is the soundness the keystone delivers.
+    fn build_cached_query(command: CmdType) -> Query<'static> {
+        let mcx = cache_memory_context();
+        let mut q = Query::new(mcx);
+        q.commandType = command;
+        q
+    }
+
+    #[test]
+    fn cache_arena_yields_static_query_trees() {
+        // Build several Query trees in separate scopes; they all live in the
+        // single process-lifetime arena and survive past the building call.
+        let q1 = build_cached_query(CmdType::CMD_SELECT);
+        let q2 = build_cached_query(CmdType::CMD_UPDATE);
+        assert_eq!(q1.commandType, CmdType::CMD_SELECT);
+        assert_eq!(q2.commandType, CmdType::CMD_UPDATE);
+    }
+
+    #[test]
+    fn rulelock_owns_query_action_trees() {
+        // A RewriteRule's `actions` is a PgVec<'static, Query<'static>> in the
+        // cache arena — the C `List *actions` of whole Query trees. Assemble a
+        // RuleLock holding them, exactly the shape `RelationBuildRuleLock`
+        // produces and `RelationData.rd_rules` owns.
+        let mcx = cache_memory_context();
+        let mut actions = mcx::PgVec::new_in(mcx);
+        actions.push(build_cached_query(CmdType::CMD_SELECT));
+
+        let mut rules = mcx::PgVec::new_in(mcx);
+        rules.push(RewriteRule {
+            ruleId: 12345,
+            event: CmdType::CMD_SELECT,
+            enabled: b'O',
+            isInstead: true,
+            qual: None,
+            actions,
+        });
+        let lock: mcx::PgBox<'static, RuleLock> =
+            mcx::alloc_in(mcx, RuleLock { rules }).expect("alloc RuleLock in cache arena");
+
+        // A lifetime-free RelationData can own this for the backend's life.
+        let mut entry = crate::core_entry_store::entry::RelationData::default();
+        entry.rd_rules = Some(lock);
+
+        let rd_rules = entry.rd_rules.as_ref().expect("rd_rules present");
+        assert_eq!(rd_rules.rules.len(), 1);
+        assert_eq!(rd_rules.rules[0].ruleId, 12345);
+        assert!(rd_rules.rules[0].isInstead);
+        assert_eq!(rd_rules.rules[0].enabled, b'O');
+        assert_eq!(rd_rules.rules[0].actions.len(), 1);
+        assert_eq!(rd_rules.rules[0].actions[0].commandType, CmdType::CMD_SELECT);
+    }
+}

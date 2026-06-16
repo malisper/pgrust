@@ -331,10 +331,10 @@ fn finish_relcache_entries() -> PgResult<()> {
                 }
                 restart = true;
             }
-            if with_rel(rd, |r| r.rd_rel.relhasrules && !r.rd_has_rules) {
+            if with_rel(rd, |r| r.rd_rel.relhasrules && r.rd_rules.is_none()) {
                 with_rel_mut(rd, crate::derived::RelationBuildRuleLock)?;
                 with_rel_mut(rd, |r| {
-                    if !r.rd_has_rules {
+                    if r.rd_rules.is_none() {
                         r.rd_rel.relhasrules = false;
                     }
                 });
@@ -1209,7 +1209,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         }
 
         // C: reset all the derived/per-xact fields to their fresh state.
-        rel.rd_has_rules = false;
+        rel.rd_rules = None;
         rel.rd_has_trigdesc = false;
         rel.rd_has_rsdesc = false;
         rel.rd_has_partkey = false;
