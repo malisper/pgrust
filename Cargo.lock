@@ -6769,6 +6769,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-conv-euc-cn-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-jp-and-sjis"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-kr-and-mic"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc-tw-and-big5"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-conv-euc2004-sjis2004"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error-fgram",
+ "backend-utils-mb-conv-string-helpers",
+ "backend-utils-mb-fgram",
+ "common-wchar",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -18193,6 +18247,11 @@ dependencies = [
  "backend-commands-vacuum",
  "backend-commands-variable",
  "backend-common-relpath",
+ "backend-conv-euc-cn-and-mic",
+ "backend-conv-euc-jp-and-sjis",
+ "backend-conv-euc-kr-and-mic",
+ "backend-conv-euc-tw-and-big5",
+ "backend-conv-euc2004-sjis2004",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",

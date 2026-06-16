@@ -381,6 +381,11 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-euc-cn-and-mic = { path = "../backend-conv-euc-cn-and-mic" }
+backend-conv-euc-jp-and-sjis = { path = "../backend-conv-euc-jp-and-sjis" }
+backend-conv-euc-kr-and-mic = { path = "../backend-conv-euc-kr-and-mic" }
+backend-conv-euc-tw-and-big5 = { path = "../backend-conv-euc-tw-and-big5" }
+backend-conv-euc2004-sjis2004 = { path = "../backend-conv-euc2004-sjis2004" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
