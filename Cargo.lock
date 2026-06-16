@@ -4144,6 +4144,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-database"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-indexing",
+ "backend-catalog-pg-database-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-database-seams"
 version = "0.0.0"
 dependencies = [
@@ -4152,6 +4181,8 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -15902,6 +15933,7 @@ dependencies = [
  "backend-catalog-pg-class",
  "backend-catalog-pg-constraint",
  "backend-catalog-pg-conversion",
+ "backend-catalog-pg-database",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-enum",
