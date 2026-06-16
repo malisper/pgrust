@@ -341,6 +341,7 @@ backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
 backend-storage-large-object = { path = "../backend-storage-large-object" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
+backend-storage-lmgr-lock = { path = "../backend-storage-lmgr-lock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }

@@ -223,6 +223,22 @@ pub struct LOCK {
     pub nGranted: i32,
 }
 
+impl Default for LOCK {
+    fn default() -> Self {
+        LOCK {
+            tag: LOCKTAG::default(),
+            grantMask: 0,
+            waitMask: 0,
+            procLocks: dlist_head::default(),
+            waitProcs: dclist_head::default(),
+            requested: [0; MAX_LOCKMODES],
+            nRequested: 0,
+            granted: [0; MAX_LOCKMODES],
+            nGranted: 0,
+        }
+    }
+}
+
 /// `PROCLOCKTAG` (`storage/lock.h`) — hash key of a `PROCLOCK`: the lock and
 /// the owning backend. The C struct holds raw `LOCK *` / `PGPROC *`; here the
 /// linked structures are reached by owning box.
