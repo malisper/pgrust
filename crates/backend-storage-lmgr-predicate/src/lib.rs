@@ -223,6 +223,22 @@ pub fn init_seams() {
             tuple_xid,
         )
     });
+
+    // GUC variable backing storage owned by predicate.c, read at
+    // shmem-sizing time (PredicateLockShmemSize): `serializable_buffers`
+    // directly and `max_predicate_locks_per_xact` via the NPREDICATELOCKTARGETENTS
+    // macro.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::serializable_buffers.install(GucVarAccessors {
+            get: globals::serializable_buffers,
+            set: globals::set_serializable_buffers,
+        });
+        vars::max_predicate_locks_per_xact.install(GucVarAccessors {
+            get: globals::max_predicate_locks_per_xact,
+            set: globals::set_max_predicate_locks_per_xact,
+        });
+    }
 }
 
 #[inline]

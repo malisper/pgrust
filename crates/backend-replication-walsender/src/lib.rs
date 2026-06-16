@@ -108,6 +108,17 @@ pub fn init_seams() {
     ws::log_replication_commands::set(|| core::proc_get(|p| p.log_replication_commands));
     ws::max_wal_senders::set(|| core::proc_get(|p| p.max_wal_senders));
 
+    // `int max_wal_senders` GUC backing storage (walsender.c). Read directly
+    // at shmem-sizing time by WalSndShmemSize (mul_size(max_wal_senders,
+    // sizeof(WalSnd))); the GUC engine seeds it from boot_val.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::max_wal_senders.install(GucVarAccessors {
+            get: || core::proc_get(|p| p.max_wal_senders),
+            set: |v| core::with_proc(|p| p.max_wal_senders = v),
+        });
+    }
+
     ws::wal_snd_set_state::set(crate::init::WalSndSetState);
 
     ws::handle_wal_snd_init_stopping::set(crate::wakeup::HandleWalSndInitStopping);

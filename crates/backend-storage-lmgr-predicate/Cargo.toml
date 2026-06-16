@@ -42,3 +42,4 @@ backend-access-transam-twophase-seams = { path = "../backend-access-transam-twop
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

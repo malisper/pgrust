@@ -174,6 +174,25 @@ pub fn init_seams() {
         get: globals::NBuffers,
         set: globals::SetNBuffers,
     });
+    // SLRU buffer-size GUCs whose `conf->variable` backing storage lives in
+    // globals.c (mirrored in `globals`); read at shmem-sizing time by
+    // CLOGShmemSize/MultiXactShmemSize/AsyncShmemSize.
+    vars::transaction_buffers.install(GucVarAccessors {
+        get: globals::transaction_buffers,
+        set: globals::set_transaction_buffers,
+    });
+    vars::multixact_member_buffers.install(GucVarAccessors {
+        get: globals::multixact_member_buffers,
+        set: globals::set_multixact_member_buffers,
+    });
+    vars::multixact_offset_buffers.install(GucVarAccessors {
+        get: globals::multixact_offset_buffers,
+        set: globals::set_multixact_offset_buffers,
+    });
+    vars::notify_buffers.install(GucVarAccessors {
+        get: globals::notify_buffers,
+        set: globals::set_notify_buffers,
+    });
 }
 
 #[cfg(test)]
