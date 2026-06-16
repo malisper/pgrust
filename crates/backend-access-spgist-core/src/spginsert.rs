@@ -90,7 +90,7 @@ pub fn spgbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    index_info: &mut IndexInfo,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bufmgr::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)? != 0 {
         return Err(types_error::PgError::error(&alloc::format!(
@@ -147,6 +147,7 @@ pub fn spgbuild<'mcx>(
         let bs = &mut buildstate;
         let index_alias = index.alias();
         backend_access_table_tableam_seams::table_index_build_scan::call(
+            mcx,
             heap,
             index,
             index_info,

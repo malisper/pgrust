@@ -425,7 +425,7 @@ pub fn hashbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &types_rel::Relation<'mcx>,
     index: &types_rel::Relation<'mcx>,
-    index_info: &mut types_tableam::amapi::IndexInfo,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     // We expect to be called exactly once for any index relation. If that's
     // not the case, big trouble's what we have.
@@ -480,6 +480,7 @@ pub fn hashbuild<'mcx>(
         let bs = &mut buildstate;
         let index_alias = index.alias();
         backend_access_table_tableam_seams::table_index_build_scan::call(
+            mcx,
             heap,
             index,
             index_info,

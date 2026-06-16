@@ -712,3 +712,31 @@ pub fn provider_index_build_range_scan<'mcx>(
     )
 }
 
+/// `table_index_build_scan` provider entry (heap AM dispatch). The C inline
+/// `table_index_build_scan` forwards to `index_build_range_scan` over the whole
+/// relation: `anyvisible = false`, `start_blockno = 0`, `numblocks =
+/// InvalidBlockNumber` (tableam.h).
+#[allow(clippy::too_many_arguments)]
+pub fn provider_index_build_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_rel: &Relation<'mcx>,
+    index_rel: &Relation<'mcx>,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
+    allow_sync: bool,
+    progress: bool,
+    callback: &mut dyn FnMut(ItemPointerData, &[Datum<'mcx>], &[bool], bool) -> PgResult<()>,
+) -> PgResult<f64> {
+    heapam_index_build_range_scan(
+        mcx,
+        table_rel,
+        index_rel,
+        index_info,
+        allow_sync,
+        false,
+        progress,
+        0,
+        INVALID_BLOCK_NUMBER,
+        callback,
+    )
+}
+

@@ -918,29 +918,18 @@ mod recurrence_guard {
         // retired: heapam_handler.c (core stage) + tableamapi.c::GetTableAmRoutine
         // are ported in backend-access-heap-heapam-handler-core, which installs all
         // four provider-facing seams from its init_seams().)
-        // DESIGN_DEBT (TD-INDEXBUILDSCAN): the heap provider
-        // `heapam_index_build_range_scan` IS now ported + installed
-        // (backend-access-heap-heapam-handler-core::build_scan) on the canonical,
-        // fully-typed `table_index_build_range_scan` seam (mcx +
-        // execnodes::IndexInfo<'mcx> + canonical Datum). brinsummarize reaches it
-        // with the real IndexInfo via build_index_info.
-        //
-        // The WHOLE-RELATION `table_index_build_scan` seam still cannot be
-        // honestly installed: it carries the OPAQUE `types_tableam::amapi::
-        // IndexInfo` (the indexam DAG-bridge forwarder — a `Box<dyn Any>` of the
-        // AM's ii_AmCache, NOT the real IndexInfo) and no `mcx`, because its
-        // consumers (gin/spg/hash/nbtsort ambuild) only ever receive that opaque
-        // carrier from indexam, never the real `execnodes::IndexInfo`. Bridging
-        // it requires the IndexInfo-through-`ambuild`-vtable keystone (re-sign the
-        // `IndexAmRoutine.ambuild` callback + all six AM build fns to carry the
-        // real IndexInfo, ~40 sites) — out of scope. A panicking shim would be
-        // the forbidden hollow-provider anti-pattern, so it stays allowlisted
-        // until that keystone lands. See DESIGN_DEBT.md.
-        ("backend_access_table_tableam", "table_index_build_scan"),
-        // (`table_index_build_range_scan` is now INSTALLED — see above. The brin
-        // consumer imports the seam fn directly so the recurrence guard's
-        // call-site scanner never attributed the call to the tableam-seams crate;
-        // it was never a tuple entry and needs none now that it is installed.)
+        // (Both serial index-build heap-scan seams are now INSTALLED by
+        // backend-access-heap-heapam-handler-core (build_scan) on the canonical,
+        // fully-typed contract (mcx + execnodes::IndexInfo<'mcx> + canonical
+        // Datum): `table_index_build_range_scan` -> heapam_index_build_range_scan
+        // (brinsummarize reaches it via build_index_info), and the whole-relation
+        // `table_index_build_scan` -> the same provider over the entire relation.
+        // The IndexInfo-through-ambuild keystone re-signed all the AM serial
+        // build drivers to carry the real `execnodes::IndexInfo` + mcx, so the
+        // `table_index_build_scan` allowlist entry is retired. The brin consumer
+        // imports the range-scan seam fn directly so the recurrence guard's
+        // call-site scanner never attributed that call to the tableam-seams
+        // crate; it was never a tuple entry and needs none.)
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the
