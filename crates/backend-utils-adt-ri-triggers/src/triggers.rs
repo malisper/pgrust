@@ -808,13 +808,13 @@ pub fn ri_initial_check(
     let userid = backend_utils_init_miscinit_seams::get_user_id::call();
     if !backend_utils_adt_acl_seams::has_bypassrls_privilege::call(userid)?
         && ((pk_rel.rd_rel.relrowsecurity
-            && !backend_utils_adt_acl_seams::object_ownercheck::call(
+            && !backend_catalog_aclchk_seams::object_ownercheck::call(
                 types_catalog::catalog::RELATION_RELATION_ID,
                 pk_rel.rd_id,
                 userid,
             )?)
             || (fk_rel.rd_rel.relrowsecurity
-                && !backend_utils_adt_acl_seams::object_ownercheck::call(
+                && !backend_catalog_aclchk_seams::object_ownercheck::call(
                     types_catalog::catalog::RELATION_RELATION_ID,
                     fk_rel.rd_id,
                     userid,

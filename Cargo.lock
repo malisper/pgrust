@@ -3634,6 +3634,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-aclchk"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaddress",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-user-seams",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-array",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-aclchk-seams"
 version = "0.0.0"
 dependencies = [
@@ -4358,6 +4395,8 @@ dependencies = [
 name = "backend-catalog-pg-largeobject"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
@@ -4369,6 +4408,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-catalog",
  "types-core",
  "types-error",
@@ -4384,7 +4424,9 @@ dependencies = [
 name = "backend-catalog-pg-largeobject-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-acl",
  "types-core",
  "types-error",
  "types-snapshot",
@@ -5339,6 +5381,7 @@ dependencies = [
 name = "backend-commands-functioncmds"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-aclchk-seams",
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
  "backend-commands-proclang-seams",
@@ -16807,6 +16850,7 @@ dependencies = [
  "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
+ "backend-catalog-aclchk",
  "backend-catalog-catalog",
  "backend-catalog-dependency",
  "backend-catalog-indexing",

@@ -29,3 +29,6 @@ backend-catalog-pg-largeobject-seams = { path = "../backend-catalog-pg-largeobje
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+types-acl = { path = "../types-acl" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

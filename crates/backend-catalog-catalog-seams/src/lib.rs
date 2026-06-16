@@ -82,3 +82,12 @@ seam_core::seam!(
     /// `IsSystemClass(relid, reltuple)` (catalog.c).
     pub fn is_system_class(relid: Oid, form: &types_cluster::PgClassForm) -> PgResult<bool>
 );
+seam_core::seam!(
+    /// `IsSystemClass(relid, reltuple)` (catalog.c), keyed by the *namespace*
+    /// OID rather than a full `Form_pg_class`: `IsCatalogRelationOid(relid) ||
+    /// IsToastNamespace(relnamespace)`. The aclchk `pg_class_aclmask_ext` path
+    /// only has `relowner`/`relkind`/`relnamespace` (from the syscache ACL
+    /// projection), so this variant takes the namespace directly. Pure
+    /// OID-range/backend-local arithmetic — infallible.
+    pub fn is_system_class_by_namespace(relid: Oid, relnamespace: Oid) -> bool
+);

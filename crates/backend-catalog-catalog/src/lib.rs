@@ -131,6 +131,13 @@ pub fn IsSystemClass(relid: Oid, reltuple: &PgClassForm) -> bool {
     IsCatalogRelationOid(relid) || IsToastNamespace(reltuple.relnamespace)
 }
 
+/// `IsSystemClass(relid, reltuple)` keyed by `relnamespace` only (the aclchk
+/// `pg_class_aclmask_ext` face): `IsCatalogRelationOid(relid) ||
+/// IsToastNamespace(relnamespace)`.
+pub fn IsSystemClassByNamespace(relid: Oid, relnamespace: Oid) -> bool {
+    IsCatalogRelationOid(relid) || IsToastNamespace(relnamespace)
+}
+
 fn IsSystemClassForm(relid: Oid, reltuple: &FormData_pg_class) -> bool {
     IsCatalogRelationOid(relid) || IsToastClass(reltuple)
 }
@@ -813,6 +820,7 @@ pub fn init_seams() {
     backend_catalog_catalog_seams::is_reserved_name::set(|name| Ok(IsReservedName(&name)));
     backend_catalog_catalog_seams::is_system_relation::set(is_system_relation_seam);
     backend_catalog_catalog_seams::is_system_class::set(is_system_class_seam);
+    backend_catalog_catalog_seams::is_system_class_by_namespace::set(IsSystemClassByNamespace);
     backend_catalog_catalog_seams::get_new_relfilenumber::set(get_new_relfilenumber_seam);
     backend_catalog_catalog_seams::relation_invalidates_snapshots_only::set(
         RelationInvalidatesSnapshotsOnly,

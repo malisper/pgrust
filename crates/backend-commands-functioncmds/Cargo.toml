@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
