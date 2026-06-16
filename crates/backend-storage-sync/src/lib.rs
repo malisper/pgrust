@@ -765,6 +765,10 @@ fn register_sync_request_seam(
     with_state(|s| register_sync_request(s, &ftag, request_type, retry_on_error))
 }
 
+fn remember_sync_request_seam(ftag: FileTag, request_type: SyncRequestType) -> PgResult<()> {
+    with_state(|s| remember_sync_request(s, &ftag, request_type))
+}
+
 /// Install every seam in `backend-storage-sync-seams`.
 pub fn init_seams() {
     backend_storage_sync_seams::init_sync::set(init_sync_seam);
@@ -772,6 +776,7 @@ pub fn init_seams() {
     backend_storage_sync_seams::sync_post_checkpoint::set(sync_post_checkpoint_seam);
     backend_storage_sync_seams::process_sync_requests::set(process_sync_requests_seam);
     backend_storage_sync_seams::register_sync_request::set(register_sync_request_seam);
+    backend_storage_sync_seams::remember_sync_request::set(remember_sync_request_seam);
 }
 
 #[cfg(test)]
