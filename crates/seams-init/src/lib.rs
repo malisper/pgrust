@@ -298,6 +298,7 @@ pub fn init_all() {
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();
+    backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();

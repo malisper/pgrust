@@ -12945,6 +12945,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-encode"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-encode-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-encode-seams"
 version = "0.0.0"
 dependencies = [
@@ -16237,6 +16247,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-encode",
  "backend-utils-adt-float",
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
