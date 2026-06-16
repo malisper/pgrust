@@ -622,6 +622,7 @@ pub fn init_seams() {
     v::tidstore_end_iterate::set(|iter_handle| {
         TidStoreEndIterate(TidStoreIter::from_iter_handle(iter_handle))
     });
+    v::tidstore_is_member::set(|ts, tid| TidStoreIsMember(&ts, &tid));
 }
 
 #[cfg(test)]

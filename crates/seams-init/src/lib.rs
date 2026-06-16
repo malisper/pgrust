@@ -104,6 +104,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_vacuum::init_seams();
     backend_commands_variable::init_seams();
     backend_commands_comment::init_seams();
     backend_commands_proclang::init_seams();
