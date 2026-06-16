@@ -11469,6 +11469,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-basebackup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-libpqwalreceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -12115,6 +12125,67 @@ dependencies = [
  "types-core",
  "types-error",
  "types-walreceiver",
+]
+
+[[package]]
+name = "backend-replication-walsender"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqsignal",
+ "backend-postmaster-interrupt",
+ "backend-postmaster-postmaster-seams",
+ "backend-replication-basebackup-seams",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-repl-gram",
+ "backend-replication-repl-scanner-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-snapbuild-seams",
+ "backend-replication-syncrep-seams",
+ "backend-replication-walreceiverfuncs-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-dest-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-io-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-ps-status-seams",
+ "backend-utils-misc-timeout-seams",
+ "backend-utils-resowner-resowner-seams",
+ "libc",
+ "port-pgsleep",
+ "port-pqsignal-seams",
+ "types-condvar",
+ "types-core",
+ "types-datetime",
+ "types-dest",
+ "types-error",
+ "types-guc",
+ "types-replication",
+ "types-signal",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18173,6 +18244,7 @@ dependencies = [
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
+ "backend-replication-walsender",
  "backend-rewrite-core",
  "backend-rmgrdesc-next",
  "backend-storage-aio-read-stream",
@@ -18925,6 +18997,7 @@ name = "types-replication"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-datetime",
  "types-parsenodes",
 ]
 

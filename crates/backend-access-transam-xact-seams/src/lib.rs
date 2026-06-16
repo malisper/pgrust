@@ -332,3 +332,10 @@ seam_core::seam!(
     /// level. variable.c's `check_transaction_isolation` reads it.
     pub fn xact_iso_level() -> i32
 );
+
+seam_core::seam!(
+    /// `int synchronous_commit` (xact.c GUC) — the current
+    /// `synchronous_commit` level; `SyncRepRequested()` compares it against
+    /// `SYNCHRONOUS_COMMIT_LOCAL_FLUSH`.
+    pub fn synchronous_commit() -> i32
+);

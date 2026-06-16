@@ -2051,6 +2051,40 @@ pub fn pq_modify_fe_be_wait_set_latch(latch: LatchHandle) -> PgResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// FeBeWaitSet socket modify + combined wait (walsender's WalSndWait).
+// ---------------------------------------------------------------------------
+
+/// `ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, events, NULL)` — update
+/// the FE/BE wait set's interest in socket readability/writability before a
+/// `WaitEventSetWait` (walsender's `WalSndWait`).  A no-op when `FeBeWaitSet`
+/// is unset.
+pub fn pq_modify_fe_be_wait_set_socket(events: u32) {
+    with_fe_be_wait_set(|set| {
+        if let Some((set, _latch)) = set {
+            set.modify_event(FeBeWaitSetSocketPos, events, None)
+                .expect("ModifyWaitEvent(FeBeWaitSet, socket)");
+        }
+    })
+}
+
+/// `WaitEventSetWait(FeBeWaitSet, timeout, &event, 1, wait_event_info)` — the
+/// walsender's combined latch/socket/postmaster-death sleep.  Returns
+/// `(nevents, events)`: the count of fired events and the OR of their wakeup
+/// bits (the walsender only inspects `WL_POSTMASTER_DEATH`).
+pub fn pq_wait_event_set_wait_fe_be(timeout: i64, wait_event_info: u32) -> (i32, u32) {
+    with_fe_be_wait_set(|set| {
+        let (set, _latch) = set.expect("WalSndWait: FeBeWaitSet not created");
+        // C passes a single-element occurred_events array (nevents = 1).
+        let mut event = [WaitEvent::default(); 1];
+        let rc = set
+            .wait(timeout, &mut event, wait_event_info)
+            .expect("WaitEventSetWait(FeBeWaitSet)");
+        let bits = if rc >= 1 { event[0].events } else { 0 };
+        (rc, bits)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Seam adapters.
 // ---------------------------------------------------------------------------
 
@@ -2095,6 +2129,17 @@ pub fn init_seams() {
     backend_libpq_pqcomm_seams::pq_peekbyte::set(pq_peekbyte);
     backend_libpq_pqcomm_seams::pq_buffer_remaining_data::set(pq_buffer_remaining_data_seam);
     backend_libpq_pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
+    backend_libpq_pqcomm_seams::pq_is_send_pending::set(pq_is_send_pending);
+    // `pq_flush_if_writable()` returns the C int (0 / EOF); the owner body's
+    // PgResult only carries an OOM-on-grow ereport, never reached here.
+    backend_libpq_pqcomm_seams::pq_flush_if_writable::set(|| {
+        pq_flush_if_writable().expect("pq_flush_if_writable")
+    });
+    backend_libpq_pqcomm_seams::pq_putmessage_noblock::set(|msgtype, body| {
+        pq_putmessage_noblock(msgtype, body).expect("pq_putmessage_noblock");
+    });
+    backend_libpq_pqcomm_seams::modify_fe_be_wait_set_socket::set(pq_modify_fe_be_wait_set_socket);
+    backend_libpq_pqcomm_seams::wait_event_set_wait_fe_be::set(pq_wait_event_set_wait_fe_be);
 
     vars::Unix_socket_permissions.install(GucVarAccessors {
         get: config::unix_socket_permissions,

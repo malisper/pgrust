@@ -98,3 +98,17 @@ seam_core::seam!(
     /// `elog(ERROR, "could not request parent death signal: %m")`.
     pub fn request_parent_death_signal(signum: i32) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MarkPostmasterChildWalSender()` (pmsignal.c) — set the
+    /// `PM_CHILD_WALSENDER` slot flag so the postmaster lets this child outlive
+    /// bgwriter and kills it last (it must stream remaining WAL at shutdown).
+    pub fn mark_postmaster_child_wal_sender()
+);
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_ADVANCE_STATE_MACHINE)` (pmsignal.c) —
+    /// nudge the postmaster's state machine after marking ourselves a WAL
+    /// sender.
+    pub fn send_postmaster_signal_advance_state_machine()
+);

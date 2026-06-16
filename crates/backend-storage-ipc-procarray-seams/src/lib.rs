@@ -376,3 +376,17 @@ seam_core::seam!(
     /// already gone). Shared-memory scan; cannot `ereport`.
     pub fn backend_pid_get_proc_role(pid: i32) -> Option<(Oid, ProcNumber)>
 );
+
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_AFFECTS_ALL_HORIZONS` via
+    /// `ProcGlobal->statusFlags[MyProc->pgxactoff]` (procarray.c) — a
+    /// database-less (physical) walsender's xmin must hold back vacuum in all
+    /// databases. Set under ProcArrayLock by the procarray owner.
+    pub fn set_proc_affects_all_horizons()
+);
+
+seam_core::seam!(
+    /// `MyProc->xmin` (the backend's advertised xmin in the proc array).
+    /// `InitWalSender`'s assertion reads it; the procarray owner returns it.
+    pub fn my_proc_xmin() -> TransactionId
+);
