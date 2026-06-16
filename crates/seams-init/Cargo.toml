@@ -196,6 +196,8 @@ backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
+backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }
+backend-libpq-hba = { path = "../backend-libpq-hba" }
 backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
@@ -381,6 +383,18 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-conv-euc-cn-and-mic = { path = "../backend-conv-euc-cn-and-mic" }
+backend-conv-euc-jp-and-sjis = { path = "../backend-conv-euc-jp-and-sjis" }
+backend-conv-euc-kr-and-mic = { path = "../backend-conv-euc-kr-and-mic" }
+backend-conv-euc-tw-and-big5 = { path = "../backend-conv-euc-tw-and-big5" }
+backend-conv-euc2004-sjis2004 = { path = "../backend-conv-euc2004-sjis2004" }
+backend-conv-utf8-and-big5 = { path = "../backend-conv-utf8-and-big5" }
+backend-conv-utf8-and-cyrillic = { path = "../backend-conv-utf8-and-cyrillic" }
+backend-conv-utf8-and-euc2004 = { path = "../backend-conv-utf8-and-euc2004" }
+backend-conv-utf8-and-euc-cn = { path = "../backend-conv-utf8-and-euc-cn" }
+backend-conv-utf8-and-euc-jp = { path = "../backend-conv-utf8-and-euc-jp" }
+backend-conv-utf8-and-euc-kr = { path = "../backend-conv-utf8-and-euc-kr" }
+backend-conv-utf8-and-euc-tw = { path = "../backend-conv-utf8-and-euc-tw" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-conv-utf8-and-gb18030 = { path = "../backend-conv-utf8-and-gb18030" }
 backend-conv-utf8-and-gbk = { path = "../backend-conv-utf8-and-gbk" }
@@ -416,6 +430,7 @@ common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
+common-scram-common = { path = "../common-scram-common" }
 common-string = { path = "../common-string" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }

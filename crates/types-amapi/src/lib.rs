@@ -11,8 +11,9 @@
 #![allow(non_upper_case_globals)]
 
 pub use types_tableam::amapi::{
-    CompareType, IndexAmRoutine, IndexAmTranslateCompareType, IndexAmTranslateStrategy,
-    IndexAmValidate, IndexBuildResult, IndexInfo, IndexUniqueCheck, TIDBitmap, T_IndexAmRoutine,
-    COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID, COMPARE_LE,
-    COMPARE_LT, COMPARE_NE, COMPARE_OVERLAP,
+    AmCostEstimate, CompareType, Cost, IndexAMProperty, IndexAmRoutine,
+    IndexAmTranslateCompareType, IndexAmTranslateStrategy, IndexAmValidate, IndexBuildResult,
+    IndexInfo, IndexPath, IndexUniqueCheck, OpFamilyMember, PlannerInfo, Selectivity, TIDBitmap,
+    T_IndexAmRoutine, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID,
+    COMPARE_LE, COMPARE_LT, COMPARE_NE, COMPARE_OVERLAP,
 };

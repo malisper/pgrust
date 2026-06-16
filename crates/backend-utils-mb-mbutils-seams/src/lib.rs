@@ -219,3 +219,21 @@ seam_core::seam!(
         mbstr: &[u8],
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `check_encoding_conversion_args(src_encoding, dest_encoding, len,
+    /// expected_src_encoding, expected_dest_encoding)` (mbutils.c): validate the
+    /// source/destination encoding ids and the length argument passed to a
+    /// conversion procedure (the `CHECK_ENCODING_CONVERSION_ARGS` macro expands
+    /// to a call to this). `expected_src_encoding`/`expected_dest_encoding` may
+    /// be `-1` to mean "any valid encoding accepted". Raises `elog(ERROR)` on a
+    /// bad encoding id, an encoding mismatch, or a negative length (carried on
+    /// `Err`); returns `Ok(())` when the arguments are valid.
+    pub fn check_encoding_conversion_args(
+        src_encoding: i32,
+        dest_encoding: i32,
+        len: i32,
+        expected_src_encoding: i32,
+        expected_dest_encoding: i32,
+    ) -> PgResult<()>
+);

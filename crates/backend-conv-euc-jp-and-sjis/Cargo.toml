@@ -1,0 +1,17 @@
+[package]
+name = "backend-conv-euc-jp-and-sjis"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_conv_euc_jp_and_sjis"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+backend-utils-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }
+backend-utils-mb-fgram = { path = "../backend-utils-mb-fgram" }
+backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+types-wchar = { path = "../types-wchar" }
+common-wchar = { path = "../common-wchar" }

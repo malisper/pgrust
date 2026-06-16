@@ -86,7 +86,8 @@ use types_storage::storage::Buffer;
 use types_core::primitive::InvalidBlockNumber;
 use types_tuple::heaptuple::FIRST_OFFSET_NUMBER as FirstOffsetNumber;
 use types_tableam::amapi::{
-    IndexAmRoutine, IndexInfo, IndexUniqueCheck, TIDBitmap, T_IndexAmRoutine,
+    AmCostEstimate, IndexAmRoutine, IndexBuildResult, IndexInfo, IndexPath, IndexUniqueCheck,
+    OpFamilyMember, PlannerInfo, TIDBitmap, T_IndexAmRoutine,
 };
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
@@ -172,6 +173,21 @@ pub fn ginhandler() -> IndexAmRoutine {
         amtranslatestrategy: None,
         amtranslatecmptype: None,
 
+        // Build / options / plan-time callbacks (#340). `ginbuildphasename` is
+        // this crate's own fn (wired directly). `ginbuild`/`ginbuildempty`
+        // (gin-ginbulk, above this crate), `ginoptions` (needs the reloptions
+        // Datum detoast the #341 dispatch does), `gincostestimate` (selfuncs.c)
+        // and `ginadjustmembers` (gin-core-probe) are sanctioned panic legs
+        // reached via #341. GIN has no gettreeheight/property (NULL in C).
+        ambuild: ginbuild_am,
+        ambuildempty: ginbuildempty_am,
+        amcostestimate: gincostestimate_am,
+        amgettreeheight: None,
+        amoptions: ginoptions_am,
+        amproperty: None,
+        ambuildphasename: Some(ginbuildphasename_am),
+        amadjustmembers: Some(ginadjustmembers_am),
+
         // Required interface functions invoked by indexam.c. The scan callbacks
         // are in the unported ginscan.c/ginget.c; the insert/vacuum callbacks in
         // the unported gininsert.c/ginvacuum.c. The adapters seam-and-panic into
@@ -199,6 +215,69 @@ pub fn ginhandler() -> IndexAmRoutine {
         aminitparallelscan: None,
         amparallelrescan: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Build / options / plan-time vtable adapters (#340). See the doc comment in
+// `ginhandler` for why the build / cross-crate slots are sanctioned panic legs
+// (reached via the #341 index.c dispatch).
+
+/// `ambuild` adapter — `ginbuild` (gin-ginbulk, above this crate) needs the
+/// real `IndexInfo`; reached via the #341 dispatch.
+fn ginbuild_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _heap_relation: &Relation<'mcx>,
+    _index_relation: &Relation<'mcx>,
+    _index_info: &mut IndexInfo,
+) -> PgResult<IndexBuildResult> {
+    panic!(
+        "ginbuild: index.c build dispatch (#341) not yet ported — \
+         ginbuild lives in backend-access-gin-ginbulk and needs the real IndexInfo"
+    )
+}
+
+/// `ambuildempty` adapter — `ginbuildempty` (gin-ginbulk) not reachable from
+/// this crate; reached via the #341 dispatch.
+fn ginbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
+    panic!("ginbuildempty: lives in backend-access-gin-ginbulk, not reachable from ginutil (#341)")
+}
+
+/// `amcostestimate` adapter — `gincostestimate` (selfuncs.c) not reachable;
+/// reached via the #341 dispatch.
+fn gincostestimate_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    _path: &mut IndexPath,
+    _loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    panic!("gincostestimate: index cost estimation (selfuncs.c) not yet reachable from gin (#341)")
+}
+
+/// `amoptions` adapter — `ginoptions` takes the parsed reloptions byte image,
+/// which needs the reloptions `Datum` detoast the #341 dispatch performs.
+fn ginoptions_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _reloptions: Datum<'mcx>,
+    _validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    panic!("ginoptions: needs the reloptions Datum detoast done by the index.c dispatch (#341)")
+}
+
+/// `ambuildphasename` adapter — wires this crate's `ginbuildphasename`.
+fn ginbuildphasename_am(phasenum: i64) -> Option<alloc::string::String> {
+    ginbuildphasename(phasenum).map(alloc::string::ToString::to_string)
+}
+
+/// `amadjustmembers` adapter — `ginadjustmembers` (gin-core-probe) not reachable
+/// from this crate; reached via the #341 dispatch.
+fn ginadjustmembers_am<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _opfamilyoid: Oid,
+    _opclassoid: Oid,
+    _operators: &mut Vec<OpFamilyMember>,
+    _functions: &mut Vec<OpFamilyMember>,
+) -> PgResult<()> {
+    panic!("ginadjustmembers: opclass member adjust (gin-core-probe) not yet reachable from ginutil (#341)")
 }
 
 // ---------------------------------------------------------------------------

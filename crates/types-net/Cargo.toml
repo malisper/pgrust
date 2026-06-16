@@ -10,4 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-regex = { path = "../types-regex" }
 libc = { version = "0.2", default-features = false }
