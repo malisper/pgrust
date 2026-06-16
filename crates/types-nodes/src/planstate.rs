@@ -257,6 +257,44 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// Back-fill the non-owning `ExprState.parent` back-link on every `ExprState`
+    /// this node OWNS, now that the node's enclosing [`PlanStateNode`] enum has a
+    /// stable address.
+    ///
+    /// This is the owned-model rendering of C's `ExecInitExpr(node, parent)`
+    /// contract (execExpr.c), where `parent` is the `PlanState *` cast of the
+    /// already-`makeNode`-allocated, address-stable state struct. In C the cast
+    /// target and the back-link identity are the *same* address, so `parent` can
+    /// be set *during* the node's `ExecInit*`. In the owned tree the concrete
+    /// `*State` struct and its enclosing `PlanStateNode` enum are two distinct
+    /// allocations: the concrete struct is boxed first (by the node's `ExecInit*`,
+    /// where the `ExecInitExpr`/`ExecInitQual` seams run with `parent: None`), and
+    /// the enum wrapper — whose address the `GROUPING_FUNC`/`MERGE_SUPPORT_FUNC`/
+    /// SubPlan consumers need, because `as_agg_state`/`as_modify_table_state` are
+    /// enum methods — is boxed afterwards by `ExecInitNode`. So the back-link is
+    /// stamped here, right after the wrap, from the now-stable `&PlanStateNode`.
+    ///
+    /// Covers the `ExprState`s reachable through the embedded `PlanState` head —
+    /// `qual` (the node's filter, where `GROUPING()`/`MERGE_SUPPORT()` in a HAVING
+    /// clause compile) and `ps_ProjInfo.pi_state` (the result projection, where
+    /// targetlist `GROUPING()`/`MERGE_SUPPORT()`/SubPlan compile). These are the
+    /// `parent`-consuming sites in the C executor; per-node side `ExprState`s
+    /// (join quals, index quals) never reach a `parent`-reading opcode.
+    pub fn stamp_expr_parents(&mut self) {
+        // Compute the back-link first so the shared `&self` borrow is released
+        // (`PlanStateLink` is `Copy` and erases the borrow into a raw address)
+        // before taking the `&mut self` for the head; mirrors the C
+        // `(PlanState *) node` pointer copy.
+        let link = PlanStateLink::from_ref(&*self);
+        let head = self.ps_head_mut();
+        if let Some(qual) = head.qual.as_mut() {
+            qual.parent = Some(link);
+        }
+        if let Some(proj) = head.ps_ProjInfo.as_mut() {
+            proj.pi_state.parent = Some(link);
+        }
+    }
+
     /// `(ScanState *) node` — the embedded `ScanState` of a relation-scan-node
     /// state (`SeqScanState`, `IndexScanState`, ... — every concrete scan-node
     /// struct begins with a `ScanState`). `None` for non-scan nodes. Returns
