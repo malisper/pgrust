@@ -555,6 +555,15 @@ pub fn CommitTsShmemInit() -> PgResult<CommitTsState> {
     })
 }
 
+std::thread_local! {
+    /// `static int commit_timestamp_buffers` (commit_ts.c) — the
+    /// `commit_timestamp_buffers` GUC's backing storage (`conf->variable`).
+    static COMMIT_TIMESTAMP_BUFFERS: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+    /// `bool track_commit_timestamp` (commit_ts.c:109) — the
+    /// `track_commit_timestamp` GUC's backing storage.
+    static TRACK_COMMIT_TIMESTAMP: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
 /// `check_commit_ts_buffers` — GUC check_hook for `commit_timestamp_buffers`.
 /// Returns `(ok, errdetail)`; the C function returns `bool` and sets
 /// `GUC_check_errdetail` on failure.
@@ -950,6 +959,18 @@ pub fn init_seams() {
             Ok(ok)
         },
     );
+
+    // GUC variable accessors (commit_ts.c owns these `conf->variable`
+    // integers/bool; there is no separate global beyond the GUC value).
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::commit_timestamp_buffers.install(GucVarAccessors {
+        get: || COMMIT_TIMESTAMP_BUFFERS.with(core::cell::Cell::get),
+        set: |v| COMMIT_TIMESTAMP_BUFFERS.with(|c| c.set(v)),
+    });
+    vars::track_commit_timestamp.install(GucVarAccessors {
+        get: || TRACK_COMMIT_TIMESTAMP.with(core::cell::Cell::get),
+        set: |v| TRACK_COMMIT_TIMESTAMP.with(|c| c.set(v)),
+    });
 
     seams::commit_ts_shmem_size::set(|| Ok(CommitTsShmemSize()));
     seams::commit_ts_shmem_init::set(commit_ts_shmem_init_seam);

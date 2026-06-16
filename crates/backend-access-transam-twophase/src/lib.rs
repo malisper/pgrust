@@ -2514,6 +2514,15 @@ pub fn set_reached_consistency(v: bool) {
 pub fn init_seams() {
     use backend_access_transam_twophase_seams as seams;
 
+    // `max_prepared_xacts` GUC (twophase.c:115). Install the accessor bridging the
+    // C-global storage so the shmem-sizing path (procarray) can read it.
+    backend_utils_misc_guc_tables::vars::max_prepared_xacts.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || max_prepared_xacts_guc() as i32,
+            set: |v| set_max_prepared_xacts(v.max(0) as usize),
+        },
+    );
+
     seams::standby_transaction_id_is_prepared::set(|xid| {
         standby_transaction_id_is_prepared(xid, max_prepared_xacts_guc())
     });

@@ -3197,6 +3197,7 @@ dependencies = [
  "backend-utils-cache-inval-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-tables",
  "libc",
  "port-crc32c-seams",
  "types-core",

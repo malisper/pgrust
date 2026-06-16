@@ -9,6 +9,7 @@ name = "backend_access_transam_twophase"
 path = "src/lib.rs"
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
