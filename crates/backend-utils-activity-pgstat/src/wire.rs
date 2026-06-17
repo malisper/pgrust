@@ -150,6 +150,15 @@ pub fn install_seams() {
         })
     });
 
+    // `pgstat_assert_is_up()` (pgstat.c:1539 / pgstat_internal.h:590). Outside
+    // `USE_ASSERT_CHECKING` this is the macro `#define pgstat_assert_is_up()
+    // ((void)true)` — a pure no-op. This port builds without assertion checking,
+    // so the faithful installation is the empty body; the report paths
+    // (pgstat_report_stat etc.) call it as a cheap invariant guard that compiles
+    // away in production. (In an assert build it would
+    // `Assert(pgstat_is_initialized && !pgstat_is_shutdown)`.)
+    pgstat_seam::assert_is_up::set(|| {});
+
     // ---- pgstat.c GUC variable backing (conf->variable accessors) ----
     //
     // `bool pgstat_track_counts` and `int pgstat_fetch_consistency` are plain

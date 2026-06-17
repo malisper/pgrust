@@ -63,6 +63,7 @@ pub mod consts;
 pub mod dispatch;
 pub mod loglevel;
 pub mod returns;
+pub mod slow;
 
 pub use classify::{
     CheckRestrictedOperation, ClassifyUtilityCommandAsReadOnly, CommandIsReadOnly,
@@ -94,4 +95,10 @@ pub fn init_seams() {
     backend_tcop_utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
     backend_tcop_utility_seams::prevent_command_during_recovery::set(PreventCommandDuringRecovery);
     backend_tcop_utility_seams::process_utility::set(ProcessUtility);
+
+    // The event-trigger-fenced DDL fan-out (`ProcessUtilitySlow`). The dispatch's
+    // GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path arms and the
+    // `_ =>` arm reach it through the `process_utility_slow` outward seam; install
+    // it here so CREATE TABLE → `DefineRelation` becomes reachable.
+    backend_tcop_utility_out_seams::process_utility_slow::set(slow::process_utility_slow);
 }

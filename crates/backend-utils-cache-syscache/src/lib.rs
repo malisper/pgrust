@@ -1112,6 +1112,118 @@ pub fn init_seams() {
         projections::pg_statistic_stawidth,
     );
 
+    // ---- batch 2026-06-17: additional caller-shaped syscache projections ----
+    use backend_utils_cache_syscache_seams as s;
+    // SearchSysCacheExists* probes.
+    s::reloid_exists::set(projections::reloid_exists);
+    s::tablespace_exists::set(projections::tablespace_exists);
+    s::auth_oid_exists::set(projections::auth_oid_exists);
+    s::namespace_name_exists::set(projections::namespace_name_exists);
+    s::procoid_exists::set(projections::procoid_exists);
+    s::operoid_exists::set(projections::operoid_exists);
+    s::typeoid_exists::set(projections::typeoid_exists);
+    s::colloid_exists::set(projections::colloid_exists);
+    s::tsconfigoid_exists::set(projections::tsconfigoid_exists);
+    s::tsdictoid_exists::set(projections::tsdictoid_exists);
+    s::namespaceoid_exists::set(projections::namespaceoid_exists);
+    s::type_exists::set(projections::type_exists);
+    s::statext_exists::set(projections::statext_exists);
+    s::ts_parser_exists::set(projections::ts_parser_exists);
+    s::ts_dict_exists::set(projections::ts_dict_exists);
+    s::ts_template_exists::set(projections::ts_template_exists);
+    s::ts_config_exists::set(projections::ts_config_exists);
+    s::opfamily_exists::set(projections::opfamily_exists);
+    s::opclass_exists::set(projections::opclass_exists);
+    s::amop_search_exists::set(projections::amop_search_exists);
+    // GetSysCacheOid* probes.
+    s::get_type_oid::set(projections::get_type_oid);
+    s::get_opfamily_oid::set(projections::get_opfamily_oid);
+    s::amop_oid::set(projections::amop_oid);
+    s::amproc_oid::set(projections::amproc_oid);
+    s::get_conversion_oid_cached::set(projections::get_conversion_oid_cached);
+    s::get_statext_oid::set(projections::get_statext_oid);
+    s::get_ts_parser_oid_cached::set(projections::get_ts_parser_oid_cached);
+    s::get_ts_dict_oid_cached::set(projections::get_ts_dict_oid_cached);
+    s::get_ts_template_oid_cached::set(projections::get_ts_template_oid_cached);
+    s::get_ts_config_oid_cached::set(projections::get_ts_config_oid_cached);
+    s::get_collation_oid_by_name_enc_nsp::set(projections::get_collation_oid_by_name_enc_nsp);
+    s::get_am_oid_by_name::set(projections::get_am_oid_by_name);
+    s::cast_oid::set(projections::cast_oid);
+    s::get_publication_oid_syscache::set(projections::get_publication_oid_syscache);
+    s::get_subscription_oid_syscache::set(projections::get_subscription_oid_syscache);
+    // name lookups.
+    s::search_type_name::set(projections::search_type_name);
+    s::search_namespace_name::set(projections::search_namespace_name);
+    s::search_am_name::set(projections::search_am_name);
+    s::am_name::set(projections::am_name);
+    s::rel_name::set(projections::rel_name);
+    s::language_name::set(projections::language_name);
+    s::constraint_name::set(projections::constraint_name);
+    s::event_trigger_name::set(projections::event_trigger_name);
+    s::get_publication_name_syscache::set(projections::get_publication_name_syscache);
+    s::get_subscription_name_syscache::set(projections::get_subscription_name_syscache);
+    s::search_attnum_attname::set(projections::search_attnum_attname);
+    s::parameter_acl_name::set(projections::parameter_acl_name);
+    // (namespace, name) -> CatalogObjectName.
+    s::relation_namespace_and_name::set(projections::relation_namespace_and_name);
+    s::type_namespace_and_name::set(projections::type_namespace_and_name);
+    s::collation_namespace_and_name::set(projections::collation_namespace_and_name);
+    s::conversion_namespace_and_name::set(projections::conversion_namespace_and_name);
+    s::statext_namespace_and_name::set(projections::statext_namespace_and_name);
+    s::ts_parser_namespace_and_name::set(projections::ts_parser_namespace_and_name);
+    s::ts_dict_namespace_and_name::set(projections::ts_dict_namespace_and_name);
+    s::ts_template_namespace_and_name::set(projections::ts_template_namespace_and_name);
+    s::ts_config_namespace_and_name::set(projections::ts_config_namespace_and_name);
+    // (namespace, owner, name) namespace rows.
+    s::namespace_owner_row_by_name::set(projections::namespace_owner_row_by_name);
+    s::namespace_owner_row_by_oid::set(projections::namespace_owner_row_by_oid);
+    // scalar / small-tuple field projections.
+    s::search_attname_attnum::set(projections::search_attname_attnum);
+    s::search_attnum_attisdropped::set(projections::search_attnum_attisdropped);
+    s::att_get_attnotnull::set(projections::att_get_attnotnull);
+    s::search_relation_rls_flags::set(projections::search_relation_rls_flags);
+    s::search_authid_rolsuper::set(projections::search_authid_rolsuper);
+    s::database_datdba::set(projections::database_datdba);
+    s::collation_isdeterministic::set(projections::collation_isdeterministic);
+    s::collation_any_encoding_row::set(projections::collation_any_encoding_row);
+    s::oper_exact::set(projections::oper_exact);
+    s::constraint_type_index::set(projections::constraint_type_index);
+    s::constraint_relid::set(projections::constraint_relid);
+    s::constraint_identity::set(projections::constraint_identity);
+    s::transform_funcs::set(projections::transform_funcs);
+    s::transform_type_lang::set(projections::transform_type_lang);
+    s::user_mapping_user_server::set(projections::user_mapping_user_server);
+    s::statext_get_relid::set(projections::statext_get_relid);
+    s::statext_namespace::set(projections::statext_namespace);
+    s::publication_rel_pub_rel::set(projections::publication_rel_pub_rel);
+    s::publication_rel_ids::set(projections::publication_rel_ids);
+    s::publication_namespace_pub_nsp::set(projections::publication_namespace_pub_nsp);
+    s::publication_namespace_ids::set(projections::publication_namespace_ids);
+    // pg_index / pg_range / pg_opclass / pg_class extra projections.
+    s::index_isclustered::set(projections::index_isclustered);
+    s::index_get_relid::set(projections::index_get_relid);
+    s::index_get_indisprimary::set(projections::index_get_indisprimary);
+    s::pg_index_flags::set(projections::pg_index_flags);
+    s::pg_range_form::set(projections::pg_range_form);
+    s::pg_range_fields::set(projections::pg_range_fields);
+    s::pg_range_rngtypid_of_multirange::set(projections::pg_range_rngtypid_of_multirange);
+    s::pg_opclass_form::set(projections::pg_opclass_form);
+    s::pg_opclass_keytype::set(projections::pg_opclass_keytype);
+    s::opclass_namespace_method_name::set(projections::opclass_namespace_method_name);
+    s::pg_class_extra::set(projections::pg_class_extra);
+    s::rel_relispartition::set(projections::rel_relispartition);
+    s::rel_namespace::set(projections::rel_namespace);
+    s::search_partrelid_partdefid::set(projections::search_partrelid_partdefid);
+    // pg_amop strategy/sortfamily + pg_proc projections.
+    s::amop_by_opr_purpose::set(projections::amop_by_opr_purpose);
+    s::amop_by_opr_purpose_family::set(projections::amop_by_opr_purpose_family);
+    s::proc_proargnames_isnull::set(projections::proc_proargnames_isnull);
+    // follow-on simple projections.
+    s::collation_name::set(projections::collation_name);
+    s::lookup_pg_class_by_relid::set(projections::lookup_pg_class_by_relid);
+    s::search_am_by_name::set(projections::search_am_by_name);
+    s::auth_members_of_member::set(projections::auth_members_of_member);
+
     // plancache's InitPlanCache resolves the integer SysCacheIdentifier for the
     // caches it hooks; map its small enum to the genbki cache ids.
     backend_utils_cache_syscache_pc_seams::syscache_id::set(syscache_id_for);
