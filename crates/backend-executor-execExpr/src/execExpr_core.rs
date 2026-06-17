@@ -1020,6 +1020,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                         value: types_datum::Datum::from_usize(0),
                         isnull: false,
                     }],
+                    // Value-per-call SRF channel (#349): unused (I/O coerce frame).
+                    ..Default::default()
                 },
             )?;
 
@@ -1071,6 +1073,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                             isnull: false,
                         },
                     ],
+                    // Value-per-call SRF channel (#349): unused (I/O coerce frame).
+                    ..Default::default()
                 },
             )?;
 

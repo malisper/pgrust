@@ -73,12 +73,19 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
     );
-    // The value-per-call SRF protocol is funcapi-owned but not yet modeled
-    // (only the materialize-mode tuplestore path is). Install an EXPLICIT honest
-    // seam-and-panic body (mirror-pg-and-panic) so a value-SRF caller gets a
-    // loud, owner-rooted failure naming the missing machinery, rather than an
-    // implicit "uninstalled seam" abort. Replace with the real per-call
-    // FuncCallContext machinery when it lands.
+    // The value-per-call SRF protocol (#349): the multi-call FuncCallContext
+    // machinery (SRF_FIRSTCALL_INIT / SRF_PERCALL_SETUP / the SRF_RETURN_DONE
+    // teardown) over the `fn_extra`/`fn_mcxt` call-frame channels and the
+    // `ReturnSetInfo.{econtext,isDone}` carriers. `shutdown_MultiFuncCall` is
+    // funcapi-internal (C file-static), driven by `end_MultiFuncCall`.
+    backend_utils_fmgr_funcapi_seams::init_MultiFuncCall::set(srf_support::init_MultiFuncCall);
+    backend_utils_fmgr_funcapi_seams::per_MultiFuncCall::set(srf_support::per_MultiFuncCall);
+    backend_utils_fmgr_funcapi_seams::end_MultiFuncCall::set(srf_support::end_MultiFuncCall);
+    // The `value_srf_unported` seam is retired: the value-per-call protocol is
+    // now ported. (Its former consumers — pg_partition_tree / pg_lock_status —
+    // become wireable through init/per/end_MultiFuncCall as their owners land.)
+    // Kept installed with the panic body only while any caller still routes to
+    // it; new SRFs use the real machinery above.
     backend_utils_fmgr_funcapi_seams::value_srf_unported::set(srf_support::value_srf_unported);
     backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::set(
         result_type::get_expr_result_tupdesc,

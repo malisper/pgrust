@@ -237,10 +237,9 @@ pub fn materialized_srf_putvalues<'mcx>(
 /// context, allocate and zero a [`FuncCallContext`], stash it in
 /// `flinfo->fn_extra`, and register [`shutdown_MultiFuncCall`] on the
 /// `ExprContext`. `elog(ERROR)` on a second call.
-pub fn init_MultiFuncCall<'mcx>(
-    _mcx: Mcx<'mcx>,
-    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<FuncCallContext<'mcx>> {
+pub fn init_MultiFuncCall<'a, 'mcx>(
+    fcinfo: &'a mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<&'a mut FuncCallContext<'mcx>> {
     // C funcapi.c:140-146:
     //   if (fcinfo->resultinfo == NULL || !IsA(fcinfo->resultinfo, ReturnSetInfo))
     //       ereport(ERROR,
@@ -271,68 +270,105 @@ pub fn init_MultiFuncCall<'mcx>(
     //   } else
     //       elog(ERROR, "init_MultiFuncCall cannot be called more than once");
     //
-    // This whole body lives on `fcinfo->flinfo`: the once-only guard reads/writes
-    // `flinfo->fn_extra`, the multi-call context is created under
-    // `flinfo->fn_mcxt`, and the shutdown callback is registered against
-    // `rsi->econtext` keyed by `PointerGetDatum(flinfo)`. The trimmed call frame
-    // carries no `flinfo` and the trimmed `ReturnSetInfo` no `econtext`, so none
-    // of it is reachable from the ported shape. Mirror PG and panic at that
-    // boundary (it lands when the fmgr call frame + ExprContext widen here).
-    panic!(
-        "init_MultiFuncCall: fn_extra / fn_mcxt (fcinfo->flinfo) and the \
-         ExprContext (rsinfo->econtext) for the multi-call context and shutdown \
-         callback are not reachable from the trimmed call frame; widen the fmgr \
-         call frame (flinfo) and ReturnSetInfo (econtext) here"
-    )
+    // OWNED MODEL (the value-per-call SRF channel, #349):
+    //   * C's `flinfo->fn_extra` (the once-only guard + the cross-call
+    //     FuncCallContext slot) is the `fn_extra` channel on the owned call
+    //     frame (the `'mcx`-bound place the `FuncCallContext` can live — the
+    //     std/lifetime-free `flinfo` cannot name it, #327). `SRF_IS_FIRSTCALL()`
+    //     (`flinfo->fn_extra == NULL`) is `fcinfo.fn_extra.is_none()`.
+    //   * C's `flinfo->fn_mcxt` (the parent of the new multi-call context) is
+    //     the `fn_mcxt` channel on the frame.
+    //   * The `RegisterExprContextCallback(rsi->econtext, shutdown_MultiFuncCall,
+    //     ...)` early-reset cleanup hook is SUBSUMED BY OWNERSHIP here: the
+    //     multi-call context is the owned `MemoryContext` stored in
+    //     `funcctx.multi_call_memory_ctx`, owned (transitively) by
+    //     `SetExprState.fcinfo`, so a dropped/reset ExprContext (or an aborted
+    //     query) frees it deterministically via RAII — exactly the leak the C
+    //     callback exists to prevent. `end_MultiFuncCall` still performs the
+    //     explicit teardown C drives through the callback. No hollow callback is
+    //     registered (the bare-`fn` ExprContext callback cannot reach the
+    //     frame's `fn_extra`, and RAII already guarantees the cleanup).
+    if fcinfo.fn_extra.is_some() {
+        // C: elog(ERROR, "init_MultiFuncCall cannot be called more than once");
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INTERNAL_ERROR)
+            .errmsg("init_MultiFuncCall cannot be called more than once")
+            .into_error());
+    }
+
+    // C: multi_call_ctx = AllocSetContextCreate(fcinfo->flinfo->fn_mcxt,
+    //                         "SRF multi-call context", ALLOCSET_SMALL_SIZES);
+    // The owned multi-call context is a child of the per-query `fn_mcxt` channel.
+    let fn_mcxt = fcinfo.fn_mcxt.expect(
+        "init_MultiFuncCall: fcinfo->fn_mcxt (the per-query context the multi-call \
+         context is created under) must be set by the SRF caller before the call",
+    );
+    let multi_call_ctx = fn_mcxt.context().new_child("SRF multi-call context");
+
+    // C: retval = MemoryContextAllocZero(multi_call_ctx, sizeof(FuncCallContext));
+    //    retval->call_cntr = 0; ...; retval->multi_call_memory_ctx = multi_call_ctx;
+    //    fcinfo->flinfo->fn_extra = retval;
+    fcinfo.fn_extra = Some(FuncCallContext {
+        call_cntr: 0,
+        max_calls: 0,
+        user_fctx: None,
+        attinmeta: None,
+        multi_call_memory_ctx: Some(multi_call_ctx),
+        tuple_desc: Default::default(),
+    });
+
+    Ok(fcinfo
+        .fn_extra
+        .as_mut()
+        .expect("init_MultiFuncCall: fn_extra just assigned"))
 }
 
 /// `per_MultiFuncCall(PG_FUNCTION_ARGS)` (funcapi.c:208) — return the
 /// `FuncCallContext` saved in `flinfo->fn_extra` for the current per-call step.
-pub fn per_MultiFuncCall<'mcx>(
-    _fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<FuncCallContext<'mcx>> {
+pub fn per_MultiFuncCall<'a, 'mcx>(
+    fcinfo: &'a mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<&'a mut FuncCallContext<'mcx>> {
     // C funcapi.c:208-214:
     //   FuncCallContext *retval = (FuncCallContext *) fcinfo->flinfo->fn_extra;
     //   return retval;
     //
-    // The call frame now carries `flinfo` (`Option<FmgrInfo>`), but the owned
-    // `FmgrInfo` (types_core::fmgr) does NOT model the `fn_extra` handler
-    // scratch slot the C cross-call state lives in — there is no typed
-    // `FuncCallContext` carrier on `flinfo` to read back. Mirror PG and panic
-    // until `FmgrInfo` grows a typed `fn_extra` (FuncCallContext) slot.
-    panic!(
-        "per_MultiFuncCall: the cross-call FuncCallContext lives in \
-         flinfo->fn_extra, which the owned FmgrInfo does not model; add a typed \
-         fn_extra (FuncCallContext) slot to FmgrInfo here"
-    )
+    // The cross-call FuncCallContext lives in the frame's `fn_extra` channel
+    // (#349). C never NULL-checks `fn_extra` here (the SRF body only calls
+    // SRF_PERCALL_SETUP after SRF_FIRSTCALL_INIT has set it); the owned model
+    // surfaces the contract violation loudly instead of returning a bogus value.
+    fcinfo.fn_extra.as_mut().ok_or_else(|| {
+        ereport(ERROR)
+            .errcode(ERRCODE_INTERNAL_ERROR)
+            .errmsg("per_MultiFuncCall called before init_MultiFuncCall (fn_extra is NULL)")
+            .into_error()
+    })
 }
 
 /// `end_MultiFuncCall(PG_FUNCTION_ARGS, funcctx)` (funcapi.c:220) — deregister
 /// the shutdown callback and run [`shutdown_MultiFuncCall`] to tear down the
 /// multi-call context.
-pub fn end_MultiFuncCall<'mcx>(
-    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-    funcctx: &mut FuncCallContext<'mcx>,
-) -> PgResult<()> {
+pub fn end_MultiFuncCall<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<()> {
     // C funcapi.c:220-235:
     //   ReturnSetInfo *rsi = (ReturnSetInfo *) fcinfo->resultinfo;
     //   /* Deregister the shutdown callback */
     //   UnregisterExprContextCallback(rsi->econtext, shutdown_MultiFuncCall,
     //                                 PointerGetDatum(fcinfo->flinfo));
-    //   /* But use it to delete the context we are about to lose */
+    //   /* But use it to do the real work */
     //   shutdown_MultiFuncCall(PointerGetDatum(fcinfo->flinfo));
     //
-    // Both the callback deregistration (against `rsi->econtext`, keyed by
-    // `PointerGetDatum(fcinfo->flinfo)`) and the teardown reach `fcinfo->flinfo`
-    // and `rsi->econtext`, neither carried by the trimmed shapes. Mirror PG and
-    // panic at the boundary.
-    let _ = (fcinfo, funcctx);
-    panic!(
-        "end_MultiFuncCall: the ExprContext (rsinfo->econtext) and flinfo \
-         (fcinfo->flinfo) needed to unregister the shutdown callback and delete \
-         the multi-call context are not reachable from the trimmed call frame; \
-         widen the fmgr call frame (flinfo) and ReturnSetInfo (econtext) here"
-    )
+    // OWNED MODEL: no ExprContext callback was registered (init_MultiFuncCall
+    // documents why — the cleanup is RAII-owned), so there is nothing to
+    // deregister. The teardown C drives through `shutdown_MultiFuncCall` is run
+    // directly: take the cross-call state out of the frame's `fn_extra` channel
+    // (the C `flinfo->fn_extra = NULL` unbind) and delete its multi-call context
+    // (the C `MemoryContextDelete`), which `shutdown_MultiFuncCall` does and
+    // dropping the taken-out `FuncCallContext` completes.
+    if let Some(mut funcctx) = fcinfo.fn_extra.take() {
+        shutdown_MultiFuncCall(&mut funcctx)?;
+        // Dropping `funcctx` here frees the FuncCallContext itself (C: it lived
+        // inside the now-deleted multi_call_memory_ctx).
+    }
+    Ok(())
 }
 
 /// `shutdown_MultiFuncCall(Datum arg)` (funcapi.c:238) — the `ExprContext`
@@ -348,21 +384,14 @@ pub fn shutdown_MultiFuncCall<'mcx>(funcctx: &mut FuncCallContext<'mcx>) -> PgRe
     //    * FuncCallContext */
     //   MemoryContextDelete(funcctx->multi_call_memory_ctx);
     //
-    // The C callback receives `PointerGetDatum(flinfo)` and recovers the
-    // `FuncCallContext` from `flinfo->fn_extra`; the owned signature hands the
-    // `FuncCallContext` directly. Both the `flinfo->fn_extra = NULL` unbind and
-    // the `MemoryContextDelete(funcctx->multi_call_memory_ctx)` reach state the
-    // trimmed shapes do not carry (`flinfo`, and `FuncCallContext` carries no
-    // `multi_call_memory_ctx` — it is owned by the SRF
-    // plumbing seam). Mirror PG and panic at that boundary.
-    let _ = funcctx;
-    panic!(
-        "shutdown_MultiFuncCall: the flinfo unbind (flinfo->fn_extra = NULL) and \
-         the multi-call memory context deletion \
-         (funcctx->multi_call_memory_ctx) are not reachable from the trimmed \
-         shapes; widen the fmgr call frame (flinfo) and FuncCallContext \
-         (multi_call_memory_ctx) here"
-    )
+    // OWNED MODEL: the C callback recovers `funcctx` from `flinfo->fn_extra` via
+    // the `PointerGetDatum(flinfo)` arg; the owned signature is handed the
+    // `funcctx` directly (the `flinfo->fn_extra = NULL` unbind is the caller's
+    // `fcinfo.fn_extra.take()` in `end_MultiFuncCall`). The
+    // `MemoryContextDelete(funcctx->multi_call_memory_ctx)` is dropping the
+    // owned multi-call arena ([`FuncCallContext::shutdown`]).
+    funcctx.shutdown();
+    Ok(())
 }
 
 /// `PG_ARGISNULL(0) ? None : Some(PG_GETARG_OID(0))` — read the optional
@@ -414,34 +443,32 @@ pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<
     backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
 }
 
-/// The value-per-call set-returning-function protocol
-/// (`SRF_IS_FIRSTCALL`/`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/
-/// `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` over a `FuncCallContext` carrying a
-/// `multi_call_memory_ctx` and `user_fctx`). funcapi presently models only the
-/// materialize-mode tuplestore path (`InitMaterializedSRF` /
-/// `materialized_srf_putvalues`); the value-per-call path is genuinely not yet
-/// ported.
+/// LEGACY stub for value-per-call SRF call sites not yet rewired onto the now-
+/// ported multi-call protocol (#349).
 ///
-/// This is funcapi's OWN surface, so we install an EXPLICIT honest
-/// seam-and-panic here (mirror-pg-and-panic) rather than leaving the seam
-/// declared-but-uninstalled (an implicit seam-infrastructure panic at the call
-/// site). Consumers that cross here — `pg_partition_tree` /
-/// `pg_partition_ancestors` / `pg_lock_status` — then get a loud, owner-rooted
-/// failure that names the missing machinery instead of a generic "uninstalled
-/// seam" abort.
+/// The value-per-call machinery (`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/the
+/// `SRF_RETURN_DONE` teardown over a [`FuncCallContext`] carrying a
+/// `multi_call_memory_ctx`/`user_fctx`) is now implemented here as
+/// [`init_MultiFuncCall`] / [`per_MultiFuncCall`] / [`end_MultiFuncCall`] /
+/// [`shutdown_MultiFuncCall`], threaded through the `fn_extra`/`fn_mcxt` call-
+/// frame channels with `ReturnSetInfo.{econtext,isDone}`. New SRFs use that.
+///
+/// A handful of legacy consumers (`pg_partition_tree` / `pg_partition_ancestors`
+/// / `pg_lock_status`) still route here because their *owners* are not yet
+/// ported through `ExecMakeFunctionResultSet` (execSRF.c) — the consumer that
+/// builds the frame and drives the per-call series. They get a loud, owner-
+/// rooted failure naming the missing executor leg rather than an implicit
+/// "uninstalled seam" abort, exactly as before. Rewire each onto
+/// `init/per/end_MultiFuncCall` as execSRF lands.
 pub fn value_srf_unported() {
-    // C funcapi.h: SRF_FIRSTCALL_INIT / per_MultiFuncCall / SRF_RETURN_NEXT /
-    // SRF_RETURN_DONE drive the per-call `FuncCallContext`. Modeling them needs
-    // the per-query / multi_call memory context + `user_fctx` carrier threaded
-    // through the fmgr call frame, which the trimmed `FunctionCallInfoBaseData`
-    // / `ReturnSetInfo` do not yet provide. Lands with the value-SRF machinery.
     panic!(
-        "value-per-call SRF protocol (SRF_FIRSTCALL_INIT/SRF_PERCALL_SETUP/\
-         SRF_RETURN_NEXT/SRF_RETURN_DONE over FuncCallContext.multi_call_memory_ctx/\
-         user_fctx) is not yet ported in funcapi; only the materialize-mode \
-         tuplestore path is modeled. Port the value-SRF machinery here (widen the \
-         fmgr call frame with the per-call FuncCallContext) before calling a \
-         value-per-call SRF (pg_partition_tree/pg_partition_ancestors/pg_lock_status)"
+        "value-per-call SRF call site not yet rewired onto the ported \
+         init/per/end_MultiFuncCall protocol (#349). The funcapi multi-call \
+         FuncCallContext machinery IS ported; this caller's owner still needs \
+         the executor leg (ExecMakeFunctionResultSet / execSRF.c) that builds \
+         the call frame and drives the row series. Port that, then call \
+         init_MultiFuncCall / per_MultiFuncCall / end_MultiFuncCall here \
+         (pg_partition_tree/pg_partition_ancestors/pg_lock_status)"
     )
 }
 
@@ -449,3 +476,234 @@ pub fn value_srf_unported() {
 // store InitMaterializedSRF performs once the per-query context lands; named here
 // so the enum stays referenced from the SRF module that sets it.
 const _: SetFunctionReturnMode = SetFunctionReturnMode::Materialize;
+
+#[cfg(test)]
+mod srf_protocol_tests {
+    //! Proof-of-life for the value-per-call SRF protocol keystone (#349): drive
+    //! the full `SRF_FIRSTCALL_INIT` / `SRF_PERCALL_SETUP` / `SRF_RETURN_NEXT` /
+    //! `SRF_RETURN_DONE` cycle through `init_MultiFuncCall` / `per_MultiFuncCall`
+    //! / `end_MultiFuncCall` over a real `types_nodes` call frame, faithfully
+    //! mirroring `int.c`'s `generate_series_step_int4` — the canonical
+    //! value-per-call SRF. This is exactly the body
+    //! `ExecMakeFunctionResultSet` (execSRF.c) will run a value-SRF `PGFunction`
+    //! through once that executor leg lands.
+
+    use super::*;
+    use core::any::Any;
+    use mcx::{MemoryContext, PgBox};
+    use types_datum::NullableDatum;
+    use types_nodes::execexpr::ExprDoneCond;
+    use types_nodes::funcapi::{ReturnSetInfo, SFRM_ValuePerCall};
+
+    /// `generate_series_fctx` (int.c:47) — the cross-call state. A plain
+    /// `'static` struct, exactly as the C SRF's `user_fctx` payload (`void *`).
+    #[derive(Debug)]
+    struct GenerateSeriesFctx {
+        current: i32,
+        finish: i32,
+        step: i32,
+    }
+
+    /// Erase a `'static` user-state value into the `FuncCallContext.user_fctx`
+    /// carrier (`PgBox<'mcx, dyn Any>`) — the C `funcctx->user_fctx = palloc(...)`
+    /// stash. Same unsize-through-raw-pointer pattern the rest of the repo uses
+    /// (no `CoerceUnsized` on stable).
+    fn erase_user_fctx<'mcx, T: Any>(
+        mcx: Mcx<'mcx>,
+        v: T,
+    ) -> PgResult<PgBox<'mcx, dyn Any>> {
+        let boxed = mcx::alloc_in(mcx, v)?;
+        let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
+        // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast
+        // only attaches the `dyn Any` vtable.
+        Ok(unsafe { PgBox::from_raw_in(ptr as *mut dyn Any, alloc) })
+    }
+
+    /// One invocation of the value-per-call SRF, mirroring
+    /// `generate_series_step_int4(PG_FUNCTION_ARGS)`. Returns
+    /// `(result_i32_or_None, isDone)` — `None` is `SRF_RETURN_DONE`'s NULL.
+    fn generate_series_step_int4<'mcx>(
+        mcx: Mcx<'mcx>,
+        fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+    ) -> PgResult<(Option<i32>, ExprDoneCond)> {
+        // C: if (SRF_IS_FIRSTCALL()) { ... funcctx = SRF_FIRSTCALL_INIT(); ... }
+        if fcinfo.fn_extra.is_none() {
+            let start = fcinfo.args[0].value.as_i32();
+            let finish = fcinfo.args[1].value.as_i32();
+            // C: step = 1; if (PG_NARGS() == 3) step = PG_GETARG_INT32(2);
+            let step = if fcinfo.nargs == 3 {
+                fcinfo.args[2].value.as_i32()
+            } else {
+                1
+            };
+            // C: if (step == 0) ereport(ERROR, "step size cannot equal zero");
+            assert!(step != 0, "test uses non-zero step");
+
+            // funcctx = SRF_FIRSTCALL_INIT();  (allocates the multi-call context
+            // + FuncCallContext, stashes it in the fn_extra channel.)
+            init_MultiFuncCall(fcinfo)?;
+            // C: oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+            //    fctx = palloc(...); fctx->current = start; ...
+            //    funcctx->user_fctx = fctx;
+            let fctx = erase_user_fctx(
+                mcx,
+                GenerateSeriesFctx {
+                    current: start,
+                    finish,
+                    step,
+                },
+            )?;
+            // Reborrow the stashed context to set user_fctx.
+            let funcctx = per_MultiFuncCall(fcinfo)?;
+            funcctx.user_fctx = Some(fctx);
+        }
+
+        // C: funcctx = SRF_PERCALL_SETUP();
+        let funcctx = per_MultiFuncCall(fcinfo)?;
+        // C: fctx = funcctx->user_fctx; result = fctx->current;
+        let fctx: &mut GenerateSeriesFctx = funcctx
+            .user_fctx
+            .as_mut()
+            .expect("user_fctx set on first call")
+            .downcast_mut::<GenerateSeriesFctx>()
+            .expect("user_fctx is a GenerateSeriesFctx");
+        let result = fctx.current;
+
+        let in_range = (fctx.step > 0 && fctx.current <= fctx.finish)
+            || (fctx.step < 0 && fctx.current >= fctx.finish);
+
+        if in_range {
+            // C: if (pg_add_s32_overflow(...)) fctx->step = 0; else current=next.
+            match fctx.current.checked_add(fctx.step) {
+                Some(next) => fctx.current = next,
+                None => fctx.step = 0,
+            }
+            // C: SRF_RETURN_NEXT(funcctx, Int32GetDatum(result)):
+            //    funcctx->call_cntr++; rsi->isDone = ExprMultipleResult;
+            funcctx.call_cntr += 1;
+            let rsi = fcinfo
+                .resultinfo
+                .as_mut()
+                .expect("resultinfo present for an SRF call");
+            rsi.isDone = ExprDoneCond::ExprMultipleResult;
+            Ok((Some(result), ExprDoneCond::ExprMultipleResult))
+        } else {
+            // C: SRF_RETURN_DONE(funcctx):
+            //    end_MultiFuncCall(fcinfo, funcctx); rsi->isDone = ExprEndResult;
+            end_MultiFuncCall(fcinfo)?;
+            let rsi = fcinfo
+                .resultinfo
+                .as_mut()
+                .expect("resultinfo present for an SRF call");
+            rsi.isDone = ExprDoneCond::ExprEndResult;
+            Ok((None, ExprDoneCond::ExprEndResult))
+        }
+    }
+
+    /// Build a value-per-call SRF call frame the way `ExecMakeFunctionResultSet`
+    /// would: a `ReturnSetInfo` at `resultinfo` (ValuePerCall, isDone pre-set to
+    /// ExprSingleResult by the caller) and the per-query context on the
+    /// `fn_mcxt` channel.
+    fn make_srf_frame<'mcx>(mcx: Mcx<'mcx>, args: &[i32]) -> FunctionCallInfoBaseData<'mcx> {
+        FunctionCallInfoBaseData {
+            resultinfo: Some(ReturnSetInfo {
+                allowedModes: SFRM_ValuePerCall,
+                isDone: ExprDoneCond::ExprSingleResult,
+                ..Default::default()
+            }),
+            nargs: args.len() as i16,
+            args: args
+                .iter()
+                .map(|&v| NullableDatum::value(types_datum::Datum::from_i32(v)))
+                .collect(),
+            fn_mcxt: Some(mcx),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn value_per_call_series_runs_to_completion() {
+        let ctx = MemoryContext::new("srf-proof per-query");
+        let mcx = ctx.mcx();
+        let mut fcinfo = make_srf_frame(mcx, &[1, 3]); // generate_series(1, 3)
+
+        // First call: SRF_IS_FIRSTCALL true → init + stash; produces 1.
+        let mut produced = Vec::new();
+        loop {
+            let (result, done) = generate_series_step_int4(mcx, &mut fcinfo).unwrap();
+            match done {
+                ExprDoneCond::ExprMultipleResult => {
+                    produced.push(result.expect("a value on a producing call"));
+                }
+                ExprDoneCond::ExprEndResult => {
+                    assert!(result.is_none(), "SRF_RETURN_DONE returns NULL");
+                    break;
+                }
+                ExprDoneCond::ExprSingleResult => panic!("set SRF never returns single"),
+            }
+            assert!(produced.len() < 100, "series must terminate");
+        }
+
+        // generate_series(1, 3) = {1, 2, 3}.
+        assert_eq!(produced, vec![1, 2, 3]);
+
+        // After SRF_RETURN_DONE the fn_extra channel is unbound (C:
+        // flinfo->fn_extra = NULL), so a fresh series could start again.
+        assert!(fcinfo.fn_extra.is_none(), "fn_extra unbound after RETURN_DONE");
+        // The caller-visible isDone reached ExprEndResult.
+        assert_eq!(
+            fcinfo.resultinfo.as_ref().unwrap().isDone,
+            ExprDoneCond::ExprEndResult
+        );
+    }
+
+    #[test]
+    fn first_call_is_detected_via_fn_extra_channel() {
+        let ctx = MemoryContext::new("srf-firstcall");
+        let mcx = ctx.mcx();
+        let mut fcinfo = make_srf_frame(mcx, &[5, 5]);
+
+        // SRF_IS_FIRSTCALL() == (fn_extra == NULL).
+        assert!(fcinfo.fn_extra.is_none());
+        init_MultiFuncCall(&mut fcinfo).unwrap();
+        assert!(fcinfo.fn_extra.is_some(), "init binds fn_extra");
+        // The multi-call context is owned by the FuncCallContext.
+        assert!(fcinfo
+            .fn_extra
+            .as_ref()
+            .unwrap()
+            .multi_call_memory_ctx
+            .is_some());
+
+        // A second init is the C "cannot be called more than once" error.
+        let err = init_MultiFuncCall(&mut fcinfo).unwrap_err();
+        assert_eq!(err.message(), "init_MultiFuncCall cannot be called more than once");
+    }
+
+    #[test]
+    fn end_multifunccall_tears_down_the_context() {
+        let ctx = MemoryContext::new("srf-end");
+        let mcx = ctx.mcx();
+        let mut fcinfo = make_srf_frame(mcx, &[1, 1]);
+
+        init_MultiFuncCall(&mut fcinfo).unwrap();
+        assert!(fcinfo.fn_extra.is_some());
+        // SRF_RETURN_DONE's end_MultiFuncCall unbinds fn_extra and deletes the
+        // multi-call context (drops the owned arena).
+        end_MultiFuncCall(&mut fcinfo).unwrap();
+        assert!(fcinfo.fn_extra.is_none(), "end unbinds fn_extra");
+    }
+
+    #[test]
+    fn no_resultinfo_is_feature_not_supported() {
+        let ctx = MemoryContext::new("srf-norsi");
+        let mcx = ctx.mcx();
+        let mut fcinfo = FunctionCallInfoBaseData {
+            fn_mcxt: Some(mcx),
+            ..Default::default()
+        };
+        // C: rsinfo == NULL → ERRCODE_FEATURE_NOT_SUPPORTED.
+        let err = init_MultiFuncCall(&mut fcinfo).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    }
+}

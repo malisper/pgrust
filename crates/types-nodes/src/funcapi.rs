@@ -87,23 +87,58 @@ impl Clone for Tuplestorestate<'_> {
 
 /// `ReturnSetInfo` (nodes/execnodes.h) — the node passed as
 /// `fcinfo->resultinfo` when calling a function that might return a set.
-/// Trimmed (docs/types.md rule 3) to the Materialize-mode result fields
-/// current ports consume — the fields `InitMaterializedSRF` fills and SRF
-/// bodies hand to `tuplestore_putvalues`. The funcapi/executor ports widen it
-/// (`econtext`, `expectedDesc`, `allowedModes`, `returnMode`, `isDone`).
+///
+/// Field-for-field with the C struct (the value-per-call SRF keystone, #349,
+/// added `econtext` + `isDone`):
+///
+/// ```c
+/// typedef struct ReturnSetInfo
+/// {
+///     NodeTag       type;
+///     /* values set by caller: */
+///     ExprContext  *econtext;     /* context function is being called in */
+///     TupleDesc     expectedDesc; /* tuple descriptor expected by caller */
+///     int           allowedModes; /* bitmask: return modes caller can handle */
+///     /* result status from function (but pre-initialized by caller): */
+///     SetFunctionReturnMode returnMode;   /* actual return mode */
+///     ExprDoneCond  isDone;       /* status for ValuePerCall mode */
+///     /* fields filled by function in Materialize return mode: */
+///     Tuplestorestate *setResult; /* holds the complete returned tuple set */
+///     TupleDesc     setDesc;      /* actual descriptor for returned tuples */
+/// } ReturnSetInfo;
+/// ```
 #[derive(Debug, Default)]
 pub struct ReturnSetInfo<'mcx> {
-    /// `int allowedModes` — bitmask of return modes the caller can handle
-    /// (`SFRM_*`). Set by the caller before the SRF runs; `InitMaterializedSRF`
-    /// / `init_MultiFuncCall` read it.
-    pub allowedModes: i32,
+    /// `ExprContext *econtext` — the per-node expression-evaluation context the
+    /// function is being called in. The owned model addresses the EState's
+    /// per-node `ExprContext`s by [`EcxtId`](crate::execnodes::EcxtId) (the same
+    /// id `execSRF` / `SetExprState` carry), so this is the context's id rather
+    /// than a borrowed pointer. `None` is the C `NULL`. Read by
+    /// `init_MultiFuncCall` / `end_MultiFuncCall` to (un)register the
+    /// `shutdown_MultiFuncCall` callback against the context, and by
+    /// `InitMaterializedSRF` (C reaches `econtext->ecxt_per_query_memory`
+    /// through it).
+    pub econtext: Option<crate::execnodes::EcxtId>,
     /// `TupleDesc expectedDesc` — descriptor expected by the caller (`None` is
     /// the C `NULL`). Read by `InitMaterializedSRF` under
     /// `MAT_SRF_USE_EXPECTED_DESC` and by `internal_get_result_type`.
     pub expectedDesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    /// `int allowedModes` — bitmask of return modes the caller can handle
+    /// (`SFRM_*`). Set by the caller before the SRF runs; `InitMaterializedSRF`
+    /// / `init_MultiFuncCall` read it.
+    pub allowedModes: i32,
     /// `SetFunctionReturnMode returnMode` — actual return mode the function
     /// chose; `InitMaterializedSRF` sets this to `SFRM_Materialize`.
     pub returnMode: SetFunctionReturnMode,
+    /// `ExprDoneCond isDone` — status for ValuePerCall mode. The value-per-call
+    /// SRF macros set this every call: `SRF_RETURN_NEXT` →
+    /// [`ExprMultipleResult`](crate::execexpr::ExprDoneCond::ExprMultipleResult),
+    /// `SRF_RETURN_DONE` →
+    /// [`ExprEndResult`](crate::execexpr::ExprDoneCond::ExprEndResult). The
+    /// caller (`ExecMakeFunctionResultSet`) reads it back after each call to
+    /// drive the row series. Pre-initialized by the caller to
+    /// [`ExprSingleResult`](crate::execexpr::ExprDoneCond::ExprSingleResult).
+    pub isDone: crate::execexpr::ExprDoneCond,
     /// `Tuplestorestate *setResult` — holds the complete returned tuple set.
     /// The carrier's empty state is the C `NULL` pointer.
     pub setResult: Tuplestorestate<'mcx>,
@@ -226,10 +261,9 @@ pub struct ExtractedVariadicArgs<'mcx> {
 }
 
 /// `FuncCallContext` (funcapi.h) — cross-call state for a Set Returning
-/// Function, held across fmgr calls via `flinfo->fn_extra`. The owned model
-/// keeps the cross-call data fields; the C `multi_call_memory_ctx` long-lived
-/// context is owned by the SRF plumbing seam (executor/fmgr boundary).
-/// Field-checked against funcapi.h.
+/// Function, held across fmgr calls via `flinfo->fn_extra`. Field-checked
+/// against funcapi.h (the value-per-call SRF keystone, #349, modeled
+/// `multi_call_memory_ctx`).
 #[derive(Debug, Default)]
 pub struct FuncCallContext<'mcx> {
     /// `uint64 call_cntr` — number of times called before.
@@ -237,12 +271,39 @@ pub struct FuncCallContext<'mcx> {
     /// `uint64 max_calls` — optional maximum number of calls.
     pub max_calls: u64,
     /// `void *user_fctx` — optional caller-private cross-call state. Genuinely
-    /// heterogeneous per-SRF (the C `void *`); kept type-erased.
+    /// heterogeneous per-SRF (the C `void *`); kept type-erased. C allocates it
+    /// in `multi_call_memory_ctx`; the owned model allocates it in the
+    /// per-query `'mcx` (which outlives the whole call series, so the cross-call
+    /// persistence the C arena provides is preserved) and frees it with the rest
+    /// of the per-query memory at end of query, equivalently to the multi-call
+    /// context being deleted by `shutdown_MultiFuncCall`.
     pub user_fctx: Option<mcx::PgBox<'mcx, dyn core::any::Any>>,
     /// `AttInMetadata *attinmeta` — input metadata for `BuildTupleFromCStrings`
     /// (`None` is the C `NULL`).
     pub attinmeta: Option<AttInMetadata<'mcx>>,
+    /// `MemoryContext multi_call_memory_ctx` — the context that holds all
+    /// cross-call data (`SRF_FIRSTCALL_INIT` sets it; `SRF_RETURN_DONE` /
+    /// `shutdown_MultiFuncCall` delete it). C makes it a child of
+    /// `flinfo->fn_mcxt` and frees everything (including the `FuncCallContext`
+    /// itself) by `MemoryContextDelete`. The owned model stores the *owned*
+    /// child arena here; deleting it is dropping this `Option`
+    /// ([`Self::shutdown`]). `None` once shut down (the C "context already
+    /// deleted"). The `'mcx`-bound fields above are NOT allocated in this arena
+    /// (that would be a self-borrow); they live in the per-query `'mcx`, which
+    /// outlives this context.
+    pub multi_call_memory_ctx: Option<mcx::MemoryContext>,
     /// `TupleDesc tuple_desc` — descriptor for `heap_form_tuple`-built tuples
     /// (`None` is the C `NULL`).
     pub tuple_desc: types_tuple::heaptuple::TupleDesc<'mcx>,
+}
+
+impl<'mcx> FuncCallContext<'mcx> {
+    /// Delete the multi-call memory context (C:
+    /// `MemoryContextDelete(funcctx->multi_call_memory_ctx)`) — drop the owned
+    /// arena. Idempotent: a second call is the C "already NULL" no-op.
+    pub fn shutdown(&mut self) {
+        // Dropping the owned MemoryContext fires its reset callbacks and frees
+        // its accounting subtree — the owned-model MemoryContextDelete.
+        let _ = self.multi_call_memory_ctx.take();
+    }
 }

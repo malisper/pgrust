@@ -69,4 +69,28 @@ pub struct FunctionCallInfoBaseData<'mcx> {
     /// executor gathers its per-argument result cells into this vector
     /// immediately before dispatching the call.
     pub args: Vec<NullableDatum>,
+    /// CHANNEL for C's `flinfo->fn_extra` (the value-per-call SRF keystone,
+    /// #349). C holds the cross-call [`FuncCallContext`] on the *caller's*
+    /// `FmgrInfo` (`flinfo->fn_extra`, a `void *`); the owned `flinfo`
+    /// ([`types_core::fmgr::FmgrInfo`]) is `std`/lifetime-free and cannot name a
+    /// `'mcx`-bound `FuncCallContext` (the std/`no_std` + lifetime divergence,
+    /// #327 — WONTFIX-to-unify). So the `'mcx` `FuncCallContext` is threaded
+    /// through *this* call frame, the place where both the callee and the
+    /// `'mcx` lifetime are in scope. For a `fn_retset` function the executor
+    /// keeps this frame alive across the whole row series (it lives in
+    /// `SetExprState.fcinfo`), so the channel provides exactly the cross-call
+    /// persistence C's `fn_extra` does. `SRF_IS_FIRSTCALL()` (C
+    /// `flinfo->fn_extra == NULL`) is `fn_extra.is_none()` here. `None` is the C
+    /// `NULL` (no in-flight multi-call state).
+    pub fn_extra: Option<crate::funcapi::FuncCallContext<'mcx>>,
+    /// CHANNEL for C's `flinfo->fn_mcxt` (the value-per-call SRF keystone,
+    /// #349). C's `FmgrInfo.fn_mcxt` is the long-lived memory context callees
+    /// charge cross-call state to; `init_MultiFuncCall` makes the multi-call
+    /// context a child of it. The owned `flinfo` carries no stored context (this
+    /// repo threads `Mcx` explicitly, not ambiently), so the per-query context
+    /// the SRF's cross-call data must outlive its individual calls in is carried
+    /// on the frame as the `fn_mcxt` channel. `None` is "no per-query context
+    /// supplied" (the caller sets it before a `fn_retset` call, exactly as
+    /// `fmgr_info` stamps `fn_mcxt`).
+    pub fn_mcxt: Option<mcx::Mcx<'mcx>>,
 }

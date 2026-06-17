@@ -73,6 +73,44 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `init_MultiFuncCall(fcinfo)` (funcapi.c) = `SRF_FIRSTCALL_INIT()`: the
+    /// first-call setup of a value-per-call SRF. Verifies the `ReturnSetInfo`
+    /// context, creates the long-lived multi-call memory context under the
+    /// frame's `fn_mcxt` channel, allocates and zeroes a [`FuncCallContext`],
+    /// and stashes it in the frame's `fn_extra` channel (C's
+    /// `flinfo->fn_extra`). Returns a `&mut` to the stashed context (C returns
+    /// the `FuncCallContext *` that aliases `fn_extra`). `Err` on the wrong
+    /// calling context (`ERRCODE_FEATURE_NOT_SUPPORTED`) or a second call
+    /// ("init_MultiFuncCall cannot be called more than once"). The caller must
+    /// set `fcinfo.fn_mcxt` (per-query context) first.
+    pub fn init_MultiFuncCall<'a, 'mcx>(
+        fcinfo: &'a mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    ) -> types_error::PgResult<&'a mut types_nodes::funcapi::FuncCallContext<'mcx>>
+);
+
+seam_core::seam!(
+    /// `per_MultiFuncCall(fcinfo)` (funcapi.c) = `SRF_PERCALL_SETUP()`: return
+    /// (a `&mut` to) the cross-call [`FuncCallContext`] saved in the frame's
+    /// `fn_extra` channel for the current per-call step. `Err` if called before
+    /// `init_MultiFuncCall` (the C contract violation, `fn_extra == NULL`).
+    pub fn per_MultiFuncCall<'a, 'mcx>(
+        fcinfo: &'a mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    ) -> types_error::PgResult<&'a mut types_nodes::funcapi::FuncCallContext<'mcx>>
+);
+
+seam_core::seam!(
+    /// `end_MultiFuncCall(fcinfo, funcctx)` (funcapi.c) — the teardown
+    /// `SRF_RETURN_DONE` drives: tear down the multi-call context and unbind the
+    /// frame's `fn_extra` channel. (The C shutdown-callback deregistration is
+    /// subsumed by ownership in the owned model — see the funcapi body — so the
+    /// `funcctx` argument C threads through is not needed; the context is taken
+    /// straight out of `fcinfo.fn_extra`.) Can carry an `Err` from the teardown.
+    pub fn end_MultiFuncCall<'mcx>(
+        fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// The value-per-call set-returning-function machinery
     /// (`SRF_IS_FIRSTCALL`/`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/
     /// `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` over a `FuncCallContext` with a

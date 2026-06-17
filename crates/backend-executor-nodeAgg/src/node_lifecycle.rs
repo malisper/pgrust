@@ -668,6 +668,9 @@ fn new_agg_fcinfo<'mcx>(
         isnull: false,
         nargs: nargs as i16,
         args,
+        // Value-per-call SRF channel (#349): unused for an aggregate transition
+        // frame (no in-flight FuncCallContext / per-query SRF context).
+        ..Default::default()
     };
     alloc_in(mcx, fcinfo)
 }

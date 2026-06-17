@@ -480,6 +480,8 @@ pub(crate) fn exec_init_func<'mcx>(
             isnull: false,
             nargs: nargs as i16,
             args: Vec::new(),
+            // Value-per-call SRF channel (#349): unused here (non-set function).
+            ..Default::default()
         },
     )?;
 
@@ -671,6 +673,8 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
             isnull: false,
             nargs: 2,
             args: Vec::new(),
+            // Value-per-call SRF channel (#349): unused here (non-set function).
+            ..Default::default()
         },
     )?;
 
