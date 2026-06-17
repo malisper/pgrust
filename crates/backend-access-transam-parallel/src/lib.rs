@@ -74,6 +74,7 @@ use types_storage::storage::shm_toc_estimator;
 use backend_access_transam_parallel_rt_seams as rt;
 
 pub mod shared_dsm_object;
+mod fps_driver;
 
 // ===========================================================================
 // Constants (parallel.c:48-79).
@@ -2157,10 +2158,75 @@ fn lookup_parallel_worker_function(libraryname: &str, funcname: &str) -> PgResul
 // Seam installation.
 // ===========================================================================
 
-/// All seams this crate previously installed were removed: the parallel
-/// routines are now called directly by consumers (faithful de-indirection,
-/// identical behavior), so there is nothing left to install.
-pub fn init_seams() {}
+/// Install the DSM-helper and `FixedParallelState`-driver runtime seams this
+/// crate owns. These were collected in `backend-access-transam-parallel-rt-seams`
+/// (the design-debt home) but their bodies live here — the DSM-segment-handle
+/// bridge (`DsmSegmentHandle <-> DsmSegmentId`), the in-segment fixed-state
+/// byte layout, and the genuine cross-process `FixedParallelState.mutex`
+/// spinlock are all owned by the parallel subsystem.
+pub fn init_seams() {
+    install_dsm_helper_seams();
+    install_fps_driver_seams();
+}
+
+/// Install the thin DSM helpers that bridge the `DsmSegmentHandle` carrier (its
+/// value *is* `DsmSegmentId::as_u64()`, opacity-inherited) into the merged
+/// `dsm-core` segment API, plus the per-session-handle byte read/write into the
+/// real DSM chunk.
+fn install_dsm_helper_seams() {
+    use backend_storage_ipc_dsm_core::dsm as dsm_core;
+
+    // `dsm_detach((dsm_segment *) seg)` — drop the segment's mapping and run its
+    // on-detach callbacks. Mirrors the leader/worker explicit detach.
+    rt::dsm_detach::set(|seg| dsm_core::dsm_detach(seg_id_of(seg)));
+    // Same body, distinct slot name (the worker-shutdown path uses the
+    // `_handle` flavor reached via `dsm_segment_from_datum`).
+    rt::dsm_detach_handle::set(|seg| dsm_core::dsm_detach(seg_id_of(seg)));
+
+    // `dsm_segment_handle(seg)` — the integer `dsm_handle` name of a segment.
+    rt::dsm_segment_handle::set(|seg| Ok(dsm_core::dsm_segment_handle(seg_id_of(seg))));
+
+    // `(dsm_segment *) DatumGetPointer(arg)` — the on-detach callback `arg` is
+    // the segment handle word (opacity-inherited: handle value == id == the
+    // machine word the C `Datum` carried). Recover the `DsmSegmentHandle`.
+    rt::dsm_segment_from_datum::set(|arg| Ok(DsmSegmentHandle(arg.as_usize())));
+
+    // `*(dsm_handle *) space = handle` — write the per-session DSM handle into
+    // its `shm_toc_allocate`'d chunk. SAFETY: `base` is the start of a
+    // `sizeof(dsm_handle)` chunk the leader reserved; it is writable and
+    // suitably aligned for a `u32`.
+    rt::write_dsm_handle::set(|base, value| {
+        unsafe {
+            core::ptr::write(base as *mut dsm_handle, value);
+        }
+        Ok(())
+    });
+    // `*(dsm_handle *) space` — read it back in the worker. SAFETY: as above;
+    // the leader wrote a `dsm_handle` here before publishing the chunk.
+    rt::read_dsm_handle::set(|base| {
+        let v = unsafe { core::ptr::read(base as *const dsm_handle) };
+        Ok(v)
+    });
+}
+
+/// Install the `FixedParallelState` DSM driver — the in-segment byte layout and
+/// its genuine cross-process spinlock (see `fps_driver`).
+fn install_fps_driver_seams() {
+    rt::fps_init::set(|base, state| {
+        fps_driver::fps_init(base, state);
+        Ok(())
+    });
+    rt::fps_read::set(|base| Ok(fps_driver::fps_read(base)));
+    rt::fps_reset_last_xlog_end::set(|base| {
+        fps_driver::fps_reset_last_xlog_end(base);
+        Ok(())
+    });
+    rt::fps_get_last_xlog_end::set(|base| Ok(fps_driver::fps_get_last_xlog_end(base)));
+    rt::fps_report_last_rec_end::set(|base, last_xlog_end| {
+        fps_driver::fps_report_last_rec_end(base, last_xlog_end);
+        Ok(())
+    });
+}
 
 // ===========================================================================
 // Runtime test: the DSM-init core over a REAL dsm-core segment.
