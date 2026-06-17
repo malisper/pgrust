@@ -2437,6 +2437,38 @@ pub fn expression_planner<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Expr> {
     Ok(result)
 }
 
+/// `expression_planner_with_deps(expr, &relationOids, &invalItems)`
+/// (clauses.c:5479). Like [`expression_planner`] but also extracts the
+/// relation-OID and function-inval-item dependencies of the const-folded
+/// expression — the form `GetCachedExpression` (`plancache.c`) uses so the
+/// cached expression is invalidated when its dependencies change. C makes up a
+/// dummy `PlannerGlobal`/`PlannerInfo` and runs `extract_query_dependencies_walker`
+/// over the planned result; we delegate the walk to setrefs'
+/// [`extract_expr_dependencies_value`](backend_optimizer_plan_setrefs::extract_expr_dependencies_value)
+/// (the owner of the dependency-extraction machinery — no cycle, the planner
+/// already depends on setrefs).
+pub fn expression_planner_with_deps<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Expr,
+) -> PgResult<(Expr, alloc::vec::Vec<Oid>, alloc::vec::Vec<types_plancache::InvalItemKey>)> {
+    // result = (Expr *) expression_planner((Expr *) expr); (const-fold + opfuncids)
+    let result = expression_planner(mcx, expr)?;
+
+    // (void) extract_query_dependencies_walker((Node *) result, &root);
+    let deps = backend_optimizer_plan_setrefs::extract_expr_dependencies_value(mcx, &result)?;
+
+    // *relationOids = glob.relationOids; *invalItems = glob.invalItems;
+    let inval_items = deps
+        .inval_items
+        .into_iter()
+        .map(|(cache_id, hash_value)| types_plancache::InvalItemKey {
+            cache_id,
+            hash_value,
+        })
+        .collect();
+    Ok((result, deps.relation_oids, inval_items))
+}
+
 // ===========================================================================
 // plan_cluster_use_sort()  (planner.c:6859) — installed as a seam.
 // ===========================================================================
@@ -2577,6 +2609,9 @@ pub fn init_seams() {
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
+    backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
+        expression_planner_with_deps,
+    );
 
     // create_plan-tail: apply_tlist_labeling(plan->targetlist,
     // root->processed_tlist) (createplan.c create_plan, tlist.c:327). The

@@ -179,6 +179,9 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_ts_template_oid::set(seam_get_ts_template_oid);
     backend_catalog_namespace_seams::get_statistics_object_oid::set(seam_get_statistics_object_oid);
     backend_catalog_namespace_seams::fetch_search_path::set(crate::fetch_search_path);
+    backend_catalog_namespace_seams::get_search_path_matcher_value::set(
+        crate::GetSearchPathMatcher,
+    );
 
     // Install the GUC machinery's typed accessors for the `search_path` GUC
     // (C's `char *namespace_search_path`, guc_tables.c:4513). C points

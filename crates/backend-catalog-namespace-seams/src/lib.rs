@@ -9,6 +9,7 @@ use types_core::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
 use types_namespace::FuncCandidateList;
+use types_namespace::SearchPathMatcher;
 use types_storage::lock::LOCKMODE;
 use types_tuple::access::RangeVar;
 
@@ -308,6 +309,22 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         include_implicit: bool,
     ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `GetSearchPathMatcher(context)` (namespace.c:3855) over the OWNED value
+    /// model — fetch the current `search_path` definition as a
+    /// [`SearchPathMatcher`] allocated in `mcx` (the C `context` argument). The
+    /// matcher captures the resolved schema-OID list plus the
+    /// implicitly-prepended `pg_catalog`/temp flags and the path generation, so
+    /// the caller can later cheaply re-validate it against the active
+    /// environment. `Err` carries the `recomputeNamespacePath` `ereport(ERROR)`
+    /// surface and OOM. This is the VALUE counterpart of the handle-based
+    /// `backend_catalog_namespace_pc_seams::get_search_path_matcher` that
+    /// plancache's F0 de-handle will switch to.
+    pub fn get_search_path_matcher_value<'mcx>(
+        mcx: Mcx<'mcx>,
+    ) -> PgResult<SearchPathMatcher<'mcx>>
 );
 // (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
 // function (guc.c:2246), not namespace.c's — and installed by the merged guc

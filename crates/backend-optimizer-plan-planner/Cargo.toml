@@ -20,6 +20,9 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # This unit's own inward seams (pg_plan_query / plan_cluster_use_sort).
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+# plancache's slice of the planner (expression_planner_with_deps value seam).
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
+types-plancache = { path = "../types-plancache" }
 # plan_set_operations (prepunion.c — no crate yet).
 backend-optimizer-prep-prepunion-seams = { path = "../backend-optimizer-prep-prepunion-seams" }
 # create_plan dispatch spine.

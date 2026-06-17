@@ -41,6 +41,22 @@ pub fn init_seams() {
     backend_rewrite_rewritehandler_seams::query_rewrite_canonical::set(
         seam_query_rewrite_canonical,
     );
+    backend_rewrite_rewritehandler_seams::acquire_rewrite_locks::set(seam_acquire_rewrite_locks);
+}
+
+/// `AcquireRewriteLocks(parsetree, forExecute, forUpdatePushedDown)`
+/// (rewriteHandler.c:148) over the value `Query` — the standalone re-lock entry
+/// `plancache.c`'s `RevalidateCachedQuery` uses. The owned `AcquireRewriteLocks`
+/// mutates `&mut Query` in place; the seam takes the `Query` by value, locks +
+/// updates it, and returns it.
+fn seam_acquire_rewrite_locks<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut parsetree: types_nodes::copy_query::Query<'mcx>,
+    for_execute: bool,
+    for_update_pushed_down: bool,
+) -> PgResult<types_nodes::copy_query::Query<'mcx>> {
+    crate::AcquireRewriteLocks(mcx, &mut parsetree, for_execute, for_update_pushed_down)?;
+    Ok(parsetree)
 }
 
 /// Legacy opaque `portalcmds::Query` entry. Collapsing this contract into the

@@ -5,9 +5,10 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
+use types_nodes::copy_query::Query;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::portalcmds::ParamListInfo;
-use types_portal::{FetchDirection, Portal};
+use types_portal::{FetchDirection, Portal, PortalStrategy};
 use types_snapshot::SnapshotData;
 
 seam_core::seam!(
@@ -34,4 +35,15 @@ seam_core::seam!(
         count: i64,
         dest: DestReceiverHandle,
     ) -> PgResult<u64>
+);
+
+seam_core::seam!(
+    /// `ChoosePortalStrategy(stmt_list)` (pquery.c:210) over the OWNED `Query`
+    /// value tree — the leg `plancache.c` uses (its cached `stmt_list` is a list
+    /// of `Query` nodes, not `PlannedStmt`s). Selects the [`PortalStrategy`] for
+    /// the querytree list. `Err` carries the `UtilityReturnsTuples` lookup
+    /// surface. This is the VALUE counterpart of the handle-based
+    /// `backend_tcop_pquery_pc_seams::choose_portal_strategy` that plancache's F0
+    /// de-handle will switch to.
+    pub fn choose_portal_strategy_queries(stmts: &[Query<'_>]) -> PgResult<PortalStrategy>
 );

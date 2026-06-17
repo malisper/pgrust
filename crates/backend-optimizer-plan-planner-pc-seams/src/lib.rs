@@ -14,6 +14,24 @@ use types_plancache::{
 };
 
 seam_core::seam!(
+    /// `expression_planner_with_deps(expr, &relationOids, &invalItems)`
+    /// (clauses.c:5479) over the OWNED value [`types_nodes::primnodes::Expr`] —
+    /// prepare a standalone expression for execution (const-fold + `fix_opfuncids`
+    /// via `expression_planner`) and extract the relation-OID / function-inval-item
+    /// dependencies the const-folded result carries, exactly as the planner's
+    /// dependency machinery would. Returns the planned expression (allocated in
+    /// `mcx`) plus its `(relationOids, invalItems)`. `GetCachedExpression`
+    /// (`plancache.c`) is the sole caller. This is the VALUE counterpart of the
+    /// handle-based
+    /// `backend_nodes_copyfuncs_pc_seams::expression_planner_with_deps` that
+    /// plancache's F0 de-handle will switch to.
+    pub fn expression_planner_with_deps_value<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: types_nodes::primnodes::Expr,
+    ) -> PgResult<(types_nodes::primnodes::Expr, Vec<Oid>, Vec<InvalItemKey>)>
+);
+
+seam_core::seam!(
     /// `pg_plan_queries(querytree_list, query_string, cursor_options, boundParams)`.
     pub fn plan_queries(
         querytree_list: QueryListHandle,

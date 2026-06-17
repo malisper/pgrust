@@ -41,6 +41,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AcquireRewriteLocks(parsetree, forExecute, forUpdatePushedDown)`
+    /// (rewriteHandler.c:148) over the value-typed
+    /// [`types_nodes::copy_query::Query`] — acquire the appropriate relation
+    /// locks for every relation in the query, fix up dropped JOIN alias vars,
+    /// and refresh RTE relkinds, recursing through subquery RTEs and CTEs. The
+    /// `Query` is taken by value, mutated in place (locks taken, relkinds /
+    /// joinaliasvars updated), and returned. `plancache.c`'s
+    /// `RevalidateCachedQuery` analyzed branch calls this **standalone** (i.e.
+    /// separately from `QueryRewrite`) to re-lock the cached analyzed querytree
+    /// before re-planning. Runs the locker engine; can `ereport(ERROR)`. The
+    /// sub-link descent remains the documented `'static`-SubLink keystone panic
+    /// (rare on the SELECT/DML spine).
+    pub fn acquire_rewrite_locks<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        parsetree: types_nodes::copy_query::Query<'mcx>,
+        for_execute: bool,
+        for_update_pushed_down: bool,
+    ) -> PgResult<types_nodes::copy_query::Query<'mcx>>
+);
+
+seam_core::seam!(
     /// `build_column_default(rel, attrno)` (rewriteHandler.c): build the
     /// default-value expression tree for the 1-based column `attrno` of `rel`,
     /// or `None` (the C `NULL`) when the column has no default. For a generated

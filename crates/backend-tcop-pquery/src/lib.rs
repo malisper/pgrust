@@ -30,6 +30,7 @@ use types_error::{
 };
 
 use types_dest::CommandDest;
+use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{
     Node, NodeTag, CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY,
@@ -270,6 +271,69 @@ pub fn choose_portal_strategy(stmts: &[PlannedStmt<'_>]) -> PgResult<PortalStrat
                 return Ok(PORTAL_MULTI_QUERY); /* no need to look further */
             }
             if pstmt.commandType == CMD_UTILITY || !pstmt.hasReturning {
+                return Ok(PORTAL_MULTI_QUERY); /* no need to look further */
+            }
+        }
+    }
+    if n_set_tag == 1 {
+        return Ok(PORTAL_ONE_RETURNING);
+    }
+
+    /* Else, it's the general case... */
+    Ok(PORTAL_MULTI_QUERY)
+}
+
+/// `ChoosePortalStrategy` (pquery.c:210-317) over the OWNED `Query` value tree —
+/// the leg `plancache.c` exercises (`PlanCacheComputeResultDesc` /
+/// `GetCachedPlan`), where `stmt_list` is a list of `Query` nodes rather than
+/// `PlannedStmt`s. Mirrors [`choose_portal_strategy`] field-for-field: the
+/// `commandType`/`canSetTag`/`hasModifyingCTE`/`returningList` reads come off the
+/// `Query` instead of the `PlannedStmt`, and the CMD_UTILITY leg consults
+/// `UtilityReturnsTuples(query->utilityStmt)` via the utility seam. The
+/// `unrecognized node type` `elog(ERROR)` leg is unreachable (the element type is
+/// statically `Query`).
+pub fn choose_portal_strategy_queries(stmts: &[Query<'_>]) -> PgResult<PortalStrategy> {
+    let mut n_set_tag: i32;
+
+    /*
+     * PORTAL_ONE_SELECT and PORTAL_UTIL_SELECT need only consider the
+     * single-statement case ...
+     */
+    if stmts.len() == 1 {
+        let query = &stmts[0];
+        if query.canSetTag {
+            if query.commandType == CMD_SELECT {
+                if query.hasModifyingCTE {
+                    return Ok(PORTAL_ONE_MOD_WITH);
+                } else {
+                    return Ok(PORTAL_ONE_SELECT);
+                }
+            }
+            if query.commandType == CMD_UTILITY {
+                if let Some(utility_stmt) = query.utilityStmt.as_deref() {
+                    if utility_seam::utility_returns_tuples::call(utility_stmt)? {
+                        return Ok(PORTAL_UTIL_SELECT);
+                    }
+                }
+                /* it can't be ONE_RETURNING, so give up */
+                return Ok(PORTAL_MULTI_QUERY);
+            }
+        }
+    }
+
+    /*
+     * PORTAL_ONE_RETURNING has to allow auxiliary queries added by rewrite.
+     * Choose PORTAL_ONE_RETURNING if there is exactly one canSetTag query and
+     * it has a RETURNING list.
+     */
+    n_set_tag = 0;
+    for query in stmts {
+        if query.canSetTag {
+            n_set_tag += 1;
+            if n_set_tag > 1 {
+                return Ok(PORTAL_MULTI_QUERY); /* no need to look further */
+            }
+            if query.commandType == CMD_UTILITY || query.returningList.is_empty() {
                 return Ok(PORTAL_MULTI_QUERY); /* no need to look further */
             }
         }
@@ -1645,4 +1709,5 @@ pub fn init_seams() {
     backend_tcop_pquery_seams::portal_run_fetch::set(|portal, fdirection, count, dest| {
         portal_run_fetch(portal, fdirection, count, dest)
     });
+    backend_tcop_pquery_seams::choose_portal_strategy_queries::set(choose_portal_strategy_queries);
 }

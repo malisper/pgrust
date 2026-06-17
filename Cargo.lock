@@ -11638,6 +11638,7 @@ dependencies = [
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-planner-pc-seams",
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-plan-setrefs",
  "backend-optimizer-plan-small",
@@ -11660,6 +11661,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-pathnodes",
+ "types-plancache",
 ]
 
 [[package]]
@@ -11678,9 +11680,11 @@ dependencies = [
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-plancache",
 ]
 

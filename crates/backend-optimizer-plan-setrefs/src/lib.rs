@@ -3111,6 +3111,36 @@ fn extract_query_dependencies_value<'mcx>(
     })
 }
 
+/// `extract_query_dependencies_walker(result, &root)` over a single planned
+/// expression (the dependency-extraction tail of
+/// `expression_planner_with_deps`, clauses.c:5479). Given the const-folded
+/// expression `clauses.c`'s `expression_planner_with_deps` produces, walk it to
+/// collect the relation-OID and function-inval-item dependencies (same dummy
+/// `PlannerGlobal`/`PlannerInfo` realized as the local [`ExtractDepsCtx`]). The
+/// `depends_on_rls` field is unused on the bare-expression path (an expression
+/// carries no `Query.hasRowSecurity`) but is returned for shape parity.
+/// Exported for the planner owner's `expression_planner_with_deps` value form;
+/// the planner crate depends on this one directly (no cycle).
+pub fn extract_expr_dependencies_value<'mcx>(
+    _mcx: Mcx<'mcx>,
+    expr: &Expr,
+) -> PgResult<ext::QueryDependenciesValue> {
+    let mut ctx = ExtractDepsCtx {
+        relation_oids: Vec::new(),
+        inval_items: Vec::new(),
+        depends_on_role: false,
+    };
+    // (void) extract_query_dependencies_walker(result, &root); — `result` is a
+    // bare Expr, wrapped as the `Node::Expr` the walker dispatches on.
+    let node = Node::Expr(expr.clone());
+    extract_query_dependencies_walker(&node, &mut ctx)?;
+    Ok(ext::QueryDependenciesValue {
+        relation_oids: ctx.relation_oids,
+        inval_items: ctx.inval_items,
+        depends_on_rls: ctx.depends_on_role,
+    })
+}
+
 /// `set_returning_clause_references(root, rlist, topplan, resultRelation, rtoffset)`
 /// (setrefs.c:3398). Ported as a real body (uses build_tlist_index_other_vars +
 /// fix_join_expr); reached only from the ModifyTable RETURNING leg (loud above).

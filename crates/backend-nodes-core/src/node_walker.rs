@@ -918,9 +918,14 @@ pub fn query_tree_walker(
     }
     // C also walks groupClause/distinctClause/sortClause SortGroupClause lists
     // only under QTW_EXAMINE_SORTGROUP; they are primitives (no subnodes) so a
-    // plain `false`/visit-only otherwise. cteList descends via range_table only.
-    if list_walk!(query.cteList) {
-        return true;
+    // plain `false`/visit-only otherwise. The cteList walk descends into each
+    // CommonTableExpr (and thence its ctequery), but is suppressed under
+    // QTW_IGNORE_CTE_SUBQUERIES — the leg plancache.c's ScanQueryForLocks uses
+    // (it has already locked the CTE subqueries itself) via QTW_IGNORE_RC_SUBQUERIES.
+    if flags & QTW_IGNORE_CTE_SUBQUERIES == 0 {
+        if list_walk!(query.cteList) {
+            return true;
+        }
     }
     // Finally the range table.
     if flags & QTW_IGNORE_RANGE_TABLE == 0 {
