@@ -244,6 +244,11 @@ int_var!(I_PostAuthDelay, PostAuthDelay, set_PostAuthDelay, 0);
 
 // ---- enum GUCs (guc_tables.c) — stored as the int the enum maps to -------
 
+// `int log_statement = LOGSTMT_NONE;` (postgres.c) — the `log_statement` GUC's
+// backing, centralized here alongside the other postgres.c-owned GUC globals
+// (cf. `log_statement_stats`). LOGSTMT_NONE == 0.
+int_var!(I_log_statement, log_statement, set_log_statement, 0);
+
 // HUGE_PAGES_OFF=0, ON=1, TRY=2 (boot for huge_pages), UNKNOWN=3 (boot for
 // huge_pages_status) — see storage/pg_shmem.h.
 int_var!(I_huge_pages, huge_pages, set_huge_pages, 2); // HUGE_PAGES_TRY

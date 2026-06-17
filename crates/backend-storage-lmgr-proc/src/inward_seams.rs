@@ -182,6 +182,32 @@ fn vxid_lock_table_insert_my_proc(
     })
 }
 
+/// `VirtualXactLockTableCleanup()` shared-memory clear (lock.c:4613). Asserts
+/// `MyProc->vxid.procNumber != INVALID_PROC_NUMBER`, then under
+/// `MyProc->fpInfoLock` reads and clears the fast-path VXID state, returning the
+/// prior `(fpVXIDLock, fpLocalTransactionId)` so the lock.c caller can decide
+/// whether the lock was transferred to the main table.
+fn vxid_lock_table_cleanup_my_proc() -> PgResult<(bool, LocalTransactionId)> {
+    let my_procno = crate::proc_shmem::my_proc_number();
+    with_my_proc(|p| {
+        debug_assert_ne!(p.vxid.procNumber, types_core::INVALID_PROC_NUMBER);
+
+        // LWLockAcquire(&MyProc->fpInfoLock, LW_EXCLUSIVE); released on drop.
+        let _guard = lwlock::lwlock_acquire::call(
+            &p.fpInfoLock,
+            LWLockMode::LW_EXCLUSIVE,
+            my_procno,
+        )?;
+
+        let fastpath = p.fpVXIDLock;
+        let lxid = p.fpLocalTransactionId;
+        p.fpVXIDLock = false;
+        p.fpLocalTransactionId = InvalidLocalTransactionId;
+
+        Ok((fastpath, lxid))
+    })
+}
+
 fn lock_error_cleanup() {
     // C `LockErrorCleanup(void)` is void: it is the lock-wait unwind run on the
     // error path and does not itself raise. The port's `LockErrorCleanup`
@@ -951,6 +977,7 @@ pub(crate) fn install() {
     seams::set_my_proc_wait_start::set(set_my_proc_wait_start);
     seams::set_my_proc_vxid_proc_number::set(set_my_proc_vxid_proc_number);
     seams::vxid_lock_table_insert_my_proc::set(vxid_lock_table_insert_my_proc);
+    seams::vxid_lock_table_cleanup_my_proc::set(vxid_lock_table_cleanup_my_proc);
     seams::set_my_proc_temp_namespace_id::set(set_my_proc_temp_namespace_id);
     seams::my_proc_lxid::set(my_proc_lxid);
     seams::set_my_proc_lxid::set(set_my_proc_lxid);

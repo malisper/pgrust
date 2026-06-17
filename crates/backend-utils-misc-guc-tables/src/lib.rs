@@ -361,6 +361,10 @@ fn install_guc_tables_owned_vars() {
     });
 
     // --- enum (stored as int) ---
+    vars::log_statement.install(GucVarAccessors {
+        get: backing::log_statement,
+        set: backing::set_log_statement,
+    });
     vars::huge_pages.install(GucVarAccessors {
         get: backing::huge_pages,
         set: backing::set_huge_pages,

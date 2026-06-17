@@ -122,6 +122,20 @@ impl LOCKTAG {
             locktag_lockmethodid: USER_LOCKMETHOD,
         }
     }
+
+    /// `SET_LOCKTAG_VIRTUALTRANSACTION(locktag, vxid)` (`storage/lock.h`): the
+    /// tag for a virtual-transaction lock. `field1` is the vxid's procNumber and
+    /// `field2` its localTransactionId.
+    pub fn virtualtransaction(proc_number: uint32, local_transaction_id: uint32) -> Self {
+        LOCKTAG {
+            locktag_field1: proc_number,
+            locktag_field2: local_transaction_id,
+            locktag_field3: 0,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_VIRTUALTRANSACTION,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
 }
 
 /// `LockInstanceData` (`storage/lock.h`) — one PROCLOCK's worth of state, as

@@ -266,6 +266,13 @@ pub fn init_seams() {
         let _previous_base = set_stack_base();
     });
 
+    // `check_stack_depth()` is likewise declared on the tcop/postgres.c seam
+    // crate (its historical home before the PG18 stack_depth.c split); many
+    // recursive planner/executor units call it through that seam. Its body lives
+    // here, so install it there as well, delegating to the same implementation
+    // as this crate's own `check_stack_depth` seam.
+    backend_tcop_postgres_seams::check_stack_depth::set(check_stack_depth);
+
     backend_utils_misc_guc_tables::hooks::check_max_stack_depth
         .install(|newval, _extra, source| Ok(check_max_stack_depth(*newval, source)));
     backend_utils_misc_guc_tables::hooks::assign_max_stack_depth

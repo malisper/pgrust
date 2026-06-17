@@ -2235,6 +2235,226 @@ fn bms_add_range(a: Relids, lower: i32, upper: i32) -> Relids {
     Some(alloc::boxed::Box::new(Bitmapset { words }))
 }
 
+/// `bms_copy(a)` (bitmapset.c) — a fresh copy of set `a` (empty → empty).
+fn bms_copy(a: &Relids) -> Relids {
+    a.as_ref()
+        .map(|a| alloc::boxed::Box::new(Bitmapset { words: a.words.clone() }))
+}
+
+/// `bms_equal(a, b)` (bitmapset.c) — `a` and `b` contain the same members. In
+/// this normalized model trailing-zero words are always trimmed, so equal sets
+/// have equal word vectors.
+fn bms_equal(a: &Relids, b: &Relids) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (None, Some(_)) | (Some(_), None) => false,
+        (Some(a), Some(b)) => a.words == b.words,
+    }
+}
+
+/// `bms_make_singleton(x)` (bitmapset.c) — a fresh set `{x}`.
+fn bms_make_singleton(x: i32) -> Relids {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    let wnum = wordnum(x);
+    let bnum = bitnum(x);
+    let mut words = alloc::vec![0u64; wnum + 1];
+    words[wnum] = 1u64 << bnum;
+    Some(alloc::boxed::Box::new(Bitmapset { words }))
+}
+
+/// `bms_is_member(x, a)` (bitmapset.c) — `x` is present in `a`.
+fn bms_is_member(x: i32, a: &Relids) -> bool {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    let a = match a {
+        None => return false,
+        Some(a) => a,
+    };
+    let wnum = wordnum(x);
+    if wnum >= a.words.len() {
+        return false;
+    }
+    (a.words[wnum] & (1u64 << bitnum(x))) != 0
+}
+
+/// `bms_is_empty(a)` (bitmapset.c) — `a` has no members (canonically `None`).
+fn bms_is_empty(a: &Relids) -> bool {
+    a.is_none()
+}
+
+/// `bms_num_members(a)` (bitmapset.c) — number of members in `a`.
+fn bms_num_members(a: &Relids) -> i32 {
+    match a {
+        None => 0,
+        Some(a) => a.words.iter().map(|&w| w.count_ones() as i32).sum(),
+    }
+}
+
+/// `bms_union(a, b)` (bitmapset.c) — a fresh set `a ∪ b`.
+fn bms_union(a: &Relids, b: &Relids) -> Relids {
+    let (a, b) = match (a, b) {
+        (None, _) => return bms_copy(b),
+        (_, None) => return bms_copy(a),
+        (Some(a), Some(b)) => (a, b),
+    };
+    // Copy the longer one; union the shorter into it.
+    let (mut result, other) = if a.words.len() <= b.words.len() {
+        (b.words.clone(), a)
+    } else {
+        (a.words.clone(), b)
+    };
+    for (i, &w) in other.words.iter().enumerate() {
+        result[i] |= w;
+    }
+    // A union of non-empty sets is non-empty and already trailing-trimmed.
+    Some(alloc::boxed::Box::new(Bitmapset { words: result }))
+}
+
+/// `bms_intersect(a, b)` (bitmapset.c) — a fresh set `a ∩ b`.
+fn bms_intersect(a: &Relids, b: &Relids) -> Relids {
+    let (a, b) = match (a, b) {
+        (None, _) | (_, None) => return None,
+        (Some(a), Some(b)) => (a, b),
+    };
+    // Copy the shorter one; intersect the longer into it.
+    let (shorter, longer) = if a.words.len() <= b.words.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let mut result = shorter.words.clone();
+    for i in 0..result.len() {
+        result[i] &= longer.words[i];
+    }
+    bms_normalize(result)
+}
+
+/// `bms_add_member(a, x)` (bitmapset.c) — add `x` to `a` (recycled).
+fn bms_add_member(a: Relids, x: i32) -> Relids {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    let wnum = wordnum(x);
+    let bnum = bitnum(x);
+    let mut words = match a {
+        None => return bms_make_singleton(x),
+        Some(b) => b.words,
+    };
+    if wnum >= words.len() {
+        words.resize(wnum + 1, 0);
+    }
+    words[wnum] |= 1u64 << bnum;
+    Some(alloc::boxed::Box::new(Bitmapset { words }))
+}
+
+/// `bms_add_members(a, b)` (bitmapset.c) — add all of `b`'s members to `a`
+/// (recycled), returning `a ∪ b`.
+fn bms_add_members(a: Relids, b: &Relids) -> Relids {
+    let mut words = match a {
+        None => return bms_copy(b),
+        Some(b) => b.words,
+    };
+    let b = match b {
+        None => return Some(alloc::boxed::Box::new(Bitmapset { words })),
+        Some(b) => b,
+    };
+    if b.words.len() > words.len() {
+        words.resize(b.words.len(), 0);
+    }
+    for (i, &w) in b.words.iter().enumerate() {
+        words[i] |= w;
+    }
+    Some(alloc::boxed::Box::new(Bitmapset { words }))
+}
+
+/// `bms_int_members(a, b)` (bitmapset.c) — set `a` to `a ∩ b` (recycled).
+fn bms_int_members(a: Relids, b: &Relids) -> Relids {
+    let words = match a {
+        None => return None,
+        Some(a) => a.words,
+    };
+    let b = match b {
+        None => return None,
+        Some(b) => b,
+    };
+    let shortlen = core::cmp::min(words.len(), b.words.len());
+    let mut result = words;
+    for i in 0..shortlen {
+        result[i] &= b.words[i];
+    }
+    // Anything past the shorter length intersects to empty.
+    result.truncate(shortlen);
+    bms_normalize(result)
+}
+
+/// `bms_join(a, b)` (bitmapset.c) — union of `a` and `b`, recycling both. With
+/// owned (non-aliased) `Relids` this is just `bms_add_members(a, &b)`.
+fn bms_join(a: Relids, b: Relids) -> Relids {
+    bms_add_members(a, &b)
+}
+
+/// `bms_is_subset(a, b)` (bitmapset.c) — every member of `a` is in `b`.
+fn bms_is_subset(a: &Relids, b: &Relids) -> bool {
+    let a = match a {
+        None => return true, // empty set is a subset of anything
+        Some(a) => a,
+    };
+    let b = match b {
+        None => return false,
+        Some(b) => b,
+    };
+    // 'a' can't be a subset of 'b' if it contains more words (sets are
+    // normalized, so extra words in 'a' carry real members).
+    if a.words.len() > b.words.len() {
+        return false;
+    }
+    for i in 0..a.words.len() {
+        if (a.words[i] & !b.words[i]) != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `bms_overlap(a, b)` (bitmapset.c) — `a` and `b` share a member.
+fn bms_overlap(a: &Relids, b: &Relids) -> bool {
+    let (a, b) = match (a, b) {
+        (None, _) | (_, None) => return false,
+        (Some(a), Some(b)) => (a, b),
+    };
+    let shortlen = core::cmp::min(a.words.len(), b.words.len());
+    for i in 0..shortlen {
+        if (a.words[i] & b.words[i]) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `bms_nonempty_difference(a, b)` (bitmapset.c) — `a \ b` is non-empty.
+fn bms_nonempty_difference(a: &Relids, b: &Relids) -> bool {
+    let a = match a {
+        None => return false,
+        Some(a) => a,
+    };
+    let b = match b {
+        None => return true,
+        Some(b) => b,
+    };
+    if a.words.len() > b.words.len() {
+        return true;
+    }
+    for i in 0..a.words.len() {
+        if (a.words[i] & !b.words[i]) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /* ==========================================================================
  * Seam installation
  * ======================================================================== */
@@ -2261,6 +2481,21 @@ pub fn init_seams() {
     bms::relids_membership::set(bms_membership);
     bms::relids_difference::set(bms_difference);
     bms::relids_add_range::set(bms_add_range);
+    bms::relids_copy::set(bms_copy);
+    bms::relids_equal::set(bms_equal);
+    bms::relids_make_singleton::set(bms_make_singleton);
+    bms::relids_is_member::set(bms_is_member);
+    bms::relids_is_empty::set(bms_is_empty);
+    bms::relids_num_members::set(bms_num_members);
+    bms::relids_union::set(bms_union);
+    bms::relids_intersect::set(bms_intersect);
+    bms::relids_add_member::set(bms_add_member);
+    bms::relids_add_members::set(bms_add_members);
+    bms::relids_int_members::set(bms_int_members);
+    bms::relids_join::set(bms_join);
+    bms::relids_is_subset::set(bms_is_subset);
+    bms::relids_overlap::set(bms_overlap);
+    bms::relids_nonempty_difference::set(bms_nonempty_difference);
 }
 
 fn seam_find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {

@@ -199,6 +199,106 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 }
 
 // ===========================================================================
+// InteractiveBackend / interactive_getc — postgres.c:236 / :324
+// ===========================================================================
+
+/// `InteractiveBackend(inBuf)` (postgres.c:236) — called for user interactive
+/// (single-user / standalone) connections. The string entered by the user is
+/// placed in `in_buf` and we act like a `'Q'` (simple query) message was
+/// received. Returns [`EOF`] if end-of-file input is seen (time to shut down).
+fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    use std::io::Write;
+
+    // Display a prompt and obtain input from the user.
+    print!("backend> ");
+    let _ = std::io::stdout().flush();
+
+    in_buf.reset(); // resetStringInfo(inBuf)
+
+    // Read characters until EOF or the appropriate delimiter is seen.
+    let mut c = interactive_getc()?;
+    while c != EOF {
+        if c == b'\n' as i32 {
+            if globals::use_semi_newline_newline() {
+                // In -j mode, semicolon followed by two newlines ends the
+                // command; otherwise treat newline as a regular character.
+                let len = in_buf.len();
+                if len > 1
+                    && in_buf.data[len - 1] == b'\n'
+                    && in_buf.data[len - 2] == b';'
+                {
+                    // might as well drop the second newline
+                    break;
+                }
+            } else {
+                // In plain mode, newline ends the command unless preceded by
+                // backslash.
+                let len = in_buf.len();
+                if len > 0 && in_buf.data[len - 1] == b'\\' {
+                    // discard backslash from inBuf
+                    in_buf.data.pop();
+                    // discard newline too
+                    c = interactive_getc()?;
+                    continue;
+                } else {
+                    // keep the newline character, but end the command
+                    in_buf.data.push(b'\n');
+                    break;
+                }
+            }
+        }
+
+        // Not newline, or newline treated as a regular character.
+        in_buf.data.push(c as u8);
+        c = interactive_getc()?;
+    }
+
+    // No input before EOF signal means time to quit.
+    if c == EOF && in_buf.len() == 0 {
+        return Ok(EOF);
+    }
+
+    // Otherwise we have a user query so process it.
+
+    // Add '\0' to make it look the same as the message case.
+    in_buf.data.push(b'\0');
+
+    // If the query echo flag was given, print the query.
+    if globals::echo_query() {
+        // inBuf->data is NUL-terminated; print up to (but not including) it.
+        let text = core::str::from_utf8(&in_buf.data[..in_buf.len() - 1]).unwrap_or("");
+        print!("statement: {text}\n");
+    }
+    let _ = std::io::stdout().flush();
+
+    Ok(pqmsg::QUERY) // PqMsg_Query
+}
+
+/// `interactive_getc()` (postgres.c:324) — collect one character from stdin.
+/// Even though we are not reading from a "client" process, we still want to
+/// respond to signals, particularly SIGTERM/SIGQUIT. Returns [`EOF`] (-1) at
+/// end of file.
+fn interactive_getc() -> PgResult<i32> {
+    use std::io::Read;
+
+    // This will not process catchup interrupts or notifications while reading.
+    // But those can't really be relevant for a standalone backend anyway.
+    crate::interrupt::check_for_interrupts()?; // CHECK_FOR_INTERRUPTS()
+
+    // c = getc(stdin);
+    let mut byte = [0u8; 1];
+    let c = match std::io::stdin().read(&mut byte) {
+        Ok(0) => EOF,
+        Ok(_) => byte[0] as i32,
+        Err(_) => EOF,
+    };
+
+    crate::interrupt::ProcessClientReadInterrupt(false)?;
+
+    Ok(c)
+}
+
+// ===========================================================================
 // ReadCommand — postgres.c:479
 // ===========================================================================
 
@@ -206,24 +306,15 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
 /// standard input), placing it in `in_buf` and returning the message type code.
 /// [`EOF`] on end of file.
 ///
-/// `InteractiveBackend` (the `DestRemote != whereToSendOutput` standalone path)
-/// reads from stdin; the standalone single-user driver is `PostgresSingleUserMain`
-/// (not this F0a unit). Here `whereToSendOutput` is always `DestRemote` (a real
-/// connection), so we take the `SocketBackend` arm; the interactive arm panics
-/// with a precise rationale if reached.
+/// `if (whereToSendOutput == DestRemote) SocketBackend(inBuf); else
+/// InteractiveBackend(inBuf);` — the interactive arm is reached from
+/// `PostgresSingleUserMain` (the standalone single-user backend), where
+/// `whereToSendOutput` is not `DestRemote`.
 fn ReadCommand(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if globals::where_to_send_output() == CommandDest::Remote {
         SocketBackend(in_buf)
     } else {
-        // InteractiveBackend: only reached from PostgresSingleUserMain (the
-        // standalone backend, a separate unported entry). A real connection
-        // backend always has whereToSendOutput == DestRemote here.
-        panic!(
-            "ReadCommand: InteractiveBackend (stdin) path is reached only from \
-             PostgresSingleUserMain (standalone single-user backend), which is \
-             a separate unported entry; a connection backend always has \
-             whereToSendOutput == DestRemote"
-        )
+        InteractiveBackend(in_buf)
     }
 }
 

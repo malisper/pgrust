@@ -1094,11 +1094,12 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
     check_lockmethodid(lockmethodid)?;
     let num_lock_modes = tables::num_lock_modes(lockmethodid as u16);
 
-    // Get rid of our fast-path VXID lock (DEFAULT_LOCKMETHOD only). The
-    // VirtualXactLockTableCleanup is the 2PC/vxid family (F4); with the fast
-    // path disabled there is no fast-path VXID lock to drop, so this is a no-op
-    // here (faithful: the cleanup only removes a fast-path entry).
-    let _ = lockmethodid == DEFAULT_LOCKMETHOD;
+    // Get rid of our fast-path VXID lock, if appropriate. Note that this is the
+    // only way that the lock we hold on our own VXID can ever get released: it is
+    // always and only released when a toplevel transaction ends.
+    if lockmethodid == DEFAULT_LOCKMETHOD {
+        VirtualXactLockTableCleanup()?;
+    }
 
     // Pass 1: scan the locallock table, mark proclocks, drop locallock entries.
     let all_localtags: Vec<LOCALLOCKTAG> = state::with_local(|m| m.keys().copied().collect());
@@ -1706,6 +1707,32 @@ pub(crate) fn VirtualXactLockTableInsert(
     debug_assert!(vxid.is_valid());
 
     proc::vxid_lock_table_insert_my_proc::call(vxid.procNumber, vxid.localTransactionId)
+}
+
+/// `VirtualXactLockTableCleanup()` (lock.c:4613): check whether a VXID lock has
+/// been materialized; if so, release it, unblocking waiters.
+///
+/// The `MyProc->fpInfoLock` critical section (read+clear the fast-path VXID
+/// state) is owned by proc.c, which returns the prior `(fastpath, lxid)`. If the
+/// fast-path bit was cleared without touching `fpLocalTransactionId`, someone
+/// transferred the lock to the main lock table, so we re-find and release it.
+pub(crate) fn VirtualXactLockTableCleanup() -> PgResult<()> {
+    let (fastpath, lxid) = proc::vxid_lock_table_cleanup_my_proc::call()?;
+
+    // If fpVXIDLock has been cleared without touching fpLocalTransactionId, that
+    // means someone transferred the lock to the main lock table.
+    if !fastpath && lxid != types_core::InvalidLocalTransactionId {
+        let myprocno = proc::my_proc_number::call();
+        let locktag = LOCKTAG::virtualtransaction(myprocno as u32, lxid);
+        LockRefindAndRelease(
+            myprocno,
+            &locktag,
+            types_storage::lock::ExclusiveLock,
+            false,
+        )?;
+    }
+
+    Ok(())
 }
 
 // ===========================================================================
