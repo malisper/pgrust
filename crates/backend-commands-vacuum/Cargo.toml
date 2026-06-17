@@ -59,3 +59,17 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
 backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+
+# Catalog SCAN + inplace-WRITE substrate for the vac_update_relstats /
+# vac_update_datfrozenxid pg_class/pg_database loops (vacuum.c's own seqscans
+# and systable_inplace_update_begin/finish): table_open + the genam systable
+# scan/inplace seams + heap_deform_tuple + the tupdesc alignment walk.
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+# (backend-utils-cache-relcache-seams already declared above — relation_rules)
+types-catalog = { path = "../types-catalog" }
+types-scan = { path = "../types-scan" }

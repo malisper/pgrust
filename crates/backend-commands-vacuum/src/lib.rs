@@ -100,6 +100,7 @@ use backend_access_transam_clog_seams as clog_seam;
 use backend_access_transam_commit_ts_seams as commit_ts_seam;
 use backend_access_transam_multixact_seams as multixact_seam;
 
+mod catalog_scan;
 mod seams_install;
 pub use seams_install::init_seams;
 

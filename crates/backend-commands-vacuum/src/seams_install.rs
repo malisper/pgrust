@@ -53,6 +53,10 @@ pub fn init_seams() {
     vacuumlazy::set_vacuum_cost_active::set(crate::set_vacuum_cost_active_impl);
     vacuumlazy::set_vacuum_cost_balance::set(crate::set_vacuum_cost_balance_impl);
 
+    // --- catalog SCAN + inplace-WRITE seams (vacuum.c's own pg_class /
+    //     pg_database seqscans + systable_inplace_update writers) ---------------
+    crate::catalog_scan::install();
+
     // --- ProcessUtility dispatch arm (utility.c VacuumStmt → ExecVacuum) ------
     backend_tcop_utility_out_seams::exec_vacuum::set(exec_vacuum_arm);
 
