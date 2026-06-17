@@ -1,0 +1,205 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+//! `dbsize.c` functions whose argument/result types are expressible at the
+//! current fmgr boundary (the scalar `oid`/`int8` I/O, the `name`/`text` by-ref
+//! lanes, and the `text` result).
+//!
+//! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
+//! call frame, calls the matching value core in [`crate`], and writes back the
+//! result word / by-reference payload. [`register_dbsize_builtins`] registers
+//! every row into the fmgr-core builtin table (C: `fmgr_builtins[]`), so by-OID
+//! dispatch (and the `fmgr_isbuiltin` fast path early catalog scankeys rely on)
+//! resolves them. OIDs / nargs / strict / retset are transcribed exactly from
+//! `pg_proc.dat` (all are strict by default, none retset).
+//!
+//! The `int8`-returning size cores return `PgResult<Option<i64>>` — `None` is
+//! C's `PG_RETURN_NULL()`, mapped to `fcinfo.set_result_null(true)`. A `name`
+//! arg arrives as its fixed `NAMEDATALEN` buffer bytes on the by-ref lane (the
+//! cores take a `&str`, so the buffer is NUL-trimmed). A `text` arg arrives as
+//! its detoasted `VARDATA_ANY` payload bytes (passed straight to the byte-taking
+//! core). A `text` result is written back as a `Varlena` payload (the boundary
+//! re-wraps it with the varlena header), mirroring `cstring_to_text`.
+//!
+//! Scope: only the six rows this task registers. The remaining `dbsize.c` fmgr
+//! surface — `pg_relation_size`/`pg_table_size`/`pg_indexes_size`/
+//! `pg_total_relation_size` (`regclass` arg) and `pg_relation_filenode`/
+//! `pg_filenode_relation`/`pg_relation_filepath` (`regclass`/`oid`+`text`) — is
+//! deferred (their value cores exist but bottom out on still-uninstalled
+//! catalog/relcache seams; they are not registered here).
+
+use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+
+use types_core::Oid;
+
+// ---------------------------------------------------------------------------
+// Argument readers / result writers.
+// ---------------------------------------------------------------------------
+
+/// `PG_GETARG_OID(i)` → `DatumGetObjectId`: the low 32 bits of arg `i`'s word.
+#[inline]
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
+    fcinfo.arg(i).expect("dbsize fn: missing arg").value.as_oid()
+}
+
+/// `PG_GETARG_INT64(i)` → `DatumGetInt64`: arg `i`'s word as a signed `int8`.
+#[inline]
+fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
+    fcinfo.arg(i).expect("dbsize fn: missing arg").value.as_i64()
+}
+
+/// A `name` arg's fixed `NAMEDATALEN` buffer on the by-ref lane, as a `&str`
+/// trimmed at the first NUL (C: `NameStr(*PG_GETARG_NAME(i))`).
+#[inline]
+fn arg_name<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    let bytes = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("dbsize fn: name arg missing from by-ref lane");
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).expect("dbsize fn: name arg not valid UTF-8")
+}
+
+/// A `text` arg's detoasted `VARDATA_ANY` payload bytes on the by-ref lane.
+#[inline]
+fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("dbsize fn: text arg missing from by-ref lane")
+}
+
+/// Write an `int8` result, or set the result NULL for `None` (C:
+/// `PG_RETURN_NULL()`). Returns the result word (a dummy `0` when NULL).
+#[inline]
+fn ret_int64_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<i64>) -> Datum {
+    match v {
+        Some(n) => Datum::from_i64(n),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// Write a `text` result on the by-ref lane (C: `cstring_to_text(buf)` →
+/// `PG_RETURN_TEXT_P`); the boundary re-wraps the payload with the varlena
+/// header. Returns the dummy result word.
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes()));
+    Datum::from_usize(0)
+}
+
+/// A scratch context for the cores that allocate their numeric round-trips
+/// through `Mcx`.
+fn scratch_mcx() -> mcx::MemoryContext {
+    mcx::MemoryContext::new("dbsize fmgr scratch")
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
+/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: types_error::PgError) -> ! {
+    let chars = types_error::unpack_sqlstate(err.sqlstate());
+    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
+    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+}
+
+/// Unwrap a `PgResult`, re-raising its error through `raise`.
+#[inline]
+fn ok<T>(r: backend_utils_error::PgResult<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => raise(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters.
+// ---------------------------------------------------------------------------
+
+/// `pg_database_size_oid(oid)` (OID 2324).
+fn fc_pg_database_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let db_oid = arg_oid(fcinfo, 0);
+    let size = ok(crate::pg_database_size_oid(db_oid));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_database_size_name(name)` (OID 2168).
+fn fc_pg_database_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let db_name = arg_name(fcinfo, 0).to_string();
+    let size = ok(crate::pg_database_size_name(&db_name));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_tablespace_size_oid(oid)` (OID 2322).
+fn fc_pg_tablespace_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let tblspc_oid = arg_oid(fcinfo, 0);
+    let size = ok(crate::pg_tablespace_size_oid(tblspc_oid));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_tablespace_size_name(name)` (OID 2323).
+fn fc_pg_tablespace_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let tblspc_name = arg_name(fcinfo, 0).to_string();
+    let size = ok(crate::pg_tablespace_size_name(&tblspc_name));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_size_pretty(int8)` (OID 2288).
+fn fc_pg_size_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let size = arg_int64(fcinfo, 0);
+    let text = crate::pg_size_pretty(size);
+    ret_text(fcinfo, text)
+}
+
+/// `pg_size_bytes(text)` (OID 3334).
+fn fc_pg_size_bytes(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let arg = arg_text_bytes(fcinfo, 0);
+    let bytes = ok(crate::pg_size_bytes(m.mcx(), arg));
+    Datum::from_i64(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    retset: bool,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset,
+        func: Some(func),
+    }
+}
+
+/// Register the `dbsize.c` fmgr builtins this crate owns (C: their
+/// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
+/// OIDs / nargs / strict / retset transcribed exactly from `pg_proc.dat`
+/// (all `proisstrict` defaults to `'t'`; none set `proretset`).
+pub fn register_dbsize_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // pg_database_size(oid) -> int8
+        builtin(2324, "pg_database_size", 1, true, false, fc_pg_database_size_oid),
+        // pg_database_size(name) -> int8
+        builtin(2168, "pg_database_size", 1, true, false, fc_pg_database_size_name),
+        // pg_tablespace_size(oid) -> int8
+        builtin(2322, "pg_tablespace_size", 1, true, false, fc_pg_tablespace_size_oid),
+        // pg_tablespace_size(name) -> int8
+        builtin(2323, "pg_tablespace_size", 1, true, false, fc_pg_tablespace_size_name),
+        // pg_size_pretty(int8) -> text
+        builtin(2288, "pg_size_pretty", 1, true, false, fc_pg_size_pretty),
+        // pg_size_bytes(text) -> int8
+        builtin(3334, "pg_size_bytes", 1, true, false, fc_pg_size_bytes),
+    ]);
+}

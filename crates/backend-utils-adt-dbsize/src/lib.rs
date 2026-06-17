@@ -42,6 +42,11 @@ use types_storage::storage::RelFileLocator;
 
 use types_core::primitive::Oid;
 
+/// The fmgr/`Datum` boundary: the SQL-callable `fc_*` adapters for the
+/// `dbsize.c` functions, registered into the fmgr-core builtin table by
+/// [`fmgr_builtins::register_dbsize_builtins`] (called from [`init_seams`]).
+pub mod fmgr_builtins;
+
 /// `RelFileNumber` (`relpath.h`).
 pub type RelFileNumber = types_core::primitive::Oid;
 
@@ -1255,6 +1260,18 @@ pub fn pg_relation_filepath(relid: Oid) -> PgResult<Option<String>> {
     );
 
     Ok(Some(path))
+}
+
+// ===========================================================================
+// Seam install + fmgr builtin registration.
+// ===========================================================================
+
+/// Register the `dbsize.c` fmgr builtins (so `fmgr_isbuiltin` resolves them on
+/// the fast path). This crate owns no inward seams — its outbound seams are
+/// installed by their owners — so registration is the only init work here.
+/// Invoked by `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_dbsize_builtins();
 }
 
 #[cfg(test)]
