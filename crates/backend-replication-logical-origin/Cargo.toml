@@ -12,6 +12,9 @@ crate-type = ["rlib"]
 [dependencies]
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 mcx = { path = "../mcx" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }

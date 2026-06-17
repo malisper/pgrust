@@ -70,6 +70,7 @@ use types_wal::rmgr::XLogReaderState;
 
 pub mod checkpoint_file;
 pub mod core;
+pub mod fmgr_builtins;
 
 pub use crate::core::{
     xl_replorigin_drop, xl_replorigin_set, DoNotReplicateId, InvalidRepOriginId, InvalidXLogRecPtr,
@@ -1325,6 +1326,11 @@ fn set_replorigin_session_timestamp_seam(ts: TimestampTz) {
 /// Install every seam this crate owns. Called once from `seams-init`.
 pub fn init_seams() {
     use backend_replication_logical_origin_seams as s;
+
+    // Register this crate's SQL-callable builtins into the fmgr-core builtin
+    // table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
+    fmgr_builtins::register_backend_replication_logical_origin_builtins();
+
     s::replorigin_redo::set(replorigin_redo);
     s::replorigin_session_origin::set(replorigin_session_origin);
     s::replorigin_session_origin_lsn::set(replorigin_session_origin_lsn);
