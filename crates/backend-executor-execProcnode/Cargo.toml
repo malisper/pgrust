@@ -59,6 +59,7 @@ backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
 backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 # ExecInitSubPlan (nodeSubplan.c) — the ExecInitNode initPlan walk (#328) routes

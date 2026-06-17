@@ -167,10 +167,14 @@ pub fn exec_init_node<'mcx>(
         // is ported.
 
         // case T_TidRangeScan: ExecInitTidRangeScan((TidRangeScan *) node, estate, eflags)
-        Node::TidRangeScan(_) => panic!(
-            "backend-executor-nodeTidrangescan::ExecInitTidRangeScan: ExecInitNode \
-             T_TidRangeScan arm; not ported / no seam declared"
-        ),
+        Node::TidRangeScan(tidrangescan) => {
+            let s = backend_executor_nodeTidrangescan::ExecInitTidRangeScan(
+                tidrangescan,
+                estate,
+                eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::TidRangeScan(alloc_in(mcx, s)?))?
+        }
 
         // case T_SubqueryScan: ExecInitSubqueryScan(...) (nodeSubqueryscan.c)
         Node::SubqueryScan(subqueryscan) => {

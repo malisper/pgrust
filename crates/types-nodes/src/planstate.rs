@@ -96,6 +96,8 @@ pub enum PlanStateNode<'mcx> {
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
     /// `T_TidScanState`.
     TidScan(PgBox<'mcx, crate::nodetidscan::TidScanState<'mcx>>),
+    /// `T_TidRangeScanState`.
+    TidRangeScan(PgBox<'mcx, crate::nodetidrangescan::TidRangeScanState<'mcx>>),
     /// `T_WorkTableScanState`. The state struct lives in `types-nodes`
     /// (`nodeworktablescan`), so it is carried by value (no crate cycle).
     WorkTableScan(PgBox<'mcx, crate::nodeworktablescan::WorkTableScanStateData<'mcx>>),
@@ -157,6 +159,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
             PlanStateNode::TidScan(_) => crate::nodes::T_TidScanState,
+            PlanStateNode::TidRangeScan(_) => crate::nodes::T_TidRangeScanState,
             PlanStateNode::WorkTableScan(_) => crate::nodeworktablescan::T_WorkTableScanState,
             PlanStateNode::BitmapHeapScan(_) => crate::execstate_tags::T_BitmapHeapScanState,
             PlanStateNode::SubqueryScan(_) => crate::nodes::T_SubqueryScanState,
@@ -202,6 +205,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
             PlanStateNode::TidScan(t) => &t.ss.ps,
+            PlanStateNode::TidRangeScan(t) => &t.ss.ps,
             PlanStateNode::WorkTableScan(w) => &w.ss.ps,
             PlanStateNode::BitmapHeapScan(b) => &b.ss.ps,
             PlanStateNode::SubqueryScan(s) => &s.ss.ps,
@@ -246,6 +250,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
             PlanStateNode::TidScan(t) => &mut t.ss.ps,
+            PlanStateNode::TidRangeScan(t) => &mut t.ss.ps,
             PlanStateNode::WorkTableScan(w) => &mut w.ss.ps,
             PlanStateNode::BitmapHeapScan(b) => &mut b.ss.ps,
             PlanStateNode::SubqueryScan(s) => &mut s.ss.ps,
@@ -312,6 +317,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `TidScanState` begins with a `ScanState`.
             PlanStateNode::TidScan(t) => Some(&t.ss),
+            // `TidRangeScanState` begins with a `ScanState`.
+            PlanStateNode::TidRangeScan(t) => Some(&t.ss),
             // `WorkTableScanState` begins with a `ScanState`.
             PlanStateNode::WorkTableScan(w) => Some(&w.ss),
             // `BitmapHeapScanState` begins with a `ScanState`.

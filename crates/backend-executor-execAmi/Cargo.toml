@@ -51,6 +51,7 @@ backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncreme
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
 backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }

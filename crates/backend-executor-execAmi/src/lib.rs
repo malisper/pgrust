@@ -58,6 +58,7 @@ use backend_executor_nodeIncrementalSort as nodeIncrementalSort;
 use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
 use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
 use backend_executor_nodeTidscan as nodeTidscan;
+use backend_executor_nodeTidrangescan as nodeTidrangescan;
 use backend_executor_nodeWorktablescan as nodeWorktablescan;
 use backend_executor_nodeUnique as nodeUnique;
 use backend_executor_nodeValuesscan as nodeValuesscan;
@@ -328,10 +329,14 @@ pub fn exec_re_scan<'mcx>(
             // case T_LimitState: ExecReScanLimit((LimitState *) node);
             PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
 
-            // The remaining C arms (T_SampleScanState/T_TidRangeScanState/
-            // T_FunctionScanState/T_AggState/T_LockRowsState) operate on
-            // node-state variants not yet present in PlanStateNode, so their
-            // tags cannot occur. C default:
+            // case T_TidRangeScanState: ExecReScanTidRangeScan((TidRangeScanState *) node);
+            PlanStateNode::TidRangeScan(m) => {
+                nodeTidrangescan::ExecReScanTidRangeScan(m, estate)?
+            }
+
+            // The remaining C arms (T_SampleScanState/T_FunctionScanState/
+            // T_AggState/T_LockRowsState) operate on node-state variants not yet
+            // present in PlanStateNode, so their tags cannot occur. C default:
             //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
             other => return Err(unrecognized_node_type(other.tag())),
         }

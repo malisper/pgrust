@@ -348,6 +348,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::TidScan(state) => {
             backend_executor_nodeTidscan::ExecEndTidScan(state)
         }
+        // case T_TidRangeScanState: ExecEndTidRangeScan((TidRangeScanState *) node);
+        PlanStateNode::TidRangeScan(state) => {
+            backend_executor_nodeTidrangescan::ExecEndTidRangeScan(state, estate)
+        }
         // case T_SubqueryScanState: ExecEndSubqueryScan((SubqueryScanState *) node);
         PlanStateNode::SubqueryScan(state) => {
             backend_executor_nodeSubqueryscan::ExecEndSubqueryScan(state, estate)
@@ -402,7 +406,7 @@ pub fn exec_end_node<'mcx>(
         | PlanStateNode::WorkTableScan(_) => Ok(()),
 
         // The remaining C arms (T_SampleScanState/T_FunctionScanState/
-        // T_IncrementalSortState/T_AggState/T_LockRowsState/T_TidRangeScanState)
+        // T_IncrementalSortState/T_AggState/T_LockRowsState)
         // operate on node-state variants not yet present in
         // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.
         // The C `default: elog(ERROR, "unrecognized node type")` covers any tag
