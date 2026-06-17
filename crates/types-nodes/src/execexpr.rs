@@ -360,6 +360,19 @@ pub enum SubscriptMethod {
     ArrayFetchOld,
     /// `array_subscript_fetch_old_slice` (arraysubs.c) — slice OLD fetch.
     ArrayFetchOldSlice,
+    /// `jsonb_subscript_fetch` (jsonbsubs.c) — element FETCH for jsonb.
+    JsonbFetch,
+    /// `jsonb_subscript_assign` (jsonbsubs.c) — element ASSIGN for jsonb.
+    JsonbAssign,
+    /// `jsonb_subscript_fetch_old` (jsonbsubs.c) — element OLD fetch for a
+    /// nested jsonb assignment.
+    JsonbFetchOld,
+    /// `jsonb_subscript_check_subscripts` (jsonbsubs.c) — the jsonb
+    /// `sbs_check_subscripts` method. Unlike the array case (pure integer
+    /// conversion), jsonb's coerces each subscript `Datum` to a text path
+    /// element and records the array-vs-object expectation, so it is reached
+    /// through the jsonbsubs owner.
+    JsonbCheckSubscripts,
 }
 
 /// `SubscriptingRefState` (execExpr.h) — non-inline data for container
@@ -493,18 +506,49 @@ impl Default for ArraySubWorkspace {
     }
 }
 
+/// `JsonbSubWorkspace` (utils/adt/jsonbsubs.c) — the jsonb-type-specific
+/// subscripting workspace `jsonb_exec_setup` allocates into
+/// `sbsrefstate->workspace`.
+///
+/// ```c
+/// typedef struct JsonbSubWorkspace {
+///     bool   expectArray;   /* jsonb root is expected to be an array */
+///     Oid   *indexOid;      /* OID of coerced subscript expr (INT4 or TEXT) */
+///     Datum *index;         /* Subscript values in Datum format */
+/// } JsonbSubWorkspace;
+/// ```
+///
+/// In C `index[]` holds the per-subscript values, written by
+/// `jsonb_subscript_check_subscripts` (which coerces INT4 subscripts to text)
+/// and read by `jsonb_subscript_fetch`/`jsonb_subscript_assign`. In the owned
+/// model those text path elements are re-derived from the arena cells at each
+/// step (mirroring the array interpreter), so the persistent workspace only
+/// carries `expect_array` (set by check, read by assign) and the per-subscript
+/// `index_oid` (set by `jsonb_exec_setup` from `exprType`, read by check). The
+/// `index_oid` vector is plain owned metadata (no arena lifetime).
+#[derive(Clone, Debug, Default)]
+pub struct JsonbSubWorkspace {
+    /// `bool expectArray` — jsonb root is expected to be an array.
+    pub expect_array: bool,
+    /// `Oid *indexOid` — OID of each coerced subscript expression (INT4 or
+    /// TEXT), one per upper subscript.
+    pub index_oid: alloc::vec::Vec<Oid>,
+}
+
 /// Typed replacement for the C `void *workspace` field of
-/// [`SubscriptingRefState`]. The only producer in core PostgreSQL is
-/// `array_exec_setup`, which stores an [`ArraySubWorkspace`]; a freshly
-/// `palloc0`'d state (or a type whose `exec_setup` allocates no workspace) has
-/// `None`.
-#[derive(Clone, Copy, Debug, Default)]
+/// [`SubscriptingRefState`]. The producers in core PostgreSQL are
+/// `array_exec_setup` (storing an [`ArraySubWorkspace`]) and `jsonb_exec_setup`
+/// (storing a [`JsonbSubWorkspace`]); a freshly `palloc0`'d state (or a type
+/// whose `exec_setup` allocates no workspace) has `None`.
+#[derive(Clone, Debug, Default)]
 pub enum SubscriptWorkspace {
     /// C NULL `workspace` (no type-specific workspace allocated).
     #[default]
     None,
     /// `(ArraySubWorkspace *) workspace` — the array handler's workspace.
     Array(ArraySubWorkspace),
+    /// `(JsonbSubWorkspace *) workspace` — the jsonb handler's workspace.
+    Jsonb(JsonbSubWorkspace),
 }
 
 impl SubscriptWorkspace {
@@ -514,9 +558,7 @@ impl SubscriptWorkspace {
     pub fn array(&self) -> &ArraySubWorkspace {
         match self {
             SubscriptWorkspace::Array(w) => w,
-            SubscriptWorkspace::None => {
-                panic!("SubscriptWorkspace: expected an array workspace, found None")
-            }
+            _ => panic!("SubscriptWorkspace: expected an array workspace"),
         }
     }
 
@@ -524,9 +566,24 @@ impl SubscriptWorkspace {
     pub fn array_mut(&mut self) -> &mut ArraySubWorkspace {
         match self {
             SubscriptWorkspace::Array(w) => w,
-            SubscriptWorkspace::None => {
-                panic!("SubscriptWorkspace: expected an array workspace, found None")
-            }
+            _ => panic!("SubscriptWorkspace: expected an array workspace"),
+        }
+    }
+
+    /// Borrow the [`JsonbSubWorkspace`] (the C
+    /// `(JsonbSubWorkspace *) sbsrefstate->workspace` downcast).
+    pub fn jsonb(&self) -> &JsonbSubWorkspace {
+        match self {
+            SubscriptWorkspace::Jsonb(w) => w,
+            _ => panic!("SubscriptWorkspace: expected a jsonb workspace"),
+        }
+    }
+
+    /// Mutable form of [`SubscriptWorkspace::jsonb`].
+    pub fn jsonb_mut(&mut self) -> &mut JsonbSubWorkspace {
+        match self {
+            SubscriptWorkspace::Jsonb(w) => w,
+            _ => panic!("SubscriptWorkspace: expected a jsonb workspace"),
         }
     }
 }
@@ -564,6 +621,8 @@ pub enum SubscriptHandler {
     /// `raw_array_subscript_handler` — fixed-length "raw" arrays (also
     /// `array_exec_setup`).
     RawArray,
+    /// `jsonb_subscript_handler` — jsonb (`jsonb_exec_setup`, jsonbsubs.c).
+    Jsonb,
 }
 
 /// `JsonConstructorExprState` (execExpr.h) — EEOP_JSON_CONSTRUCTOR state, too

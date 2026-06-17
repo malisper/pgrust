@@ -1330,7 +1330,7 @@ fn clone_state_inner<'mcx>(
     };
     let dst = SubscriptingRefState {
         isassignment: s.isassignment,
-        workspace: s.workspace,
+        workspace: s.workspace.clone(),
         numupper: s.numupper,
         upperprovided: clone_bools(&s.upperprovided)?,
         upperindex: Some(zeroed_datums(mcx, s.numupper)?),
@@ -1367,7 +1367,58 @@ fn subscript_exec_setup<'mcx>(
         SubscriptHandler::Array | SubscriptHandler::RawArray => {
             array_exec_setup(sbsref, sbsrefstate, methods)
         }
+        SubscriptHandler::Jsonb => jsonb_exec_setup(sbsref, sbsrefstate, methods),
     }
+}
+
+/// `jsonb_exec_setup(sbsref, sbsrefstate, methods)` (jsonbsubs.c) — set up the
+/// jsonb subscript workspace and method discriminants. Unlike arrays there is
+/// no limit on the number of subscripts (jsonb has no nesting limit) and no
+/// slice support (the transform errored on slices).
+fn jsonb_exec_setup<'mcx>(
+    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut types_nodes::execexpr::SubscriptExecSteps,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{JsonbSubWorkspace, SubscriptMethod, SubscriptWorkspace};
+
+    // C: int nupper = sbsref->refupperindexpr->length;
+    //    workspace = palloc0(MAXALIGN(sizeof(JsonbSubWorkspace)) +
+    //                        nupper * (sizeof(Datum) + sizeof(Oid)));
+    //    workspace->expectArray = false;
+    let nupper = sbsref.refupperindexpr.len();
+    let mut workspace = JsonbSubWorkspace {
+        expect_array: false,
+        // workspace->index is re-derived per step; workspace->indexOid is
+        // collected below from exprType of each subscript.
+        index_oid: alloc::vec::Vec::with_capacity(nupper),
+    };
+
+    // C: foreach(lc, sbsref->refupperindexpr)
+    //        workspace->indexOid[i] = exprType(expr);
+    //
+    // jsonb subscripting does not support slices, so every upper index is a
+    // real expression (the transform errored on omitted/NULL slice bounds).
+    for e in sbsref.refupperindexpr.iter() {
+        let expr = e.as_ref().expect(
+            "jsonb_exec_setup: jsonb subscript has no slices, every upper index is provided",
+        );
+        let typid = backend_nodes_nodeFuncs_seams::expr_type_info::call(expr)?.typid;
+        workspace.index_oid.push(typid);
+    }
+
+    sbsrefstate.workspace = SubscriptWorkspace::Jsonb(workspace);
+
+    // C: pass back step functions.
+    //    methods->sbs_check_subscripts = jsonb_subscript_check_subscripts;
+    //    methods->sbs_fetch     = jsonb_subscript_fetch;
+    //    methods->sbs_assign    = jsonb_subscript_assign;
+    //    methods->sbs_fetch_old = jsonb_subscript_fetch_old;
+    methods.sbs_check_subscripts = Some(SubscriptMethod::JsonbCheckSubscripts);
+    methods.sbs_fetch = Some(SubscriptMethod::JsonbFetch);
+    methods.sbs_assign = Some(SubscriptMethod::JsonbAssign);
+    methods.sbs_fetch_old = Some(SubscriptMethod::JsonbFetchOld);
+    Ok(())
 }
 
 /// `array_exec_setup(sbsref, sbsrefstate, methods)` (arraysubs.c) — set up the
