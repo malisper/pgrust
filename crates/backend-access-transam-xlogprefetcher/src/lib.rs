@@ -1261,6 +1261,34 @@ pub fn init_seams() {
     backend_access_transam_xlogprefetcher_seams::xlog_prefetch_shmem_init::set(
         XLogPrefetchShmemInit,
     );
+
+    // `recovery_prefetch` GUC (guc_tables.c). C reads it from the GUC slot: the
+    // `int recovery_prefetch` global is what the config table points
+    // `conf->variable` at, written through `*conf->variable` by guc.c and
+    // (redundantly) by `assign_recovery_prefetch`. Not a ControlFile value. Wire
+    // the variable accessor to this unit's backing store, plus the check/assign
+    // hooks the table references by C symbol.
+    backend_utils_misc_guc_tables::vars::recovery_prefetch.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: recovery_prefetch,
+            set: |new_value| RECOVERY_PREFETCH.with(|c| c.set(new_value)),
+        },
+    );
+    backend_utils_misc_guc_tables::hooks::check_recovery_prefetch.install(
+        |new_value, _extra, _source| {
+            // C `check_recovery_prefetch` returns false (recording the detail via
+            // GUC_check_errdetail) for an unsupported value, true otherwise.
+            match check_recovery_prefetch(*new_value) {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    backend_utils_misc_guc_seams::guc_check_errdetail::call(e.message().to_string());
+                    Ok(false)
+                }
+            }
+        },
+    );
+    backend_utils_misc_guc_tables::hooks::assign_recovery_prefetch
+        .install(|new_value, _extra| assign_recovery_prefetch(new_value));
 }
 
 #[cfg(test)]
