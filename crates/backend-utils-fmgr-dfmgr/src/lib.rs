@@ -830,6 +830,51 @@ pub fn init_seams() {
         install_invoke_output_plugin_callback,
     );
 
+    // Parallel-worker transfer of the loaded-library list. The bodies are owned
+    // here; the seam decls live in parallel-rt-seams. The DSM chunk is a packed
+    // sequence of NUL-terminated filenames ending in a final empty (double-NUL)
+    // entry, so it is self-delimiting on the restore side.
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::estimate_library_state_space::set(|| Ok(estimate_library_state_space()));
+        rt::serialize_library_state::set(|len, space| {
+            // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+            // reserved for the library state (EstimateLibraryStateSpace sized
+            // it); the leader writes the whole chunk here. The audited
+            // DSM-pointer primitive (cf. backend-utils-misc-guc).
+            let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+            serialize_library_state(len, buf)
+        });
+        rt::restore_library_state::set(|space| {
+            // The blob ends at the final empty entry (a NUL at an entry
+            // boundary). Walk the NUL-terminated names to find that terminator,
+            // bounding the slice handed to the owner. SAFETY: `space` points at
+            // the library-state chunk the leader serialized; the embedded
+            // double-NUL terminator bounds the read.
+            let mut total = 0usize;
+            loop {
+                let first = unsafe { *((space + total) as *const u8) };
+                if first == 0 {
+                    // Final empty entry — include its terminator byte.
+                    total += 1;
+                    break;
+                }
+                // Skip this name's bytes plus its NUL terminator.
+                let mut i = total;
+                loop {
+                    let b = unsafe { *((space + i) as *const u8) };
+                    i += 1;
+                    if b == 0 {
+                        break;
+                    }
+                }
+                total = i;
+            }
+            let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+            restore_library_state(buf)
+        });
+    }
+
     // `char *Dynamic_library_path;` (`dfmgr.c`) is this unit's own GUC string
     // variable (`guc_tables.c` binds `&Dynamic_library_path` with no
     // check/assign/show hook). C reads the value straight out of the GUC slot;

@@ -1273,6 +1273,60 @@ pub fn init_seams() {
     storage_seam::relation_set_new_filelocator_storage::set(relation_set_new_filelocator_storage);
     storage_seam::smgr_create_init_fork_and_log::set(smgr_create_init_fork_and_log);
 
+    // Parallel-worker transfer of pending syncs. The bodies are owned here; the
+    // seam decls live in parallel-rt-seams. The DSM chunk is a packed array of
+    // `RelFileLocator` records (three `Oid`s = `RelFileLocatorWireSize` bytes
+    // each) terminated by an all-zero `relNumber` record, so it is
+    // self-delimiting on the restore side.
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::estimate_pending_syncs_space::set(EstimatePendingSyncsSpace);
+        rt::serialize_pending_syncs::set(|len, space| {
+            // The owner writes survivors + a zero terminator into a
+            // `RelFileLocator` slice; marshal that into the `len`-byte DSM chunk
+            // as packed 12-byte records. SAFETY: `space` is the start of the
+            // `len`-byte chunk shm_toc_allocate reserved for pending syncs
+            // (EstimatePendingSyncsSpace sized it).
+            let records = len / RelFileLocatorWireSize;
+            let mut slots = vec![RelFileLocator { spcOid: 0, dbOid: 0, relNumber: 0 }; records];
+            SerializePendingSyncs(&mut slots)?;
+            let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+            for (i, rloc) in slots.iter().enumerate() {
+                let off = i * RelFileLocatorWireSize;
+                buf[off..off + 4].copy_from_slice(&rloc.spc_oid().to_ne_bytes());
+                buf[off + 4..off + 8].copy_from_slice(&rloc.db_oid().to_ne_bytes());
+                buf[off + 8..off + 12].copy_from_slice(&rloc.rel_number().to_ne_bytes());
+            }
+            Ok(())
+        });
+        rt::restore_pending_syncs::set(|space| {
+            // Decode packed `RelFileLocator` records up to (and including) the
+            // zero-`relNumber` terminator, then hand the slice to the owner.
+            // SAFETY: `space` points at the pending-syncs chunk the leader
+            // serialized; the terminator bounds the read (the chunk was sized to
+            // hold survivors + terminator). We read one record at a time so the
+            // first decode failure (short buffer) stops before the terminator.
+            let mut decoded: Vec<RelFileLocator> = Vec::new();
+            let mut off = 0usize;
+            loop {
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (space + off) as *const u8,
+                        RelFileLocatorWireSize,
+                    )
+                };
+                let rloc = RelFileLocator::from_bytes(bytes)
+                    .expect("RelFileLocatorWireSize-byte record");
+                decoded.push(rloc);
+                off += RelFileLocatorWireSize;
+                if rloc.rel_number() == 0 {
+                    break;
+                }
+            }
+            RestorePendingSyncs(&decoded)
+        });
+    }
+
     // `int wal_skip_threshold = 2048;` (storage.c). Plain backend-local GUC int
     // read directly from its variable at runtime (RelationNeedsWAL/
     // smgrDoPendingSyncs compare the relation size in KB against

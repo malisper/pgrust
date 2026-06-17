@@ -17,6 +17,7 @@ types-logical = { path = "../types-logical" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 port-dynloader-seams = { path = "../port-dynloader-seams" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
 common-path-seams = { path = "../common-path-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

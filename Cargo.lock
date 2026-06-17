@@ -19887,6 +19887,7 @@ dependencies = [
 name = "backend-utils-cache-relmapper"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
@@ -20172,6 +20173,7 @@ dependencies = [
 name = "backend-utils-fmgr-dfmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-storage-file-fd-seams",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-small",
@@ -20314,6 +20316,7 @@ name = "backend-utils-init-miscinit"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel",
+ "backend-access-transam-parallel-rt-seams",
  "backend-common-exec-seams",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqsignal-seams",
@@ -21198,6 +21201,7 @@ dependencies = [
 name = "backend-utils-time-combocid"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-utils-time-combocid-seams",
  "mcx",

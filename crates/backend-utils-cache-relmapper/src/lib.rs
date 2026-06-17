@@ -1148,6 +1148,42 @@ pub fn init_seams() {
     seams::relation_map_oid_to_filenumber::set(|relation_id, shared| {
         Ok(RelationMapOidToFilenumber(relation_id, shared))
     });
+
+    // Parallel-worker transfer of the active relmap state. The bodies are owned
+    // here; the seam decls live in parallel-rt-seams. The DSM chunk is a
+    // fixed-size `2 * sizeof(RelMapFile)` image (two `RelMapFile`s), so both
+    // sides know the extent statically (no length prefix needed).
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::estimate_relation_map_space::set(|| Ok(EstimateRelationMapSpace()));
+        rt::serialize_relation_map::set(|len, space| {
+            // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+            // reserved for the relmap state (EstimateRelationMapSpace sized it as
+            // 2*SIZEOF_RELMAPFILE); the leader writes the whole chunk here. The
+            // audited DSM-pointer primitive (cf. backend-utils-misc-guc).
+            debug_assert!(len >= 2 * SIZEOF_RELMAPFILE);
+            let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+            let relmaps = SerializeRelationMap();
+            buf[0..SIZEOF_RELMAPFILE]
+                .copy_from_slice(&encode_relmapfile(&relmaps.active_shared_updates));
+            buf[SIZEOF_RELMAPFILE..2 * SIZEOF_RELMAPFILE]
+                .copy_from_slice(&encode_relmapfile(&relmaps.active_local_updates));
+            Ok(())
+        });
+        rt::restore_relation_map::set(|space| {
+            // SAFETY: `space` points at the `2*SIZEOF_RELMAPFILE` relmap chunk
+            // the leader serialized; the fixed image size bounds the read.
+            let buf =
+                unsafe { core::slice::from_raw_parts(space as *const u8, 2 * SIZEOF_RELMAPFILE) };
+            let relmaps = SerializedActiveRelMaps {
+                active_shared_updates: decode_relmapfile(&buf[0..SIZEOF_RELMAPFILE]),
+                active_local_updates: decode_relmapfile(
+                    &buf[SIZEOF_RELMAPFILE..2 * SIZEOF_RELMAPFILE],
+                ),
+            };
+            RestoreRelationMap(&relmaps)
+        });
+    }
 }
 
 #[cfg(test)]

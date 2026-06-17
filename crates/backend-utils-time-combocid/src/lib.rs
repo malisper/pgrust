@@ -77,6 +77,37 @@ pub fn init_seams() {
         with_state(|s| HeapTupleHeaderAdjustCmax(s, tuple, cmax))
     });
     backend_utils_time_combocid_seams::at_eoxact_combocid::set(|| with_state(AtEOXact_ComboCid));
+
+    // Parallel-worker transfer of the combo-CID state. The bodies are owned
+    // here; the seam decls live in parallel-rt-seams. The DSM byte chunk is
+    // self-delimiting — the first machine `int` is the entry count, so the
+    // restore side reconstructs the slice length the same way the GUC transfer
+    // does (cf. backend-utils-misc-guc restore_guc_state).
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::estimate_combocid_state_space::set(|| with_state(|s| EstimateComboCIDStateSpace(s)));
+        rt::serialize_combocid_state::set(|len, space| {
+            // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+            // reserved for the combo-CID state (EstimateComboCIDStateSpace sized
+            // it); the leader writes the whole chunk here. The audited
+            // DSM-pointer primitive (cf. backend-utils-misc-guc).
+            let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+            with_state(|s| SerializeComboCIDState(s, buf))
+        });
+        rt::restore_combocid_state::set(|space| {
+            // The first machine `int` of the stream is the entry count; read it,
+            // then form the `SIZEOF_INT + count * SIZEOF_COMBO_CID_KEY_DATA`
+            // slice. SAFETY: `space` points at the combo-CID chunk the leader
+            // serialized; the embedded count bounds the readable extent.
+            let count = unsafe {
+                let head = core::slice::from_raw_parts(space as *const u8, SIZEOF_INT);
+                i32::from_ne_bytes(head.try_into().expect("4-byte count prefix"))
+            };
+            let total = SIZEOF_INT + (count.max(0) as usize) * SIZEOF_COMBO_CID_KEY_DATA;
+            let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+            with_state(|s| RestoreComboCIDState(s, buf))
+        });
+    }
 }
 
 /// `CCID_HASH_SIZE` — initial size of the hash table.

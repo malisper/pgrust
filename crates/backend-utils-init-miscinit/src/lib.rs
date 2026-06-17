@@ -1104,6 +1104,40 @@ pub fn init_seams() {
         get: get_local_preload_libraries,
         set: set_local_preload_libraries,
     });
+
+    // Parallel-worker transfer of MyClientConnectionInfo. The bodies are owned
+    // here; the seam decls live in parallel-rt-seams. The DSM chunk is an
+    // `int32 authn_id_len` + `UserAuth auth_method` header (SERIALIZED_HEADER_LEN
+    // bytes) followed, when `authn_id_len >= 0`, by `authn_id_len` bytes plus a
+    // NUL — so the header bounds the restore read.
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::estimate_client_connection_info_space::set(|| Ok(EstimateClientConnectionInfoSpace()));
+        rt::serialize_client_connection_info::set(|len, space| {
+            // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+            // reserved for the ClientConnectionInfo (EstimateClientConnection-
+            // InfoSpace sized it); the leader writes the whole chunk here. The
+            // audited DSM-pointer primitive (cf. backend-utils-misc-guc).
+            let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+            SerializeClientConnectionInfo(buf)
+        });
+        rt::restore_client_connection_info::set(|space| {
+            // Read the fixed header, derive the total length from `authn_id_len`,
+            // then form the bounded slice. SAFETY: `space` points at the
+            // ClientConnectionInfo chunk the leader serialized; the header's
+            // `authn_id_len` bounds the readable extent.
+            let header =
+                unsafe { core::slice::from_raw_parts(space as *const u8, SERIALIZED_HEADER_LEN) };
+            let authn_id_len = i32::from_ne_bytes(header[..4].try_into().expect("4-byte len"));
+            let total = if authn_id_len >= 0 {
+                SERIALIZED_HEADER_LEN + authn_id_len as usize + 1
+            } else {
+                SERIALIZED_HEADER_LEN
+            };
+            let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+            RestoreClientConnectionInfo(buf)
+        });
+    }
 }
 
 #[cfg(test)]
