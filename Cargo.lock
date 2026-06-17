@@ -18262,6 +18262,7 @@ dependencies = [
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",
