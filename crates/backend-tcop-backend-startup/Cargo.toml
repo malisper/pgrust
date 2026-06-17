@@ -41,6 +41,7 @@ backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+backend-libpq-auth-seams = { path = "../backend-libpq-auth-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }

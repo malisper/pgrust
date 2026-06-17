@@ -1135,6 +1135,15 @@ pub fn init_seams() {
         get: globals::log_connections_string::get,
         set: globals::log_connections_string::set,
     });
+
+    // `log_connections & LOG_CONNECTION_AUTHENTICATION` — auth.c reads this
+    // bitmask to decide whether to emit the per-method "connection
+    // authenticated" line. The `log_connections` aspect-flag mask is owned by
+    // this unit (backend_startup.c, parsed by check/assign_log_connections), so
+    // the read for auth.c is installed here.
+    backend_libpq_auth_seams::log_connection_authentication::set(|| {
+        log_connections::get() & LOG_CONNECTION_AUTHENTICATION != 0
+    });
 }
 
 /// `set_conn_timing_child` (the inward seam): transfer launch timings into the
