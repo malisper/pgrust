@@ -805,7 +805,7 @@ pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
 fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult<()> {
     // Assert(dbname != NULL); Assert(username != NULL);
     let dbname = dbname.expect("PostgresMain requires a non-NULL dbname");
-    let _username = username; // InitPostgres seam takes only dbname (role resolved internally).
+    let username = username.expect("PostgresMain requires a non-NULL username");
 
     // --- Per-backend signal-handler setup (postgres.c:4213-4252) ---
     //
@@ -840,9 +840,27 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // not threaded here. The BackendKeyData send (below) is likewise skipped.
 
     // --- General initialization (postgres.c:4289) ---
-    // InitPostgres(dbname, ...): connect to the database, load the relcache /
-    // catcache, set MyDatabaseId, run session_preload_libraries.
-    backend_utils_init_miscinit_seams::init_postgres::call(dbname)?;
+    // InitPostgres(dbname, InvalidOid, username, InvalidOid,
+    //              (!am_walsender) ? INIT_PG_LOAD_SESSION_LIBS : 0, NULL):
+    // connect to the database, resolve the connecting role by name (from
+    // MyProcPort->user_name, threaded down as `username`), load the relcache /
+    // catcache, set MyDatabaseId, run session_preload_libraries. The slotsync-
+    // flavored `init_postgres(dbname)` seam passes a NULL username and is for the
+    // background-worker path only; the regular backend must pass the
+    // authenticated role name or InitializeSessionUserId resolves OID 0.
+    // `INIT_PG_LOAD_SESSION_LIBS` (miscadmin.h) — the InitPostgres flag bit
+    // requesting session_preload_libraries be loaded.
+    const INIT_PG_LOAD_SESSION_LIBS: u32 = 0x0001;
+    let init_flags = if backend_replication_walsender_seams::am_walsender::call() {
+        0
+    } else {
+        INIT_PG_LOAD_SESSION_LIBS
+    };
+    backend_utils_init_postinit_seams::init_postgres_by_name::call(
+        Some(dbname),
+        Some(username),
+        init_flags,
+    )?;
 
     // if (PostmasterContext) { MemoryContextDelete; PostmasterContext = NULL; }
     // — the postmaster-handoff context recycle; that context is owned by the
