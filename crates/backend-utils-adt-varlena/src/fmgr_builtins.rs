@@ -669,6 +669,13 @@ pub fn register_varlena_more_builtins() {
         // ---- name <-> text casts ----
         builtin(406, "text", 1, fc_name_text),
         builtin(407, "name", 1, fc_text_name),
+        // ---- varchar <-> name casts (share the name<->text cores: varchar is
+        // varlena-bodied like text, so it crosses header-stripped on the by-ref
+        // lane exactly like a `text` arg/result) ----
+        // 1400 `name`(varchar)->name, prosrc text_name (varchar -> name buffer).
+        builtin(1400, "name", 1, fc_text_name),
+        // 1401 `varchar`(name)->varchar, prosrc name_text (name buffer -> varlena).
+        builtin(1401, "varchar", 1, fc_name_text),
         // ---- length / octet-length / concat ----
         builtin(1257, "textlen", 1, fc_textlen),
         builtin(1317, "length", 1, fc_textlen),
