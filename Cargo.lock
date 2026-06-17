@@ -19351,6 +19351,7 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
  "common-path-seams",
  "mcx",
  "port-dynloader-seams",

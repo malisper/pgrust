@@ -21,3 +21,4 @@ backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
 common-path-seams = { path = "../common-path-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

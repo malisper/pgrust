@@ -829,6 +829,20 @@ pub fn init_seams() {
     backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback::set(
         install_invoke_output_plugin_callback,
     );
+
+    // `char *Dynamic_library_path;` (`dfmgr.c`) is this unit's own GUC string
+    // variable (`guc_tables.c` binds `&Dynamic_library_path` with no
+    // check/assign/show hook). C reads the value straight out of the GUC slot;
+    // install accessors so the GUC machinery (SET / boot-value assignment)
+    // reads and writes this unit's backing `thread_local`. The variable is
+    // never NULL here (boot value `"$libdir"`), so `get` always yields `Some`
+    // and `set` substitutes the default for the C NULL case.
+    backend_utils_misc_guc_tables::vars::Dynamic_library_path.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || Some(dynamic_library_path()),
+            set: |v| set_dynamic_library_path(&v.unwrap_or_default()),
+        },
+    );
 }
 
 #[cfg(test)]
