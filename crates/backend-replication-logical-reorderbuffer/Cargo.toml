@@ -42,5 +42,12 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 libc = "0.2"
 
+# GUC slots: reorderbuffer.c owns the backing storage for the
+# `logical_decoding_work_mem` / `debug_logical_replication_streaming` GUC
+# variables (the `int logical_decoding_work_mem;` /
+# `int debug_logical_replication_streaming;` globals), so it installs their
+# `conf->variable` accessors here.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }

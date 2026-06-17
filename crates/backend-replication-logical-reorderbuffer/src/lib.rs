@@ -73,6 +73,58 @@ const MAX_DISTR_INVAL_MSG_PER_TXN: usize =
     (8 * 1024 * 1024) / core::mem::size_of::<SharedInvalidationMessage>();
 
 // ---------------------------------------------------------------------------
+// GUC-backed globals owned by reorderbuffer.c.
+//
+// `int logical_decoding_work_mem;` and
+// `int debug_logical_replication_streaming = DEBUG_LOGICAL_REP_STREAMING_BUFFERED;`
+// are plain process-local `int` globals defined in reorderbuffer.c (lines 225 /
+// 229). The GUC machinery reads/writes them through the `config_int` /
+// `config_enum` table entries' `conf->variable` pointer (guc_tables.c:2604 /
+// 5418); the reorder buffer's eviction driver
+// (`ReorderBufferCheckMemoryLimit`) and the streaming-vs-serialize decision
+// read the current value out of the same global. So reorderbuffer.c owns the
+// backing storage and installs the `conf->variable` accessors into the GUC
+// slots, exactly as globals.c does for `NBuffers` etc.
+//
+// Modeled as backend-local `Cell`s (the C globals are per-backend); seeded to
+// the C boot defaults so a read before `InitializeGUCOptions` matches C.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// `int logical_decoding_work_mem;` (reorderbuffer.c:225). Boot value
+    /// 65536 (guc_tables.c:2611) in KB.
+    static LOGICAL_DECODING_WORK_MEM: core::cell::Cell<i32> = const { core::cell::Cell::new(65536) };
+    /// `int debug_logical_replication_streaming = DEBUG_LOGICAL_REP_STREAMING_BUFFERED;`
+    /// (reorderbuffer.c:229). `DEBUG_LOGICAL_REP_STREAMING_BUFFERED == 0`.
+    static DEBUG_LOGICAL_REPLICATION_STREAMING: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+}
+
+/// `int logical_decoding_work_mem;` — read the current GUC value.
+#[inline]
+pub fn logical_decoding_work_mem() -> i32 {
+    LOGICAL_DECODING_WORK_MEM.with(core::cell::Cell::get)
+}
+
+/// `conf->variable` write for `logical_decoding_work_mem` (the GUC assign path).
+#[inline]
+pub fn set_logical_decoding_work_mem(value: i32) {
+    LOGICAL_DECODING_WORK_MEM.with(|c| c.set(value));
+}
+
+/// `int debug_logical_replication_streaming;` — read the current GUC value
+/// (a `DEBUG_LOGICAL_REP_STREAMING_*` enum member).
+#[inline]
+pub fn debug_logical_replication_streaming() -> i32 {
+    DEBUG_LOGICAL_REPLICATION_STREAMING.with(core::cell::Cell::get)
+}
+
+/// `conf->variable` write for `debug_logical_replication_streaming`.
+#[inline]
+pub fn set_debug_logical_replication_streaming(value: i32) {
+    DEBUG_LOGICAL_REPLICATION_STREAMING.with(|c| c.set(value));
+}
+
+// ---------------------------------------------------------------------------
 // ReorderBufferTXN txn_flags (reorderbuffer.h)
 // ---------------------------------------------------------------------------
 

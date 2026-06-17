@@ -594,4 +594,18 @@ pub fn init_seams() {
 
     // WAL-startup cleanup of leftover on-disk spill files (StartupXLOG).
     s::startup_reorder_buffer::set(crate::spill::startup_reorder_buffer);
+
+    // GUC `conf->variable` accessors for the two reorderbuffer.c-owned `int`
+    // globals (`logical_decoding_work_mem` / `debug_logical_replication_streaming`).
+    // The GUC machinery seeds these from boot_val during InitializeGUCOptions and
+    // the eviction / streaming-decision paths read the current value back.
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::logical_decoding_work_mem.install(GucVarAccessors {
+        get: crate::logical_decoding_work_mem,
+        set: crate::set_logical_decoding_work_mem,
+    });
+    vars::debug_logical_replication_streaming.install(GucVarAccessors {
+        get: crate::debug_logical_replication_streaming,
+        set: crate::set_debug_logical_replication_streaming,
+    });
 }

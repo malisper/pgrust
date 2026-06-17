@@ -13848,6 +13848,7 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
  "backend-utils-cache-inval-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-time-snapmgr-seams",
  "libc",
  "mcx",
