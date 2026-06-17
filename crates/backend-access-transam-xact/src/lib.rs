@@ -903,14 +903,17 @@ pub(crate) fn AtStart_Memory() {
     });
 }
 
-/// `AtStart_ResourceOwner` (xact.c:1226). The owner value dissolves into RAII
-/// guards (docs/query-lifecycle-raii.md); the flag preserves the
-/// `if (s->curTransactionOwner)` control flow.
-pub(crate) fn AtStart_ResourceOwner() {
+/// `AtStart_ResourceOwner` (xact.c:1226). The flag preserves the
+/// `if (s->curTransactionOwner)` control flow; the real toplevel transaction
+/// resource owner is created in the resowner unit and published to the
+/// Top/Cur/Current globals (the buffer manager's `ResourceOwnerEnlarge(
+/// CurrentResourceOwner)` pin path requires a live current owner).
+pub(crate) fn AtStart_ResourceOwner() -> PgResult<()> {
     xs(|s| {
         debug_assert!(!s.current().has_resource_owner);
         s.current_mut().has_resource_owner = true;
     });
+    backend_utils_resowner_resowner_seams::at_start_resource_owner::call()
 }
 
 /// `AtSubStart_Memory` (xact.c:1254) — create the subxact's

@@ -85,3 +85,44 @@ seam_core::seam!(
     /// the owner saved before StartTransactionCommand (NULL handle == C NULL).
     pub fn set_current_resource_owner(owner: ParsestmtResourceOwnerHandle)
 );
+
+seam_core::seam!(
+    /// `AtStart_ResourceOwner()` (xact.c:1330): create the toplevel
+    /// "TopTransaction" resource owner for the transaction and publish it to
+    /// the `TopTransactionResourceOwner`/`CurTransactionResourceOwner`/
+    /// `CurrentResourceOwner` globals. Consumers (the buffer manager's
+    /// `ResourceOwnerEnlarge(CurrentResourceOwner)` pin path) require a live
+    /// current owner. `Err` carries the `ResourceOwnerCreate` ereport surface.
+    pub fn at_start_resource_owner() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRelease(TopTransactionResourceOwner,
+    /// RESOURCE_RELEASE_BEFORE_LOCKS, true, is_commit)` — the first
+    /// transaction-end resource-owner release leg of `CommitTransaction`/
+    /// `AbortTransaction`/`PrepareTransaction` (xact.c), issued before the
+    /// `AtEOXact_Buffers`/relcache/inval calls. Commit/Abort additionally do
+    /// `CurrentResourceOwner = NULL` immediately before this via
+    /// `reset_current_resource_owner` (Prepare does not). `Err` carries the
+    /// release ereport surface.
+    pub fn release_transaction_owner_before_locks(is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRelease(TopTransactionResourceOwner,
+    /// RESOURCE_RELEASE_LOCKS, true, is_commit)` then
+    /// `ResourceOwnerRelease(..., RESOURCE_RELEASE_AFTER_LOCKS, ...)` — the
+    /// second transaction-end resource-owner release legs of
+    /// `CommitTransaction`/`AbortTransaction` (xact.c), issued after
+    /// `AtEOXact_Inval`/`AtEOXact_MultiXact`. `Err` carries the release surface.
+    pub fn release_transaction_owner_locks(is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerDelete(TopTransactionResourceOwner);
+    /// CurTransactionResourceOwner = NULL; TopTransactionResourceOwner = NULL`
+    /// — the final transaction-end resource-owner delete/clear leg of
+    /// `CommitTransaction`/`AbortTransaction`/`CleanupTransaction` (xact.c).
+    /// `Err` carries the delete ereport surface.
+    pub fn delete_transaction_owner() -> PgResult<()>
+);

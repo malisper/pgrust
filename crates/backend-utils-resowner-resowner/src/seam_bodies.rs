@@ -15,7 +15,8 @@ use crate::{
     ReleaseAuxProcessResources, ResourceOwnerCreate, ResourceOwnerDelete, ResourceOwnerEnlarge,
     ResourceOwnerForget, ResourceOwnerForgetLock, ResourceOwnerGetParent, ResourceOwnerNewParent,
     ResourceOwnerReleaseAllOfKind, ResourceOwnerRemember, ResourceOwnerRememberLock,
-    SetCurrentResourceOwner,
+    SetCurrentResourceOwner, SetCurTransactionResourceOwner, SetTopTransactionResourceOwner,
+    TopTransactionResourceOwner,
 };
 
 mod rr {
@@ -120,6 +121,53 @@ pub fn install() {
     rr::reset_current_resource_owner::set(|| SetCurrentResourceOwner(None));
 
     rr::set_current_resource_owner::set(|owner| SetCurrentResourceOwner(opt(owner)));
+
+    // `AtStart_ResourceOwner()` (xact.c:1330): create the toplevel transaction
+    // resource owner and publish it to all three transaction-owner globals.
+    rr::at_start_resource_owner::set(|| {
+        // Assert(TopTransactionResourceOwner == NULL);
+        debug_assert!(TopTransactionResourceOwner().is_none());
+        let owner = ResourceOwnerCreate(None, "TopTransaction")?;
+        SetTopTransactionResourceOwner(Some(owner));
+        SetCurTransactionResourceOwner(Some(owner));
+        SetCurrentResourceOwner(Some(owner));
+        Ok(())
+    });
+
+    // CommitTransaction/AbortTransaction/PrepareTransaction first release leg
+    // (xact.c): ResourceOwnerRelease(TopTransactionResourceOwner, BEFORE_LOCKS,
+    // true, isCommit). The `CurrentResourceOwner = NULL` that Commit/Abort do
+    // immediately before this (but Prepare does not) is the separate
+    // `reset_current_resource_owner` seam, called explicitly by those paths.
+    rr::release_transaction_owner_before_locks::set(|is_commit| {
+        if let Some(owner) = TopTransactionResourceOwner() {
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, is_commit, true)?;
+        }
+        Ok(())
+    });
+
+    // CommitTransaction/AbortTransaction second release legs (xact.c):
+    //   ResourceOwnerRelease(TopTransactionResourceOwner, LOCKS, true, isCommit);
+    //   ResourceOwnerRelease(TopTransactionResourceOwner, AFTER_LOCKS, true, isCommit);
+    rr::release_transaction_owner_locks::set(|is_commit| {
+        if let Some(owner) = TopTransactionResourceOwner() {
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_LOCKS, is_commit, true)?;
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_AFTER_LOCKS, is_commit, true)?;
+        }
+        Ok(())
+    });
+
+    // CommitTransaction/AbortTransaction/CleanupTransaction final leg (xact.c):
+    //   ResourceOwnerDelete(TopTransactionResourceOwner);
+    //   CurTransactionResourceOwner = NULL; TopTransactionResourceOwner = NULL;
+    rr::delete_transaction_owner::set(|| {
+        if let Some(owner) = TopTransactionResourceOwner() {
+            ResourceOwnerDelete(owner)?;
+        }
+        SetCurTransactionResourceOwner(None);
+        SetTopTransactionResourceOwner(None);
+        Ok(())
+    });
 
     // --- resowner-seams ----------------------------------------------------
     rs::resource_owner_create_portal::set(|| {

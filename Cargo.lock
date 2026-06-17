@@ -3364,6 +3364,7 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-more2-seams",
  "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-resowner-resowner-seams",
  "backend-utils-time-combocid-seams",
  "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",

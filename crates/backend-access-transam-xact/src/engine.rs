@@ -376,7 +376,7 @@ fn StartTransaction() -> PgResult<()> {
 
     // must initialize resource-management stuff first
     AtStart_Memory();
-    AtStart_ResourceOwner();
+    AtStart_ResourceOwner()?;
 
     // Assign a new LocalTransactionId, combine with the proc number to form
     // a virtual transaction id, lock it, and advertise it in the proc array.
@@ -550,6 +550,11 @@ fn CommitTransaction() -> PgResult<()> {
         XACT_EVENT_COMMIT
     })?;
 
+    // CurrentResourceOwner = NULL;
+    // ResourceOwnerRelease(TopTransactionResourceOwner, BEFORE_LOCKS, true, true).
+    backend_utils_resowner_resowner_seams::reset_current_resource_owner::call();
+    backend_utils_resowner_resowner_seams::release_transaction_owner_before_locks::call(true)?;
+
     aio_seams::at_eoxact_aio::call(true);
 
     // Check we've released all buffer pins.
@@ -566,6 +571,10 @@ fn CommitTransaction() -> PgResult<()> {
     inval_seams::at_eoxact_inval::call(true)?;
 
     multixact_seams::at_eoxact_multixact::call();
+
+    // ResourceOwnerRelease(TopTransactionResourceOwner, LOCKS, true, true);
+    // ResourceOwnerRelease(TopTransactionResourceOwner, AFTER_LOCKS, true, true).
+    backend_utils_resowner_resowner_seams::release_transaction_owner_locks::call(true)?;
 
     // Drop files deleted during the transaction (after releasing relcache
     // and buffer pins, and after releasing locks).
@@ -591,7 +600,9 @@ fn CommitTransaction() -> PgResult<()> {
     lrworker_seams::at_eoxact_logical_rep_workers::call(true);
     status_seams::pgstat_report_xact_timestamp::call(0);
 
-    // ResourceOwnerDelete(TopTransactionResourceOwner) dissolves.
+    // ResourceOwnerDelete(TopTransactionResourceOwner);
+    // CurTransactionResourceOwner = NULL; TopTransactionResourceOwner = NULL.
+    backend_utils_resowner_resowner_seams::delete_transaction_owner::call()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCommit_Memory();
@@ -953,14 +964,16 @@ fn AbortTransaction() -> PgResult<()> {
             XACT_EVENT_ABORT
         })?;
 
-        // ResourceOwnerRelease(BEFORE_LOCKS) dissolves.
+        // ResourceOwnerRelease(TopTransactionResourceOwner, BEFORE_LOCKS, true, false).
+        backend_utils_resowner_resowner_seams::release_transaction_owner_before_locks::call(false)?;
         aio_seams::at_eoxact_aio::call(false);
         bufmgr_seams::at_eoxact_buffers::call(false);
         relcache_seams::at_eoxact_relation_cache::call(false)?;
         typcache_seams::at_eoxact_type_cache::call();
         inval_seams::at_eoxact_inval::call(false)?;
         multixact_seams::at_eoxact_multixact::call();
-        // ResourceOwnerRelease(LOCKS / AFTER_LOCKS) dissolve.
+        // ResourceOwnerRelease(LOCKS, true, false); ResourceOwnerRelease(AFTER_LOCKS, true, false).
+        backend_utils_resowner_resowner_seams::release_transaction_owner_locks::call(false)?;
         storage_seams::smgr_do_pending_deletes::call(false)?;
 
         guc_core_seams::at_eoxact_guc::call(false, 1)?;
@@ -1000,7 +1013,11 @@ fn CleanupTransaction() -> PgResult<()> {
     portal_seams::at_cleanup_portals::call()?; // now safe to release portal memory
     snapmgr_seams::at_eoxact_snapshot::call(false, true)?; // release the transaction's snapshots
 
-    // resource owner deletion dissolves
+    // CurrentResourceOwner = NULL;
+    // if (TopTransactionResourceOwner) ResourceOwnerDelete(TopTransactionResourceOwner);
+    // CurTransactionResourceOwner = NULL; TopTransactionResourceOwner = NULL.
+    backend_utils_resowner_resowner_seams::reset_current_resource_owner::call();
+    backend_utils_resowner_resowner_seams::delete_transaction_owner::call()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCleanup_Memory(); // and transaction memory
