@@ -46,3 +46,6 @@ backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" 
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+# criticalSharedRelcachesBuilt — GetDatabaseTuple/ByOid force a heap scan (no
+# index) until the critical shared relcache entries are nailed (postinit.c).
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }

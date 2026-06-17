@@ -46,6 +46,7 @@ use backend_catalog_indexing::keystone::{
 
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table_seams as table_seams;
+use backend_utils_cache_relcache_seams as relcache_seams;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_utils_cache_syscache::SearchSysCache1;
@@ -312,20 +313,28 @@ fn columns_from_existing<'mcx>(
  * Scan helper: by name / by oid, first matching live tuple.
  * ========================================================================== */
 
-/// `systable_beginscan(rel, indexId, true, NULL, 1, &key)` +
+/// `systable_beginscan(rel, indexId, indexOK, NULL, 1, &key)` +
 /// `systable_getnext(scan)` (the first row) + `systable_endscan(scan)` — the
 /// shared scan that `GetDatabaseTuple`/`GetDatabaseTupleByOid` and the locked
 /// ALTER read perform. Returns the first matching tuple (copied into `mcx`) and
 /// the `DatabaseNameIndexId`/`DatabaseOidIndexId` it used. `None` if no match.
+///
+/// `index_ok` mirrors the C `indexOK` arg: `GetDatabaseTuple[ByOid]` pass
+/// `criticalSharedRelcachesBuilt` so that during early `InitPostgres` startup
+/// (before the critical shared relcache entries are nailed) the scan falls back
+/// to a heap scan — opening `DatabaseNameIndexId` would recursively try to build
+/// the still-absent `pg_class` relcache entry. The ALTER/DROP read paths run
+/// well after startup and always pass `true` (matching dbcommands.c).
 fn scan_first<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     index_id: Oid,
+    index_ok: bool,
     key: ScanKeyData<'mcx>,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
     let keys = [key];
     let mut scan =
-        genam_seams::systable_beginscan::call(rel, index_id, true, None, &keys)?;
+        genam_seams::systable_beginscan::call(rel, index_id, index_ok, None, &keys)?;
     let tup = genam_seams::systable_getnext::call(mcx, scan.desc_mut())?;
     scan.end()?;
     Ok(tup)
@@ -344,7 +353,9 @@ fn get_database_tuple_by_name<'mcx>(
     // the open/close (postinit only asks for the decoded row).
     let rel = table_seams::table_open::call(mcx, cat::DatabaseRelationId, AccessShareLock)?;
     let key = name_key(mcx, cat::Anum_pg_database_datname as AttrNumber, dbname)?;
-    let result = scan_first(mcx, &rel, cat::DatabaseNameIndexId, key)?;
+    // C: systable_beginscan(rel, DatabaseNameIndexId, criticalSharedRelcachesBuilt, ...)
+    let index_ok = relcache_seams::critical_shared_relcaches_built::call();
+    let result = scan_first(mcx, &rel, cat::DatabaseNameIndexId, index_ok, key)?;
     let decoded = match &result {
         Some(tup) => {
             let desc = rel.rd_att_clone_in(mcx)?;
@@ -363,7 +374,9 @@ fn get_database_tuple_by_oid<'mcx>(
 ) -> PgResult<Option<FormPgDatabase<'mcx>>> {
     let rel = table_seams::table_open::call(mcx, cat::DatabaseRelationId, AccessShareLock)?;
     let key = oid_key(cat::Anum_pg_database_oid as AttrNumber, dboid)?;
-    let result = scan_first(mcx, &rel, cat::DatabaseOidIndexId, key)?;
+    // C: systable_beginscan(rel, DatabaseOidIndexId, criticalSharedRelcachesBuilt, ...)
+    let index_ok = relcache_seams::critical_shared_relcaches_built::call();
+    let result = scan_first(mcx, &rel, cat::DatabaseOidIndexId, index_ok, key)?;
     let decoded = match &result {
         Some(tup) => {
             let desc = rel.rd_att_clone_in(mcx)?;
@@ -463,7 +476,9 @@ fn scan_pg_database_locked_for_update<'mcx>(
         )
     };
 
-    let result = scan_first(mcx, rel, index_id, key)?;
+    // dbcommands.c: ALTER/DROP DATABASE always passes indexOK=true (runs well
+    // after the critical shared relcache entries are nailed).
+    let result = scan_first(mcx, rel, index_id, true, key)?;
     let Some(tup) = result else {
         return Ok(None);
     };

@@ -5070,6 +5070,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache",
  "mcx",
  "seam-core",

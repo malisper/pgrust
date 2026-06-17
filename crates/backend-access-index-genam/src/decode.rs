@@ -277,8 +277,15 @@ fn scan_pg_class(reloid: Oid, index_ok: bool) -> PgResult<Option<seam::ScannedPg
     )?];
 
     let relation = table_open(smcx, RelationRelationId, AccessShareLock)?;
+    // C: systable_beginscan(pg_class_desc, ClassOidIndexId,
+    //                       indexOK && criticalRelcachesBuilt, ...).
+    // Force a heap scan until the critical relcache entries (incl. the pg_class
+    // index ClassOidIndexId) are nailed; otherwise opening the index here would
+    // recursively try to build the still-incomplete pg_class relcache entry.
+    let use_index =
+        index_ok && backend_utils_cache_relcache_seams::critical_relcaches_built::call();
     let mut scandesc =
-        systable_beginscan(&relation, ClassOidIndexId, index_ok, None, &skey)?;
+        systable_beginscan(&relation, ClassOidIndexId, use_index, None, &skey)?;
 
     // pg_class_tuple = systable_getnext(pg_class_scan); if (!HeapTupleIsValid)
     // return NULL.
@@ -366,8 +373,14 @@ fn scan_pg_attribute(reloid: Oid, _natts: i16) -> PgResult<Vec<seam::ScannedPgAt
     ];
 
     let relation = table_open(smcx, AttributeRelationId, AccessShareLock)?;
+    // C: systable_beginscan(pg_attribute_desc, AttributeRelidNumIndexId,
+    //                       criticalRelcachesBuilt, ...).
+    // Force a heap scan until the critical relcache entries (incl. the
+    // pg_attribute index AttributeRelidNumIndexId) are nailed, to break the
+    // bootstrap recursion through index_open.
+    let use_index = backend_utils_cache_relcache_seams::critical_relcaches_built::call();
     let mut scandesc =
-        systable_beginscan(&relation, AttributeRelidNumIndexId, true, None, &skey)?;
+        systable_beginscan(&relation, AttributeRelidNumIndexId, use_index, None, &skey)?;
 
     let mut out = Vec::new();
     while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
