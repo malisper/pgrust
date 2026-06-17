@@ -256,6 +256,7 @@ pub fn init_all() {
     backend_libpq_pqmq::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
+    interfaces_libpq_fe::init_seams();
     backend_nodes_copyfuncs::init_seams();
     backend_nodes_core::init_seams();
     backend_nodes_equalfuncs::init_seams();
