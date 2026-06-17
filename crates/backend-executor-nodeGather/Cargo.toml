@@ -9,7 +9,7 @@ name = "backend_executor_nodeGather"
 path = "src/lib.rs"
 
 [dependencies]
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execParallel-seams = { path = "../backend-executor-execParallel-seams" }

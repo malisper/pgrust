@@ -30,7 +30,7 @@
 #![allow(non_snake_case)]
 
 use backend_access_index_indexam_seams as indexam;
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execUtils_seams as execUtils;
 use backend_executor_instrument_seams as instrument;
 use backend_executor_nodeIndexscan_seams as nodeIndexscan;
@@ -278,14 +278,14 @@ pub fn ExecEndBitmapIndexScan<'mcx>(
     //       winstrument = &node->biss_SharedInfo->winstrument[ParallelWorkerNumber];
     //       winstrument->nsearches += node->biss_Instrument.nsearches;
     //   }
-    if node.biss_SharedInfo.is_some() && parallel::is_parallel_worker::call() {
+    if node.biss_SharedInfo.is_some() && parallel::is_parallel_worker() {
         // We have to accumulate the stats rather than performing a memcpy: when a
         // Gather/GatherMerge node finishes it performs planner shutdown on the
         // workers; on rescan it spins up new workers with a new
         // BitmapIndexScanState and zeroed stats.
         let nsearches = node.biss_Instrument.nsearches;
         let shared = node.biss_SharedInfo.as_mut().unwrap();
-        parallel::accumulate_shared_index_searches::call(shared, nsearches);
+        parallel::accumulate_shared_index_searches(shared, nsearches);
     }
 
     // close the index relation (no-op if we didn't open it)

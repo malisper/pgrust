@@ -40,7 +40,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execParallel_seams as execParallel;
@@ -320,9 +320,9 @@ pub fn ExecGather<'mcx>(
                 .as_deref()
                 .and_then(|pei| pei.pcxt)
                 .ok_or_else(|| elog_error("Gather parallel context is missing"))?;
-            parallel::launch_parallel_workers::call(pcxt)?;
-            let nworkers_launched = parallel::pcxt_nworkers_launched::call(pcxt);
-            let nworkers_to_launch = parallel::pcxt_nworkers_to_launch::call(pcxt);
+            parallel::launch_parallel_workers(pcxt)?;
+            let nworkers_launched = parallel::pcxt_nworkers_launched(pcxt);
+            let nworkers_to_launch = parallel::pcxt_nworkers_to_launch(pcxt);
             node.nworkers_launched = nworkers_launched;
             estate.es_parallel_workers_to_launch += nworkers_to_launch;
             estate.es_parallel_workers_launched += nworkers_launched;

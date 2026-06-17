@@ -31,6 +31,7 @@ use crate::scan_block::{heap_vac_scan_next_block, NextBlock};
 use crate::scan_page::{lazy_scan_new_or_empty, lazy_scan_noprune, lazy_scan_prune};
 
 use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_common_tidstore_seams as tidstore_seams;
 
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("vacuumlazy.c", 0, funcname)
@@ -81,7 +82,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
          * least one page-worth of tuples to be stored.
          */
         if vacrel.dead_items_info.num_items > 0
-            && vl::tidstore_memory_usage::call(vacrel.dead_items)? > vacrel.dead_items_info.max_bytes
+            && tidstore_seams::tidstore_memory_usage::call(vacrel.dead_items)? > vacrel.dead_items_info.max_bytes
         {
             /* Release any pin on the visibility map page. */
             if buffer_is_valid(vmbuffer) {

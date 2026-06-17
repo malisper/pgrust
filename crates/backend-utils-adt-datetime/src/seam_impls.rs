@@ -315,13 +315,13 @@ use state_pgtz::session_timezone;
 // --- datetime.c calendar / validate / tz-offset adapters ------------------
 
 /// `date2j(y, m, d)` (datetime.c): Julian day number.
-fn seam_date2j(year: i32, month: i32, day: i32) -> i32 {
+pub fn seam_date2j(year: i32, month: i32, day: i32) -> i32 {
     crate::calendar::date2j(year, month, day)
 }
 
 /// `j2date(jd, &y, &m, &d)` (datetime.c): the core returns the triple; the seam
 /// packages it as a `YmdDate`.
-fn seam_j2date(jd: i32) -> YmdDate {
+pub fn seam_j2date(jd: i32) -> YmdDate {
     let (year, mon, mday) = crate::calendar::j2date(jd);
     YmdDate { year, mon, mday }
 }
@@ -329,14 +329,14 @@ fn seam_j2date(jd: i32) -> YmdDate {
 /// `ValidateDate(fmask, isjulian, is2digits, bc, tm)` (datetime.c). The
 /// formatting.c consumer never decodes a Julian field (it has no `J`/julian
 /// token path), so `isjulian` is always false at this seam — pass `false`.
-fn seam_validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
+pub fn seam_validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
     crate::decode::ValidateDate(fmask, false, is2digits, bc, tm)
 }
 
 /// `DetermineTimeZoneOffset(tm, tzp)` (datetime.c): resolve under the session
 /// timezone (the seam carries no tzp, mirroring the C call sites that pass
 /// `session_timezone`).
-fn seam_determine_time_zone_offset(tm: &mut pg_tm) -> i32 {
+pub fn seam_determine_time_zone_offset(tm: &mut pg_tm) -> i32 {
     crate::decode::DetermineTimeZoneOffset(tm, &session_timezone())
 }
 
@@ -379,7 +379,7 @@ fn resolve_tz(handle: TzHandle) -> Rc<pg_tz> {
 /// `DecodeTimezoneAbbrevPrefix(str, &offset, &tz)` (datetime.c:3371): owned
 /// output shape. On a dynamic match the resolved zone is interned and its handle
 /// returned in `tzp`.
-fn seam_decode_timezone_abbrev_prefix(s: &[u8]) -> TzAbbrevMatch {
+pub fn seam_decode_timezone_abbrev_prefix(s: &[u8]) -> TzAbbrevMatch {
     let (tzlen, gmtoffset, tz) = crate::decode::DecodeTimezoneAbbrevPrefix(s);
     TzAbbrevMatch {
         tzlen,
@@ -390,7 +390,7 @@ fn seam_decode_timezone_abbrev_prefix(s: &[u8]) -> TzAbbrevMatch {
 
 /// `DetermineTimeZoneAbbrevOffset(tm, abbr, tzp)` (datetime.c:1765): resolve the
 /// dynamic abbreviation's offset under the zone named by `tzp`.
-fn seam_determine_time_zone_abbrev_offset(tm: &mut pg_tm, abbr: &str, tzp: TzHandle) -> i32 {
+pub fn seam_determine_time_zone_abbrev_offset(tm: &mut pg_tm, abbr: &str, tzp: TzHandle) -> i32 {
     let zone = resolve_tz(tzp);
     crate::decode::DetermineTimeZoneAbbrevOffset(tm, abbr, &zone)
 }
@@ -507,14 +507,11 @@ pub fn init_seams() {
     ts::adjust_timestamp_for_typmod::set(seam_adjust_timestamp_for_typmod);
     ts::adjust_time_for_typmod::set(seam_adjust_time_for_typmod);
 
-    use backend_utils_adt_datetime_seams as dt;
-    dt::convert_time_zone_abbrevs::set(convert_time_zone_abbrevs);
-    dt::date2j::set(seam_date2j);
-    dt::j2date::set(seam_j2date);
-    dt::validate_date::set(seam_validate_date);
-    dt::determine_time_zone_offset::set(seam_determine_time_zone_offset);
-    dt::determine_time_zone_abbrev_offset::set(seam_determine_time_zone_abbrev_offset);
-    dt::decode_timezone_abbrev_prefix::set(seam_decode_timezone_abbrev_prefix);
+    // The datetime.c outward seams (`date2j`/`j2date`/`validate_date`/
+    // `determine_time_zone_offset`/`determine_time_zone_abbrev_offset`/
+    // `decode_timezone_abbrev_prefix`/`convert_time_zone_abbrevs`) were removed:
+    // their `seam_*` adapters in `crate::seam_impls` are now `pub` and called
+    // directly by the consumers (formatting, timeout). Faithful de-indirection.
 
     use backend_utils_adt_isoweek_seams as iw;
     iw::date2isoweek::set(seam_date2isoweek);

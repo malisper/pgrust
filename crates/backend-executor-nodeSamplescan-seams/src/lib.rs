@@ -16,13 +16,11 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox};
 use types_core::primitive::uint32;
-use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::execnodes::EStateData;
-use types_samplescan::{SampleScan, SampleScanState, TsmRoutine};
+use types_samplescan::{SampleScan, SampleScanState};
 
 // --- node factory / makeNode / plan-state links ---
 
@@ -156,58 +154,12 @@ seam_core::seam!(
     pub fn hashfloat8(datum: Datum) -> PgResult<uint32>
 );
 
-// --- tablesample-method registry and callbacks (access/tsmapi.h) ---
-
-seam_core::seam!(
-    /// `GetTsmRoutine(handlerOid)` (access/tablesample/tablesample.c) — resolve
-    /// the tablesample method's `TsmRoutine` from its handler-function OID,
-    /// charging the result to `mcx`. The C reads only the handler OID; both the
-    /// executor (`ExecInitSampleScan`) and the parser
-    /// (`transformRangeTableSample`, which needs the routine's `parameterTypes`
-    /// / `repeatable_across_queries` before any node state exists) use it.
-    /// Installed by the (still-unported) tablesample-method registry owner.
-    pub fn get_tsm_routine_oid<'mcx>(
-        mcx: Mcx<'mcx>,
-        handler_oid: Oid,
-    ) -> PgResult<PgBox<'mcx, TsmRoutine>>
-);
-
-seam_core::seam!(
-    /// `tsm->InitSampleScan != NULL`.
-    pub fn tsm_has_init_sample_scan<'mcx>(scanstate: &SampleScanState<'mcx>) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `tsm->InitSampleScan(scanstate, eflags)`.
-    pub fn tsm_init_sample_scan<'mcx>(
-        scanstate: &mut SampleScanState<'mcx>,
-        eflags: i32,
-    ) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `tsm->BeginSampleScan(scanstate, params, nparams, seed)`.
-    pub fn tsm_begin_sample_scan<'mcx>(
-        scanstate: &mut SampleScanState<'mcx>,
-        params: &[Datum],
-        seed: uint32,
-    ) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `tsm->NextSampleBlock != NULL` (the `allow_sync` test).
-    pub fn tsm_has_next_sample_block<'mcx>(scanstate: &SampleScanState<'mcx>) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `tsm->EndSampleScan != NULL`.
-    pub fn tsm_has_end_sample_scan<'mcx>(node: &SampleScanState<'mcx>) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `tsm->EndSampleScan(node)`.
-    pub fn tsm_end_sample_scan<'mcx>(node: &mut SampleScanState<'mcx>) -> PgResult<()>
-);
+// The tablesample-method registry/callback seams (access/tsmapi.h:
+// `get_tsm_routine_oid`, `tsm_has_init_sample_scan`, `tsm_init_sample_scan`,
+// `tsm_begin_sample_scan`, `tsm_has_next_sample_block`,
+// `tsm_has_end_sample_scan`, `tsm_end_sample_scan`) were moved to
+// `backend-access-tablesample-core-seams`, whose stem matches their true owner
+// `backend-access-tablesample-core`.
 
 // --- table access methods ---
 

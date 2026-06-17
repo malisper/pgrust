@@ -29,6 +29,7 @@ use crate::core::{
 };
 
 use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_common_tidstore_seams as tidstore_seams;
 
 /// What [`heap_vac_scan_next_block`] yields: the next block to process and its
 /// `VAC_BLK_*` flag byte, or `Exhausted` at end of relation.
@@ -233,7 +234,7 @@ pub enum ReapNextBlock {
 ///
 /// NB: Assumed to be safe to use with `READ_STREAM_USE_BATCHING`.
 pub fn vacuum_reap_lp_read_stream_next(iter: TidStoreIterHandle) -> PgResult<ReapNextBlock> {
-    match vl::tidstore_iterate_next::call(iter)? {
+    match tidstore_seams::tidstore_iterate_next::call(iter)? {
         /* The relation is exhausted. */
         None => Ok(ReapNextBlock::Exhausted),
         /*

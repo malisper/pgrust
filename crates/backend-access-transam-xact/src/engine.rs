@@ -391,7 +391,7 @@ fn StartTransaction() -> PgResult<()> {
     // first command's statement_timestamp(); advance it for transactions
     // started inside nonatomic SPI contexts (procedures); a parallel worker
     // got it via SetParallelStartTimestamps().
-    if !parallel_seams::is_parallel_worker::call() {
+    if !parallel_seams::is_parallel_worker() {
         let ts = if !spi_seams::spi_inside_nonatomic_context::call() {
             xs(|s| s.stmt_start_timestamp)
         } else {
@@ -467,7 +467,7 @@ fn CommitTransaction() -> PgResult<()> {
 
     // Clean up any unfinished parallel operation's workers, warning about
     // leaked resources. (parallelModeLevel itself resets at TRANS_COMMIT.)
-    parallel_seams::at_eoxact_parallel::call(true)?;
+    parallel_seams::at_eoxact_parallel(true)?;
     let level = xs(|s| s.current().parallel_mode_level);
     if is_parallel_worker {
         if level != 1 {
@@ -531,7 +531,7 @@ fn CommitTransaction() -> PgResult<()> {
     } else {
         // We must not mark our XID committed; the parallel leader does that.
         // But make sure the leader knows about any WAL we wrote.
-        parallel_seams::parallel_worker_report_last_rec_end::call(
+        parallel_seams::parallel_worker_report_last_rec_end(
             xlog_seams::xact_last_rec_end::call(),
         )?;
         InvalidTransactionId
@@ -926,7 +926,7 @@ fn AbortTransaction() -> PgResult<()> {
 
     // Clean up any unfinished parallel operation and exit parallel mode;
     // don't warn about leaked resources.
-    parallel_seams::at_eoxact_parallel::call(false)?;
+    parallel_seams::at_eoxact_parallel(false)?;
     xs(|s| {
         s.current_mut().parallel_mode_level = 0;
         s.current_mut().parallel_child_xact = false; // should be false already
@@ -1697,7 +1697,7 @@ pub fn EndImplicitTransactionBlock() {
 pub fn DefineSavepoint(name: Option<&str>) -> PgResult<()> {
     // Workers synchronize transaction state at the beginning of each parallel
     // operation, so we can't account for new subtransactions after that.
-    if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
+    if IsInParallelMode() || parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot define savepoints during a parallel operation")
@@ -1731,7 +1731,7 @@ pub fn DefineSavepoint(name: Option<&str>) -> PgResult<()> {
 
 /// `ReleaseSavepoint` (xact.c:4458)
 pub fn ReleaseSavepoint(name: &str) -> PgResult<()> {
-    if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
+    if IsInParallelMode() || parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot release savepoints during a parallel operation")
@@ -1808,7 +1808,7 @@ pub fn ReleaseSavepoint(name: &str) -> PgResult<()> {
 
 /// `RollbackToSavepoint` (xact.c:4567)
 pub fn RollbackToSavepoint(name: &str) -> PgResult<()> {
-    if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
+    if IsInParallelMode() || parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot rollback to savepoints during a parallel operation")
@@ -2139,7 +2139,7 @@ fn CommitSubTransaction() -> PgResult<()> {
     CallSubXactCallbacks(SUBXACT_EVENT_PRE_COMMIT_SUB, my, parent)?;
 
     // Clean up any unfinished parallel operation; warn about leaks.
-    parallel_seams::at_eosubxact_parallel::call(true, my)?;
+    parallel_seams::at_eosubxact_parallel(true, my)?;
     let level = xs(|s| s.current().parallel_mode_level);
     if level != 0 {
         warn_internal(&format!(
@@ -2274,7 +2274,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     // Clean up any unfinished parallel operation; no leak warnings.
     let (my, parent) = subxact_ids();
-    parallel_seams::at_eosubxact_parallel::call(false, my)?;
+    parallel_seams::at_eosubxact_parallel(false, my)?;
     xs(|s| s.current_mut().parallel_mode_level = 0);
 
     // We can skip all of this if the subxact failed before creating a

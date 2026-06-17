@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+use backend_access_tablesample_core_seams as tsm;
 use backend_executor_nodeSamplescan_seams as seam;
 use mcx::vec_with_capacity_in;
 use types_datum::datum::Datum;
@@ -385,12 +386,12 @@ pub fn ExecInitSampleScan<'mcx>(
     // handler OID, so this goes through the OID-keyed seam (shared with the
     // parser's transformRangeTableSample).
     let tsmhandler = sample_clause(node).map(|tsc| tsc.tsmhandler).unwrap_or(0);
-    scanstate.tsmroutine = Some(seam::get_tsm_routine_oid::call(estate.es_query_cxt, tsmhandler)?);
+    scanstate.tsmroutine = Some(tsm::get_tsm_routine_oid::call(estate.es_query_cxt, tsmhandler)?);
     scanstate.tsm_state = None;
 
     // if (tsm->InitSampleScan) tsm->InitSampleScan(scanstate, eflags);
-    if seam::tsm_has_init_sample_scan::call(&scanstate)? {
-        seam::tsm_init_sample_scan::call(&mut scanstate, eflags)?;
+    if tsm::tsm_has_init_sample_scan::call(&scanstate)? {
+        tsm::tsm_init_sample_scan::call(&mut scanstate, eflags)?;
     }
 
     // We'll do BeginSampleScan later; we can't evaluate params yet.
@@ -403,8 +404,8 @@ pub fn ExecInitSampleScan<'mcx>(
 pub fn ExecEndSampleScan<'mcx>(node: &mut SampleScanState<'mcx>) -> PgResult<()> {
     // Tell sampling function that we finished the scan.
     // if (node->tsmroutine->EndSampleScan) node->tsmroutine->EndSampleScan(node);
-    if seam::tsm_has_end_sample_scan::call(node)? {
-        seam::tsm_end_sample_scan::call(node)?;
+    if tsm::tsm_has_end_sample_scan::call(node)? {
+        tsm::tsm_end_sample_scan::call(node)?;
     }
 
     // close heap scan
@@ -486,11 +487,11 @@ fn tablesample_init<'mcx>(
 
     // Let tablesample method do its thing.
     // tsm->BeginSampleScan(scanstate, params, list_length(args), seed);
-    seam::tsm_begin_sample_scan::call(scanstate, &params, seed)?;
+    tsm::tsm_begin_sample_scan::call(scanstate, &params, seed)?;
 
     // We'll use syncscan if there's no NextSampleBlock function.
     // allow_sync = (tsm->NextSampleBlock == NULL);
-    let allow_sync = !seam::tsm_has_next_sample_block::call(scanstate)?;
+    let allow_sync = !tsm::tsm_has_next_sample_block::call(scanstate)?;
 
     // Now we can create or reset the HeapScanDesc.
     if scanstate.ss_currentScanDesc.is_none() {

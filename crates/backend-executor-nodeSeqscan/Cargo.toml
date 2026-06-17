@@ -22,7 +22,7 @@ backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" 
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 
 # Direct cargo deps (acyclic): the table-AM crate's parallel-scan helpers and

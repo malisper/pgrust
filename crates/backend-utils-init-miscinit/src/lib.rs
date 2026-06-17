@@ -425,7 +425,7 @@ pub fn InitializeSessionUserId(
 ) -> PgResult<()> {
     // In a parallel worker, ParallelWorkerMain already set our output variables
     // and we don't enforce rolcanlogin/rolconnlimit, nor scan the catalogs.
-    if backend_access_transam_parallel_seams::initializing_parallel_worker::call() {
+    if backend_access_transam_parallel::initializing_parallel_worker() {
         debug_assert!(bypass_login_check);
         return Ok(());
     }

@@ -73,7 +73,7 @@ backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }

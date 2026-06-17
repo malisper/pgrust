@@ -96,7 +96,6 @@ fn install_seams_once() {
         backend_commands_async_seams::handle_notify_interrupt::set(|| {
             ENV.with(|e| e.notify_calls.set(e.notify_calls.get() + 1))
         });
-        backend_access_transam_parallel_seams::handle_parallel_message_interrupt::set(|| {});
         backend_replication_walsender_seams::handle_wal_snd_init_stopping::set(|| {});
         backend_utils_mmgr_mcxt_seams::handle_log_memory_context_interrupt::set(|| {});
         backend_replication_logical_applyparallelworker_seams::handle_parallel_apply_message_interrupt::set(|| {});

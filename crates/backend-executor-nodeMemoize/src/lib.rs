@@ -49,7 +49,7 @@ use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 // (see `byval_word`); everywhere else stays canonical.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_nodeMemoize_seams as seam;
 use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 
@@ -1018,13 +1018,13 @@ pub fn ExecEndMemoize<'mcx>(
     }
 
     // In a parallel worker, copy stats back into shared memory for EXPLAIN.
-    if node.shared_info.is_some() && parallel::is_parallel_worker::call() {
+    if node.shared_info.is_some() && parallel::is_parallel_worker() {
         // Make mem_peak available for EXPLAIN.
         if node.stats.mem_peak == 0 {
             node.stats.mem_peak = node.mem_used;
         }
 
-        let worker_number = parallel::parallel_worker_number::call();
+        let worker_number = parallel::parallel_worker_number();
         let stats = node.stats;
         let shared = match node.shared_info.as_mut() {
             Some(shared) => shared,
@@ -1124,7 +1124,7 @@ pub fn ExecMemoizeEstimate<'mcx>(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    let nworkers = parallel::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
@@ -1138,9 +1138,9 @@ pub fn ExecMemoizeEstimate<'mcx>(
 
     //   shm_toc_estimate_chunk(&pcxt->estimator, size);
     //   shm_toc_estimate_keys(&pcxt->estimator, 1);
-    let estimator = parallel::pcxt_estimator::call(pcxt);
-    parallel::shm_toc_estimate_chunk::call(estimator, size);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    let estimator = parallel::pcxt_estimator(pcxt);
+    parallel::shm_toc_estimate_chunk(estimator, size);
+    parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -1152,7 +1152,7 @@ pub fn ExecMemoizeInitializeDSM<'mcx>(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    let nworkers = parallel::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
@@ -1191,8 +1191,8 @@ pub fn ExecMemoizeInitializeDSM<'mcx>(
     // The chunk allocation itself is a real owned shm_toc call; the placement +
     // carrier handoff mirror-and-panic into the parallel DSM owner until those
     // surfaces land.
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let _chunk = parallel::shm_toc_allocate::call(toc, size);
+    let toc = parallel::pcxt_toc(pcxt);
+    let _chunk = parallel::shm_toc_allocate(toc, size);
     let _ = (nworkers, node.plan_node_id);
     panic!(
         "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
@@ -1220,8 +1220,8 @@ pub fn ExecMemoizeInitializeWorker<'mcx>(
     // merged Memoize node holds an in-process `Box<SharedMemoizeInfo>`) and the
     // keystone flexible-array slot accessor. Mirror-and-panic into the parallel
     // DSM owner until those land.
-    let toc = parallel::pwcxt_toc::call(pwcxt);
-    let _attached = parallel::shm_toc_lookup::call(toc, node.plan_node_id as u64, true);
+    let toc = parallel::pwcxt_toc(pwcxt);
+    let _attached = parallel::shm_toc_lookup(toc, node.plan_node_id as u64, true);
     panic!(
         "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
          attach (ExecMemoizeInitializeWorker) — needs a DSM-resident shared_info \

@@ -129,7 +129,7 @@ fn local_mgr_get_or_create() -> &'static localbuf::LocalBufferManager {
         return mgr;
     }
     let num_temp_buffers = backend_utils_misc_guc_tables::vars::num_temp_buffers.read();
-    let is_parallel_worker = backend_access_transam_parallel_seams::is_parallel_worker::call();
+    let is_parallel_worker = backend_access_transam_parallel::is_parallel_worker();
     localbuf::LocalBufferManager::new(num_temp_buffers, is_parallel_worker).register_global()
 }
 

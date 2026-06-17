@@ -21,9 +21,7 @@
 //!     that lane lands.
 
 use alloc::vec::Vec;
-use backend_access_gist_core_seams::{
-    gist_get_fake_lsn, gist_xlog_delete, gist_xlog_split, gist_xlog_update,
-};
+use crate::gistxlog::{gist_get_fake_lsn, gist_xlog_delete, gist_xlog_split, gist_xlog_update};
 use backend_storage_buffer_bufmgr_seams::{
     buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, lock_buffer,
     mark_buffer_dirty, read_buffer, release_buffer, unlock_release_buffer, with_buffer_page,
@@ -480,7 +478,7 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
             // gistXLogSplit over the full dist chain (root prepended for root
             // split). The WAL writer lives in the GiST xlog (F7) lane.
             let full: Vec<SplitPageLayout<'mcx>> = build_xlog_chain(&mut dist, root_layout.take());
-            recptr = gist_xlog_split::call(
+            recptr = gist_xlog_split(
                 is_leaf,
                 &full,
                 oldrlink,
@@ -491,7 +489,7 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
             // restore dist from full (root prepended), so subsequent loops use it
             restore_dist_from_chain(&mut dist, full, is_rootsplit);
         } else {
-            recptr = gist_get_fake_lsn::call(rel)?;
+            recptr = gist_get_fake_lsn(rel)?;
         }
         let _ = page_size;
 
@@ -561,9 +559,9 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
             } else {
                 Vec::new()
             };
-            recptr = gist_xlog_update::call(buffer, &deloffs, itup, left_child_buf)?;
+            recptr = gist_xlog_update(buffer, &deloffs, itup, left_child_buf)?;
         } else {
-            recptr = gist_get_fake_lsn::call(rel)?;
+            recptr = gist_get_fake_lsn(rel)?;
         }
         page_modify(buffer, |page: &mut [u8]| {
             page_set_lsn_bytes(page, recptr);
@@ -802,9 +800,9 @@ pub fn gistprunepage<'mcx>(
         mark_buffer_dirty::call(buffer);
 
         let recptr = if relation_needs_wal(rel) {
-            gist_xlog_delete::call(buffer, &deletable, snapshot_conflict_horizon, heap_rel)?
+            gist_xlog_delete(buffer, &deletable, snapshot_conflict_horizon, heap_rel)?
         } else {
-            gist_get_fake_lsn::call(rel)?
+            gist_get_fake_lsn(rel)?
         };
         page_modify(buffer, |page: &mut [u8]| {
             page_set_lsn_bytes(page, recptr);

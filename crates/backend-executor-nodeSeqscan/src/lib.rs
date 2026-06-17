@@ -41,7 +41,7 @@ use backend_executor_execScan_seams as execScan;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop;
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_nodes_core_seams as bitmapset;
 
 use types_error::PgResult;
@@ -763,10 +763,10 @@ pub fn ExecSeqScanEstimate<'mcx>(
     node.pscan_len = backend_access_table_tableam::table_parallelscan_estimate(rel, &snapshot)?;
 
     // shm_toc_estimate_chunk(&pcxt->estimator, node->pscan_len);
-    let estimator = parallel::pcxt_estimator::call(pcxt);
-    parallel::shm_toc_estimate_chunk::call(estimator, node.pscan_len);
+    let estimator = parallel::pcxt_estimator(pcxt);
+    parallel::shm_toc_estimate_chunk(estimator, node.pscan_len);
     // shm_toc_estimate_keys(&pcxt->estimator, 1);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -781,8 +781,8 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
     // ParallelTableScanDesc pscan;
 
     // pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let pscan_cursor = parallel::shm_toc_allocate::call(toc, node.pscan_len);
+    let toc = parallel::pcxt_toc(pcxt);
+    let pscan_cursor = parallel::shm_toc_allocate(toc, node.pscan_len);
 
     // table_parallelscan_initialize(node->ss.ss_currentRelation, pscan,
     //                               estate->es_snapshot);
@@ -813,7 +813,7 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
     }
 
     // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
-    parallel::shm_toc_insert::call(toc, plan_node_id as u64, pscan_cursor);
+    parallel::shm_toc_insert(toc, plan_node_id as u64, pscan_cursor);
 
     // node->ss.ss_currentScanDesc = table_beginscan_parallel(rel, pscan);
     let pscan_arc: std::sync::Arc<ParallelTableScanDescData> = std::sync::Arc::from(pscan);
@@ -872,8 +872,8 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
         .plan
         .map(|p| p.plan_head().plan_node_id)
         .expect("ExecSeqScanInitializeWorker: no plan");
-    let toc = parallel::pwcxt_toc::call(pwcxt);
-    let pscan_cursor = parallel::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+    let toc = parallel::pwcxt_toc(pwcxt);
+    let pscan_cursor = parallel::shm_toc_lookup(toc, plan_node_id as u64, false)
         .expect("ExecSeqScanInitializeWorker: shm_toc_lookup(noError=false) returned NULL");
 
     // node->ss.ss_currentScanDesc = table_beginscan_parallel(rel, pscan);

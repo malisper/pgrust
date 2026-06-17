@@ -989,11 +989,9 @@ impl Default for BlockRefTableWriter {
 // Seam installation.
 // ---------------------------------------------------------------------------
 
-/// Install this crate's seams. Called once at startup by `seams-init`.
-///
-/// All former outward seams of this unit are now called directly by their
-/// consumers (`backend-backup-incremental`, `backend-backup-walsummaryfuncs`,
-/// `backend-postmaster-walsummarizer`), so there is nothing to install.
+/// The block-reference-table routines are now called directly by their
+/// consumers (the outward seams were removed as faithful de-indirection — a
+/// direct call replaces the fn-ptr seam call), so nothing remains to install.
 pub fn init_seams() {}
 
 #[cfg(test)]

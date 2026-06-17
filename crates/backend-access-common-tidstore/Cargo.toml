@@ -19,4 +19,4 @@ types-tuple = { path = "../types-tuple" }
 types-vacuum = { path = "../types-vacuum" }
 backend-storage-page = { path = "../backend-storage-page" }
 backend-lib-radixtree-seams = { path = "../backend-lib-radixtree-seams" }
-backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-access-common-tidstore-seams = { path = "../backend-access-common-tidstore-seams" }

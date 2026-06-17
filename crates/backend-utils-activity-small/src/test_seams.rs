@@ -149,7 +149,6 @@ pub(crate) fn with_fixture<R>(f: impl FnOnce(&Env) -> R) -> R {
 }
 
 fn install_seams() {
-    use backend_access_transam_parallel_seams as parallel;
     use backend_libpq_pqcomm_seams as pqcomm;
     use backend_storage_lmgr_lwlock_seams as lwlock;
     use backend_utils_activity_pgstat_seams as pgstat;
@@ -161,7 +160,6 @@ fn install_seams() {
     status::track_activities::set(|| env().track.get());
     status::with_my_beentry::set(|f| f(&mut env().beentry.borrow_mut()));
 
-    parallel::is_parallel_worker::set(|| env().parallel.get());
 
     // backend_progress builds PqMsg_Progress messages with the real pqformat
     // routines (a direct cargo dependency); only the transport is a seam.

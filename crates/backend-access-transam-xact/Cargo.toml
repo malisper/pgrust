@@ -27,7 +27,7 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 # per-owner seam crates for outward calls
 backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
 backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
 backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }

@@ -52,7 +52,7 @@ use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 
 mod parallel {
-    pub use backend_access_transam_parallel_seams::parallel_worker_number;
+    pub use backend_access_transam_parallel::parallel_worker_number;
 }
 mod nodeHash {
     pub use backend_executor_nodeHash_seams::get_hash_memory_limit;
@@ -311,7 +311,7 @@ pub fn build_tuple_hash_table<'mcx>(
     // C: MemoryContextSwitchTo(metacxt); the bucket array lives in metacxt. In
     // the owned model the bucket Vec is charged via try_reserve to mcx.
     if use_variable_hash_iv {
-        hash_iv = murmurhash32(parallel::parallel_worker_number::call() as u32);
+        hash_iv = murmurhash32(parallel::parallel_worker_number() as u32);
     }
 
     let hashtab = tuplehash::create(mcx, nbuckets as u32)?;

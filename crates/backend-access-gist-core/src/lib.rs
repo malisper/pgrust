@@ -100,20 +100,12 @@ pub fn init_seams() {
         |mcx, info, stats| gistvacuumcleanup(mcx, info, stats),
     );
 
-    // gistxlog.c rmgr-table callbacks (gist_redo / gist_xlog_startup /
-    // gist_xlog_cleanup / gist_mask) + the GiST WAL-write seams the insert
+    // The gistxlog.c rmgr-table callbacks (gist_redo / gist_xlog_startup /
+    // gist_xlog_cleanup / gist_mask) and the GiST WAL-write routines the insert
     // spine reaches (gist_xlog_split / gist_xlog_update / gist_xlog_delete /
-    // gist_xlog_page_delete / gist_xlog_page_reuse / gist_get_fake_lsn).
-    backend_access_gist_core_seams::gist_redo::set(gistxlog::gist_redo);
-    backend_access_gist_core_seams::gist_xlog_startup::set(gistxlog::gist_xlog_startup);
-    backend_access_gist_core_seams::gist_xlog_cleanup::set(gistxlog::gist_xlog_cleanup);
-    backend_access_gist_core_seams::gist_mask::set(gistxlog::gist_mask);
-    backend_access_gist_core_seams::gist_xlog_split::set(gistxlog::gist_xlog_split);
-    backend_access_gist_core_seams::gist_xlog_update::set(gistxlog::gist_xlog_update);
-    backend_access_gist_core_seams::gist_xlog_delete::set(gistxlog::gist_xlog_delete);
-    backend_access_gist_core_seams::gist_xlog_page_delete::set(gistxlog::gist_xlog_page_delete);
-    backend_access_gist_core_seams::gist_xlog_page_reuse::set(gistxlog::gist_xlog_page_reuse);
-    backend_access_gist_core_seams::gist_get_fake_lsn::set(gistxlog::gist_get_fake_lsn);
+    // gist_xlog_page_delete / gist_xlog_page_reuse / gist_get_fake_lsn) used to
+    // be installed here as outward seams; they are now called directly through
+    // the `gistxlog` module (faithful de-indirection), so nothing to install.
 
     // Register the GiST fmgr builtin(s) ported in this crate into the fmgr-core
     // builtin table (C: their `fmgr_builtins[]` rows), so by-OID dispatch /

@@ -67,7 +67,7 @@ fn zero_tm() -> pg_tm {
 // ---------------------------------------------------------------------------
 
 fn date2j(year: i32, month: i32, day: i32) -> i32 {
-    backend_utils_adt_datetime_seams::date2j::call(year, month, day)
+    backend_utils_adt_datetime::seam_impls::seam_date2j(year, month, day)
 }
 fn timestamp2tm(
     dt: Timestamp,
@@ -94,13 +94,13 @@ fn adjust_time_for_typmod(time: TimeADT, typmod: i32) -> TimeADT {
     backend_utils_adt_timestamp_seams::adjust_time_for_typmod::call(time, typmod)
 }
 fn determine_time_zone_offset(tm: &mut pg_tm) -> i32 {
-    backend_utils_adt_datetime_seams::determine_time_zone_offset::call(tm)
+    backend_utils_adt_datetime::seam_impls::seam_determine_time_zone_offset(tm)
 }
 fn determine_time_zone_abbrev_offset(tm: &mut pg_tm, abbr: &str, tzp: TzHandle) -> i32 {
-    backend_utils_adt_datetime_seams::determine_time_zone_abbrev_offset::call(tm, abbr, tzp)
+    backend_utils_adt_datetime::seam_impls::seam_determine_time_zone_abbrev_offset(tm, abbr, tzp)
 }
 fn j2date_seam(jd: i32) -> YmdDate {
-    backend_utils_adt_datetime_seams::j2date::call(jd)
+    backend_utils_adt_datetime::seam_impls::seam_j2date(jd)
 }
 fn isoweek2date_seam(woy: i32, year: i32) -> YmdDate {
     backend_utils_adt_isoweek_seams::isoweek2date::call(woy, year)
@@ -112,7 +112,7 @@ fn isoweek2j(year: i32, week: i32) -> i32 {
     backend_utils_adt_isoweek_seams::isoweek2j::call(year, week)
 }
 fn validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
-    backend_utils_adt_datetime_seams::validate_date::call(fmask, is2digits, bc, tm)
+    backend_utils_adt_datetime::seam_impls::seam_validate_date(fmask, is2digits, bc, tm)
 }
 
 // ---------------------------------------------------------------------------

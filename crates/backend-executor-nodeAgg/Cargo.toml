@@ -35,7 +35,6 @@ backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-s
 backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 types-core = { path = "../types-core" }

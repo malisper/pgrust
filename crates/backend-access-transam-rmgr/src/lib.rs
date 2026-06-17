@@ -30,7 +30,7 @@ use types_wal::rmgr::{
 
 use backend_access_brin_xlog_seams as brin_xlog;
 use backend_access_gin_core_seams as ginxlog;
-use backend_access_gist_core_seams as gistxlog;
+use backend_access_gist_core::gistxlog;
 use backend_access_hash_xlog_seams as hash_xlog;
 use backend_access_heap_heapam_xlog_seams as heapam_xlog;
 use backend_access_nbt_xlog_seams as nbtxlog;
@@ -258,12 +258,12 @@ static RMGR_BUILTIN_TABLE: [RmgrData; RM_N_BUILTIN_IDS] = [
     //         gist_xlog_startup, gist_xlog_cleanup, gist_mask, NULL)
     RmgrData {
         rm_name: Some("Gist"),
-        rm_redo: Some(gistxlog::gist_redo::call),
+        rm_redo: Some(gistxlog::gist_redo),
         rm_desc: Some(gistdesc::gist_desc::call),
         rm_identify: Some(gistdesc::gist_identify::call),
-        rm_startup: Some(gistxlog::gist_xlog_startup::call),
-        rm_cleanup: Some(gistxlog::gist_xlog_cleanup::call),
-        rm_mask: Some(gistxlog::gist_mask::call),
+        rm_startup: Some(gistxlog::gist_xlog_startup),
+        rm_cleanup: Some(gistxlog::gist_xlog_cleanup),
+        rm_mask: Some(gistxlog::gist_mask),
         rm_decode: None,
     },
     // PG_RMGR(RM_SEQ_ID, "Sequence", seq_redo, seq_desc, seq_identify,

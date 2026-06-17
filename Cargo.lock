@@ -562,7 +562,7 @@ dependencies = [
 name = "backend-access-common-tidstore"
 version = "0.0.0"
 dependencies = [
- "backend-access-heap-vacuumlazy-seams",
+ "backend-access-common-tidstore-seams",
  "backend-lib-radixtree-seams",
  "backend-storage-page",
  "seam-core",
@@ -571,6 +571,17 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-storage",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-access-common-tidstore-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
  "types-tuple",
  "types-vacuum",
 ]
@@ -1101,7 +1112,6 @@ dependencies = [
  "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
  "backend-access-gist-am-seams",
- "backend-access-gist-core-seams",
  "backend-access-gist-dispatch-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-heap-hio-seams",
@@ -1408,7 +1418,7 @@ dependencies = [
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-table-tableam",
  "backend-access-transam-multixact-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-transam",
  "backend-access-transam-transam-seams",
  "backend-access-transam-xact-seams",
@@ -1783,6 +1793,7 @@ dependencies = [
 name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tidstore-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-commands-vacuum-seams",
  "backend-utils-error",
@@ -2847,7 +2858,7 @@ dependencies = [
 name = "backend-access-tablesample-core"
 version = "0.0.0"
 dependencies = [
- "backend-executor-nodeSamplescan-seams",
+ "backend-access-tablesample-core-seams",
  "backend-optimizer-path-costsize",
  "backend-optimizer-util-clauses",
  "common-hashfn",
@@ -2858,6 +2869,18 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-samplescan",
+]
+
+[[package]]
+name = "backend-access-tablesample-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
  "types-samplescan",
 ]
 
@@ -3070,7 +3093,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-brin-xlog-seams",
  "backend-access-gin-core-seams",
- "backend-access-gist-core-seams",
+ "backend-access-gist-core",
  "backend-access-hash-xlog-seams",
  "backend-access-heap-heapam-xlog-seams",
  "backend-access-nbt-xlog-seams",
@@ -3339,7 +3362,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-commit-ts-seams",
  "backend-access-transam-multixact-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-subtrans-seams",
  "backend-access-transam-transam-seams",
  "backend-access-transam-twophase-seams",
@@ -4620,7 +4643,7 @@ dependencies = [
 name = "backend-catalog-namespace"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-catalog-aclchk-seams",
@@ -5999,7 +6022,7 @@ dependencies = [
 name = "backend-commands-async"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-slru",
  "backend-access-transam-transam-seams",
  "backend-access-transam-xact-seams",
@@ -7782,6 +7805,7 @@ dependencies = [
 name = "backend-commands-vacuum"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tidstore-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-xact-seams",
  "backend-commands-analyze-seams",
@@ -7826,8 +7850,8 @@ name = "backend-commands-vacuumparallel"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
- "backend-access-transam-parallel-seams",
  "backend-commands-vacuum-seams",
  "backend-utils-error",
  "mcx",
@@ -7844,7 +7868,7 @@ dependencies = [
 name = "backend-commands-variable"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogprefetcher",
@@ -8426,7 +8450,7 @@ dependencies = [
 name = "backend-executor-execGrouping"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execExpr-seams",
  "backend-executor-execGrouping-seams",
  "backend-executor-execTuples-seams",
@@ -8564,7 +8588,7 @@ dependencies = [
 name = "backend-executor-execParallel"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execMain",
  "backend-executor-execParallel-seams",
  "backend-executor-execParallel-support-seams",
@@ -8992,7 +9016,6 @@ name = "backend-executor-nodeAgg"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel",
- "backend-access-transam-parallel-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-objectaccess-seams",
  "backend-executor-execExpr-seams",
@@ -9041,7 +9064,7 @@ dependencies = [
 name = "backend-executor-nodeAppend"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execAsync-seams",
  "backend-executor-execPartition-seams",
@@ -9109,7 +9132,6 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-access-table-tableam-bm-seams",
  "backend-access-transam-parallel",
- "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execProcnode-seams",
@@ -9150,7 +9172,7 @@ name = "backend-executor-nodeBitmapIndexscan"
 version = "0.0.0"
 dependencies = [
  "backend-access-index-indexam-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-instrument-seams",
@@ -9301,7 +9323,7 @@ name = "backend-executor-nodeGather"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execParallel-seams",
@@ -9329,7 +9351,7 @@ name = "backend-executor-nodeGatherMerge"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execParallel-seams",
@@ -9374,7 +9396,7 @@ name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-commands-tablespace-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -9434,7 +9456,6 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-transam-parallel",
- "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execProcnode-seams",
@@ -9485,7 +9506,7 @@ dependencies = [
 name = "backend-executor-nodeIncrementalSort"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
@@ -9522,7 +9543,7 @@ dependencies = [
  "backend-access-common-indextuple-seams",
  "backend-access-heap-visibilitymap-seams",
  "backend-access-index-indexam-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
@@ -9561,7 +9582,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-scankey",
  "backend-access-index-indexam-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execScan-seams",
@@ -9676,7 +9697,7 @@ dependencies = [
 name = "backend-executor-nodeMemoize"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execProcnode-seams",
@@ -9896,6 +9917,7 @@ dependencies = [
 name = "backend-executor-nodeSamplescan"
 version = "0.0.0"
 dependencies = [
+ "backend-access-tablesample-core-seams",
  "backend-executor-nodeSamplescan-seams",
  "mcx",
  "seam-core",
@@ -9925,7 +9947,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-tableam",
  "backend-access-table-tableam-seams",
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
@@ -9977,7 +9999,7 @@ dependencies = [
 name = "backend-executor-nodeSort"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-executor-execAmi-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
@@ -12423,11 +12445,11 @@ name = "backend-parser-clause"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
+ "backend-access-tablesample-core-seams",
  "backend-catalog-catalog",
  "backend-catalog-namespace",
  "backend-catalog-pg-constraint",
  "backend-commands-opclasscmds",
- "backend-executor-nodeSamplescan-seams",
  "backend-nodes-copyfuncs-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
@@ -14165,7 +14187,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery-seams",
  "backend-commands-dbcommands-seams",
  "backend-postmaster-interrupt",
- "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-logical-logical-seams",
  "backend-replication-logical-slotsync-seams",
  "backend-replication-slot-seams",
@@ -14389,7 +14411,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
- "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-logical-logical",
  "backend-replication-logical-slotsync-seams",
  "backend-replication-slot",
@@ -14495,7 +14517,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-postmaster-auxprocess-seams",
  "backend-postmaster-interrupt",
- "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-libpqwalreceiver",
  "backend-replication-walreceiver-seams",
  "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
@@ -15055,7 +15077,7 @@ dependencies = [
 name = "backend-storage-buffer-support"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-xlog-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-buffer-support-seams",
@@ -15581,7 +15603,7 @@ dependencies = [
 name = "backend-storage-ipc-procsignal"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-commands-async-seams",
  "backend-replication-logical-applyparallelworker-seams",
  "backend-replication-walsender-seams",
@@ -16058,7 +16080,6 @@ name = "backend-storage-lmgr-predicate"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel",
- "backend-access-transam-parallel-seams",
  "backend-access-transam-slru",
  "backend-access-transam-transam",
  "backend-access-transam-twophase-rmgr",
@@ -17098,7 +17119,7 @@ dependencies = [
 name = "backend-utils-activity-small"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqformat",
  "backend-storage-lmgr-lwlock-seams",
@@ -17501,7 +17522,6 @@ dependencies = [
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime-seams",
- "backend-utils-adt-datetime-seams",
  "backend-utils-adt-isoweek-seams",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
@@ -17686,7 +17706,7 @@ dependencies = [
 name = "backend-utils-adt-formatting"
 version = "0.0.0"
 dependencies = [
- "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-datetime",
  "backend-utils-adt-formatting-seams",
  "backend-utils-adt-isoweek-seams",
  "backend-utils-adt-numeric",
@@ -19655,8 +19675,8 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
- "backend-access-transam-parallel-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-catalog-binary-upgrade-seams",
@@ -20181,7 +20201,7 @@ dependencies = [
 name = "backend-utils-init-miscinit"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel-seams",
+ "backend-access-transam-parallel",
  "backend-common-exec-seams",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqsignal-seams",
@@ -20705,7 +20725,7 @@ version = "0.0.0"
 dependencies = [
  "backend-storage-ipc-injection-point-seams",
  "backend-storage-ipc-latch-seams",
- "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-datetime",
  "backend-utils-adt-domains-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
@@ -21164,7 +21184,6 @@ dependencies = [
 name = "common-blkreftable"
 version = "0.0.0"
 dependencies = [
- "common-blkreftable-seams",
  "mcx",
  "port-crc32c",
  "port-pg-crc32c-seams",

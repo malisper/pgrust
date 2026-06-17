@@ -53,7 +53,7 @@ use types_nodes::{EStateData, PlanStateNode};
 use types_core::instrument::{BufferUsage, WalUsage};
 use types_nodes::instrument::Instrumentation;
 
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execParallel_support_seams as sup;
 use backend_executor_tqueue_seams as tqueue;
 use backend_storage_ipc_shm_mq_seams as shmmq;
@@ -373,7 +373,7 @@ fn ExecParallelInitializeDSM<'mcx>(
 ) -> PgResult<bool> {
     // If instrumentation is enabled, initialize slot for this node.
     if let Some(sei) = instrumentation {
-        parallel::set_sei_plan_node_id::call(sei, *nnodes, planstate.plan_node_id());
+        parallel::set_sei_plan_node_id(sei, *nnodes, planstate.plan_node_id());
     }
 
     // Count this node.
@@ -452,22 +452,22 @@ fn ExecParallelSetupTupleQueues<'mcx>(
     pcxt: types_execparallel::ParallelContextHandle,
     reinitialize: bool,
 ) -> PgResult<PgVec<'mcx, types_execparallel::ShmMqAttachHandle>> {
-    let nworkers = parallel::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel::pcxt_nworkers(pcxt);
 
     // Skip this if no workers.
     if nworkers == 0 {
         return Ok(PgVec::new_in(mcx));
     }
 
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let seg = parallel::pcxt_seg::call(pcxt);
+    let toc = parallel::pcxt_toc(pcxt);
+    let seg = parallel::pcxt_seg(pcxt);
 
     // If not reinitializing, allocate space from the DSM for the queues;
     // otherwise, find the already allocated space.
     let tqueuespace: SerializeCursor = if !reinitialize {
-        parallel::shm_toc_allocate::call(toc, mul_size(PARALLEL_TUPLE_QUEUE_SIZE, nworkers as usize)?)
+        parallel::shm_toc_allocate(toc, mul_size(PARALLEL_TUPLE_QUEUE_SIZE, nworkers as usize)?)
     } else {
-        parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_TUPLE_QUEUE, false).ok_or_else(|| {
+        parallel::shm_toc_lookup(toc, PARALLEL_KEY_TUPLE_QUEUE, false).ok_or_else(|| {
             PgError::error(
                 "ExecParallelSetupTupleQueues: PARALLEL_KEY_TUPLE_QUEUE present (noError == false)",
             )
@@ -485,7 +485,7 @@ fn ExecParallelSetupTupleQueues<'mcx>(
 
     // Add array of queues to shm_toc, so others can find it.
     if !reinitialize {
-        parallel::shm_toc_insert::call(toc, PARALLEL_KEY_TUPLE_QUEUE, tqueuespace);
+        parallel::shm_toc_insert(toc, PARALLEL_KEY_TUPLE_QUEUE, tqueuespace);
     }
 
     Ok(responseq)
@@ -547,7 +547,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     let pstmt_data = ExecSerializePlan(estate)?;
 
     // Create a parallel context.
-    let pcxt = parallel::create_parallel_context::call(
+    let pcxt = parallel::create_parallel_context(
         mcx,
         String::from("postgres"),
         String::from("ParallelQueryMain"),
@@ -555,12 +555,12 @@ pub fn ExecInitParallelPlan<'mcx>(
     )?;
     pei.pcxt = Some(pcxt);
 
-    let estimator = parallel::pcxt_estimator::call(pcxt);
-    let pcxt_nworkers = parallel::pcxt_nworkers::call(pcxt);
+    let estimator = parallel::pcxt_estimator(pcxt);
+    let pcxt_nworkers = parallel::pcxt_nworkers(pcxt);
 
     // Estimate space for fixed-size state.
-    parallel::shm_toc_estimate_chunk::call(estimator, SIZEOF_FIXED_STATE);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, SIZEOF_FIXED_STATE);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for query text.
     let query_text = estate
@@ -569,37 +569,37 @@ pub fn ExecInitParallelPlan<'mcx>(
         .map(|s| s.as_str().to_string())
         .ok_or_else(|| PgError::error("ExecInitParallelPlan: estate->es_sourceText is NULL"))?;
     let query_len: i32 = query_text.len() as i32;
-    parallel::shm_toc_estimate_chunk::call(estimator, query_len as Size + 1);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, query_len as Size + 1);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for serialized PlannedStmt.
     let pstmt_len: i32 = pstmt_data.len() as i32 + 1;
-    parallel::shm_toc_estimate_chunk::call(estimator, pstmt_len as Size);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, pstmt_len as Size);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for serialized ParamListInfo.
     let param_li = estate.es_param_list_info;
     let paramlistinfo_len: i32 = sup::estimate_param_list_space::call(param_li) as i32;
-    parallel::shm_toc_estimate_chunk::call(estimator, paramlistinfo_len as Size);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, paramlistinfo_len as Size);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for BufferUsage.
-    parallel::shm_toc_estimate_chunk::call(
+    parallel::shm_toc_estimate_chunk(
         estimator,
         mul_size(SIZEOF_BUFFER_USAGE, pcxt_nworkers as usize)?,
     );
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Same for WalUsage.
-    parallel::shm_toc_estimate_chunk::call(estimator, mul_size(SIZEOF_WAL_USAGE, pcxt_nworkers as usize)?);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, mul_size(SIZEOF_WAL_USAGE, pcxt_nworkers as usize)?);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for tuple queues.
-    parallel::shm_toc_estimate_chunk::call(
+    parallel::shm_toc_estimate_chunk(
         estimator,
         mul_size(PARALLEL_TUPLE_QUEUE_SIZE, pcxt_nworkers as usize)?,
     );
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Give parallel-aware nodes a chance to add to the estimates, and count
     // how many PlanState nodes there are.
@@ -618,31 +618,31 @@ pub fn ExecInitParallelPlan<'mcx>(
             SIZEOF_INSTRUMENTATION,
             mul_size(nnodes_estimate as usize, nworkers as usize)?,
         )? as i32;
-        parallel::shm_toc_estimate_chunk::call(estimator, instrumentation_len as Size);
-        parallel::shm_toc_estimate_keys::call(estimator, 1);
+        parallel::shm_toc_estimate_chunk(estimator, instrumentation_len as Size);
+        parallel::shm_toc_estimate_keys(estimator, 1);
 
         // Estimate space for JIT instrumentation, if required.
         if es_jit_flags != PGJIT_NONE {
             jit_instrumentation_len =
                 OFFSET_OF_JIT_INSTR as i32 + SIZEOF_JIT_INSTRUMENTATION as i32 * nworkers;
-            parallel::shm_toc_estimate_chunk::call(estimator, jit_instrumentation_len as Size);
-            parallel::shm_toc_estimate_keys::call(estimator, 1);
+            parallel::shm_toc_estimate_chunk(estimator, jit_instrumentation_len as Size);
+            parallel::shm_toc_estimate_keys(estimator, 1);
         }
     }
 
     // Estimate space for DSA area.
-    parallel::shm_toc_estimate_chunk::call(estimator, dsa_minsize);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    parallel::shm_toc_estimate_chunk(estimator, dsa_minsize);
+    parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Everyone's had a chance to ask for space, so now create the DSM.
-    parallel::initialize_parallel_dsm::call(mcx, pcxt)?;
+    parallel::initialize_parallel_dsm(mcx, pcxt)?;
 
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let seg = parallel::pcxt_seg::call(pcxt);
+    let toc = parallel::pcxt_toc(pcxt);
+    let seg = parallel::pcxt_seg(pcxt);
 
     // Store fixed-size state.
-    let fpes_chunk = parallel::shm_toc_allocate::call(toc, SIZEOF_FIXED_STATE);
-    let fpes = parallel::store_fixed_state::call(
+    let fpes_chunk = parallel::shm_toc_allocate(toc, SIZEOF_FIXED_STATE);
+    let fpes = parallel::store_fixed_state(
         fpes_chunk,
         FixedParallelExecutorState {
             tuples_needed,
@@ -651,33 +651,33 @@ pub fn ExecInitParallelPlan<'mcx>(
             jit_flags: es_jit_flags,
         },
     );
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_EXECUTOR_FIXED, fpes_chunk);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_EXECUTOR_FIXED, fpes_chunk);
 
     // Store query string.
-    let query_chunk = parallel::shm_toc_allocate::call(toc, query_len as Size + 1);
-    parallel::store_cstring::call(query_chunk, query_text);
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_QUERY_TEXT, query_chunk);
+    let query_chunk = parallel::shm_toc_allocate(toc, query_len as Size + 1);
+    parallel::store_cstring(query_chunk, query_text);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_QUERY_TEXT, query_chunk);
 
     // Store serialized PlannedStmt.
-    let pstmt_chunk = parallel::shm_toc_allocate::call(toc, pstmt_len as Size);
-    parallel::store_cstring::call(pstmt_chunk, pstmt_data);
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_PLANNEDSTMT, pstmt_chunk);
+    let pstmt_chunk = parallel::shm_toc_allocate(toc, pstmt_len as Size);
+    parallel::store_cstring(pstmt_chunk, pstmt_data);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_PLANNEDSTMT, pstmt_chunk);
 
     // Store serialized ParamListInfo.
-    let paramlistinfo_chunk = parallel::shm_toc_allocate::call(toc, paramlistinfo_len as Size);
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_chunk);
+    let paramlistinfo_chunk = parallel::shm_toc_allocate(toc, paramlistinfo_len as Size);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_chunk);
     sup::serialize_param_list::call(param_li, paramlistinfo_chunk)?;
 
     // Allocate space for each worker's BufferUsage; no need to initialize.
     let bufusage_chunk =
-        parallel::shm_toc_allocate::call(toc, mul_size(SIZEOF_BUFFER_USAGE, pcxt_nworkers as usize)?);
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_BUFFER_USAGE, bufusage_chunk);
+        parallel::shm_toc_allocate(toc, mul_size(SIZEOF_BUFFER_USAGE, pcxt_nworkers as usize)?);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_BUFFER_USAGE, bufusage_chunk);
     pei.buffer_usage = bufusage_chunk;
 
     // Same for WalUsage.
     let walusage_chunk =
-        parallel::shm_toc_allocate::call(toc, mul_size(SIZEOF_WAL_USAGE, pcxt_nworkers as usize)?);
-    parallel::shm_toc_insert::call(toc, PARALLEL_KEY_WAL_USAGE, walusage_chunk);
+        parallel::shm_toc_allocate(toc, mul_size(SIZEOF_WAL_USAGE, pcxt_nworkers as usize)?);
+    parallel::shm_toc_insert(toc, PARALLEL_KEY_WAL_USAGE, walusage_chunk);
     pei.wal_usage = walusage_chunk;
 
     // Set up the tuple queues that the workers will write into.
@@ -688,8 +688,8 @@ pub fn ExecInitParallelPlan<'mcx>(
 
     // If instrumentation options were supplied, allocate space for the data.
     if es_instrument != 0 {
-        let instr_chunk = parallel::shm_toc_allocate::call(toc, instrumentation_len as Size);
-        let instrumentation = parallel::store_instrumentation_header::call(
+        let instr_chunk = parallel::shm_toc_allocate(toc, instrumentation_len as Size);
+        let instrumentation = parallel::store_instrumentation_header(
             instr_chunk,
             SharedExecutorInstrumentation {
                 instrument_options: es_instrument,
@@ -701,14 +701,14 @@ pub fn ExecInitParallelPlan<'mcx>(
         for i in 0..(nworkers * nnodes_estimate) {
             sup::instr_init_slot::call(instrumentation, i, es_instrument);
         }
-        parallel::shm_toc_insert::call(toc, PARALLEL_KEY_INSTRUMENTATION, instr_chunk);
+        parallel::shm_toc_insert(toc, PARALLEL_KEY_INSTRUMENTATION, instr_chunk);
         pei.instrumentation = Some(instrumentation);
 
         if es_jit_flags != PGJIT_NONE {
-            let jit_chunk = parallel::shm_toc_allocate::call(toc, jit_instrumentation_len as Size);
+            let jit_chunk = parallel::shm_toc_allocate(toc, jit_instrumentation_len as Size);
             let jit_instrumentation =
-                parallel::store_jit_instrumentation_header::call(jit_chunk, nworkers);
-            parallel::shm_toc_insert::call(toc, PARALLEL_KEY_JIT_INSTRUMENTATION, jit_chunk);
+                parallel::store_jit_instrumentation_header(jit_chunk, nworkers);
+            parallel::shm_toc_insert(toc, PARALLEL_KEY_JIT_INSTRUMENTATION, jit_chunk);
             pei.jit_instrumentation = Some(jit_instrumentation);
         }
     }
@@ -716,8 +716,8 @@ pub fn ExecInitParallelPlan<'mcx>(
     // Create a DSA area usable by the leader and all workers. (If we failed to
     // create a DSM and are using private memory instead, skip this.)
     if let Some(seg) = seg {
-        let area_chunk = parallel::shm_toc_allocate::call(toc, dsa_minsize);
-        parallel::shm_toc_insert::call(toc, PARALLEL_KEY_DSA, area_chunk);
+        let area_chunk = parallel::shm_toc_allocate(toc, dsa_minsize);
+        parallel::shm_toc_insert(toc, PARALLEL_KEY_DSA, area_chunk);
         let area =
             dsa::dsa_create_in_place::call(area_chunk, dsa_minsize, LWTRANCHE_PARALLEL_QUERY_DSA, seg);
         pei.area = Some(area);
@@ -725,7 +725,7 @@ pub fn ExecInitParallelPlan<'mcx>(
         // Serialize parameters, if any, using DSA storage.
         if !sup::bms_is_empty::call(send_params) {
             pei.param_exec = SerializeParamExecParams(estate, send_params, area)?;
-            parallel::set_fixed_param_exec::call(fpes, pei.param_exec);
+            parallel::set_fixed_param_exec(fpes, pei.param_exec);
         }
     }
 
@@ -760,7 +760,7 @@ pub fn ExecParallelCreateReaders<'mcx>(
     let pcxt = pei
         .pcxt
         .ok_or_else(|| PgError::error("ExecParallelCreateReaders: pei->pcxt is live"))?;
-    let nworkers = parallel::pcxt_nworkers_launched::call(pcxt);
+    let nworkers = parallel::pcxt_nworkers_launched(pcxt);
 
     debug_assert!(pei.reader.is_empty());
 
@@ -768,7 +768,7 @@ pub fn ExecParallelCreateReaders<'mcx>(
         let mut reader = mcx::vec_with_capacity_in(mcx, nworkers as usize)?;
         for i in 0..nworkers {
             let tqueue_i = pei.tqueue[i as usize];
-            shmmq::shm_mq_set_handle::call(tqueue_i, parallel::pcxt_worker_bgwhandle::call(pcxt, i));
+            shmmq::shm_mq_set_handle::call(tqueue_i, parallel::pcxt_worker_bgwhandle(pcxt, i));
             reader.push(tqueue::create_tuple_queue_reader::call(tqueue_i));
         }
         pei.reader = reader;
@@ -810,23 +810,23 @@ pub fn ExecParallelReinitialize<'mcx>(
     let per_tuple_econtext = sup::get_per_tuple_expr_context_owned::call(estate)?;
     sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
 
-    parallel::reinitialize_parallel_dsm::call(pcxt)?;
+    parallel::reinitialize_parallel_dsm(pcxt)?;
     pei.tqueue = ExecParallelSetupTupleQueues(mcx, pcxt, true)?;
     pei.reader = PgVec::new_in(mcx);
     pei.finished = false;
 
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let fpes_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_EXECUTOR_FIXED, false)
+    let toc = parallel::pcxt_toc(pcxt);
+    let fpes_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_EXECUTOR_FIXED, false)
         .ok_or_else(|| PgError::error("ExecParallelReinitialize: PARALLEL_KEY_EXECUTOR_FIXED present"))?;
-    let fpes = parallel::fixed_state_from_chunk::call(fpes_chunk);
+    let fpes = parallel::fixed_state_from_chunk(fpes_chunk);
 
     // Free any serialized parameters from the last round.
-    if dsa_pointer_is_valid(parallel::fixed_param_exec::call(fpes)) {
+    if dsa_pointer_is_valid(parallel::fixed_param_exec(fpes)) {
         let area = pei
             .area
             .ok_or_else(|| PgError::error("ExecParallelReinitialize: pei->area is live during reinit"))?;
-        dsa::dsa_free::call(area, parallel::fixed_param_exec::call(fpes));
-        parallel::set_fixed_param_exec::call(fpes, INVALID_DSA_POINTER);
+        dsa::dsa_free::call(area, parallel::fixed_param_exec(fpes));
+        parallel::set_fixed_param_exec(fpes, INVALID_DSA_POINTER);
     }
 
     // Serialize current parameter values if required.
@@ -835,7 +835,7 @@ pub fn ExecParallelReinitialize<'mcx>(
             .area
             .ok_or_else(|| PgError::error("ExecParallelReinitialize: pei->area is live during reinit"))?;
         pei.param_exec = SerializeParamExecParams(estate, send_params, area)?;
-        parallel::set_fixed_param_exec::call(fpes, pei.param_exec);
+        parallel::set_fixed_param_exec(fpes, pei.param_exec);
     }
 
     // Traverse plan tree and let each child node reset associated state.
@@ -936,7 +936,7 @@ pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<'mcx>) -> PgResul
     let pcxt = pei
         .pcxt
         .ok_or_else(|| PgError::error("ExecParallelFinish: pei->pcxt is live"))?;
-    let nworkers = parallel::pcxt_nworkers_launched::call(pcxt);
+    let nworkers = parallel::pcxt_nworkers_launched(pcxt);
 
     // Make this be a no-op if called twice in a row.
     if pei.finished {
@@ -962,7 +962,7 @@ pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<'mcx>) -> PgResul
     }
 
     // Now wait for the workers to finish.
-    parallel::wait_for_parallel_workers_to_finish::call(pcxt)?;
+    parallel::wait_for_parallel_workers_to_finish(pcxt)?;
 
     // Next, accumulate buffer/WAL usage.
     for i in 0..nworkers {
@@ -1022,7 +1022,7 @@ pub fn ExecParallelCleanup<'mcx>(
         dsa::dsa_detach::call(area);
     }
     if let Some(pcxt) = pei.pcxt.take() {
-        parallel::destroy_parallel_context::call(pcxt)?;
+        parallel::destroy_parallel_context(pcxt)?;
     }
     // C `pfree(pei)`: the owned value is dropped by the caller.
     Ok(())
@@ -1038,14 +1038,14 @@ fn ExecParallelGetReceiver(
     seg: DsmSegmentHandle,
     toc: ShmTocHandle,
 ) -> PgResult<types_execparallel::DestReceiverHandle> {
-    let mqspace = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_TUPLE_QUEUE, false)
+    let mqspace = parallel::shm_toc_lookup(toc, PARALLEL_KEY_TUPLE_QUEUE, false)
         .ok_or_else(|| PgError::error("ExecParallelGetReceiver: PARALLEL_KEY_TUPLE_QUEUE present"))?;
     // mqspace += ParallelWorkerNumber * PARALLEL_TUPLE_QUEUE_SIZE
     // C: mq = (shm_mq *) mqspace — the worker *casts* the leader-created queue,
     // it does not re-create it (that would wipe the leader's mq_set_receiver).
     let mq = shmmq::shm_mq_at::call(
         mqspace,
-        parallel::parallel_worker_number::call(),
+        parallel::parallel_worker_number(),
         PARALLEL_TUPLE_QUEUE_SIZE,
     );
     shmmq::shm_mq_set_sender_to_myproc::call(mq);
@@ -1065,17 +1065,17 @@ fn ExecParallelGetQueryDesc<'mcx>(
     instrument_options: i32,
 ) -> PgResult<QueryDesc> {
     // Get the query string from shared memory.
-    let query_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_QUERY_TEXT, false)
+    let query_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_QUERY_TEXT present"))?;
-    let query_string = parallel::cursor_cstring::call(query_chunk)?;
+    let query_string = parallel::cursor_cstring(query_chunk)?;
 
     // Reconstruct leader-supplied PlannedStmt.
-    let pstmt_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_PLANNEDSTMT, false)
+    let pstmt_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_PLANNEDSTMT, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_PLANNEDSTMT present"))?;
-    let pstmt = parallel::cursor_cstring::call(pstmt_chunk)?;
+    let pstmt = parallel::cursor_cstring(pstmt_chunk)?;
 
     // Reconstruct ParamListInfo.
-    let param_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_PARAMLISTINFO, false)
+    let param_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_PARAMLISTINFO, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_PARAMLISTINFO present"))?;
     let param_li = sup::restore_param_list::call(param_chunk);
 
@@ -1187,19 +1187,19 @@ pub fn ParallelQueryMain<'mcx>(
     let mut instrument_options: i32 = 0;
 
     // Get fixed-size state.
-    let fpes_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_EXECUTOR_FIXED, false)
+    let fpes_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_EXECUTOR_FIXED, false)
         .ok_or_else(|| PgError::error("ParallelQueryMain: PARALLEL_KEY_EXECUTOR_FIXED present"))?;
-    let fpes = parallel::fixed_state_from_chunk::call(fpes_chunk);
+    let fpes = parallel::fixed_state_from_chunk(fpes_chunk);
 
     // Set up DestReceiver, SharedExecutorInstrumentation, and QueryDesc.
     let receiver = ExecParallelGetReceiver(seg, toc)?;
-    let instrumentation = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_INSTRUMENTATION, true)
-        .map(parallel::instrumentation_from_chunk::call);
+    let instrumentation = parallel::shm_toc_lookup(toc, PARALLEL_KEY_INSTRUMENTATION, true)
+        .map(parallel::instrumentation_from_chunk);
     if let Some(sei) = instrumentation {
-        instrument_options = parallel::sei_instrument_options::call(sei);
+        instrument_options = parallel::sei_instrument_options(sei);
     }
-    let jit_instrumentation = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_JIT_INSTRUMENTATION, true)
-        .map(parallel::jit_instrumentation_from_chunk::call);
+    let jit_instrumentation = parallel::shm_toc_lookup(toc, PARALLEL_KEY_JIT_INSTRUMENTATION, true)
+        .map(parallel::jit_instrumentation_from_chunk);
     let mut query_desc = ExecParallelGetQueryDesc(mcx, toc, receiver, instrument_options)?;
 
     // Setting debug_query_string for individual workers.
@@ -1210,27 +1210,27 @@ pub fn ParallelQueryMain<'mcx>(
     sup::pgstat_report_activity_running::call(source_text);
 
     // Attach to the dynamic shared memory area.
-    let area_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_DSA, false)
+    let area_chunk = parallel::shm_toc_lookup(toc, PARALLEL_KEY_DSA, false)
         .ok_or_else(|| PgError::error("ParallelQueryMain: PARALLEL_KEY_DSA present"))?;
     let area = dsa::dsa_attach_in_place::call(area_chunk, seg);
 
     // Start up the executor.
-    sup::set_query_desc_jit_flags_owned::call(&mut query_desc, parallel::fixed_jit_flags::call(fpes));
-    execMain::ExecutorStart(&mut query_desc, parallel::fixed_eflags::call(fpes))?;
+    sup::set_query_desc_jit_flags_owned::call(&mut query_desc, parallel::fixed_jit_flags(fpes));
+    execMain::ExecutorStart(&mut query_desc, parallel::fixed_eflags(fpes))?;
 
     // Special executor initialization steps for parallel workers:
     //   estate->es_query_dsa = area;
     //   if (DsaPointerIsValid(fpes->param_exec))
     //       RestoreParamExecParams(start_address, queryDesc->estate);
     //   ExecParallelInitializeWorker(queryDesc->planstate, &pwcxt);
-    let pwcxt = parallel::make_parallel_worker_context::call(seg, toc);
-    let fixed_param_exec = parallel::fixed_param_exec::call(fpes);
+    let pwcxt = parallel::make_parallel_worker_context(seg, toc);
+    let fixed_param_exec = parallel::fixed_param_exec(fpes);
     let paramexec_cursor = if dsa_pointer_is_valid(fixed_param_exec) {
         Some(dsa::dsa_get_address::call(area, fixed_param_exec))
     } else {
         None
     };
-    let tuples_needed = parallel::fixed_tuples_needed::call(fpes);
+    let tuples_needed = parallel::fixed_tuples_needed(fpes);
 
     query_desc.with_plan_and_estate_mut(|_plan, _pstmt, estate, planstate_slot| -> PgResult<()> {
         estate.es_query_dsa = Some(area);
@@ -1263,11 +1263,11 @@ pub fn ParallelQueryMain<'mcx>(
     execMain::ExecutorFinish(&mut query_desc)?;
 
     // Report buffer/WAL usage during parallel execution.
-    let buffer_usage = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_BUFFER_USAGE, false)
+    let buffer_usage = parallel::shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false)
         .ok_or_else(|| PgError::error("ParallelQueryMain: PARALLEL_KEY_BUFFER_USAGE present"))?;
-    let wal_usage = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_WAL_USAGE, false)
+    let wal_usage = parallel::shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false)
         .ok_or_else(|| PgError::error("ParallelQueryMain: PARALLEL_KEY_WAL_USAGE present"))?;
-    let parallel_worker_number = parallel::parallel_worker_number::call();
+    let parallel_worker_number = parallel::parallel_worker_number();
     sup::instr_end_parallel_query::call(buffer_usage, wal_usage, parallel_worker_number);
 
     // Report instrumentation data if any instrumentation options are set.

@@ -62,7 +62,7 @@ use backend_utils_misc_guc_tables::hooks;
 use backend_utils_misc_guc_tables::GucHookExtra;
 
 // Owner seam crates this unit reaches into.
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_access_transam_xact_seams as xact;
 use backend_access_transam_xlog_seams as xlog;
 use backend_commands_variable_seams as own;
@@ -480,7 +480,7 @@ pub fn check_transaction_read_only(
     if !*newval
         && xact::xact_read_only::call()
         && xact::is_transaction_state::call()
-        && !parallel::initializing_parallel_worker::call()
+        && !parallel::initializing_parallel_worker()
     {
         // Can't go to r/w mode inside a r/o transaction.
         if xact::is_sub_transaction::call() {
@@ -522,7 +522,7 @@ pub fn check_transaction_isolation(
 
     if newXactIsoLevel != xact::xact_iso_level::call()
         && xact::is_transaction_state::call()
-        && !parallel::initializing_parallel_worker::call()
+        && !parallel::initializing_parallel_worker()
     {
         if own::first_snapshot_set::call() {
             GUC_check_errcode(ERRCODE_ACTIVE_SQL_TRANSACTION);
@@ -560,7 +560,7 @@ pub fn check_transaction_deferrable(
     _source: GucSource,
 ) -> PgResult<bool> {
     // Just accept the value when restoring state in a parallel worker.
-    if parallel::initializing_parallel_worker::call() {
+    if parallel::initializing_parallel_worker() {
         return Ok(true);
     }
 
@@ -652,7 +652,7 @@ pub fn check_client_encoding(
      * Parallel workers send data to the leader, not the client. (See the long
      * comment in variable.c.)
      */
-    if parallel::is_parallel_worker::call() && !parallel::initializing_parallel_worker::call() {
+    if parallel::is_parallel_worker() && !parallel::initializing_parallel_worker() {
         GUC_check_errcode(ERRCODE_INVALID_TRANSACTION_STATE);
         GUC_check_errdetail("Cannot change \"client_encoding\" during a parallel operation.");
         return Ok(false);
@@ -663,7 +663,7 @@ pub fn check_client_encoding(
      * able to look up the necessary conversion procs. (See the long comment in
      * variable.c.)
      */
-    if !parallel::is_parallel_worker::call() && own::prepare_client_encoding::call(encoding)? < 0 {
+    if !parallel::is_parallel_worker() && own::prepare_client_encoding::call(encoding)? < 0 {
         if xact::is_transaction_state::call() {
             // Must be a genuine no-such-conversion problem.
             GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
@@ -700,7 +700,7 @@ pub fn assign_client_encoding(_newval: Option<&str>, extra: Option<&GucHookExtra
      * In a parallel worker, we never override the client encoding that was set
      * by ParallelWorkerMain().
      */
-    if parallel::is_parallel_worker::call() {
+    if parallel::is_parallel_worker() {
         return;
     }
 
@@ -737,7 +737,7 @@ pub fn check_session_authorization(
     let roleid;
     let is_superuser;
 
-    if parallel::initializing_parallel_worker::call() {
+    if parallel::initializing_parallel_worker() {
         /*
          * In parallel worker initialization, we want to copy the leader's state
          * even if it no longer matches the catalogs.
@@ -842,7 +842,7 @@ pub fn check_role(
         // hardwired translation
         roleid = InvalidOid;
         is_superuser = false;
-    } else if parallel::initializing_parallel_worker::call() {
+    } else if parallel::initializing_parallel_worker() {
         /*
          * In parallel worker initialization, we want to copy the leader's state
          * even if it no longer matches the catalogs.

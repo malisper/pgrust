@@ -42,7 +42,7 @@ extern crate alloc;
 
 use backend_access_common_scankey as scankey_owner;
 use backend_access_index_indexam_seams as indexam;
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execScan_seams as execScan;
@@ -626,10 +626,10 @@ pub fn ExecEndIndexScan<'mcx>(
 ) -> PgResult<()> {
     // When ending a parallel worker, accumulate the gathered stats back into
     // shared memory for EXPLAIN ANALYZE.
-    if node.iss_SharedInfo.is_some() && parallel::is_parallel_worker::call() {
+    if node.iss_SharedInfo.is_some() && parallel::is_parallel_worker() {
         let nsearches = node.iss_Instrument.nsearches;
         let shared = node.iss_SharedInfo.as_mut().unwrap();
-        parallel::accumulate_shared_index_searches::call(shared, nsearches);
+        parallel::accumulate_shared_index_searches(shared, nsearches);
     }
 
     // close the index relation (no-op if we didn't open it)

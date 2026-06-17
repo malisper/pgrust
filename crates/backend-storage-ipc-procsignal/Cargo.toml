@@ -9,7 +9,7 @@ name = "backend_storage_ipc_procsignal"
 path = "src/lib.rs"
 
 [dependencies]
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
 backend-replication-logical-applyparallelworker-seams = { path = "../backend-replication-logical-applyparallelworker-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }

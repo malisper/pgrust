@@ -985,7 +985,7 @@ pub fn gistNewBuffer<'mcx>(
                 {
                     let page = buffer_get_page::call(mcx, buffer)?;
                     let delete_xid = GistPageGetDeleteXid(&page)?;
-                    backend_access_gist_core_seams::gist_xlog_page_reuse::call(
+                    crate::gistxlog::gist_xlog_page_reuse(
                         r,
                         heaprel,
                         backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer),

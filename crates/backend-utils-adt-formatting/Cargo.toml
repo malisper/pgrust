@@ -25,7 +25,7 @@ backend-utils-adt-formatting-seams = { path = "../backend-utils-adt-formatting-s
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
-backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 backend-utils-adt-isoweek-seams = { path = "../backend-utils-adt-isoweek-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }

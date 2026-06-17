@@ -22,6 +22,7 @@ use crate::heap_vacuum::lazy_vacuum_heap_rel;
 use crate::index::lazy_vacuum_one_index;
 
 use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_common_tidstore_seams as tidstore_seams;
 
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("vacuumlazy.c", 0, funcname)
@@ -53,7 +54,7 @@ pub fn lazy_vacuum(vacrel: &mut LVRelState) -> PgResult<()> {
 
         let threshold = (vacrel.rel_pages as f64 * BYPASS_THRESHOLD_PAGES) as types_core::BlockNumber;
         bypass = vacrel.lpdead_item_pages < threshold
-            && vl::tidstore_memory_usage::call(vacrel.dead_items)? < 32 * 1024 * 1024;
+            && tidstore_seams::tidstore_memory_usage::call(vacrel.dead_items)? < 32 * 1024 * 1024;
     }
 
     if bypass {

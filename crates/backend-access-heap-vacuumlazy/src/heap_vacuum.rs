@@ -33,6 +33,7 @@ use crate::errcb::{restore_vacuum_error_info, update_vacuum_error_info};
 use crate::scan_block::{vacuum_reap_lp_read_stream_next, ReapNextBlock};
 
 use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_common_tidstore_seams as tidstore_seams;
 
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("vacuumlazy.c", 0, funcname)
@@ -65,7 +66,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
         InvalidOffsetNumber,
     );
 
-    let iter = vl::tidstore_begin_iterate::call(vacrel.dead_items)?;
+    let iter = tidstore_seams::tidstore_begin_iterate::call(vacrel.dead_items)?;
 
     /*
      * Set up the read stream for vacuum's second pass through the heap.
@@ -124,7 +125,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
     }
 
     vl::read_stream_end::call(stream)?;
-    vl::tidstore_end_iterate::call(iter)?;
+    tidstore_seams::tidstore_end_iterate::call(iter)?;
 
     vacrel.blkno = InvalidBlockNumber;
     if buffer_is_valid(vmbuffer) {

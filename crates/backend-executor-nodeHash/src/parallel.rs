@@ -718,7 +718,7 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
         (pstate.old_batches, pstate.old_nbatch, pstate.nparticipants)
     };
     let old_batches_addr = dsa_get_addr(area, old_batches_dp);
-    let pworker = backend_access_transam_parallel_seams::parallel_worker_number::call();
+    let pworker = backend_access_transam_parallel::parallel_worker_number();
 
     // old_inner_tuples = palloc0_array(SharedTuplestoreAccessor *, old_nbatch);
     let mut old_inner_tuples: alloc_vec::Vec<Option<types_execparallel::SharedTuplestoreAccessorHandle>> =
@@ -1285,7 +1285,7 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
     debug_assert!(hashtable.batches.is_empty());
     let area = hashtable.area.expect("parallel hash: area is None");
     let nparticipants = pstate_mut(hashtable).nparticipants;
-    let pworker = backend_access_transam_parallel_seams::parallel_worker_number::call();
+    let pworker = backend_access_transam_parallel::parallel_worker_number();
 
     // pstate->batches = dsa_allocate0(area, Estimate * nbatch);
     let total = estimate_parallel_hash_join_batch(nparticipants) * nbatch as usize;
@@ -1408,7 +1408,7 @@ pub fn ExecParallelHashEnsureBatchAccessors<'mcx>(
         let pstate = pstate_mut(hashtable);
         (pstate.batches, pstate.nparticipants)
     };
-    let pworker = backend_access_transam_parallel_seams::parallel_worker_number::call();
+    let pworker = backend_access_transam_parallel::parallel_worker_number();
 
     hashtable.nbatch = pstate_nbatch;
     let batches_base = dsa_get_addr(area, batches_dp);
@@ -1903,7 +1903,7 @@ fn pstate_fileset_handle(
 /// seam (the no-ambient-globals rule). Read off the parallel subsystem.
 #[inline]
 fn current_proc_number() -> types_core::ProcNumber {
-    backend_access_transam_parallel_seams::parallel_worker_number::call() as types_core::ProcNumber
+    backend_access_transam_parallel::parallel_worker_number() as types_core::ProcNumber
 }
 
 /// `sts_puttuple(accessor, &hashvalue, tuple)` over an on-DSA MinimalTuple at

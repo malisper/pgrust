@@ -20,4 +20,4 @@ types-samplescan = { path = "../types-samplescan" }
 common-hashfn = { path = "../common-hashfn" }
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
-backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
+backend-access-tablesample-core-seams = { path = "../backend-access-tablesample-core-seams" }

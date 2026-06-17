@@ -17,5 +17,6 @@ types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
 types-samplescan = { path = "../types-samplescan" }
 backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
+backend-access-tablesample-core-seams = { path = "../backend-access-tablesample-core-seams" }
 
 [dev-dependencies]

@@ -38,7 +38,7 @@
 //!
 //! `parse_sub_analyze` (analyze — `backend-parser-analyze-seams`),
 //! `FigureColname` (parse_target — `backend-parser-target-seams`),
-//! `GetTsmRoutine` (nodeSamplescan — `backend-executor-nodeSamplescan-seams`),
+//! `GetTsmRoutine` (tablesample registry — `backend-access-tablesample-core-seams`),
 //! `LookupFuncName` / `get_func_rettype` (parse_func/lsyscache —
 //! `backend-commands-functioncmds-seams`), plus the F1 seams.
 //! `addRangeTableEntryForFunction` (parse_relation; panics until funcapi lands).
@@ -102,7 +102,7 @@ use backend_parser_relation::{
 use backend_access_table_table::table_close;
 
 use backend_parser_parse_func_seams as parse_func;
-use backend_executor_nodeSamplescan_seams as tsmapi;
+use backend_access_tablesample_core_seams as tsmapi;
 use backend_parser_analyze_seams as analyze;
 use backend_parser_target_seams as parse_target;
 use backend_utils_cache_lsyscache_seams as lsyscache;

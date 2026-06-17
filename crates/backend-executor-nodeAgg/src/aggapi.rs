@@ -16,7 +16,7 @@ use types_execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 
-use backend_access_transam_parallel_seams as parallel_seams;
+use backend_access_transam_parallel as parallel_seams;
 use backend_access_transam_parallel::shared_dsm_object;
 
 /// `AGG_CONTEXT_AGGREGATE` (executor/executor.h) — called as a plain aggregate.
@@ -216,7 +216,7 @@ pub fn ExecAggEstimate<'mcx>(
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
-    let nworkers = parallel_seams::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel_seams::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
@@ -235,9 +235,9 @@ pub fn ExecAggEstimate<'mcx>(
         .checked_add(shared_agg_info_sinstrument_offset())
         .expect("add_size overflow");
     let size = shared_dsm_object::estimate_flex(nbytes);
-    let estimator = parallel_seams::pcxt_estimator::call(pcxt);
-    parallel_seams::shm_toc_estimate_chunk::call(estimator, size);
-    parallel_seams::shm_toc_estimate_keys::call(estimator, 1);
+    let estimator = parallel_seams::pcxt_estimator(pcxt);
+    parallel_seams::shm_toc_estimate_chunk(estimator, size);
+    parallel_seams::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -248,7 +248,7 @@ pub fn ExecAggInitializeDSM<'mcx>(
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
-    let nworkers = parallel_seams::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel_seams::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
@@ -296,8 +296,8 @@ pub fn ExecAggInitializeDSM<'mcx>(
     // The chunk allocation itself is a real keystone-backed shm_toc call; the
     // placement + carrier + key handoff mirror-and-panic into the parallel DSM
     // owner until those surfaces land.
-    let toc = parallel_seams::pcxt_toc::call(pcxt);
-    let chunk = parallel_seams::shm_toc_allocate::call(toc, size);
+    let toc = parallel_seams::pcxt_toc(pcxt);
+    let chunk = parallel_seams::shm_toc_allocate(toc, size);
     let _ = (chunk, nworkers);
     panic!(
         "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \

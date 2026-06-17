@@ -25,7 +25,6 @@ state-pgtz = { path = "../state-pgtz" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 common-hashfn = { path = "../common-hashfn" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
-backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
 backend-utils-adt-isoweek-seams = { path = "../backend-utils-adt-isoweek-seams" }
 backend-timezone-strftime-seams = { path = "../backend-timezone-strftime-seams" }
 types-fmgr = { path = "../types-fmgr" }

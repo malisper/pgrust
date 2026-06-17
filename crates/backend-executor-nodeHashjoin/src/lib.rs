@@ -26,7 +26,7 @@
 extern crate alloc;
 
 use backend_access_transam_parallel::shared_dsm_object;
-use backend_access_transam_parallel_seams as parallel_sup;
+use backend_access_transam_parallel as parallel_sup;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execProcnode_seams as execProcnode;
@@ -1765,12 +1765,12 @@ pub fn ExecHashJoinEstimate(
     _node: &mut HashJoinState<'_>,
     pcxt: types_execparallel::ParallelContextHandle,
 ) -> PgResult<()> {
-    let estimator = parallel_sup::pcxt_estimator::call(pcxt);
-    parallel_sup::shm_toc_estimate_chunk::call(
+    let estimator = parallel_sup::pcxt_estimator(pcxt);
+    parallel_sup::shm_toc_estimate_chunk(
         estimator,
         shared_dsm_object::estimate::<ParallelHashJoinState>(),
     );
-    parallel_sup::shm_toc_estimate_keys::call(estimator, 1);
+    parallel_sup::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -1805,7 +1805,7 @@ pub fn ExecHashJoinInitializeDSM(
     // Disable shared hash table mode if we failed to create a real DSM segment,
     // because that means that we don't have a DSA area to work with.
     //   if (pcxt->seg == NULL) return;
-    let seg = match parallel_sup::pcxt_seg::call(pcxt) {
+    let seg = match parallel_sup::pcxt_seg(pcxt) {
         Some(seg) => seg,
         None => return Ok(()),
     };
@@ -1816,9 +1816,9 @@ pub fn ExecHashJoinInitializeDSM(
     // Set up the state needed to coordinate access to the shared hash table(s),
     // using the plan node ID as the toc key.
     //   pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelHashJoinState));
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
-    let toc = parallel_sup::pcxt_toc::call(pcxt);
-    let chunk = parallel_sup::shm_toc_allocate::call(
+    let nworkers = parallel_sup::pcxt_nworkers(pcxt);
+    let toc = parallel_sup::pcxt_toc(pcxt);
+    let chunk = parallel_sup::shm_toc_allocate(
         toc,
         shared_dsm_object::estimate::<ParallelHashJoinState>(),
     );
@@ -1876,7 +1876,7 @@ pub fn ExecHashJoinInitializeDSM(
     init_result?;
 
     // shm_toc_insert(pcxt->toc, plan_node_id, pstate);
-    parallel_sup::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
+    parallel_sup::shm_toc_insert(toc, plan_node_id as u64, chunk);
 
     // Initialize the shared state in the hash node.
     //   hashNode = (HashState *) innerPlanState(state);
@@ -1908,14 +1908,14 @@ pub fn ExecHashJoinReInitializeDSM(
 
     // Nothing to do if we failed to create a DSM segment.
     //   if (pcxt->seg == NULL) return;
-    let seg = match parallel_sup::pcxt_seg::call(pcxt) {
+    let seg = match parallel_sup::pcxt_seg(pcxt) {
         Some(seg) => seg,
         None => return Ok(()),
     };
 
     // pstate = shm_toc_lookup(pcxt->toc, plan_node_id, false);
-    let toc = parallel_sup::pcxt_toc::call(pcxt);
-    let chunk = parallel_sup::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+    let toc = parallel_sup::pcxt_toc(pcxt);
+    let chunk = parallel_sup::shm_toc_lookup(toc, plan_node_id as u64, false)
         .expect("ExecHashJoinReInitializeDSM: shm_toc_lookup(plan_node_id) missing");
 
     // It would be possible to reuse the shared hash table in single-batch cases
@@ -1960,10 +1960,10 @@ pub fn ExecHashJoinInitializeWorker(
     let plan_node_id = hashjoin_plan_node_id(node);
 
     // pstate = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
-    let toc = parallel_sup::pwcxt_toc::call(pwcxt);
-    let chunk = parallel_sup::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+    let toc = parallel_sup::pwcxt_toc(pwcxt);
+    let chunk = parallel_sup::shm_toc_lookup(toc, plan_node_id as u64, false)
         .expect("ExecHashJoinInitializeWorker: shm_toc_lookup(plan_node_id) missing");
-    let seg = parallel_sup::pwcxt_seg::call(pwcxt);
+    let seg = parallel_sup::pwcxt_seg(pwcxt);
 
     // Attach to the space for shared temporary files.
     //   SharedFileSetAttach(&pstate->fileset, pwcxt->seg);

@@ -55,7 +55,7 @@ use types_error::{
     ERRCODE_S_E_INVALID_SPECIFICATION, ERROR, FATAL, WARNING,
 };
 
-pub(crate) use backend_access_transam_parallel_seams as parallel_seams;
+pub(crate) use backend_access_transam_parallel as parallel_seams;
 pub(crate) use backend_access_transam_varsup_seams as varsup_seams;
 pub(crate) use backend_access_transam_xlog_seams as xlog_seams;
 pub(crate) use backend_access_transam_xloginsert_seams as xloginsert_seams;
@@ -531,7 +531,7 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
 
     // Workers synchronize transaction state at the beginning of each parallel
     // operation, so we can't account for new XIDs at this point.
-    if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
+    if IsInParallelMode() || parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot assign transaction IDs during a parallel operation")
@@ -672,7 +672,7 @@ pub fn GetCurrentCommandId(used: bool) -> PgResult<CommandId> {
     if used {
         // Forbid setting currentCommandIdUsed in a parallel worker: there is
         // no provision for communicating this back to the leader.
-        if parallel_seams::is_parallel_worker::call() {
+        if parallel_seams::is_parallel_worker() {
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
                 .errmsg("cannot modify data in a parallel worker")
@@ -686,7 +686,7 @@ pub fn GetCurrentCommandId(used: bool) -> PgResult<CommandId> {
 
 /// `SetParallelStartTimestamps` (xact.c:859)
 pub fn SetParallelStartTimestamps(xact_ts: TimestampTz, stmt_ts: TimestampTz) {
-    debug_assert!(parallel_seams::is_parallel_worker::call());
+    debug_assert!(parallel_seams::is_parallel_worker());
     xs(|s| {
         s.xact_start_timestamp = xact_ts;
         s.stmt_start_timestamp = stmt_ts;
@@ -714,7 +714,7 @@ pub fn GetCurrentTransactionStopTimestamp() -> TimestampTz {
 
 /// `SetCurrentStatementStartTimestamp` (xact.c:914)
 pub fn SetCurrentStatementStartTimestamp() {
-    if !parallel_seams::is_parallel_worker::call() {
+    if !parallel_seams::is_parallel_worker() {
         let ts = timestamp_seams::get_current_timestamp::call();
         xs(|s| s.stmt_start_timestamp = ts);
     } else {
@@ -842,7 +842,7 @@ pub fn CommandCounterIncrement() -> PgResult<()> {
 
     // Workers synchronize transaction state at the beginning of each parallel
     // operation, so we can't account for new commands after that point.
-    if IsInParallelMode() || parallel_seams::is_parallel_worker::call() {
+    if IsInParallelMode() || parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot start commands during a parallel operation")

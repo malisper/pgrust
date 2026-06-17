@@ -79,7 +79,7 @@ use types_vacuum::vacuumparallel::{
 
 use backend_commands_vacuum_seams as vac;
 use backend_access_heap_vacuumlazy_seams as vl;
-use backend_access_transam_parallel_seams as p;
+use backend_access_transam_parallel as p;
 use backend_access_transam_parallel_rt_seams as prt;
 
 // =======================================================================
@@ -401,57 +401,57 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
     let ctx = mcx::MemoryContext::new("parallel_vacuum_init");
     let mcx = ctx.mcx();
 
-    let pcxt = p::create_parallel_context::call(
+    let pcxt = p::create_parallel_context(
         mcx,
         String::from("postgres"),
         String::from("parallel_vacuum_main"),
         parallel_workers,
     )?;
-    debug_assert!(p::pcxt_nworkers::call(pcxt) > 0);
+    debug_assert!(p::pcxt_nworkers(pcxt) > 0);
     pvs.pcxt = Some(pcxt);
-    let pcxt_nworkers = p::pcxt_nworkers::call(pcxt);
+    let pcxt_nworkers = p::pcxt_nworkers(pcxt);
 
-    let estimator = p::pcxt_estimator::call(pcxt);
+    let estimator = p::pcxt_estimator(pcxt);
 
     /* Estimate size for index vacuum stats -- PARALLEL_VACUUM_KEY_INDEX_STATS */
     let est_indstats_len = mul_size(core::mem::size_of::<PVIndStats>(), nindexes as usize);
-    p::shm_toc_estimate_chunk::call(estimator, est_indstats_len);
-    p::shm_toc_estimate_keys::call(estimator, 1);
+    p::shm_toc_estimate_chunk(estimator, est_indstats_len);
+    p::shm_toc_estimate_keys(estimator, 1);
 
     /* Estimate size for shared information -- PARALLEL_VACUUM_KEY_SHARED */
     let est_shared_len = core::mem::size_of::<PVShared>();
-    p::shm_toc_estimate_chunk::call(estimator, est_shared_len);
-    p::shm_toc_estimate_keys::call(estimator, 1);
+    p::shm_toc_estimate_chunk(estimator, est_shared_len);
+    p::shm_toc_estimate_keys(estimator, 1);
 
     /*
      * Estimate space for BufferUsage and WalUsage --
      * PARALLEL_VACUUM_KEY_BUFFER_USAGE and PARALLEL_VACUUM_KEY_WAL_USAGE.
      */
-    p::shm_toc_estimate_chunk::call(
+    p::shm_toc_estimate_chunk(
         estimator,
         mul_size(core::mem::size_of::<BufferUsage>(), pcxt_nworkers as usize),
     );
-    p::shm_toc_estimate_keys::call(estimator, 1);
-    p::shm_toc_estimate_chunk::call(
+    p::shm_toc_estimate_keys(estimator, 1);
+    p::shm_toc_estimate_chunk(
         estimator,
         mul_size(core::mem::size_of::<WalUsage>(), pcxt_nworkers as usize),
     );
-    p::shm_toc_estimate_keys::call(estimator, 1);
+    p::shm_toc_estimate_keys(estimator, 1);
 
     /* Finally, estimate PARALLEL_VACUUM_KEY_QUERY_TEXT space */
     let debug_query = vac::debug_query_string_pv::call()?;
     let querylen = match &debug_query {
         Some(q) => {
             let querylen = q.len();
-            p::shm_toc_estimate_chunk::call(estimator, querylen + 1);
-            p::shm_toc_estimate_keys::call(estimator, 1);
+            p::shm_toc_estimate_chunk(estimator, querylen + 1);
+            p::shm_toc_estimate_keys(estimator, 1);
             querylen
         }
         None => 0, /* keep compiler quiet */
     };
     let _ = querylen;
 
-    p::initialize_parallel_dsm::call(mcx, pcxt)?;
+    p::initialize_parallel_dsm(mcx, pcxt)?;
 
     /* Prepare index vacuum stats */
     let mut indstats: Vec<PVIndStats> = alloc::vec![PVIndStats::default(); nindexes as usize];
@@ -601,7 +601,7 @@ fn parallel_vacuum_end(
     }
 
     if let Some(pcxt) = state.pcxt {
-        p::destroy_parallel_context::call(pcxt)?;
+        p::destroy_parallel_context(pcxt)?;
     }
     prt::exit_parallel_mode::call()?;
 
@@ -833,7 +833,7 @@ fn parallel_vacuum_process_all_indexes(
     let pcxt = pvs
         .pcxt
         .ok_or_else(|| PgError::error("leader must hold a parallel context"))?;
-    nworkers = core::cmp::min(nworkers, p::pcxt_nworkers::call(pcxt));
+    nworkers = core::cmp::min(nworkers, p::pcxt_nworkers(pcxt));
 
     /*
      * Set index vacuum status and mark whether parallel vacuum worker can
@@ -857,7 +857,7 @@ fn parallel_vacuum_process_all_indexes(
     if nworkers > 0 {
         /* Reinitialize parallel context to relaunch parallel workers */
         if num_index_scans > 0 {
-            p::reinitialize_parallel_dsm::call(pcxt)?;
+            p::reinitialize_parallel_dsm(pcxt)?;
         }
 
         /*
@@ -880,11 +880,11 @@ fn parallel_vacuum_process_all_indexes(
         /*
          * The number of workers can vary between bulkdelete and cleanup phase.
          */
-        p::reinitialize_parallel_workers::call(pcxt, nworkers);
+        p::reinitialize_parallel_workers(pcxt, nworkers);
 
-        p::launch_parallel_workers::call(pcxt)?;
+        p::launch_parallel_workers(pcxt)?;
 
-        if p::pcxt_nworkers_launched::call(pcxt) > 0 {
+        if p::pcxt_nworkers_launched(pcxt) > 0 {
             /*
              * Reset the local cost values for leader backend as we have
              * already accumulated the remaining balance of heap.
@@ -905,7 +905,7 @@ fn parallel_vacuum_process_all_indexes(
             )?;
         }
 
-        let nworkers_launched = p::pcxt_nworkers_launched::call(pcxt);
+        let nworkers_launched = p::pcxt_nworkers_launched(pcxt);
         if vacuum {
             ereport(ErrorLevel(pvs.shared.elevel))
                 .errmsg(ngettext_workers_vacuuming(nworkers_launched, nworkers))
@@ -932,9 +932,9 @@ fn parallel_vacuum_process_all_indexes(
      */
     if nworkers > 0 {
         /* Wait for all vacuum workers to finish */
-        p::wait_for_parallel_workers_to_finish::call(pcxt)?;
+        p::wait_for_parallel_workers_to_finish(pcxt)?;
 
-        for i in 0..p::pcxt_nworkers_launched::call(pcxt) {
+        for i in 0..p::pcxt_nworkers_launched(pcxt) {
             vac::instr_accum_parallel_query_pv::call(i)?;
         }
     }
@@ -1277,7 +1277,7 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     parallel_vacuum_process_safe_indexes(&mut pvs)?;
 
     /* Report buffer/WAL usage during parallel execution */
-    let pwn = p::parallel_worker_number::call();
+    let pwn = p::parallel_worker_number();
     vac::instr_end_parallel_query_pv::call(pwn)?;
 
     /* Report any remaining cost-based vacuum delay time */

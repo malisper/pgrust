@@ -65,7 +65,7 @@ use backend_utils_init_small_seams as smallinit;
 use backend_utils_misc_guc_seams as guc;
 use backend_utils_fmgr_dfmgr_seams as dfmgr;
 use backend_replication_logical_slotsync_seams as slotsync;
-use backend_replication_libpqwalreceiver_seams as walreceiver;
+use backend_replication_libpqwalreceiver::walrcv_table as walreceiver;
 
 /// `PG_GET_REPLICATION_SLOTS_COLS` — the SRF column count (a local `#define`).
 const PG_GET_REPLICATION_SLOTS_COLS: usize = 20;
@@ -1137,7 +1137,7 @@ pub fn pg_sync_replication_slots(mcx: Mcx<'_>) -> PgResult<()> {
 
     /* Connect to the primary server. */
     let primary_conninfo = xlogrecovery::primary_conninfo::call(mcx)?;
-    let wrconn = match walreceiver::walrcv_connect::call(
+    let wrconn = match walreceiver::walrcv_connect(
         primary_conninfo.as_str().to_string(),
         false,
         false,
@@ -1159,7 +1159,7 @@ pub fn pg_sync_replication_slots(mcx: Mcx<'_>) -> PgResult<()> {
 
     slotsync::sync_replication_slots::call(wrconn)?;
 
-    walreceiver::walrcv_disconnect::call(wrconn);
+    walreceiver::walrcv_disconnect(wrconn);
 
     Ok(())
 }

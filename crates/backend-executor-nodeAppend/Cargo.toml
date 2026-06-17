@@ -9,7 +9,7 @@ name = "backend_executor_nodeAppend"
 path = "src/lib.rs"
 
 [dependencies]
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execAsync-seams = { path = "../backend-executor-execAsync-seams" }

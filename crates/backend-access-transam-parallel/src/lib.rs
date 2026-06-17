@@ -435,7 +435,7 @@ fn estimator_slot_of(_e: ShmTocEstimatorHandle) -> usize {
 /// `add_size` overflow `ereport(ERROR)`s in C. The execParallel contract is
 /// infallible here and the requests are bounded, so an overflow is a
 /// programming error: panic loudly (matches the `ereport(ERROR)` non-return).
-fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
+pub fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
         backend_storage_ipc_shm_toc::shm_toc_estimate_chunk(&mut c.estimator, sz)
@@ -444,7 +444,7 @@ fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
 }
 
 /// `shm_toc_estimate_keys(&pcxt->estimator, nkeys)`.
-fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
+pub fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
         backend_storage_ipc_shm_toc::shm_toc_estimate_keys(&mut c.estimator, nkeys as Size)
@@ -474,7 +474,7 @@ fn with_toc<R>(toc: ExecShmToc, f: impl FnOnce(&ShmToc, usize) -> R) -> R {
 /// cannot happen in correct operation. The execParallel contract is infallible,
 /// so an allocation failure is a programming error: panic loudly (matches the
 /// `ereport(ERROR)` non-return).
-fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
+pub fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
     with_toc(toc, |real, _base| {
         let ptr = real
             .allocate(nbytes)
@@ -485,7 +485,7 @@ fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
 
 /// `shm_toc_insert(toc, key, address)` — register the chunk's real address in
 /// the real in-segment entry table.
-fn shm_toc_insert(toc: ExecShmToc, key: u64, address: SerializeCursor) {
+pub fn shm_toc_insert(toc: ExecShmToc, key: u64, address: SerializeCursor) {
     with_toc(toc, |real, _base| {
         let addr =
             NonNull::new(address.0 as *mut u8).expect("shm_toc chunk address is non-null");
@@ -497,7 +497,7 @@ fn shm_toc_insert(toc: ExecShmToc, key: u64, address: SerializeCursor) {
 
 /// `shm_toc_lookup(toc, key, noError)` — `None` when `noError` and absent. The
 /// chunk's real address is returned as a `SerializeCursor`.
-fn shm_toc_lookup(toc: ExecShmToc, key: u64, no_error: bool) -> Option<SerializeCursor> {
+pub fn shm_toc_lookup(toc: ExecShmToc, key: u64, no_error: bool) -> Option<SerializeCursor> {
     with_toc(toc, |real, _base| {
         // shm_toc_lookup elog(ERROR) on a missing required key. The execParallel
         // contract is infallible, so a missing required key is a programming
@@ -528,7 +528,7 @@ fn shm_toc_lookup(toc: ExecShmToc, key: u64, no_error: bool) -> Option<Serialize
 
 /// `fpes = shm_toc_allocate(...); *fpes = state;` — write the `repr(C)`
 /// `FixedParallelExecutorState` in place at the chunk address.
-fn store_fixed_state(chunk: SerializeCursor, state: FixedParallelExecutorState) -> FixedStateHandle {
+pub fn store_fixed_state(chunk: SerializeCursor, state: FixedParallelExecutorState) -> FixedStateHandle {
     let p = chunk.0 as *mut FixedParallelExecutorState;
     // SAFETY: see the module SAFETY contract above.
     unsafe { p.write_unaligned(state) };
@@ -536,7 +536,7 @@ fn store_fixed_state(chunk: SerializeCursor, state: FixedParallelExecutorState) 
 }
 
 /// `fpes = (FixedParallelExecutorState *) chunk` — reinterpret an existing chunk.
-fn fixed_state_from_chunk(chunk: SerializeCursor) -> FixedStateHandle {
+pub fn fixed_state_from_chunk(chunk: SerializeCursor) -> FixedStateHandle {
     FixedStateHandle(chunk.0)
 }
 
@@ -546,29 +546,29 @@ fn read_fixed_state(fpes: FixedStateHandle) -> FixedParallelExecutorState {
     unsafe { p.read_unaligned() }
 }
 
-fn set_fixed_param_exec(fpes: FixedStateHandle, dp: u64) {
+pub fn set_fixed_param_exec(fpes: FixedStateHandle, dp: u64) {
     let mut st = read_fixed_state(fpes);
     st.param_exec = dp;
     let p = fpes.0 as *mut FixedParallelExecutorState;
     // SAFETY: see the module SAFETY contract above.
     unsafe { p.write_unaligned(st) };
 }
-fn fixed_param_exec(fpes: FixedStateHandle) -> u64 {
+pub fn fixed_param_exec(fpes: FixedStateHandle) -> u64 {
     read_fixed_state(fpes).param_exec
 }
-fn fixed_eflags(fpes: FixedStateHandle) -> i32 {
+pub fn fixed_eflags(fpes: FixedStateHandle) -> i32 {
     read_fixed_state(fpes).eflags
 }
-fn fixed_jit_flags(fpes: FixedStateHandle) -> i32 {
+pub fn fixed_jit_flags(fpes: FixedStateHandle) -> i32 {
     read_fixed_state(fpes).jit_flags
 }
-fn fixed_tuples_needed(fpes: FixedStateHandle) -> i64 {
+pub fn fixed_tuples_needed(fpes: FixedStateHandle) -> i64 {
     read_fixed_state(fpes).tuples_needed
 }
 
 /// `memcpy(chunk, value, strlen(value) + 1)` — copy the NUL-terminated string
 /// into the chunk. The chunk was sized `value.len() + 1` by the caller.
-fn store_cstring(chunk: SerializeCursor, value: String) {
+pub fn store_cstring(chunk: SerializeCursor, value: String) {
     let bytes = value.as_bytes();
     let dst = chunk.0 as *mut u8;
     // SAFETY: see the module SAFETY contract above; the chunk was allocated with
@@ -580,7 +580,7 @@ fn store_cstring(chunk: SerializeCursor, value: String) {
 }
 
 /// Read the NUL-terminated string back out of a chunk (`pstrdup(chunk)`).
-fn cursor_cstring(chunk: SerializeCursor) -> PgResult<String> {
+pub fn cursor_cstring(chunk: SerializeCursor) -> PgResult<String> {
     let p = chunk.0 as *const u8;
     // SAFETY: see the module SAFETY contract above; `store_cstring` (or the C
     // leader) wrote a NUL-terminated string here.
@@ -636,7 +636,7 @@ const SEI_PLAN_NODE_ID_OFFSET: usize =
 /// trailing `plan_node_id` array and the `Instrumentation` slots are written
 /// separately into the same chunk (`set_sei_plan_node_id` / the `instr_*`
 /// support seams), matching C's writes past the header.
-fn store_instrumentation_header(
+pub fn store_instrumentation_header(
     chunk: SerializeCursor,
     header: SharedExecutorInstrumentation,
 ) -> InstrumentationHandle {
@@ -647,7 +647,7 @@ fn store_instrumentation_header(
 }
 
 /// `instrumentation = (SharedExecutorInstrumentation *) chunk`.
-fn instrumentation_from_chunk(chunk: SerializeCursor) -> InstrumentationHandle {
+pub fn instrumentation_from_chunk(chunk: SerializeCursor) -> InstrumentationHandle {
     InstrumentationHandle(chunk.0)
 }
 
@@ -657,24 +657,24 @@ fn read_sei_header(sei: InstrumentationHandle) -> SharedExecutorInstrumentation 
     unsafe { p.read_unaligned() }
 }
 
-fn sei_instrument_options(sei: InstrumentationHandle) -> i32 {
+pub fn sei_instrument_options(sei: InstrumentationHandle) -> i32 {
     read_sei_header(sei).instrument_options
 }
-fn sei_num_workers(sei: InstrumentationHandle) -> i32 {
+pub fn sei_num_workers(sei: InstrumentationHandle) -> i32 {
     read_sei_header(sei).num_workers
 }
-fn sei_num_plan_nodes(sei: InstrumentationHandle) -> i32 {
+pub fn sei_num_plan_nodes(sei: InstrumentationHandle) -> i32 {
     read_sei_header(sei).num_plan_nodes
 }
 /// `sei->plan_node_id[index]` — the flexible array immediately follows the header.
-fn sei_plan_node_id(sei: InstrumentationHandle, index: i32) -> i32 {
+pub fn sei_plan_node_id(sei: InstrumentationHandle, index: i32) -> i32 {
     let p = (sei.0 + SEI_PLAN_NODE_ID_OFFSET) as *const i32;
     // SAFETY: see the module SAFETY contract above; `index < num_plan_nodes`,
     // and the chunk was sized `header + num_plan_nodes * sizeof(int) + ...`.
     unsafe { p.add(index as usize).read_unaligned() }
 }
 /// `sei->plan_node_id[index] = value`.
-fn set_sei_plan_node_id(sei: InstrumentationHandle, index: i32, value: i32) {
+pub fn set_sei_plan_node_id(sei: InstrumentationHandle, index: i32, value: i32) {
     let p = (sei.0 + SEI_PLAN_NODE_ID_OFFSET) as *mut i32;
     // SAFETY: see the module SAFETY contract above; `index < num_plan_nodes`.
     unsafe { p.add(index as usize).write_unaligned(value) };
@@ -686,7 +686,7 @@ fn set_sei_plan_node_id(sei: InstrumentationHandle, index: i32, value: i32) {
 /// followed (at `offsetof(.., jit_instr)`) by `num_workers` zeroed
 /// `JitInstrumentation` objects. The caller sized the chunk for both; the
 /// `jit_instr` array is left zeroed (chunk space is not pre-zeroed, so zero it).
-fn store_jit_instrumentation_header(
+pub fn store_jit_instrumentation_header(
     chunk: SerializeCursor,
     num_workers: i32,
 ) -> JitInstrumentationHandle {
@@ -712,12 +712,12 @@ fn jit_instr_offset() -> usize {
 }
 
 /// `jit_instrumentation = (SharedJitInstrumentation *) chunk`.
-fn jit_instrumentation_from_chunk(chunk: SerializeCursor) -> JitInstrumentationHandle {
+pub fn jit_instrumentation_from_chunk(chunk: SerializeCursor) -> JitInstrumentationHandle {
     JitInstrumentationHandle(chunk.0)
 }
 
 /// `shared_jit->num_workers`.
-fn shared_jit_num_workers(shared_jit: JitInstrumentationHandle) -> i32 {
+pub fn shared_jit_num_workers(shared_jit: JitInstrumentationHandle) -> i32 {
     let p = shared_jit.0 as *const i32;
     // SAFETY: see the module SAFETY contract above.
     unsafe { p.read_unaligned() }
@@ -727,23 +727,23 @@ fn shared_jit_num_workers(shared_jit: JitInstrumentationHandle) -> i32 {
 // Accessor seams on the live ParallelContext (execParallel reads pcxt->field).
 // ===========================================================================
 
-fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32 {
+pub fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32 {
     with_globals(|g| g.get(pcxt).nworkers)
 }
-fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32 {
+pub fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32 {
     with_globals(|g| g.get(pcxt).nworkers_launched)
 }
-fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32 {
+pub fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32 {
     with_globals(|g| g.get(pcxt).nworkers_to_launch)
 }
-fn pcxt_estimator(pcxt: ParallelContextHandle) -> ShmTocEstimatorHandle {
+pub fn pcxt_estimator(pcxt: ParallelContextHandle) -> ShmTocEstimatorHandle {
     // The estimator is part of the context; address it by the same slot.
     ShmTocEstimatorHandle(pcxt.0)
 }
-fn pcxt_toc(pcxt: ParallelContextHandle) -> ExecShmToc {
+pub fn pcxt_toc(pcxt: ParallelContextHandle) -> ExecShmToc {
     toc_handle(pcxt.0)
 }
-fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
+pub fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
     with_globals(|g| {
         let c = g.get(pcxt);
         if c.seg.is_null() {
@@ -755,29 +755,29 @@ fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
         }
     })
 }
-fn pcxt_worker_bgwhandle(pcxt: ParallelContextHandle, i: i32) -> BackgroundWorkerHandle {
+pub fn pcxt_worker_bgwhandle(pcxt: ParallelContextHandle, i: i32) -> BackgroundWorkerHandle {
     with_globals(|g| BackgroundWorkerHandle(g.get(pcxt).worker[i as usize].bgwhandle.0))
 }
-fn make_parallel_worker_context(seg: ExecDsmSeg, toc: ExecShmToc) -> ParallelWorkerContextHandle {
+pub fn make_parallel_worker_context(seg: ExecDsmSeg, toc: ExecShmToc) -> ParallelWorkerContextHandle {
     // {seg, toc} pair handed to per-node Exec*InitializeWorker hooks; encode the
     // toc slot (both share the context identity).
     let _ = seg;
     ParallelWorkerContextHandle(toc.0)
 }
-fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
+pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
     // `make_parallel_worker_context` encoded the worker context as the toc slot
     // (`ParallelWorkerContextHandle(toc.0)`); recover it symmetrically. Mirrors
     // C `pwcxt->toc`.
     toc_handle(pwcxt.0)
 }
-fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
+pub fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
     // The worker context shares the parallel context's slot identity (its toc,
     // seg and estimator are all addressed by the same slot — see
     // `make_parallel_worker_context`), so the segment is the context's `seg`.
     // Mirrors C `pwcxt->seg`.
     with_globals(|g| ExecDsmSeg(g.get(ParallelContextHandle(pwcxt.0)).seg.0))
 }
-fn parallel_worker_number() -> i32 {
+pub fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)
 }
 
@@ -787,7 +787,7 @@ fn parallel_worker_number() -> i32 {
 /// `winstrument[ParallelWorkerNumber].nsearches += nsearches`. The slot is
 /// picked here because `ParallelWorkerNumber` is parallel.c's per-backend
 /// global (owned by this crate).
-fn accumulate_shared_index_searches(
+pub fn accumulate_shared_index_searches(
     shared_info: &mut types_nodes::SharedIndexScanInstrumentation,
     nsearches: u64,
 ) {
@@ -2157,66 +2157,10 @@ fn lookup_parallel_worker_function(libraryname: &str, funcname: &str) -> PgResul
 // Seam installation.
 // ===========================================================================
 
-/// Install every seam this crate owns.
-pub fn init_seams() {
-    use backend_access_transam_parallel_seams as seams;
-
-    seams::is_parallel_worker::set(is_parallel_worker);
-    seams::accumulate_shared_index_searches::set(accumulate_shared_index_searches);
-    seams::initializing_parallel_worker::set(initializing_parallel_worker);
-    seams::handle_parallel_message_interrupt::set(handle_parallel_message_interrupt);
-    seams::at_eoxact_parallel::set(at_eoxact_parallel);
-    seams::at_eosubxact_parallel::set(at_eosubxact_parallel);
-    seams::parallel_worker_report_last_rec_end::set(parallel_worker_report_last_rec_end);
-
-    seams::create_parallel_context::set(create_parallel_context);
-    seams::launch_parallel_workers::set(launch_parallel_workers);
-    seams::initialize_parallel_dsm::set(initialize_parallel_dsm);
-    seams::reinitialize_parallel_dsm::set(reinitialize_parallel_dsm);
-    seams::reinitialize_parallel_workers::set(reinitialize_parallel_workers);
-    seams::wait_for_parallel_workers_to_finish::set(wait_for_parallel_workers_to_finish);
-    seams::destroy_parallel_context::set(destroy_parallel_context);
-    seams::pcxt_nworkers::set(pcxt_nworkers);
-    seams::pcxt_nworkers_launched::set(pcxt_nworkers_launched);
-    seams::pcxt_nworkers_to_launch::set(pcxt_nworkers_to_launch);
-    seams::pcxt_estimator::set(pcxt_estimator);
-    seams::pcxt_toc::set(pcxt_toc);
-    seams::pwcxt_toc::set(pwcxt_toc);
-    seams::pwcxt_seg::set(pwcxt_seg);
-    seams::pcxt_seg::set(pcxt_seg);
-    seams::pcxt_worker_bgwhandle::set(pcxt_worker_bgwhandle);
-    seams::make_parallel_worker_context::set(make_parallel_worker_context);
-    seams::parallel_worker_number::set(parallel_worker_number);
-
-    seams::shm_toc_estimate_chunk::set(shm_toc_estimate_chunk);
-    seams::shm_toc_estimate_keys::set(shm_toc_estimate_keys);
-    seams::shm_toc_allocate::set(shm_toc_allocate);
-    seams::shm_toc_insert::set(shm_toc_insert);
-    seams::shm_toc_lookup::set(shm_toc_lookup);
-
-    seams::store_fixed_state::set(store_fixed_state);
-    seams::set_fixed_param_exec::set(set_fixed_param_exec);
-    seams::fixed_param_exec::set(fixed_param_exec);
-    seams::fixed_eflags::set(fixed_eflags);
-    seams::fixed_jit_flags::set(fixed_jit_flags);
-    seams::fixed_tuples_needed::set(fixed_tuples_needed);
-    seams::fixed_state_from_chunk::set(fixed_state_from_chunk);
-
-    seams::store_cstring::set(store_cstring);
-    seams::cursor_cstring::set(cursor_cstring);
-
-    seams::store_instrumentation_header::set(store_instrumentation_header);
-    seams::instrumentation_from_chunk::set(instrumentation_from_chunk);
-    seams::sei_instrument_options::set(sei_instrument_options);
-    seams::sei_num_workers::set(sei_num_workers);
-    seams::sei_num_plan_nodes::set(sei_num_plan_nodes);
-    seams::sei_plan_node_id::set(sei_plan_node_id);
-    seams::set_sei_plan_node_id::set(set_sei_plan_node_id);
-
-    seams::store_jit_instrumentation_header::set(store_jit_instrumentation_header);
-    seams::jit_instrumentation_from_chunk::set(jit_instrumentation_from_chunk);
-    seams::shared_jit_num_workers::set(shared_jit_num_workers);
-}
+/// All seams this crate previously installed were removed: the parallel
+/// routines are now called directly by consumers (faithful de-indirection,
+/// identical behavior), so there is nothing left to install.
+pub fn init_seams() {}
 
 // ===========================================================================
 // Runtime test: the DSM-init core over a REAL dsm-core segment.

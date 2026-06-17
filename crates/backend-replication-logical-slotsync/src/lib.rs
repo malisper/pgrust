@@ -56,7 +56,7 @@ use backend_storage_lmgr_s_lock::Spinlock;
 
 // Owner seam crate aliases.
 use backend_replication_slot_seams as slot;
-use backend_replication_libpqwalreceiver_seams as libpqwalrcv;
+use backend_replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
 use backend_replication_walreceiver_seams as walrcv;
 use backend_replication_walsender_seams as walsnd;
 use backend_replication_snapbuild_seams as snapbuild;
@@ -786,67 +786,67 @@ fn synchronize_slots(wrconn: WalReceiverConn) -> PgResult<bool> {
         started_tx = true;
     }
 
-    let res = libpqwalrcv::walrcv_exec::call(
+    let res = libpqwalrcv::walrcv_exec(
         wrconn,
         query.to_string(),
         SLOTSYNC_COLUMN_COUNT,
         slot_row,
     )?;
-    if libpqwalrcv::res_status::call(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
-        let err = libpqwalrcv::res_err::call(res).unwrap_or_default();
+    if libpqwalrcv::res_status(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
+        let err = libpqwalrcv::res_err(res).unwrap_or_default();
         return Err(PgError::error(format!(
             "could not fetch failover logical slots info from the primary server: {err}"
         )));
     }
 
-    let tupslot = libpqwalrcv::make_result_tupslot::call(res)?;
-    while libpqwalrcv::result_gettupleslot::call(res, tupslot)? {
+    let tupslot = libpqwalrcv::make_result_tupslot(res)?;
+    while libpqwalrcv::result_gettupleslot(res, tupslot)? {
         let mut remote_slot = RemoteSlot::new();
         let mut col: i32 = 0;
 
         col += 1;
-        let (name, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
+        let (name, isnull) = libpqwalrcv::getattr_text(tupslot, col)?;
         remote_slot.name = name.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (plugin, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
+        let (plugin, isnull) = libpqwalrcv::getattr_text(tupslot, col)?;
         remote_slot.plugin = plugin.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn(tupslot, col)?;
         remote_slot.confirmed_lsn = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn(tupslot, col)?;
         remote_slot.restart_lsn = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (xid, isnull) = libpqwalrcv::getattr_xid::call(tupslot, col)?;
+        let (xid, isnull) = libpqwalrcv::getattr_xid(tupslot, col)?;
         remote_slot.catalog_xmin = if isnull { InvalidTransactionId } else { xid };
 
         col += 1;
-        let (two_phase, isnull) = libpqwalrcv::getattr_bool::call(tupslot, col)?;
+        let (two_phase, isnull) = libpqwalrcv::getattr_bool(tupslot, col)?;
         remote_slot.two_phase = two_phase;
         debug_assert!(!isnull);
 
         col += 1;
-        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn(tupslot, col)?;
         remote_slot.two_phase_at = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (failover, isnull) = libpqwalrcv::getattr_bool::call(tupslot, col)?;
+        let (failover, isnull) = libpqwalrcv::getattr_bool(tupslot, col)?;
         remote_slot.failover = failover;
         debug_assert!(!isnull);
 
         col += 1;
-        let (database, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
+        let (database, isnull) = libpqwalrcv::getattr_text(tupslot, col)?;
         remote_slot.database = database.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (reason, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
+        let (reason, isnull) = libpqwalrcv::getattr_text(tupslot, col)?;
         remote_slot.invalidated = if isnull {
             RS_INVAL_NONE
         } else {
@@ -868,7 +868,7 @@ fn synchronize_slots(wrconn: WalReceiverConn) -> PgResult<bool> {
             remote_slot_list.push(remote_slot);
         }
 
-        libpqwalrcv::exec_clear_tuple::call(tupslot)?;
+        libpqwalrcv::exec_clear_tuple(tupslot)?;
     }
 
     drop_local_obsolete_slots(&remote_slot_list)?;
@@ -886,7 +886,7 @@ fn synchronize_slots(wrconn: WalReceiverConn) -> PgResult<bool> {
 
     drop(remote_slot_list);
 
-    libpqwalrcv::walrcv_clear_result::call(res)?;
+    libpqwalrcv::walrcv_clear_result(res)?;
 
     if started_tx {
         xact::commit_transaction_command::call()?;
@@ -914,29 +914,29 @@ fn validate_remote_info(wrconn: WalReceiverConn) -> PgResult<()> {
         started_tx = true;
     }
 
-    let res = libpqwalrcv::walrcv_exec::call(
+    let res = libpqwalrcv::walrcv_exec(
         wrconn,
         cmd,
         PRIMARY_INFO_OUTPUT_COL_COUNT,
         slot_row,
     )?;
 
-    if libpqwalrcv::res_status::call(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
-        let err = libpqwalrcv::res_err::call(res).unwrap_or_default();
+    if libpqwalrcv::res_status(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
+        let err = libpqwalrcv::res_err(res).unwrap_or_default();
         return Err(PgError::error(format!(
             "could not fetch primary slot name \"{primary_slot_name}\" info from the primary server: {err}"
         ))
         .with_hint("Check if \"primary_slot_name\" is configured correctly."));
     }
 
-    let tupslot = libpqwalrcv::make_result_tupslot::call(res)?;
-    if !libpqwalrcv::result_gettupleslot::call(res, tupslot)? {
+    let tupslot = libpqwalrcv::make_result_tupslot(res)?;
+    if !libpqwalrcv::result_gettupleslot(res, tupslot)? {
         return Err(PgError::error(
             "failed to fetch tuple for the primary server slot specified by \"primary_slot_name\"",
         ));
     }
 
-    let (remote_in_recovery, isnull) = libpqwalrcv::getattr_bool::call(tupslot, 1)?;
+    let (remote_in_recovery, isnull) = libpqwalrcv::getattr_bool(tupslot, 1)?;
     debug_assert!(!isnull);
 
     if remote_in_recovery {
@@ -946,7 +946,7 @@ fn validate_remote_info(wrconn: WalReceiverConn) -> PgResult<()> {
         );
     }
 
-    let (primary_slot_valid, isnull) = libpqwalrcv::getattr_bool::call(tupslot, 2)?;
+    let (primary_slot_valid, isnull) = libpqwalrcv::getattr_bool(tupslot, 2)?;
     debug_assert!(!isnull);
 
     if !primary_slot_valid {
@@ -957,8 +957,8 @@ fn validate_remote_info(wrconn: WalReceiverConn) -> PgResult<()> {
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
-    libpqwalrcv::exec_clear_tuple::call(tupslot)?;
-    libpqwalrcv::walrcv_clear_result::call(res)?;
+    libpqwalrcv::exec_clear_tuple(tupslot)?;
+    libpqwalrcv::walrcv_clear_result(res)?;
 
     if started_tx {
         xact::commit_transaction_command::call()?;
@@ -973,7 +973,7 @@ fn validate_remote_info(wrconn: WalReceiverConn) -> PgResult<()> {
 
 pub fn CheckAndGetDbnameFromConninfo() -> PgResult<String> {
     let primary_conninfo = read_primary_conn_info()?;
-    let dbname = libpqwalrcv::walrcv_get_dbname_from_conninfo::call(primary_conninfo);
+    let dbname = libpqwalrcv::walrcv_get_dbname_from_conninfo(primary_conninfo);
     match dbname {
         None => Err(PgError::error(format!(
             "replication slot synchronization requires \"{}\" to be specified in \"{}\"",
@@ -1132,7 +1132,7 @@ fn ProcessSlotSyncInterrupts(_wrconn: WalReceiverConn) -> PgResult<()> {
 /// `slotsync_worker_disconnect(code, arg)` (slotsync.c). `arg` is the wrconn.
 pub fn slotsync_worker_disconnect(_code: i32, arg: Datum<'static>) -> PgResult<()> {
     let wrconn = WalReceiverConn(arg.as_usize());
-    libpqwalrcv::walrcv_disconnect::call(wrconn);
+    libpqwalrcv::walrcv_disconnect(wrconn);
     Ok(())
 }
 
@@ -1268,7 +1268,7 @@ fn repl_slot_sync_worker_main_inner() -> PgResult<()> {
     ipc::before_shmem_exit::call(slotsync_worker_onexit, Datum::from_i64(0))?;
 
     miscinit::initialize_timeouts::call()?;
-    libpqwalrcv::load_libpqwalreceiver::call()?;
+    libpqwalrcv::load_libpqwalreceiver()?;
     miscinit::unblock_signals::call()?;
     guc::set_config_option_search_path_empty::call()?;
 
@@ -1286,7 +1286,7 @@ fn repl_slot_sync_worker_main_inner() -> PgResult<()> {
     // C: `walrcv_connect(PrimaryConnInfo, false, false, false, app_name.data,
     // &err)` — a non-replication ("regular") connection so `walrcv_exec` runs.
     let primary_conninfo = read_primary_conn_info()?;
-    let wrconn = match libpqwalrcv::walrcv_connect::call(
+    let wrconn = match libpqwalrcv::walrcv_connect(
         primary_conninfo,
         false,
         false,
@@ -1494,7 +1494,7 @@ pub fn slotsync_failure_callback(_code: i32, wrconn: WalReceiverConn) -> PgResul
         reset_syncing_flag()?;
     }
 
-    libpqwalrcv::walrcv_disconnect::call(wrconn);
+    libpqwalrcv::walrcv_disconnect(wrconn);
 
     Ok(())
 }

@@ -37,4 +37,4 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
 backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
-backend-replication-libpqwalreceiver-seams = { path = "../backend-replication-libpqwalreceiver-seams" }
+backend-replication-libpqwalreceiver = { path = "../backend-replication-libpqwalreceiver" }

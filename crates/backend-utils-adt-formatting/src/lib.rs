@@ -105,18 +105,9 @@ pub(crate) fn install_test_seams() {
         backend_utils_adt_isoweek_seams::date2isoyearday::set(|_, _, _| 1);
         backend_utils_adt_isoweek_seams::date2isoweek::set(|_, _, _| 1);
         backend_utils_adt_isoweek_seams::date2isoyear::set(|y, _, _| y);
-        backend_utils_adt_datetime_seams::date2j::set(|y, m, d| {
-            // datetime.c:date2j — self-contained Gregorian->Julian conversion.
-            let (year, month) = if m > 2 {
-                (y + 4800, m + 1)
-            } else {
-                (y + 4799, m + 13)
-            };
-            let century = year / 100;
-            let mut julian = year * 365 - 32167;
-            julian += year / 4 - century + century / 4;
-            julian += 7834 * month / 256 + d;
-            julian
-        });
+        // `date2j` is no longer a seam — DCH now calls the real
+        // `backend_utils_adt_datetime::seam_impls::seam_date2j` directly (which
+        // is the same self-contained Gregorian->Julian conversion this stub
+        // re-implemented), so no installation is needed in tests.
     });
 }

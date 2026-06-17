@@ -29,7 +29,7 @@ backend-replication-walreceiver-seams = { path = "../backend-replication-walrece
 
 # outward owner-seam crates
 backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
-backend-replication-libpqwalreceiver-seams = { path = "../backend-replication-libpqwalreceiver-seams" }
+backend-replication-libpqwalreceiver = { path = "../backend-replication-libpqwalreceiver" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }

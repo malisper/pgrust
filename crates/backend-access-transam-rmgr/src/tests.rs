@@ -45,11 +45,11 @@ fn setup() {
             Ok(())
         });
         ginxlog::gin_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
-        gistxlog::gist_xlog_startup::set(|_parent| {
-            STARTUPS.with(|c| c.set(c.get() + 1));
-            Ok(())
-        });
-        gistxlog::gist_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
+        // GiST's startup/cleanup are no longer seams — the rmgr table points at
+        // the real `backend_access_gist_core::gistxlog::{gist_xlog_startup,
+        // gist_xlog_cleanup}` (faithful de-indirection), so they cannot be
+        // mocked into the STARTUPS/CLEANUPS counters here; the real (trivial,
+        // memory-context-only) bodies run during RmgrStartup/RmgrCleanup below.
         spgxlog::spg_xlog_startup::set(|_parent| {
             STARTUPS.with(|c| c.set(c.get() + 1));
             Ok(())
@@ -192,9 +192,11 @@ fn startup_and_cleanup_invoke_each_defined_callback_once() {
     setup();
     let root = mcx::MemoryContext::new("test");
     RmgrStartup(root.mcx()).unwrap();
-    assert_eq!(STARTUPS.with(|c| c.get()), 4, "btree/gin/gist/spgist");
+    // gist is no longer a seam (real body runs, not counted); btree/gin/spgist
+    // are still mocked into the counters.
+    assert_eq!(STARTUPS.with(|c| c.get()), 3, "btree/gin/spgist");
     RmgrCleanup();
-    assert_eq!(CLEANUPS.with(|c| c.get()), 4, "btree/gin/gist/spgist");
+    assert_eq!(CLEANUPS.with(|c| c.get()), 3, "btree/gin/spgist");
 }
 
 #[test]

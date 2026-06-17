@@ -123,7 +123,7 @@ fn heap_prepare_insert<'mcx>(
      * inserts in general except for the cases where inserts generate a new
      * CommandId (eg. inserts into a table having a foreign key column).
      */
-    if backend_access_transam_parallel_seams::is_parallel_worker::call() {
+    if backend_access_transam_parallel::is_parallel_worker() {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
             .errmsg("cannot insert tuples in a parallel worker")

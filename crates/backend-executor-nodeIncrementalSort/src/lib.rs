@@ -193,7 +193,7 @@ fn select_group_info_fullsort<'a>(
     if node.shared_info.is_some() && node.am_worker {
         // Assert(IsParallelWorker());
         // Assert(ParallelWorkerNumber <= node->shared_info->num_workers);
-        let worker_number = backend_access_transam_parallel_seams::parallel_worker_number::call();
+        let worker_number = backend_access_transam_parallel::parallel_worker_number();
         let shared = node
             .shared_info
             .as_deref_mut()
@@ -214,7 +214,7 @@ fn select_group_info_prefixsort<'a>(
     node: &'a mut IncrementalSortStateData<'_>,
 ) -> PgResult<&'a mut IncrementalSortGroupInfo> {
     if node.shared_info.is_some() && node.am_worker {
-        let worker_number = backend_access_transam_parallel_seams::parallel_worker_number::call();
+        let worker_number = backend_access_transam_parallel::parallel_worker_number();
         let shared = node
             .shared_info
             .as_deref_mut()

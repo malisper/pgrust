@@ -98,7 +98,7 @@ fn pg_mblen_cstr(s: &[u8]) -> i32 {
 /// C: `DecodeTimezoneAbbrevPrefix(str, &gmtoffset, &tzp)` via the per-owner
 /// datetime seam.
 fn decode_timezone_abbrev_prefix(s: &[u8]) -> TzAbbrevMatch {
-    backend_utils_adt_datetime_seams::decode_timezone_abbrev_prefix::call(s)
+    backend_utils_adt_datetime::seam_impls::seam_decode_timezone_abbrev_prefix(s)
 }
 
 // ---------------------------------------------------------------------------

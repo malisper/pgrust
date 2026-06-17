@@ -28,7 +28,7 @@ use types_wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
 use backend_access_index_amapi_seams as amapi_seam;
 use backend_access_index_genam_seams as genam_seam;
 use backend_access_table_tableam_seams as tableam_seam;
-use backend_access_transam_parallel_seams as parallel_seam;
+use backend_access_transam_parallel as parallel_seam;
 use backend_access_transam_xact_seams as xact_seam;
 use backend_catalog_catalog_seams as catalog_seam;
 use backend_catalog_storage_seams as storage_seam;
@@ -219,7 +219,7 @@ pub fn RelationInitPhysicalAddr(rd: &mut RelationData) -> PgResult<()> {
 
     // For RelationNeedsWAL() to answer correctly on parallel workers, restore
     // rd_firstRelfilelocatorSubid.
-    if parallel_seam::is_parallel_worker::call() && oldnumber != rd.rd_locator.relNumber {
+    if parallel_seam::is_parallel_worker() && oldnumber != rd.rd_locator.relNumber {
         if storage_seam::rel_file_locator_skipping_wal::call(rd.rd_locator) {
             rd.rd_firstRelfilelocatorSubid = TopSubTransactionId;
         } else {

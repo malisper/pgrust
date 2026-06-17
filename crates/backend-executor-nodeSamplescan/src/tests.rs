@@ -67,6 +67,7 @@ fn install() {
         return;
     }
     use seam::*;
+    use tsm::*;
 
     check_for_interrupts::set(|| Ok(()));
     es_epq_active_present::set(|_| Ok(false));

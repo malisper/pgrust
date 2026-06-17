@@ -18,7 +18,7 @@ backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page = { path = "../backend-storage-page" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-buffer-support-seams = { path = "../backend-storage-buffer-support-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }

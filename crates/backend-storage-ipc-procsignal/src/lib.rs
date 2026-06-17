@@ -689,7 +689,7 @@ pub fn procsignal_sigusr1_handler() {
     }
 
     if CheckProcSignal(PROCSIG_PARALLEL_MESSAGE) {
-        backend_access_transam_parallel_seams::handle_parallel_message_interrupt::call();
+        backend_access_transam_parallel::handle_parallel_message_interrupt();
     }
 
     if CheckProcSignal(PROCSIG_WALSND_INIT_STOPPING) {

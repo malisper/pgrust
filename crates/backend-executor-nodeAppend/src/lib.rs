@@ -33,7 +33,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execAsync_seams as execAsync;
 use backend_executor_execPartition_seams as execPartition;
@@ -601,9 +601,9 @@ pub fn ExecAppendEstimate(
 
     // shm_toc_estimate_chunk(&pcxt->estimator, node->pstate_len);
     // shm_toc_estimate_keys(&pcxt->estimator, 1);
-    let estimator = parallel::pcxt_estimator::call(pcxt);
-    parallel::shm_toc_estimate_chunk::call(estimator, node.pstate_len);
-    parallel::shm_toc_estimate_keys::call(estimator, 1);
+    let estimator = parallel::pcxt_estimator(pcxt);
+    parallel::shm_toc_estimate_chunk(estimator, node.pstate_len);
+    parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -632,8 +632,8 @@ pub fn ExecAppendInitializeDSM(
 ) -> PgResult<()> {
     // pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
     let plan_node_id = append_plan_node_id(node);
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let chunk = parallel::shm_toc_allocate::call(toc, node.pstate_len);
+    let toc = parallel::pcxt_toc(pcxt);
+    let chunk = parallel::shm_toc_allocate(toc, node.pstate_len);
     let _ = (chunk, plan_node_id);
 
     // memset(pstate, 0, node->pstate_len);
@@ -692,8 +692,8 @@ pub fn ExecAppendInitializeWorker(
 ) -> PgResult<()> {
     // node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
     let plan_node_id = append_plan_node_id(node);
-    let toc = parallel::pwcxt_toc::call(pwcxt);
-    let chunk = parallel::shm_toc_lookup::call(toc, plan_node_id as u64, false);
+    let toc = parallel::pwcxt_toc(pwcxt);
+    let chunk = parallel::shm_toc_lookup(toc, plan_node_id as u64, false);
     let _ = chunk;
 
     // node->choose_next_subplan = choose_next_subplan_for_worker;

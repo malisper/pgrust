@@ -15,7 +15,7 @@
 //!     `ConvertTimeZoneAbbrevs` (`utils/adt/datetime.c`), which re-allocates the
 //!     entries into the `guc_malloc`'d `TimeZoneAbbrevTable`.
 
-use backend_utils_adt_datetime_seams::convert_time_zone_abbrevs;
+use backend_utils_adt_datetime::seam_impls::convert_time_zone_abbrevs;
 use port_path_seams::read_tz_file;
 use types_misc_more2::{TimeZoneAbbrevTable, TzEntry, TzFileOpenError, TzFileResult, SECS_PER_HOUR, TOKMAXLEN};
 
@@ -382,5 +382,5 @@ pub fn load_tzoffsets(filename: &str) -> Result<TimeZoneAbbrevTable, TzParseErro
 
     // C: if (n >= 0) result = ConvertTimeZoneAbbrevs(array, n);
     //    if (!result) GUC_check_errmsg("out of memory");
-    convert_time_zone_abbrevs::call(array).ok_or_else(|| TzParseError::msg("out of memory"))
+    convert_time_zone_abbrevs(array).ok_or_else(|| TzParseError::msg("out of memory"))
 }

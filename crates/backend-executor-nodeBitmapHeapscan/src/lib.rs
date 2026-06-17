@@ -483,9 +483,9 @@ pub fn ExecEndBitmapHeapScan<'mcx>(
     // back into shared memory so that it can be picked up by the main process to
     // report in EXPLAIN ANALYZE.
     // if (node->sinstrument != NULL && IsParallelWorker())
-    if node.sinstrument.is_some() && backend_access_transam_parallel_seams::is_parallel_worker::call() {
+    if node.sinstrument.is_some() && backend_access_transam_parallel::is_parallel_worker() {
         // Assert(ParallelWorkerNumber <= node->sinstrument->num_workers);
-        let worker = backend_access_transam_parallel_seams::parallel_worker_number::call();
+        let worker = backend_access_transam_parallel::parallel_worker_number();
         let sinstr = node.sinstrument.as_ref().expect("sinstrument");
         debug_assert!(worker <= sinstr.num_workers());
         // si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
@@ -584,7 +584,7 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
 
     // open the scan relation
     // currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
-    let is_parallel_worker = backend_access_transam_parallel_seams::is_parallel_worker::call();
+    let is_parallel_worker = backend_access_transam_parallel::is_parallel_worker();
     let current_relation = backend_executor_execUtils::ExecOpenScanRelation(
         estate,
         plan.scan.scanrelid,
@@ -724,7 +724,7 @@ pub fn ExecBitmapHeapEstimate(
 
     // account for instrumentation, if required
     // if (node->ss.ps.instrument && pcxt->nworkers > 0)
-    let nworkers = backend_access_transam_parallel_seams::pcxt_nworkers::call(pcxt);
+    let nworkers = backend_access_transam_parallel::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_some() && nworkers > 0 {
         // size = add_size(size, offsetof(SharedBitmapHeapInstrumentation, sinstrument));
         size += SharedBitmapHeapInstrumentation::offset_of_sinstrument();
@@ -734,9 +734,9 @@ pub fn ExecBitmapHeapEstimate(
 
     // shm_toc_estimate_chunk(&pcxt->estimator, size);
     // shm_toc_estimate_keys(&pcxt->estimator, 1);
-    let estimator = backend_access_transam_parallel_seams::pcxt_estimator::call(pcxt);
-    backend_access_transam_parallel_seams::shm_toc_estimate_chunk::call(estimator, size);
-    backend_access_transam_parallel_seams::shm_toc_estimate_keys::call(estimator, 1);
+    let estimator = backend_access_transam_parallel::pcxt_estimator(pcxt);
+    backend_access_transam_parallel::shm_toc_estimate_chunk(estimator, size);
+    backend_access_transam_parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -755,7 +755,7 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     }
 
     // Determine whether instrumentation is needed and the chunk size.
-    let nworkers = backend_access_transam_parallel_seams::pcxt_nworkers::call(pcxt);
+    let nworkers = backend_access_transam_parallel::pcxt_nworkers(pcxt);
     let want_instr = node.ss.ps.instrument.is_some() && nworkers > 0;
     let mut size = maxalign(core::mem::size_of::<ParallelBitmapHeapState>());
     if want_instr {
@@ -764,8 +764,8 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     }
 
     // ptr = shm_toc_allocate(pcxt->toc, size);
-    let toc = backend_access_transam_parallel_seams::pcxt_toc::call(pcxt);
-    let ptr = backend_access_transam_parallel_seams::shm_toc_allocate::call(toc, size);
+    let toc = backend_access_transam_parallel::pcxt_toc(pcxt);
+    let ptr = backend_access_transam_parallel::shm_toc_allocate(toc, size);
     let plan_node_id = bitmap_heap_plan_node_id(node);
     let seg = pcxt_seg_handle(pcxt);
 
@@ -819,7 +819,7 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     };
 
     // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pstate);
-    backend_access_transam_parallel_seams::shm_toc_insert::call(toc, plan_node_id as u64, ptr);
+    backend_access_transam_parallel::shm_toc_insert(toc, plan_node_id as u64, ptr);
 
     // node->pstate = pstate;
     // node->sinstrument = sinstrument;
@@ -869,8 +869,8 @@ pub fn ExecBitmapHeapInitializeWorker<'mcx>(
     let plan_node_id = bitmap_heap_plan_node_id(node);
 
     // ptr = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
-    let toc = backend_access_transam_parallel_seams::pwcxt_toc::call(pwcxt);
-    let ptr = backend_access_transam_parallel_seams::shm_toc_lookup::call(
+    let toc = backend_access_transam_parallel::pwcxt_toc(pwcxt);
+    let ptr = backend_access_transam_parallel::shm_toc_lookup(
         toc,
         plan_node_id as u64,
         false,
@@ -964,7 +964,7 @@ pub fn ExecBitmapHeapRetrieveInstrumentation(node: &mut BitmapHeapScanState) -> 
 fn pcxt_seg_handle(
     pcxt: types_execparallel::ParallelContextHandle,
 ) -> types_execparallel::DsmSegmentHandle {
-    match backend_access_transam_parallel_seams::pcxt_seg::call(pcxt) {
+    match backend_access_transam_parallel::pcxt_seg(pcxt) {
         Some(seg) => seg,
         None => types_execparallel::DsmSegmentHandle(0),
     }

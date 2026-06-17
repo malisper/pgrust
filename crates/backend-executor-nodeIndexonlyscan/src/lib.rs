@@ -32,7 +32,7 @@
 use backend_access_common_indextuple_seams as indextuple;
 use backend_access_heap_visibilitymap_seams as visibilitymap;
 use backend_access_index_indexam_seams as indexam;
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execScan_seams as execScan;
@@ -480,11 +480,11 @@ pub fn ExecEndIndexOnlyScan<'mcx>(
     // shared memory for EXPLAIN ANALYZE.
     //
     // if (node->ioss_SharedInfo != NULL && IsParallelWorker())
-    if node.ioss_SharedInfo.is_some() && parallel::is_parallel_worker::call() {
+    if node.ioss_SharedInfo.is_some() && parallel::is_parallel_worker() {
         // winstrument[ParallelWorkerNumber].nsearches += ioss_Instrument.nsearches;
         let nsearches = node.ioss_Instrument.nsearches;
         let shared = node.ioss_SharedInfo.as_mut().unwrap();
-        parallel::accumulate_shared_index_searches::call(shared, nsearches);
+        parallel::accumulate_shared_index_searches(shared, nsearches);
     }
 
     // close the index relation (no-op if we didn't open it)

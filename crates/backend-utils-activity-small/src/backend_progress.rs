@@ -11,7 +11,7 @@
 
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
-use backend_access_transam_parallel_seams::is_parallel_worker;
+use backend_access_transam_parallel::is_parallel_worker;
 use backend_libpq_pqformat::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
 use backend_utils_activity_status_seams::{my_be_entry_present, track_activities, with_my_beentry};
 use mcx::Mcx;
@@ -111,7 +111,7 @@ pub fn pgstat_progress_parallel_incr_param(mcx: Mcx<'_>, index: i32, incr: int64
     // Parallel workers notify a leader through a PqMsg_Progress message to
     // update progress, passing the progress index and incremented value.
     // Leaders can just call pgstat_progress_incr_param directly.
-    if is_parallel_worker::call() {
+    if is_parallel_worker() {
         let mut msgbuf = pq_beginmessage(mcx, PQ_MSG_PROGRESS)?;
         pq_sendint32(&mut msgbuf, index as u32)?;
         pq_sendint64(&mut msgbuf, incr as u64)?;

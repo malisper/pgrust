@@ -9,7 +9,6 @@ name = "common_blkreftable"
 path = "src/lib.rs"
 
 [dependencies]
-common-blkreftable-seams = { path = "../common-blkreftable-seams" }
 port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
 types-blkreftable = { path = "../types-blkreftable" }
 types-core = { path = "../types-core" }

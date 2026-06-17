@@ -68,9 +68,6 @@ fn setup() -> MutexGuard<'static, ()> {
             RECOVERY_IN_PROGRESS.with(|c| c.get())
         });
         own::first_snapshot_set::set(|| FIRST_SNAPSHOT_SET.with(|c| c.get()));
-        backend_access_transam_parallel_seams::initializing_parallel_worker::set(|| {
-            INIT_PARALLEL_WORKER.with(|c| c.get())
-        });
     });
     reset_guc_check_error();
     // Reset cells to defaults for each test.

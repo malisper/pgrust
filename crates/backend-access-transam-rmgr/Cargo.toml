@@ -33,7 +33,7 @@ backend-access-heap-heapam-xlog-seams = { path = "../backend-access-heap-heapam-
 backend-access-nbt-xlog-seams = { path = "../backend-access-nbt-xlog-seams" }
 backend-access-hash-xlog-seams = { path = "../backend-access-hash-xlog-seams" }
 backend-access-gin-core-seams = { path = "../backend-access-gin-core-seams" }
-backend-access-gist-core-seams = { path = "../backend-access-gist-core-seams" }
+backend-access-gist-core = { path = "../backend-access-gist-core" }
 backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }
 backend-access-spg-xlog-seams = { path = "../backend-access-spg-xlog-seams" }
 backend-access-brin-xlog-seams = { path = "../backend-access-brin-xlog-seams" }

@@ -40,7 +40,6 @@ backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
 backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 
 # Direct deps on ported owners (acyclic).
 # The execParallel keystone's typed-shared-DSM-object primitive

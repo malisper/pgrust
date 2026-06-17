@@ -103,7 +103,7 @@ pub mod hash;
 
 // Inward seam implementations (timestamp.c / datetime.c entry points other
 // crates reach through their -seams crates) + init_seams().
-mod seam_impls;
+pub mod seam_impls;
 pub use seam_impls::init_seams;
 
 // fmgr builtin layer: the `Datum xxx(PG_FUNCTION_ARGS)` shims for every

@@ -27,5 +27,5 @@ backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 
 # parallel-query infrastructure seams.
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

@@ -81,7 +81,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use backend_executor_nodeSamplescan_seams as seam;
+use backend_access_tablesample_core_seams as seam;
 use backend_optimizer_path_costsize::clamp_row_est;
 use backend_optimizer_util_clauses::estimate_expression_value;
 use common_hashfn::hash_bytes;

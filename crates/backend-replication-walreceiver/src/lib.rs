@@ -44,7 +44,7 @@ use backend_access_transam_xlog_seams as xlog;
 use backend_access_transam_xlogarchive_seams as xlogarchive;
 use backend_access_transam_xlogrecovery_seams as xlogrecovery;
 use backend_access_transam_varsup_seams as varsup;
-use backend_replication_libpqwalreceiver_seams as libpqwalrcv;
+use backend_replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
 use backend_replication_walreceiverfuncs_seams as walrcvfuncs;
 use backend_replication_walsender_seams as walsender;
 use backend_storage_ipc_latch_seams as latch;
@@ -445,7 +445,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     setup_signal_handlers();
 
     /* Load the libpq-specific functions; verify it initialized */
-    libpqwalrcv::load_libpqwalreceiver::call()?;
+    libpqwalrcv::load_libpqwalreceiver()?;
 
     /* Establish the connection to the primary for XLOG streaming */
     let cluster = guc_tables::cluster_name::call();
@@ -454,7 +454,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     } else {
         "walreceiver".to_string()
     };
-    let conn = match libpqwalrcv::walrcv_connect::call(conninfo, true, false, false, appname.clone())
+    let conn = match libpqwalrcv::walrcv_connect(conninfo, true, false, false, appname.clone())
     {
         Ok(c) => c,
         Err(err) => {
@@ -472,8 +472,8 @@ fn wal_receiver_main_inner() -> PgResult<()> {
      * Save user-visible connection string (clobbers original conninfo) plus
      * host/port of the sender server.
      */
-    let tmp_conninfo = libpqwalrcv::walrcv_get_conninfo::call(conn);
-    let (sender_host, sender_port) = libpqwalrcv::walrcv_get_senderinfo::call(conn);
+    let tmp_conninfo = libpqwalrcv::walrcv_get_conninfo(conn);
+    let (sender_host, sender_port) = libpqwalrcv::walrcv_get_senderinfo(conn);
     walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
         walrcv.conninfo = tmp_conninfo.clone().unwrap_or_default();
         walrcv.sender_host = sender_host.clone().unwrap_or_default();
@@ -487,7 +487,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
          * Check that we're connected to a valid server using the
          * IDENTIFY_SYSTEM replication command.
          */
-        let (primary_sysid, primaryTLI) = libpqwalrcv::walrcv_identify_system::call(conn)?;
+        let (primary_sysid, primaryTLI) = libpqwalrcv::walrcv_identify_system(conn)?;
 
         let standby_sysid = format!("{}", xlog::get_system_identifier::call());
         if primary_sysid != standby_sysid {
@@ -526,10 +526,10 @@ fn wal_receiver_main_inner() -> PgResult<()> {
         if is_temp_slot {
             let new_slot = format!(
                 "pg_walreceiver_{}",
-                libpqwalrcv::walrcv_get_backend_pid::call(conn)
+                libpqwalrcv::walrcv_get_backend_pid(conn)
             );
             slotname = name_from_str(&new_slot);
-            libpqwalrcv::walrcv_create_slot::call(conn, new_slot.clone())?;
+            libpqwalrcv::walrcv_create_slot(conn, new_slot.clone())?;
             let slot_for_shmem = strlcpy_to_string(slotname.as_slice(), NAMEDATALEN);
             walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
                 walrcv.slotname = slot_for_shmem.clone();
@@ -550,7 +550,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
             physical_startpointTLI: startpointTLI,
         };
 
-        if libpqwalrcv::walrcv_startstreaming::call(conn, options)? {
+        if libpqwalrcv::walrcv_startstreaming(conn, options)? {
             if first_stream {
                 emit(ereport(LOG).errmsg(format!(
                     "started streaming WAL from primary at {} on timeline {startpointTLI}",
@@ -612,7 +612,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
                 }
 
                 /* See if we can read data immediately */
-                let (mut len, mut buf, fd) = libpqwalrcv::walrcv_receive::call(conn)?;
+                let (mut len, mut buf, fd) = libpqwalrcv::walrcv_receive(conn)?;
                 wait_fd = if fd != PGINVALID_SOCKET { fd } else { wait_fd };
                 if len != 0 {
                     /*
@@ -645,7 +645,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
                             endofwal = true;
                             break;
                         }
-                        let (l, b, f) = libpqwalrcv::walrcv_receive::call(conn)?;
+                        let (l, b, f) = libpqwalrcv::walrcv_receive(conn)?;
                         len = l;
                         buf = b;
                         wait_fd = if f != PGINVALID_SOCKET { f } else { wait_fd };
@@ -743,7 +743,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
              * The backend finished streaming. Exit streaming COPY-mode from our
              * side, too.
              */
-            let primaryTLI = libpqwalrcv::walrcv_endstreaming::call(conn)?;
+            let primaryTLI = libpqwalrcv::walrcv_endstreaming(conn)?;
 
             /*
              * If the server had switched to a new timeline that we didn't know
@@ -910,7 +910,7 @@ fn WalRcvFetchTimeLineHistoryFiles(first: TimeLineID, last: TimeLineID) -> PgRes
             )));
 
             let (fname, content) =
-                libpqwalrcv::walrcv_readtimelinehistoryfile::call(conn, tli)?;
+                libpqwalrcv::walrcv_readtimelinehistoryfile(conn, tli)?;
 
             /*
              * Check that the filename on the primary matches what we calculated
@@ -979,7 +979,7 @@ pub fn WalRcvDie(_code: i32, startpointTLI: TimeLineID) -> PgResult<()> {
 
     /* Terminate the connection gracefully. */
     if let Some(conn) = with_state(|s| s.wrconn) {
-        libpqwalrcv::walrcv_disconnect::call(conn);
+        libpqwalrcv::walrcv_disconnect(conn);
     }
 
     /* Wake up the startup process to notice promptly that we're gone */
@@ -1290,7 +1290,7 @@ fn XLogWalRcvSendReply(force: bool, requestReply: bool) -> PgResult<()> {
 
     let conn = with_state(|s| s.wrconn)
         .ok_or_else(|| PgError::error("XLogWalRcvSendReply: wrconn set during streaming"))?;
-    libpqwalrcv::walrcv_send::call(conn, reply_message)?;
+    libpqwalrcv::walrcv_send(conn, reply_message)?;
     Ok(())
 }
 
@@ -1371,7 +1371,7 @@ fn XLogWalRcvSendHSFeedback(immed: bool) -> PgResult<()> {
     pq_sendint32(&mut reply_message, catalog_xmin_epoch as i32);
     let conn = with_state(|s| s.wrconn)
         .ok_or_else(|| PgError::error("XLogWalRcvSendHSFeedback: wrconn set during streaming"))?;
-    libpqwalrcv::walrcv_send::call(conn, reply_message)?;
+    libpqwalrcv::walrcv_send(conn, reply_message)?;
     if TransactionIdIsValid(xmin) || TransactionIdIsValid(catalog_xmin) {
         with_state(|s| s.primary_has_standby_xmin = true);
     } else {

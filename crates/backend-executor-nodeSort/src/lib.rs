@@ -34,7 +34,7 @@ use backend_executor_execParallel_support_seams as parallel_sup;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
-use backend_access_transam_parallel_seams as parallel;
+use backend_access_transam_parallel as parallel;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_init_small_seams as globals;
 use backend_utils_sort_tuplesort_seams as tuplesort;
@@ -793,7 +793,7 @@ fn store_worker_stats<'mcx>(
     // store once the worker number is known — but the worker number is owned by
     // access/parallel.c, so it is obtained via the support seam, and the slot
     // is populated here.
-    let worker_number = parallel::parallel_worker_number::call();
+    let worker_number = parallel::parallel_worker_number();
     let shared = node
         .shared_info
         .as_deref_mut()

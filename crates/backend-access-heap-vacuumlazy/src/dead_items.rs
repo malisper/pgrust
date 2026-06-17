@@ -16,6 +16,7 @@ use crate::consts::{
 use crate::core::{parallel_vacuum_is_active, LVRelState};
 
 use backend_access_heap_vacuumlazy_seams as vl;
+use backend_access_common_tidstore_seams as tidstore_seams;
 
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("vacuumlazy.c", 0, funcname)
@@ -76,7 +77,7 @@ pub fn dead_items_alloc(vacrel: &mut LVRelState, nworkers: i32) -> PgResult<()> 
     vacrel.dead_items_info.max_bytes = vac_work_mem as usize * 1024usize;
     vacrel.dead_items_info.num_items = 0;
 
-    vacrel.dead_items = vl::tidstore_create_local::call(vacrel.dead_items_info.max_bytes, true)?;
+    vacrel.dead_items = tidstore_seams::tidstore_create_local::call(vacrel.dead_items_info.max_bytes, true)?;
     Ok(())
 }
 
@@ -89,14 +90,14 @@ pub fn dead_items_add(
 ) -> PgResult<()> {
     let num_offsets = offsets.len() as i64;
 
-    vl::tidstore_set_block_offsets::call(vacrel.dead_items, blkno, offsets)?;
+    tidstore_seams::tidstore_set_block_offsets::call(vacrel.dead_items, blkno, offsets)?;
     vacrel.dead_items_info.num_items += num_offsets;
 
     /* update the progress information */
     let prog_index = vec![PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS, PROGRESS_VACUUM_DEAD_TUPLE_BYTES];
     let prog_val = vec![
         vacrel.dead_items_info.num_items,
-        vl::tidstore_memory_usage::call(vacrel.dead_items)? as i64,
+        tidstore_seams::tidstore_memory_usage::call(vacrel.dead_items)? as i64,
     ];
     vl::pgstat_progress_update_multi_param::call(prog_index, prog_val)?;
     Ok(())
@@ -114,8 +115,8 @@ pub fn dead_items_reset(vacrel: &mut LVRelState) -> PgResult<()> {
     }
 
     /* Recreate the tidstore with the same max_bytes limitation. */
-    vl::tidstore_destroy::call(vacrel.dead_items)?;
-    vacrel.dead_items = vl::tidstore_create_local::call(vacrel.dead_items_info.max_bytes, true)?;
+    tidstore_seams::tidstore_destroy::call(vacrel.dead_items)?;
+    vacrel.dead_items = tidstore_seams::tidstore_create_local::call(vacrel.dead_items_info.max_bytes, true)?;
 
     /* Reset the counter. */
     vacrel.dead_items_info.num_items = 0;

@@ -94,7 +94,7 @@ pub use types_namespace::namespace::{
     TEMP_NAMESPACE_IDLE, TEMP_NAMESPACE_IN_USE, TEMP_NAMESPACE_NOT_TEMP,
 };
 
-use backend_access_transam_parallel_seams as parallel_seams;
+use backend_access_transam_parallel as parallel_seams;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_access_transam_xlog_seams as xlog_seams;
 use backend_catalog_aclchk_seams as aclchk_seams;
@@ -4118,7 +4118,7 @@ fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
     }
 
     /* Parallel workers can't create temporary tables, either. */
-    if parallel_seams::is_parallel_worker::call() {
+    if parallel_seams::is_parallel_worker() {
         return ereport(ERROR)
             .errcode(ERRCODE_READ_ONLY_SQL_TRANSACTION)
             .errmsg("cannot create temporary tables during a parallel operation")

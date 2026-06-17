@@ -52,7 +52,7 @@ backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-s
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
-backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
+backend-access-tablesample-core-seams = { path = "../backend-access-tablesample-core-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-nodes-copyfuncs-seams = { path = "../backend-nodes-copyfuncs-seams" }

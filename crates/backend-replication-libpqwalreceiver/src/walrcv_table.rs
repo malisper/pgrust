@@ -22,7 +22,6 @@ use types_walreceiver::{
     WalRcvStreamOptions as SeamStreamOptions, WalReceiverConn as ConnHandle,
 };
 
-use backend_replication_libpqwalreceiver_seams as s;
 use interfaces_libpq_fe_seams as rt;
 
 use crate::conn_registry as reg;
@@ -47,7 +46,7 @@ use types_error::ERROR;
 /// caller verifies `WalReceiverFunctions != NULL` (`elog(ERROR)` otherwise).
 /// `load_file` is idempotent (only the first load runs `_PG_init`); here we mark
 /// the vtable loaded once and then confirm it is installed.
-fn load_libpqwalreceiver() -> PgResult<()> {
+pub fn load_libpqwalreceiver() -> PgResult<()> {
     // Idempotent load: the first call marks the vtable installed; later calls
     // are no-ops (C's load_file does not re-run _PG_init).
     WAL_RECEIVER_FUNCTIONS_LOADED.store(true, Ordering::SeqCst);
@@ -71,7 +70,7 @@ fn load_libpqwalreceiver() -> PgResult<()> {
 /// registered.  An ereport(ERROR) (must_use_password without password) bubbles
 /// up as a panic from the unwrap, matching the handle-only seam contract (which
 /// has no PgError channel for `walrcv_connect`).
-fn walrcv_connect(
+pub fn walrcv_connect(
     conninfo: String,
     replication: bool,
     logical: bool,
@@ -94,30 +93,30 @@ fn walrcv_connect(
 }
 
 /// `walrcv_get_dbname_from_conninfo(conninfo)`.
-fn walrcv_get_dbname_from_conninfo(conninfo: String) -> Option<String> {
+pub fn walrcv_get_dbname_from_conninfo(conninfo: String) -> Option<String> {
     libpqrcv_get_dbname_from_conninfo(&conninfo)
         .unwrap_or_else(|e| panic!("walrcv_get_dbname_from_conninfo: {}", e.message))
 }
 
 /// `walrcv_get_conninfo(conn)`.
-fn walrcv_get_conninfo(conn: ConnHandle) -> Option<String> {
+pub fn walrcv_get_conninfo(conn: ConnHandle) -> Option<String> {
     reg::with_conn(conn.0, |c| {
         libpqrcv_get_conninfo(c).unwrap_or_else(|e| panic!("walrcv_get_conninfo: {}", e.message))
     })
 }
 
 /// `walrcv_get_senderinfo(conn, &host, &port)`.
-fn walrcv_get_senderinfo(conn: ConnHandle) -> (Option<String>, i32) {
+pub fn walrcv_get_senderinfo(conn: ConnHandle) -> (Option<String>, i32) {
     reg::with_conn(conn.0, libpqrcv_get_senderinfo)
 }
 
 /// `walrcv_identify_system(conn, &primary_tli)`.
-fn walrcv_identify_system(conn: ConnHandle) -> PgResult<(String, TimeLineID)> {
+pub fn walrcv_identify_system(conn: ConnHandle) -> PgResult<(String, TimeLineID)> {
     reg::with_conn(conn.0, libpqrcv_identify_system)
 }
 
 /// `walrcv_get_backend_pid(conn)` — the seam widens the C `pid_t`/`int` to `i64`.
-fn walrcv_get_backend_pid(conn: ConnHandle) -> i64 {
+pub fn walrcv_get_backend_pid(conn: ConnHandle) -> i64 {
     reg::with_conn(conn.0, |c| libpqrcv_get_backend_pid(c) as i64)
 }
 
@@ -125,7 +124,7 @@ fn walrcv_get_backend_pid(conn: ConnHandle) -> i64 {
 /// false /* failover */, CRS_NOEXPORT_SNAPSHOT, NULL /* lsn */)` as the WAL
 /// receiver's temp-slot creation calls it; the (snapshot, lsn) the physical
 /// caller does not want are dropped.
-fn walrcv_create_slot(conn: ConnHandle, slotname: String) -> PgResult<()> {
+pub fn walrcv_create_slot(conn: ConnHandle, slotname: String) -> PgResult<()> {
     reg::with_conn(conn.0, |c| {
         libpqrcv_create_slot(
             c,
@@ -143,7 +142,7 @@ fn walrcv_create_slot(conn: ConnHandle, slotname: String) -> PgResult<()> {
 /// `walrcv_startstreaming(conn, &options)`.  The seam carries the physical-only
 /// [`types_walreceiver::WalRcvStreamOptions`]; adapt to the provider's full
 /// physical/logical form by selecting the physical arm.
-fn walrcv_startstreaming(conn: ConnHandle, options: SeamStreamOptions) -> PgResult<bool> {
+pub fn walrcv_startstreaming(conn: ConnHandle, options: SeamStreamOptions) -> PgResult<bool> {
     let provider_options = WalRcvStreamOptions {
         logical: options.logical,
         slotname: options.slotname,
@@ -156,14 +155,14 @@ fn walrcv_startstreaming(conn: ConnHandle, options: SeamStreamOptions) -> PgResu
 }
 
 /// `walrcv_endstreaming(conn, &primary_tli)`.
-fn walrcv_endstreaming(conn: ConnHandle) -> PgResult<TimeLineID> {
+pub fn walrcv_endstreaming(conn: ConnHandle) -> PgResult<TimeLineID> {
     reg::with_conn(conn.0, libpqrcv_endstreaming)
 }
 
 /// `walrcv_receive(conn, &buf, &wait_fd)`.  The C `**buffer` out-param is the
 /// connection's `recvBuf` (refilled in place); the returned `Vec<u8>` is a copy
 /// of it.
-fn walrcv_receive(conn: ConnHandle) -> PgResult<(i32, Vec<u8>, pgsocket)> {
+pub fn walrcv_receive(conn: ConnHandle) -> PgResult<(i32, Vec<u8>, pgsocket)> {
     reg::with_conn_mut(conn.0, |c| {
         let (len, wait_fd) = libpqrcv_receive(c)?;
         let buf = if len > 0 { c.recvBuf.clone() } else { Vec::new() };
@@ -172,18 +171,18 @@ fn walrcv_receive(conn: ConnHandle) -> PgResult<(i32, Vec<u8>, pgsocket)> {
 }
 
 /// `walrcv_send(conn, buf, nbytes)`.
-fn walrcv_send(conn: ConnHandle, buf: Vec<u8>) -> PgResult<()> {
+pub fn walrcv_send(conn: ConnHandle, buf: Vec<u8>) -> PgResult<()> {
     reg::with_conn(conn.0, |c| libpqrcv_send(c, &buf))
 }
 
 /// `walrcv_readtimelinehistoryfile(conn, tli, &fname, &content, &len)`.
-fn walrcv_readtimelinehistoryfile(conn: ConnHandle, tli: TimeLineID) -> PgResult<(String, Vec<u8>)> {
+pub fn walrcv_readtimelinehistoryfile(conn: ConnHandle, tli: TimeLineID) -> PgResult<(String, Vec<u8>)> {
     reg::with_conn(conn.0, |c| libpqrcv_readtimelinehistoryfile(c, tli))
 }
 
 /// `walrcv_disconnect(conn)` — remove from the registry and run the real
 /// disconnect on the owned value.  A NULL / already-removed handle is a no-op.
-fn walrcv_disconnect(conn: ConnHandle) {
+pub fn walrcv_disconnect(conn: ConnHandle) {
     if let Some(owned) = reg::remove_conn(conn.0) {
         libpqrcv_disconnect(owned);
     }
@@ -195,7 +194,7 @@ fn walrcv_disconnect(conn: ConnHandle) {
 
 /// `walrcv_exec(conn, query, nRetTypes, retTypes)` — park the produced result
 /// and return its handle.
-fn walrcv_exec(
+pub fn walrcv_exec(
     conn: ConnHandle,
     query: String,
     nret: i32,
@@ -206,18 +205,18 @@ fn walrcv_exec(
 }
 
 /// `res->status`.
-fn res_status(res: ResHandle) -> WalRcvExecStatus {
+pub fn res_status(res: ResHandle) -> WalRcvExecStatus {
     reg::with_result(res.0, |r| r.status.to_types())
 }
 
 /// `res->err`.
-fn res_err(res: ResHandle) -> Option<String> {
+pub fn res_err(res: ResHandle) -> Option<String> {
     reg::with_result(res.0, |r| r.err.clone())
 }
 
 /// `walrcv_clear_result(res)` (walreceiver.h inline) — free the err string,
 /// tuplestore, tupledesc and the struct.
-fn walrcv_clear_result(res: ResHandle) -> PgResult<()> {
+pub fn walrcv_clear_result(res: ResHandle) -> PgResult<()> {
     // if (!walres) return; — a NULL handle is a no-op.
     if let Some(owned) = reg::remove_result(res.0) {
         if owned.tuplestore != 0 {
@@ -234,7 +233,7 @@ fn walrcv_clear_result(res: ResHandle) -> PgResult<()> {
 
 /// `MakeTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple)` (slotsync.c) — a
 /// slot suitable for iterating the result's tuplestore.
-fn make_result_tupslot(res: ResHandle) -> PgResult<TupslotHandle> {
+pub fn make_result_tupslot(res: ResHandle) -> PgResult<TupslotHandle> {
     let tupledesc = reg::with_result(res.0, |r| r.tupledesc);
     let slot = rt::make_tuple_table_slot::call(tupledesc);
     let id = reg::insert_tupslot(ResultTupslot {
@@ -246,20 +245,20 @@ fn make_result_tupslot(res: ResHandle) -> PgResult<TupslotHandle> {
 
 /// `tuplestore_gettupleslot(res->tuplestore, true, false, tupslot)` — advance to
 /// the next tuple.  Returns false when the store is exhausted.
-fn result_gettupleslot(res: ResHandle, tupslot: TupslotHandle) -> PgResult<bool> {
+pub fn result_gettupleslot(res: ResHandle, tupslot: TupslotHandle) -> PgResult<bool> {
     let tuplestore = reg::with_result(res.0, |r| r.tuplestore);
     let ts = reg::get_tupslot(tupslot.0);
     Ok(rt::tuplestore_gettupleslot::call(tuplestore, ts.slot))
 }
 
 /// `slot_getattr(tupslot, col, &isnull)` → `TextDatumGetCString`.
-fn getattr_text(tupslot: TupslotHandle, col: i32) -> PgResult<(Option<String>, bool)> {
+pub fn getattr_text(tupslot: TupslotHandle, col: i32) -> PgResult<(Option<String>, bool)> {
     let ts = reg::get_tupslot(tupslot.0);
     rt::slot_getattr_text::call(ts.slot, col)
 }
 
 /// `slot_getattr(tupslot, col, &isnull)` → `DatumGetLSN`.
-fn getattr_lsn(
+pub fn getattr_lsn(
     tupslot: TupslotHandle,
     col: i32,
 ) -> PgResult<(types_core::XLogRecPtr, bool)> {
@@ -268,7 +267,7 @@ fn getattr_lsn(
 }
 
 /// `slot_getattr(tupslot, col, &isnull)` → `DatumGetTransactionId`.
-fn getattr_xid(
+pub fn getattr_xid(
     tupslot: TupslotHandle,
     col: i32,
 ) -> PgResult<(types_core::TransactionId, bool)> {
@@ -277,13 +276,13 @@ fn getattr_xid(
 }
 
 /// `slot_getattr(tupslot, col, &isnull)` → `DatumGetBool`.
-fn getattr_bool(tupslot: TupslotHandle, col: i32) -> PgResult<(bool, bool)> {
+pub fn getattr_bool(tupslot: TupslotHandle, col: i32) -> PgResult<(bool, bool)> {
     let ts = reg::get_tupslot(tupslot.0);
     rt::slot_getattr_bool::call(ts.slot, col)
 }
 
 /// `ExecClearTuple(tupslot)`.
-fn exec_clear_tuple(tupslot: TupslotHandle) -> PgResult<()> {
+pub fn exec_clear_tuple(tupslot: TupslotHandle) -> PgResult<()> {
     let ts = reg::get_tupslot(tupslot.0);
     rt::exec_clear_tuple::call(ts.slot);
     Ok(())
@@ -293,31 +292,7 @@ fn exec_clear_tuple(tupslot: TupslotHandle) -> PgResult<()> {
 // Wiring.
 // ===========================================================================
 
-/// Install every inward seam in `backend_replication_libpqwalreceiver_seams`.
-pub fn init_seams() {
-    s::load_libpqwalreceiver::set(load_libpqwalreceiver);
-    s::walrcv_connect::set(walrcv_connect);
-    s::walrcv_exec::set(walrcv_exec);
-    s::res_status::set(res_status);
-    s::res_err::set(res_err);
-    s::make_result_tupslot::set(make_result_tupslot);
-    s::result_gettupleslot::set(result_gettupleslot);
-    s::getattr_text::set(getattr_text);
-    s::getattr_lsn::set(getattr_lsn);
-    s::getattr_xid::set(getattr_xid);
-    s::getattr_bool::set(getattr_bool);
-    s::exec_clear_tuple::set(exec_clear_tuple);
-    s::walrcv_clear_result::set(walrcv_clear_result);
-    s::walrcv_get_dbname_from_conninfo::set(walrcv_get_dbname_from_conninfo);
-    s::walrcv_get_conninfo::set(walrcv_get_conninfo);
-    s::walrcv_get_senderinfo::set(walrcv_get_senderinfo);
-    s::walrcv_identify_system::set(walrcv_identify_system);
-    s::walrcv_get_backend_pid::set(walrcv_get_backend_pid);
-    s::walrcv_create_slot::set(walrcv_create_slot);
-    s::walrcv_startstreaming::set(walrcv_startstreaming);
-    s::walrcv_endstreaming::set(walrcv_endstreaming);
-    s::walrcv_receive::set(walrcv_receive);
-    s::walrcv_send::set(walrcv_send);
-    s::walrcv_readtimelinehistoryfile::set(walrcv_readtimelinehistoryfile);
-    s::walrcv_disconnect::set(walrcv_disconnect);
-}
+/// The `walrcv_*` routines are now called directly by consumers (the
+/// libpqwalreceiver outward seams were removed as a faithful de-indirection);
+/// nothing remains to install here.
+pub fn init_seams() {}

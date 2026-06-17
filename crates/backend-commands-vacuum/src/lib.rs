@@ -74,7 +74,7 @@ use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDe
 use backend_commands_define_seams::DefElemArg;
 
 use backend_access_transam_xact_seams as xact;
-use backend_access_heap_vacuumlazy_seams as vacuumlazy;
+use backend_access_common_tidstore_seams as tidstore_seams;
 use backend_commands_analyze_seams as analyze;
 use backend_commands_define_seams as define;
 use backend_commands_vacuum_seams as rt;
@@ -2520,7 +2520,7 @@ pub fn register_tid_callback_state(ts: TidStore) -> u64 {
 fn vacuum_tid_is_dead_impl(tid: ItemPointerData, callback_state_handle: u64) -> bool {
     let ts = tid_callback_registry::lookup(callback_state_handle)
         .expect("vacuum_tid_is_dead: unknown callback-state handle");
-    vacuumlazy::tidstore_is_member::call(ts, tid).expect("tidstore_is_member")
+    tidstore_seams::tidstore_is_member::call(ts, tid).expect("tidstore_is_member")
 }
 
 /// Inward seam body for the no-arg `vacuum_delay_point()` (consumed by index

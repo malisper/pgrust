@@ -24,7 +24,7 @@ use types_nodes::nodehash::{
     SharedHashInfoHeader,
 };
 
-use backend_access_transam_parallel_seams as parallel_sup;
+use backend_access_transam_parallel as parallel_sup;
 use types_parallel::shared_dsm_object;
 
 /// `node->ps.plan->plan_node_id` — the DSM toc key. Mirrors the C
@@ -58,11 +58,11 @@ pub fn ExecHashEstimate(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ps.instrument || pcxt->nworkers == 0) return;
-    if node.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
+    if node.ps.instrument.is_none() || parallel_sup::pcxt_nworkers(pcxt) == 0 {
         return Ok(());
     }
 
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt) as usize;
+    let nworkers = parallel_sup::pcxt_nworkers(pcxt) as usize;
 
     //   size = mul_size(pcxt->nworkers, sizeof(HashInstrumentation));
     //   size = add_size(size, offsetof(SharedHashInfo, hinstrument));
@@ -70,9 +70,9 @@ pub fn ExecHashEstimate(
 
     //   shm_toc_estimate_chunk(&pcxt->estimator, size);
     //   shm_toc_estimate_keys(&pcxt->estimator, 1);
-    let estimator = parallel_sup::pcxt_estimator::call(pcxt);
-    parallel_sup::shm_toc_estimate_chunk::call(estimator, size);
-    parallel_sup::shm_toc_estimate_keys::call(estimator, 1);
+    let estimator = parallel_sup::pcxt_estimator(pcxt);
+    parallel_sup::shm_toc_estimate_chunk(estimator, size);
+    parallel_sup::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -84,7 +84,7 @@ pub fn ExecHashInitializeDSM(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ps.instrument || pcxt->nworkers == 0) return;
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
+    let nworkers = parallel_sup::pcxt_nworkers(pcxt);
     if node.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
@@ -96,14 +96,14 @@ pub fn ExecHashInitializeDSM(
     let size = shared_hash_info_size(nworkers as usize);
 
     //   node->shared_info = (SharedHashInfo *) shm_toc_allocate(pcxt->toc, size);
-    let toc = parallel_sup::pcxt_toc::call(pcxt);
-    let chunk = parallel_sup::shm_toc_allocate::call(toc, shared_dsm_object::estimate_flex(size));
+    let toc = parallel_sup::pcxt_toc(pcxt);
+    let chunk = parallel_sup::shm_toc_allocate(toc, shared_dsm_object::estimate_flex(size));
 
     // `ExecHashInitializeDSM` does NOT gate on `pcxt->seg` (unlike the hash-join
     // hook); `place_flex`'s `_seg` argument is unused (the placement is the raw
     // chunk address). A parallel query with instrument-bearing workers always
     // has a real DSM segment.
-    let seg = parallel_sup::pcxt_seg::call(pcxt)
+    let seg = parallel_sup::pcxt_seg(pcxt)
         .expect("ExecHashInitializeDSM: instrumenting parallel query without a DSM segment");
 
     //   /* Each per-worker area must start out as zeroes. */
@@ -118,7 +118,7 @@ pub fn ExecHashInitializeDSM(
     );
 
     //   shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, node->shared_info);
-    parallel_sup::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
+    parallel_sup::shm_toc_insert(toc, plan_node_id as u64, chunk);
 
     node.shared_info = Some(SharedHashInfo::Dsm {
         chunk,
@@ -143,13 +143,13 @@ pub fn ExecHashInitializeWorker(
     //   shared_info = (SharedHashInfo *)
     //       shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
     let plan_node_id = hash_plan_node_id(node);
-    let toc = parallel_sup::pwcxt_toc::call(pwcxt);
-    let chunk = parallel_sup::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+    let toc = parallel_sup::pwcxt_toc(pwcxt);
+    let chunk = parallel_sup::shm_toc_lookup(toc, plan_node_id as u64, false)
         .expect("ExecHashInitializeWorker: shm_toc_lookup(plan_node_id) missing");
 
     //   node->hinstrument = &shared_info->hinstrument[ParallelWorkerNumber];
-    let seg = parallel_sup::pwcxt_seg::call(pwcxt);
-    let worker_index = parallel_sup::parallel_worker_number::call();
+    let seg = parallel_sup::pwcxt_seg(pwcxt);
+    let worker_index = parallel_sup::parallel_worker_number();
     node.hinstrument = Some(HashInstrumentSlot::Dsm {
         chunk,
         seg,

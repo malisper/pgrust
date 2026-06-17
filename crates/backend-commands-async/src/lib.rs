@@ -61,7 +61,7 @@ use types_storage::storage::{
 use types_storage::sync::SyncRequestHandler;
 
 // Seam aliases (cycle partners / unported owners).
-use backend_access_transam_parallel_seams as parallel_seams;
+use backend_access_transam_parallel as parallel_seams;
 use backend_access_transam_transam_seams as transam_seams;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_storage_ipc_dsm_core_seams as ipc_seams;
@@ -545,7 +545,7 @@ pub fn pg_notification_queue_usage_core() -> PgResult<f64> {
 pub fn Async_Notify(channel: &str, payload: Option<&str>) -> PgResult<()> {
     let my_level = xact_seams::get_current_transaction_nest_level::call();
 
-    if parallel_seams::is_parallel_worker::call() {
+    if parallel_seams::is_parallel_worker() {
         return Err(elog_error("cannot send notifications from a parallel worker"));
     }
 

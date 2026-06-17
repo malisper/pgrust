@@ -73,7 +73,7 @@ fn pgvec_of_pgvec_to_vec(a: mcx::PgVec<'_, mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> 
 }
 
 fn date2j(year: i32, month: i32, day: i32) -> i32 {
-    backend_utils_adt_datetime_seams::date2j::call(year, month, day)
+    backend_utils_adt_datetime::seam_impls::seam_date2j(year, month, day)
 }
 fn date2isoweek(year: i32, mon: i32, mday: i32) -> i32 {
     backend_utils_adt_isoweek_seams::date2isoweek::call(year, mon, mday)

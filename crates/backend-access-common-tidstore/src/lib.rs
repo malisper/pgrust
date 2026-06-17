@@ -595,10 +595,10 @@ fn iter_result_to_reap(result: &TidStoreIterResult) -> PgResult<ReapBlockInfo> {
 
 /// Install this crate's seams: the `access/tidstore.h` surface other crates
 /// reach across a dependency cycle (declared in
-/// `backend-access-heap-vacuumlazy-seams`). Each marshals to the in-crate
+/// `backend-access-common-tidstore-seams`). Each marshals to the in-crate
 /// public function and delegates the radix substrate outward.
 pub fn init_seams() {
-    use backend_access_heap_vacuumlazy_seams as v;
+    use backend_access_common_tidstore_seams as v;
 
     v::tidstore_create_local::set(|max_bytes, insert_only| {
         TidStoreCreateLocal(max_bytes, insert_only)

@@ -28,7 +28,7 @@ backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-inj
 # The INJECTION_POINT(name) macro seam (no-op in this build), reached by typcache.c.
 backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 port-path-seams = { path = "../port-path-seams" }
-backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 common-config-info-seams = { path = "../common-config-info-seams" }
 # read_tz_file owner support: share-path derivation + my_exec_path global.
 common-path-seams = { path = "../common-path-seams" }

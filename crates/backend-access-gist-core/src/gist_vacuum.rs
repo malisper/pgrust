@@ -57,7 +57,7 @@ use crate::gist_page::{
 use crate::gist_page::gistcheckpage;
 use crate::gistutil::{gist_page_recyclable, gist_tuple_is_invalid, itup_block_number};
 
-use backend_access_gist_core_seams as xlog;
+use crate::gistxlog as xlog;
 use backend_utils_error_elog_seams as elog;
 
 // ===========================================================================
@@ -164,7 +164,7 @@ fn get_insert_rec_ptr() -> u64 {
     backend_access_transam_xlog_seams::get_insert_rec_ptr::call()
 }
 fn gist_get_fake_lsn<'mcx>(rel: &Relation<'mcx>) -> PgResult<u64> {
-    xlog::gist_get_fake_lsn::call(rel)
+    xlog::gist_get_fake_lsn(rel)
 }
 
 /// The index-vacuum dead-TID test (the `IndexBulkDeleteCallback`).
@@ -423,7 +423,7 @@ fn gistvacuumpage<'mcx>(
                 GistMarkTuplesDeleted(&mut page)?;
 
                 let recptr = if relation_needs_wal(rel) {
-                    xlog::gist_xlog_update::call(buffer, &todelete, &[], 0)?
+                    xlog::gist_xlog_update(buffer, &todelete, &[], 0)?
                 } else {
                     gist_get_fake_lsn(rel)?
                 };
@@ -700,7 +700,7 @@ fn gistdeletepage<'mcx>(
     }
 
     let recptr = if relation_needs_wal(&info.index) {
-        xlog::gist_xlog_page_delete::call(leaf_buffer, txid, parent_buffer, downlink)?
+        xlog::gist_xlog_page_delete(leaf_buffer, txid, parent_buffer, downlink)?
     } else {
         gist_get_fake_lsn(&info.index)?
     };

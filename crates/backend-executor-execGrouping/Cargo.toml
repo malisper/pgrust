@@ -16,7 +16,7 @@ backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams
 backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 common-hashfn = { path = "../common-hashfn" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

@@ -28,7 +28,7 @@ backend-commands-variable-seams = { path = "../backend-commands-variable-seams" 
 # Owner seam crates this unit calls into directly.
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

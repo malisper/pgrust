@@ -107,7 +107,7 @@ pub fn is_in_parallel_mode() -> bool {
 
 #[inline]
 pub fn is_parallel_worker() -> bool {
-    backend_access_transam_parallel_seams::is_parallel_worker::call()
+    backend_access_transam_parallel::is_parallel_worker()
 }
 
 #[inline]
