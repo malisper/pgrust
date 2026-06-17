@@ -2543,6 +2543,61 @@ thread_local! {
     static VACUUM_COST_BALANCE_LOCAL: Cell<i32> = const { Cell::new(0) };
 }
 
+/* =========================================================================
+ * vacuum.c GUC variables (`conf->variable` backing).  These are plain int /
+ * bool / double GUC globals declared in vacuum.c (vacuum_freeze_min_age,
+ * vacuum_freeze_table_age, vacuum_multixact_freeze_min_age,
+ * vacuum_multixact_freeze_table_age, vacuum_failsafe_age,
+ * vacuum_multixact_failsafe_age, vacuum_max_eager_freeze_failure_rate,
+ * track_cost_delay_timing, vacuum_truncate) and read directly from the GUC
+ * slot by the VACUUM driver (and autovacuum).  None come from ControlFile.
+ *
+ * vacuum.c owns the C `conf->variable` storage, so the GUC var accessors are
+ * installed here over these thread-local cells.  The cells are seeded with the
+ * C boot_val (guc_tables.c) so a read before InitializeGUCOptions sees the
+ * compiled-in default, exactly as the C global would; the GUC engine writes the
+ * boot value (and any user override) through the installed `set`.
+ * ========================================================================= */
+
+pub(crate) mod guc_globals {
+    use core::cell::Cell;
+
+    macro_rules! guc_global {
+        ($cell:ident, $get:ident, $set:ident, $ty:ty, $init:expr) => {
+            thread_local! {
+                static $cell: Cell<$ty> = const { Cell::new($init) };
+            }
+            #[inline]
+            pub fn $get() -> $ty {
+                $cell.with(|c| c.get())
+            }
+            #[inline]
+            pub fn $set(value: $ty) {
+                $cell.with(|c| c.set(value));
+            }
+        };
+    }
+
+    // `int vacuum_freeze_min_age;` — guc_tables.c boot_val 50000000.
+    guc_global!(VACUUM_FREEZE_MIN_AGE, vacuum_freeze_min_age, set_vacuum_freeze_min_age, i32, 50000000);
+    // `int vacuum_freeze_table_age;` — boot_val 150000000.
+    guc_global!(VACUUM_FREEZE_TABLE_AGE, vacuum_freeze_table_age, set_vacuum_freeze_table_age, i32, 150000000);
+    // `int vacuum_multixact_freeze_min_age;` — boot_val 5000000.
+    guc_global!(VACUUM_MULTIXACT_FREEZE_MIN_AGE, vacuum_multixact_freeze_min_age, set_vacuum_multixact_freeze_min_age, i32, 5000000);
+    // `int vacuum_multixact_freeze_table_age;` — boot_val 150000000.
+    guc_global!(VACUUM_MULTIXACT_FREEZE_TABLE_AGE, vacuum_multixact_freeze_table_age, set_vacuum_multixact_freeze_table_age, i32, 150000000);
+    // `int vacuum_failsafe_age;` — boot_val 1600000000.
+    guc_global!(VACUUM_FAILSAFE_AGE, vacuum_failsafe_age, set_vacuum_failsafe_age, i32, 1600000000);
+    // `int vacuum_multixact_failsafe_age;` — boot_val 1600000000.
+    guc_global!(VACUUM_MULTIXACT_FAILSAFE_AGE, vacuum_multixact_failsafe_age, set_vacuum_multixact_failsafe_age, i32, 1600000000);
+    // `double vacuum_max_eager_freeze_failure_rate;` — boot_val 0.03.
+    guc_global!(VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE, vacuum_max_eager_freeze_failure_rate, set_vacuum_max_eager_freeze_failure_rate, f64, 0.03f64);
+    // `bool track_cost_delay_timing;` — boot_val false.
+    guc_global!(TRACK_COST_DELAY_TIMING, track_cost_delay_timing, set_track_cost_delay_timing, bool, false);
+    // `bool vacuum_truncate;` — boot_val true.
+    guc_global!(VACUUM_TRUNCATE, vacuum_truncate, set_vacuum_truncate, bool, true);
+}
+
 fn vacuum_failsafe_active_impl() -> PgResult<bool> {
     Ok(VACUUM_FAILSAFE_ACTIVE.with(|c| c.get()))
 }

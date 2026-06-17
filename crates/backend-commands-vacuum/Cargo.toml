@@ -22,6 +22,9 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-cluster = { path = "../types-cluster" }
 
 backend-utils-error = { path = "../backend-utils-error" }
+# GUC `conf->variable` slots: vacuum.c owns these globals, so it installs the
+# GucVarAccessors over its own backing store.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # own seam crate (inward)
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }

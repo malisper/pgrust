@@ -7707,6 +7707,7 @@ dependencies = [
  "backend-parser-small1-seams",
  "backend-tcop-utility-out-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-cluster",

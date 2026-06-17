@@ -55,6 +55,72 @@ pub fn init_seams() {
 
     // --- ProcessUtility dispatch arm (utility.c VacuumStmt → ExecVacuum) ------
     backend_tcop_utility_out_seams::exec_vacuum::set(exec_vacuum_arm);
+
+    // --- vacuum.c GUC `conf->variable` accessors + seam getters --------------
+    // vacuum.c owns these plain int/bool/double GUC globals (guc_tables.c reads
+    // them straight from the GUC slot; none come from ControlFile). Install the
+    // GucVarAccessors over our own backing store, then install the vacuum-seams
+    // getters that read the slot via `vars::<name>.read()`.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        use crate::guc_globals as g;
+
+        vars::vacuum_freeze_min_age.install(GucVarAccessors {
+            get: g::vacuum_freeze_min_age,
+            set: g::set_vacuum_freeze_min_age,
+        });
+        vars::vacuum_freeze_table_age.install(GucVarAccessors {
+            get: g::vacuum_freeze_table_age,
+            set: g::set_vacuum_freeze_table_age,
+        });
+        vars::vacuum_multixact_freeze_min_age.install(GucVarAccessors {
+            get: g::vacuum_multixact_freeze_min_age,
+            set: g::set_vacuum_multixact_freeze_min_age,
+        });
+        vars::vacuum_multixact_freeze_table_age.install(GucVarAccessors {
+            get: g::vacuum_multixact_freeze_table_age,
+            set: g::set_vacuum_multixact_freeze_table_age,
+        });
+        vars::vacuum_failsafe_age.install(GucVarAccessors {
+            get: g::vacuum_failsafe_age,
+            set: g::set_vacuum_failsafe_age,
+        });
+        vars::vacuum_multixact_failsafe_age.install(GucVarAccessors {
+            get: g::vacuum_multixact_failsafe_age,
+            set: g::set_vacuum_multixact_failsafe_age,
+        });
+        vars::vacuum_max_eager_freeze_failure_rate.install(GucVarAccessors {
+            get: g::vacuum_max_eager_freeze_failure_rate,
+            set: g::set_vacuum_max_eager_freeze_failure_rate,
+        });
+        vars::track_cost_delay_timing.install(GucVarAccessors {
+            get: g::track_cost_delay_timing,
+            set: g::set_track_cost_delay_timing,
+        });
+        vars::vacuum_truncate.install(GucVarAccessors {
+            get: g::vacuum_truncate,
+            set: g::set_vacuum_truncate,
+        });
+
+        // The vacuum-seams getters read the now-installed GUC slots.
+        vacuum::vacuum_freeze_min_age::set(|| Ok(vars::vacuum_freeze_min_age.read()));
+        vacuum::vacuum_freeze_table_age::set(|| Ok(vars::vacuum_freeze_table_age.read()));
+        vacuum::vacuum_multixact_freeze_min_age::set(|| {
+            Ok(vars::vacuum_multixact_freeze_min_age.read())
+        });
+        vacuum::vacuum_multixact_freeze_table_age::set(|| {
+            Ok(vars::vacuum_multixact_freeze_table_age.read())
+        });
+        vacuum::vacuum_failsafe_age::set(|| Ok(vars::vacuum_failsafe_age.read()));
+        vacuum::vacuum_multixact_failsafe_age::set(|| {
+            Ok(vars::vacuum_multixact_failsafe_age.read())
+        });
+        vacuum::vacuum_max_eager_freeze_failure_rate::set(|| {
+            Ok(vars::vacuum_max_eager_freeze_failure_rate.read())
+        });
+        vacuum::track_cost_delay_timing::set(|| Ok(vars::track_cost_delay_timing.read()));
+        vacuum::vacuum_truncate::set(|| Ok(vars::vacuum_truncate.read()));
+    }
 }
 
 use mcx::Mcx;
