@@ -70,6 +70,27 @@ use backend_optimizer_util_relnode as relnode;
 use backend_optimizer_path_equivclass as equivclass;
 use backend_nodes_core::list as pg_list;
 
+/// Backing storage for the `enable_self_join_elimination` GUC.
+///
+/// analyzejoins.c declares the GUC's `conf->variable` backing as a plain
+/// process-global `bool enable_self_join_elimination;` (analyzejoins.c:53),
+/// read directly at plan time in `remove_useless_self_joins` (analyzejoins.c:2493).
+/// It is not derived from the ControlFile. We mirror that C global with a
+/// process-global `AtomicBool`, seeded to the `boot_val` (`true`) declared in
+/// `guc_tables.c`, and expose it to the GUC engine via [`init_seams`].
+static ENABLE_SELF_JOIN_ELIMINATION: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// Reader mirroring the C global `enable_self_join_elimination`.
+pub fn enable_self_join_elimination() -> bool {
+    ENABLE_SELF_JOIN_ELIMINATION.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Writer the GUC engine calls when `enable_self_join_elimination` is assigned.
+pub fn set_enable_self_join_elimination(value: bool) {
+    ENABLE_SELF_JOIN_ELIMINATION.store(value, core::sync::atomic::Ordering::Relaxed);
+}
+
 pub mod change_relids;
 pub mod query_distinct;
 pub mod relids;
@@ -739,6 +760,17 @@ pub fn init_seams() {
                 restrictlist,
                 force_cache,
             )
+        },
+    );
+
+    // Expose the `enable_self_join_elimination` GUC's backing storage to the
+    // GUC engine. analyzejoins.c owns the `conf->variable` for this GUC (the
+    // file-scope `bool enable_self_join_elimination;`, analyzejoins.c:53); the
+    // engine reads/writes it through these accessors.
+    backend_utils_misc_guc_tables::vars::enable_self_join_elimination.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: enable_self_join_elimination,
+            set: set_enable_self_join_elimination,
         },
     );
 }
