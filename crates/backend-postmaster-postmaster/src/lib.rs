@@ -166,6 +166,17 @@ pub fn init_seams() {
     sp::listen_addresses::set(gucreads::listen_addresses);
     sp::unix_socket_directories::set(gucreads::unix_socket_directories);
 
+    // `ClientAuthInProgress` (postmaster.c global) — the backend-local flag set
+    // around the client_authentication() exchange in PerformAuthentication
+    // (postinit.c) and read by error reporting to limit log visibility during
+    // auth. postmaster.c declares the global, so its read/write live here. Each
+    // process owns its own `PostmasterState` (a forked backend lazily inits its
+    // copy), mirroring the C file-static that the backend inherits a copy of.
+    sp::client_auth_in_progress::set(|| core::pm().client_auth_in_progress);
+    sp::set_client_auth_in_progress::set(|value| {
+        core::pm_mut().client_auth_in_progress = value;
+    });
+
     // Postmaster-owned file writes from PostmasterMain (postmaster.c bodies).
     sp::create_opts_file::set(fileops::create_opts_file);
     sp::maybe_write_external_pid_file::set(fileops::maybe_write_external_pid_file);
