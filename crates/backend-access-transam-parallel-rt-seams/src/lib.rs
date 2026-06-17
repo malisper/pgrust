@@ -19,6 +19,7 @@ use alloc::string::String;
 
 use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
 use types_tuple::Datum;
+use types_snapshot::SnapshotData;
 use types_error::PgResult;
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
@@ -124,19 +125,22 @@ seam_core::seam!(pub fn restore_guc_state(space: usize) -> PgResult<()>);
 seam_core::seam!(pub fn estimate_combocid_state_space() -> PgResult<Size>);
 seam_core::seam!(pub fn serialize_combocid_state(len: Size, space: usize) -> PgResult<()>);
 seam_core::seam!(pub fn restore_combocid_state(space: usize) -> PgResult<()>);
-// The snapshot seams below are snapmgr.c functions by C definition, but the
-// parallel DSM serialization path threads raw `usize` byte-offset/handle
-// arguments (InitializeParallelDSM / RestoreSnapshot space pointers) that
-// diverge from the snapmgr base crate's owned-`SnapshotData` contract. They
-// stay homed here as a single coupled handle-based family until the parallel
-// snapshot-serialization contract is reconciled.
-seam_core::seam!(pub fn get_transaction_snapshot() -> PgResult<usize>);
-seam_core::seam!(pub fn get_active_snapshot() -> PgResult<usize>);
-seam_core::seam!(pub fn estimate_snapshot_space(snapshot: usize) -> PgResult<Size>);
-seam_core::seam!(pub fn serialize_snapshot(snapshot: usize, space: usize) -> PgResult<()>);
-seam_core::seam!(pub fn restore_snapshot(space: usize) -> PgResult<usize>);
-seam_core::seam!(pub fn restore_transaction_snapshot(snapshot: usize, source_pgproc: PgProcHandle) -> PgResult<()>);
-seam_core::seam!(pub fn push_active_snapshot(snapshot: usize) -> PgResult<()>);
+// The snapshot seams below are snapmgr.c functions. The snapshot OBJECT crosses
+// as snapmgr's real owned `SnapshotData` value (Datum-unification: no opaque
+// token); only the DSM chunk address (`space: usize`) — a genuine in-segment
+// pointer the leader's `shm_toc_allocate` handed out, dereferenced in place like
+// every other serializer here — stays a raw address. snapmgr installs these
+// slots (bridging `EstimateSnapshotSpace`/`SerializeSnapshot`/`RestoreSnapshot`/
+// `GetTransactionSnapshot`/`GetActiveSnapshot`/`RestoreTransactionSnapshot`/
+// `PushActiveSnapshot`/`PopActiveSnapshot`), reading/writing the chunk bytes with
+// its own ownership of the `SerializedSnapshotData` byte layout.
+seam_core::seam!(pub fn get_transaction_snapshot() -> PgResult<SnapshotData>);
+seam_core::seam!(pub fn get_active_snapshot() -> PgResult<SnapshotData>);
+seam_core::seam!(pub fn estimate_snapshot_space(snapshot: &SnapshotData) -> PgResult<Size>);
+seam_core::seam!(pub fn serialize_snapshot(snapshot: &SnapshotData, space: usize) -> PgResult<()>);
+seam_core::seam!(pub fn restore_snapshot(space: usize) -> PgResult<SnapshotData>);
+seam_core::seam!(pub fn restore_transaction_snapshot(snapshot: SnapshotData, source_proc: ProcNumber) -> PgResult<()>);
+seam_core::seam!(pub fn push_active_snapshot(snapshot: SnapshotData) -> PgResult<()>);
 seam_core::seam!(pub fn pop_active_snapshot() -> PgResult<()>);
 seam_core::seam!(pub fn estimate_transaction_state_space() -> PgResult<Size>);
 seam_core::seam!(pub fn serialize_transaction_state(len: Size, space: usize) -> PgResult<()>);

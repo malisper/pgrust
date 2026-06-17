@@ -3080,6 +3080,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-parallel",
+ "types-snapshot",
  "types-tuple",
 ]
 
@@ -21261,6 +21262,7 @@ dependencies = [
 name = "backend-utils-time-snapmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-subtrans-seams",
  "backend-access-transam-xact",
  "backend-storage-file-fd-seams",

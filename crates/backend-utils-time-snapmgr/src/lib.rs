@@ -1494,6 +1494,17 @@ pub fn RestoreSnapshot(start_address: &[u8]) -> SnapHandle {
     new_handle(snapshot)
 }
 
+/// Total serialized length of the snapshot at `start_address` — `SERIALIZED_HEADER_LEN`
+/// plus the XID/SubXID arrays whose counts are in the self-describing header.
+/// This mirrors the size `EstimateSnapshotSpace` reserved (the C `RestoreSnapshot`
+/// reads only as far as the header dictates; the chunk has no separate length).
+fn serialized_snapshot_len(start_address: &[u8]) -> usize {
+    let xcnt = u32::from_le_bytes(start_address[8..12].try_into().unwrap());
+    let subxcnt = i32::from_le_bytes(start_address[12..16].try_into().unwrap());
+    SERIALIZED_HEADER_LEN
+        + (xcnt as usize + subxcnt.max(0) as usize) * core::mem::size_of::<TransactionId>()
+}
+
 /* ----------------------------------------------------------------------
  * Visibility
  * ---------------------------------------------------------------------- */
@@ -1681,6 +1692,52 @@ pub fn init_seams() {
     pc_seams::set_transaction_xmin::set(|xmin| with_state(|s| s.transaction_xmin = xmin));
     // `RecentXmin` — read by procarray.c's GlobalVis horizon machinery.
     pc_seams::recent_xmin::set(RecentXmin);
+
+    // parallel.c runtime-service snapshot slots: the leader serializes its
+    // active/transaction snapshot into the DSM, the worker restores it. snapmgr
+    // owns the `SnapshotData` bodies AND the `SerializedSnapshotData` byte layout,
+    // so it bridges its real functions here. The snapshot OBJECT crosses as the
+    // owned `SnapshotData` value; only the DSM chunk address (`space`) is a raw
+    // in-segment pointer the leader's `shm_toc_allocate` handed out (dereferenced
+    // in place exactly as the C writes/reads `start_address`).
+    use backend_access_transam_parallel_rt_seams as rt_seams;
+    rt_seams::get_transaction_snapshot::set(|| Ok(GetTransactionSnapshot()?.borrow().clone()));
+    // C asserts `GetActiveSnapshot() != NULL` (it is called only with an active
+    // snapshot installed); the owned value is the topmost active snapshot.
+    rt_seams::get_active_snapshot::set(|| Ok(GetActiveSnapshot().borrow().clone()));
+    rt_seams::estimate_snapshot_space::set(|snapshot| {
+        Ok(EstimateSnapshotSpace(&new_handle(snapshot.clone())))
+    });
+    rt_seams::serialize_snapshot::set(|snapshot, space| {
+        // `SerializeSnapshot(snapshot, start_address)` — C writes into the
+        // caller-provided (shared) memory; the owned body returns the bytes,
+        // which we copy into the DSM chunk in place. SAFETY: `space` is the start
+        // of a chunk the leader sized by `EstimateSnapshotSpace` via
+        // `shm_toc_allocate`, so it is writable for `bytes.len()` bytes.
+        let bytes = SerializeSnapshot(&new_handle(snapshot.clone()));
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), space as *mut u8, bytes.len());
+        }
+        Ok(())
+    });
+    rt_seams::restore_snapshot::set(|space| {
+        // `RestoreSnapshot(start_address)` — read the serialized snapshot in
+        // place at the DSM chunk address. SAFETY: `space` is a chunk the leader
+        // serialized a snapshot into and published via `shm_toc`; the header is
+        // self-describing, so we first read it to bound the slice, then decode.
+        let header = unsafe { core::slice::from_raw_parts(space as *const u8, SERIALIZED_HEADER_LEN) };
+        let total = serialized_snapshot_len(header);
+        let bytes = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+        Ok(RestoreSnapshot(bytes).borrow().clone())
+    });
+    rt_seams::restore_transaction_snapshot::set(|snapshot, source_proc| {
+        RestoreTransactionSnapshot(&new_handle(snapshot), source_proc)
+    });
+    rt_seams::push_active_snapshot::set(|snapshot| {
+        PushActiveSnapshot(&new_handle(snapshot));
+        Ok(())
+    });
+    rt_seams::pop_active_snapshot::set(PopActiveSnapshot);
 
     // Register this crate's SQL-callable builtins (C: `fmgr_builtins[]`).
     fmgr_builtins::register_snapmgr_builtins();

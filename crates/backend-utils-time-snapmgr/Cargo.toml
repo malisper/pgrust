@@ -17,6 +17,10 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 # plancache/xact/standby/subtrans's split slice of snapmgr's active-snapshot +
 # TransactionXmin contract — same inward seams, installed from init_seams().
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
+# parallel.c's runtime-service snapshot slots (serialize/restore the leader's
+# snapshot into the parallel DSM) — snapmgr owns the bodies and the serialized
+# byte layout, so it installs these from init_seams().
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 # Transaction-state predicates snapmgr consults directly (acyclic: xact depends
 # on snapmgr-seams, not on snapmgr itself), plus GetCurrentCommandId.
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }

@@ -993,6 +993,8 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
     let mut session_dsm_handle: dsm_handle = DSM_HANDLE_INVALID;
     let transaction_snapshot = rt::get_transaction_snapshot::call()?;
     let active_snapshot = rt::get_active_snapshot::call()?;
+    // Borrowed for estimate/serialize below — the owned `SnapshotData` values
+    // live until the DSM serialization is complete.
 
     // We might be running in a very short-lived memory context.
     let oldcontext = rt::switch_to_top_transaction_context::call()?;
@@ -1025,10 +1027,10 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         combocidlen = rt::estimate_combocid_state_space::call()?;
         shm_toc_estimate_chunk(est, combocidlen);
         if rt::isolation_uses_xact_snapshot::call() {
-            tsnaplen = rt::estimate_snapshot_space::call(transaction_snapshot)?;
+            tsnaplen = rt::estimate_snapshot_space::call(&transaction_snapshot)?;
             shm_toc_estimate_chunk(est, tsnaplen);
         }
-        asnaplen = rt::estimate_snapshot_space::call(active_snapshot)?;
+        asnaplen = rt::estimate_snapshot_space::call(&active_snapshot)?;
         shm_toc_estimate_chunk(est, asnaplen);
         tstatelen = rt::estimate_transaction_state_space::call()?;
         shm_toc_estimate_chunk(est, tstatelen);
@@ -1096,13 +1098,13 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         // Serialize the transaction snapshot if the isolation level uses one.
         if rt::isolation_uses_xact_snapshot::call() {
             let tsnapspace = shm_toc_allocate(toc, tsnaplen);
-            rt::serialize_snapshot::call(transaction_snapshot, tsnapspace.0)?;
+            rt::serialize_snapshot::call(&transaction_snapshot, tsnapspace.0)?;
             shm_toc_insert(toc, PARALLEL_KEY_TRANSACTION_SNAPSHOT, tsnapspace);
         }
 
         // Serialize the active snapshot.
         let asnapspace = shm_toc_allocate(toc, asnaplen);
-        rt::serialize_snapshot::call(active_snapshot, asnapspace.0)?;
+        rt::serialize_snapshot::call(&active_snapshot, asnapspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_ACTIVE_SNAPSHOT, asnapspace);
 
         // Provide the handle for per-session segment.
@@ -2002,9 +2004,11 @@ pub fn parallel_worker_main(main_arg: Datum<'static>) -> PgResult<()> {
     let tsnapshot = if tsnapspace != 0 {
         rt::restore_snapshot::call(tsnapspace)?
     } else {
-        asnapshot
+        // C aliases `tsnapshot = asnapshot` (same `Snapshot` pointer); the owned
+        // value model takes a distinct copy, then pushes the active one below.
+        asnapshot.clone()
     };
-    rt::restore_transaction_snapshot::call(tsnapshot, fps.parallel_leader_pgproc)?;
+    rt::restore_transaction_snapshot::call(tsnapshot, fps.parallel_leader_proc_number)?;
     rt::push_active_snapshot::call(asnapshot)?;
 
     // We've changed which tuples we can see; invalidate system caches.
