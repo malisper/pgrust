@@ -91,7 +91,38 @@ pub struct LocalBufferManager {
     storage: RefCell<LocalBufferStorage>,
 }
 
+thread_local! {
+    /// THIS backend's ambient local (temp-relation) buffer manager (the
+    /// per-backend `LocalBufferDescriptors`/`LocalBufHash` analog), published by
+    /// [`LocalBufferManager::register_global`]. Like the shared
+    /// `BufferManager::global` posture, this is strictly per-backend — the local
+    /// pool is never in shmem — so a `thread_local` `'static` handle mirrors C's
+    /// process-global file-static state.
+    static BACKEND_LOCAL_MGR: Cell<Option<&'static LocalBufferManager>> =
+        const { Cell::new(None) };
+}
+
 impl LocalBufferManager {
+    /// Publish this manager as THIS backend's ambient local buffer manager,
+    /// returning a `'static` reference to it. Calling more than once for the
+    /// same backend returns the FIRST-published manager.
+    pub fn register_global(self) -> &'static LocalBufferManager {
+        BACKEND_LOCAL_MGR.with(|slot| {
+            if let Some(existing) = slot.get() {
+                return existing;
+            }
+            let leaked: &'static LocalBufferManager = Box::leak(Box::new(self));
+            slot.set(Some(leaked));
+            leaked
+        })
+    }
+
+    /// THIS backend's ambient local buffer manager, or `None` if not yet
+    /// published (e.g. a backend that has never touched a temp relation).
+    pub fn global() -> Option<&'static LocalBufferManager> {
+        BACKEND_LOCAL_MGR.with(|slot| slot.get())
+    }
+
     /// Construct an uninitialized local buffer manager (buffers allocated lazily
     /// by `InitLocalBuffers`, exactly as localbuf.c does on first temp access).
     /// `num_temp_buffers` is the `temp_buffers` GUC value; `is_parallel_worker`

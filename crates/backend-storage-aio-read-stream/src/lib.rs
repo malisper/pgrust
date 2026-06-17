@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult};
-use backend_storage_buffer_support::BufferAccessStrategyRing;
+use backend_storage_buffer_support::{BufferAccessStrategyRing, LocalBufferManager};
 use types_rel::Relation;
 use types_storage::buf::BufferAccessStrategy;
 use types_storage::storage::{BufferIsValid, InvalidBuffer};
@@ -965,25 +965,26 @@ fn bm_get_additional_pin_limit(bm: &BufferManager) -> i32 {
 }
 
 /// `GetAdditionalLocalPinLimit()` (localbuf.c) — the local (temp-relation)
-/// buffer pin limit. The localbuf subsystem is not modelled in the shared
-/// buffer-manager core (see bufmgr's `ExtendBufferedRel` localbuf note), so a
-/// temp-relation read stream reaches this here. Panic-until-owner (the localbuf
-/// global instance is unwired; sanctioned).
+/// buffer pin limit (pins available beyond those already held). A
+/// temp-relation read stream reaches this here; it delegates to the real
+/// localbuf accessor on THIS backend's ambient [`LocalBufferManager`]. The
+/// local pool is established before any temp-relation read stream runs (the
+/// stream pins the relation's local buffers), so the manager is published.
 fn bm_get_additional_local_pin_limit() -> i32 {
-    panic!(
-        "read_stream: GetAdditionalLocalPinLimit (temp-relation look-ahead) \
-         requires the localbuf subsystem, which is not yet wired into the \
-         shared buffer-manager core"
+    let lbm = LocalBufferManager::global().expect(
+        "read_stream: the local (temp-relation) buffer manager is not registered \
+         for this process",
     );
+    i32::try_from(lbm.GetAdditionalLocalPinLimit()).unwrap_or(PG_INT16_MAX)
 }
 
 /// `GetLocalPinLimit()` (localbuf.c) — see [`bm_get_additional_local_pin_limit`].
 fn bm_get_local_pin_limit() -> u32 {
-    panic!(
-        "read_stream: GetLocalPinLimit (temp-relation look-ahead) requires the \
-         localbuf subsystem, which is not yet wired into the shared \
-         buffer-manager core"
+    let lbm = LocalBufferManager::global().expect(
+        "read_stream: the local (temp-relation) buffer manager is not registered \
+         for this process",
     );
+    lbm.GetLocalPinLimit()
 }
 
 // === AIO batch mode =========================================================
