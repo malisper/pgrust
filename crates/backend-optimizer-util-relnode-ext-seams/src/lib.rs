@@ -138,7 +138,7 @@ seam_core::seam!(
     /// `get_parameterized_baserel_size(root, rel, param_clauses)` (costsize.c).
     pub fn get_parameterized_baserel_size<'mcx>(
         run: &PlannerRun<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
         baserel: RelId,
         param_clauses: &[RinfoId],
     ) -> f64
@@ -148,7 +148,7 @@ seam_core::seam!(
     /// restrict_clauses)` (costsize.c).
     pub fn get_parameterized_joinrel_size<'mcx>(
         run: &PlannerRun<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
         joinrel: RelId,
         outer_path: PathId,
         inner_path: PathId,

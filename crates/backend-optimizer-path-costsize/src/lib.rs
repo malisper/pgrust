@@ -40,6 +40,7 @@ use backend_optimizer_util_pathnode_seams as ps;
 use backend_utils_adt_selfuncs_seams as selfuncs;
 
 pub mod exprcost;
+mod guc;
 pub mod joins;
 pub mod qualcost;
 pub mod scans;
@@ -97,6 +98,9 @@ pub static ENABLE_MATERIAL: bool = true;
 pub static ENABLE_MERGEJOIN: bool = true;
 pub static ENABLE_HASHJOIN: bool = true;
 pub static ENABLE_GATHERMERGE: bool = true;
+pub static ENABLE_MEMOIZE: bool = true;
+pub static ENABLE_PARALLEL_APPEND: bool = true;
+pub static ENABLE_PARALLEL_HASH: bool = true;
 // enable_partitionwise_* GUCs default OFF (costsize.c lines 159-160).
 pub static ENABLE_PARTITIONWISE_JOIN: bool = false;
 

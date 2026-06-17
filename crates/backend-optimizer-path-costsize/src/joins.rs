@@ -527,7 +527,7 @@ fn outer_pathtarget_width(p: &Path) -> i32 {
 /// `approx_tuple_count` (costsize.c:5303).
 fn approx_tuple_count<'mcx>(
     run: &PlannerRun<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     outer_id: PathId,
     inner_id: PathId,
     quals: &[RinfoId],
@@ -958,7 +958,7 @@ fn get_rightop(_root: &PlannerInfo, clause: types_pathnodes::NodeId) -> types_pa
 /// `compute_semi_anti_join_factors`.
 pub fn compute_semi_anti_join_factors<'mcx>(
     run: &PlannerRun<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
@@ -1022,23 +1022,26 @@ pub fn compute_semi_anti_join_factors<'mcx>(
 /// `get_parameterized_baserel_size` (costsize.c:5378).
 pub fn get_parameterized_baserel_size<'mcx>(
     run: &PlannerRun<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     rel: RelId,
     param_clauses: &[RinfoId],
 ) -> f64 {
-    let baserel = root.rel(rel);
+    let baserel_tuples = root.rel(rel).tuples;
+    let baserel_relid = root.rel(rel).relid;
+    let baserel_rows = root.rel(rel).rows;
+    let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
 
     let mut all_nodes: Vec<types_pathnodes::NodeId> =
         param_clauses.iter().map(|&id| root.rinfo(id).clause).collect();
-    for &id in baserel.baserestrictinfo.iter() {
+    for &id in baserestrictinfo.iter() {
         all_nodes.push(root.rinfo(id).clause);
     }
 
-    let mut nrows = baserel.tuples
-        * cz::clauselist_selectivity::call(run, root, &all_nodes, baserel.relid as i32, JOIN_INNER as i32, None);
+    let mut nrows = baserel_tuples
+        * cz::clauselist_selectivity::call(run, root, &all_nodes, baserel_relid as i32, JOIN_INNER as i32, None);
     nrows = clamp_row_est(nrows);
-    if nrows > baserel.rows {
-        nrows = baserel.rows;
+    if nrows > baserel_rows {
+        nrows = baserel_rows;
     }
     nrows
 }
@@ -1072,7 +1075,7 @@ pub fn set_joinrel_size_estimates<'mcx>(
 /// `get_parameterized_joinrel_size` (costsize.c:5459).
 pub fn get_parameterized_joinrel_size<'mcx>(
     run: &PlannerRun<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     rel: RelId,
     outer_path: PathId,
     inner_path: PathId,
@@ -1102,7 +1105,7 @@ pub fn get_parameterized_joinrel_size<'mcx>(
 /// `calc_joinrel_size_estimate` (costsize.c:5500).
 pub fn calc_joinrel_size_estimate<'mcx>(
     run: &PlannerRun<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     joinrel: RelId,
     outer_rel: RelId,
     inner_rel: RelId,

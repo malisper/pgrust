@@ -22,6 +22,10 @@ types-pathnodes = { path = "../types-pathnodes" }
 # The init-subselect-ext `rte_kind_inh_relkind` is one RTE projection; this
 # resolver crate installs it through `planner_rt_fetch` (its real RTE store).
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
+# costsize.c `set_rel_width` reads `rte->relid` via a RelOptInfo handle; this
+# resolver crate installs that projection through the same `planner_rt_fetch`
+# RTE store (the seam declares it `(run, root, rel)` with no ported owner).
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 
 [dev-dependencies]
 # Needed by the synthetic fixture's tests to build an (empty) PlannerRun in an

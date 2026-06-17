@@ -237,7 +237,7 @@ seam_core::seam!(
     /// `compute_semi_anti_join_factors(...)`.
     pub fn compute_semi_anti_join_factors<'mcx>(
         run: &PlannerRun<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
         joinrel: RelId,
         outerrel: RelId,
         innerrel: RelId,

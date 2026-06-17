@@ -37,6 +37,9 @@ const SIZEOF_MINIMAL_TUPLE_HEADER: usize = {
 };
 
 pub fn init_seams() {
+    /* ---- costsize.c-owned scan/join `enable_*` cost GUC slots ---------- */
+    crate::guc::install_enable_gucs();
+
     /* ---- costsize-seams (this unit's own clamp helpers) ---------------- */
     cz::clamp_row_est::set(crate::clamp_row_est);
     cz::clamp_cardinality_to_long::set(crate::clamp_cardinality_to_long);
@@ -44,6 +47,30 @@ pub fn init_seams() {
     // enable_indexonlyscan GUC; indxpath.c reaches them through these seams.
     cz::cost_bitmap_tree_node::set(crate::scans::cost_bitmap_tree_node);
     cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN);
+
+    // `get_tablespace_page_costs(spcid)` (spccache.c). costsize.c owns the
+    // `random_page_cost`/`seq_page_cost` GUC defaults the lookup falls back to
+    // (its module globals); the lookup itself + `MyDatabaseTableSpace` live in
+    // spccache/init. Install the cost seam here, delegating to spccache with
+    // those defaults and the init-small `MyDatabaseTableSpace` global.
+    cz::get_tablespace_page_costs::set(|spcid| {
+        let defaults = backend_utils_cache_spccache::PageCostDefaults {
+            random_page_cost: crate::RANDOM_PAGE_COST,
+            seq_page_cost: crate::SEQ_PAGE_COST,
+        };
+        let my_db_ts = backend_utils_init_small_seams::my_database_table_space::call();
+        let mut spc_random_page_cost = 0.0f64;
+        let mut spc_seq_page_cost = 0.0f64;
+        backend_utils_cache_spccache::get_tablespace_page_costs(
+            spcid,
+            my_db_ts,
+            &defaults,
+            Some(&mut spc_random_page_cost),
+            Some(&mut spc_seq_page_cost),
+        )
+        .expect("get_tablespace_page_costs");
+        cz::TablespacePageCosts { spc_random_page_cost, spc_seq_page_cost }
+    });
 
     /* ---- other costsize.c-owned GUC getters consumed elsewhere -------- */
     // `enable_partitionwise_join` (costsize.c GUC, default OFF) read by

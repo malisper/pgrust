@@ -31,3 +31,13 @@ types-selfuncs = { path = "../types-selfuncs" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+# costsize.c owns the scan/join `enable_*` cost GUCs; this crate installs their
+# guc-table slots (process-private backing cells) so allpaths.c/joinrels.c can
+# read them through `vars::enable_*.read()`.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# costsize.c owns the `random_page_cost`/`seq_page_cost` GUC defaults that
+# spccache.c's `get_tablespace_page_costs` falls back to; this crate installs
+# the `get_tablespace_page_costs` cost seam, delegating to spccache with those
+# defaults + `MyDatabaseTableSpace` (init-small global).
+backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

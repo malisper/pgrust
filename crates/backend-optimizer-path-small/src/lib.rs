@@ -53,6 +53,7 @@ use types_pathnodes::{
 use types_selfuncs::{DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
 use backend_optimizer_path_small_seams as seam;
+use backend_optimizer_path_costsize_seams as cz_seam;
 use backend_nodes_equalfuncs_seams as eq;
 use backend_optimizer_util_pathnode_seams as ps;
 use backend_optimizer_util_relnode_seams as bms;
@@ -1667,12 +1668,78 @@ fn elog_error(msg: &str) -> types_error::PgError {
  * Seam installation.
  * ====================================================================== */
 
+/* ==========================================================================
+ * costsize.c selectivity-seam adapters.
+ *
+ * costsize.c (and the join-size estimators in relnode/joinpath) reaches
+ * `clauselist_selectivity` / `clause_selectivity` over a list/handle of *bare
+ * clause-expr* nodes (the C `List *` whose elements may be plain `Expr *`, i.e.
+ * `rinfo == NULL`), not over `RestrictInfo` handles. These adapters wrap the
+ * bare `NodeId`s as [`ListEntry::Bare`] elements and delegate to the same
+ * clausesel.c core that the RestrictInfo-form seam uses, exactly matching the
+ * C calls `clauselist_selectivity(root, list, varRelid, jointype, sjinfo)` /
+ * `clause_selectivity(root, (Node *) clause, ...)`.
+ * ======================================================================== */
+
+/// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over a
+/// list of bare clause-expr [`NodeId`] handles (the costsize.c-seam form).
+fn clauselist_selectivity_nodes<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clauses: &[NodeId],
+    var_relid: i32,
+    jointype: i32,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> f64 {
+    let entries: Vec<ListEntry> = clauses
+        .iter()
+        .map(|&id| ListEntry::Bare(root.node(id).clone()))
+        .collect();
+    clauselist_selectivity_ext_entries(
+        run,
+        root,
+        &entries,
+        var_relid,
+        jointype as JoinType,
+        sjinfo,
+        true,
+    )
+    .expect("clauselist_selectivity")
+}
+
+/// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)` over
+/// a single bare clause-expr [`NodeId`] handle (the costsize.c-seam form).
+fn clause_selectivity_nodes<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clause: NodeId,
+    var_relid: i32,
+    jointype: i32,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> f64 {
+    let clause_node = root.node(clause).clone();
+    clause_selectivity_ext(
+        run,
+        root,
+        ClauseRef::Bare,
+        &clause_node,
+        var_relid,
+        jointype as JoinType,
+        sjinfo,
+        true,
+    )
+    .expect("clause_selectivity")
+}
+
 /// Install this unit's inward seam ([`clauselist_selectivity`]). Called once at
 /// single-threaded startup from `seams-init`.
 pub fn init_seams() {
     seam::clauselist_selectivity::set(clauselist_selectivity);
     seam::clause_selectivity::set(clause_selectivity);
     seam::clause_selectivity_node::set(clause_selectivity_node);
+    // costsize.c selectivity seams (bare clause-node form).
+    cz_seam::clauselist_selectivity::set(clauselist_selectivity_nodes);
+    cz_seam::clause_selectivity::set(clause_selectivity_nodes);
 }
 
 #[cfg(test)]

@@ -105,7 +105,7 @@ seam_core::seam!(
     /// a list of clause-expr handles (the C `List *RestrictInfo*`).
     pub fn clauselist_selectivity<'mcx>(
         run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
         clauses: &[NodeId],
         var_relid: i32,
         jointype: i32,
@@ -116,7 +116,7 @@ seam_core::seam!(
     /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)`.
     pub fn clause_selectivity<'mcx>(
         run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
         clause: NodeId,
         var_relid: i32,
         jointype: i32,
@@ -349,7 +349,16 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `rte->relid` (set_rel_width): the underlying table OID, 0 for a phony rel.
-    pub fn rte_relid(root: &PlannerInfo, rel: RelId) -> Oid
+    ///
+    /// `rel` is the `RelOptInfo` handle; the owner resolves it to the RT index
+    /// (`rel->relid`) and fetches the RTE through the planner run, so `run` is
+    /// threaded (matching the `backend-optimizer-rte-seams` RTE-projection
+    /// contract — `planner_rt_fetch(run, root, rti)->relid`).
+    pub fn rte_relid<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> Oid
 );
 /// The WindowClause-derived values `cost_windowagg` needs but cannot read from
 /// the fabled arena (the `WindowClause` carries a lifetime and is not arena-

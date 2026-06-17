@@ -278,6 +278,14 @@ pub fn init_seams() {
     rte_jointype::set(|run, root, rti| planner_rt_fetch(run, root, rti).jointype as JoinType);
     rte_enrtuples::set(|run, root, rti| planner_rt_fetch(run, root, rti).enrtuples);
 
+    // costsize.c `set_rel_width` — `rte->relid` from a RelOptInfo handle. The
+    // RelOptInfo's `relid` field is the 1-based RT index; resolve the RTE through
+    // the same `planner_rt_fetch` store and project its `relid` (table OID).
+    backend_optimizer_path_costsize_seams::rte_relid::set(|run, root, rel| {
+        let rti = root.rel(rel).relid;
+        planner_rt_fetch(run, root, rti).relid
+    });
+
     // Query-level projections — `root->parse->...`.
     parse_rtable_len::set(|run, root| run.rtable(root.parse).len() as i32);
     parse_rteperminfos_len::set(|run, root| run.resolve(root.parse).rteperminfos.len() as i32);

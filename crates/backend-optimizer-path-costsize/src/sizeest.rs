@@ -40,7 +40,7 @@ pub fn set_baserel_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Plann
     let qcost = cost_qual_eval(root, &clause_nodes);
     root.rel_mut(rel).baserestrictcost = qcost;
 
-    set_rel_width(root, rel);
+    set_rel_width(run, root, rel);
 }
 
 /// `set_function_size_estimates` (costsize.c:6066).
@@ -149,10 +149,10 @@ pub fn set_pathtarget_cost_width(root: &PlannerInfo, target: &mut PathTarget) {
 }
 
 /// `set_rel_width` (costsize.c:6480).
-pub fn set_rel_width(root: &mut PlannerInfo, rel: RelId) {
+pub fn set_rel_width<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     let relid_idx = root.rel(rel).relid;
     // rte->relid (underlying table OID, 0 for phony rel) — RTE unreachable → seam.
-    let reloid: Oid = cz::rte_relid::call(root, rel);
+    let reloid: Oid = cz::rte_relid::call(run, root, rel);
 
     let min_attr = root.rel(rel).min_attr;
     let max_attr = root.rel(rel).max_attr;

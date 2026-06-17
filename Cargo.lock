@@ -11264,6 +11264,9 @@ dependencies = [
  "backend-optimizer-util-relnode-seams",
  "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-spccache",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",
@@ -11449,6 +11452,7 @@ name = "backend-optimizer-path-small"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-small-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-seams",
@@ -11883,6 +11887,7 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
  "mcx",
  "seam-core",
