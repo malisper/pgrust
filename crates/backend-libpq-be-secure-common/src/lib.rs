@@ -16,7 +16,7 @@ use backend_libpq_be_secure_common_seams as my_seams;
 use backend_storage_file_fd_seams as fd_seams;
 use backend_storage_file_fd_seams::PipeReadLine;
 use backend_utils_error::{ereport, ErrorLevel};
-use backend_utils_misc_guc_tables::vars;
+use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
 use common_percentrepl::replace_percent_placeholders;
 use common_string::pg_strip_crlf;
 use mcx::{Mcx, PgVec};
@@ -265,8 +265,35 @@ fn strip_crlf_in_place(buf: &mut PgVec<'_, u8>) {
     buf.truncate(new_len);
 }
 
+// Runtime storage for the `ssl_key_file` GUC (`char *ssl_key_file;` in
+// be-secure.c — the SSL-transport translation unit this crate represents).
+// It is an ordinary `PGC_SIGHUP` string GUC read from the GUC slot (boot value
+// "server.key"); C leaves the pointer NULL at startup and the GUC machinery
+// assigns it. We mirror that `char **variable` here, where `None` is C's NULL.
+thread_local! {
+    static SSL_KEY_FILE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Read `*conf->variable` for `ssl_key_file` (`char *ssl_key_file`).
+fn ssl_key_file() -> Option<String> {
+    SSL_KEY_FILE.with(|v| v.borrow().clone())
+}
+
+/// Write `*conf->variable` for `ssl_key_file`.
+fn set_ssl_key_file(value: Option<String>) {
+    SSL_KEY_FILE.with(|v| *v.borrow_mut() = value);
+}
+
 /// Install this unit's inward seams (consumed by `be-secure-openssl.c`).
 pub fn init_seams() {
     my_seams::run_ssl_passphrase_command::set(run_ssl_passphrase_command);
     my_seams::check_ssl_key_file_permissions::set(check_ssl_key_file_permissions);
+
+    // Install the `ssl_key_file` GUC variable accessor over this unit's backing
+    // store (C's `char *ssl_key_file` in be-secure.c).
+    vars::ssl_key_file.install(GucVarAccessors {
+        get: ssl_key_file,
+        set: set_ssl_key_file,
+    });
 }
