@@ -281,18 +281,22 @@ pub fn advance_transition_function<'mcx>(
     //   aggstate->curpertrans = NULL;
     //
     // FunctionCallInvoke + InitFunctionCallInfoData ARE ported (fmgr-core, #52)
-    // and `transfn_fcinfo` is now BUILT by build_pertrans_for_aggref (#324/#165
-    // construction landed). The remaining F4 RESIDUAL is the live-AggState
-    // back-reference through `fcinfo.context`: a transfn that calls
-    // AggCheckCallContext / AggGetAggref / AggStateIsShared reaches back into the
-    // AggState through `(Node *) aggstate`, but `FunctionCallInfoBaseData.context`
-    // is `Option<&Node>` and the `Node` enum carries no AggState variant. Adding
-    // one is the same erased-carrier + self-reference keystone as
-    // PlanStateNode::Agg (#324 P0/#335), not yet built — so the transfn frame is
-    // built with `context: None` and this invocation path stays seam-panicked.
-    // `ExecAggCopyTransValue` (the by-ref transValue reparent) is the secondary
-    // residual. ExecInitAgg construction itself is complete and returns a real
-    // AggStateData.
+    // and `transfn_fcinfo` is now BUILT by build_pertrans_for_aggref (#324/#165)
+    // WITH the live-AggState `fcinfo.context` back-reference installed (K1: the
+    // `FmgrCallContext::Agg(AggStateContextLink)` channel — a transfn that calls
+    // AggCheckCallContext / AggGetAggref / AggStateIsShared now reaches the
+    // AggState through `(AggState *) fcinfo->context`). The remaining residual on
+    // THIS deobfuscated invoke path is that the by-value transfn dispatch the
+    // executor actually uses re-resolves by OID through the
+    // `function_call_invoke` seam (fn_oid, collation, &args), which does NOT
+    // thread `fcinfo.context` to the callee — so a transfn reached via this seam
+    // still observes a context-less frame. Threading context across that seam is
+    // the (K2-class) `function_call_invoke` re-sign, deferred with the std/no_std
+    // `FunctionCallInfoBaseData` dual-home (DESIGN_DEBT). `ExecAggCopyTransValue`
+    // (the by-ref transValue reparent) is the secondary residual. The plain
+    // count(*) / int8inc path ignores both context and by-ref copy, so it is not
+    // gated by either; ExecInitAgg construction is complete and returns a real
+    // AggStateData carrying the K1 context link.
     //
     //   if (!pertrans->transtypeByVal &&
     //       DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
@@ -300,13 +304,13 @@ pub fn advance_transition_function<'mcx>(
     //   pergroupstate->transValue = newVal;
     //   pergroupstate->transValueIsNull = fcinfo->isnull;
     panic!(
-        "backend-executor-nodeAgg::advance_transition_function: F4 runtime residual \
-         — the transfn call-frame `fcinfo.context` cannot carry `(Node *) aggstate` \
-         (the `Node` enum has no AggState variant; same erased-carrier + \
-         self-reference keystone as PlanStateNode::Agg, #324 P0/#335), and \
-         ExecAggCopyTransValue (by-ref transValue reparent) is unported. \
-         ExecInitAgg construction is complete; the transition runtime is gated on \
-         the agg call-frame context channel keystone (transtypeByVal={})",
+        "backend-executor-nodeAgg::advance_transition_function: runtime residual \
+         — the live-AggState `fcinfo.context` channel now works (K1), but the \
+         by-value transfn dispatch (`function_call_invoke` seam, fn_oid/collation/&args) \
+         does not thread fcinfo.context to the callee (the K2-class seam re-sign, \
+         deferred with the FunctionCallInfoBaseData dual-home), and \
+         ExecAggCopyTransValue (by-ref transValue reparent) is unported \
+         (transtypeByVal={})",
         pertrans.transtype_by_val
     );
 }

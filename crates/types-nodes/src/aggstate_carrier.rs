@@ -127,3 +127,93 @@ pub fn downcast_agg_state_mut<'a, 'mcx, T: AggStateTagged<'mcx>>(
 pub fn live_type_name_of<T>() -> &'static str {
     type_name::<T>()
 }
+
+/// A lifetime-free raw back-pointer to a live `AggState` — the owned-model
+/// rendering of C's `fcinfo->context = (Node *) aggstate` (the `Node *` an
+/// aggregate's transition/final function call frame carries so the support
+/// functions `AggCheckCallContext` / `AggGetAggref` / `AggStateIsShared` /
+/// `AggRegisterCallback` can recover the calling `AggState` via
+/// `(AggState *) fcinfo->context`).
+///
+/// Modelled identically to the established [`crate::planstate::PlanStateLink`]
+/// uplink (`ExprState.parent`) and the `EStateLink` / `mcx` child->parent raw
+/// back-pointer idioms: a `Copy`, lifetime-free `NonNull` to the erased
+/// [`AggStateLive`] trait object, with no lifetime to infect the call frame, and
+/// the `&` re-derived per access. Tag-checked downcast (via
+/// [`downcast_agg_state_ref`] / [`downcast_agg_state_mut`]) recovers the concrete
+/// `AggStateData<'mcx>` exactly as C's `IsA(fcinfo->context, AggState)` +
+/// `(AggState *) fcinfo->context` cast does -- never a `dyn Any` (the payload is
+/// `'mcx`-bearing, not `'static`), never an owning box (the plan-state tree owns
+/// the node).
+///
+/// SAFETY / liveness: the link is set into a transfn/finalfn call frame that is
+/// itself owned by the `AggState` (lives in `pertrans->transfn_fcinfo`), so the
+/// pointed-at `AggState` OUTLIVES -- and, because it transitively owns the frame
+/// carrying this link, never moves while linked -- the frame. This is the same
+/// parent-outlives-child invariant `PlanStateLink` discharges, pointing from the
+/// shorter-lived call frame back to the longer-lived owning node.
+#[derive(Clone, Copy, Debug)]
+pub struct AggStateContextLink(core::ptr::NonNull<dyn AggStateLive<'static>>);
+
+impl AggStateContextLink {
+    /// Wrap the stable address of the live `AggState` (its erased
+    /// [`AggStateLive`] view) as a `fcinfo->context` back-link. The caller must
+    /// guarantee the `AggState` outlives every call frame carrying the link (it
+    /// does: the `AggState` owns those frames); see the type docs. The `'mcx` is
+    /// erased into the raw address.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn from_ref<'mcx>(aggstate: &(dyn AggStateLive<'mcx> + 'mcx)) -> Self {
+        // Erase the payload lifetime into the raw address (as PlanStateLink does
+        // for its `'mcx` node). A `dyn` trait object's runtime layout (data ptr +
+        // vtable ptr) is lifetime-invariant, so re-tagging the lifetime parameter
+        // preserves both halves of the wide pointer -- but a normal `as` cast
+        // won't shorten/extend a trait object's lifetime, so transmute the wide
+        // pointer (the sanctioned lifetime-erasure for a `dyn`).
+        let p: *mut (dyn AggStateLive<'mcx> + 'mcx) =
+            aggstate as *const (dyn AggStateLive<'mcx> + 'mcx) as *mut _;
+        // SAFETY: only the (compile-time-only) lifetime parameter of the trait
+        // object differs between source and target; the data/vtable wide-pointer
+        // representation is identical. `aggstate` is a live reference, hence the
+        // resulting pointer is non-null. Mirrors `PlanStateLink::from_ref`'s
+        // `'mcx`->`'static` erasure of the owning node address.
+        let p: *mut dyn AggStateLive<'static> = unsafe { core::mem::transmute(p) };
+        AggStateContextLink(unsafe { core::ptr::NonNull::new_unchecked(p) })
+    }
+
+    /// Momentary shared read of the live `AggState` through the back-link -- the
+    /// single audited deref (mirrors [`crate::planstate::PlanStateLink::get`]).
+    /// Re-derives the `&` per access at the caller-chosen lifetime; never stores
+    /// a stale reference. This is the owned-model rendering of C's
+    /// `(AggState *) fcinfo->context` cast.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get<'a, 'mcx>(&self) -> &'a (dyn AggStateLive<'mcx> + 'mcx) {
+        // Re-derive a fresh pointer from the stored raw address so the deref's
+        // provenance is current (never deref a once-captured tag); mirrors
+        // `PlanStateLink::get`.
+        // SAFETY: `self.0` is non-null (newtype invariant) and points at the
+        // owning `AggState` that outlives + never moves while linked the call
+        // frame carrying this link (see the type docs' liveness invariant). The
+        // lifetime is re-attached at the caller-chosen `'a`/`'mcx`; the runtime
+        // representation is lifetime-invariant.
+        let p: *const dyn AggStateLive<'static> = self.0.as_ptr();
+        let p: *const (dyn AggStateLive<'mcx> + 'mcx) = unsafe { core::mem::transmute(p) };
+        unsafe { &*p }
+    }
+
+    /// Momentary exclusive read of the live `AggState` through the back-link.
+    /// Same liveness obligation as [`Self::get`]; used by the call frame's
+    /// `AggRegisterCallback` (which registers against the live `curaggcontext`).
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get_mut<'a, 'mcx>(&mut self) -> &'a mut (dyn AggStateLive<'mcx> + 'mcx) {
+        // SAFETY: as `get`, but the exclusive borrow is justified by the call
+        // frame holding the only `&mut` path to the link at the call site (the
+        // support function runs with the frame borrowed); the `AggState`
+        // outlives and never moves while linked.
+        let p: *mut dyn AggStateLive<'static> = self.0.as_ptr();
+        let p: *mut (dyn AggStateLive<'mcx> + 'mcx) = unsafe { core::mem::transmute(p) };
+        unsafe { &mut *p }
+    }
+}

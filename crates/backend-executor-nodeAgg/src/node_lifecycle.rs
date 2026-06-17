@@ -398,14 +398,14 @@ pub fn build_pertrans_for_aggref<'mcx>(
     // InitFunctionCallInfoData(*fcinfo, &pertrans->transfn, numTransArgs,
     //                          pertrans->aggCollation, (Node *) aggstate, NULL);
     //
-    // F4 RESIDUAL (#324/#335 agg call-frame channel): the C `(Node *) aggstate`
-    // context cannot be stored — `FunctionCallInfoBaseData.context` is
-    // `Option<&Node>` and the `Node` enum carries no AggState variant (adding one
-    // is the same erased-carrier + self-reference keystone as PlanStateNode::Agg,
-    // not yet built). The frame is built with `context: None`; the live-AggState
-    // resolution (`AggCheckCallContext` / `AggGetAggref` et al.) and the
-    // transition runtime (`advance_transition_function`) stay seam-panicked.
-    let transfn_fcinfo = new_agg_fcinfo(mcx, transfn, num_trans_args, pertrans.agg_collation)?;
+    // K1 (#324/#335 agg call-frame channel): the C `(Node *) aggstate` context is
+    // installed — capture the address-stable AggState (PgBox-allocated in
+    // ExecInitAgg, the C `makeNode`-stable node) as a tag-checked
+    // `AggStateContextLink` and store it as the frame's `FmgrCallContext::Agg`.
+    // The aggregate support functions recover the calling `AggState` through it.
+    let agg_link = agg_state_context_link(aggstate);
+    let transfn_fcinfo =
+        new_agg_fcinfo(mcx, transfn, num_trans_args, pertrans.agg_collation, agg_link)?;
     pertrans.transfn_fcinfo = Some(transfn_fcinfo);
 
     {
@@ -646,15 +646,33 @@ fn get_typlenbyval_owned(typid: Oid) -> PgResult<(i16, bool)> {
 /// zero-init a transition/serial/deserial call frame carrying the resolved
 /// `FmgrInfo`.
 ///
-/// F4 RESIDUAL (#324/#335): the C `(Node *) aggstate` context is stored as
-/// `None` here — `FunctionCallInfoBaseData.context` is `Option<&Node>` and the
-/// `Node` enum carries no AggState variant. The frame is otherwise complete; the
-/// live-AggState resolution + transition runtime stay seam-panicked.
+/// `(Node *) aggstate` — capture the address-stable live `AggState` as a
+/// tag-checked back-link for an aggregate call frame's `fcinfo->context`. The
+/// `AggStateData` is PgBox-allocated by `ExecInitAgg` (the C `makeNode`-stable
+/// node), so its address is fixed for the AggState's lifetime; the link points
+/// from the call frames (which the AggState transitively owns) back to it,
+/// discharging the `PlanStateLink` parent-outlives-child invariant.
+fn agg_state_context_link<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+) -> types_nodes::aggstate_carrier::AggStateContextLink {
+    types_nodes::aggstate_carrier::AggStateContextLink::from_ref(
+        aggstate as &(dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+    )
+}
+
+/// K1 (#324/#335): the C `(Node *) aggstate` context IS stored — `context` is a
+/// [`FmgrCallContext::Agg`] carrying the tag-checked
+/// [`AggStateContextLink`](types_nodes::aggstate_carrier::AggStateContextLink)
+/// back-reference to the live `AggState` (the `PlanStateLink` discipline). The
+/// caller passes the link captured from the PgBox-allocated (address-stable, C
+/// `makeNode`-equivalent) `AggStateData`, so the aggregate support functions
+/// (`AggCheckCallContext` etc.) recover the calling `AggState` through the frame.
 fn new_agg_fcinfo<'mcx>(
     mcx: Mcx<'mcx>,
     flinfo: FmgrInfo,
     nargs: i32,
     fncollation: Oid,
+    context: types_nodes::aggstate_carrier::AggStateContextLink,
 ) -> PgResult<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>> {
     let mut args = vec_with_capacity_in_std(nargs as usize);
     for _ in 0..nargs {
@@ -662,7 +680,8 @@ fn new_agg_fcinfo<'mcx>(
     }
     let fcinfo = FunctionCallInfoBaseData {
         flinfo: Some(flinfo),
-        context: None, // C: (Node *) aggstate — F4 residual (no Node::AggState)
+        // C: InitFunctionCallInfoData(..., (Node *) aggstate, NULL)
+        context: Some(types_nodes::fmgr::FmgrCallContext::Agg(context)),
         resultinfo: None,
         fncollation,
         isnull: false,
@@ -686,7 +705,7 @@ fn vec_with_capacity_in_std<T>(cap: usize) -> alloc::vec::Vec<T> {
 /// `InitFunctionCallInfoData` for the 1-arg serialfn call frame.
 fn build_serialfn_call_frame_owned<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
-    _aggstate: &mut AggStateData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
     aggserialfn: Oid,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -701,7 +720,9 @@ fn build_serialfn_call_frame_owned<'mcx>(
     let mut serialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggserialfn)?;
     backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut serialfn, &serialfnexpr);
     pertrans.serialfn = serialfn.clone();
-    pertrans.serialfn_fcinfo = Some(new_agg_fcinfo(mcx, serialfn, 1, INVALID_OID)?);
+    // InitFunctionCallInfoData(..., 1, InvalidOid, (Node *) aggstate, NULL)
+    let agg_link = agg_state_context_link(aggstate);
+    pertrans.serialfn_fcinfo = Some(new_agg_fcinfo(mcx, serialfn, 1, INVALID_OID, agg_link)?);
     Ok(())
 }
 
@@ -709,7 +730,7 @@ fn build_serialfn_call_frame_owned<'mcx>(
 /// `InitFunctionCallInfoData` for the 2-arg deserialfn call frame.
 fn build_deserialfn_call_frame_owned<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
-    _aggstate: &mut AggStateData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
     aggdeserialfn: Oid,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -718,7 +739,9 @@ fn build_deserialfn_call_frame_owned<'mcx>(
     let mut deserialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggdeserialfn)?;
     backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut deserialfn, &deserialfnexpr);
     pertrans.deserialfn = deserialfn.clone();
-    pertrans.deserialfn_fcinfo = Some(new_agg_fcinfo(mcx, deserialfn, 2, INVALID_OID)?);
+    // InitFunctionCallInfoData(..., 2, InvalidOid, (Node *) aggstate, NULL)
+    let agg_link = agg_state_context_link(aggstate);
+    pertrans.deserialfn_fcinfo = Some(new_agg_fcinfo(mcx, deserialfn, 2, INVALID_OID, agg_link)?);
     Ok(())
 }
 

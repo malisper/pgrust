@@ -7,10 +7,10 @@
 //! (or a `WindowAggState`); these resolve it. The parallel entry points are
 //! the methods this unit installs into `backend-executor-nodeAgg-pq-seams`.
 
-use mcx::MemoryContext;
 use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::nodeagg::Aggref;
+use types_nodes::EcxtId;
 use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo};
 use types_execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
@@ -25,42 +25,63 @@ pub const AGG_CONTEXT_AGGREGATE: i32 = 1;
 pub const AGG_CONTEXT_WINDOW: i32 = 2;
 
 /// The C `context` of an fmgr call frame is `fmNodePtr context` — a `Node *`
-/// the executor sets to the live `AggState`/`WindowAggState`. The shared
-/// `FunctionCallInfoBaseData` vocabulary on main is trimmed and does not carry
-/// that back-reference, so a support function reached through it observes the
-/// C `fcinfo->context == NULL` case: it is not being called as an aggregate.
+/// the executor sets to the live `AggState`/`WindowAggState`. This recovers it:
+/// `if (fcinfo->context && IsA(fcinfo->context, AggState))` then
+/// `(AggState *) fcinfo->context`, returning the concrete `AggStateData` when
+/// the frame is an aggregate call and `None` otherwise (the C `NULL` /
+/// not-an-`AggState` fall-through).
 ///
-/// This helper localizes that single fact so each entry point below reads as a
-/// direct transcription of the C `if (fcinfo->context && IsA(...))` guard.
+/// The back-reference is carried as the tag-checked
+/// [`AggStateContextLink`](types_nodes::aggstate_carrier::AggStateContextLink)
+/// inside [`FmgrCallContext::Agg`] (the `PlanStateLink` discipline); the
+/// downcast to the concrete `AggStateData` is C's `(AggState *)` cast.
 #[inline]
 fn agg_context<'a, 'mcx>(
-    _fcinfo: &'a FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &'a FunctionCallInfoBaseData<'mcx>,
 ) -> Option<&'a AggStateData<'mcx>> {
-    None
+    // if (fcinfo->context && IsA(fcinfo->context, AggState)) {
+    //     AggState *aggstate = (AggState *) fcinfo->context; ... }
+    let live = fcinfo.context.as_ref()?.as_agg_state()?;
+    types_nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
 }
 
 /// `AggCheckCallContext(fcinfo, &aggcontext)` — report whether the function is
 /// being called as an aggregate transition/final function. Returns
-/// `AGG_CONTEXT_AGGREGATE` (1) / `AGG_CONTEXT_WINDOW` (2) / 0, and (when not
-/// null) the appropriate aggregate memory context.
+/// `AGG_CONTEXT_AGGREGATE` (1) / `AGG_CONTEXT_WINDOW` (2) / 0, and (when called
+/// as an aggregate) the [`EcxtId`] of the appropriate aggregate `ExprContext`
+/// (the owned-model rendering of C's `*aggcontext = ...->ecxt_per_tuple_memory`
+/// out-parameter; see the type note below).
+///
+/// MODEL NOTE: C fills `*aggcontext` with the `MemoryContext` *pointer*
+/// `aggstate->curaggcontext->ecxt_per_tuple_memory`. The owned `MemoryContext`
+/// is a non-Copy domain handle owned by the EState's `ExprContext` pool — it
+/// cannot be returned by value, and the caller wants to *switch into* it (which
+/// in this repo is addressed by [`EcxtId`], the model's `ExprContext *`). So the
+/// out-parameter is returned as the curaggcontext's `EcxtId`; resolving it to
+/// the live per-tuple `Mcx` is the caller's `MemoryContextSwitchTo` (an
+/// execUtils EState-pool lookup), exactly as C dereferences the returned
+/// pointer. The load-bearing `i32` context-code is now fully resolved.
 pub fn AggCheckCallContext<'mcx>(
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
-) -> (i32, Option<MemoryContext>) {
+) -> (i32, Option<EcxtId>) {
     if let Some(aggstate) = agg_context(fcinfo) {
-        // *aggcontext = aggstate->curaggcontext->ecxt_per_tuple_memory.
-        // C hands back a *pointer* to that context; the owned `MemoryContext`
-        // is a non-Copy domain handle the AggState owns, so it cannot be moved
-        // out of the borrow. Resolving the handle to return belongs to the
-        // not-yet-landed owned-fcinfo back-reference model.
-        let _ = aggstate.curaggcontext;
-        panic!(
-            "backend_executor_nodeAgg::AggCheckCallContext: live-AggState \
-             curaggcontext handoff — unported call-frame back-reference"
-        );
+        // if (aggcontext) *aggcontext = aggstate->curaggcontext->ecxt_per_tuple_memory;
+        // return AGG_CONTEXT_AGGREGATE;
+        //
+        // `aggstate->curaggcontext` is an index into `aggcontexts`; that element
+        // is the `ExprContext *` (an `EcxtId` in the owned model). Hand it back
+        // as the out-parameter.
+        let aggcontext = aggstate
+            .aggcontexts
+            .as_ref()
+            .and_then(|c| c.get(aggstate.curaggcontext as usize))
+            .copied();
+        return (AGG_CONTEXT_AGGREGATE, aggcontext);
     }
-    // The WindowAggState arm of the C is not reachable through the trimmed
-    // call frame on main; with no context carried the function falls through
-    // to the C `*aggcontext = NULL; return 0;` tail.
+    // The WindowAggState arm of the C (`IsA(fcinfo->context, WindowAggState)`)
+    // is not modeled here (the WindowAggState carrier is not in this enum yet);
+    // with no AggState context the function falls through to the C
+    // `*aggcontext = NULL; return 0;` tail.
     (0, None)
 }
 
@@ -99,21 +120,20 @@ pub fn AggGetAggref<'a, 'mcx>(
 }
 
 /// `AggGetTempMemoryContext(fcinfo)` — the short-lived per-input-tuple memory
-/// context an aggregate may use for scratch space, or `None`.
+/// context an aggregate may use for scratch space, or `None` when not called as
+/// an aggregate.
+///
+/// MODEL NOTE: as in [`AggCheckCallContext`], C returns the *pointer*
+/// `aggstate->tmpcontext->ecxt_per_tuple_memory`; the owned `MemoryContext` is a
+/// non-Copy EState-pool handle, so the model hands back the tmpcontext's
+/// [`EcxtId`] (the `ExprContext *`), which the caller resolves to the live `Mcx`
+/// through the execUtils pool when it switches into it.
 pub fn AggGetTempMemoryContext<'mcx>(
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
-) -> Option<MemoryContext> {
+) -> Option<EcxtId> {
     if let Some(aggstate) = agg_context(fcinfo) {
-        // return aggstate->tmpcontext->ecxt_per_tuple_memory. As in
-        // AggCheckCallContext, C returns a pointer to the AggState-owned
-        // context; the non-Copy owned `MemoryContext` handle can't be moved out
-        // of the borrow — the handoff is the unported call-frame back-reference.
-        let _ = aggstate.tmpcontext;
-        panic!(
-            "backend_executor_nodeAgg::AggGetTempMemoryContext: live-AggState \
-             tmpcontext handoff — the tmpcontext is an EcxtId into the EState pool, \
-             but this fmgr call-frame back-reference does not thread the EState"
-        );
+        // return aggstate->tmpcontext->ecxt_per_tuple_memory;
+        return aggstate.tmpcontext;
     }
     None
 }
@@ -162,16 +182,24 @@ pub fn AggRegisterCallback<'mcx>(
     func: types_nodes::ExprContextCallbackFunction,
     arg: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
-    if agg_context(fcinfo).is_some() {
+    if let Some(aggstate) = agg_context(fcinfo) {
         // RegisterExprContextCallback(aggstate->curaggcontext, func, arg);
-        // RegisterExprContextCallback is owned by executor/execUtils.c, and
-        // registering against the live curaggcontext requires the &mut AggState
-        // back-reference the trimmed call frame on main does not carry — so the
-        // delegation panics through the unported execUtils owner.
+        //
+        // The calling AggState is now reachable (the K1 fcinfo->context channel);
+        // `aggstate->curaggcontext` is an `EcxtId` into the EState ExprContext
+        // pool. The residual is the delegation target: `RegisterExprContextCallback`
+        // (execUtils, ported) takes a `&mut ExprContext`, and reaching the live
+        // pool `&mut` for that `EcxtId` from here needs an EState-pool register
+        // seam keyed by `EcxtId` (none is declared yet, and this entry point
+        // carries no `&mut EState`). That EState-pool mutable handoff — NOT the
+        // call-frame context channel, which now works — is the remaining surface.
+        let _curaggcontext: i32 = aggstate.curaggcontext;
         let _ = (func, arg);
         panic!(
-            "backend_executor_execUtils::RegisterExprContextCallback: \
-             unported (AggRegisterCallback delegation)"
+            "backend_executor_execUtils::RegisterExprContextCallback: AggRegisterCallback \
+             reaches the live AggState (K1 context channel works) but the delegation needs \
+             an EState ExprContext-pool register seam keyed by the curaggcontext EcxtId \
+             (unported; this entry point holds no &mut EState)"
         );
     }
     // elog(ERROR, "aggregate function cannot register a callback in this context")
@@ -415,4 +443,76 @@ pub fn init_seams() {
     backend_executor_nodeAgg_pq_seams::exec_agg_retrieve_instrumentation::set(
         exec_agg_retrieve_instrumentation_shim,
     );
+}
+
+#[cfg(test)]
+mod k1_context_channel_tests {
+    //! K1 (#324/#335): exercise the `fcinfo->context = (Node *) aggstate`
+    //! channel — `agg_context()` recovering the live `AggState` through the
+    //! `FmgrCallContext::Agg(AggStateContextLink)` back-reference, and the
+    //! `Agg*` support functions reading it. Mirrors C's
+    //! `IsA(fcinfo->context, AggState)` + `(AggState *) fcinfo->context`.
+    use super::*;
+    use mcx::{MemoryContext, PgVec};
+    use types_nodes::aggstate_carrier::AggStateContextLink;
+    use types_nodes::fmgr::FmgrCallContext;
+
+    /// A frame whose `context` is the live AggState resolves as an aggregate
+    /// call: `AggCheckCallContext` => AGG_CONTEXT_AGGREGATE + the curaggcontext
+    /// EcxtId, `AggGetTempMemoryContext` => the tmpcontext EcxtId.
+    #[test]
+    fn agg_frame_resolves_back_to_aggstate() {
+        let ctx = MemoryContext::new("k1-test");
+        let mcx = ctx.mcx();
+
+        // Construct a minimal live AggState (PgBox-stable in real code; a stack
+        // local that outlives the frame here, satisfying the link invariant).
+        let mut aggstate = AggStateData::new_in(mcx).unwrap();
+        // aggstate->aggcontexts[0] = (ExprContext *) EcxtId(3); curaggcontext = 0.
+        let mut aggcontexts: PgVec<'_, EcxtId> = PgVec::new_in(mcx);
+        aggcontexts.push(EcxtId(3));
+        aggstate.aggcontexts = Some(aggcontexts);
+        aggstate.curaggcontext = 0;
+        // aggstate->tmpcontext = (ExprContext *) EcxtId(7);
+        aggstate.tmpcontext = Some(EcxtId(7));
+        // Not in a transition/final fn: curperagg = curpertrans = -1.
+        aggstate.curperagg = -1;
+        aggstate.curpertrans = -1;
+
+        // fcinfo->context = (Node *) aggstate;
+        let link = AggStateContextLink::from_ref(
+            &aggstate as &(dyn types_nodes::aggstate_carrier::AggStateLive<'_> + '_),
+        );
+        let mut fcinfo = FunctionCallInfoBaseData::default();
+        fcinfo.context = Some(FmgrCallContext::Agg(link));
+
+        // agg_context resolves to the same live AggState (tag-checked downcast).
+        assert!(agg_context(&fcinfo).is_some(), "agg_context must recover the AggState");
+
+        // AggCheckCallContext => AGG_CONTEXT_AGGREGATE + curaggcontext EcxtId.
+        let (code, aggcxt) = AggCheckCallContext(&fcinfo);
+        assert_eq!(code, AGG_CONTEXT_AGGREGATE);
+        assert_eq!(aggcxt, Some(EcxtId(3)));
+
+        // AggGetTempMemoryContext => the tmpcontext EcxtId.
+        assert_eq!(AggGetTempMemoryContext(&fcinfo), Some(EcxtId(7)));
+
+        // Not in a transition/final fn => AggGetAggref is None; AggStateIsShared
+        // falls through to the conservative `true`.
+        assert!(AggGetAggref(&fcinfo).is_none());
+        assert!(AggStateIsShared(&fcinfo));
+    }
+
+    /// A frame with no context is the C `fcinfo->context == NULL` case: not an
+    /// aggregate call.
+    #[test]
+    fn null_context_is_not_an_aggregate_call() {
+        let fcinfo = FunctionCallInfoBaseData::default();
+        assert!(agg_context(&fcinfo).is_none());
+        assert_eq!(AggCheckCallContext(&fcinfo), (0, None));
+        assert_eq!(AggGetTempMemoryContext(&fcinfo), None);
+        assert!(AggGetAggref(&fcinfo).is_none());
+        // Conservative "don't scribble on your input" answer when not an agg.
+        assert!(AggStateIsShared(&fcinfo));
+    }
 }
