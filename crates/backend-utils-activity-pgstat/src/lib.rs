@@ -40,6 +40,7 @@ pub mod guc;
 pub mod kind_info;
 pub mod local;
 pub mod pgstat_core;
+pub mod pgstat_relation;
 pub mod registry;
 pub mod shmem;
 mod wire;

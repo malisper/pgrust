@@ -74,6 +74,13 @@ pub fn install_seams() {
     pgstat_seam::pgstat_restore_stats::set(pgcore::pgstat_restore_stats);
     pgstat_seam::pgstat_discard_stats::set(pgcore::pgstat_discard_stats);
 
+    // ---- pgstat_relation.c (relation-open stats gate) ----
+    //
+    // pgstat_init_relation(relid, relkind): the relation-open gate deciding
+    // whether to count this relation's stats. The seam returns the bit the
+    // caller stores into rel->pgstat_enabled.
+    pgstat_seam::pgstat_init_relation::set(crate::pgstat_relation::pgstat_init_relation);
+
     // ---- pgstat.c GUC variable backing (conf->variable accessors) ----
     //
     // `bool pgstat_track_counts` and `int pgstat_fetch_consistency` are plain
