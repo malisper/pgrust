@@ -83,6 +83,49 @@ use backend_utils_sort_storage::logtape;
 use backend_access_common_heaptuple as heaptuple;
 
 // ===========================================================================
+// GUC variables owned by tuplesort.c.
+//
+// `bool trace_sort = false;` and `bool optimize_bounded_sort = true;`
+// (tuplesort.c globals; declared in guc_tables.c as PGC_USERSET bools with no
+// check/assign/show hooks). C reads them straight from the variable, not the
+// ControlFile. Each lives in a per-backend `thread_local` here (the Rust home
+// for the C global); the `guc-tables` slot reads/writes it through the
+// `GucVarAccessors` installed from `init_seams`.
+// ===========================================================================
+
+use core::cell::Cell;
+
+thread_local! {
+    /// `bool trace_sort` (tuplesort.c) — emit LOG lines about sort resource
+    /// usage. Boot default `false`.
+    static trace_sort: Cell<bool> = const { Cell::new(false) };
+
+    /// `bool optimize_bounded_sort` (tuplesort.c) — allow the top-N heapsort
+    /// optimization for bounded sorts. Boot default `true`.
+    static optimize_bounded_sort: Cell<bool> = const { Cell::new(true) };
+}
+
+#[inline]
+fn trace_sort_get() -> bool {
+    trace_sort.with(Cell::get)
+}
+
+#[inline]
+fn trace_sort_set(v: bool) {
+    trace_sort.with(|c| c.set(v));
+}
+
+#[inline]
+fn optimize_bounded_sort_get() -> bool {
+    optimize_bounded_sort.with(Cell::get)
+}
+
+#[inline]
+fn optimize_bounded_sort_set(v: bool) {
+    optimize_bounded_sort.with(|c| c.set(v));
+}
+
+// ===========================================================================
 // Constants (tuplesort.c).
 // ===========================================================================
 
@@ -3865,6 +3908,23 @@ pub fn init_seams() {
     sx::tuplesort_begin_index_gist::set(seam_begin_index_gist);
     sx::tuplesort_putindextuplevalues::set(seam_putindextuplevalues);
     sx::tuplesort_getindextuple::set(seam_getindextuple);
+
+    // The two `bool` GUC variables tuplesort.c owns. C reads them from the
+    // variable itself (no ControlFile, no check/assign/show hooks); each lives
+    // in a thread-local backing store here.
+    //
+    // `trace_sort` has a `guc-tables` slot, so the GUC machinery reaches its
+    // store through the installed `GucVarAccessors` (the get/set path the
+    // boot/SET/SHOW machinery uses to read and write the variable).
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::trace_sort.install(GucVarAccessors {
+        get: trace_sort_get,
+        set: trace_sort_set,
+    });
+
+    // `optimize_bounded_sort` has no `guc-tables` slot in this port, so its
+    // value is exposed through this unit's own read seam instead.
+    sx::optimize_bounded_sort::set(optimize_bounded_sort_get);
 }
 
 fn seam_begin_index_btree<'mcx>(

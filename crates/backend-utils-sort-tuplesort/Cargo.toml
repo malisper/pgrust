@@ -48,6 +48,10 @@ backend-access-common-indextuple-seams = { path = "../backend-access-common-inde
 backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
 # `BuildIndexValueDescription` — the unique-violation error detail (cold path).
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+# The GUC variable slots (`trace_sort` / `optimize_bounded_sort`): tuplesort.c
+# owns these two `bool` config variables; `init_seams()` installs their
+# `GucVarAccessors` so the GUC machinery reaches the backing store here.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 [dev-dependencies]
 # An in-memory BufFile provider for the external-merge tape tests (a leaf-crate

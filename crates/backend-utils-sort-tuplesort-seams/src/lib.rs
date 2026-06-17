@@ -19,6 +19,18 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 seam_core::seam!(
+    /// `bool optimize_bounded_sort` (tuplesort.c): the GUC controlling whether
+    /// the top-N (bounded) heapsort optimization is used. C reads this `bool`
+    /// straight from the variable (no ControlFile; it is a plain PGC_USERSET
+    /// bool in guc_tables.c with no check/assign/show hooks). The
+    /// `backend-utils-misc-guc-tables` port has no slot for this variable, so
+    /// the owner exposes it through this read seam instead; the owner's
+    /// `thread_local` backing store is the C global's Rust home. Pure read of
+    /// backend-local state.
+    pub fn optimize_bounded_sort() -> bool
+);
+
+seam_core::seam!(
     /// `tuplesort_begin_index_hash(heapRel, indexRel, high_mask, low_mask,
     /// max_buckets, workMem, coordinate=NULL, sortopt)` (tuplesortvariants.c):
     /// begin a hash-index tuple sort keyed by bucket number (the masks feed

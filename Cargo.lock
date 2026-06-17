@@ -20253,6 +20253,7 @@ dependencies = [
  "backend-access-nbtree-core-seams",
  "backend-storage-file-buffile-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-sort-sortsupport-seams",
  "backend-utils-sort-storage",
  "backend-utils-sort-storage-seams",
