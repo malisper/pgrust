@@ -40,3 +40,17 @@ seam_core::seam!(
         bool,
     )>
 );
+
+seam_core::seam!(
+    /// `ExecEvalExprNoReturn(state, econtext)` (executor.h / execExprInterp.c):
+    /// run a compiled `ExprState` whose program ends in `EEOP_DONE_NO_RETURN`
+    /// (e.g. a projection's assign program) in `econtext`'s per-tuple memory,
+    /// writing its results directly into `state->resultslot` rather than
+    /// returning a `Datum`. This is the interpreter entry `ExecProject`'s inline
+    /// invokes after `ExecClearTuple(slot)`. Can `ereport(ERROR)`.
+    pub fn exec_eval_expr_no_return<'mcx>(
+        state: &mut ExprState<'mcx>,
+        econtext: types_nodes::EcxtId,
+        estate: &mut EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

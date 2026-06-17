@@ -488,7 +488,7 @@ seam_core::seam!(
     /// projections, which live on the `MergeActionState`, not a node's
     /// `ps_ProjInfo`. Fallible on `ereport(ERROR)` from a projection expression.
     pub fn exec_project_info<'mcx>(
-        proj_info: &types_nodes::execexpr::ProjectionInfo<'mcx>,
+        proj_info: &mut types_nodes::execexpr::ProjectionInfo<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<types_nodes::SlotId>
 );

@@ -1678,6 +1678,7 @@ pub fn exec_build_projection_info_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     target_list: &[types_nodes::TargetEntry<'mcx>],
     econtext: EcxtId,
+    slot: Option<SlotId>,
     input_desc: Option<&TupleDescData<'_>>,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -1691,6 +1692,10 @@ pub fn exec_build_projection_info_impl<'mcx>(
     // not thread parent/ext_params; mirrors ExecInitExpr's parent-ignoring path)
     let state = &mut proj_info.pi_state;
     state.ext_params = 0;
+    // state->resultslot = slot; — the projection's output slot (a pool SlotId,
+    // C's `TupleTableSlot *`). The interpreter's EEOP_ASSIGN_* arms write the
+    // projected columns into this slot at ExecProject time.
+    state.resultslot = slot;
     ensure_result_arena(mcx, state)?;
 
     // ExecCreateExprSetupSteps(state, (Node *) targetList);
@@ -1821,7 +1826,12 @@ pub fn exec_build_projection_info<'mcx>(
         .ps_ExprContext
         .expect("ExecBuildProjectionInfo: PlanState has no ps_ExprContext");
 
-    exec_build_projection_info_impl(estate, target_list, econtext, input_desc)
+    // planstate->ps_ResultTupleSlot — the projection's output slot (C's
+    // ExecAssignProjectionInfo passes `planstate->ps_ResultTupleSlot` as the
+    // `slot` argument). Already a pool SlotId.
+    let slot = planstate.ps_ResultTupleSlot;
+
+    exec_build_projection_info_impl(estate, target_list, econtext, slot, input_desc)
 }
 
 /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos, relDesc,
@@ -1840,6 +1850,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
     target_colnos: &[i32],
     rel_desc: &TupleDescData<'_>,
     econtext: EcxtId,
+    slot: Option<SlotId>,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
@@ -1849,6 +1860,8 @@ pub fn exec_build_update_projection_impl<'mcx>(
     let state = &mut proj_info.pi_state;
     // if (evalTargetList) state->expr = (Expr *) targetList; else state->expr = NULL;
     state.ext_params = 0;
+    // state->resultslot = slot; — the UPDATE projection's output slot.
+    state.resultslot = slot;
     ensure_result_arena(mcx, state)?;
 
     // Count non-junk columns and verify junk comes last.
@@ -2161,43 +2174,77 @@ pub fn exec_qual_and_reset<'mcx>(
 /// slot->tts_flags &= ~TTS_FLAG_EMPTY;
 /// return slot;
 /// ```
-/// Two genuine cross-unit pieces are missing: (1) the embedded
-/// `ExprState.resultslot` is a `PgBox<TupleTableSlot>` in the keystone model,
-/// not a pool [`SlotId`], so the projection's result slot cannot be resolved to
-/// the [`SlotId`] this seam must return (the keystone left `resultslot` as a
-/// `PgBox`, unlike `resvalue`→`ResultCellId`); and (2) execExprInterp (the
-/// cycle partner) exports only `exec_eval_expr_switch_context` — there is no
-/// no-return projection-eval entry (`ExecEvalExprNoReturn`) that runs the
-/// assign program and reports the written slot. Until those land this routes
-/// loudly.
 pub fn exec_project<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SlotId> {
-    let _ = (planstate, estate);
-    panic!(
-        "execExpr-core: ExecProject(ps_ProjInfo) needs (1) the projection result slot as a \
-         pool SlotId — the keystone ExprState.resultslot is still a PgBox<TupleTableSlot>, not \
-         a SlotId — and (2) the execExprInterp no-return projection-eval seam \
-         (ExecEvalExprNoReturn); neither is exported yet"
-    );
+    // ExecProject(planstate->ps_ProjInfo). The projection is owned by the
+    // PlanState; borrow it mutably (the eval mutates pi_state's scratch cells —
+    // C's `ProjectionInfo *` is non-const).
+    let mut proj_info = planstate
+        .ps_ProjInfo
+        .take()
+        .expect("ExecProject: PlanState has no ps_ProjInfo");
+    let slot = exec_project_info(&mut proj_info, estate);
+    // restore the projection on the PlanState
+    planstate.ps_ProjInfo = Some(proj_info);
+    slot
 }
 
-/// `ExecProject(proj_info)` (executor.h) of an explicitly-supplied projection.
-/// Same C inline as [`exec_project`], over a caller-supplied `ProjectionInfo`
-/// (the MERGE per-action `mas_proj` / RETURNING projections). Blocked on the
-/// same two pieces: the `ExprState.resultslot` `SlotId` linkage and the
-/// execExprInterp no-return projection-eval seam.
+/// `ExecProject(proj_info)` (executor.h) of an explicitly-supplied projection
+/// (the MERGE per-action `mas_proj` / RETURNING / subscript projections). The C
+/// `static inline` body:
+/// ```c
+/// econtext = projInfo->pi_exprContext;
+/// state = &projInfo->pi_state;
+/// slot = state->resultslot;
+/// ExecClearTuple(slot);
+/// ExecEvalExprNoReturnSwitchContext(state, econtext);  // runs EEOP_ASSIGN_* steps
+/// slot->tts_flags &= ~TTS_FLAG_EMPTY;                  // ExecStoreVirtualTuple inline
+/// slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+/// return slot;
+/// ```
 pub fn exec_project_info<'mcx>(
-    proj_info: &ProjectionInfo<'mcx>,
+    proj_info: &mut ProjectionInfo<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SlotId> {
-    let _ = (proj_info, estate);
-    panic!(
-        "execExpr-core: ExecProject(projInfo) needs the projection result slot as a pool SlotId \
-         (ExprState.resultslot is still a PgBox<TupleTableSlot>) and the execExprInterp \
-         no-return projection-eval seam (ExecEvalExprNoReturn); neither is exported yet"
-    );
+    // econtext = projInfo->pi_exprContext;
+    let econtext = proj_info
+        .pi_exprContext
+        .expect("ExecProject: ProjectionInfo has no pi_exprContext");
+    // state = &projInfo->pi_state;  slot = state->resultslot;
+    let slot = proj_info
+        .pi_state
+        .resultslot
+        .expect("ExecProject: ProjectionInfo's ExprState has no resultslot");
+
+    // ExecClearTuple(slot): clear any former contents so the slot's
+    // Datum/isnull arrays are safe to use as workspace.
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot)?;
+
+    // ExecEvalExprNoReturnSwitchContext(state, econtext): run the compiled
+    // assign program; it writes the projected columns into the result slot's
+    // tts_values/tts_isnull arrays. The owned interpreter resolves the result
+    // slot from state->resultslot (the SlotId) and writes through `estate`.
+    backend_executor_execExprInterp_seams::exec_eval_expr_no_return::call(
+        &mut proj_info.pi_state,
+        econtext,
+        estate,
+    )?;
+
+    // Mark the result slot as a valid virtual tuple (inlined
+    // ExecStoreVirtualTuple): clear TTS_FLAG_EMPTY and set tts_nvalid to the
+    // descriptor's column count.
+    let result = estate.slot_mut(slot);
+    result.tts_flags &= !types_nodes::tuptable::TTS_FLAG_EMPTY;
+    let natts = result
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("ExecProject: result slot has no tuple descriptor")
+        .natts;
+    result.tts_nvalid = natts as i16;
+
+    Ok(slot)
 }
 
 /// `CreateExecutorState()` (execUtils.c) — a throwaway EState.

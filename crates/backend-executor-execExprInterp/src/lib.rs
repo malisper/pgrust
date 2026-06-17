@@ -59,4 +59,7 @@ pub fn init_seams() {
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::set(
         dispatch::ExecInterpExprStillValid,
     );
+    backend_executor_execExprInterp_seams::exec_eval_expr_no_return::set(
+        dispatch::ExecEvalExprNoReturn,
+    );
 }

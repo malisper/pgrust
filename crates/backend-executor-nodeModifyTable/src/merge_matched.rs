@@ -227,7 +227,7 @@ pub fn ExecMergeMatched<'mcx>(
             // from `mas_action`, and clones of the `mas_whenqual`/`mas_proj`
             // exec-state structs so the `estate` borrow is free for the
             // `ExecQual`/`ExecProject` owner seams. Mirrors `ExecMergeNotMatched`.
-            let (command_type, action_match_kind, action_overriding, mut whenqual, proj) = {
+            let (command_type, action_match_kind, action_overriding, mut whenqual, mut proj) = {
                 let action = &estate.result_rel(result_rel_info).ri_MergeActions
                     [action_kind as usize]
                     .as_ref()
@@ -296,7 +296,7 @@ pub fn ExecMergeMatched<'mcx>(
                     // because the UPDATE action's targetlist doesn't have any.
                     //   newslot = ExecProject(relaction->mas_proj);
                     let proj = proj
-                        .as_ref()
+                        .as_mut()
                         .expect("CMD_UPDATE MERGE action has a projection");
                     let projected =
                         backend_executor_execExpr_seams::exec_project_info::call(proj, estate)?;

@@ -222,8 +222,8 @@ pub fn sub_exec_project<'mcx>(
     // `ExecProject` is owned by execExpr-core; route through its seam over the
     // explicit ProjectionInfo. The result lands in the projection's result
     // slot (its pool id is `carrier.resultslot`).
-    let carrier = proj_carrier(proj_slot(node, which), which);
-    let _resultslot = crate::execExpr_core::exec_project_info(&carrier.proj, estate)?;
+    let carrier = proj_carrier_mut(proj_slot_mut(node, which), which);
+    let _resultslot = crate::execExpr_core::exec_project_info(&mut carrier.proj, estate)?;
     Ok(())
 }
 

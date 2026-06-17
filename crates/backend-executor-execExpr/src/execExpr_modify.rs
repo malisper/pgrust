@@ -88,7 +88,7 @@ pub fn exec_build_merge_insert_projection<'mcx>(
     estate: &mut EStateData<'mcx>,
     target_list: &[TargetEntry<'mcx>],
     econtext: EcxtId,
-    _tgt_slot: SlotId,
+    tgt_slot: SlotId,
     tgt_desc_rel: RriId,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -105,6 +105,7 @@ pub fn exec_build_merge_insert_projection<'mcx>(
         estate,
         target_list,
         econtext,
+        Some(tgt_slot),
         Some(&tgt_desc),
     )
 }
@@ -136,6 +137,9 @@ pub fn exec_build_merge_update_projection<'mcx>(
         .as_ref()
         .expect("ExecBuildMergeUpdateProjection: ri_RelationDesc is NULL")
         .rd_att_clone_in(mcx)?;
+    // result slot = resultRelInfo->ri_newTupleSlot (the MERGE UPDATE "new tuple"
+    // slot).
+    let slot = estate.result_rel(result_rel_info).ri_newTupleSlot;
     execExpr_core::exec_build_update_projection_impl(
         estate,
         target_list,
@@ -143,6 +147,7 @@ pub fn exec_build_merge_update_projection<'mcx>(
         update_colnos,
         &rel_desc,
         econtext,
+        slot,
     )
 }
 
@@ -400,8 +405,15 @@ pub fn exec_build_returning_projection<'mcx>(
         .expect("ExecBuildReturningProjection: ri_RelationDesc is NULL")
         .rd_att_clone_in(mcx)?;
 
-    let proj =
-        execExpr_core::exec_build_projection_info_impl(estate, rlist, econtext, Some(&rd_att))?;
+    // result slot = mtstate->ps.ps_ResultTupleSlot
+    let slot = mtstate.ps.ps_ResultTupleSlot;
+    let proj = execExpr_core::exec_build_projection_info_impl(
+        estate,
+        rlist,
+        econtext,
+        slot,
+        Some(&rd_att),
+    )?;
 
     // resultRelInfo->ri_returningList = rlist;
     let mut stored_list: mcx::PgVec<'mcx, TargetEntry<'mcx>> =
@@ -433,7 +445,7 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
     on_conflict_set: &[TargetEntry<'mcx>],
     on_conflict_cols: &[i32],
     econtext: EcxtId,
-    _proj_slot: SlotId,
+    proj_slot: SlotId,
 ) -> PgResult<ProjectionInfo<'mcx>> {
     let mcx = estate.es_query_cxt;
     let rel_desc = estate
@@ -449,6 +461,7 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
         on_conflict_cols,
         &rel_desc,
         econtext,
+        Some(proj_slot),
     )?;
     Ok(PgBox::into_inner(proj))
 }
@@ -490,14 +503,14 @@ pub fn exec_project_returning<'mcx>(
     // detach the projection out of the pool to satisfy the borrow checker, run
     // ExecProject, then restore it (the projection's identity / contents are
     // unchanged by evaluation — ExecProject only fills its result slot).
-    let project_returning = estate
+    let mut project_returning = estate
         .result_rel_mut(result_rel_info)
         .ri_projectReturning
         .take()
         .expect("ExecProject: resultRelInfo->ri_projectReturning is NULL");
 
     // return ExecProject(projectReturning);
-    let result = execExpr_core::exec_project_info(&project_returning, estate);
+    let result = execExpr_core::exec_project_info(&mut project_returning, estate);
 
     estate.result_rel_mut(result_rel_info).ri_projectReturning = Some(project_returning);
 

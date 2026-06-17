@@ -23,7 +23,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::HeapTuple;
 use types_tuple::heaptuple::TupleDescData;
 
-use crate::execnodes::{EcxtId, Opaque};
+use crate::execnodes::{EcxtId, Opaque, SlotId};
 use types_slot::{TupleSlotKind, TupleTableSlot};
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodes::NodeTag;
@@ -1221,8 +1221,11 @@ pub struct ExprState<'mcx> {
     /// projection.
     pub resvalue: Datum<'mcx>,
     /// `TupleTableSlot *resultslot` — holds the result if projecting a tuple,
-    /// else NULL.
-    pub resultslot: Option<PgBox<'mcx, TupleTableSlot<'mcx>>>,
+    /// else NULL. In the owned model a `TupleTableSlot *` is a pool [`SlotId`]
+    /// into the owning EState's `es_tupleTable` (mirroring every other executor
+    /// slot pointer; the projection's output slot is `ps_ResultTupleSlot`,
+    /// already a `SlotId`). `None` is the C NULL (a non-projecting `ExprState`).
+    pub resultslot: Option<SlotId>,
     /// `struct ExprEvalStep *steps` — instructions computing the return value.
     pub steps: Option<PgVec<'mcx, ExprEvalStep<'mcx>>>,
     /// Per-step result-cell arena (the owned-model replacement for the C

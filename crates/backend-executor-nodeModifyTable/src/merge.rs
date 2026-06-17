@@ -171,9 +171,9 @@ pub fn ExecMergeNotMatched<'mcx>(
                 // projection was already built to use the root's descriptor, so
                 // we don't need to map the tuple here.
                 //   newslot = ExecProject(action->mas_proj);
-                let proj = proj.expect("CMD_INSERT MERGE action has a projection");
+                let mut proj = proj.expect("CMD_INSERT MERGE action has a projection");
                 let newslot =
-                    backend_executor_execExpr_seams::exec_project_info::call(&proj, estate)?;
+                    backend_executor_execExpr_seams::exec_project_info::call(&mut proj, estate)?;
 
                 // mtstate->mt_merge_action = action;
                 //

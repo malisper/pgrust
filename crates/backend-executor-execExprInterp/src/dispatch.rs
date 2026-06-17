@@ -410,6 +410,28 @@ pub fn ExecInterpExprStillValid<'mcx>(
     evalfunc.call(state, econtext, estate)
 }
 
+/// `ExecEvalExprNoReturn(state, econtext)` (executor.h) — run a compiled
+/// `ExprState` whose program ends in `EEOP_DONE_NO_RETURN` purely for its
+/// side-effects (the assign program writes the projected columns into
+/// `state->resultslot`'s value/null arrays). C is a thin static inline:
+/// ```c
+/// retDatum = state->evalfunc(state, econtext, NULL);  // isNull == NULL
+/// Assert(retDatum == (Datum) 0);
+/// ```
+/// The owned model dispatches through the same [`ExecInterpExprStillValid`]
+/// entry (no separate evalfunc; the still-valid check runs once, exactly as the
+/// scalar path) and discards the `(Datum, bool)` it returns — the
+/// `EEOP_DONE_NO_RETURN` arm yields `(Datum::null(), false)`, mirroring C's
+/// zero-Datum assertion.
+pub fn ExecEvalExprNoReturn<'mcx>(
+    state: &mut ExprState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let _ = ExecInterpExprStillValid(state, econtext, estate)?;
+    Ok(())
+}
+
 /// `CheckExprStillValid(ExprState *state, ExprContext *econtext)` — verify the
 /// slot types referenced by the compiled steps still match the econtext's
 /// current tuples.

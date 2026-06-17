@@ -166,7 +166,7 @@ pub fn ExecJustAssignVarImpl<'mcx>(
     // (slot_getattr, 1-based) and written into state->resultslot's per-attribute
     // value/null arrays, which the canonical TupleTableSlot now carries.
     let (value, isnull) = slot_getattr(inslot_id, attnum, estate)?;
-    write_resultslot(state, resultnum, value, isnull);
+    write_resultslot(state, estate, resultnum, value, isnull);
     Ok((Datum::null(), false))
 }
 
@@ -174,15 +174,18 @@ pub fn ExecJustAssignVarImpl<'mcx>(
 /// `tts_isnull[resultnum]` (the C `outslot->tts_values/tts_isnull[resultnum]`
 /// assignment shared by the `ExecJustAssignVar*` paths).
 fn write_resultslot<'mcx>(
-    state: &mut ExprState<'mcx>,
+    state: &ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
     resultnum: i32,
     value: Datum<'mcx>,
     isnull: bool,
 ) {
-    let outslot = state
+    // C: outslot = state->resultslot (a `TupleTableSlot *`); in the owned model
+    // a pool SlotId resolved against the EState tuple table.
+    let slot_id = state
         .resultslot
-        .as_mut()
         .expect("ExecJustAssignVar*: ExprState has no resultslot");
+    let outslot = estate.slot_mut(slot_id);
     let idx = resultnum as usize;
     debug_assert!(
         idx < outslot.tts_values.len(),
@@ -251,7 +254,7 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
     // seam (attnum is 0-based here, slot_getattr is 1-based) and written into
     // state->resultslot's per-attribute value/null arrays.
     let (value, isnull) = slot_getattr(inslot_id, attnum + 1, estate)?;
-    write_resultslot(state, resultnum, value, isnull);
+    write_resultslot(state, estate, resultnum, value, isnull);
     Ok((Datum::null(), false))
 }
 

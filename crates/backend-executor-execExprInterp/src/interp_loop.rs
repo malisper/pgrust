@@ -242,7 +242,7 @@ pub fn ExecInterpExpr<'mcx>(
                         slot_id,
                         attnum + 1,
                     )?;
-                write_resultslot(state, resultnum, value, isnull);
+                write_resultslot(state, estate, resultnum, value, isnull);
                 op += 1;
             }
 
@@ -253,7 +253,7 @@ pub fn ExecInterpExpr<'mcx>(
                 let resultnum = assign_tmp_resultnum(state, op);
                 let value = state.resvalue.clone();
                 let isnull = state.resnull;
-                write_resultslot(state, resultnum, value, isnull);
+                write_resultslot(state, estate, resultnum, value, isnull);
                 op += 1;
             }
 
@@ -280,7 +280,7 @@ pub fn ExecInterpExpr<'mcx>(
                 } else {
                     state.resvalue.clone()
                 };
-                write_resultslot(state, resultnum, value, isnull);
+                write_resultslot(state, estate, resultnum, value, isnull);
                 op += 1;
             }
 
@@ -1198,15 +1198,20 @@ fn assign_tmp_resultnum(state: &ExprState<'_>, op: usize) -> i32 {
 /// `tts_isnull[resultnum]`. C asserts `resultnum < resultslot->...->natts`; the
 /// canonical slot's `tts_values`/`tts_isnull` carry the projected columns.
 fn write_resultslot<'mcx>(
-    state: &mut ExprState<'mcx>,
+    state: &ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
     resultnum: i32,
     value: Datum<'mcx>,
     isnull: bool,
 ) {
-    let resultslot = state
+    // C: resultslot = state->resultslot (a `TupleTableSlot *`). In the owned
+    // model that pointer is a pool SlotId into the EState's tuple table; resolve
+    // it to the canonical slot whose tts_values/tts_isnull arrays carry the
+    // projected columns.
+    let slot_id = state
         .resultslot
-        .as_mut()
         .expect("EEOP_ASSIGN_*: ExprState has no resultslot");
+    let resultslot = estate.slot_mut(slot_id);
     let idx = resultnum as usize;
     debug_assert!(
         idx < resultslot.tts_values.len(),
