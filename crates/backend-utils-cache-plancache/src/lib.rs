@@ -9,24 +9,32 @@
 //! assertions, error messages) of every revalidation / invalidation / build
 //! routine. Only calls into *other* subsystems cross a seam.
 //!
-//! ## Modeling the shared-mutable cache graph
+//! ## Modeling the shared-mutable cache graph (identity vs storage)
 //!
 //! C shares the same `CachedPlan *` simultaneously between `plansource->gplan`,
 //! the caller's returned pointer, and a `ResourceOwner`, and the backend-global
 //! lists hold `CachedPlanSource *`s that invalidation callbacks mutate in place
-//! while callers still hold them. That shape is modeled with `Rc<RefCell<…>>`
-//! interned in a [`thread_local!`] registry keyed by a stable `u64` handle; the
-//! public entry points take/return those handles exactly as the C entry points
-//! take/return `CachedPlanSource *` / `CachedPlan *`. The C reference count
-//! (`CachedPlan.refcount`) stays authoritative; the registry `Rc` only keeps
-//! the data reachable until the refcount and all links drop, at which point the
-//! entry is removed (`MemoryContextDelete` crosses the mctx seam for the real
-//! storage).
+//! while callers still hold them. That *identity* shape is modeled with
+//! `Rc<RefCell<…>>` interned in a [`thread_local!`] registry keyed by a stable
+//! `u64` handle; the public entry points take/return those handles exactly as
+//! the C entry points take/return `CachedPlanSource *` / `CachedPlan *`. The C
+//! reference count (`CachedPlan.refcount`) stays authoritative; the registry
+//! `Rc` only keeps the data reachable until the refcount and all links drop.
 //!
-//! The saved-source / cached-expression lists are a backend-lifetime
-//! thread-local global, so their owned `String`/`Vec` fields use plain owned
-//! collections (`docs/mctx-design.md` decision 5), not `Mcx`-parameterized
-//! ones.
+//! ## De-handled data: owned value nodes in private MemoryContexts (F0)
+//!
+//! Where C allocates the querytree / plan / search-path / result-tupdesc data
+//! in a `MemoryContext` subsidiary to the `CachedPlanSource`/`CachedPlan`, the
+//! Rust model OWNS those values directly inside the struct, backed by a
+//! struct-private [`mcx::MemoryContext`] (the portalmem pattern,
+//! `docs/mctx-design.md`): each value is produced/copied via `clone_in(ctx.mcx())`
+//! and its borrow extended to the field's `'static` marker. That is sound
+//! because each value field is declared *before* the `MemoryContext` field that
+//! backs it, so the value is dropped (freeing its `Global`-heap storage) before
+//! the arena it is accounted to. `CreateCachedPlan`'s C trick of building under
+//! the caller's transient context and reparenting later is collapsed to: build
+//! the value, drop on error — Rust's drop on `?` gives the same "disappears on
+//! error" guarantee.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -35,33 +43,48 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_plancache::{
-    AnalyzedQueryHandle, CommandTag, CtxId, ExprHandle, InvalItemKey, ParamListInfoHandle,
-    ParserSetupHandle, PlannedStmtListHandle, PortalStrategy, PostRewriteHandle,
-    QueryEnvHandle, QueryHandle, QueryListHandle, RawStmtHandle, ResourceOwnerHandle,
-    SearchPathMatcherHandle, SysCacheId, TargetListHandle, TupleDescHandle, CACHEDEXPR_MAGIC,
-    CACHEDPLANSOURCE_MAGIC, CACHEDPLAN_MAGIC, CURSOR_OPT_CUSTOM_PLAN,
-    CURSOR_OPT_GENERIC_PLAN, FIRST_NORMAL_TRANSACTION_ID, PLAN_CACHE_MODE_FORCE_CUSTOM_PLAN,
-    PLAN_CACHE_MODE_FORCE_GENERIC_PLAN, RTE_RELATION, RTE_SUBQUERY,
+use types_namespace::namespace::SearchPathMatcher;
+use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
+use types_nodes::nodeindexscan::PlannedStmt;
+use types_nodes::nodes::{CmdType, Node};
+use types_nodes::parsestmt::{
+    CachedPlanHandle as SeamPlanHandle, CachedPlanSourceHandle as SeamSourceHandle, CommandTag,
+    ParamListInfoHandle, RawStmt, ResourceOwnerHandle,
 };
+use types_nodes::primnodes::Expr;
+use types_nodes::queryenvironment::QueryEnvironment;
+use types_plancache::{
+    InvalItemKey, SysCacheId, CACHEDEXPR_MAGIC, CACHEDPLANSOURCE_MAGIC,
+    CACHEDPLAN_MAGIC, CURSOR_OPT_CUSTOM_PLAN, CURSOR_OPT_GENERIC_PLAN,
+    FIRST_NORMAL_TRANSACTION_ID, PLAN_CACHE_MODE_FORCE_CUSTOM_PLAN,
+    PLAN_CACHE_MODE_FORCE_GENERIC_PLAN,
+};
+use types_tuple::heaptuple::TupleDescData;
 
-use backend_access_common_tupdesc_pc_seams as tupdesc_seams;
-use backend_catalog_namespace_pc_seams as namespace_seams;
-use backend_nodes_copyfuncs_pc_seams as node_seams;
-use backend_optimizer_plan_planner_pc_seams as planner_seams;
-use backend_parser_analyze_pc_seams as analyze_seams;
-use backend_rewrite_rewriteHandler_pc_seams as rewrite_seams;
+// Value-producer seams (the de-handled pipeline).
+use backend_catalog_namespace_seams as namespace_seams;
+use backend_executor_execTuples_seams as exectuples_seams;
+use backend_optimizer_plan_planner_pc_seams as planner_pc_seams;
+use backend_optimizer_plan_setrefs_seams as setrefs_seams;
+use backend_parser_analyze_seams as analyze_seams;
+use backend_rewrite_rewritehandler_seams as rewrite_seams;
+use backend_tcop_postgres_seams as postgres_seams;
+use backend_tcop_pquery_seams as pquery_seams;
+use backend_tcop_utility_seams as utility_seams;
+
+// Seams that stay handle/scalar-shaped (no value content crosses them).
+use backend_access_common_tupdesc_seams as tupdesc_seams;
 use backend_storage_lmgr_lmgr_pc_seams as lmgr_seams;
-use backend_tcop_pquery_pc_seams as pquery_seams;
-use backend_tcop_utility_pc_seams as utility_seams;
 use backend_utils_cache_inval_pc_seams as inval_seams;
 use backend_utils_cache_syscache_pc_seams as syscache_seams;
 use backend_utils_misc_backendstate_pc_seams as backend_seams;
-use backend_utils_mmgr_mcxt_pc_seams as mcxt_seams;
 use backend_utils_resowner_pc_seams as resowner_seams;
 use backend_utils_time_snapmgr_pc_seams as snapmgr_seams;
+
+use backend_utils_cache_plancache_seams as inward;
 
 #[cfg(test)]
 mod tests;
@@ -82,29 +105,41 @@ const NULL_HANDLE: u64 = 0;
 
 /* ==========================================================================
  * In-crate state owned by plancache (mirrors plancache.c's allocations).
+ *
+ * The value fields OWN their nodes in the struct-private `MemoryContext`s
+ * (`context` for permanent source data; `query_context` for the rewritten
+ * querytree). DROP ORDER: every value field is declared BEFORE the context
+ * that backs it, so values are dropped first (portalmem `'static` pattern).
  * ======================================================================== */
 
-/// `struct CachedPlanSource`. Querytree/plan handles and search-path/result-
-/// desc tokens point at storage owned by sibling subsystems (reached via seam).
+/// `struct CachedPlanSource`.
 struct CachedPlanSourceData {
     magic: i32,
-    raw_parse_tree: RawStmtHandle,
-    analyzed_parse_tree: AnalyzedQueryHandle,
+    /// `RawStmt *raw_parse_tree` — owned in `context` (NULL == `None`).
+    raw_parse_tree: Option<RawStmt<'static>>,
+    /// `Query *analyzed_parse_tree` — owned in `context` (NULL == `None`).
+    analyzed_parse_tree: Option<Query<'static>>,
     query_string: String,
     command_tag: CommandTag,
     param_types: Vec<Oid>,
     num_params: i32,
-    parser_setup: ParserSetupHandle,
-    post_rewrite: PostRewriteHandle,
+    /// `bool has_parser_setup` — C `parserSetup != NULL`. The owned model has
+    /// no value parser-setup hook (only reached for PREPARE-with-$n / SPI; see
+    /// map B2), so revalidation of such a source is an unsupported-feature path.
+    has_parser_setup: bool,
+    /// `void (*postRewrite)` — present? The owned model has no value post-rewrite
+    /// hook producer yet; presence is tracked, invocation is the B2 path.
+    has_post_rewrite: bool,
     cursor_options: i32,
     fixed_result: bool,
-    result_desc: TupleDescHandle,
-    context: CtxId,
-    query_list: QueryListHandle,
+    /// `TupleDesc resultDesc` — owned in `context` (NULL == `None`).
+    result_desc: Option<TupleDescData<'static>>,
+    /// `List *query_list` — the rewritten `Query` list, owned in `query_context`.
+    query_list: Vec<Query<'static>>,
     relation_oids: Vec<Oid>,
     inval_items: Vec<InvalItemKey>,
-    search_path: SearchPathMatcherHandle,
-    query_context: Option<CtxId>,
+    /// `SearchPathMatcher *search_path` — owned in `query_context`.
+    search_path: Option<SearchPathMatcher<'static>>,
     rewrite_role_id: Oid,
     rewrite_row_security: bool,
     depends_on_rls: bool,
@@ -118,6 +153,16 @@ struct CachedPlanSourceData {
     total_custom_cost: f64,
     num_custom_plans: i64,
     num_generic_plans: i64,
+    /// `MemoryContext query_context` — backs `query_list`/`search_path`. Declared
+    /// AFTER those value fields so it drops last. `None` when not yet built.
+    query_context: Option<MemoryContext>,
+    /// `MemoryContext context` — the source's permanent context, backs
+    /// `raw_parse_tree`/`analyzed_parse_tree`/`result_desc`/`query_string`.
+    /// Declared LAST so it drops after every value field above. For one-shot
+    /// sources there is no dedicated context (data lives in the caller's
+    /// context in C); we still own a context here for storage, faithful in
+    /// behavior (dropped with the struct).
+    context: MemoryContext,
 }
 
 /// `struct CachedPlan`. `generation` is written but, as in C, never read by
@@ -125,7 +170,8 @@ struct CachedPlanSourceData {
 #[allow(dead_code)]
 struct CachedPlanData {
     magic: i32,
-    stmt_list: PlannedStmtListHandle,
+    /// `List *stmt_list` — owned `PlannedStmt`s in this plan's private `context`.
+    stmt_list: Vec<PlannedStmt<'static>>,
     is_oneshot: bool,
     is_saved: bool,
     is_valid: bool,
@@ -134,18 +180,22 @@ struct CachedPlanData {
     saved_xmin: u32,
     generation: i32,
     refcount: i32,
-    context: CtxId,
+    /// `MemoryContext context` — declared AFTER `stmt_list` so it drops last.
+    context: MemoryContext,
 }
 
-/// `struct CachedExpression`. `expr` holds the planned-expression handle.
+/// `struct CachedExpression`. `expr` holds the planned expression.
 #[allow(dead_code)]
 struct CachedExpressionData {
     magic: i32,
-    expr: ExprHandle,
+    /// `Node *expr` — owned planned expression. `Expr` is lifetime-free (owns
+    /// its payload inline), so no arena backing is needed.
+    expr: Expr,
     is_valid: bool,
     relation_oids: Vec<Oid>,
     inval_items: Vec<InvalItemKey>,
-    context: CtxId,
+    /// `MemoryContext context` — declared AFTER `expr` so it drops last.
+    context: MemoryContext,
 }
 
 type SourceRc = Rc<RefCell<CachedPlanSourceData>>;
@@ -219,6 +269,79 @@ fn get_expr(h: u64) -> ExprRc {
 }
 
 /* ==========================================================================
+ * `'static` clone helpers — the portalmem pattern.  Each clones a value into
+ * the named `MemoryContext` and extends the borrow to the context-lived
+ * `'static` marker. SOUND because the destination context is owned by the same
+ * struct and dropped AFTER the value field (see the field-order notes above).
+ * ======================================================================== */
+
+/// `MemoryContextSwitchTo(ctx); copyObject(query)` — clone `query` into `ctx`.
+fn clone_query_into(ctx: &MemoryContext, query: &Query<'_>) -> PgResult<Query<'static>> {
+    let copied = query.clone_in(ctx.mcx())?;
+    // SAFETY: `copied` lives in `ctx` (real owned heap freed by its own
+    // PgBox/PgVec Drop). `ctx` is dropped after the value field it backs.
+    Ok(unsafe { core::mem::transmute::<Query<'_>, Query<'static>>(copied) })
+}
+
+/// Clone a `Query` list into `ctx`.
+fn clone_query_list_into(
+    ctx: &MemoryContext,
+    list: &[Query<'_>],
+) -> PgResult<Vec<Query<'static>>> {
+    let mut out = Vec::with_capacity(list.len());
+    for q in list {
+        out.push(clone_query_into(ctx, q)?);
+    }
+    Ok(out)
+}
+
+/// Clone a `PlannedStmt` list into `ctx`.
+fn clone_plan_list_into(
+    ctx: &MemoryContext,
+    list: &[PlannedStmt<'_>],
+) -> PgResult<Vec<PlannedStmt<'static>>> {
+    let mut out = Vec::with_capacity(list.len());
+    for s in list {
+        let copied = s.clone_in(ctx.mcx())?;
+        out.push(unsafe { core::mem::transmute::<PlannedStmt<'_>, PlannedStmt<'static>>(copied) });
+    }
+    Ok(out)
+}
+
+/// Clone a `RawStmt` into `ctx`.
+fn clone_raw_into(ctx: &MemoryContext, raw: &RawStmt<'_>) -> PgResult<RawStmt<'static>> {
+    let copied = raw.clone_in(ctx.mcx())?;
+    Ok(unsafe { core::mem::transmute::<RawStmt<'_>, RawStmt<'static>>(copied) })
+}
+
+/// Clone a `TupleDescData` into `ctx` (C `CreateTupleDescCopy`).
+fn clone_tupdesc_into(
+    ctx: &MemoryContext,
+    td: &TupleDescData<'_>,
+) -> PgResult<TupleDescData<'static>> {
+    let copied = td.clone_in(ctx.mcx())?;
+    Ok(unsafe { core::mem::transmute::<TupleDescData<'_>, TupleDescData<'static>>(copied) })
+}
+
+/// Clone a `SearchPathMatcher` into `ctx` (the `query_context` it is saved in).
+fn clone_search_path_into(
+    ctx: &MemoryContext,
+    sp: &SearchPathMatcher<'_>,
+) -> PgResult<SearchPathMatcher<'static>> {
+    let mut schemas: PgVec<'_, Oid> = mcx::vec_with_capacity_in(ctx.mcx(), sp.schemas.len())?;
+    for &o in sp.schemas.iter() {
+        schemas.push(o);
+    }
+    let schemas = unsafe { core::mem::transmute::<PgVec<'_, Oid>, PgVec<'static, Oid>>(schemas) };
+    Ok(SearchPathMatcher {
+        schemas,
+        addCatalog: sp.addCatalog,
+        addTemp: sp.addTemp,
+        generation: sp.generation,
+    })
+}
+
+/* ==========================================================================
  * Small inline helpers from transam.h / c.h.
  * ======================================================================== */
 
@@ -246,9 +369,27 @@ fn oid_is_valid(oid: Oid) -> bool {
     oid != INVALID_OID
 }
 
+/// `(plannedstmt->commandType == CMD_UTILITY)`.
+#[inline]
+fn pstmt_is_utility(stmt: &PlannedStmt<'_>) -> bool {
+    stmt.commandType == CmdType::CMD_UTILITY
+}
+
+/// `(query->commandType == CMD_UTILITY)`.
+#[inline]
+fn query_is_utility(q: &Query<'_>) -> bool {
+    q.commandType == CmdType::CMD_UTILITY
+}
+
 /// `elog(ERROR, ...)` — internal error.
 fn elog_error(msg: &str) -> PgError {
     PgError::new(ERROR, msg.to_string())
+}
+
+/// `list_member_oid(list, oid)`.
+#[inline]
+fn list_member_oid(list: &[Oid], oid: Oid) -> bool {
+    list.contains(&oid)
 }
 
 /* ==========================================================================
@@ -280,30 +421,28 @@ pub fn InitPlanCache() -> PgResult<()> {
  * ======================================================================== */
 
 fn new_source(
-    context: CtxId,
+    context: MemoryContext,
     is_oneshot: bool,
     command_tag: CommandTag,
     query_string: String,
 ) -> CachedPlanSourceData {
     CachedPlanSourceData {
         magic: CACHEDPLANSOURCE_MAGIC,
-        raw_parse_tree: RawStmtHandle::NULL,
-        analyzed_parse_tree: AnalyzedQueryHandle::NULL,
+        raw_parse_tree: None,
+        analyzed_parse_tree: None,
         query_string,
         command_tag,
         param_types: Vec::new(),
         num_params: 0,
-        parser_setup: ParserSetupHandle::NONE,
-        post_rewrite: PostRewriteHandle::NONE,
+        has_parser_setup: false,
+        has_post_rewrite: false,
         cursor_options: 0,
         fixed_result: false,
-        result_desc: TupleDescHandle::NULL,
-        context,
-        query_list: QueryListHandle::NIL,
+        result_desc: None,
+        query_list: Vec::new(),
         relation_oids: Vec::new(),
         inval_items: Vec::new(),
-        search_path: SearchPathMatcherHandle::NULL,
-        query_context: None,
+        search_path: None,
         rewrite_role_id: INVALID_OID,
         rewrite_row_security: false,
         depends_on_rls: false,
@@ -317,30 +456,45 @@ fn new_source(
         total_custom_cost: 0.0,
         num_custom_plans: 0,
         num_generic_plans: 0,
+        query_context: None,
+        context,
     }
 }
 
 /// `CreateCachedPlan(raw_parse_tree, query_string, commandTag)`.
+///
+/// The de-handle takes the raw parse tree by reference and copies it into the
+/// source's private `context` (C `copyObject(raw_parse_tree)`). A NULL raw tree
+/// (empty query) is the `None`-typed companion entry `create_cached_plan_empty`.
 pub fn CreateCachedPlan(
-    raw_parse_tree: RawStmtHandle,
+    raw_parse_tree: &RawStmt<'_>,
     query_string: &str,
     command_tag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
-    let current = mcxt_seams::current_memory_context::call()?;
-    let source_context =
-        mcxt_seams::alloc_set_context_create_small::call(current, "CachedPlanSource")?;
-    let oldcxt = mcxt_seams::memory_context_switch_to::call(source_context)?;
+    // AllocSetContextCreate(CurrentMemoryContext, "CachedPlanSource", ...).
+    let context = MemoryContext::new("CachedPlanSource");
 
-    // raw_parse_tree = copyObject(raw_parse_tree) — NULL copies to NULL.
-    let raw_copy = node_seams::copy_raw_stmt::call(raw_parse_tree)?;
-    let qstr = query_string.to_string();
-    mcxt_seams::memory_context_set_identifier::call(source_context, &qstr)?;
+    // raw_parse_tree = copyObject(raw_parse_tree).
+    let raw_copy = clone_raw_into(&context, raw_parse_tree)?;
 
-    let mut data = new_source(source_context, false, command_tag, qstr);
-    data.raw_parse_tree = raw_copy;
+    let mut data = new_source(context, false, command_tag, query_string.to_string());
+    data.raw_parse_tree = Some(raw_copy);
 
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
+    let handle = with_state(|s| {
+        let h = s.alloc_handle();
+        s.sources.insert(h, Rc::new(RefCell::new(data)));
+        h
+    });
+    Ok(handle)
+}
 
+/// `CreateCachedPlan(NULL, query_string, commandTag)` — the empty-query case.
+pub fn CreateCachedPlanEmpty(
+    query_string: &str,
+    command_tag: CommandTag,
+) -> PgResult<CachedPlanSourceHandle> {
+    let context = MemoryContext::new("CachedPlanSource");
+    let data = new_source(context, false, command_tag, query_string.to_string());
     let handle = with_state(|s| {
         let h = s.alloc_handle();
         s.sources.insert(h, Rc::new(RefCell::new(data)));
@@ -351,30 +505,34 @@ pub fn CreateCachedPlan(
 
 /// `CreateCachedPlanForQuery(analyzed_parse_tree, query_string, commandTag)`.
 pub fn CreateCachedPlanForQuery(
-    analyzed_parse_tree: AnalyzedQueryHandle,
+    analyzed_parse_tree: &Query<'_>,
     query_string: &str,
     command_tag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
-    let plansource = CreateCachedPlan(RawStmtHandle::NULL, query_string, command_tag)?;
+    let plansource = CreateCachedPlanEmpty(query_string, command_tag)?;
     let src = get_source(plansource);
-    let context = src.borrow().context;
-    let oldcxt = mcxt_seams::memory_context_switch_to::call(context)?;
-    let copy = node_seams::copy_analyzed_query::call(analyzed_parse_tree)?;
-    src.borrow_mut().analyzed_parse_tree = copy;
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
+    let copy = {
+        let p = src.borrow();
+        clone_query_into(&p.context, analyzed_parse_tree)?
+    };
+    src.borrow_mut().analyzed_parse_tree = Some(copy);
     Ok(plansource)
 }
 
 /// `CreateOneShotCachedPlan(raw_parse_tree, query_string, commandTag)`.
+///
+/// In C the raw tree is NOT copied (it lives in the caller's context). The owned
+/// model still copies it into the source's context (it has nowhere else to own
+/// it from); behavior is identical — the data disappears with the source.
 pub fn CreateOneShotCachedPlan(
-    raw_parse_tree: RawStmtHandle,
+    raw_parse_tree: &RawStmt<'_>,
     query_string: &str,
     command_tag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
-    // palloc0 in CurrentMemoryContext; raw tree NOT copied.
-    let current = mcxt_seams::current_memory_context::call()?;
-    let mut data = new_source(current, true, command_tag, query_string.to_string());
-    data.raw_parse_tree = raw_parse_tree;
+    let context = MemoryContext::new("CachedPlanSource");
+    let raw_copy = clone_raw_into(&context, raw_parse_tree)?;
+    let mut data = new_source(context, true, command_tag, query_string.to_string());
+    data.raw_parse_tree = Some(raw_copy);
 
     let handle = with_state(|s| {
         let h = s.alloc_handle();
@@ -388,61 +546,69 @@ pub fn CreateOneShotCachedPlan(
  * CompleteCachedPlan
  * ======================================================================== */
 
-/// `CompleteCachedPlan(...)`.
+/// `CompleteCachedPlan(plansource, querytree_list, querytree_context, ...)`.
+///
+/// `querytree_list` is the rewritten `Query` list (a slice of `Node::Query`).
+/// The de-handle always owns the querytree in a freshly created `query_context`
+/// (the C `querytree_context == NULL` path — callers in this model never hand
+/// in a pre-built context).
 #[allow(clippy::too_many_arguments)]
 pub fn CompleteCachedPlan(
     plansource: CachedPlanSourceHandle,
-    mut querytree_list: QueryListHandle,
-    querytree_context: Option<CtxId>,
+    querytree_list: &[Query<'_>],
     param_types: &[Oid],
     num_params: i32,
-    parser_setup: ParserSetupHandle,
+    has_parser_setup: bool,
     cursor_options: i32,
     fixed_result: bool,
 ) -> PgResult<()> {
     let src = get_source(plansource);
 
-    let (source_context, is_oneshot) = {
+    let is_oneshot = {
         let p = src.borrow();
         debug_assert_eq!(p.magic, CACHEDPLANSOURCE_MAGIC);
         debug_assert!(!p.is_complete);
-        (p.context, p.is_oneshot)
+        p.is_oneshot
     };
 
-    let oldcxt = mcxt_seams::current_memory_context::call()?;
-
-    let querytree_context: CtxId = if is_oneshot {
-        mcxt_seams::current_memory_context::call()?
-    } else if let Some(qcxt) = querytree_context {
-        mcxt_seams::memory_context_set_parent::call(qcxt, source_context)?;
-        mcxt_seams::memory_context_switch_to::call(qcxt)?;
-        qcxt
+    // querytree_context: a fresh child for non-one-shot; for one-shot the data
+    // lives directly in `context`.
+    let query_context = if is_oneshot {
+        None
     } else {
-        let qcxt =
-            mcxt_seams::alloc_set_context_create_small::call(source_context, "CachedPlanQuery")?;
-        mcxt_seams::memory_context_switch_to::call(qcxt)?;
-        querytree_list = node_seams::copy_query_list::call(querytree_list)?;
-        qcxt
+        Some(MemoryContext::new("CachedPlanQuery"))
     };
 
-    src.borrow_mut().query_context = Some(querytree_context);
-    src.borrow_mut().query_list = querytree_list;
+    // Copy the querytree list into the owning context.
+    let owned_qlist = {
+        let p = src.borrow();
+        let ctx = query_context.as_ref().unwrap_or(&p.context);
+        clone_query_list_into(ctx, querytree_list)?
+    };
 
-    if !is_oneshot && StmtPlanRequiresRevalidation(&src)? {
-        let deps = node_seams::extract_query_dependencies::call(querytree_list)?;
-        let role = backend_seams::get_user_id::call()?;
-        let rsec = backend_seams::row_security::call()?;
-        let sp = namespace_seams::get_search_path_matcher::call(querytree_context)?;
+    {
         let mut p = src.borrow_mut();
-        p.relation_oids = deps.relation_oids;
-        p.inval_items = deps.inval_items;
-        p.depends_on_rls = deps.depends_on_rls;
-        p.rewrite_role_id = role;
-        p.rewrite_row_security = rsec;
-        p.search_path = sp;
+        p.query_context = query_context;
+        p.query_list = owned_qlist;
     }
 
-    mcxt_seams::memory_context_switch_to::call(source_context)?;
+    if !is_oneshot && StmtPlanRequiresRevalidation(&src)? {
+        // extract_query_dependencies over the owned query list.
+        let deps = {
+            let p = src.borrow();
+            extract_deps(&p.query_list)?
+        };
+        let role = backend_seams::get_user_id::call()?;
+        let rsec = backend_seams::row_security::call()?;
+        let sp = get_search_path_into(&src)?;
+        let mut p = src.borrow_mut();
+        p.relation_oids = deps.0;
+        p.inval_items = deps.1;
+        p.depends_on_rls = deps.2;
+        p.rewrite_role_id = role;
+        p.rewrite_row_security = rsec;
+        p.search_path = Some(sp);
+    }
 
     {
         let mut p = src.borrow_mut();
@@ -452,15 +618,17 @@ pub fn CompleteCachedPlan(
             p.param_types = Vec::new();
         }
         p.num_params = num_params;
-        p.parser_setup = parser_setup;
+        p.has_parser_setup = has_parser_setup;
         p.cursor_options = cursor_options;
         p.fixed_result = fixed_result;
     }
 
-    let result_desc = PlanCacheComputeResultDesc(querytree_list)?;
+    // result_desc = PlanCacheComputeResultDesc(querytree_list), owned in context.
+    let result_desc = {
+        let p = src.borrow();
+        compute_result_desc_into(&p.context, &p.query_list)?
+    };
     src.borrow_mut().result_desc = result_desc;
-
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
 
     let mut p = src.borrow_mut();
     p.is_complete = true;
@@ -469,26 +637,16 @@ pub fn CompleteCachedPlan(
 }
 
 /* ==========================================================================
- * SetPostRewriteHook
- * ======================================================================== */
-
-/// `SetPostRewriteHook(plansource, postRewrite, postRewriteArg)`.
-pub fn SetPostRewriteHook(
-    plansource: CachedPlanSourceHandle,
-    post_rewrite: PostRewriteHandle,
-) -> PgResult<()> {
-    let src = get_source(plansource);
-    let mut p = src.borrow_mut();
-    debug_assert_eq!(p.magic, CACHEDPLANSOURCE_MAGIC);
-    p.post_rewrite = post_rewrite;
-    Ok(())
-}
-
-/* ==========================================================================
  * SaveCachedPlan
  * ======================================================================== */
 
 /// `SaveCachedPlan(plansource)`.
+///
+/// In C this reparents the source's context under `CacheMemoryContext` so it
+/// lives indefinitely. In the owned model the source already outlives the call
+/// (it is in the registry); "saving" only adds it to `saved_plan_list` and
+/// flips `is_saved` so the invalidation callbacks scan it. The context lifetime
+/// is governed by the struct (dropped on `DropCachedPlan`).
 pub fn SaveCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
     let src = get_source(plansource);
     {
@@ -503,10 +661,6 @@ pub fn SaveCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
 
     ReleaseGenericPlan(plansource)?;
 
-    let context = src.borrow().context;
-    let cache_cxt = mcxt_seams::cache_memory_context::call()?;
-    mcxt_seams::memory_context_set_parent::call(context, cache_cxt)?;
-
     with_state(|s| s.saved_plan_list.push(plansource));
     src.borrow_mut().is_saved = true;
     Ok(())
@@ -519,10 +673,10 @@ pub fn SaveCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
 /// `DropCachedPlan(plansource)`.
 pub fn DropCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
     let src = get_source(plansource);
-    let (is_saved, is_oneshot, context) = {
+    let is_saved = {
         let p = src.borrow();
         debug_assert_eq!(p.magic, CACHEDPLANSOURCE_MAGIC);
-        (p.is_saved, p.is_oneshot, p.context)
+        p.is_saved
     };
 
     if is_saved {
@@ -534,10 +688,9 @@ pub fn DropCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
 
     src.borrow_mut().magic = 0;
 
-    if !is_oneshot {
-        mcxt_seams::memory_context_delete::call(context)?;
-    }
-
+    // MemoryContextDelete(plansource->context) — happens when the struct (and
+    // its owned `context`/`query_context`) drops as we remove it from the
+    // registry below (the last `Rc` reference).
     with_state(|s| {
         s.sources.remove(&plansource);
     });
@@ -567,10 +720,10 @@ fn ReleaseGenericPlan(plansource: CachedPlanSourceHandle) -> PgResult<()> {
 /// `StmtPlanRequiresRevalidation(plansource)`.
 fn StmtPlanRequiresRevalidation(src: &SourceRc) -> PgResult<bool> {
     let p = src.borrow();
-    if !p.raw_parse_tree.is_null() {
-        analyze_seams::stmt_requires_parse_analysis::call(p.raw_parse_tree)
-    } else if !p.analyzed_parse_tree.is_null() {
-        analyze_seams::query_requires_rewrite_plan::call(p.analyzed_parse_tree)
+    if let Some(raw) = &p.raw_parse_tree {
+        analyze_seams::stmt_requires_parse_analysis_value::call(raw)
+    } else if let Some(analyzed) = &p.analyzed_parse_tree {
+        analyze_seams::query_requires_rewrite_plan_value::call(analyzed)
     } else {
         // empty query never needs revalidation
         Ok(false)
@@ -580,36 +733,94 @@ fn StmtPlanRequiresRevalidation(src: &SourceRc) -> PgResult<bool> {
 /// `BuildingPlanRequiresSnapshot(plansource)`.
 fn BuildingPlanRequiresSnapshot(src: &SourceRc) -> PgResult<bool> {
     let p = src.borrow();
-    if !p.raw_parse_tree.is_null() {
-        analyze_seams::analyze_requires_snapshot::call(p.raw_parse_tree)
-    } else if !p.analyzed_parse_tree.is_null() {
-        analyze_seams::query_requires_rewrite_plan::call(p.analyzed_parse_tree)
+    if let Some(raw) = &p.raw_parse_tree {
+        analyze_seams::analyze_requires_snapshot_value::call(raw)
+    } else if let Some(analyzed) = &p.analyzed_parse_tree {
+        analyze_seams::query_requires_rewrite_plan_value::call(analyzed)
     } else {
         Ok(false)
     }
 }
 
 /* ==========================================================================
+ * Dependency / search-path / result-desc value helpers.
+ * ======================================================================== */
+
+/// `extract_query_dependencies((Node *) qlist, &relationOids, &invalItems,
+/// &dependsOnRLS)` over the owned `Query` list.
+fn extract_deps(qlist: &[Query<'_>]) -> PgResult<(Vec<Oid>, Vec<InvalItemKey>, bool)> {
+    // The value producer wants `&[Query<'mcx>]` for some `'mcx`; our list is
+    // `Query<'static>`. Run it in a scratch context so the produced
+    // dependencies (plain Oid/(i32,u32) scalars) are independent of any arena.
+    let scratch = MemoryContext::new("plancache_extract_deps");
+    let deps = setrefs_seams::extract_query_dependencies_value::call(scratch.mcx(), qlist)?;
+    let inval_items = deps
+        .inval_items
+        .into_iter()
+        .map(|(cache_id, hash_value)| InvalItemKey {
+            cache_id,
+            hash_value,
+        })
+        .collect();
+    Ok((deps.relation_oids, inval_items, deps.depends_on_rls))
+}
+
+/// `GetSearchPathMatcher(querytree_context)` — fetch the current search path and
+/// own it in the source's `query_context` (falls back to `context`).
+fn get_search_path_into(src: &SourceRc) -> PgResult<SearchPathMatcher<'static>> {
+    let scratch = MemoryContext::new("plancache_search_path");
+    let sp = namespace_seams::get_search_path_matcher_value::call(scratch.mcx())?;
+    let p = src.borrow();
+    let ctx = p.query_context.as_ref().unwrap_or(&p.context);
+    clone_search_path_into(ctx, &sp)
+}
+
+/// `PlanCacheComputeResultDesc(stmt_list)` with the descriptor owned in `ctx`.
+fn compute_result_desc_into(
+    ctx: &MemoryContext,
+    stmt_list: &[Query<'_>],
+) -> PgResult<Option<TupleDescData<'static>>> {
+    PlanCacheComputeResultDesc(ctx, stmt_list)
+}
+
+/* ==========================================================================
  * RevalidateCachedQuery (static)
  * ======================================================================== */
 
-/// `RevalidateCachedQuery(plansource, queryEnv)`.
+/// `RevalidateCachedQuery(plansource, queryEnv)`. Returns the transient
+/// re-analyzed/rewritten query list (empty when no re-analysis happened), to
+/// save `BuildCachedPlan` a copy step.
 fn RevalidateCachedQuery(
     plansource: CachedPlanSourceHandle,
-    query_env: QueryEnvHandle,
-) -> PgResult<QueryListHandle> {
+    query_env: Option<&QueryEnvironment<'_>>,
+) -> PgResult<Vec<Query<'static>>> {
     let src = get_source(plansource);
-    let nil = QueryListHandle::NIL;
 
     if src.borrow().is_oneshot || !StmtPlanRequiresRevalidation(&src)? {
         debug_assert!(src.borrow().is_valid);
-        return Ok(nil);
+        return Ok(Vec::new());
     }
 
     if src.borrow().is_valid {
-        let sp = src.borrow().search_path;
-        debug_assert!(!sp.is_null());
-        if !namespace_seams::search_path_matches_current_environment::call(sp)? {
+        let matches = {
+            let mut p = src.borrow_mut();
+            debug_assert!(p.search_path.is_some());
+            let scratch = MemoryContext::new("plancache_spmatch");
+            let sp = p.search_path.as_mut().unwrap();
+            // SAFETY: the value seam takes &mut SearchPathMatcher<'mcx>; our
+            // stored matcher is `'static`. Reborrow to the scratch lifetime for
+            // the call (it only reads/updates scalar fields).
+            let sp_ref: &mut SearchPathMatcher<'_> = unsafe {
+                core::mem::transmute::<&mut SearchPathMatcher<'static>, &mut SearchPathMatcher<'_>>(
+                    sp,
+                )
+            };
+            namespace_seams::search_path_matches_current_environment_value::call(
+                scratch.mcx(),
+                sp_ref,
+            )?
+        };
+        if !matches {
             src.borrow_mut().is_valid = false;
             let gplan = src.borrow().gplan;
             if gplan != NULL_HANDLE {
@@ -631,30 +842,27 @@ fn RevalidateCachedQuery(
     }
 
     if src.borrow().is_valid {
-        let qlist = src.borrow().query_list;
-        AcquirePlannerLocks(qlist, true)?;
+        AcquirePlannerLocks(&src, true)?;
 
         if src.borrow().is_valid {
-            return Ok(nil);
+            return Ok(Vec::new());
         }
 
         // Oops, the race case happened.  Release useless locks.
-        AcquirePlannerLocks(qlist, false)?;
+        AcquirePlannerLocks(&src, false)?;
     }
 
     {
         let mut p = src.borrow_mut();
         p.is_valid = false;
-        p.query_list = QueryListHandle::NIL;
+        p.query_list = Vec::new();
         p.relation_oids = Vec::new();
         p.inval_items = Vec::new();
-        p.search_path = SearchPathMatcherHandle::NULL;
+        p.search_path = None;
     }
 
-    if let Some(qcxt) = src.borrow().query_context {
-        src.borrow_mut().query_context = None;
-        mcxt_seams::memory_context_delete::call(qcxt)?;
-    }
+    // Free the query_context (drop the owned MemoryContext).
+    src.borrow_mut().query_context = None;
 
     ReleaseGenericPlan(plansource)?;
 
@@ -666,104 +874,128 @@ fn RevalidateCachedQuery(
         snapshot_set = true;
     }
 
-    let tlist: QueryListHandle;
-    // rawtree = copyObject(plansource->raw_parse_tree).
-    let (raw, analyzed) = {
-        let p = src.borrow();
-        (p.raw_parse_tree, p.analyzed_parse_tree)
-    };
-    if !raw.is_null() {
-        let rawtree = node_seams::copy_raw_stmt::call(raw)?;
-        let (qstr, psetup, params) = {
+    // Re-do parse analysis (if needed) and rule rewriting. The produced `tlist`
+    // is built in a transient context held for the rest of this routine (C uses
+    // the caller's CurrentMemoryContext); we copy what we keep into the
+    // permanent `query_context`. C returns `tlist` to save BuildCachedPlan a
+    // copy; we instead always return NIL and let BuildCachedPlan copy from the
+    // stored `query_list` (behaviorally identical — `tlist` is purely a copy
+    // optimization, plancache.c:662-664).
+    let transient = MemoryContext::new("CachedPlanRevalidate");
+    let tlist: PgVec<'_, Query<'_>> = {
+        let has_raw = src.borrow().raw_parse_tree.is_some();
+        let has_analyzed = src.borrow().analyzed_parse_tree.is_some();
+        if has_raw {
+            let has_setup = src.borrow().has_parser_setup;
+            if has_setup {
+                // parserSetup branch (PREPARE-with-$n / SPI). No value
+                // parse_analyze_withcb producer exists (map B2); precise panic.
+                let _ = query_env;
+                panic!(
+                    "plancache RevalidateCachedQuery: parserSetup (parse_analyze_withcb) \
+                     value path not yet ported (PREPARE-with-$n / SPI only; map B2)"
+                );
+            } else {
+                let p = src.borrow();
+                let raw = p.raw_parse_tree.as_ref().unwrap();
+                let rawtree = raw.clone_in(transient.mcx())?;
+                // analyze_and_rewrite_fixedparams: parse-analyze + rewrite.
+                analyze_seams::pg_analyze_and_rewrite_fixedparams_params::call(
+                    transient.mcx(),
+                    &rawtree,
+                    p.query_string.as_str(),
+                    p.param_types.as_slice(),
+                )?
+            }
+        } else if has_analyzed {
             let p = src.borrow();
-            (p.query_string.clone(), p.parser_setup, p.param_types.clone())
-        };
-        if psetup.is_some() {
-            tlist =
-                analyze_seams::analyze_and_rewrite_withcb::call(rawtree, &qstr, psetup, query_env)?;
-        } else {
-            tlist = analyze_seams::analyze_and_rewrite_fixedparams::call(
-                rawtree, &qstr, &params, query_env,
+            let analyzed = p.analyzed_parse_tree.as_ref().unwrap();
+            let analyzed_tree = analyzed.clone_in(transient.mcx())?;
+            // AcquireRewriteLocks(analyzed_tree, true, false) then rewrite.
+            let locked = rewrite_seams::acquire_rewrite_locks::call(
+                transient.mcx(),
+                analyzed_tree,
+                true,
+                false,
             )?;
+            rewrite_seams::query_rewrite_canonical::call(transient.mcx(), locked)?
+        } else {
+            mcx::vec_with_capacity_in(transient.mcx(), 0)?
         }
-    } else if !analyzed.is_null() {
-        let analyzed_tree = node_seams::copy_analyzed_query::call(analyzed)?;
-        rewrite_seams::acquire_rewrite_locks::call(analyzed_tree)?;
-        tlist = rewrite_seams::rewrite_query::call(analyzed_tree)?;
-    } else {
-        tlist = QueryListHandle::NIL;
-    }
+    };
 
-    let post = src.borrow().post_rewrite;
-    if post.is_some() {
-        rewrite_seams::invoke_post_rewrite::call(post, tlist)?;
+    // Apply post-rewrite callback if there is one (B2: no value producer).
+    if src.borrow().has_post_rewrite {
+        panic!(
+            "plancache RevalidateCachedQuery: postRewrite hook value path not yet ported (map B2)"
+        );
     }
 
     if snapshot_set {
         snapmgr_seams::pop_active_snapshot::call()?;
     }
 
-    // Check or update the result tupdesc.
-    let mut result_desc = PlanCacheComputeResultDesc(tlist)?;
-    let existing_desc = src.borrow().result_desc;
-    if result_desc.is_null() && existing_desc.is_null() {
+    // Check or update the result tupdesc. Compute into a transient context held
+    // alive through the comparison; copy into the permanent context only if it
+    // actually changed.
+    let desc_scratch = MemoryContext::new("plancache_newdesc");
+    let new_desc = PlanCacheComputeResultDesc(&desc_scratch, tlist.as_slice())?;
+    let had_existing = src.borrow().result_desc.is_some();
+    let equal = match (&new_desc, src.borrow().result_desc.as_ref()) {
+        (Some(a), Some(b)) => tupdesc_seams::equal_row_types::call(a, b),
+        _ => false,
+    };
+    if new_desc.is_none() && !had_existing {
         // OK, doesn't return tuples.
-    } else if result_desc.is_null()
-        || existing_desc.is_null()
-        || !tupdesc_seams::equal_row_types::call(result_desc, existing_desc)?
-    {
+    } else if new_desc.is_none() || !had_existing || !equal {
         if src.borrow().fixed_result {
-            return Err(PgError::new(ERROR, "cached plan must not change result type".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            return Err(PgError::new(
+                ERROR,
+                "cached plan must not change result type".to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
         }
-        let context = src.borrow().context;
-        let oldcxt = mcxt_seams::memory_context_switch_to::call(context)?;
-        if !result_desc.is_null() {
-            result_desc = tupdesc_seams::create_tuple_desc_copy::call(result_desc)?;
-        }
-        if !existing_desc.is_null() {
-            tupdesc_seams::free_tuple_desc::call(existing_desc)?;
-        }
-        src.borrow_mut().result_desc = result_desc;
-        mcxt_seams::memory_context_switch_to::call(oldcxt)?;
+        // Copy the new descriptor into the source's permanent context; drop the
+        // old one (FreeTupleDesc).
+        let owned = match &new_desc {
+            Some(td) => {
+                let p = src.borrow();
+                Some(clone_tupdesc_into(&p.context, td)?)
+            }
+            None => None,
+        };
+        src.borrow_mut().result_desc = owned;
     }
+    drop(desc_scratch);
 
     // Allocate new query_context and copy the completed querytree into it.
-    let current = mcxt_seams::current_memory_context::call()?;
-    let querytree_context =
-        mcxt_seams::alloc_set_context_create_small::call(current, "CachedPlanQuery")?;
-    let oldcxt = mcxt_seams::memory_context_switch_to::call(querytree_context)?;
+    let querytree_context = MemoryContext::new("CachedPlanQuery");
+    let qlist = clone_query_list_into(&querytree_context, tlist.as_slice())?;
 
-    let qlist = node_seams::copy_query_list::call(tlist)?;
-
-    let deps = node_seams::extract_query_dependencies::call(qlist)?;
+    let deps = extract_deps(&qlist)?;
     let role = backend_seams::get_user_id::call()?;
     let rsec = backend_seams::row_security::call()?;
-    let sp = namespace_seams::get_search_path_matcher::call(querytree_context)?;
+    let scratch = MemoryContext::new("plancache_sp");
+    let sp_val = namespace_seams::get_search_path_matcher_value::call(scratch.mcx())?;
+    let sp = clone_search_path_into(&querytree_context, &sp_val)?;
+
     {
         let mut p = src.borrow_mut();
-        p.relation_oids = deps.relation_oids;
-        p.inval_items = deps.inval_items;
-        p.depends_on_rls = deps.depends_on_rls;
+        p.relation_oids = deps.0;
+        p.inval_items = deps.1;
+        p.depends_on_rls = deps.2;
         p.rewrite_role_id = role;
         p.rewrite_row_security = rsec;
-        p.search_path = sp;
-    }
-
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
-
-    let context = src.borrow().context;
-    mcxt_seams::memory_context_set_parent::call(querytree_context, context)?;
-
-    {
-        let mut p = src.borrow_mut();
+        p.search_path = Some(sp);
         p.query_context = Some(querytree_context);
         p.query_list = qlist;
         // Note: we do not reset generic_cost or total_custom_cost.
         p.is_valid = true;
     }
 
-    Ok(tlist)
+    // `transient` (and `tlist` borrowing it) drop here in reverse declaration
+    // order — `tlist` first, then `transient`.
+    Ok(Vec::new())
 }
 
 /* ==========================================================================
@@ -795,8 +1027,7 @@ fn CheckCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<bool> {
     if plan.borrow().is_valid {
         debug_assert!(plan.borrow().refcount > 0);
 
-        let stmt_list = plan.borrow().stmt_list;
-        AcquireExecutorLocks(stmt_list, true)?;
+        AcquireExecutorLocks(&plan, true)?;
 
         let saved_xmin = plan.borrow().saved_xmin;
         if plan.borrow().is_valid
@@ -810,7 +1041,7 @@ fn CheckCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<bool> {
             return Ok(true);
         }
 
-        AcquireExecutorLocks(stmt_list, false)?;
+        AcquireExecutorLocks(&plan, false)?;
     }
 
     ReleaseGenericPlan(plansource)?;
@@ -823,30 +1054,47 @@ fn CheckCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<bool> {
  * ======================================================================== */
 
 /// `BuildCachedPlan(plansource, qlist, boundParams, queryEnv)`.
+///
+/// `qlist_in` is the transient query list returned by RevalidateCachedQuery; in
+/// the owned model it is always empty (RevalidateCachedQuery returns NIL), so we
+/// copy from the stored `query_list`.
 fn BuildCachedPlan(
     plansource: CachedPlanSourceHandle,
-    mut qlist: QueryListHandle,
+    qlist_in: &[Query<'_>],
     bound_params: ParamListInfoHandle,
-    query_env: QueryEnvHandle,
+    query_env: Option<&QueryEnvironment<'_>>,
 ) -> PgResult<CachedPlanHandle> {
     let src = get_source(plansource);
-    let oldcxt = mcxt_seams::current_memory_context::call()?;
 
+    let mut revalidated: Vec<Query<'static>> = Vec::new();
+    let use_revalidated;
     if !src.borrow().is_valid {
-        qlist = RevalidateCachedQuery(plansource, query_env)?;
+        revalidated = RevalidateCachedQuery(plansource, query_env)?;
+        use_revalidated = !revalidated.is_empty();
+    } else {
+        use_revalidated = !qlist_in.is_empty();
     }
 
-    if qlist.is_nil() {
-        let (is_oneshot, query_list) = {
-            let p = src.borrow();
-            (p.is_oneshot, p.query_list)
-        };
-        if !is_oneshot {
-            qlist = node_seams::copy_query_list::call(query_list)?;
+    // Build the query list to plan, copied into a transient context.
+    let transient = MemoryContext::new("CachedPlanWork");
+    let qlist: Vec<Query<'static>> = if use_revalidated {
+        // qlist_in / revalidated already live (transient or caller); copy.
+        if !qlist_in.is_empty() {
+            clone_query_list_into(&transient, qlist_in)?
         } else {
-            qlist = query_list;
+            clone_query_list_into(&transient, revalidated.as_slice())?
         }
-    }
+    } else {
+        let is_oneshot = src.borrow().is_oneshot;
+        let p = src.borrow();
+        if !is_oneshot {
+            clone_query_list_into(&transient, p.query_list.as_slice())?
+        } else {
+            // One-shot: C consumes query_list in place; we copy (behaviorally
+            // identical — the one-shot source is dropped right after).
+            clone_query_list_into(&transient, p.query_list.as_slice())?
+        }
+    };
 
     let mut snapshot_set = false;
     if !snapmgr_seams::active_snapshot_set::call()? && BuildingPlanRequiresSnapshot(&src)? {
@@ -858,37 +1106,48 @@ fn BuildCachedPlan(
         let p = src.borrow();
         (p.query_string.clone(), p.cursor_options)
     };
-    let mut plist = planner_seams::plan_queries::call(qlist, &qstr, cursor_options, bound_params)?;
+
+    // pg_plan_queries(qlist, query_string, cursor_options, boundParams). The
+    // generic-plan spine passes NULL boundParams; custom-plan substitution
+    // (non-NULL) has no value `ParamListInfoData` reachable from the opaque
+    // handle (map B-bis 2b) — precise panic, never on the SELECT/EXECUTE
+    // -without-params spine.
+    let plan_context = MemoryContext::new("CachedPlan");
+    let plist: Vec<PlannedStmt<'static>> = {
+        if bound_params != ParamListInfoHandle::NULL {
+            panic!(
+                "plancache BuildCachedPlan: custom-plan boundParams substitution not yet \
+                 threaded through the value planning stack (map B-bis 2b)"
+            );
+        }
+        let planned = postgres_seams::pg_plan_queries_value::call(
+            plan_context.mcx(),
+            qlist.as_slice(),
+            qstr.as_str(),
+            cursor_options,
+            None,
+        )?;
+        // Own the planned stmts in plan_context (already allocated there).
+        clone_plan_list_into(&plan_context, planned.as_slice())?
+    };
 
     if snapshot_set {
         snapmgr_seams::pop_active_snapshot::call()?;
     }
 
     let is_oneshot = src.borrow().is_oneshot;
-    let plan_context: CtxId;
-    if !is_oneshot {
-        let current = mcxt_seams::current_memory_context::call()?;
-        plan_context = mcxt_seams::alloc_set_context_create_small::call(current, "CachedPlan")?;
-        let qstr2 = src.borrow().query_string.clone();
-        mcxt_seams::memory_context_copy_and_set_identifier::call(plan_context, &qstr2)?;
-
-        mcxt_seams::memory_context_switch_to::call(plan_context)?;
-        plist = node_seams::copy_plan_list::call(plist)?;
-    } else {
-        plan_context = mcxt_seams::current_memory_context::call()?;
-    }
 
     let plan_role_id = backend_seams::get_user_id::call()?;
     let mut depends_on_role = src.borrow().depends_on_rls;
     let mut is_transient = false;
-    for stmt in node_seams::plan_list_elements::call(plist)? {
-        if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
+    for stmt in plist.iter() {
+        if pstmt_is_utility(stmt) {
             continue; // Ignore utility statements.
         }
-        if planner_seams::pstmt_transient_plan::call(stmt)? {
+        if stmt.transientPlan {
             is_transient = true;
         }
-        if planner_seams::pstmt_depends_on_role::call(stmt)? {
+        if stmt.dependsOnRole {
             depends_on_role = true;
         }
     }
@@ -921,7 +1180,7 @@ fn BuildCachedPlan(
         context: plan_context,
     };
 
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
+    drop(transient);
 
     let handle = with_state(|s| {
         let h = s.alloc_handle();
@@ -946,7 +1205,7 @@ fn choose_custom_plan(
         return Ok(true);
     }
 
-    if bound_params.is_null() {
+    if bound_params == ParamListInfoHandle::NULL {
         return Ok(false);
     }
     if !StmtPlanRequiresRevalidation(&src)? {
@@ -990,18 +1249,19 @@ fn choose_custom_plan(
 /// `cached_plan_cost(plan, include_planner)`.
 fn cached_plan_cost(plan: CachedPlanHandle, include_planner: bool) -> PgResult<f64> {
     let mut result: f64 = 0.0;
-    let stmt_list = get_plan(plan).borrow().stmt_list;
+    let pl = get_plan(plan);
+    let p = pl.borrow();
 
-    for stmt in node_seams::plan_list_elements::call(stmt_list)? {
-        if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
+    for stmt in p.stmt_list.iter() {
+        if pstmt_is_utility(stmt) {
             continue; // Ignore utility statements.
         }
 
-        result += planner_seams::pstmt_plantree_total_cost::call(stmt)?;
+        result += stmt.plan_total_cost();
 
         if include_planner {
-            let nrelations = planner_seams::pstmt_rtable_length::call(stmt)?;
-            let cpu_operator_cost = planner_seams::cpu_operator_cost::call()?;
+            let nrelations = stmt.rtable.as_ref().map(|r| r.len()).unwrap_or(0);
+            let cpu_operator_cost = planner_pc_seams::cpu_operator_cost::call()?;
             result += 1000.0 * cpu_operator_cost * (nrelations as f64 + 1.0);
         }
     }
@@ -1018,7 +1278,7 @@ pub fn GetCachedPlan(
     plansource: CachedPlanSourceHandle,
     bound_params: ParamListInfoHandle,
     owner: ResourceOwnerHandle,
-    query_env: QueryEnvHandle,
+    query_env: Option<&QueryEnvironment<'_>>,
 ) -> PgResult<CachedPlanHandle> {
     let src = get_source(plansource);
     let mut plan: CachedPlanHandle = NULL_HANDLE;
@@ -1031,7 +1291,8 @@ pub fn GetCachedPlan(
         ));
     }
 
-    let mut qlist = RevalidateCachedQuery(plansource, query_env)?;
+    let qlist = RevalidateCachedQuery(plansource, query_env)?;
+    let mut have_qlist = !qlist.is_empty();
 
     let mut customplan = choose_custom_plan(plansource, bound_params)?;
 
@@ -1040,34 +1301,29 @@ pub fn GetCachedPlan(
             plan = src.borrow().gplan;
             debug_assert_eq!(get_plan(plan).borrow().magic, CACHEDPLAN_MAGIC);
         } else {
-            plan = BuildCachedPlan(plansource, qlist, ParamListInfoHandle::NULL, query_env)?;
+            let qslice: &[Query<'_>] = if have_qlist { qlist.as_slice() } else { &[] };
+            plan = BuildCachedPlan(plansource, qslice, ParamListInfoHandle::NULL, query_env)?;
             ReleaseGenericPlan(plansource)?;
             src.borrow_mut().gplan = plan;
             get_plan(plan).borrow_mut().refcount += 1;
-            let (is_saved, context) = {
-                let p = src.borrow();
-                (p.is_saved, p.context)
-            };
-            let plan_context = get_plan(plan).borrow().context;
+            // is_saved propagation (context reparenting is a no-op in the owned
+            // model — the plan's context is owned by the struct).
+            let is_saved = src.borrow().is_saved;
             if is_saved {
-                let cache_cxt = mcxt_seams::cache_memory_context::call()?;
-                mcxt_seams::memory_context_set_parent::call(plan_context, cache_cxt)?;
                 get_plan(plan).borrow_mut().is_saved = true;
-            } else {
-                let parent = mcxt_seams::memory_context_get_parent::call(context)?;
-                mcxt_seams::memory_context_set_parent::call(plan_context, parent)?;
             }
             let cost = cached_plan_cost(plan, false)?;
             src.borrow_mut().generic_cost = cost;
 
             customplan = choose_custom_plan(plansource, bound_params)?;
 
-            qlist = QueryListHandle::NIL;
+            have_qlist = false;
         }
     }
 
     if customplan {
-        plan = BuildCachedPlan(plansource, qlist, bound_params, query_env)?;
+        let qslice: &[Query<'_>] = if have_qlist { qlist.as_slice() } else { &[] };
+        plan = BuildCachedPlan(plansource, qslice, bound_params, query_env)?;
         let cost = cached_plan_cost(plan, true)?;
         let mut p = src.borrow_mut();
         p.total_custom_cost += cost;
@@ -1087,22 +1343,10 @@ pub fn GetCachedPlan(
     }
 
     if customplan && src.borrow().is_saved {
-        let cache_cxt = mcxt_seams::cache_memory_context::call()?;
-        let plan_context = get_plan(plan).borrow().context;
-        mcxt_seams::memory_context_set_parent::call(plan_context, cache_cxt)?;
         get_plan(plan).borrow_mut().is_saved = true;
     }
 
     Ok(plan)
-}
-
-/// Borrowable access to `CachedPlan.stmt_list` for callers that hold only a
-/// `CachedPlan` (the executor / portal consumers).
-pub fn CachedPlanStmtList(plan: CachedPlanHandle) -> PgResult<PlannedStmtListHandle> {
-    let plan = get_plan(plan);
-    debug_assert_eq!(plan.borrow().magic, CACHEDPLAN_MAGIC);
-    let stmt_list = plan.borrow().stmt_list;
-    Ok(stmt_list)
 }
 
 /* ==========================================================================
@@ -1121,14 +1365,8 @@ pub fn ReleaseCachedPlan(plan: CachedPlanHandle, owner: ResourceOwnerHandle) -> 
     p.borrow_mut().refcount -= 1;
     if p.borrow().refcount == 0 {
         p.borrow_mut().magic = 0;
-
-        let (is_oneshot, context) = {
-            let pl = p.borrow();
-            (pl.is_oneshot, pl.context)
-        };
-        if !is_oneshot {
-            mcxt_seams::memory_context_delete::call(context)?;
-        }
+        // MemoryContextDelete(plan->context) — happens when the struct (owning
+        // its `context`) drops as the last Rc is removed from the registry.
         with_state(|s| {
             s.plans.remove(&plan);
         });
@@ -1153,7 +1391,7 @@ pub fn CachedPlanAllowsSimpleValidityCheck(
     debug_assert_eq!(pl.borrow().magic, CACHEDPLAN_MAGIC);
     debug_assert!(pl.borrow().is_valid);
     debug_assert_eq!(plan, src.borrow().gplan);
-    debug_assert!(!src.borrow().search_path.is_null());
+    debug_assert!(src.borrow().search_path.is_some());
 
     if src.borrow().is_oneshot {
         return Ok(false);
@@ -1171,29 +1409,35 @@ pub fn CachedPlanAllowsSimpleValidityCheck(
     }
 
     // Reject if AcquirePlannerLocks would have anything to do.
-    let query_list = src.borrow().query_list;
-    for query in node_seams::query_list_elements::call(query_list)? {
-        if analyze_seams::query_command_type_is_utility::call(query)? {
-            return Ok(false);
-        }
-        if analyze_seams::query_has_rtable::call(query)?
-            || analyze_seams::query_has_cte_list::call(query)?
-            || analyze_seams::query_has_sublinks::call(query)?
-        {
-            return Ok(false);
+    {
+        let p = src.borrow();
+        for query in p.query_list.iter() {
+            if query_is_utility(query) {
+                return Ok(false);
+            }
+            if !query.rtable.is_empty()
+                || !query.cteList.is_empty()
+                || query.hasSubLinks
+            {
+                return Ok(false);
+            }
         }
     }
 
     // Reject if AcquireExecutorLocks would have anything to do.
-    let stmt_list = pl.borrow().stmt_list;
-    for stmt in node_seams::plan_list_elements::call(stmt_list)? {
-        if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
-            return Ok(false);
-        }
-        // grovel through the rtable for an RTE_RELATION.
-        for rte in planner_seams::pstmt_rtable_fields::call(stmt)? {
-            if rte.rtekind == RTE_RELATION {
+    {
+        let p = pl.borrow();
+        for stmt in p.stmt_list.iter() {
+            if pstmt_is_utility(stmt) {
                 return Ok(false);
+            }
+            // grovel through the rtable for an RTE_RELATION.
+            if let Some(rtable) = &stmt.rtable {
+                for rte in rtable.iter() {
+                    if rte.rtekind == RTEKind_relation() {
+                        return Ok(false);
+                    }
+                }
             }
         }
     }
@@ -1233,10 +1477,20 @@ pub fn CachedPlanIsSimplyValid(
     let pl = get_plan(plan);
     debug_assert_eq!(pl.borrow().magic, CACHEDPLAN_MAGIC);
 
-    let sp = src.borrow().search_path;
-    debug_assert!(!sp.is_null());
-    if !namespace_seams::search_path_matches_current_environment::call(sp)? {
-        return Ok(false);
+    {
+        let mut p = src.borrow_mut();
+        debug_assert!(p.search_path.is_some());
+        let scratch = MemoryContext::new("plancache_spmatch2");
+        let sp = p.search_path.as_mut().unwrap();
+        let sp_ref: &mut SearchPathMatcher<'_> = unsafe {
+            core::mem::transmute::<&mut SearchPathMatcher<'static>, &mut SearchPathMatcher<'_>>(sp)
+        };
+        if !namespace_seams::search_path_matches_current_environment_value::call(
+            scratch.mcx(),
+            sp_ref,
+        )? {
+            return Ok(false);
+        }
     }
 
     if !owner.is_null() {
@@ -1248,48 +1502,25 @@ pub fn CachedPlanIsSimplyValid(
     Ok(true)
 }
 
-/* ==========================================================================
- * CachedPlanSetParentContext
- * ======================================================================== */
+/// `RTE_RELATION` as the model's `RTEKind`.
+#[inline]
+fn RTEKind_relation() -> types_nodes::parsenodes::RTEKind {
+    types_nodes::parsenodes::RTEKind::RTE_RELATION
+}
 
-/// `CachedPlanSetParentContext(plansource, newcontext)`.
-pub fn CachedPlanSetParentContext(
-    plansource: CachedPlanSourceHandle,
-    newcontext: CtxId,
-) -> PgResult<()> {
-    let src = get_source(plansource);
-
-    {
-        let p = src.borrow();
-        debug_assert_eq!(p.magic, CACHEDPLANSOURCE_MAGIC);
-        debug_assert!(p.is_complete);
-
-        if p.is_saved {
-            return Err(elog_error(
-                "cannot move a saved cached plan to another context",
-            ));
-        }
-        if p.is_oneshot {
-            return Err(elog_error(
-                "cannot move a one-shot cached plan to another context",
-            ));
-        }
-    }
-
-    let context = src.borrow().context;
-    mcxt_seams::memory_context_set_parent::call(context, newcontext)?;
-
-    let gplan = src.borrow().gplan;
-    if gplan != NULL_HANDLE {
-        debug_assert_eq!(get_plan(gplan).borrow().magic, CACHEDPLAN_MAGIC);
-        let plan_context = get_plan(gplan).borrow().context;
-        mcxt_seams::memory_context_set_parent::call(plan_context, newcontext)?;
-    }
-    Ok(())
+/// `RTE_SUBQUERY` as the model's `RTEKind`.
+#[inline]
+fn RTEKind_subquery() -> types_nodes::parsenodes::RTEKind {
+    types_nodes::parsenodes::RTEKind::RTE_SUBQUERY
 }
 
 /* ==========================================================================
- * CopyCachedPlan
+ * CachedPlanSetParentContext / CopyCachedPlan
+ *
+ * In the owned model the source's storage context is owned by the struct (not
+ * reparentable). These two entry points are not on the SELECT/EXECUTE spine and
+ * have no value-model meaning for the context-reparenting half; they retain
+ * their guards + the data-copy half.
  * ======================================================================== */
 
 /// `CopyCachedPlan(plansource)`.
@@ -1304,126 +1535,62 @@ pub fn CopyCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<CachedPlan
         }
     }
 
-    let current = mcxt_seams::current_memory_context::call()?;
-    let source_context =
-        mcxt_seams::alloc_set_context_create_small::call(current, "CachedPlanSource")?;
-    let oldcxt = mcxt_seams::memory_context_switch_to::call(source_context)?;
+    let context = MemoryContext::new("CachedPlanSource");
+    let query_context = MemoryContext::new("CachedPlanQuery");
 
-    let (
-        raw_copy,
-        analyzed_copy,
-        qstr,
-        command_tag,
-        param_types,
-        num_params,
-        parser_setup,
-        post_rewrite,
-        cursor_options,
-        fixed_result,
-        result_desc_copy,
-    ) = {
+    let newdata = {
         let p = src.borrow();
-        let raw_copy = node_seams::copy_raw_stmt::call(p.raw_parse_tree)?;
-        let analyzed_copy = node_seams::copy_analyzed_query::call(p.analyzed_parse_tree)?;
-        let result_desc_copy = if !p.result_desc.is_null() {
-            tupdesc_seams::create_tuple_desc_copy::call(p.result_desc)?
-        } else {
-            TupleDescHandle::NULL
+        let raw_copy = match &p.raw_parse_tree {
+            Some(r) => Some(clone_raw_into(&context, r)?),
+            None => None,
         };
-        (
-            raw_copy,
-            analyzed_copy,
-            p.query_string.clone(),
-            p.command_tag,
-            p.param_types.clone(),
-            p.num_params,
-            p.parser_setup,
-            p.post_rewrite,
-            p.cursor_options,
-            p.fixed_result,
-            result_desc_copy,
-        )
-    };
-    mcxt_seams::memory_context_set_identifier::call(source_context, &qstr)?;
-
-    let querytree_context =
-        mcxt_seams::alloc_set_context_create_small::call(source_context, "CachedPlanQuery")?;
-    mcxt_seams::memory_context_switch_to::call(querytree_context)?;
-
-    let (
-        query_list_copy,
-        relation_oids,
-        inval_items,
-        search_path_copy,
-        is_valid,
-        generation,
-        generic_cost,
-        total_custom_cost,
-        num_generic_plans,
-        num_custom_plans,
-        rewrite_role_id,
-        rewrite_row_security,
-        depends_on_rls,
-    ) = {
-        let p = src.borrow();
-        let query_list_copy = node_seams::copy_query_list::call(p.query_list)?;
-        let search_path_copy = if !p.search_path.is_null() {
-            namespace_seams::copy_search_path_matcher::call(p.search_path)?
-        } else {
-            SearchPathMatcherHandle::NULL
+        let analyzed_copy = match &p.analyzed_parse_tree {
+            Some(q) => Some(clone_query_into(&context, q)?),
+            None => None,
         };
-        (
-            query_list_copy,
-            p.relation_oids.clone(),
-            p.inval_items.clone(),
-            search_path_copy,
-            p.is_valid,
-            p.generation,
-            p.generic_cost,
-            p.total_custom_cost,
-            p.num_generic_plans,
-            p.num_custom_plans,
-            p.rewrite_role_id,
-            p.rewrite_row_security,
-            p.depends_on_rls,
-        )
+        let result_desc_copy = match &p.result_desc {
+            Some(td) => Some(clone_tupdesc_into(&context, td)?),
+            None => None,
+        };
+        let query_list_copy = clone_query_list_into(&query_context, p.query_list.as_slice())?;
+        let search_path_copy = match &p.search_path {
+            Some(sp) => Some(clone_search_path_into(&query_context, sp)?),
+            None => None,
+        };
+        CachedPlanSourceData {
+            magic: CACHEDPLANSOURCE_MAGIC,
+            raw_parse_tree: raw_copy,
+            analyzed_parse_tree: analyzed_copy,
+            query_string: p.query_string.clone(),
+            command_tag: p.command_tag,
+            param_types: p.param_types.clone(),
+            num_params: p.num_params,
+            has_parser_setup: p.has_parser_setup,
+            has_post_rewrite: p.has_post_rewrite,
+            cursor_options: p.cursor_options,
+            fixed_result: p.fixed_result,
+            result_desc: result_desc_copy,
+            query_list: query_list_copy,
+            relation_oids: p.relation_oids.clone(),
+            inval_items: p.inval_items.clone(),
+            search_path: search_path_copy,
+            rewrite_role_id: p.rewrite_role_id,
+            rewrite_row_security: p.rewrite_row_security,
+            depends_on_rls: p.depends_on_rls,
+            gplan: NULL_HANDLE,
+            is_oneshot: false,
+            is_complete: true,
+            is_saved: false,
+            is_valid: p.is_valid,
+            generation: p.generation,
+            generic_cost: p.generic_cost,
+            total_custom_cost: p.total_custom_cost,
+            num_custom_plans: p.num_custom_plans,
+            num_generic_plans: p.num_generic_plans,
+            query_context: Some(query_context),
+            context,
+        }
     };
-
-    let newdata = CachedPlanSourceData {
-        magic: CACHEDPLANSOURCE_MAGIC,
-        raw_parse_tree: raw_copy,
-        analyzed_parse_tree: analyzed_copy,
-        query_string: qstr,
-        command_tag,
-        param_types,
-        num_params,
-        parser_setup,
-        post_rewrite,
-        cursor_options,
-        fixed_result,
-        result_desc: result_desc_copy,
-        context: source_context,
-        query_list: query_list_copy,
-        relation_oids,
-        inval_items,
-        search_path: search_path_copy,
-        query_context: Some(querytree_context),
-        rewrite_role_id,
-        rewrite_row_security,
-        depends_on_rls,
-        gplan: NULL_HANDLE,
-        is_oneshot: false,
-        is_complete: true,
-        is_saved: false,
-        is_valid,
-        generation,
-        generic_cost,
-        total_custom_cost,
-        num_custom_plans,
-        num_generic_plans,
-    };
-
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
 
     let handle = with_state(|s| {
         let h = s.alloc_handle();
@@ -1449,56 +1616,62 @@ pub fn CachedPlanIsValid(plansource: CachedPlanSourceHandle) -> PgResult<bool> {
  * CachedPlanGetTargetList
  * ======================================================================== */
 
-/// `CachedPlanGetTargetList(plansource, queryEnv)`.
-pub fn CachedPlanGetTargetList(
+/// `CachedPlanGetTargetList(plansource, queryEnv)` — the primary query's
+/// cleaned target list as owned `TargetEntry` nodes, allocated in `mcx`.
+pub fn CachedPlanGetTargetList<'mcx>(
+    mcx: Mcx<'mcx>,
     plansource: CachedPlanSourceHandle,
-    query_env: QueryEnvHandle,
-) -> PgResult<TargetListHandle> {
+    query_env: Option<&QueryEnvironment<'_>>,
+) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
     let src = get_source(plansource);
 
     debug_assert_eq!(src.borrow().magic, CACHEDPLANSOURCE_MAGIC);
     debug_assert!(src.borrow().is_complete);
 
-    if src.borrow().result_desc.is_null() {
-        return Ok(TargetListHandle::NIL);
+    if src.borrow().result_desc.is_none() {
+        return mcx::vec_with_capacity_in(mcx, 0);
     }
 
     RevalidateCachedQuery(plansource, query_env)?;
 
-    let query_list = src.borrow().query_list;
-    let pstmt = QueryListGetPrimaryStmt(query_list)?;
-
-    pquery_seams::fetch_statement_target_list::call(pstmt)
+    // QueryListGetPrimaryStmt(plansource->query_list)->targetList, cleaned.
+    let p = src.borrow();
+    let primary = query_list_get_primary_stmt(&p.query_list);
+    match primary {
+        Some(q) => {
+            let mut out = mcx::vec_with_capacity_in(mcx, q.targetList.len())?;
+            for te in q.targetList.iter() {
+                out.push(te.clone_in(mcx)?);
+            }
+            Ok(out)
+        }
+        None => mcx::vec_with_capacity_in(mcx, 0),
+    }
 }
 
 /* ==========================================================================
- * GetCachedExpression
+ * GetCachedExpression / FreeCachedExpression
  * ======================================================================== */
 
 /// `GetCachedExpression(expr)`.
-pub fn GetCachedExpression(expr: ExprHandle) -> PgResult<CachedExpressionHandle> {
+pub fn GetCachedExpression(expr: Expr) -> PgResult<CachedExpressionHandle> {
+    // expression_planner_with_deps(expr, &relationOids, &invalItems).
+    let scratch = MemoryContext::new("plancache_planexpr");
     let (planned_expr, relation_oids, inval_items) =
-        node_seams::expression_planner_with_deps::call(expr)?;
+        planner_pc_seams::expression_planner_with_deps_value::call(scratch.mcx(), expr)?;
 
-    let current = mcxt_seams::current_memory_context::call()?;
-    let cexpr_context =
-        mcxt_seams::alloc_set_context_create_small::call(current, "CachedExpression")?;
-    let oldcxt = mcxt_seams::memory_context_switch_to::call(cexpr_context)?;
+    // `Expr` is lifetime-free; cexpr->context exists only for faithful
+    // structure (no arena-borrowed payload to back).
+    let context = MemoryContext::new("CachedExpression");
 
-    let expr_copy = node_seams::copy_expr::call(planned_expr)?;
     let data = CachedExpressionData {
         magic: CACHEDEXPR_MAGIC,
-        expr: expr_copy,
+        expr: planned_expr,
         is_valid: true,
         relation_oids,
         inval_items,
-        context: cexpr_context,
+        context,
     };
-
-    mcxt_seams::memory_context_switch_to::call(oldcxt)?;
-
-    let cache_cxt = mcxt_seams::cache_memory_context::call()?;
-    mcxt_seams::memory_context_set_parent::call(cexpr_context, cache_cxt)?;
 
     let handle = with_state(|s| {
         let h = s.alloc_handle();
@@ -1509,17 +1682,12 @@ pub fn GetCachedExpression(expr: ExprHandle) -> PgResult<CachedExpressionHandle>
     Ok(handle)
 }
 
-/* ==========================================================================
- * FreeCachedExpression
- * ======================================================================== */
-
 /// `FreeCachedExpression(cexpr)`.
 pub fn FreeCachedExpression(cexpr: CachedExpressionHandle) -> PgResult<()> {
     let ce = get_expr(cexpr);
     debug_assert_eq!(ce.borrow().magic, CACHEDEXPR_MAGIC);
     with_state(|s| s.cached_expression_list.retain(|&h| h != cexpr));
-    let context = ce.borrow().context;
-    mcxt_seams::memory_context_delete::call(context)?;
+    // MemoryContextDelete(cexpr->context) — happens when the struct drops below.
     with_state(|s| {
         s.expressions.remove(&cexpr);
     });
@@ -1530,14 +1698,13 @@ pub fn FreeCachedExpression(cexpr: CachedExpressionHandle) -> PgResult<()> {
  * QueryListGetPrimaryStmt (static)
  * ======================================================================== */
 
-/// `QueryListGetPrimaryStmt(stmts)`.
-fn QueryListGetPrimaryStmt(stmts: QueryListHandle) -> PgResult<QueryHandle> {
-    for stmt in node_seams::query_list_elements::call(stmts)? {
-        if analyze_seams::query_can_set_tag::call(stmt)? {
-            return Ok(stmt);
-        }
-    }
-    Ok(QueryHandle::NULL)
+/// `QueryListGetPrimaryStmt(stmts)` — the first `canSetTag` query, if any.
+fn query_list_get_primary_stmt<'a>(stmts: &'a [Query<'_>]) -> Option<&'a Query<'a>> {
+    // SAFETY: lifetime-narrowing of the inner 'mcx to the borrow 'a; we only
+    // read the returned reference within the borrow scope.
+    stmts.iter().find(|q| q.canSetTag).map(|q| unsafe {
+        core::mem::transmute::<&Query<'_>, &Query<'a>>(q)
+    })
 }
 
 /* ==========================================================================
@@ -1545,28 +1712,31 @@ fn QueryListGetPrimaryStmt(stmts: QueryListHandle) -> PgResult<QueryHandle> {
  * ======================================================================== */
 
 /// `AcquireExecutorLocks(stmt_list, acquire)`.
-fn AcquireExecutorLocks(stmt_list: PlannedStmtListHandle, acquire: bool) -> PgResult<()> {
-    for stmt in node_seams::plan_list_elements::call(stmt_list)? {
-        if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
+fn AcquireExecutorLocks(plan: &PlanRc, acquire: bool) -> PgResult<()> {
+    let p = plan.borrow();
+    for stmt in p.stmt_list.iter() {
+        if pstmt_is_utility(stmt) {
             // Ignore utility statements, except those that contain a query.
-            let utility = planner_seams::pstmt_utility_stmt::call(stmt)?;
-            let query = utility_seams::utility_contains_query::call(utility)?;
-            if !query.is_null() {
-                ScanQueryForLocks(query, acquire)?;
+            if let Some(util) = &stmt.utilityStmt {
+                if let Some(q) = utility_contains_query_value(util) {
+                    ScanQueryForLocks(q, acquire)?;
+                }
             }
             continue;
         }
 
-        for rte in planner_seams::pstmt_rtable_fields::call(stmt)? {
-            if !(rte.rtekind == RTE_RELATION
-                || (rte.rtekind == RTE_SUBQUERY && oid_is_valid(rte.relid)))
-            {
-                continue;
-            }
-            if acquire {
-                lmgr_seams::lock_relation_oid::call(rte.relid, rte.rellockmode)?;
-            } else {
-                lmgr_seams::unlock_relation_oid::call(rte.relid, rte.rellockmode)?;
+        if let Some(rtable) = &stmt.rtable {
+            for rte in rtable.iter() {
+                if !(rte.rtekind == RTEKind_relation()
+                    || (rte.rtekind == RTEKind_subquery() && oid_is_valid(rte.relid)))
+                {
+                    continue;
+                }
+                if acquire {
+                    lmgr_seams::lock_relation_oid::call(rte.relid, rte.rellockmode)?;
+                } else {
+                    lmgr_seams::unlock_relation_oid::call(rte.relid, rte.rellockmode)?;
+                }
             }
         }
     }
@@ -1578,14 +1748,15 @@ fn AcquireExecutorLocks(stmt_list: PlannedStmtListHandle, acquire: bool) -> PgRe
  * ======================================================================== */
 
 /// `AcquirePlannerLocks(stmt_list, acquire)`.
-fn AcquirePlannerLocks(stmt_list: QueryListHandle, acquire: bool) -> PgResult<()> {
-    for query in node_seams::query_list_elements::call(stmt_list)? {
-        if analyze_seams::query_command_type_is_utility::call(query)? {
+fn AcquirePlannerLocks(src: &SourceRc, acquire: bool) -> PgResult<()> {
+    let p = src.borrow();
+    for query in p.query_list.iter() {
+        if query_is_utility(query) {
             // Ignore utility statements, unless they contain a Query.
-            let utility = analyze_seams::query_utility_stmt::call(query)?;
-            let inner = utility_seams::utility_contains_query::call(utility)?;
-            if !inner.is_null() {
-                ScanQueryForLocks(inner, acquire)?;
+            if let Some(util) = &query.utilityStmt {
+                if let Some(inner) = utility_contains_query_value(util) {
+                    ScanQueryForLocks(inner, acquire)?;
+                }
             }
             continue;
         }
@@ -1594,23 +1765,52 @@ fn AcquirePlannerLocks(stmt_list: QueryListHandle, acquire: bool) -> PgResult<()
     Ok(())
 }
 
+/// `UtilityContainsQuery(parsetree)` (utility.c:2178) over the owned utility
+/// `Node` — the embedded `Query` of an EXPLAIN / CTAS / DECLARE CURSOR, drilling
+/// through nested utility-`Query` wrappers to a non-utility `Query`. Returns
+/// `None` for utilities that do not contain a query.
+fn utility_contains_query_value<'a>(util: &'a Node<'_>) -> Option<&'a Query<'a>> {
+    let qry: Option<&Node<'_>> = match util {
+        Node::DeclareCursorStmt(s) => s.query.as_deref(),
+        Node::ExplainStmt(s) => s.query.as_deref(),
+        Node::CreateTableAsStmt(s) => s.query.as_deref(),
+        _ => return None,
+    };
+    match qry {
+        Some(node) => match node.as_query() {
+            Some(q) => {
+                if q.commandType == CmdType::CMD_UTILITY {
+                    match q.utilityStmt.as_deref() {
+                        Some(inner) => utility_contains_query_value(inner),
+                        None => None,
+                    }
+                } else {
+                    Some(unsafe { core::mem::transmute::<&Query<'_>, &Query<'a>>(q) })
+                }
+            }
+            None => None,
+        },
+        None => None,
+    }
+}
+
 /* ==========================================================================
- * ScanQueryForLocks (static)
+ * ScanQueryForLocks / ScanQueryWalker (static)
  * ======================================================================== */
 
 /// `ScanQueryForLocks(parsetree, acquire)`.
-fn ScanQueryForLocks(parsetree: QueryHandle, acquire: bool) -> PgResult<()> {
-    debug_assert!(!analyze_seams::query_command_type_is_utility::call(parsetree)?);
+fn ScanQueryForLocks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
+    debug_assert!(!query_is_utility(parsetree));
 
     // First, process RTEs of the current query level.
-    for rte in analyze_seams::query_rtable_fields::call(parsetree)? {
-        if rte.rtekind == RTE_RELATION {
+    for rte in parsetree.rtable.iter() {
+        if rte.rtekind == RTEKind_relation() {
             if acquire {
                 lmgr_seams::lock_relation_oid::call(rte.relid, rte.rellockmode)?;
             } else {
                 lmgr_seams::unlock_relation_oid::call(rte.relid, rte.rellockmode)?;
             }
-        } else if rte.rtekind == RTE_SUBQUERY {
+        } else if rte.rtekind == RTEKind_subquery() {
             // If this was a view, must lock/unlock the view.
             if oid_is_valid(rte.relid) {
                 if acquire {
@@ -1620,65 +1820,128 @@ fn ScanQueryForLocks(parsetree: QueryHandle, acquire: bool) -> PgResult<()> {
                 }
             }
             // Recurse into subquery-in-FROM.
-            ScanQueryForLocks(rte.subquery, acquire)?;
+            if let Some(subq) = &rte.subquery {
+                ScanQueryForLocks(subq, acquire)?;
+            }
         }
         // else: ignore other types of RTEs.
     }
 
     // Recurse into subquery-in-WITH.
-    for ctequery in analyze_seams::query_cte_queries::call(parsetree)? {
-        ScanQueryForLocks(ctequery, acquire)?;
+    for cte in parsetree.cteList.iter() {
+        // cte is a CommonTableExpr Node; its ctequery is the embedded Query.
+        if let Some(q) = cte_query(cte) {
+            ScanQueryForLocks(q, acquire)?;
+        }
     }
 
     // Recurse into sublink subqueries, too (rtable + cteList already done).
-    if analyze_seams::query_has_sublinks::call(parsetree)? {
-        for sub in ScanQueryWalker(parsetree)? {
-            ScanQueryForLocks(sub, acquire)?;
-        }
+    if parsetree.hasSubLinks {
+        scan_query_sublinks(parsetree, acquire)?;
     }
     Ok(())
 }
 
-/* ==========================================================================
- * ScanQueryWalker (static)
- * ======================================================================== */
+/// `castNode(Query, cte->ctequery)` — the embedded `Query` of a
+/// `CommonTableExpr` node (post-analysis).
+fn cte_query<'a>(cte: &'a Node<'_>) -> Option<&'a Query<'a>> {
+    if let Node::CommonTableExpr(c) = cte {
+        c.ctequery
+            .as_deref()
+            .and_then(|n| n.as_query())
+            .map(|q| unsafe { core::mem::transmute::<&Query<'_>, &Query<'a>>(q) })
+    } else {
+        None
+    }
+}
 
-/// `ScanQueryWalker` — find sublink subqueries for `ScanQueryForLocks`.
-fn ScanQueryWalker(parsetree: QueryHandle) -> PgResult<Vec<QueryHandle>> {
-    analyze_seams::walk_query_sublinks_for_locks::call(parsetree)
+/// `query_tree_walker(parsetree, ScanQueryWalker, &acquire,
+/// QTW_IGNORE_RC_SUBQUERIES)` — descend expression sublinks, recursing
+/// `ScanQueryForLocks` into each `SubLink.subselect`. We collect the sublink
+/// subqueries with a closure walker (the value `query_tree_walker`), then
+/// recurse — equivalent to C's in-walker recursion (order is irrelevant for
+/// lock acquisition).
+fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
+    // Collect raw pointers to the SubLink subselects so the immutable borrow of
+    // `parsetree` taken by the walker ends before we recurse. Lifetime-erased to
+    // `*const ()` because the HRTB walker node lifetime differs from `subs`.
+    let mut subs: Vec<*const ()> = Vec::new();
+    {
+        let mut walker = |node: &Node<'_>| -> bool {
+            if let Node::SubLink(sl) = node {
+                // castNode(Query, sub->subselect).
+                if let Some(q) = sl.subselect.as_deref().and_then(|n| n.as_query()) {
+                    subs.push(q as *const Query<'_> as *const ());
+                }
+            }
+            // expression_tree_walker recursion is handled by query_tree_walker
+            // itself; do NOT recurse into Query nodes (ScanQueryForLocks does).
+            false
+        };
+        backend_nodes_core::node_walker::query_tree_walker(
+            parsetree,
+            &mut walker,
+            backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+        );
+    }
+    for sub in subs {
+        // SAFETY: `sub` points into `parsetree`'s owned tree, alive for this
+        // call; no mutation happens between collection and use.
+        let q: &Query<'_> = unsafe { &*(sub as *const Query<'_>) };
+        ScanQueryForLocks(q, acquire)?;
+    }
+    Ok(())
 }
 
 /* ==========================================================================
  * PlanCacheComputeResultDesc (static)
  * ======================================================================== */
 
-/// `PlanCacheComputeResultDesc(stmt_list)`.
-fn PlanCacheComputeResultDesc(stmt_list: QueryListHandle) -> PgResult<TupleDescHandle> {
-    match pquery_seams::choose_portal_strategy::call(stmt_list)? {
-        PortalStrategy::OneSelect | PortalStrategy::OneModWith => {
-            let query = first_query(stmt_list)?;
-            let tl = analyze_seams::query_target_list::call(query)?;
-            pquery_seams::exec_clean_type_from_tl::call(tl)
+/// `PlanCacheComputeResultDesc(stmt_list)` — over the owned `Query` list,
+/// returning an owned `TupleDescData` allocated in `dest`. `None` == no result
+/// tuples. The descriptor is `'static`-marked but lives in `dest`, which the
+/// caller MUST keep alive at least as long as it uses the result.
+fn PlanCacheComputeResultDesc(
+    dest: &MemoryContext,
+    stmt_list: &[Query<'_>],
+) -> PgResult<Option<TupleDescData<'static>>> {
+    use types_portal::PortalStrategy as PStrat;
+    let strategy = pquery_seams::choose_portal_strategy_queries::call(stmt_list)?;
+    let td: types_tuple::heaptuple::TupleDesc<'_> = match strategy {
+        PStrat::PORTAL_ONE_SELECT | PStrat::PORTAL_ONE_MOD_WITH => match stmt_list.first() {
+            Some(q) => {
+                exectuples_seams::exec_clean_type_from_tl::call(dest.mcx(), q.targetList.as_slice())?
+            }
+            None => None,
+        },
+        PStrat::PORTAL_ONE_RETURNING => match query_list_get_primary_stmt(stmt_list) {
+            Some(q) => exectuples_seams::exec_clean_type_from_tl::call(
+                dest.mcx(),
+                q.returningList.as_slice(),
+            )?,
+            None => None,
+        },
+        PStrat::PORTAL_UTIL_SELECT => {
+            match stmt_list.first().and_then(|q| q.utilityStmt.as_deref()) {
+                Some(util) => utility_seams::utility_tuple_descriptor::call(dest.mcx(), util)?,
+                None => None,
+            }
         }
-        PortalStrategy::OneReturning => {
-            let query = QueryListGetPrimaryStmt(stmt_list)?;
-            let returning = analyze_seams::query_returning_list::call(query)?;
-            pquery_seams::exec_clean_type_from_tl::call(returning)
+        PStrat::PORTAL_MULTI_QUERY => None,
+    };
+    // The descriptor lives in `dest`; clone the boxed payload into a value and
+    // extend the borrow to the `'static` marker (sound while `dest` is alive —
+    // the caller's contract).
+    match td {
+        Some(boxed) => {
+            let value = boxed.clone_in(dest.mcx())?;
+            Ok(Some(unsafe {
+                core::mem::transmute::<TupleDescData<'_>, TupleDescData<'static>>(value)
+            }))
         }
-        PortalStrategy::UtilSelect => {
-            let query = first_query(stmt_list)?;
-            let util = analyze_seams::query_utility_stmt::call(query)?;
-            debug_assert!(!util.is_null());
-            utility_seams::utility_tuple_descriptor::call(util)
-        }
-        PortalStrategy::MultiQuery => Ok(TupleDescHandle::NULL),
+        None => Ok(None),
     }
-}
-
-/// `linitial_node(Query, stmt_list)`.
-fn first_query(stmt_list: QueryListHandle) -> PgResult<QueryHandle> {
-    let elems = node_seams::query_list_elements::call(stmt_list)?;
-    Ok(elems.into_iter().next().unwrap_or(QueryHandle::NULL))
 }
 
 /* ==========================================================================
@@ -1687,8 +1950,6 @@ fn first_query(stmt_list: QueryListHandle) -> PgResult<QueryHandle> {
 
 /// `PlanCacheRelCallback(arg, relid)` — relcache inval callback.
 fn plan_cache_rel_callback(relid: Oid) {
-    // A registered C callback cannot return a Result; in C an error here would
-    // ereport(ERROR). The project convention swallows at this boundary.
     let _ = plan_cache_rel_callback_impl(relid);
 }
 
@@ -1712,7 +1973,7 @@ fn plan_cache_rel_callback_impl(relid: Oid) -> PgResult<()> {
         let hit = if relid == INVALID_OID {
             !src.borrow().relation_oids.is_empty()
         } else {
-            node_seams::list_member_oid::call(&src.borrow().relation_oids, relid)?
+            list_member_oid(&src.borrow().relation_oids, relid)
         };
         if hit {
             src.borrow_mut().is_valid = false;
@@ -1724,21 +1985,29 @@ fn plan_cache_rel_callback_impl(relid: Oid) -> PgResult<()> {
 
         let gplan = src.borrow().gplan;
         if gplan != NULL_HANDLE && get_plan(gplan).borrow().is_valid {
-            let stmt_list = get_plan(gplan).borrow().stmt_list;
-            for stmt in node_seams::plan_list_elements::call(stmt_list)? {
-                if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
-                    continue;
+            let pl = get_plan(gplan);
+            let mut invalidate = false;
+            {
+                let p = pl.borrow();
+                'stmt_scan: for stmt in p.stmt_list.iter() {
+                    if pstmt_is_utility(stmt) {
+                        continue;
+                    }
+                    let empty: &[Oid] = &[];
+                    let oids: &[Oid] = stmt.relationOids.as_deref().unwrap_or(empty);
+                    let stmt_hit = if relid == INVALID_OID {
+                        !oids.is_empty()
+                    } else {
+                        list_member_oid(oids, relid)
+                    };
+                    if stmt_hit {
+                        invalidate = true;
+                        break 'stmt_scan;
+                    }
                 }
-                let oids = planner_seams::pstmt_relation_oids::call(stmt)?;
-                let stmt_hit = if relid == INVALID_OID {
-                    !oids.is_empty()
-                } else {
-                    node_seams::list_member_oid::call(&oids, relid)?
-                };
-                if stmt_hit {
-                    get_plan(gplan).borrow_mut().is_valid = false;
-                    break;
-                }
+            }
+            if invalidate {
+                pl.borrow_mut().is_valid = false;
             }
         }
     }
@@ -1759,7 +2028,7 @@ fn plan_cache_rel_callback_impl(relid: Oid) -> PgResult<()> {
         let hit = if relid == INVALID_OID {
             !ce.borrow().relation_oids.is_empty()
         } else {
-            node_seams::list_member_oid::call(&ce.borrow().relation_oids, relid)?
+            list_member_oid(&ce.borrow().relation_oids, relid)
         };
         if hit {
             ce.borrow_mut().is_valid = false;
@@ -1814,20 +2083,30 @@ fn plan_cache_object_callback_impl(cacheid: i32, hashvalue: u32) -> PgResult<()>
 
         let gplan = src.borrow().gplan;
         if gplan != NULL_HANDLE && get_plan(gplan).borrow().is_valid {
-            let stmt_list = get_plan(gplan).borrow().stmt_list;
-            'stmt_scan: for stmt in node_seams::plan_list_elements::call(stmt_list)? {
-                if planner_seams::pstmt_command_type_is_utility::call(stmt)? {
-                    continue;
-                }
-                for item in planner_seams::pstmt_inval_items::call(stmt)? {
-                    if inval_matches(&item, cacheid, hashvalue) {
-                        get_plan(gplan).borrow_mut().is_valid = false;
-                        break;
+            let pl = get_plan(gplan);
+            let mut invalidate = false;
+            {
+                let p = pl.borrow();
+                'stmt_scan: for stmt in p.stmt_list.iter() {
+                    if pstmt_is_utility(stmt) {
+                        continue;
+                    }
+                    if let Some(inval) = &stmt.invalItems {
+                        for pii in inval.iter() {
+                            let key = InvalItemKey {
+                                cache_id: pii.cacheId,
+                                hash_value: pii.hashValue,
+                            };
+                            if inval_matches(&key, cacheid, hashvalue) {
+                                invalidate = true;
+                                break 'stmt_scan;
+                            }
+                        }
                     }
                 }
-                if !get_plan(gplan).borrow().is_valid {
-                    break 'stmt_scan;
-                }
+            }
+            if invalidate {
+                pl.borrow_mut().is_valid = false;
             }
         }
     }
@@ -1911,13 +2190,11 @@ pub fn ResetPlanCache() -> PgResult<()> {
 }
 
 /* ==========================================================================
- * ReleaseAllPlanCacheRefsInOwner
+ * ReleaseAllPlanCacheRefsInOwner / ResOwnerReleaseCachedPlan
  * ======================================================================== */
 
 /// `ReleaseAllPlanCacheRefsInOwner(owner)`.
 pub fn ReleaseAllPlanCacheRefsInOwner(owner: ResourceOwnerHandle) -> PgResult<()> {
-    // ResourceOwnerReleaseAllOfKind returns the plan ids still held by `owner`;
-    // each re-enters ResOwnerReleaseCachedPlan -> ReleaseCachedPlan(plan, NULL).
     let plans = resowner_seams::resource_owner_release_all_plan_refs::call(owner)?;
     for plan in plans {
         ResOwnerReleaseCachedPlan(plan)?;
@@ -1925,31 +2202,213 @@ pub fn ReleaseAllPlanCacheRefsInOwner(owner: ResourceOwnerHandle) -> PgResult<()
     Ok(())
 }
 
-/* ==========================================================================
- * ResOwnerReleaseCachedPlan (static) — ResourceOwner release callback.
- * ======================================================================== */
-
 /// `ResOwnerReleaseCachedPlan(res)` — `ReleaseCachedPlan((CachedPlan *) res, NULL)`.
 pub fn ResOwnerReleaseCachedPlan(plan: CachedPlanHandle) -> PgResult<()> {
     ReleaseCachedPlan(plan, ResourceOwnerHandle::NULL)
 }
 
 /* ==========================================================================
- * Seam installation.  plancache has no INWARD seams (no other crate calls it
- * across a cycle yet), so init_seams() installs nothing.  It exists so the
- * aggregator can call it uniformly.
+ * INWARD seam bodies — the value-shaped public API the prepare/portal
+ * consumers call (backend-utils-cache-plancache-seams).
  * ======================================================================== */
 
-/// Install plancache's own seams. `init_plan_cache` is consumed across the
-/// postinit bring-up cycle via `plancache-seams`, so it is installed here
-/// (assemble/seam-wiring-guard pure-wiring fix).
-pub fn init_seams() {
-    backend_utils_cache_plancache_seams::init_plan_cache::set(InitPlanCache);
+/// `create_cached_plan(mcx, raw_stmt, query_string, command_tag)`.
+fn seam_create_cached_plan<'mcx>(
+    _mcx: Mcx<'mcx>,
+    raw_stmt: &RawStmt<'mcx>,
+    query_string: &str,
+    command_tag: CommandTag,
+) -> PgResult<SeamSourceHandle> {
+    Ok(SeamSourceHandle(CreateCachedPlan(
+        raw_stmt,
+        query_string,
+        command_tag,
+    )?))
+}
 
-    // `plan_cache_mode` (plancache.c:138 `int plan_cache_mode`) is a USERSET enum
-    // GUC owned by this unit (guc_tables.c:5372 binds `&plan_cache_mode`).  C reads
-    // it straight from the GUC slot in choose_custom_plan(); mirror that by reading
-    // the guc-tables slot (GucEnumVar::read() -> i32).
+/// `complete_cached_plan(mcx, plansource, query_list, arg_types)` — the
+/// fixed-cursor / fixed-result PREPARE convenience form
+/// (`CompleteCachedPlan(..., CURSOR_OPT_PARALLEL_OK, true)`).
+fn seam_complete_cached_plan<'mcx>(
+    _mcx: Mcx<'mcx>,
+    plansource: SeamSourceHandle,
+    query_list: &[Node<'mcx>],
+    arg_types: &[Oid],
+) -> PgResult<()> {
+    // Each node is a Node::Query — project to &Query, copying into a scratch
+    // context so `CompleteCachedPlan` gets an owned `&[Query]`.
+    let scratch = MemoryContext::new("plancache_complete_in");
+    let mut owned: Vec<Query<'_>> = Vec::with_capacity(query_list.len());
+    for n in query_list {
+        match n.as_query() {
+            Some(q) => owned.push(q.clone_in(scratch.mcx())?),
+            None => {
+                return Err(elog_error(
+                    "complete_cached_plan: querytree list element is not a Query",
+                ))
+            }
+        }
+    }
+    let num_params = arg_types.len() as i32;
+    CompleteCachedPlan(
+        plansource.0,
+        owned.as_slice(),
+        arg_types,
+        num_params,
+        /* has_parser_setup */ false,
+        CURSOR_OPT_PARALLEL_OK,
+        /* fixed_result */ true,
+    )
+}
+
+/// `save_cached_plan(plansource)`.
+fn seam_save_cached_plan(plansource: SeamSourceHandle) -> PgResult<()> {
+    SaveCachedPlan(plansource.0)
+}
+
+/// `drop_cached_plan(plansource)`.
+fn seam_drop_cached_plan(plansource: SeamSourceHandle) -> PgResult<()> {
+    DropCachedPlan(plansource.0)
+}
+
+/// `get_cached_plan(plansource, bound_params, owner, query_env)`.
+fn seam_get_cached_plan<'mcx>(
+    plansource: SeamSourceHandle,
+    bound_params: ParamListInfoHandle,
+    owner: ResourceOwnerHandle,
+    query_env: Option<&QueryEnvironment<'mcx>>,
+) -> PgResult<SeamPlanHandle> {
+    Ok(SeamPlanHandle(GetCachedPlan(
+        plansource.0,
+        bound_params,
+        owner,
+        query_env,
+    )?))
+}
+
+/// `release_cached_plan(cplan, owner)`.
+fn seam_release_cached_plan(cplan: SeamPlanHandle, owner: ResourceOwnerHandle) -> PgResult<()> {
+    ReleaseCachedPlan(cplan.0, owner)
+}
+
+/// `cached_plan_get_target_list(mcx, plansource)` — owned `Node` list.
+fn seam_cached_plan_get_target_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    plansource: SeamSourceHandle,
+) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
+    let tl = CachedPlanGetTargetList(mcx, plansource.0, None)?;
+    let mut out = mcx::vec_with_capacity_in(mcx, tl.len())?;
+    for te in tl.into_iter() {
+        out.push(Node::TargetEntry(te));
+    }
+    Ok(out)
+}
+
+/// `plansource_fixed_result(plansource)`.
+fn seam_plansource_fixed_result(plansource: SeamSourceHandle) -> PgResult<bool> {
+    Ok(get_source(plansource.0).borrow().fixed_result)
+}
+
+/// `plansource_num_params(plansource)`.
+fn seam_plansource_num_params(plansource: SeamSourceHandle) -> PgResult<i32> {
+    Ok(get_source(plansource.0).borrow().num_params)
+}
+
+/// `plansource_param_types(mcx, plansource)`.
+fn seam_plansource_param_types<'mcx>(
+    mcx: Mcx<'mcx>,
+    plansource: SeamSourceHandle,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let src = get_source(plansource.0);
+    let p = src.borrow();
+    let mut out = mcx::vec_with_capacity_in(mcx, p.param_types.len())?;
+    for &o in p.param_types.iter() {
+        out.push(o);
+    }
+    Ok(out)
+}
+
+/// `plansource_query_string(mcx, plansource)`.
+fn seam_plansource_query_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    plansource: SeamSourceHandle,
+) -> PgResult<mcx::PgString<'mcx>> {
+    let src = get_source(plansource.0);
+    let p = src.borrow();
+    mcx::PgString::from_str_in(p.query_string.as_str(), mcx)
+}
+
+/// `plansource_command_tag(plansource)`.
+fn seam_plansource_command_tag(plansource: SeamSourceHandle) -> PgResult<CommandTag> {
+    Ok(get_source(plansource.0).borrow().command_tag)
+}
+
+/// `plansource_result_desc(mcx, plansource)`.
+fn seam_plansource_result_desc<'mcx>(
+    mcx: Mcx<'mcx>,
+    plansource: SeamSourceHandle,
+) -> PgResult<Option<TupleDescData<'mcx>>> {
+    let src = get_source(plansource.0);
+    let p = src.borrow();
+    match &p.result_desc {
+        Some(td) => Ok(Some(td.clone_in(mcx)?)),
+        None => Ok(None),
+    }
+}
+
+/// `plansource_num_generic_plans(plansource)`.
+fn seam_plansource_num_generic_plans(plansource: SeamSourceHandle) -> PgResult<i64> {
+    Ok(get_source(plansource.0).borrow().num_generic_plans)
+}
+
+/// `plansource_num_custom_plans(plansource)`.
+fn seam_plansource_num_custom_plans(plansource: SeamSourceHandle) -> PgResult<i64> {
+    Ok(get_source(plansource.0).borrow().num_custom_plans)
+}
+
+/// `cached_plan_stmt_list(mcx, cplan)` — owned `PlannedStmt`s in `mcx`.
+fn seam_cached_plan_stmt_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    cplan: SeamPlanHandle,
+) -> PgResult<PgVec<'mcx, PlannedStmt<'mcx>>> {
+    let pl = get_plan(cplan.0);
+    let p = pl.borrow();
+    debug_assert_eq!(p.magic, CACHEDPLAN_MAGIC);
+    let mut out = mcx::vec_with_capacity_in(mcx, p.stmt_list.len())?;
+    for s in p.stmt_list.iter() {
+        out.push(s.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
+/* ==========================================================================
+ * Seam installation.
+ * ======================================================================== */
+
+/// Install plancache's INWARD value seams plus `init_plan_cache` / the
+/// `plan_cache_mode` GUC reader.
+pub fn init_seams() {
+    inward::init_plan_cache::set(InitPlanCache);
+
+    inward::create_cached_plan::set(seam_create_cached_plan);
+    inward::complete_cached_plan::set(seam_complete_cached_plan);
+    inward::save_cached_plan::set(seam_save_cached_plan);
+    inward::drop_cached_plan::set(seam_drop_cached_plan);
+    inward::get_cached_plan::set(seam_get_cached_plan);
+    inward::release_cached_plan::set(seam_release_cached_plan);
+    inward::cached_plan_get_target_list::set(seam_cached_plan_get_target_list);
+    inward::plansource_fixed_result::set(seam_plansource_fixed_result);
+    inward::plansource_num_params::set(seam_plansource_num_params);
+    inward::plansource_param_types::set(seam_plansource_param_types);
+    inward::plansource_query_string::set(seam_plansource_query_string);
+    inward::plansource_command_tag::set(seam_plansource_command_tag);
+    inward::plansource_result_desc::set(seam_plansource_result_desc);
+    inward::plansource_num_generic_plans::set(seam_plansource_num_generic_plans);
+    inward::plansource_num_custom_plans::set(seam_plansource_num_custom_plans);
+    inward::cached_plan_stmt_list::set(seam_cached_plan_stmt_list);
+
+    // `plan_cache_mode` (plancache.c:138 `int plan_cache_mode`) — USERSET enum
+    // GUC owned by this unit. Read straight from the guc-tables slot.
     backend_seams::plan_cache_mode::set(|| {
         Ok(backend_utils_misc_guc_tables::vars::plan_cache_mode.read())
     });

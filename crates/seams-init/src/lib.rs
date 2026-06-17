@@ -1101,21 +1101,10 @@ mod recurrence_guard {
         // needs `create_append_path`/`add_path`/`set_cheapest`, all ported
         // in-owner.)
         ("backend_optimizer_util_pathnode", "can_create_unique_path"),
-        // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
-        // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
-        // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
-        // with no backing registry), while the owner's real bodies
-        // (CreateTupleDescCopy / FreeTupleDesc / equalRowTypes) and its installed
-        // value-seams (`-seams`) are VALUE-based (`&TupleDescData`). Installing
-        // the handle seams needs a TupleDescHandle->TupleDescData registry
-        // (substantial unported machinery / a forbidden token-registry hack) or
-        // migrating plancache's whole result-desc path off opaque handles onto
-        // value descriptors (a contract redesign rippling through
-        // pquery/utility/analyze seams). Only `free_tuple_desc` is flagged here;
-        // the other two pc-seam names collide with the installed value-seam names
-        // so the name-keyed guard sees them as satisfied (they are equally
-        // uninstalled at runtime — same blocker).
-        ("backend_access_common_tupdesc", "free_tuple_desc"),
+        // (#159 STEP C plancache de-handle RETIRED: the handle-based tupdesc pc-seam
+        // `free_tuple_desc` is no longer called — plancache now owns TupleDescData
+        // values in a private MemoryContext (clone_in via the value `create_tuple_desc_copy`
+        // seam), freed by dropping the context rather than a handle free seam.)
         // RETIRED (task #161): `heap_tuple_header_get_datum`
         // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
         // The composite/record-Datum carrier bridge landed.
@@ -1179,24 +1168,17 @@ mod recurrence_guard {
         // imports the range-scan seam fn directly so the recurrence guard's
         // call-site scanner never attributed that call to the tableam-seams
         // crate; it was never a tuple entry and needs none.)
-        // DESIGN_DEBT: the plancache-facing search-path matcher seams are
-        // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
-        // contract (opaque SearchPathMatcherHandle, CtxId context) because the
-        // matcher's storage lives in plancache's long-lived querytree context.
-        // The namespace owner's real impls are value-shaped
-        // (GetSearchPathMatcher<'mcx>(Mcx)->SearchPathMatcher<'mcx>, etc.).
-        // Unifying onto the value shape requires redesigning the already
-        // merged/audited plancache's CachedPlanSource storage (it stores
-        // SearchPathMatcherHandle, passes CtxId, and has no access to Mcx) —
-        // a contract redesign of a downstream consumer, out of scope here.
-        ("backend_catalog_namespace", "copy_search_path_matcher"),
-        ("backend_catalog_namespace", "get_search_path_matcher"),
+        // (#159 STEP C plancache de-handle RETIRED: the handle/CtxId search-path
+        // matcher seams — copy_search_path_matcher / get_search_path_matcher /
+        // search_path_matches_current_environment — are no longer called. plancache
+        // now stores an owned SearchPathMatcher<'static> value and calls the
+        // value-shaped namespace seams get_search_path_matcher_value /
+        // search_path_matches_current_environment_value instead.)
         // (restrict_search_path retired: RestrictSearchPath is guc.c's function
         // (guc.c:2246), now ported + installed by the merged guc owner
         // (backend-utils-misc-guc) and its seam re-homed to
         // backend-utils-misc-guc-seams. Consumers (matview, cluster) call it
         // there.)
-        ("backend_catalog_namespace", "search_path_matches_current_environment"),
         // xlog reconciled out: CATALOG status corrected merged->needs-decomp
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
@@ -1378,42 +1360,16 @@ mod recurrence_guard {
         // generic `object_owner_acl` syscache projection (the `get_object_catcache_oid`
         // dispatch) plus a `table_open` + `systable_beginscan` + `heap_deform_tuple`
         // fallback for cache-less catalogs (`cacheid == -1`). Allowlist entry removed.
-        // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
-        // facing plancache seam in backend-utils-cache-plancache-seams is written
-        // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned
-        // `RawStmt<'mcx>` / `Node<'mcx>` / `PlannedStmt<'mcx>` / `TupleDescData
-        // <'mcx>` / `PgVec<'mcx,_>` / `PgString<'mcx>` values keyed by an opaque
-        // `CachedPlanSourceHandle` / `CachedPlanHandle`. The merged/audited owner
-        // is built entirely on a handle REGISTRY: its real bodies (CreateCachedPlan
-        // / CompleteCachedPlan / SaveCachedPlan / DropCachedPlan / GetCachedPlan /
-        // ReleaseCachedPlan / CachedPlanGetTargetList) take/return handles
-        // (RawStmtHandle, QueryListHandle, CtxId, TupleDescHandle) into an internal
-        // `Rc<RefCell<CachedPlanSourceData>>` map and have no `Mcx`; the
-        // `plansource_*` / `cached_plan_stmt_list` field accessors have no owner fn
-        // at all (the data lives behind handles, not as `'mcx` values). Installing
-        // these would require either forging fake values out of stored handles (a
-        // forbidden token/pointer-registry hack, opacity-inherited-never-introduced)
-        // or migrating plancache's whole CachedPlanSource/CachedPlan storage off
-        // opaque handles onto owned `'mcx` values — the K1 plancache de-handle
-        // redesign tracked in task #159, which also retires the CtxId fields. No
-        // thin adapter bridges value<->handle here. Pay down with #159, not seam
-        // wiring. See DESIGN_DEBT.md.
-        ("backend_utils_cache_plancache", "cached_plan_get_target_list"),
-        ("backend_utils_cache_plancache", "cached_plan_stmt_list"),
-        ("backend_utils_cache_plancache", "complete_cached_plan"),
-        ("backend_utils_cache_plancache", "create_cached_plan"),
-        ("backend_utils_cache_plancache", "drop_cached_plan"),
-        ("backend_utils_cache_plancache", "get_cached_plan"),
-        ("backend_utils_cache_plancache", "plansource_command_tag"),
-        ("backend_utils_cache_plancache", "plansource_fixed_result"),
-        ("backend_utils_cache_plancache", "plansource_num_custom_plans"),
-        ("backend_utils_cache_plancache", "plansource_num_generic_plans"),
-        ("backend_utils_cache_plancache", "plansource_num_params"),
-        ("backend_utils_cache_plancache", "plansource_param_types"),
-        ("backend_utils_cache_plancache", "plansource_query_string"),
-        ("backend_utils_cache_plancache", "plansource_result_desc"),
-        ("backend_utils_cache_plancache", "release_cached_plan"),
-        ("backend_utils_cache_plancache", "save_cached_plan"),
+        // (#159 STEP C plancache de-handle RETIRED: the 16 inward plancache seams —
+        // create/complete/save/drop/get/release_cached_plan, cached_plan_stmt_list,
+        // cached_plan_get_target_list, and the plansource_* field accessors — are now
+        // INSTALLED by backend-utils-cache-plancache::init_seams. The owner no longer
+        // stores opaque RawStmt/Query/PlannedStmt/TupleDesc/SearchPathMatcher handles:
+        // CachedPlanSourceData/CachedPlanData/CachedExpressionData now own the value
+        // trees in private MemoryContexts (clone_in + 'static drop-order, the portalmem
+        // pattern), so the seams cross owned `'mcx` values instead of registry handles.
+        // The handle REGISTRY is kept ONLY for plan/source u64 IDENTITY + refcount +
+        // gplan sharing (faithful to C's shared CachedPlan*).)
         // DESIGN_DEBT: `domain_check_input` (domains.c) checks a domain's
         // constraints. Its NOT NULL arm is trivial, but the DOM_CONSTRAINT_CHECK
         // arm requires `ExecCheck(con->check_exprstate, econtext)` — executor
@@ -1511,53 +1467,25 @@ mod recurrence_guard {
         //     xlog's init_seams (the real owner). XLogShutdownWalRcv reaches the
         //     inner ShutdownWalRcv via the new `shutdown_wal_rcv` seam.
         // Allowlist entries removed.
-        // DESIGN_DEBT (TD-ANALYZE-PLANCACHE-HANDLE / #159 + TD-ANALYZE-REWRITE):
-        // 19 parser/analyze.c seams `::call`ed in live consumers (chiefly
-        // plancache, bootstrap) on the audited analyze owner, none installable:
-        //
-        //   * 16 plancache-facing (-pc-seams) seams are written against opaque
-        //     `types_plancache` handle newtypes (QueryHandle / RawStmtHandle /
-        //     AnalyzedQueryHandle / QueryListHandle / TargetListHandle /
-        //     UtilityStmtHandle / RteFields / ParserSetupHandle / QueryEnvHandle)
-        //     with no producer, while the owner's real bodies operate on owned
-        //     `Query<'mcx>` / `RawStmt<'mcx>` values (three even have real logic on
-        //     owned refs — stmt_requires_parse_analysis(&RawStmt),
-        //     analyze_requires_snapshot(&RawStmt), query_requires_rewrite_plan(&Query)
-        //     — but signature-diverge from the handle decl). Installing would forge
-        //     values from handles (forbidden token-registry) or migrate plancache
-        //     off opaque handles — the K1 plancache de-handle redesign (#159). The
-        //     owner's Cargo.toml does not even dep the -pc-seams crate. Same blocker
-        //     as the plancache pc-seam cluster above.
-        //   * 2 reach the unported QueryRewrite (rewriter) leg:
-        //     analyze_and_rewrite_varparams (varparam analyze+rewrite absent),
-        //     run_post_parse_analyze_hook (hook is NULL by default, no body).
-        //     (pg_analyze_and_rewrite_fixedparams now lands via tcop/postgres.c
-        //     F1, which threads the canonical owned-value rewrite leg — entry
-        //     retired below.)
-        // DELETE these as #159 (de-handle) and the rewriter leg land.
-        ("backend_parser_analyze", "analyze_and_rewrite_fixedparams"),
+        // DESIGN_DEBT (TD-ANALYZE-REWRITE): the remaining genuinely-uninstalled
+        // analyze.c seams after the #159 STEP C plancache de-handle:
+        //   * analyze_and_rewrite_varparams — the varparam analyze+rewrite leg is
+        //     still unported (the rewriter varparam path is absent). Loud-panics.
+        //   * run_post_parse_analyze_hook — the post-parse hook is NULL by default
+        //     and has no body. Loud-panics if a hook is ever set.
+        // (#159 STEP C plancache de-handle RETIRED: the 16 -pc-seams handle forms
+        // [QueryHandle/RawStmtHandle/AnalyzedQueryHandle/QueryListHandle/...] plus
+        // analyze_and_rewrite_fixedparams / analyze_and_rewrite_withcb /
+        // analyze_requires_snapshot / stmt_requires_parse_analysis /
+        // query_requires_rewrite_plan / the query_* field accessors /
+        // walk_query_sublinks_for_locks are no longer called. plancache now owns
+        // RawStmt<'static>/Query<'static> values and calls the value seams
+        // stmt_requires_parse_analysis_value / analyze_requires_snapshot_value /
+        // query_requires_rewrite_plan_value / pg_analyze_and_rewrite_fixedparams_params,
+        // reads Query fields directly, and walks sublinks via node_walker.)
+        // DELETE these as the rewriter varparam/hook legs land.
         ("backend_parser_analyze", "analyze_and_rewrite_varparams"),
-        ("backend_parser_analyze", "analyze_and_rewrite_withcb"),
-        ("backend_parser_analyze", "analyze_requires_snapshot"),
-        // pg_analyze_and_rewrite_fixedparams is now installed by the
-        // tcop/postgres.c owner (backend-tcop-postgres init_seams; the F1
-        // simple-Query pipeline owns this function and installs it via the
-        // canonical owned-value query_rewrite_canonical leg). Allowlist entry
-        // retired.
-        ("backend_parser_analyze", "query_can_set_tag"),
-        ("backend_parser_analyze", "query_command_type_is_utility"),
-        ("backend_parser_analyze", "query_cte_queries"),
-        ("backend_parser_analyze", "query_has_cte_list"),
-        ("backend_parser_analyze", "query_has_rtable"),
-        ("backend_parser_analyze", "query_has_sublinks"),
-        ("backend_parser_analyze", "query_requires_rewrite_plan"),
-        ("backend_parser_analyze", "query_returning_list"),
-        ("backend_parser_analyze", "query_rtable_fields"),
-        ("backend_parser_analyze", "query_target_list"),
-        ("backend_parser_analyze", "query_utility_stmt"),
         ("backend_parser_analyze", "run_post_parse_analyze_hook"),
-        ("backend_parser_analyze", "stmt_requires_parse_analysis"),
-        ("backend_parser_analyze", "walk_query_sublinks_for_locks"),
         // DESIGN_DEBT (TD-PARSETYPE-TYPENAME-CARRIER, narrowed): parse_type.c's
         // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)` and
         // extracts the single `TypeName` node. The grammar IS now ported
@@ -1621,29 +1549,18 @@ mod recurrence_guard {
         // pure-wiring miss. The owners' wireable legs were installed instead.
         // ===================================================================
         //
-        // -- backend-nodes-copyfuncs (K1 plancache-handle de-handle keystone) --
-        // DESIGN_DEBT (TD-COPYFUNCS-PLANCACHE-HANDLES): these 10 are the
-        // `-pc-seams` slice of copyfuncs.c / list.c / setrefs.c::
-        // extract_query_dependencies / clauses.c::expression_planner_with_deps.
-        // They take/return the OPAQUE plancache token newtypes
-        // (`QueryListHandle`/`PlannedStmtListHandle`/`RawStmtHandle`/
-        // `AnalyzedQueryHandle`/`ExprHandle`/`QueryHandle` in types-plancache),
-        // whose storage is owned by the unported parser/planner/plancache
-        // subsystems. copyfuncs's real ported body (`copy_object`) operates on
-        // value-typed `Node`s, NOT these tokens; there is no token->value
-        // registry (forbidden — opacity-inherited-never-introduced). All 10 are
-        // consumed only by the keystone-blocked plancache unit (#159 de-handle).
-        // Install + DELETE when plancache is de-handled onto owned node values.
-        ("backend_nodes_copyfuncs", "copy_query_list"),
-        ("backend_nodes_copyfuncs", "copy_plan_list"),
-        ("backend_nodes_copyfuncs", "copy_raw_stmt"),
-        ("backend_nodes_copyfuncs", "copy_analyzed_query"),
-        ("backend_nodes_copyfuncs", "copy_expr"),
-        ("backend_nodes_copyfuncs", "query_list_elements"),
-        ("backend_nodes_copyfuncs", "plan_list_elements"),
+        // -- backend-nodes-copyfuncs --
+        // (#159 STEP C plancache de-handle RETIRED: the 9 -pc-seams handle forms —
+        // copy_query_list / copy_plan_list / copy_raw_stmt / copy_analyzed_query /
+        // copy_expr / query_list_elements / plan_list_elements /
+        // extract_query_dependencies / expression_planner_with_deps — are no longer
+        // called. plancache de-handled onto owned node values: it clones via
+        // Query/PlannedStmt/RawStmt/Expr::clone_in into private MemoryContexts and
+        // calls the value seams extract_query_dependencies_value /
+        // expression_planner_with_deps_value instead of the opaque-token handle forms.)
+        // list_member_oid stays: still declared+called+uninstalled (a separate
+        // list.c primitive, not part of the plancache de-handle slice).
         ("backend_nodes_copyfuncs", "list_member_oid"),
-        ("backend_nodes_copyfuncs", "extract_query_dependencies"),
-        ("backend_nodes_copyfuncs", "expression_planner_with_deps"),
         //
         // -- backend-commands-trigger (F1 firing/DDL leg still todo) --
         // DESIGN_DEBT (TD-TRIGGER-F1): trigger.c is CATALOG `merged` only for
@@ -1909,31 +1826,14 @@ mod recurrence_guard {
         // Delete each entry when its named blocker lands and installs the seam.
         // ============================================================
 
-        // DESIGN_DEBT (TD-PLANCACHE-OPAQUE-HANDLE): the planner plancache-
-        // consumer slice (`backend-optimizer-plan-planner-pc-seams`, called only
-        // by backend-utils-cache-plancache) keys every PlannedStmt accessor on an
-        // OPAQUE u64 handle (PlannedStmtHandle/QueryListHandle/etc. in
-        // types_plancache). The ported planner is value-typed over `mcx` arenas
-        // (pg_plan_query returns PlannedStmt<'mcx>) and there is NO handle<->value
-        // registry anywhere, so no faithful provider can be `::set`. Same class as
-        // the documented portal-static-arena / plancache keystone — wiring would
-        // mean inventing a handle registry (forbidden). DELETE when the plancache
-        // handle/value-arena reconciliation lands.
-        ("backend_optimizer_plan_planner", "plan_queries"),
-        ("backend_optimizer_plan_planner", "pstmt_command_type_is_utility"),
-        ("backend_optimizer_plan_planner", "pstmt_depends_on_role"),
-        ("backend_optimizer_plan_planner", "pstmt_inval_items"),
-        ("backend_optimizer_plan_planner", "pstmt_plantree_total_cost"),
-        ("backend_optimizer_plan_planner", "pstmt_relation_oids"),
-        ("backend_optimizer_plan_planner", "pstmt_rtable_fields"),
-        ("backend_optimizer_plan_planner", "pstmt_rtable_length"),
-        ("backend_optimizer_plan_planner", "pstmt_transient_plan"),
-        ("backend_optimizer_plan_planner", "pstmt_utility_stmt"),
-        // Same opaque-handle keystone: tcop/utility.c's UtilityContainsQuery is
-        // value-typed (&Node -> Option<&Node>) but the plancache-consumer seam
-        // (`-pc-seams`) is handle-typed (UtilityStmtHandle -> QueryHandle); no
-        // bridge. DELETE with the plancache handle reconciliation above.
-        ("backend_tcop_utility", "utility_contains_query"),
+        // (#159 STEP C plancache de-handle RETIRED: the planner plancache-consumer
+        // slice — plan_queries + the 9 pstmt_* PlannedStmt accessors — and the
+        // tcop/utility utility_contains_query handle seam are no longer called.
+        // plancache now owns PlannedStmt<'static> values: it plans via the value
+        // seam pg_plan_queries_value, reads transientPlan/dependsOnRole/invalItems/
+        // commandType/utilityStmt/rtable fields and planTree.total_cost
+        // [PlannedStmt::plan_total_cost] directly off the owned stmts, and mirrors
+        // UtilityContainsQuery as a local value recursion.)
 
         // DESIGN_DEBT (TD-VACUUMPARALLEL-OUTWARD): the ~39 `*_pv`/`*_basvac`/
         // `vacuum_*_nworkers`/`tid_store_*_pv`/`pgstat_*_pv` seams live in
