@@ -19,6 +19,7 @@ types-authid = { path = "../types-authid" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 common-cryptohash-seams = { path = "../common-cryptohash-seams" }
 common-prng-base64 = { path = "../common-prng-base64" }

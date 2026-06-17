@@ -10472,6 +10472,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "common-cryptohash-seams",
  "common-prng-base64",
  "common-sha2",

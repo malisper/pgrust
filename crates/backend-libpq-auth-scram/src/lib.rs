@@ -114,6 +114,11 @@ fn scram_sha_256_iterations() -> i32 {
     SCRAM_SHA_256_ITERATIONS.load(Ordering::Relaxed)
 }
 
+/// Write side of the `scram_iterations` GUC accessor (`*conf->variable = ...`).
+fn scram_sha_256_iterations_set(value: i32) {
+    SCRAM_SHA_256_ITERATIONS.store(value, Ordering::Relaxed);
+}
+
 /// `ErrorLocation` for an `ereport(...)` raised from auth-scram.c.
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("auth-scram.c", 0, funcname)
@@ -1592,7 +1597,18 @@ fn bytes_to_str_lossless(b: &[u8]) -> String {
 /// Install the inward seam this crate owns: `check_scram_sasl_auth`, the SCRAM
 /// arm of the `CheckSASLAuth` driver that `auth.c` consumes.
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
     backend_libpq_auth_seams::check_scram_sasl_auth::set(check_scram_sasl_auth_entry);
+
+    // The C GUC `int scram_sha_256_iterations` (auth-scram.c:196) is the backing
+    // store for the `scram_iterations` GUC and is read straight from the slot at
+    // secret-build time (auth-scram.c:508). The GUC machinery reaches our
+    // `AtomicI32` through these accessors (`*conf->variable`).
+    vars::scram_sha_256_iterations.install(GucVarAccessors {
+        get: scram_sha_256_iterations,
+        set: scram_sha_256_iterations_set,
+    });
 }
 
 #[cfg(test)]
