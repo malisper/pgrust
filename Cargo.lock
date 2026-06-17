@@ -4578,6 +4578,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-acl",

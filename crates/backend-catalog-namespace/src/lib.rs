@@ -176,6 +176,21 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_ts_template_oid::set(seam_get_ts_template_oid);
     backend_catalog_namespace_seams::get_statistics_object_oid::set(seam_get_statistics_object_oid);
     backend_catalog_namespace_seams::fetch_search_path::set(crate::fetch_search_path);
+
+    // Install the GUC machinery's typed accessors for the `search_path` GUC
+    // (C's `char *namespace_search_path`, guc_tables.c:4513). C points
+    // `conf->variable` at the `namespace_search_path` global and stores
+    // `*conf->variable` itself before invoking `assign_search_path`; this
+    // crate owns that storage, so the generic store folds into the `set`
+    // accessor here. `search_path` boots to a non-NULL value (`"$user",
+    // public`) and is never NULL, but the slot's `Option<String>` carries
+    // C's NULL/empty distinction faithfully.
+    backend_utils_misc_guc_tables::vars::namespace_search_path.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || Some(crate::namespace_search_path()),
+            set: |v| crate::set_namespace_search_path(v.as_deref().unwrap_or("")),
+        },
+    );
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
