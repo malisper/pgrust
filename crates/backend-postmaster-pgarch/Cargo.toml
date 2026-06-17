@@ -16,6 +16,7 @@ backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" 
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # outward seam crates (cyclic / not-yet-ported owners)
 backend-archive-shell-archive-seams = { path = "../backend-archive-shell-archive-seams" }

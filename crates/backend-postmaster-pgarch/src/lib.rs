@@ -130,6 +130,37 @@ thread_local! {
     /// each check; consumed when emitting the "not configured" WARNING.
     static arch_module_check_errdetail_string: RefCell<Option<alloc::string::String>> =
         const { RefCell::new(None) };
+
+    /// `char *XLogArchiveLibrary = "";` (pgarch.c:95) — the `archive_library`
+    /// GUC string global. C declares the storage here in pgarch.c and reads it
+    /// directly (`pstrdup(XLogArchiveLibrary)`, the `[0] != '\0'` checks, and
+    /// `load_external_function(XLogArchiveLibrary, ...)`); it is not a
+    /// ControlFile field. This is the owner's backing store the
+    /// `vars::XLogArchiveLibrary` GUC slot is bridged onto. `None` mirrors the
+    /// C `""` default (an empty/unset library name).
+    static xlog_archive_library_store: RefCell<Option<alloc::string::String>> =
+        const { RefCell::new(None) };
+}
+
+/// Read `XLogArchiveLibrary` (pgarch.c:95), returning an owned copy — "" when
+/// unset, matching the C `char *XLogArchiveLibrary = ""` default. Backs the
+/// `xlog_archive_library` seam (which pgarch copies via `pstrdup` before
+/// reload).
+fn xlog_archive_library_get() -> alloc::string::String {
+    xlog_archive_library_store
+        .with(|c| c.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// Write `XLogArchiveLibrary` — the GUC assign path. An empty string maps to
+/// the C `""` default (stored as `None`).
+fn xlog_archive_library_set(value: Option<alloc::string::String>) {
+    xlog_archive_library_store.with(|c| {
+        *c.borrow_mut() = match value {
+            Some(s) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+    });
 }
 
 /// Set `arch_module_check_errdetail_string` (the `arch_module_check_errdetail()`
@@ -1234,4 +1265,27 @@ pub fn init_seams() {
     backend_postmaster_pgarch_seams::pg_arch_shmem_init::set(PgArchShmemInit);
     backend_postmaster_pgarch_seams::pg_arch_wakeup::set(PgArchWakeup);
     backend_postmaster_pgarch_seams::pg_arch_force_dir_scan::set(PgArchForceDirScan);
+
+    // `archive_library` GUC (guc_tables.c) — backed by the `char
+    // *XLogArchiveLibrary` global pgarch.c owns (pgarch.c:95). Bridge the GUC
+    // slot onto this crate's thread-local backing store so the GUC machinery's
+    // get/set reach the owner's storage...
+    backend_utils_misc_guc_tables::vars::XLogArchiveLibrary.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || {
+                let s = xlog_archive_library_get();
+                if s.is_empty() {
+                    Some(String::new())
+                } else {
+                    Some(s)
+                }
+            },
+            set: xlog_archive_library_set,
+        },
+    );
+
+    // ...and install the inward `xlog_archive_library` seam (consumed by this
+    // crate's reload/check paths and shell-archive selection), reading the
+    // bare GUC global exactly as C's `pstrdup(XLogArchiveLibrary)`.
+    backend_access_transam_xlog_seams::xlog_archive_library::set(xlog_archive_library_get);
 }
