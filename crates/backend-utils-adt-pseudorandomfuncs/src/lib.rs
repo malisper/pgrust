@@ -235,7 +235,10 @@ fn fmt_g(v: f64) -> String {
 /// above.
 pub fn init_seams() {
     backend_commands_variable_seams::setseed::set(setseed);
+    fmgr_builtins::register_pseudorandomfuncs_builtins();
 }
+
+mod fmgr_builtins;
 
 #[cfg(test)]
 mod tests;
