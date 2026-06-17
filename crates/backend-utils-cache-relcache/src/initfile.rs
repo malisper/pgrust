@@ -93,15 +93,15 @@ const SharedSecLabelObjectIndexId: Oid = 3593;
 const SharedSecLabelRelationId: Oid = 3592;
 
 // Per-catalog attribute counts (formrdesc natts) — pg_*_d.h `Natts_*`.
-const Natts_pg_database: i32 = 17;
-const Natts_pg_authid: i32 = 14;
-const Natts_pg_auth_members: i32 = 5;
+const Natts_pg_database: i32 = 18;
+const Natts_pg_authid: i32 = 12;
+const Natts_pg_auth_members: i32 = 7;
 const Natts_pg_shseclabel: i32 = 4;
-const Natts_pg_subscription: i32 = 20;
-const Natts_pg_class: i32 = 33;
+const Natts_pg_subscription: i32 = 18;
+const Natts_pg_class: i32 = 34;
 const Natts_pg_attribute: i32 = 25;
 const Natts_pg_proc: i32 = 30;
-const Natts_pg_type: i32 = 31;
+const Natts_pg_type: i32 = 32;
 
 /// `RELCACHE_INIT_FILEMAGIC` (relcache.c) — the init-file magic number.
 const RELCACHE_INIT_FILEMAGIC: i32 = 0x573266;
