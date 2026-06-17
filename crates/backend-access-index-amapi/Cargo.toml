@@ -36,3 +36,6 @@ backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-brin-validate = { path = "../backend-access-brin-validate" }
 backend-access-gist-validate = { path = "../backend-access-gist-validate" }
 backend-access-spg-validate = { path = "../backend-access-spg-validate" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

@@ -104,7 +104,12 @@ pub fn init_seams() {
     amutils_sx::am_property::set(amutils_am_property);
     amutils_sx::index_can_return::set(amutils_index_can_return);
     amutils_sx::am_buildphasename::set(amutils_am_buildphasename);
+
+    // Register this crate's SQL-callable fmgr builtins (C: `fmgr_builtins[]`).
+    fmgr_builtins::register_amapi_builtins();
 }
+
+mod fmgr_builtins;
 
 // ===========================================================================
 // GetIndexAmRoutine / GetIndexAmRoutineByAmId
