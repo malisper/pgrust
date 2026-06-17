@@ -9,6 +9,7 @@ use crate::keystone::{
     def_name, error_conflicting_def_elem, errloc, name_list_to_string, OBJECT_FUNCTION,
 };
 use backend_commands_functioncmds_seams::{self as seam, CastFuncForm, TransformFuncForm};
+use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_error::ereport;
 use mcx::Mcx;
 use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
@@ -59,8 +60,10 @@ pub fn CreateCast(stmt: &CreateCastStmt) -> PgResult<ObjectAddress> {
 
     let sourcetypeid = seam::typename_type_id::call(sourcetype.clone())?;
     let targettypeid = seam::typename_type_id::call(targettype.clone())?;
-    let sourcetyptype = seam::get_typtype::call(sourcetypeid)?;
-    let targettyptype = seam::get_typtype::call(targettypeid)?;
+    // lsyscache.c `get_typtype` returns the `pg_type.typtype` char; the
+    // canonical seam carries it as `u8`, the TYPTYPE_* vocabulary here is `i8`.
+    let sourcetyptype = lsyscache::get_typtype::call(sourcetypeid)? as i8;
+    let targettyptype = lsyscache::get_typtype::call(targettypeid)? as i8;
 
     /* No pseudo-types allowed */
     if sourcetyptype == TYPTYPE_PSEUDO {
@@ -228,9 +231,12 @@ pub fn CreateCast(stmt: &CreateCastStmt) -> PgResult<ObjectAddress> {
          * Insist that the types match as to size, alignment, and pass-by-value
          * attributes.
          */
-        let (typ1len, typ1byval, typ1align) = seam::get_typlenbyvalalign::call(sourcetypeid)?;
-        let (typ2len, typ2byval, typ2align) = seam::get_typlenbyvalalign::call(targettypeid)?;
-        if typ1len != typ2len || typ1byval != typ2byval || typ1align != typ2align {
+        let typ1 = lsyscache::get_typlenbyvalalign::call(sourcetypeid)?;
+        let typ2 = lsyscache::get_typlenbyvalalign::call(targettypeid)?;
+        if typ1.typlen != typ2.typlen
+            || typ1.typbyval != typ2.typbyval
+            || typ1.typalign != typ2.typalign
+        {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                 .errmsg("source and target data types are not physically compatible")
@@ -245,8 +251,10 @@ pub fn CreateCast(stmt: &CreateCastStmt) -> PgResult<ObjectAddress> {
                 .into_error());
         }
 
-        if OidIsValid(seam::get_element_type::call(sourcetypeid)?)
-            || OidIsValid(seam::get_element_type::call(targettypeid)?)
+        // lsyscache.c `get_element_type` returns `InvalidOid` for a non-array
+        // type; the canonical seam carries that as `None`.
+        if lsyscache::get_element_type::call(sourcetypeid)?.is_some()
+            || lsyscache::get_element_type::call(targettypeid)?.is_some()
         {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
@@ -373,7 +381,7 @@ pub fn CreateTransform(stmt: &CreateTransformStmt) -> PgResult<ObjectAddress> {
         }
     };
     let typeid = seam::typename_type_id::call(type_name.clone())?;
-    let typtype = seam::get_typtype::call(typeid)?;
+    let typtype = lsyscache::get_typtype::call(typeid)? as i8;
 
     if typtype == TYPTYPE_PSEUDO {
         return Err(ereport(ERROR)

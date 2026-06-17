@@ -325,7 +325,7 @@ pub fn interpret_function_parameter_list(
             match toid {
                 ANYARRAYOID | ANYCOMPATIBLEARRAYOID | ANYOID => { /* okay */ }
                 _ => {
-                    if !OidIsValid(seam::get_element_type::call(toid)?) {
+                    if lsc::get_element_type::call(toid)?.is_none() {
                         return Err(ereport(ERROR)
                             .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                             .errmsg("VARIADIC parameter must be an array")

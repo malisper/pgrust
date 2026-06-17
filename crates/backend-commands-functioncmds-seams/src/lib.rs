@@ -210,20 +210,11 @@ seam_core::seam!(
     pub fn get_language_name(lang_oid: Oid) -> PgResult<String>
 );
 
-seam_core::seam!(
-    /// `get_element_type(typid)` — element type OID, or `InvalidOid`.
-    pub fn get_element_type(type_oid: Oid) -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// `get_typtype(typid)` — the `pg_type.typtype` char.
-    pub fn get_typtype(type_oid: Oid) -> PgResult<i8>
-);
-
-seam_core::seam!(
-    /// `get_typlenbyvalalign(typid, ...)` → `(typlen, typbyval, typalign)`.
-    pub fn get_typlenbyvalalign(type_oid: Oid) -> PgResult<(i16, bool, i8)>
-);
+// `get_element_type`, `get_base_element_type`, `get_typtype`,
+// `get_typlenbyvalalign` are NOT declared here: they are lsyscache.c functions
+// whose canonical (installed) contract lives in
+// `backend-utils-cache-lsyscache-seams`. functioncmds calls that channel
+// directly (contract unified 2026-06-17).
 
 seam_core::seam!(
     /// `TypeShellMake(typename, namespaceId, ownerId)` → the shell type's address.
@@ -301,6 +292,10 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> PgResult<Oid>
 );
+
+// `get_func_rettype` is NOT declared here: its canonical (installed) contract
+// lives in `backend-utils-cache-lsyscache-seams`; functioncmds calls that
+// channel directly (contract unified 2026-06-17).
 
 seam_core::seam!(
     /// `func_signature_string(funcname, nargs, NIL, argtypes)`

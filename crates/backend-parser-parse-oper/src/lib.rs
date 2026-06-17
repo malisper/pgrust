@@ -67,7 +67,6 @@ use types_tuple::heaptuple::{
 use backend_catalog_namespace_seams::{
     lookup_explicit_namespace, opername_get_candidates, opername_get_oprid,
 };
-use backend_utils_cache_lsyscache_seams::get_base_element_type;
 use backend_nodes_core::nodefuncs::expr_type as exprType;
 use backend_parser_coerce_seams::{enforce_generic_type_consistency, is_binary_coercible};
 use backend_parser_parse_func_seams::{
@@ -75,7 +74,9 @@ use backend_parser_parse_func_seams::{
     set_last_srf,
 };
 use backend_parser_parse_type_seams::{lookup_type_name_oid, typename_type_id};
-use backend_utils_cache_lsyscache_seams::{get_array_type, get_base_type, get_func_retset};
+use backend_utils_cache_lsyscache_seams::{
+    get_array_type, get_base_element_type, get_base_type, get_func_retset,
+};
 use backend_utils_cache_syscache_seams::oper_row_by_oid;
 use backend_utils_cache_typcache_seams::sort_group_operators;
 
