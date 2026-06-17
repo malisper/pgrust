@@ -4608,6 +4608,7 @@ dependencies = [
  "seam-core",
  "types-acl",
  "types-array",
+ "types-authid",
  "types-cache",
  "types-catalog",
  "types-cluster",
@@ -4631,6 +4632,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-array",
+ "types-authid",
  "types-catalog",
  "types-cluster",
  "types-core",
@@ -4929,6 +4931,24 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-authid"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-commands-user-seams",
+ "mcx",
+ "seam-core",
+ "types-authid",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -22064,6 +22084,7 @@ dependencies = [
  "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
+ "backend-catalog-pg-authid",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",

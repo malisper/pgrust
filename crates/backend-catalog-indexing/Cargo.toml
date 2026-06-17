@@ -47,6 +47,7 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 # backend-catalog-catalog nor backend-access-common-heaptuple depends on this
 # crate (verified via cargo tree).
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+types-authid = { path = "../types-authid" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 types-catalog = { path = "../types-catalog" }
 

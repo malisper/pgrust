@@ -182,18 +182,24 @@ seam!(
     pub fn insert_authid(rel: Oid, rec: NewAuthRecord) -> PgResult<()>
 );
 seam!(
-    /// `heap_modify_tuple` + `CatalogTupleUpdate` of the located `pg_authid` tuple.
-    pub fn update_authid(rel: Oid, tuple: TupleHandle, upd: AuthIdUpdate) -> PgResult<()>
+    /// Re-fetch the `pg_authid` row for `roleid`, apply the per-attribute deltas,
+    /// `heap_modify_tuple` + `CatalogTupleUpdate` (C `heap_modify_tuple` of the
+    /// located tuple). The C holds the located `HeapTuple`; the OID-keyed
+    /// contract re-fetches the same row within the open transaction.
+    pub fn update_authid(rel: Oid, roleid: Oid, upd: AuthIdUpdate) -> PgResult<()>
 );
 seam!(
+    /// Re-fetch the `pg_authid` row for `roleid` and
     /// `CatalogTupleDelete(pg_authid_rel, &tuple->t_self)`.
-    pub fn delete_authid(rel: Oid, tuple: TupleHandle) -> PgResult<()>
+    pub fn delete_authid(rel: Oid, roleid: Oid) -> PgResult<()>
 );
 seam!(
-    /// The `RenameRole` rename of `rolname` (and optional MD5 clear).
+    /// The `RenameRole` rename of `rolname` (and optional MD5 clear): re-fetch
+    /// the `pg_authid` row for `roleid`, set `rolname` (and clear `rolpassword`
+    /// when `clear_md5`), `heap_modify_tuple` + `CatalogTupleUpdate`.
     pub fn rename_authid(
         rel: Oid,
-        tuple: TupleHandle,
+        roleid: Oid,
         newname: String,
         clear_md5: bool,
     ) -> PgResult<()>
@@ -227,31 +233,20 @@ seam!(
     pub fn insert_authmem(rel: Oid, rec: NewAuthMemRecord) -> PgResult<()>
 );
 seam!(
-    /// `heap_modify_tuple` + `CatalogTupleUpdate` of the i-th list member tuple.
-    pub fn update_authmem(
+    /// Re-fetch the `pg_auth_members` row by its OID and `heap_modify_tuple` +
+    /// `CatalogTupleUpdate` with the per-option deltas (C `heap_modify_tuple`
+    /// of the syscache-located / list member tuple, addressed here by its
+    /// `pg_auth_members.oid`).
+    pub fn update_authmem_by_oid(
         rel: Oid,
-        list: CatCListHandle,
-        index: usize,
+        authmem_oid: Oid,
         upd: AuthMemUpdate,
     ) -> PgResult<()>
 );
 seam!(
-    /// `heap_modify_tuple` + `CatalogTupleUpdate` of a single syscache-located
-    /// `pg_auth_members` tuple.
-    pub fn update_authmem_by_tuple(
-        rel: Oid,
-        tuple: TupleHandle,
-        upd: AuthMemUpdate,
-    ) -> PgResult<()>
-);
-seam!(
-    /// `deleteSharedDependencyRecordsFor` then `CatalogTupleDelete` of the i-th
-    /// list member tuple.
-    pub fn delete_authmem_in_list(
-        rel: Oid,
-        list: CatCListHandle,
-        index: usize,
-    ) -> PgResult<()>
+    /// `deleteSharedDependencyRecordsFor(AuthMemRelationId, authmem_oid, 0)`
+    /// then `CatalogTupleDelete` of the `pg_auth_members` row with that OID.
+    pub fn delete_authmem_by_oid(rel: Oid, authmem_oid: Oid) -> PgResult<()>
 );
 seam!(
     /// `systable` scan of `pg_auth_members` by `roleid`; returns the count removed.

@@ -1345,3 +1345,96 @@ seam_core::seam!(
         row: &types_catalog::pg_index::PgIndexInsertRow,
     ) -> PgResult<()>
 );
+
+/* ======================================================================== *
+ * pg_authid / pg_auth_members (commands/user.c catalog-write value layer).
+ *
+ * The owner (`backend-catalog-indexing`) forms the heap tuple against the
+ * relation's descriptor from the value-typed row structs and runs the
+ * `heap_form_tuple`/`heap_modify_tuple` + `CatalogTuple{Insert,Update,Delete}`
+ * machinery. `rel` is the open pg_authid / pg_auth_members relation (the
+ * `commands/user.c` orchestration re-opens it by OID through the user seam).
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_authid, AuthIdOidIndexId, Anum_pg_authid_oid)`.
+    pub fn get_new_oid_with_index_pg_authid<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `GetNewOidWithIndex(pg_auth_members, AuthMemOidIndexId,
+    /// Anum_pg_auth_members_oid)`.
+    pub fn get_new_oid_with_index_pg_auth_members<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// CreateRole's `heap_form_tuple(pg_authid_dsc, new_record, nulls)` +
+    /// `CatalogTupleInsert(pg_authid_rel, tuple)`.
+    pub fn catalog_tuple_insert_pg_authid(
+        rel: &RelationData<'_>,
+        rec: &types_authid::NewAuthRecord,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// AlterRole's re-fetch of the `pg_authid` row by `roleid` +
+    /// `heap_modify_tuple` with the per-attribute deltas + `CatalogTupleUpdate`.
+    pub fn catalog_tuple_update_pg_authid(
+        rel: &RelationData<'_>,
+        roleid: Oid,
+        upd: &types_authid::AuthIdUpdate,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// RenameRole's re-fetch of the `pg_authid` row by `roleid`, set `rolname`
+    /// (and clear `rolpassword` when `clear_md5`) + `CatalogTupleUpdate`.
+    pub fn rename_tuple_pg_authid(
+        rel: &RelationData<'_>,
+        roleid: Oid,
+        newname: &str,
+        clear_md5: bool,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// DropRole's `CatalogTupleDelete(pg_authid_rel, &tuple->t_self)` for the
+    /// `pg_authid` row addressed by `roleid` (re-fetched to find its TID).
+    pub fn delete_tuple_pg_authid(rel: &RelationData<'_>, roleid: Oid) -> PgResult<()>
+);
+seam_core::seam!(
+    /// AddRoleMems's `heap_form_tuple(pg_authmem_dsc, new_record, nulls)` +
+    /// `CatalogTupleInsert(pg_authmem_rel, tuple)`.
+    pub fn catalog_tuple_insert_pg_auth_members(
+        rel: &RelationData<'_>,
+        rec: &types_authid::NewAuthMemRecord,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// AddRoleMems/DelRoleMems's re-fetch of the `pg_auth_members` row by its
+    /// OID + `heap_modify_tuple` with the per-option deltas + `CatalogTupleUpdate`.
+    pub fn catalog_tuple_update_pg_auth_members(
+        rel: &RelationData<'_>,
+        authmem_oid: Oid,
+        upd: &types_authid::AuthMemUpdate,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogTupleDelete(pg_auth_members_rel, &tuple->t_self)` for the
+    /// `pg_auth_members` row addressed by its OID (re-fetched to find its TID).
+    pub fn delete_tuple_pg_auth_members(rel: &RelationData<'_>, authmem_oid: Oid)
+        -> PgResult<()>
+);
+seam_core::seam!(
+    /// `systable` scan of `pg_auth_members` on `roleid == role` (the
+    /// `AuthMemRoleMemIndexId` probe), returning the OID of every matching row
+    /// (DropRole's first silent-removal scan).
+    pub fn authmem_oids_by_roleid(rel: &RelationData<'_>, role: Oid)
+        -> PgResult<Vec<Oid>>
+);
+seam_core::seam!(
+    /// `systable` scan of `pg_auth_members` on `member == role` (the
+    /// `AuthMemMemRoleIndexId` probe), returning the OID of every matching row
+    /// (DropRole's second silent-removal scan).
+    pub fn authmem_oids_by_member(rel: &RelationData<'_>, role: Oid)
+        -> PgResult<Vec<Oid>>
+);

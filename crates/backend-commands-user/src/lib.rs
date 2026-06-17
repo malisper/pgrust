@@ -1076,7 +1076,7 @@ pub fn AlterRole<'mcx>(
         upd.rolbypassrls = Some(defel_bool(d));
     }
 
-    seam::update_authid::call(pg_authid_rel, tuple, upd)?;
+    seam::update_authid::call(pg_authid_rel, roleid, upd)?;
 
     seam::invoke_object_post_alter_hook_authid::call(roleid)?;
 
@@ -1409,7 +1409,7 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
         /*
          * Remove the role from the pg_authid table
          */
-        seam::delete_authid::call(pg_authid_rel, tuple)?;
+        seam::delete_authid::call(pg_authid_rel, roleid)?;
 
         seam::release_sys_cache::call(tuple)?;
 
@@ -1546,7 +1546,7 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
             .finish(here("RenameRole"))?;
     }
 
-    seam::rename_authid::call(rel, oldtuple, newname.to_string(), clear_md5)?;
+    seam::rename_authid::call(rel, roleid, newname.to_string(), clear_md5)?;
 
     seam::invoke_object_post_alter_hook_authid::call(roleid)?;
 
@@ -1945,7 +1945,7 @@ fn AddRoleMems<'mcx>(
                 continue;
             }
 
-            seam::update_authmem_by_tuple::call(pg_authmem_rel, authmem_tuple, update)?;
+            seam::update_authmem_by_oid::call(pg_authmem_rel, authmem_form.oid, update)?;
 
             seam::release_sys_cache::call(authmem_tuple)?;
         } else {
@@ -2075,7 +2075,7 @@ fn DelRoleMems<'mcx>(
              * Remove the entry altogether, after first removing its
              * dependencies.
              */
-            seam::delete_authmem_in_list::call(pg_authmem_rel, memlist, i)?;
+            seam::delete_authmem_by_oid::call(pg_authmem_rel, members[i].oid)?;
         } else {
             /* Just turn off the specified option */
             let mut update = AuthMemUpdate::default();
@@ -2093,7 +2093,7 @@ fn DelRoleMems<'mcx>(
                     .finish(here("DelRoleMems"));
             }
 
-            seam::update_authmem::call(pg_authmem_rel, memlist, i, update)?;
+            seam::update_authmem_by_oid::call(pg_authmem_rel, members[i].oid, update)?;
         }
     }
 
