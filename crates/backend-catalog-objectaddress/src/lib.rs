@@ -34,6 +34,7 @@ pub mod tables;
 
 // F1 / F2 / F3 / F4 families
 pub mod description;
+pub mod fmgr_builtins;
 pub mod fmgr_sql;
 pub mod identity;
 pub mod type_description;
@@ -58,4 +59,8 @@ pub fn init_seams() {
     seams::get_object_attnum_oid::set(properties::get_object_attnum_oid);
     seams::get_object_oid_index::set(properties::get_object_oid_index);
     seams::get_object_class_descr::set(properties::get_object_class_descr);
+
+    // Register this crate's SQL-callable fmgr builtins (C: their
+    // `fmgr_builtins[]` rows) into the fmgr-core builtin table.
+    fmgr_builtins::register_objectaddress_builtins();
 }
