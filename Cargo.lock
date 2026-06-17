@@ -19771,6 +19771,7 @@ dependencies = [
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-postinit-seams",
@@ -19788,6 +19789,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-storage",
  "types-tuple",
 ]
