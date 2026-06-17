@@ -19,7 +19,7 @@
 
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use mcx::Mcx;
 use types_datum::Datum;
@@ -212,9 +212,89 @@ pub fn InstrJitAgg(dst: &mut JitInstrumentation, add: &JitInstrumentation) {
     dst.emission_counter.add(add.emission_counter);
 }
 
-/// Install this unit's inward seams (consumed by the executor). Wired into
+// ---------------------------------------------------------------------------
+// GUC backing storage
+//
+// The JIT GUC variables are plain C globals defined in `jit.c` (the
+// `conf->variable` storage the GUC machinery reads/writes directly — none are
+// read from the ControlFile). This unit owns them and installs the accessor
+// pairs over its own backing store, mirroring the `max_prepared_xacts` pattern
+// in `twophase`. Boot values match the `config_*` `boot_val`s in the GUC
+// tables (jit.c initializers, with `jit_provider`'s NULL replaced by the GUC
+// `boot_val` "llvmjit").
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// `bool jit_enabled = true` (jit.c:32).
+    static JIT_ENABLED: Cell<bool> = const { Cell::new(true) };
+    /// `bool jit_debugging_support = false` (jit.c:34).
+    static JIT_DEBUGGING_SUPPORT: Cell<bool> = const { Cell::new(false) };
+    /// `bool jit_dump_bitcode = false` (jit.c:35).
+    static JIT_DUMP_BITCODE: Cell<bool> = const { Cell::new(false) };
+    /// `bool jit_expressions = true` (jit.c:36).
+    static JIT_EXPRESSIONS: Cell<bool> = const { Cell::new(true) };
+    /// `bool jit_profiling_support = false` (jit.c:37).
+    static JIT_PROFILING_SUPPORT: Cell<bool> = const { Cell::new(false) };
+    /// `bool jit_tuple_deforming = true` (jit.c:38).
+    static JIT_TUPLE_DEFORMING: Cell<bool> = const { Cell::new(true) };
+    /// `double jit_above_cost = 100000` (jit.c:39).
+    static JIT_ABOVE_COST: Cell<f64> = const { Cell::new(100000.0) };
+    /// `double jit_inline_above_cost = 500000` (jit.c:40).
+    static JIT_INLINE_ABOVE_COST: Cell<f64> = const { Cell::new(500000.0) };
+    /// `double jit_optimize_above_cost = 500000` (jit.c:41).
+    static JIT_OPTIMIZE_ABOVE_COST: Cell<f64> = const { Cell::new(500000.0) };
+    /// `char *jit_provider = NULL` (jit.c:33); GUC `boot_val` is "llvmjit".
+    static JIT_PROVIDER: RefCell<Option<String>> =
+        RefCell::new(Some(String::from("llvmjit")));
+}
+
+/// Install this unit's inward seams (consumed by the executor) and its GUC
+/// variable accessors (consumed by the GUC machinery). Wired into
 /// `seams-init::init_all()`.
 pub fn init_seams() {
     backend_jit_jit_seams::jit_release_context::set(jit_release_context);
     backend_jit_jit_seams::jit_reset_after_error::set(jit_reset_after_error);
+
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
+    vars::jit_enabled.install(GucVarAccessors {
+        get: || JIT_ENABLED.with(Cell::get),
+        set: |v| JIT_ENABLED.with(|c| c.set(v)),
+    });
+    vars::jit_debugging_support.install(GucVarAccessors {
+        get: || JIT_DEBUGGING_SUPPORT.with(Cell::get),
+        set: |v| JIT_DEBUGGING_SUPPORT.with(|c| c.set(v)),
+    });
+    vars::jit_dump_bitcode.install(GucVarAccessors {
+        get: || JIT_DUMP_BITCODE.with(Cell::get),
+        set: |v| JIT_DUMP_BITCODE.with(|c| c.set(v)),
+    });
+    vars::jit_expressions.install(GucVarAccessors {
+        get: || JIT_EXPRESSIONS.with(Cell::get),
+        set: |v| JIT_EXPRESSIONS.with(|c| c.set(v)),
+    });
+    vars::jit_profiling_support.install(GucVarAccessors {
+        get: || JIT_PROFILING_SUPPORT.with(Cell::get),
+        set: |v| JIT_PROFILING_SUPPORT.with(|c| c.set(v)),
+    });
+    vars::jit_tuple_deforming.install(GucVarAccessors {
+        get: || JIT_TUPLE_DEFORMING.with(Cell::get),
+        set: |v| JIT_TUPLE_DEFORMING.with(|c| c.set(v)),
+    });
+    vars::jit_above_cost.install(GucVarAccessors {
+        get: || JIT_ABOVE_COST.with(Cell::get),
+        set: |v| JIT_ABOVE_COST.with(|c| c.set(v)),
+    });
+    vars::jit_inline_above_cost.install(GucVarAccessors {
+        get: || JIT_INLINE_ABOVE_COST.with(Cell::get),
+        set: |v| JIT_INLINE_ABOVE_COST.with(|c| c.set(v)),
+    });
+    vars::jit_optimize_above_cost.install(GucVarAccessors {
+        get: || JIT_OPTIMIZE_ABOVE_COST.with(Cell::get),
+        set: |v| JIT_OPTIMIZE_ABOVE_COST.with(|c| c.set(v)),
+    });
+    vars::jit_provider.install(GucVarAccessors {
+        get: || JIT_PROVIDER.with(|c| c.borrow().clone()),
+        set: |v| JIT_PROVIDER.with(|c| *c.borrow_mut() = v),
+    });
 }
