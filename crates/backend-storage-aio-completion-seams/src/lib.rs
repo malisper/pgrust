@@ -20,6 +20,10 @@
 //! these only on the async / buffered-IO completion path (never on the
 //! `io_method = sync` boot path).
 
+extern crate alloc;
+
+use alloc::string::String;
+
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -69,6 +73,15 @@ seam_core::seam!(
     /// `pgaio_io_reopen(ioh)` (aio_target.c) — re-open the target's file
     /// descriptor in an IO worker (the target's `reopen` vtable entry, smgr).
     pub fn pgaio_io_reopen(ioh_index: u32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgaio_target_info[ioh->target]->describe_identity(&ioh->target_data)`
+    /// (aio_target.c, reached from `pgaio_io_get_target_description`) — the smgr
+    /// target's `aio_smgr_describe_identity`, returning a localized, current-
+    /// memory-context-allocated string describing the IO's target. Bottoms out
+    /// in the unported smgr AIO layer.
+    pub fn pgaio_io_describe_identity(ioh_index: u32) -> PgResult<String>
 );
 
 seam_core::seam!(

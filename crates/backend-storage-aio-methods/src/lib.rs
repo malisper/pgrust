@@ -44,11 +44,41 @@
 //!    stage/complete-shared/complete-local/report dispatch loops;
 //!  * [`aio_target`] — `aio_target.c`: the target registry + dispatch;
 //!  * [`aio_io`] — `aio_io.c`: the per-op start routines, the synchronous
-//!    executor, and the op/fd helpers.
+//!    executor, and the op/fd helpers;
+//!  * [`aio_funcs`] — `aio_funcs.c`: the `pg_get_aios()` SQL set-returning
+//!    function that introspects every in-flight AIO handle.
 //!
 //! These engine entry points are installed across the three per-consumer seam
 //! crates the VFD / xact / resowner call sites reach (`-seams`, `-aio-seams`,
 //! `-core-seams`), clearing the `pgaio_closing_fd` boot wall.
+//!
+//! ## Crate ↔ c2rust-unit correspondence (relocation deferred)
+//!
+//! The c2rust canonical layout places `aio.c` / `aio_callback.c` / `aio_io.c` /
+//! `aio_funcs.c` in a `backend-storage-aio-core` crate and `aio_init.c` /
+//! `aio_target.c` / `method_sync.c` / `method_worker.c` in this
+//! `backend-storage-aio-methods` crate. This port keeps the engine files
+//! (`aio` / `aio_callback` / `aio_io` / `aio_funcs`) here alongside the
+//! `aio_internal.h` shared-memory model (`aio_init.c`) **deliberately**: a true
+//! crate split would form an *unbreakable circular crate dependency*. The
+//! engine (`aio.c`) is the primary mutator of the shared-memory model that lives
+//! with `aio_init.c` (`pgaio_ctl`, `pgaio_my_backend`, the `dclist_*` helpers,
+//! `PgAioCtl` / `PgAioHandle` / `PgAioBackend`, `pgaio_method_ops`,
+//! `io_max_concurrency`, `clear_pgaio_my_backend`) → `-core` would depend on
+//! `-methods`. But `aio_init.c`'s `pgaio_init_backend` registers
+//! `aio::pgaio_shutdown` as a `before_shmem_exit` hook and this crate's
+//! `init_seams()` installs ~7 engine entry points (`pgaio_closing_fd`,
+//! `pgaio_error_cleanup`, `AtEOXact_Aio`, `pgaio_io_release_resowner`,
+//! `pgaio_io_start_readv`) → `-methods` would depend on `-core`. In C these
+//! share one `aio_internal.h` header; across a Rust crate boundary the two
+//! directions are a cycle Cargo rejects. Breaking it would require extracting
+//! the `aio_internal.h` shmem model into a *third* crate below both and
+//! relocating the GUC-table ownership + seam-install orchestration — high-churn
+//! structural surgery touching the data model shared by `aio_init.c` /
+//! `method_sync.c` / `aio_target.c` and the engine, plus tests. That is out of
+//! scope for a fidelity pass, so the engine files stay co-located with the
+//! model they mutate. (`read_stream.c` and `method_io_uring.c`, the other
+//! c2rust `-core` members, are already separate crates / seam-and-panic stubs.)
 //!
 //! ## What is NOT here (seam-and-panic into genuinely-unported owners)
 //!
@@ -124,6 +154,12 @@ pub const PGAIO_TID_SMGR: u8 = 1;
 
 /// `PG_UINT32_MAX` — the invalid `aio_index` sentinel for a cleared wait ref.
 pub const PG_UINT32_MAX: u32 = u32::MAX;
+
+/// `PG_IOV_MAX` (`port/pg_iovec.h`) — `Min(IOV_MAX, 128)`. The maximum number of
+/// iovec entries a single handle's scatter/gather array can hold; returned by
+/// `pgaio_io_get_iovec` as the capacity of the handle's iovec sub-range. On every
+/// supported platform `IOV_MAX >= 128`, so this evaluates to 128.
+pub const PG_IOV_MAX: usize = 128;
 
 /// `WAIT_EVENT_AIO_IO_COMPLETION` (`utils/wait_event_names.txt`) — the wait
 /// event reported while sleeping on a handle's completion condition variable.
@@ -1120,6 +1156,7 @@ pub fn init_seams() {
 // The AIO engine + its aio-owned satellite source files.
 pub mod aio;
 pub mod aio_callback;
+pub mod aio_funcs;
 pub mod aio_io;
 pub mod aio_target;
 

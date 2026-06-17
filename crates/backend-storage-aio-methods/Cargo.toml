@@ -39,6 +39,10 @@ backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-s
 # fd.c / xact.c / resowner.c call sites import.
 backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
 backend-storage-aio-core-seams = { path = "../backend-storage-aio-core-seams" }
+# Outward seams of the aio_funcs.c SQL SRF (pg_get_aios): the GetPGProcByNumber
+# pid lookup (proc.c) + the InitMaterializedSRF tuplestore_putvalues (funcapi /
+# tuplestore.c), which the genuinely-external owners install.
+backend-storage-aio-funcs-seams = { path = "../backend-storage-aio-funcs-seams" }
 # HOLD_INTERRUPTS / RESUME_INTERRUPTS / START_CRIT_SECTION / END_CRIT_SECTION
 # (the interrupt-holdoff + critical-section counters the state machine wraps).
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

@@ -19,9 +19,33 @@ use crate::aio::{ioh, pgaio_io_process_completion, pgaio_io_stage};
 use crate::aio_target::pgaio_io_has_target;
 use crate::{pgaio_my_backend, PgAioHandleState, PGAIO_OP_INVALID, PGAIO_OP_READV, PGAIO_OP_WRITEV};
 
+/// `int pgaio_io_get_iovec(PgAioHandle *ioh, struct iovec **iov)` (aio_io.c).
+///
+/// Scatter/gather IO associates an iovec sub-range with the handle. In C this
+/// returns `*iov = &pgaio_ctl->iovecs[ioh->iovec_off]` (a pointer into the shared
+/// iovec array) and `PG_IOV_MAX` as its capacity. The shared iovec array lives
+/// behind a `Mutex` here, so the "pointer" is expressed as the `iovec_off` base
+/// index into [`crate::pgaio_ctl().iovecs`]; the caller indexes
+/// `[off .. off + PG_IOV_MAX]`.
+pub fn pgaio_io_get_iovec(ioh_index: usize) -> (usize, usize) {
+    let h = ioh(ioh_index);
+    debug_assert!(h.state() == PgAioHandleState::HandedOut);
+    (h.iovec_off as usize, crate::PG_IOV_MAX)
+}
+
 /// `PgAioOp pgaio_io_get_op(PgAioHandle *ioh)` (aio_io.c).
 pub fn pgaio_io_get_op(ioh_index: usize) -> u8 {
     ioh(ioh_index).data().op
+}
+
+/// `PgAioOpData *pgaio_io_get_op_data(PgAioHandle *ioh)` (aio_io.c).
+///
+/// C returns `&ioh->op_data` (a mutable pointer); the handle's `op_data` is
+/// filled only by the start routines (which mutate it through the per-handle
+/// data lock), so this exposes a copy for the read/introspection consumers
+/// (method_io_uring / aio_funcs).
+pub fn pgaio_io_get_op_data(ioh_index: usize) -> crate::PgAioOpData {
+    ioh(ioh_index).data().op_data
 }
 
 /// `void pgaio_io_start_readv(PgAioHandle *ioh, int fd, int iovcnt, uint64 off)`
@@ -125,4 +149,22 @@ pub fn pgaio_io_uses_fd(ioh_index: usize, fd: i32) -> bool {
         PGAIO_OP_READV | PGAIO_OP_WRITEV => d.op_data.fd == fd,
         _ => false,
     }
+}
+
+/// `int pgaio_io_get_iovec_length(PgAioHandle *ioh, struct iovec **iov)`
+/// (aio_io.c). Currently only expected to be used by debugging infrastructure.
+///
+/// Sets `*iov = &pgaio_ctl->iovecs[ioh->iovec_off]` (returned as the `iovec_off`
+/// base index, like [`pgaio_io_get_iovec`]) and returns the op's actual iovec
+/// length.
+pub fn pgaio_io_get_iovec_length(ioh_index: usize) -> (usize, i32) {
+    let h = ioh(ioh_index);
+    debug_assert!(h.state() as u8 >= PgAioHandleState::Defined as u8);
+    let d = h.data();
+    let len = match d.op {
+        PGAIO_OP_READV | PGAIO_OP_WRITEV => d.op_data.iov_length as i32,
+        // pg_unreachable() in C.
+        _ => unreachable!("pgaio_io_get_iovec_length: invalid op"),
+    };
+    (h.iovec_off as usize, len)
 }

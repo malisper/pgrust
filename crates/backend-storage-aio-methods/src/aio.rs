@@ -31,7 +31,8 @@ use backend_storage_lmgr_condition_variable as cv;
 use backend_utils_init_miscinit_seams as misc;
 
 use crate::{
-    dclist_delete_from, dclist_is_empty, dclist_pop_head, dclist_push_head, dclist_push_tail,
+    dclist_count, dclist_delete_from, dclist_is_empty, dclist_pop_head, dclist_push_head,
+    dclist_push_tail,
     pgaio_ctl, pgaio_method_ops, pgaio_my_backend, PgAioHandle, PgAioHandleState,
     PgAioResultStatus, PgAioReturn, PgAioWaitRef, ResourceOwnerId, PGAIO_HF_SYNCHRONOUS,
     PGAIO_OP_INVALID, PGAIO_SUBMIT_BATCH_SIZE, PGAIO_TID_INVALID, PG_UINT32_MAX,
@@ -572,17 +573,29 @@ fn pgaio_io_reclaim(ioh_index: usize) -> PgResult<()> {
 fn pgaio_io_wait_for_free() -> PgResult<()> {
     let mut reclaimed = 0;
 
-    // First check if any of our IOs actually have completed.
+    // pgaio_debug(DEBUG2, "waiting for free IO with %d pending, %u in-flight,
+    // %u idle IOs", ...) — elided (logging only).
+
     let (io_handle_off, imc) = {
         let mb = mb();
         (mb.io_handle_off as usize, crate::io_max_concurrency() as usize)
     };
+
+    // First check if any of our IOs actually have completed - when using worker,
+    // that'll often be the case. We could do so as part of the loop below, but
+    // that'd potentially lead us to wait for some IO submitted before.
     for i in 0..imc {
         let idx = io_handle_off + i;
         let h = ioh(idx);
         if h.state() == PgAioHandleState::CompletedShared {
             // Note that no interrupts are processed between the state check and
-            // the call to reclaim.
+            // the call to reclaim - that's important as otherwise an interrupt
+            // could have already reclaimed the handle.
+            //
+            // Need to ensure that there's no reordering, in the more common
+            // paths, where we wait for IO, that's done by
+            // pgaio_io_was_recycled().
+            // pg_read_barrier() — subsumed by the Acquire load in state().
             pgaio_io_reclaim(idx)?;
             reclaimed += 1;
         }
@@ -592,40 +605,85 @@ fn pgaio_io_wait_for_free() -> PgResult<()> {
         return Ok(());
     }
 
-    // Otherwise wait for the oldest in-flight IO to complete. As waiting for one
-    // IO may complete several, restart the scan after each wait.
-    loop {
-        let candidate = {
-            let mb = mb();
-            if dclist_is_empty(&mb.in_flight_ios) {
-                None
-            } else {
-                let idx = mb.in_flight_ios.members[0];
-                Some((idx, ioh(idx).generation.load(Ordering::Relaxed)))
-            }
-        };
-
-        match candidate {
-            None => break,
-            Some((idx, generation)) => {
-                pgaio_io_wait(idx, generation)?;
-                // After waiting, try to reclaim any newly completed IOs.
-                let mut any = false;
-                for i in 0..imc {
-                    let h = ioh(io_handle_off + i);
-                    if h.state() == PgAioHandleState::CompletedShared {
-                        pgaio_io_reclaim(io_handle_off + i)?;
-                        any = true;
-                    }
-                }
-                if any {
-                    break;
-                }
-            }
-        }
+    // If we have any unsubmitted IOs, submit them now. We'll start waiting in a
+    // second, so it's better they're in flight. This also addresses the
+    // edge-case that all IOs are unsubmitted.
+    if mb().num_staged_ios > 0 {
+        pgaio_submit_staged()?;
     }
 
-    Ok(())
+    // possibly some IOs finished during submission
+    if !dclist_is_empty(&mb().idle_ios) {
+        return Ok(());
+    }
+
+    if dclist_count(&mb().in_flight_ios) == 0 {
+        // ereport(ERROR, errmsg_internal("no free IOs despite no in-flight IOs"),
+        //         errdetail_internal("%d pending, %u in-flight, %u idle IOs", ...))
+        let mb = mb();
+        return Err(PgError::error(alloc::format!(
+            "no free IOs despite no in-flight IOs ({} pending, {} in-flight, {} idle IOs)",
+            mb.num_staged_ios,
+            dclist_count(&mb.in_flight_ios),
+            dclist_count(&mb.idle_ios),
+        )));
+    }
+
+    // Wait for the oldest in-flight IO to complete.
+    //
+    // XXX: Reusing the general IO wait is suboptimal, we don't need to wait for
+    // that specific IO to complete, we just need *any* IO to complete.
+    {
+        // PgAioHandle *ioh = dclist_head_element(..., &in_flight_ios);
+        let idx = {
+            let mb = mb();
+            mb.in_flight_ios.members[0]
+        };
+        let h = ioh(idx);
+        // uint64 generation = ioh->generation;
+        let generation = h.generation.load(Ordering::Relaxed);
+
+        match h.state() {
+            // should not be in in-flight list
+            PgAioHandleState::Idle
+            | PgAioHandleState::Defined
+            | PgAioHandleState::HandedOut
+            | PgAioHandleState::Staged
+            | PgAioHandleState::CompletedLocal => {
+                // elog(ERROR, "shouldn't get here with io:%d in state %d", ...)
+                return Err(PgError::error(alloc::format!(
+                    "shouldn't get here with io:{} in state {}",
+                    pgaio_io_get_id(idx),
+                    h.state() as u8,
+                )));
+            }
+            PgAioHandleState::CompletedIo | PgAioHandleState::Submitted => {
+                // pgaio_debug_io(DEBUG2, ioh, "waiting for free io with %u in
+                // flight", ...) — elided (logging only).
+                //
+                // In a more general case this would be racy, because the
+                // generation could increase after we read ioh->state above. But
+                // we are only looking at IOs by the current backend and the IO
+                // can only be recycled by this backend.
+                pgaio_io_wait(idx, generation)?;
+            }
+            PgAioHandleState::CompletedShared => {
+                // It's possible that another backend just finished this IO.
+                //
+                // Note that no interrupts are processed between the state check
+                // and the call to reclaim - that's important as otherwise an
+                // interrupt could have already reclaimed the handle.
+                // pg_read_barrier() — subsumed by the Acquire load in state().
+                pgaio_io_reclaim(idx)?;
+            }
+        }
+
+        if dclist_count(&mb().idle_ios) == 0 {
+            // elog(PANIC, "no idle IO after waiting for IO to terminate")
+            panic!("no idle IO after waiting for IO to terminate");
+        }
+        Ok(())
+    }
 }
 
 // ===========================================================================

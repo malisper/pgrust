@@ -5,6 +5,10 @@
 //! and `reopen` vtable entries bottom out in the unported smgr AIO layer and are
 //! seamed (`pgaio_io_reopen`). The invalid target's name is `"invalid"`.
 
+extern crate alloc;
+
+use alloc::string::String;
+
 use types_error::PgResult;
 
 use crate::aio::ioh;
@@ -39,6 +43,28 @@ pub fn pgaio_io_set_target(ioh_index: usize, targetid: u8) {
     let mut d = h.data();
     debug_assert!(d.target == PGAIO_TID_INVALID);
     d.target = targetid;
+}
+
+/// `PgAioTargetData *pgaio_io_get_target_data(PgAioHandle *ioh)` (aio_target.c).
+///
+/// C returns `&ioh->target_data` (a mutable pointer); the target data is filled
+/// by the target-assigning code through the per-handle data lock, so this exposes
+/// a copy for the read/introspection consumers.
+pub fn pgaio_io_get_target_data(ioh_index: usize) -> crate::PgAioTargetData {
+    ioh(ioh_index).data().target_data
+}
+
+/// `char *pgaio_io_get_target_description(PgAioHandle *ioh)` (aio_target.c).
+///
+/// Returns a stringified description of the IO's target, localized and allocated
+/// in the current memory context. The smgr target's `describe_identity`
+/// (`aio_smgr_describe_identity`) bottoms out in the unported smgr AIO layer and
+/// is seamed (`pgaio_io_describe_identity`).
+pub fn pgaio_io_get_target_description(ioh_index: usize) -> PgResult<String> {
+    let target = ioh(ioh_index).data().target;
+    // disallow INVALID, there wouldn't be a description
+    debug_assert!(target > PGAIO_TID_INVALID);
+    backend_storage_aio_completion_seams::pgaio_io_describe_identity::call(ioh_index as u32)
 }
 
 /// `bool pgaio_io_can_reopen(PgAioHandle *ioh)` (aio_target.c). The smgr target
