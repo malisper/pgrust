@@ -168,6 +168,7 @@ pub fn init_seams() {
     seams::archive_recovery_requested::set(orchestrator::archive_recovery_requested);
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
     seams::reached_consistency::set(orchestrator::reached_consistency);
+    seams::standby_mode::set(orchestrator::standby_mode);
 
     // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
     // streaming GUC globals whose C file-static storage lives in

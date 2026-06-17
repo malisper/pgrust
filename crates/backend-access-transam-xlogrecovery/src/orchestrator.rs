@@ -973,6 +973,18 @@ pub(crate) fn recovery_target_tli() -> TimeLineID {
     recovery_state_mut().recovery_target_tli
 }
 
+/// `StandbyMode` (xlogrecovery.c:149 `bool StandbyMode = false;`) read for the
+/// `standby_mode` seam install — true while the server is in standby mode
+/// (continuous recovery awaiting more WAL). The C global is set by
+/// `EnableStandbyMode` (xlogrecovery.c:487) and cleared in `FinishWalRecovery`
+/// (xlogrecovery.c:1516); it is false before the recovery-state holder exists.
+pub(crate) fn standby_mode() -> bool {
+    if !recovery_state_is_set() {
+        return false;
+    }
+    recovery_state_mut().standby_mode
+}
+
 // --- File-system helpers (the C stat/unlink/AllocateFile/pg_fsync/durable_rename
 //     calls), routed through the fd unit's seams. ---
 
