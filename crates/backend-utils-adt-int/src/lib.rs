@@ -41,8 +41,17 @@
 // `backend-utils-adt-float`.
 #![allow(clippy::manual_range_contains)]
 
+pub mod fmgr_builtins;
 pub mod overflow;
 pub mod series;
+
+/// This unit owns no inward `-seams` crate (its value cores are consumed
+/// directly). `init_seams()` registers the `int.c` fmgr builtins into the
+/// fmgr-core builtin table so `fmgr_isbuiltin` resolves them on the fast path
+/// (catalog scankeys need `int4eq`/`int2eq`/... before any catalog access).
+pub fn init_seams() {
+    fmgr_builtins::register_int_builtins();
+}
 
 pub use overflow::{
     pg_add_s16_overflow, pg_add_s32_overflow, pg_add_s64_overflow, pg_mul_s16_overflow,

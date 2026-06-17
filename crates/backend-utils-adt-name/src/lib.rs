@@ -20,6 +20,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use alloc::format;
 
 use mcx::{Mcx, PgString, PgVec};
@@ -311,6 +313,14 @@ pub fn nameconcatoid(nam: &NameData, oid: Oid) -> PgResult<NameData> {
     result.data[..namlen].copy_from_slice(&name_str[..namlen]);
     result.data[namlen..namlen + suflen].copy_from_slice(&suffix[..suflen]);
     Ok(result)
+}
+
+/// This unit owns no inward `-seams` crate (its value cores are consumed
+/// directly). `init_seams()` registers the `name.c` fmgr builtins into the
+/// fmgr-core builtin table so `fmgr_isbuiltin` resolves them on the fast path
+/// (catalog name-column scankeys need `nameeq` before any catalog access).
+pub fn init_seams() {
+    fmgr_builtins::register_name_builtins();
 }
 
 #[cfg(test)]

@@ -417,6 +417,9 @@ pub fn init_all() {
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_char::init_seams();
+    backend_utils_adt_oid::init_seams();
+    backend_utils_adt_int::init_seams();
+    backend_utils_adt_name::init_seams();
     backend_utils_adt_float::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_ruleutils::init_seams();

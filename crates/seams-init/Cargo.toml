@@ -421,6 +421,9 @@ backend-utils-adt-array-typanalyze = { path = "../backend-utils-adt-array-typana
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
+backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
+backend-utils-adt-int = { path = "../backend-utils-adt-int" }
+backend-utils-adt-name = { path = "../backend-utils-adt-name" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
