@@ -151,4 +151,13 @@ pub fn init_seams() {
     );
     seams::exec_init_on_conflict_where::set(execExpr_modify::exec_init_on_conflict_where);
     seams::exec_project_returning::set(execExpr_modify::exec_project_returning);
+
+    // OUTWARD seam owned elsewhere but BACKED by the executor: the const-test
+    // evaluator that optimizer/util/predtest.c's operator_predicate_proof runs
+    // (CreateExecutorState → make_opclause → fix_opfuncids → ExecInitExpr →
+    // ExecEvalExprSwitchContext → FreeExecutorState). Its real owner is the
+    // executor (execExpr), so install it here, onto the predtest-seams crate.
+    backend_optimizer_util_inherit_predtest_seams::eval_const_test::set(
+        execExpr_core::eval_const_test,
+    );
 }

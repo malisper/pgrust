@@ -34,7 +34,7 @@ use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodehashjoin::HashJoinState;
 use types_nodes::parsestmt::ParamListInfoHandle;
 use types_nodes::primnodes::{
-    BoolExprType, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
+    BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
 use types_nodes::{EStateData, EcxtId, SlotId};
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
@@ -2267,6 +2267,113 @@ pub fn free_executor_state<'mcx>(estate: PgBox<'mcx, EStateData<'mcx>>) -> PgRes
         "execExpr-core: FreeExecutorState alias needs the execUtils seam \
          (backend-executor-execUtils owns FreeExecutorState; no seam exported yet)"
     );
+}
+
+/// The executor-backed constant test of `operator_predicate_proof`
+/// (optimizer/util/predtest.c:1983-2020). Given the resolved btree
+/// constant-comparison operator `test_op` and the two `Const`s (`pred_const`,
+/// `clause_const`), build `test_op(pred_const, clause_const)` as a boolean
+/// `OpExpr`, compile it, and evaluate it in a throwaway executor state, exactly
+/// as the C `operator_predicate_proof` tail does:
+///
+/// ```c
+/// estate = CreateExecutorState();
+/// oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+/// test_expr = make_opclause(test_op, BOOLOID, false,
+///                           (Expr *) pred_const, (Expr *) clause_const,
+///                           InvalidOid, pred_collation);
+/// fix_opfuncids((Node *) test_expr);
+/// test_exprstate = ExecInitExpr(test_expr, NULL);
+/// test_result = ExecEvalExprSwitchContext(test_exprstate,
+///                                         GetPerTupleExprContext(estate),
+///                                         &isNull);
+/// MemoryContextSwitchTo(oldcontext);
+/// FreeExecutorState(estate);
+/// if (isNull) { elog(DEBUG2, "null predicate test result"); return false; }
+/// return DatumGetBool(test_result);
+/// ```
+///
+/// Returns `Some(true)`/`Some(false)` for the boolean result, or `None` for a
+/// NULL result (the C "null predicate test result" DEBUG2, treated as
+/// non-proof by the caller). `Err` carries any evaluation `ereport(ERROR)`.
+///
+/// The throwaway `EState` owns a private root memory context (the owned-model
+/// equivalent of `CreateExecutorState`'s per-query context, which in C is a
+/// fresh child of `CurrentMemoryContext`): the seam takes no `Mcx`, so it roots
+/// its own short-lived arena and tears it down when the context drops — exactly
+/// the `CreateExecutorState`/`FreeExecutorState` bracket the C performs. The
+/// `MemoryContextSwitchTo(es_query_cxt)` C wraps the build/eval in is implicit
+/// here: every allocation routes through `es_query_cxt` (the EState's context)
+/// by construction.
+pub fn eval_const_test(
+    test_op: types_core::Oid,
+    pred_const: &Const,
+    clause_const: &Const,
+    collation: types_core::Oid,
+) -> PgResult<Option<bool>> {
+    // estate = CreateExecutorState();  — a self-contained executor state with
+    // its own per-query memory context. The seam has no ambient Mcx, so root a
+    // fresh standalone context here, mirroring CreateExecutorState() allocating
+    // its "ExecutorState" context under CurrentMemoryContext.
+    let cx = mcx::MemoryContext::new("ExecutorState");
+    let mcx = cx.mcx();
+    let mut estate = EStateData::new_in(mcx);
+
+    // test_expr = make_opclause(test_op, BOOLOID, false,
+    //                           (Expr *) pred_const, (Expr *) clause_const,
+    //                           InvalidOid, pred_collation);
+    //
+    // make_opclause consumes its operands by value; the C passes the existing
+    // Const nodes (which live in the caller's context and outlive the EState),
+    // so cloning them into the throwaway expression is faithful.
+    let mut test_expr = backend_nodes_core::makefuncs::make_opclause(
+        test_op,
+        types_core::catalog::BOOLOID,
+        false,
+        Expr::Const(pred_const.clone()),
+        Some(Expr::Const(clause_const.clone())),
+        types_core::InvalidOid,
+        collation,
+    );
+
+    // fix_opfuncids((Node *) test_expr);
+    backend_nodes_core::nodefuncs::fix_opfuncids(&mut test_expr)?;
+
+    // test_exprstate = ExecInitExpr(test_expr, NULL);
+    let mut test_exprstate = exec_init_expr_no_parent(&test_expr, &mut estate)?;
+
+    // test_result = ExecEvalExprSwitchContext(test_exprstate,
+    //                                         GetPerTupleExprContext(estate),
+    //                                         &isNull);
+    let econtext =
+        backend_executor_execUtils_seams::get_per_tuple_expr_context::call(&mut estate)?;
+    let (test_result, is_null) =
+        exec_eval_expr_switch_context(&mut test_exprstate, econtext, &mut estate)?;
+
+    // Extract the boolean result *before* the EState (and its context) drop —
+    // `test_result` borrows `es_query_cxt`. DatumGetBool(test_result) is a copy.
+    let result = if is_null {
+        // elog(DEBUG2, "null predicate test result"); return false;  — surfaced
+        // to the caller as the "null result → non-proof" None.
+        None
+    } else {
+        Some(test_result.as_bool())
+    };
+
+    // FreeExecutorState(estate);  — the EState and its working storage are
+    // released when the compiled program, the EState, and finally the private
+    // context drop (the owned-model equivalent; this seam's throwaway EState
+    // holds no ExprContext shutdown callbacks, JIT context, or partition
+    // directory to run down). `cx` outlives both borrowers and drops last at
+    // end of scope, freeing the per-query arena.
+    drop(test_exprstate);
+    drop(estate);
+    // `cx` drops here at end of scope (last, after both borrowers), freeing the
+    // per-query arena. An explicit `drop(cx)` would move it out while the
+    // invariant `'mcx` borrow is still in scope, so the natural scope-end drop
+    // is what closes the bracket.
+
+    Ok(result)
 }
 
 /// `EvaluateParams` leaf (prepare.c).

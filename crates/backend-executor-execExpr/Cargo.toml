@@ -52,6 +52,14 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # bitmapset owns bms_add_member/bms_is_member — ExecBuildUpdateProjection builds
 # the assignedCols set to drive the old-column copy-over loop.
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+# make_opclause (makefuncs.c) + fix_opfuncids (nodeFuncs.c) — the const-test
+# evaluator (eval_const_test, the predtest.c operator_predicate_proof tail)
+# builds and stabilizes a boolean OpExpr from two Consts. Pure node-construction
+# helpers with no executor dep, so the owner crate is acyclic here.
+backend-nodes-core = { path = "../backend-nodes-core" }
+# The predtest unit's OUTWARD seam crate: eval_const_test is declared there and
+# installed from this executor owner's init_seams() (the executor backs the test).
+backend-optimizer-util-inherit-predtest-seams = { path = "../backend-optimizer-util-inherit-predtest-seams" }
 # ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
 # GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
 # (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner). The same
