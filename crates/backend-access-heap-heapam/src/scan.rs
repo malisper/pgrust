@@ -223,7 +223,10 @@ fn initscan(
         relation_get_number_of_blocks(&sscan.rs_rd)?
     };
 
-    let uses_local = relation_uses_local_buffers(relid)?;
+    // RelationUsesLocalBuffers(scan->rs_base.rs_rd) — the rel.h macro
+    // `rd_rel->relpersistence == RELPERSISTENCE_TEMP`, read directly off the
+    // in-hand Relation.
+    let uses_local = sscan.rs_rd.uses_local_buffers();
     let nbuffers = initsmall_seam::nbuffers::call();
 
     let scan = heap_scan(sscan);
@@ -318,10 +321,6 @@ fn relation_get_number_of_blocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
     )
 }
 
-/// `RelationUsesLocalBuffers(rel)` — reached through the seam keyed by OID.
-fn relation_uses_local_buffers(relid: Oid) -> PgResult<bool> {
-    vacuumlazy_seam::relation_uses_local_buffers::call(relid)
-}
 
 // ===========================================================================
 // heap_setscanlimits - restrict range of a heapscan.
