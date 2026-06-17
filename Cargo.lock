@@ -16438,6 +16438,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-dict"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-tsearch-dict-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-tsearch-dict-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-tsearch-ispell-regis"
 version = "0.0.0"
 dependencies = [
@@ -21530,6 +21562,7 @@ dependencies = [
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",
+ "backend-tsearch-dict",
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
  "backend-utils-activity-pgstat",

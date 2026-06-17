@@ -29,6 +29,7 @@ pub mod backend_access_gin_ginlogic;
 pub mod tsgistidx;
 
 use mcx::{PgString, PgVec};
+use types_core::Oid;
 
 /// `TSL_ADDPOS` (`ts_public.h`).
 pub const TSL_ADDPOS: u16 = 0x01;
@@ -128,4 +129,151 @@ pub struct DictSnowball<'mcx> {
     /// C `needrecode`: recode to/from UTF-8 around the stemmer call when the
     /// matched UTF-8 stemmer's encoding differs from the server encoding.
     pub needrecode: bool,
+}
+
+/// `#define DT_USEASIS 0x1000` (dict_thesaurus.c): a temporary reuse of
+/// `TSLexeme.flags` during thesaurus compilation.
+pub const DT_USEASIS: u16 = 0x1000;
+
+/// `DictSimple` (`dict_simple.c`): the `simple` dictionary state object the
+/// `dsimple_init` template builds and `dsimple_lexize` consumes.
+///
+/// C is `{ StopList stoplist; bool accept; }` held behind the dictionary
+/// cache's `void *dictData`.
+#[derive(Debug)]
+pub struct DictSimple<'mcx> {
+    /// C `stoplist`: the optional `StopWords` list (empty if none configured).
+    pub stoplist: StopList<'mcx>,
+    /// C `accept`: whether to accept (emit) recognized non-stop words
+    /// (defaults to `true`).
+    pub accept: bool,
+}
+
+/// `Syn` (`dict_synonym.c`): one synonym mapping `in -> out`.
+#[derive(Debug)]
+pub struct Syn<'mcx> {
+    /// C `in`: the input word (lowercased unless `case_sensitive`).
+    pub r#in: PgString<'mcx>,
+    /// C `out`: the substituted word (lowercased unless `case_sensitive`).
+    pub out: PgString<'mcx>,
+    /// C `outlen`: byte length of `out` (kept to mirror C; `out.len()`).
+    pub outlen: i32,
+    /// C `flags`: `TSL_PREFIX` if the input ended with `*`, else 0.
+    pub flags: u16,
+}
+
+/// `DictSyn` (`dict_synonym.c`): the `synonym` dictionary state object the
+/// `dsynonym_init` template builds and `dsynonym_lexize` consumes.
+///
+/// C is `{ int len; Syn *syn; bool case_sensitive; }`; `syn.len()` is the
+/// C `len`. The array is kept sorted by `in` (`compareSyn`).
+#[derive(Debug)]
+pub struct DictSyn<'mcx> {
+    /// C `syn`/`len`: the sorted synonym mappings.
+    pub syn: PgVec<'mcx, Syn<'mcx>>,
+    /// C `case_sensitive`.
+    pub case_sensitive: bool,
+}
+
+/// `LexemeInfo` (`dict_thesaurus.c`): an entry's number/position in a
+/// substitution, plus the chain links.
+///
+/// C wires `nextentry` / `nextvariant` as raw `LexemeInfo *`; the owned model
+/// replaces each pointer with an `Option<usize>` index into the carrying
+/// [`DictThesaurus::arena`] (`None` = `NULL`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LexemeInfo {
+    /// C `idsubst`: the entry's number in `DictThesaurus.subst`.
+    pub idsubst: u32,
+    /// C `posinsubst`: position info within the entry.
+    pub posinsubst: u16,
+    /// C `tnvariant`: total number of lexemes in one variant.
+    pub tnvariant: u16,
+    /// C `nextentry` (`LexemeInfo *`): arena index of the next entry, or `None`.
+    pub nextentry: Option<usize>,
+    /// C `nextvariant` (`LexemeInfo *`): arena index of the next variant, or
+    /// `None`.
+    pub nextvariant: Option<usize>,
+}
+
+/// `TheLexeme` (`dict_thesaurus.c`): a lexeme string plus its [`LexemeInfo`]
+/// chain (an arena index). C `char *lexeme` / `LexemeInfo *entries`.
+#[derive(Debug)]
+pub struct TheLexeme<'mcx> {
+    /// C `lexeme`: the word, or `None` for the stop-word marker (`NULL`).
+    pub lexeme: Option<PgString<'mcx>>,
+    /// C `entries`: arena index of the `LexemeInfo` chain head.
+    pub entries: Option<usize>,
+}
+
+/// `TheSubstitute` (`dict_thesaurus.c`): a prepared substitution result.
+#[derive(Debug)]
+pub struct TheSubstitute<'mcx> {
+    /// C `lastlexeme`: the number of lexemes to substitute (minus one).
+    pub lastlexeme: u16,
+    /// C `reslen`: length of the substituted result.
+    pub reslen: u16,
+    /// C `res`: the prepared substituted result (the `NULL`-lexeme terminator
+    /// slot is dropped).
+    pub res: PgVec<'mcx, TSLexeme<'mcx>>,
+}
+
+/// `DictThesaurus` (`dict_thesaurus.c`): the `thesaurus` dictionary state object
+/// the `thesaurus_init` template builds and `thesaurus_lexize` consumes.
+///
+/// C wires the `LexemeInfo` chains with raw pointers; the owned model holds
+/// every node in [`arena`](Self::arena) and links them by `Option<usize>`
+/// index, reproducing the `findVariant` / `matchIdSubst` / `checkMatch`
+/// pointer-chasing 1:1.
+#[derive(Debug)]
+pub struct DictThesaurus<'mcx> {
+    /// C `subdictOid`: the sub-dictionary used to normalize lexemes.
+    pub subdict_oid: Oid,
+
+    /// C `wrds`/`nwrds`/`ntwrds`: the lexeme array searched by exact match.
+    pub wrds: PgVec<'mcx, TheLexeme<'mcx>>,
+
+    /// C `subst`/`nsubst`: the per-expression substituted results.
+    pub subst: PgVec<'mcx, TheSubstitute<'mcx>>,
+    /// C `nsubst`: the number of substitution expressions (`subst.len()` after
+    /// compilation, but tracked through the build for the C bound checks).
+    pub nsubst: i32,
+
+    /// Arena backing every `LexemeInfo` node referenced by `wrds[].entries`
+    /// (the C `palloc`'d `LexemeInfo` nodes wired by `nextentry`/`nextvariant`).
+    pub arena: PgVec<'mcx, LexemeInfo>,
+}
+
+/// Cross-call state for `thesaurus_lexize`, replacing C's
+/// `DictSubState.private_state` (a raw `LexemeInfo *`) and its `isend`/`getnext`
+/// flags. `stored` is the arena index of the variant-chain head carried between
+/// consecutive `getnext` calls.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThesaurusSubState {
+    /// in: text end is reached (`DictSubState.isend`).
+    pub isend: bool,
+    /// out: the dictionary wants the next lexeme (`DictSubState.getnext`).
+    pub getnext: bool,
+    /// internal: the `LexemeInfo *` head carried between `getnext` calls.
+    pub stored: Option<usize>,
+}
+
+/// Owned `TSLexeme` carrier crossing the sub-dictionary `lexize` fmgr-dispatch
+/// seam (a `FunctionCall4(&dict->lexize, ...)`): C's `palloc`'d,
+/// `NUL`-`lexeme`-terminated `TSLexeme *` array.
+///
+/// The result is `None` for C's `NULL` (word not recognized), `Some(vec![])`
+/// for C's empty `palloc0(2*sizeof(TSLexeme))` (a non-null array whose first
+/// `lexeme` is `NULL` — the stop-word case), and `Some(vec)` for a populated
+/// array (the `NUL`-terminator slot dropped). Carried owned (not `'mcx`)
+/// because the thesaurus stashes these into its `LexemeInfo` arena.
+#[derive(Clone, Debug)]
+pub struct OwnedTSLexeme {
+    /// C `nvariant`.
+    pub nvariant: u16,
+    /// C `flags`.
+    pub flags: u16,
+    /// C `lexeme` (NUL dropped); every entry here is a real (non-`NULL`)
+    /// lexeme.
+    pub lexeme: alloc::string::String,
 }

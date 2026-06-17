@@ -394,6 +394,7 @@ backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-snowball-dict-snowball = { path = "../backend-snowball-dict-snowball" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
+backend-tsearch-dict = { path = "../backend-tsearch-dict" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
 backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
