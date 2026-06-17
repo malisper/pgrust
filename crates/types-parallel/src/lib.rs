@@ -53,10 +53,11 @@ opaque_handle!(
     /// `BackgroundWorkerHandle *` (`postmaster/bgworker.h`).
     BgwHandle
 );
-opaque_handle!(
-    /// `PGPROC *` (`storage/proc.h`).
-    PgProcHandle
-);
+// NOTE: the former `PgProcHandle` (`PGPROC *`) opaque handle is retired. This
+// repo identifies a proc by its slot index (`ProcNumber`), not a process-local
+// `PGPROC *` (which is meaningless across the leader→DSM→worker hand-off). The
+// leader's identity travels in `FixedParallelState::parallel_leader_proc_number`
+// and the lock-group / transaction-snapshot seams take a `ProcNumber`.
 
 /// Marker trait for a `#[repr(C)]` struct that is sound to map as a shared
 /// `&T` across OS processes after being placed in a DSM segment by the
@@ -147,7 +148,13 @@ pub struct FixedParallelState {
     pub sec_context: i32,
     pub session_user_is_superuser: bool,
     pub role_is_superuser: bool,
-    pub parallel_leader_pgproc: PgProcHandle,
+    /// C `PGPROC *parallel_leader_pgproc`. A process-local pointer is
+    /// meaningless across the leader→DSM→worker hand-off in this repo, so this
+    /// word is never populated (stays 0); the leader's identity is carried in
+    /// [`Self::parallel_leader_proc_number`], which every consumer reads. Kept
+    /// as a raw machine word only for `FixedParallelState` byte-layout fidelity
+    /// with the C struct.
+    pub parallel_leader_pgproc: usize,
     pub parallel_leader_pid: pid_t,
     pub parallel_leader_proc_number: ProcNumber,
     pub xact_ts: TimestampTz,
@@ -171,7 +178,7 @@ impl Default for FixedParallelState {
             sec_context: 0,
             session_user_is_superuser: false,
             role_is_superuser: false,
-            parallel_leader_pgproc: PgProcHandle::NULL,
+            parallel_leader_pgproc: 0,
             parallel_leader_pid: 0,
             parallel_leader_proc_number: INVALID_PROC_NUMBER,
             xact_ts: 0,

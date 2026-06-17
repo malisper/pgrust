@@ -31,7 +31,8 @@ use backend_storage_lmgr_s_lock::{s_lock_macro, s_unlock};
 /// Pointer-shaped C fields (`PGPROC *parallel_leader_pgproc`,
 /// `SerializableXactHandle serializable_xact_handle`) are carried as their raw
 /// machine words (`usize`), exactly as the value-typed [`FixedParallelState`]
-/// carries them (`PgProcHandle`/`usize`).
+/// carries them. `parallel_leader_pgproc` is never populated (stays 0); the
+/// leader's identity travels in `parallel_leader_proc_number`.
 #[repr(C)]
 struct FixedParallelStateShared {
     database_id: Oid,
@@ -80,7 +81,7 @@ pub fn fps_init(base: usize, state: FixedParallelState) {
                 sec_context: state.sec_context,
                 session_user_is_superuser: state.session_user_is_superuser,
                 role_is_superuser: state.role_is_superuser,
-                parallel_leader_pgproc: state.parallel_leader_pgproc.0,
+                parallel_leader_pgproc: state.parallel_leader_pgproc,
                 parallel_leader_pid: state.parallel_leader_pid,
                 parallel_leader_proc_number: state.parallel_leader_proc_number,
                 xact_ts: state.xact_ts,
@@ -107,7 +108,6 @@ pub fn fps_init(base: usize, state: FixedParallelState) {
 /// the restore path).
 pub fn fps_read(base: usize) -> FixedParallelState {
     let p = base as *const FixedParallelStateShared;
-    use types_parallel::PgProcHandle;
     unsafe {
         FixedParallelState {
             database_id: (*p).database_id,
@@ -120,7 +120,7 @@ pub fn fps_read(base: usize) -> FixedParallelState {
             sec_context: (*p).sec_context,
             session_user_is_superuser: (*p).session_user_is_superuser,
             role_is_superuser: (*p).role_is_superuser,
-            parallel_leader_pgproc: PgProcHandle((*p).parallel_leader_pgproc),
+            parallel_leader_pgproc: (*p).parallel_leader_pgproc,
             parallel_leader_pid: (*p).parallel_leader_pid,
             parallel_leader_proc_number: (*p).parallel_leader_proc_number,
             xact_ts: (*p).xact_ts,

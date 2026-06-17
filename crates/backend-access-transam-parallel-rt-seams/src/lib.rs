@@ -23,7 +23,7 @@ use types_snapshot::SnapshotData;
 use types_error::PgResult;
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
-    ParallelWorkerMainFn, ParsedErrorNotice, PgProcHandle, ShmMqHandleHandle,
+    ParallelWorkerMainFn, ParsedErrorNotice, ShmMqHandleHandle,
 };
 
 // --- memory contexts (utils/mmgr) ------------------------------------------
@@ -93,7 +93,13 @@ seam_core::seam!(pub fn register_parallel_worker_shutdown(seg: DsmSegmentHandle)
 
 // --- lock groups / latches (storage/lmgr/proc.c, storage/ipc/latch.c) ------
 seam_core::seam!(pub fn become_lock_group_leader() -> PgResult<()>);
-seam_core::seam!(pub fn become_lock_group_member(leader: PgProcHandle, pid: pid_t) -> PgResult<bool>);
+/// Join the lock group led by the proc in slot `leader_procno` (the leader's
+/// `ProcNumber`, carried in `FixedParallelState::parallel_leader_proc_number`),
+/// verifying the leader's pid as the recycle interlock. This repo identifies a
+/// proc by its slot index rather than a process-local `PGPROC *`, which is
+/// meaningless across the leader→DSM→worker hand-off; the real owner
+/// (`BecomeLockGroupMemberByNumber`, proc.c) resolves the slot.
+seam_core::seam!(pub fn become_lock_group_member(leader_procno: ProcNumber, pid: pid_t) -> PgResult<bool>);
 seam_core::seam!(pub fn wait_latch(wait_event: u32) -> PgResult<i32>);
 seam_core::seam!(pub fn reset_latch() -> PgResult<()>);
 seam_core::seam!(pub fn set_my_latch() -> PgResult<()>);
@@ -139,6 +145,11 @@ seam_core::seam!(pub fn get_active_snapshot() -> PgResult<SnapshotData>);
 seam_core::seam!(pub fn estimate_snapshot_space(snapshot: &SnapshotData) -> PgResult<Size>);
 seam_core::seam!(pub fn serialize_snapshot(snapshot: &SnapshotData, space: usize) -> PgResult<()>);
 seam_core::seam!(pub fn restore_snapshot(space: usize) -> PgResult<SnapshotData>);
+/// `RestoreTransactionSnapshot(snapshot, source_pgproc)` — the `source_proc`
+/// argument identifies the leader whose serializable snapshot the worker
+/// inherits. Carried as the leader's `ProcNumber`
+/// (`FixedParallelState::parallel_leader_proc_number`); the snapmgr owner
+/// resolves the slot. (Was a never-populated `PgProcHandle`.)
 seam_core::seam!(pub fn restore_transaction_snapshot(snapshot: SnapshotData, source_proc: ProcNumber) -> PgResult<()>);
 seam_core::seam!(pub fn push_active_snapshot(snapshot: SnapshotData) -> PgResult<()>);
 seam_core::seam!(pub fn pop_active_snapshot() -> PgResult<()>);

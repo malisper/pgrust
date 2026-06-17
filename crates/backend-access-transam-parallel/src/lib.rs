@@ -1939,7 +1939,7 @@ pub fn parallel_worker_main(main_arg: Datum<'static>) -> PgResult<()> {
     rt::pq_set_parallel_leader::call(fps.parallel_leader_pid, fps.parallel_leader_proc_number)?;
 
     // Join locking group. If we can't, the leader has gone away, so exit quietly.
-    if !rt::become_lock_group_member::call(fps.parallel_leader_pgproc, fps.parallel_leader_pid)? {
+    if !rt::become_lock_group_member::call(fps.parallel_leader_proc_number, fps.parallel_leader_pid)? {
         return Ok(());
     }
 

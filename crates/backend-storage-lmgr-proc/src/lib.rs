@@ -85,20 +85,21 @@ pub fn init_seams() {
         });
     }
 
-    // `BecomeLockGroupLeader()` (proc.c) — the leader-side lock-group attach that
-    // `access/transam/parallel.c:592` reaches outward for. proc.c owns the body;
-    // the parallel-rt slot is declared in
-    // `backend-access-transam-parallel-rt-seams`. Value-typed (`() -> PgResult<()>`),
-    // a faithful thin `::set` of the real owner function.
+    // `BecomeLockGroupLeader()` / `BecomeLockGroupMember()` (proc.c) — the
+    // lock-group attach that `access/transam/parallel.c` reaches outward for.
+    // proc.c owns the bodies; the parallel-rt slots are declared in
+    // `backend-access-transam-parallel-rt-seams`. Both are faithful thin `::set`s.
     //
-    // NOTE: the sibling `become_lock_group_member(leader, pid)` parallel-rt slot is
-    // NOT installed here — its `leader: PgProcHandle` argument has no resolver to a
-    // `&mut PGPROC` (this crate keys procs by `ProcNumber`, the opaque `PGPROC*`
-    // handle space is unmodeled and `FixedParallelState::parallel_leader_pgproc` is
-    // never populated). Installing it would require re-signing the seam from
-    // `PgProcHandle` to `ProcNumber` plus populating the leader handle in the FPS
-    // init path — a cross-crate carrier keystone, out of this wiring lane.
+    // The member slot is keyed by the leader's `ProcNumber` (the carrier the
+    // worker reads out of `FixedParallelState::parallel_leader_proc_number`),
+    // resolved to the leader `PGPROC` slot by `BecomeLockGroupMemberByNumber`.
+    // This replaces the retired `PgProcHandle` (`PGPROC *`) contract: a
+    // process-local pointer is meaningless across the leader→DSM→worker
+    // hand-off, and `parallel_leader_pgproc` was never populated.
     backend_access_transam_parallel_rt_seams::become_lock_group_leader::set(
         proc_misc::BecomeLockGroupLeader,
+    );
+    backend_access_transam_parallel_rt_seams::become_lock_group_member::set(
+        proc_misc::BecomeLockGroupMemberByNumber,
     );
 }

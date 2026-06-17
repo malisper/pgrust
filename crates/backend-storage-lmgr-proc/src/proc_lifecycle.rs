@@ -545,6 +545,12 @@ pub(crate) fn proc_number_of(proc: &PGPROC) -> ProcNumber {
     crate::proc_shmem::proc_number_of(proc)
 }
 
+/// `GetPGProcByNumber(procno)->pid` — the pid published in the genuinely-shared
+/// per-slot pid word (the interlock value lock-group join checks against).
+pub(crate) fn proc_pid_of(procno: ProcNumber) -> i32 {
+    seam::proc_pid(procno)
+}
+
 /// `GetPGProcByNumber(procno)->lockGroupLeader == GetPGProcByNumber(leaderno)`
 /// — whether the proc in slot `procno` has slot `leaderno` as its lock-group
 /// leader.

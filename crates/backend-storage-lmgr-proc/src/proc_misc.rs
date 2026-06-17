@@ -158,6 +158,53 @@ pub fn BecomeLockGroupMember(leader: &mut PGPROC, pid: i32) -> PgResult<bool> {
     Ok(ok)
 }
 
+/// `BecomeLockGroupMember` addressed by the leader's `ProcNumber` instead of a
+/// raw `PGPROC *`.
+///
+/// This repo identifies a proc by its slot index (`ProcNumber`), not by a
+/// process-local `PGPROC *` (which is meaningless across the
+/// leader→DSM→worker hand-off, since each process maps the proc array at its
+/// own address). `access/transam/parallel.c` carries the leader's identity in
+/// `FixedParallelState::parallel_leader_proc_number`; the worker passes that
+/// slot index here. The body is identical to [`BecomeLockGroupMember`] with the
+/// two `leader->` field reads (`leader->pid`, `leader->lockGroupLeader`) routed
+/// through the by-number `PGPROC` accessors. `GetPGProcByNumber(procno)` always
+/// names the correct slot even while that slot is being recycled (the partition
+/// lock is computed from the slot index alone), preserving the C interlock.
+pub fn BecomeLockGroupMemberByNumber(leader_procno: ProcNumber, pid: i32) -> PgResult<bool> {
+    let mut ok = false;
+
+    // Group leader can't become member of group / can't already be a member.
+    let my_procno = proc_lifecycle::my_proc_number();
+    debug_assert!(my_procno != leader_procno);
+    debug_assert!(proc_lifecycle::proc_lock_group_leader_is_none(my_procno));
+    // PID must be valid.
+    debug_assert!(pid != 0);
+
+    // Get lock protecting the group fields. LockHashPartitionLockByProc
+    // calculates the partition from the slot index alone (not the slot's
+    // contents), so the correct lock is taken even while the leader PGPROC is
+    // being recycled.
+    let leader_lwlock_offset = lock_hash_partition_lock_offset_by_proc(leader_procno);
+    let guard = lwlock_seams::lwlock_acquire_main::call(leader_lwlock_offset, LWLockMode::LW_EXCLUSIVE)?;
+
+    // Is this the leader we're looking for?
+    //   if (leader->pid == pid && leader->lockGroupLeader == leader)
+    if proc_lifecycle::proc_pid_of(leader_procno) == pid
+        && proc_lifecycle::proc_lock_group_leader_is(leader_procno, leader_procno)
+    {
+        // OK, join the group.
+        ok = true;
+        // MyProc->lockGroupLeader = leader;
+        proc_lifecycle::set_my_proc_lock_group_leader(leader_procno);
+        // dlist_push_tail(&leader->lockGroupMembers, &MyProc->lockGroupLink);
+        proc_lifecycle::lock_group_members_push_tail(leader_procno, my_procno);
+    }
+
+    guard.release()?;
+    Ok(ok)
+}
+
 /// Reclaimed helper (`lock.c`-adjacent, lives with the lock group logic in
 /// proc.c): the union of lock-mode masks held on a lock partition by every
 /// member of `leader`'s lock group, by walking each member's `myProcLocks`
