@@ -20,6 +20,11 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 # Inward seam contract owned by this crate.
 backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }
 
+# The tcop/utility.c ProcessUtilitySlow fan-out reaches these parse-analysis
+# transforms (transformCreateStmt / transformIndexStmt / transformStatsStmt)
+# through outward seams this crate installs (cycle-free: out-seams is a leaf).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+
 # Outward dependency seams (catalog/relcache/partcache-bound leaves).
 backend-parser-parse-utilcmd-outward-seams = { path = "../backend-parser-parse-utilcmd-outward-seams" }
 

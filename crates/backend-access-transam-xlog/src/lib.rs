@@ -827,6 +827,13 @@ pub fn init_seams() {
     s::enable_fsync::set(write::enable_fsync);
     s::wal_sync_method::set(write::wal_sync_method);
     s::wal_segment_size::set(shmem::wal_segment_size);
+
+    // xlog.c GUC-value reads consumed by the checkpointer aux-process main loop
+    // (CheckArchiveTimeout / IsCheckpointOnSchedule). `XLogArchiveTimeout` is the
+    // `archive_timeout` GUC; `CheckPointSegments` is the GUC-derived segment
+    // budget (read as f64 for the float division in IsCheckpointOnSchedule).
+    s::xlog_archive_timeout::set(write::xlog_archive_timeout);
+    s::check_point_segments::set(write::check_point_segments_f64);
     // `XLogFilePath(tli, segno, wal_segsz_bytes)` — the seam reads the segment
     // size from the xlog global, so it drops the explicit byte-size argument.
     s::xlog_file_path::set(|tli, seg| XLogFilePath(tli, seg, shmem::wal_segment_size()));

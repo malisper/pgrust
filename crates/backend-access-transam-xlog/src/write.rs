@@ -99,6 +99,22 @@ fn check_point_segments() -> i32 {
     CHECK_POINT_SEGMENTS.with(Cell::get)
 }
 
+/// `CheckPointSegments` (xlog.c:181, `int`) read as a `double` for the
+/// `check_point_segments` seam — the checkpointer's `IsCheckpointOnSchedule`
+/// divides by it in floating-point (checkpointer.c:888 `(double)
+/// CheckPointSegments`). Faithful: read the int cache, widen to f64.
+pub fn check_point_segments_f64() -> f64 {
+    check_point_segments() as f64
+}
+
+/// `int XLogArchiveTimeout` (xlog.c GUC `archive_timeout`, seconds) — a plain
+/// global read for the `xlog_archive_timeout` seam consumed by the
+/// checkpointer's `CheckArchiveTimeout` / main-loop timeout computation.
+#[inline]
+pub fn xlog_archive_timeout() -> i32 {
+    vars::XLogArchiveTimeout.read()
+}
+
 // ===========================================================================
 // GUC reads (xlog.c file-scope GUC globals, stored in the guc-tables vars).
 // ===========================================================================

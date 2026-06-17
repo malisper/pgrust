@@ -123,6 +123,11 @@ use types_portal::QueryCompletion;
 use types_error::PgResult;
 use types_core::primitive::Oid;
 use types_core::init::BackendType;
+use types_catalog::catalog_dependency::ObjectAddress;
+use types_storage::lock::LOCKMODE;
+use types_nodes::nodes::NodePtr;
+use types_nodes::ddlnodes::CreateStmt;
+use types_nodes::nodeindexscan::PlannedStmt;
 
 /* ---- recursion / readOnlyTree / transaction-state helpers ---- */
 
@@ -609,4 +614,409 @@ seam!(
 seam!(
     /// `ExecSecLabelStmt(stmt)` (seclabel.c) — SECURITY LABEL (non-event-trigger).
     pub fn exec_sec_label_stmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+
+/* ===========================================================================
+ * `ProcessUtilitySlow` (utility.c:1092-1581) — the event-trigger-fenced DDL
+ * fan-out. Reached from the dispatch's GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY
+ * LABEL "fast path" arms (when `EventTriggerSupportsObjectType` is true) and the
+ * dispatch `_ =>` arm. Every command body lives in its own subsystem and is
+ * reached through one of these thin forwarding seams; each defaults to a loud
+ * documented panic until its owning subsystem installs the real handler.
+ *
+ * INSTALLED today (the reachable CREATE TABLE spine):
+ *   * `transform_create_stmt`  ← backend-parser-parse-utilcmd
+ *   * `define_relation`        ← backend-commands-tablecmds
+ *   * `create_toast_for_relation` ← backend-commands-tablecmds (the
+ *     `transformRelOptions("toast") + heap_reloptions + NewRelationCreateToastTable`
+ *     sequence; bundled because it shares the new relation OID + reloptions Datum
+ *     and lands entirely in the catalog, exactly as createas.c::create_ctas_relation).
+ *
+ * UNINSTALLED (documented panic until the owner lands): the event-trigger fences
+ * (event_trigger.c is unported), every other DDL command handler, and the
+ * `transform_index_stmt` / `transform_stats_stmt` parse-analysis transforms whose
+ * owners are not yet wired.
+ * ======================================================================== */
+
+/* ---- parse_utilcmd.c transforms ---- */
+
+seam!(
+    /// `transformCreateStmt(stmt, queryString)` (parse_utilcmd.c) — parse analysis
+    /// for CREATE TABLE / CREATE FOREIGN TABLE. Returns the post-transform list of
+    /// statements (`CreateStmt`, `CreateForeignTableStmt`, `TableLikeClause`, or
+    /// other nodes to recurse on). Installed by backend-parser-parse-utilcmd.
+    pub fn transform_create_stmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: NodePtr<'mcx>,
+        query_string: &str,
+    ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>>
+);
+seam!(
+    /// `transformIndexStmt(relid, stmt, queryString)` (parse_utilcmd.c) — parse
+    /// analysis for CREATE INDEX. Returns the transformed `IndexStmt`.
+    pub fn transform_index_stmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodePtr<'mcx>,
+        query_string: &str,
+    ) -> PgResult<NodePtr<'mcx>>
+);
+seam!(
+    /// `transformStatsStmt(relid, stmt, queryString)` (parse_utilcmd.c) — parse
+    /// analysis for CREATE STATISTICS. Returns the transformed `CreateStatsStmt`.
+    pub fn transform_stats_stmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodePtr<'mcx>,
+        query_string: &str,
+    ) -> PgResult<NodePtr<'mcx>>
+);
+seam!(
+    /// `expandTableLikeClause(heapRel, like_clause)` (tablecmds.c) — the delayed
+    /// CREATE TABLE … (LIKE …) processing, producing additional sub-statements.
+    pub fn expand_table_like_clause<'mcx>(
+        mcx: Mcx<'mcx>,
+        heap_rv: NodePtr<'mcx>,
+        like_clause: NodePtr<'mcx>,
+    ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>>
+);
+
+/* ---- event-trigger fences (event_trigger.c — unported) ---- */
+
+seam!(
+    /// `EventTriggerBeginCompleteQuery()` (event_trigger.c) — install event-trigger
+    /// query state for the duration of a complete query; returns whether cleanup is
+    /// needed (false when no sql_drop/table_rewrite/ddl_command_end triggers exist).
+    pub fn event_trigger_begin_complete_query() -> bool
+);
+seam!(
+    /// `EventTriggerEndCompleteQuery()` (event_trigger.c) — tear down the state
+    /// installed by `EventTriggerBeginCompleteQuery` (run only when it returned true).
+    pub fn event_trigger_end_complete_query()
+);
+seam!(
+    /// `EventTriggerDDLCommandStart(parsetree)` (event_trigger.c) — fire
+    /// `ddl_command_start` event triggers.
+    pub fn event_trigger_ddl_command_start<'mcx>(parsetree: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// `EventTriggerDDLCommandEnd(parsetree)` (event_trigger.c) — fire
+    /// `ddl_command_end` event triggers.
+    pub fn event_trigger_ddl_command_end<'mcx>(parsetree: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// `EventTriggerSQLDrop(parsetree)` (event_trigger.c) — fire `sql_drop` event
+    /// triggers for the objects dropped by the command.
+    pub fn event_trigger_sql_drop<'mcx>(parsetree: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// `EventTriggerCollectSimpleCommand(address, secondaryObject, parsetree)`
+    /// (event_trigger.c) — stash a completed command for `ddl_command_end`.
+    pub fn event_trigger_collect_simple_command<'mcx>(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        parsetree: &Node<'mcx>,
+    )
+);
+seam!(
+    /// `EventTriggerCollectAlterDefPrivs(stmt)` (event_trigger.c) — stash an ALTER
+    /// DEFAULT PRIVILEGES command.
+    pub fn event_trigger_collect_alter_def_privs<'mcx>(stmt: &Node<'mcx>)
+);
+seam!(
+    /// `EventTriggerInhibitCommandCollection()` (event_trigger.c) — suppress DDL
+    /// command collection (REFRESH MATERIALIZED VIEW CONCURRENTLY).
+    pub fn event_trigger_inhibit_command_collection()
+);
+seam!(
+    /// `EventTriggerUndoInhibitCommandCollection()` (event_trigger.c) — restore DDL
+    /// command collection after REFRESH … CONCURRENTLY.
+    pub fn event_trigger_undo_inhibit_command_collection()
+);
+
+/* ---- relation / type creation (tablecmds.c / heap.c / typecmds.c) ---- */
+
+seam!(
+    /// `DefineRelation(stmt, relkind, ownerId, NULL, queryString)` (tablecmds.c) —
+    /// the CREATE TABLE / CREATE relation driver. Returns the new relation's
+    /// `ObjectAddress`. Installed by backend-commands-tablecmds.
+    pub fn define_relation<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: CreateStmt<'mcx>,
+        relkind: u8,
+        owner_id: Oid,
+        query_string: Option<&str>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// The CREATE TABLE TOAST-table follow-on (utility.c:1170-1188):
+    /// `transformRelOptions((Datum) 0, cstmt->options, "toast", HEAP_RELOPT_NAMESPACES,
+    /// true, false)` + `heap_reloptions(RELKIND_TOASTVALUE, toast_options, true)` +
+    /// `NewRelationCreateToastTable(relid, toast_options)`. Bundled into one owner
+    /// step because it shares the new relation OID and the reloptions Datum and
+    /// lands entirely in the catalog (cf. createas.c::create_ctas_relation).
+    /// Installed by backend-commands-tablecmds.
+    pub fn create_toast_for_relation<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        options: &mcx::PgVec<'mcx, NodePtr<'mcx>>,
+    ) -> PgResult<()>
+);
+seam!(
+    /// `CreateForeignTable(stmt, relid)` (foreigncmds.c) — CREATE FOREIGN TABLE.
+    pub fn create_foreign_table<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, relid: Oid) -> PgResult<()>
+);
+seam!(
+    /// `CreateSchemaCommand(stmt, queryString, stmt_location, stmt_len)`
+    /// (schemacmds.c) — CREATE SCHEMA.
+    pub fn create_schema_command<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+        query_string: &str,
+        stmt_location: i32,
+        stmt_len: i32,
+    ) -> PgResult<()>
+);
+seam!(
+    /// `DefineCompositeType(typevar, coldeflist)` (typecmds.c) — CREATE TYPE (composite).
+    pub fn define_composite_type<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineEnum(stmt)` (typecmds.c) — CREATE TYPE AS ENUM.
+    pub fn define_enum<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineRange(pstate, stmt)` (typecmds.c) — CREATE TYPE AS RANGE.
+    pub fn define_range<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterEnum(stmt)` (enum.c) — ALTER TYPE (enum).
+    pub fn alter_enum<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineDomain(pstate, stmt)` (typecmds.c) — CREATE DOMAIN.
+    pub fn define_domain<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// The `AlterDomainStmt` subtype switch (utility.c:1289-1340): `AlterDomainDefault`
+    /// / `AlterDomainNotNull` / `AlterDomainAddConstraint` / `AlterDomainDropConstraint`
+    /// / `AlterDomainValidateConstraint` (typecmds.c). Returns the address; the
+    /// `secondaryObject` (ADD CONSTRAINT) is not carried at this leaf.
+    pub fn alter_domain<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+
+/* ---- object-creation fan-out (define.c / typecmds.c / functioncmds.c / …) ---- */
+
+seam!(
+    /// The `DefineStmt` `kind` switch (utility.c:1343-1393): `DefineAggregate` /
+    /// `DefineOperator` / `DefineType` / `DefineTS*` / `DefineCollation`
+    /// (aggregatecmds.c / operatorcmds.c / typecmds.c / tsearchcmds.c). Returns the
+    /// address; the TS-CONFIGURATION/`secondaryObject` is not carried at this leaf.
+    pub fn define_stmt<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// The whole `T_AlterTableStmt` arm (utility.c:1261-1287): the DETACH
+    /// CONCURRENTLY transaction-block guard, `AlterTableGetLockLevel` +
+    /// `AlterTableLookupRelation` (tablecmds.c), the `EventTriggerAlterTableStart`
+    /// / `EventTriggerAlterTableRelid` fence, `AlterTable`, and the
+    /// `EventTriggerAlterTableEnd` close (or the "does not exist, skipping" NOTICE).
+    /// Bundled because the lock mode / relid / `AlterTableUtilityContext` are all
+    /// tablecmds-internal and interleave with the event-trigger fence. The original
+    /// `pstmt` is threaded so the recursive callbacks can rebuild it.
+    pub fn alter_table_slow<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstmt: &PlannedStmt<'mcx>,
+        stmt: &Node<'mcx>,
+        query_string: &str,
+        params: ParamListInfo,
+        is_top_level: bool,
+    ) -> PgResult<()>
+);
+seam!(
+    /// The CREATE INDEX partition-recursion pre-check (utility.c:1418-1452): when
+    /// `stmt->relation->inh` and the relation is a partitioned table, lock all
+    /// inheritors (`find_all_inheritors`), validate each partition relkind, and
+    /// return the partition count (`list_length(inheritors) - 1`); otherwise `-1`.
+    /// Bundled because it shares `relid`/`lockmode` and reaches the relcache /
+    /// inheritance machinery.
+    pub fn create_index_count_partitions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodePtr<'mcx>,
+        lockmode: LOCKMODE,
+    ) -> PgResult<i32>
+);
+seam!(
+    /// `DefineIndex(relid, stmt, InvalidOid, InvalidOid, InvalidOid, nparts,
+    /// is_alter_table, true, true, false, false)` (indexcmds.c) — CREATE INDEX.
+    /// Returns the new index's `ObjectAddress`.
+    pub fn define_index<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        stmt: NodePtr<'mcx>,
+        nparts: i32,
+        is_alter_table: bool,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `RangeVarGetRelidExtended(stmt->relation, lockmode, 0,
+    /// RangeVarCallbackOwnsRelation, NULL)` (namespace.c) — the CREATE INDEX
+    /// relation-OID lookup with the owns-relation callback.
+    pub fn range_var_get_relid_owns_relation<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: NodePtr<'mcx>,
+        lockmode: LOCKMODE,
+    ) -> PgResult<Oid>
+);
+seam!(
+    /// `ExecReindex(pstate, stmt, isTopLevel)` (indexcmds.c) — REINDEX.
+    pub fn exec_reindex<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>, is_top_level: bool) -> PgResult<()>
+);
+seam!(
+    /// `DefineView(stmt, queryString, stmt_location, stmt_len)` (view.c) — CREATE
+    /// VIEW. Returns the new view's `ObjectAddress`.
+    pub fn define_view<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+        query_string: &str,
+        stmt_location: i32,
+        stmt_len: i32,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateFunction(pstate, stmt)` (functioncmds.c) — CREATE FUNCTION/PROCEDURE.
+    pub fn create_function<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterFunction(pstate, stmt)` (functioncmds.c) — ALTER FUNCTION.
+    pub fn alter_function<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineRule(stmt, queryString)` (rewriteDefine.c) — CREATE RULE.
+    pub fn define_rule<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, query_string: &str) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineSequence(pstate, stmt)` (sequence.c) — CREATE SEQUENCE. Returns the
+    /// new sequence's `ObjectAddress`.
+    pub fn define_sequence<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterSequence(pstate, stmt)` (sequence.c) — ALTER SEQUENCE.
+    pub fn alter_sequence<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateTrigger(stmt, queryString, InvalidOid×6, NULL, false, false)`
+    /// (trigger.c) — CREATE TRIGGER. Returns the new trigger's `ObjectAddress`.
+    pub fn create_trigger<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, query_string: &str) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreatePolicy(stmt)` (policy.c) — CREATE POLICY.
+    pub fn create_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterPolicy(stmt)` (policy.c) — ALTER POLICY.
+    pub fn alter_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateStatistics(stmt, true)` (statscmds.c) — CREATE STATISTICS.
+    pub fn create_statistics<'mcx>(mcx: Mcx<'mcx>, stmt: NodePtr<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false)` (namespace.c) — the
+    /// CREATE STATISTICS relation-OID lookup.
+    pub fn range_var_get_relid_share_update<'mcx>(mcx: Mcx<'mcx>, rel: NodePtr<'mcx>) -> PgResult<Oid>
+);
+seam!(
+    /// `CommentObject(stmt)` (comment.c) — COMMENT (the slow-path / event-trigger leg).
+    pub fn comment_object_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecSecLabelStmt(stmt)` (seclabel.c) — SECURITY LABEL (the slow-path leg).
+    pub fn exec_sec_label_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecuteGrantStmt(stmt)` (aclchk.c) — GRANT/REVOKE (the slow-path leg).
+    pub fn execute_grant_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// `ExecRenameStmt(stmt)` (alter.c) — RENAME (the slow-path leg). Returns the address.
+    pub fn exec_rename_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecAlterObjectDependsStmt(stmt, &secondaryObject)` (alter.c) — ALTER …
+    /// DEPENDS ON EXTENSION (the slow-path leg).
+    pub fn exec_alter_object_depends_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecAlterObjectSchemaStmt(stmt, &secondaryObject)` (alter.c) — ALTER … SET
+    /// SCHEMA (the slow-path leg).
+    pub fn exec_alter_object_schema_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecAlterOwnerStmt(stmt)` (alter.c) — ALTER … OWNER TO (the slow-path leg).
+    pub fn exec_alter_owner_stmt_slow<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterOperator(stmt)` (operatorcmds.c) — ALTER OPERATOR.
+    pub fn alter_operator<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterType(stmt)` (typecmds.c) — ALTER TYPE … SET.
+    pub fn alter_type<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterCollation(stmt)` (collationcmds.c) — ALTER COLLATION … REFRESH VERSION.
+    pub fn alter_collation<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterStatistics(stmt)` (statscmds.c) — ALTER STATISTICS.
+    pub fn alter_statistics<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecCreateTableAs(pstate, stmt, params, queryEnv, qc)` (createas.c) —
+    /// CREATE TABLE AS / SELECT INTO / CREATE MATERIALIZED VIEW.
+    pub fn exec_create_table_as<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+        params: ParamListInfo,
+        qc: Option<&mut QueryCompletion>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecRefreshMatView(stmt, queryString, qc)` (matview.c) — REFRESH
+    /// MATERIALIZED VIEW.
+    pub fn exec_refresh_mat_view<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+        query_string: &str,
+        qc: Option<&mut QueryCompletion>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ExecAlterDefaultPrivilegesStmt(pstate, stmt)` (aclchk.c) — ALTER DEFAULT
+    /// PRIVILEGES.
+    pub fn exec_alter_default_privileges_stmt<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// `DropOwnedObjects(stmt)` (user.c) — DROP OWNED.
+    pub fn drop_owned_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
+    /// The extension / FDW / AM / publication / subscription / transform / cast /
+    /// conversion / language / op-class / op-family DDL handlers (utility.c:
+    /// 1395-1581) — `CreateExtension` / `ExecAlterExtension*` / `Create/AlterFdw` /
+    /// `Create/AlterForeignServer` / `Create/Alter/DropUserMapping` /
+    /// `ImportForeignSchema` / `CreateProceduralLanguage` / `CreateConversionCommand`
+    /// / `CreateCast` / `Define/AlterOpClass` / `Define/AlterOpFamily` /
+    /// `CreateTransform` / `CreateAccessMethod` / `Create/Alter/DropSubscription` /
+    /// `Create/AlterPublication`. These owners are not yet ported; the slow path
+    /// routes the remaining arms here so the unported-handler set is one documented
+    /// seam-panic rather than many. The `Node` carries the discriminant.
+    pub fn process_utility_slow_unported<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+        is_top_level: bool,
+    ) -> PgResult<ObjectAddress>
 );

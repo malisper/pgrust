@@ -64,4 +64,11 @@ pub fn init_seams() {
         transformCreateSchemaStmtElements,
     );
     backend_parser_parse_utilcmd_seams::transformRuleStmt::set(transformRuleStmt);
+
+    // The tcop/utility.c ProcessUtilitySlow CREATE TABLE / CREATE INDEX / CREATE
+    // STATISTICS arms run these parse-analysis transforms through the utility
+    // outward seams.
+    backend_tcop_utility_out_seams::transform_create_stmt::set(transformCreateStmt);
+    backend_tcop_utility_out_seams::transform_index_stmt::set(transformIndexStmt);
+    backend_tcop_utility_out_seams::transform_stats_stmt::set(transformStatsStmt);
 }

@@ -73,6 +73,10 @@ pub fn init_seams() {
     // --- ProcessUtility dispatch arms (utility.c TRUNCATE + DROP relations) ---
     backend_tcop_utility_out_seams::execute_truncate::set(execute_truncate_arm);
     backend_tcop_utility_out_seams::remove_relations::set(remove_relations_arm);
+
+    // --- ProcessUtilitySlow CREATE TABLE spine (utility.c:1135-1190) ---
+    // `DefineRelation(cstmt, RELKIND_RELATION, InvalidOid, NULL, queryString)`.
+    backend_tcop_utility_out_seams::define_relation::set(create::define_relation);
 }
 
 use mcx::Mcx;
