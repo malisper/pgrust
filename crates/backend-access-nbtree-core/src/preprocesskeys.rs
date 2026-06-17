@@ -215,15 +215,18 @@ fn function_call2_coll_oid(
 // ---------------------------------------------------------------------------
 
 /// `rel->rd_indoption[attno - 1]` (`utils/rel.h`) — the per-column index option
-/// flag word (DESC / NULLS FIRST bits).
-fn rd_indoption(_rel: &Relation, _attno: AttrNumber) -> i16 {
-    panic!("_bt_preprocess_keys: rel->rd_indoption[] (relcache index options) not yet ported")
+/// flag word (DESC / NULLS FIRST bits). Carried by the trimmed `RelationData`
+/// (filled by `RelationInitIndexAccessInfo`).
+fn rd_indoption(rel: &Relation, attno: AttrNumber) -> i16 {
+    let idx = (attno - 1) as usize;
+    rel.rd_indoption[idx]
 }
 
 /// `rel->rd_opfamily[attno - 1]` (`utils/rel.h`) — the per-column operator
-/// family OID.
-fn rd_opfamily(_rel: &Relation, _attno: AttrNumber) -> Oid {
-    panic!("_bt_preprocess_keys: rel->rd_opfamily[] (relcache index opfamilies) not yet ported")
+/// family OID. Carried by the trimmed `RelationData`.
+fn rd_opfamily(rel: &Relation, attno: AttrNumber) -> Oid {
+    let idx = (attno - 1) as usize;
+    rel.rd_opfamily[idx]
 }
 
 /// `rel->rd_opcintype[attno - 1]` (`utils/rel.h`) — the per-column opclass input
@@ -234,11 +237,10 @@ fn rd_opcintype(rel: &Relation, attno: AttrNumber) -> Oid {
 }
 
 /// `rel->rd_indcollation[attno - 1]` (`utils/rel.h`) — the per-column index
-/// collation OID.
-fn rd_indcollation(_rel: &Relation, _attno: AttrNumber) -> Oid {
-    panic!(
-        "_bt_preprocess_keys: rel->rd_indcollation[] (relcache index collations) not yet ported"
-    )
+/// collation OID. Carried by the trimmed `RelationData`.
+fn rd_indcollation(rel: &Relation, attno: AttrNumber) -> Oid {
+    let idx = (attno - 1) as usize;
+    rel.rd_indcollation[idx]
 }
 
 /// `IndexRelationGetNumberOfKeyAttributes(rel)` (`utils/rel.h`).

@@ -40,6 +40,8 @@ pub struct FormData_pg_opfamily {
 // pg_opclass
 // ---------------------------------------------------------------------------
 
+/// `OperatorClassRelationId` — `pg_opclass` (`pg_opclass_d.h`).
+pub const OperatorClassRelationId: Oid = 2616;
 /// `OpclassOidIndexId` — `pg_opclass_oid_index` (`pg_opclass_d.h`).
 pub const OpclassOidIndexId: Oid = 2687;
 /// `OpclassAmNameNspIndexId` — `pg_opclass_am_name_nsp_index`
@@ -110,6 +112,11 @@ pub struct FormData_pg_amop {
 // pg_amproc
 // ---------------------------------------------------------------------------
 
+/// `AccessMethodProcedureRelationId` — `pg_amproc` (`pg_amproc_d.h`).
+pub const AccessMethodProcedureRelationId: Oid = 2603;
+/// `AccessMethodProcedureIndexId` — `pg_amproc_fam_proc_index`
+/// (`pg_amproc_d.h`).
+pub const AccessMethodProcedureIndexId: Oid = 2655;
 /// `AccessMethodProcedureOidIndexId` — `pg_amproc_oid_index`
 /// (`pg_amproc_d.h`).
 pub const AccessMethodProcedureOidIndexId: Oid = 2757;

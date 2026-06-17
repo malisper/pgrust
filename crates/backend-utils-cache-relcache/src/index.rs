@@ -26,6 +26,7 @@ use types_core::{InvalidOid, InvalidSubTransactionId, TopSubTransactionId};
 use types_wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
 
 use backend_access_index_amapi_seams as amapi_seam;
+use backend_access_index_genam_seams as genam_seam;
 use backend_access_table_tableam_seams as tableam_seam;
 use backend_access_transam_parallel_seams as parallel_seam;
 use backend_access_transam_xact_seams as xact_seam;
@@ -454,17 +455,21 @@ pub fn LookupOpclassInfo(
     }
 
     // To avoid infinite recursion during startup, force heap scans if we're
-    // looking up info for the opclasses used by the indexes we'd like to
-    // reference here. (The syscache owner abstracts the indexOK choice; the
-    // condition is preserved for fidelity / future use.)
-    let _index_ok = crate::core_entry_store::with_state(|st| st.critical_relcaches_built)
+    // looking up info for the opclasses used by the indexes we would like to
+    // reference here. (relcache.c LookupOpclassInfo: indexOK = criticalRel-
+    // cachesBuilt || (operatorClassOid != OID_BTREE_OPS_OID && ...)).
+    //
+    // We must NOT go through the CLAOID/AMPROCNUM syscache here: that opens
+    // OpclassOidIndexId/AccessMethodProcedureIndexId, whose relcache build would
+    // re-enter LookupOpclassInfo and recurse during early startup. C does a
+    // direct systable_beginscan, threading this gate to a heap scan until the
+    // critical relcaches are nailed; we do the same via the genam scan seams.
+    let index_ok = crate::core_entry_store::with_state(|st| st.critical_relcaches_built)
         || (operator_class_oid != OID_BTREE_OPS_OID && operator_class_oid != INT2_BTREE_OPS_OID);
 
-    let scratch = MemoryContext::new("opclass lookup");
-    let mcx = scratch.mcx();
-
-    // Fetch the pg_opclass row to determine its opfamily and opcintype.
-    let opclassform = match syscache_seam::search_opclass::call(mcx, operator_class_oid)? {
+    // We have to fetch the pg_opclass row to determine its opfamily and
+    // opcintype, which are needed to look up related operators and functions.
+    let opclassform = match genam_seam::scan_pg_opclass::call(operator_class_oid, index_ok)? {
         Some(f) => f,
         None => {
             return Err(ereport(ERROR)
@@ -475,19 +480,16 @@ pub fn LookupOpclassInfo(
     opcentry.opcfamily = opclassform.opcfamily;
     opcentry.opcintype = opclassform.opcintype;
 
-    // Scan pg_amproc to obtain the default support procs (lefttype =
-    // righttype = opcintype).
+    // Scan pg_amproc to obtain support procs for the opclass. The genam scan
+    // already keys on amproclefttype = amprocrighttype = opcintype, so it
+    // returns only the default support procs.
     if num_support > 0 {
-        let members = syscache_seam::search_amproc_list::call(mcx, opcentry.opcfamily)?;
+        let members =
+            genam_seam::scan_pg_amproc::call(opcentry.opcfamily, opcentry.opcintype, index_ok)?;
         // SAFETY: supportProcs points at num_support initialized entries.
         let procs =
             unsafe { std::slice::from_raw_parts_mut(opcentry.supportProcs, num_support as usize) };
         for am in members.iter() {
-            if am.amproclefttype != opcentry.opcintype
-                || am.amprocrighttype != opcentry.opcintype
-            {
-                continue;
-            }
             if am.amprocnum <= 0 || am.amprocnum as u16 > num_support {
                 return Err(ereport(ERROR)
                     .errmsg_internal(format!(

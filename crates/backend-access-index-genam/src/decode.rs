@@ -52,6 +52,14 @@ use types_catalog::pg_attribute::{
     Anum_pg_attribute_attstorage, Anum_pg_attribute_atttypid,
     Anum_pg_attribute_atttypmod,
 };
+use types_catalog::opclasscmds_catalog::{
+    AccessMethodProcedureIndexId, AccessMethodProcedureRelationId,
+    Anum_pg_amproc_amproc, Anum_pg_amproc_amprocfamily,
+    Anum_pg_amproc_amproclefttype, Anum_pg_amproc_amprocnum,
+    Anum_pg_amproc_amprocrighttype, Anum_pg_opclass_oid,
+    Anum_pg_opclass_opcfamily, Anum_pg_opclass_opcintype, OpclassOidIndexId,
+    OperatorClassRelationId,
+};
 use types_catalog::pg_class::{
     ClassOidIndexId, RelationRelationId, Anum_pg_class_oid,
     Anum_pg_class_relallvisible, Anum_pg_class_relam, Anum_pg_class_relchecks,
@@ -386,6 +394,109 @@ fn scan_pg_attribute(reloid: Oid, _natts: i16) -> PgResult<Vec<seam::ScannedPgAt
     while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
         let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
         out.push(decode_pg_attribute(smcx, &row)?);
+    }
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    drop(scratch);
+    Ok(out)
+}
+
+// ===========================================================================
+// scan_pg_opclass / scan_pg_amproc — LookupOpclassInfo
+// ===========================================================================
+
+/// `LookupOpclassInfo`'s `pg_opclass` scan (relcache.c).
+fn scan_pg_opclass(
+    operator_class_oid: Oid,
+    index_ok: bool,
+) -> PgResult<Option<seam::ScannedPgOpclass>> {
+    let scratch = MemoryContext::new("LookupOpclassInfo opclass scan");
+    let smcx = scratch.mcx();
+
+    // ScanKeyInit(&skey[0], Anum_pg_opclass_oid, BTEqualStrategyNumber, F_OIDEQ,
+    //             ObjectIdGetDatum(operatorClassOid));
+    let skey = [scan_key_init(
+        Anum_pg_opclass_oid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(operator_class_oid),
+    )?];
+
+    let relation = table_open(smcx, OperatorClassRelationId, AccessShareLock)?;
+    // C: systable_beginscan(rel, OpclassOidIndexId, indexOK, NULL, 1, skey).
+    // `indexOK` is the relcache's `criticalRelcachesBuilt || (opclass not one of
+    // the bootstrap-critical btree opclasses)` gate, passed straight through to
+    // break the startup recursion (opening OpclassOidIndexId before the critical
+    // relcaches are nailed would re-enter LookupOpclassInfo).
+    let mut scandesc =
+        systable_beginscan(&relation, OpclassOidIndexId, index_ok, None, &skey)?;
+
+    let out = match systable_getnext(smcx, scandesc.desc_mut())? {
+        None => None,
+        Some(ntp) => {
+            let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+            Some(seam::ScannedPgOpclass {
+                opcfamily: col(&row, Anum_pg_opclass_opcfamily, "pg_opclass.opcfamily")?
+                    .as_oid(),
+                opcintype: col(&row, Anum_pg_opclass_opcintype, "pg_opclass.opcintype")?
+                    .as_oid(),
+            })
+        }
+    };
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    drop(scratch);
+    Ok(out)
+}
+
+/// `LookupOpclassInfo`'s `pg_amproc` scan (relcache.c).
+fn scan_pg_amproc(
+    opcfamily: Oid,
+    opcintype: Oid,
+    index_ok: bool,
+) -> PgResult<Vec<seam::ScannedPgAmproc>> {
+    let scratch = MemoryContext::new("LookupOpclassInfo amproc scan");
+    let smcx = scratch.mcx();
+
+    // ScanKeyInit(&skey[0], Anum_pg_amproc_amprocfamily, ..., opcfamily);
+    // ScanKeyInit(&skey[1], Anum_pg_amproc_amproclefttype, ..., opcintype);
+    // ScanKeyInit(&skey[2], Anum_pg_amproc_amprocrighttype, ..., opcintype);
+    let skey = [
+        scan_key_init(
+            Anum_pg_amproc_amprocfamily,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(opcfamily),
+        )?,
+        scan_key_init(
+            Anum_pg_amproc_amproclefttype,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(opcintype),
+        )?,
+        scan_key_init(
+            Anum_pg_amproc_amprocrighttype,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(opcintype),
+        )?,
+    ];
+
+    let relation = table_open(smcx, AccessMethodProcedureRelationId, AccessShareLock)?;
+    // C: systable_beginscan(rel, AccessMethodProcedureIndexId, indexOK, NULL, 3,
+    // skey). Same `indexOK` gate as the pg_opclass scan.
+    let mut scandesc =
+        systable_beginscan(&relation, AccessMethodProcedureIndexId, index_ok, None, &skey)?;
+
+    let mut out = Vec::new();
+    while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
+        let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+        out.push(seam::ScannedPgAmproc {
+            amprocnum: col(&row, Anum_pg_amproc_amprocnum, "pg_amproc.amprocnum")?.as_i16(),
+            amproc: col(&row, Anum_pg_amproc_amproc, "pg_amproc.amproc")?.as_oid(),
+        });
     }
 
     scandesc.end()?;
@@ -1083,6 +1194,8 @@ fn scan_pg_constraint_nncheck(relid: Oid) -> PgResult<Vec<seam::PgConstraintNnCh
 pub fn init_decode_seams() {
     seam::scan_pg_class::set(scan_pg_class);
     seam::scan_pg_attribute::set(scan_pg_attribute);
+    seam::scan_pg_opclass::set(scan_pg_opclass);
+    seam::scan_pg_amproc::set(scan_pg_amproc);
     seam::relcache_scan_pg_index::set(relcache_scan_pg_index);
     seam::relcache_scan_pg_rewrite::set(relcache_scan_pg_rewrite);
     seam::relcache_scan_pg_statistic_ext::set(relcache_scan_pg_statistic_ext);

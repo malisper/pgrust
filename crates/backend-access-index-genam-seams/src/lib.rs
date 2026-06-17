@@ -148,6 +148,31 @@ pub struct ScannedPgIndex {
     pub indpred_isnull: bool,
 }
 
+/// One decoded `pg_opclass` row as `LookupOpclassInfo` (relcache.c) consumes
+/// it: the `Form_pg_opclass.opcfamily`/`opcintype` the opclass cache entry
+/// records. Bootstrap-critical, so the relcache reads it through the genam
+/// direct-scan path (honoring the `index_ok` heap-vs-index gate) rather than
+/// the CLAOID syscache, which would recurse during early startup.
+#[derive(Clone, Debug)]
+pub struct ScannedPgOpclass {
+    /// `Form_pg_opclass.opcfamily`.
+    pub opcfamily: Oid,
+    /// `Form_pg_opclass.opcintype`.
+    pub opcintype: Oid,
+}
+
+/// One decoded `pg_amproc` row as `LookupOpclassInfo` (relcache.c) consumes it:
+/// the default support-proc entry (`amprocnum` and its `amproc` regproc) for an
+/// opclass. The genam scan already keys on `amproclefttype = amprocrighttype =
+/// opcintype`, so every returned row is a default support proc.
+#[derive(Clone, Debug)]
+pub struct ScannedPgAmproc {
+    /// `Form_pg_amproc.amprocnum` — the support function number (1-based).
+    pub amprocnum: i16,
+    /// `Form_pg_amproc.amproc` — the regproc OID of the support function.
+    pub amproc: Oid,
+}
+
 /// One decoded `pg_constraint` foreign-key row as `RelationGetFKeyList`
 /// consumes it (the `ForeignKeyCacheInfo` payload built by
 /// `DeconstructFkConstraintRow`). Opaque to the relcache caller (it only caches
@@ -275,6 +300,40 @@ seam_core::seam!(
     /// catalog. Can `ereport(ERROR)` (catalog read failure / missing column),
     /// carried on `Err`.
     pub fn scan_pg_attribute(reloid: Oid, natts: i16) -> PgResult<Vec<ScannedPgAttribute>>
+);
+
+seam_core::seam!(
+    /// `LookupOpclassInfo`'s `pg_opclass` scan (relcache.c):
+    /// `table_open(OperatorClassRelationId)`, `systable_beginscan(
+    /// OpclassOidIndexId, indexOK, oid = operatorClassOid)` then a single
+    /// `systable_getnext` + `GETSTRUCT(Form_pg_opclass)` deform. Returns the
+    /// found row's `opcfamily`/`opcintype`, `Ok(None)` for the C NULL (no
+    /// matching row — the caller `elog(ERROR)`s "could not find tuple for
+    /// opclass"). `index_ok` toggles the index-vs-heap scan; the relcache passes
+    /// `criticalRelcachesBuilt || (opclass not one of the bootstrap-critical
+    /// btree opclasses)` to break startup recursion. Can `ereport(ERROR)`
+    /// (catalog read failure), carried on `Err`.
+    pub fn scan_pg_opclass(
+        operator_class_oid: Oid,
+        index_ok: bool,
+    ) -> PgResult<Option<ScannedPgOpclass>>
+);
+
+seam_core::seam!(
+    /// `LookupOpclassInfo`'s `pg_amproc` scan (relcache.c):
+    /// `table_open(AccessMethodProcedureRelationId)`, `systable_beginscan(
+    /// AccessMethodProcedureIndexId, indexOK, amprocfamily = opcfamily,
+    /// amproclefttype = opcintype, amprocrighttype = opcintype)` then a
+    /// `systable_getnext` loop + `GETSTRUCT(Form_pg_amproc)` deform for each
+    /// default support proc. Returns every matching decoded row; the relcache
+    /// caller validates `amprocnum` and fills `supportProcs[amprocnum - 1]`.
+    /// `index_ok` toggles the index-vs-heap scan (same gate as the pg_opclass
+    /// scan). Can `ereport(ERROR)` (catalog read failure), carried on `Err`.
+    pub fn scan_pg_amproc(
+        opcfamily: Oid,
+        opcintype: Oid,
+        index_ok: bool,
+    ) -> PgResult<Vec<ScannedPgAmproc>>
 );
 
 seam_core::seam!(
