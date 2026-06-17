@@ -8,4 +8,7 @@
 
 pub fn init_seams() {
     backend_utils_adt_quote_seams::quote_literal_cstr::set(crate::quote_literal_cstr);
+    // Register the SQL-callable quote.c builtins into the fmgr-core table
+    // (C: fmgr_builtins[]) so by-OID dispatch resolves them.
+    crate::fmgr_builtins::register_quote_builtins();
 }

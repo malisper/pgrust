@@ -1,4 +1,6 @@
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// registers the `quote.c` builtins into the fmgr-core table (C: `fmgr_builtins[]`),
+// which uses `String`/`std`. The value cores themselves remain `alloc`-only.
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
@@ -32,6 +34,7 @@ use alloc::string::String;
 use mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
+mod fmgr_builtins;
 mod seams;
 pub use seams::init_seams;
 
