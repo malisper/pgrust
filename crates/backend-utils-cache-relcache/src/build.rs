@@ -292,6 +292,7 @@ fn project_form_pg_class<'mcx>(
         relhassubclass: f.relhassubclass,
         relpersistence: f.relpersistence as u8,
         relkind: f.relkind as u8,
+        reltype: f.reltype,
         relam: f.relam,
         relispopulated: f.relispopulated,
         relreplident: f.relreplident as u8,

@@ -332,7 +332,7 @@ pub fn query_planner<'mcx>(
      * relations.  This can't be done till we've finished expansion of
      * appendrels.
      */
-    appendinfo_seam::distribute_row_identity_vars::call(root)?;
+    appendinfo_seam::distribute_row_identity_vars::call(mcx, run, root)?;
 
     /*
      * Ready to do the primary planning.

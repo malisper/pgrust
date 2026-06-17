@@ -63,6 +63,7 @@ fn make_index<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         relhassubclass: false,
         relpersistence: b'p',
         relkind: b'i',
+        reltype: 0,
         relam: 0,
         relispopulated: true,
         relreplident: b'n',

@@ -11891,9 +11891,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-appendinfo"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table-seams",
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-util-appendinfo-ext-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-ext-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-util-appendinfo-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-appendinfo-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-pathnodes",
@@ -21772,6 +21810,7 @@ dependencies = [
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
  "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",

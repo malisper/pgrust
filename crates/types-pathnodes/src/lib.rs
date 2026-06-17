@@ -637,6 +637,36 @@ pub struct AppendRelInfo {
 }
 
 /* ==========================================================================
+ * RowIdentityVarInfo (pathnodes.h) — a row-identity resjunk column needed by an
+ * inherited UPDATE/DELETE/MERGE. `PlannerInfo::row_identity_vars` stores these
+ * as `Node *` handles in the `node_arena` id-space (an `ArenaNode::RowIdentityVar`).
+ * ======================================================================== */
+
+/// `RowIdentityVarInfo` (pathnodes.h):
+///
+/// ```c
+/// typedef struct RowIdentityVarInfo
+/// {
+///     NodeTag     type;
+///     Var        *rowidvar;       /* Var to be evaluated (but varno=ROWID_VAR) */
+///     int32       rowidwidth;     /* estimated average width */
+///     char       *rowidname;      /* name of the resjunk column */
+///     Relids      rowidrels;      /* RTEs and PHVs that use this row identity */
+/// } RowIdentityVarInfo;
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct RowIdentityVarInfo {
+    /// `Var *rowidvar` — the Var to be evaluated, with `varno == ROWID_VAR`.
+    pub rowidvar: types_nodes::primnodes::Var,
+    /// `int32 rowidwidth` — estimated average width.
+    pub rowidwidth: i32,
+    /// `char *rowidname` — name of the resjunk column.
+    pub rowidname: alloc::string::String,
+    /// `Relids rowidrels` — RTEs and PHVs that use this row identity.
+    pub rowidrels: Relids,
+}
+
+/* ==========================================================================
  * IndexOptInfo (pathnodes.h:1137-1239) — per-index planning state, built by
  * plancat.c. This is the FULL planner producer type (distinct from the
  * trimmed executor-side IndexOptInfo in types_nodes::pathnodes). The
@@ -2401,6 +2431,10 @@ pub enum ArenaNode {
     /// `make_pathkeys_for_sortclauses` store these as `Node *` handles in the
     /// same id-space. The payload is the plain (`Copy`) parsenode value.
     SortGroupClause(types_nodes::rawnodes::SortGroupClause),
+    /// A `RowIdentityVarInfo` node — `PlannerInfo::row_identity_vars` stores
+    /// these as `Node *` handles in the same id-space (appendinfo.c
+    /// `add_row_identity_var`).
+    RowIdentityVar(RowIdentityVarInfo),
 }
 
 /// `NestLoopParam` (nodes/plannodes.h) as carried in `root->curOuterParams`
@@ -2754,6 +2788,30 @@ impl PlannerInfo {
         }
     }
 
+    /// Resolve a [`NodeId`] to its [`RowIdentityVarInfo`] (a
+    /// `root->row_identity_vars` element).
+    #[inline]
+    pub fn rowidvar(&self, id: NodeId) -> &RowIdentityVarInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::RowIdentityVar(r) => r,
+            _ => panic!(
+                "PlannerInfo::rowidvar: NodeId {} does not resolve to a RowIdentityVarInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`RowIdentityVarInfo`] for mutation.
+    #[inline]
+    pub fn rowidvar_mut(&mut self, id: NodeId) -> &mut RowIdentityVarInfo {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::RowIdentityVar(r) => r,
+            _ => panic!(
+                "PlannerInfo::rowidvar_mut: NodeId {} does not resolve to a RowIdentityVarInfo",
+                id.0
+            ),
+        }
+    }
+
     /// Resolve a [`NodeId`] to its [`ForeignKeyOptInfo`] (a `root->fkey_list`
     /// element).
     #[inline]
@@ -2933,6 +2991,15 @@ impl PlannerInfo {
     ) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::SortGroupClause(sgc));
+        id
+    }
+    /// Intern a [`RowIdentityVarInfo`] into the node store, returning its
+    /// [`NodeId`] handle (`root->row_identity_vars` elements). Producer:
+    /// appendinfo's `add_row_identity_var`.
+    #[inline]
+    pub fn alloc_rowidvar(&mut self, r: RowIdentityVarInfo) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::RowIdentityVar(r));
         id
     }
     /// Intern a [`ForeignKeyOptInfo`] into the node store, returning its

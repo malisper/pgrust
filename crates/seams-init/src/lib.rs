@@ -269,6 +269,7 @@ pub fn init_all() {
     backend_optimizer_path_indxpath::init_seams();
     backend_optimizer_path_joinrels::init_seams();
     backend_optimizer_util_relnode::init_seams();
+    backend_optimizer_util_appendinfo::init_seams();
     backend_optimizer_util_plancat::init_seams();
     backend_optimizer_path_pathkeys::init_seams();
     backend_access_nbt_compare::init_seams();

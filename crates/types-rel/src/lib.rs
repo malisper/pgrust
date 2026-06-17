@@ -71,6 +71,10 @@ pub struct FormData_pg_class<'mcx> {
     pub relpersistence: u8,
     /// `char relkind` — `RELKIND_*`.
     pub relkind: u8,
+    /// `Oid reltype` — the OID of the composite (row) type this relation defines
+    /// in pg_type, or `InvalidOid`. Read by appendinfo.c `make_append_rel_info`
+    /// (`parentrel->rd_rel->reltype` / `childrel->rd_rel->reltype`).
+    pub reltype: Oid,
     /// `Oid relam` — the relation's access method (the table/index AM OID).
     /// Read by logical-replication index selection
     /// (`IsIndexUsableForReplicaIdentityFull`: `idxrel->rd_rel->relam`).
@@ -540,6 +544,7 @@ mod tests {
                 relhassubclass: false,
                 relpersistence: b'p',
                 relkind: b'r',
+                reltype: 0,
                 relam: 0,
                 relispopulated: true,
                 relreplident: b'd',

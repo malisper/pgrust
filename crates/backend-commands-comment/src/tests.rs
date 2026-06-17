@@ -228,6 +228,7 @@ fn make_rel(mcx: Mcx<'_>, oid: Oid, relkind: u8) -> Relation<'_> {
             relhassubclass: false,
             relpersistence: b'p',
             relkind,
+            reltype: 0,
             relam: 0,
             relispopulated: true,
             relreplident: b'd',

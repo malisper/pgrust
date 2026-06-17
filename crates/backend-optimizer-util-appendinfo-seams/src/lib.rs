@@ -51,5 +51,14 @@ seam_core::seam!(
     /// appendrel expansion is finished. `query_planner` (planmain.c) calls this
     /// on the general join path after `add_other_rels_to_query`. Void in C; can
     /// `palloc`, so it returns [`PgResult`].
-    pub fn distribute_row_identity_vars(root: &mut PlannerInfo) -> PgResult<()>
+    ///
+    /// The C body reads `root->parse` (`commandType`/`resultRelation`/`rtable`),
+    /// which is the opaque [`types_pathnodes::QueryId`] here; the planner-run
+    /// resolver (`run`) resolves it to the owned `Query<'mcx>`, and `mcx` is the
+    /// planner arena the rare constraint-exclusion edge case allocates in.
+    pub fn distribute_row_identity_vars<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+    ) -> PgResult<()>
 );

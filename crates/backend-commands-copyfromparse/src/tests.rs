@@ -68,6 +68,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             relhassubclass: false,
             relpersistence: b'p',
             relkind: b'r',
+            reltype: 0,
             relam: 0,
             relispopulated: true,
             relreplident: b'd',
