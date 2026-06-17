@@ -312,6 +312,7 @@ pub fn init_all() {
     backend_postmaster_auxprocess::init_seams();
     backend_postmaster_pgarch::init_seams();
     backend_postmaster_pmchild::init_seams();
+    backend_postmaster_postmaster::init_seams();
     backend_postmaster_checkpointer::init_seams();
     backend_postmaster_startup::init_seams();
     backend_postmaster_syslogger::init_seams();

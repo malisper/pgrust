@@ -13318,6 +13318,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-postmaster"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-autovacuum-seams",
+ "backend-postmaster-launch-backend-seams",
+ "backend-postmaster-pmchild",
+ "backend-postmaster-pmchild-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-pmsignal",
+ "backend-utils-init-small-seams",
+ "types-core",
+]
+
+[[package]]
 name = "backend-postmaster-postmaster-seams"
 version = "0.0.0"
 dependencies = [
@@ -21607,6 +21622,7 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-pgarch",
  "backend-postmaster-pmchild",
+ "backend-postmaster-postmaster",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-postmaster-walsummarizer",

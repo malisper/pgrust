@@ -322,6 +322,7 @@ backend-postmaster-fork-process = { path = "../backend-postmaster-fork-process" 
 backend-postmaster-auxprocess = { path = "../backend-postmaster-auxprocess" }
 backend-postmaster-pgarch = { path = "../backend-postmaster-pgarch" }
 backend-postmaster-pmchild = { path = "../backend-postmaster-pmchild" }
+backend-postmaster-postmaster = { path = "../backend-postmaster-postmaster" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-postmaster-walsummarizer = { path = "../backend-postmaster-walsummarizer" }

@@ -1,0 +1,29 @@
+[package]
+name = "backend-postmaster-postmaster"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_postmaster_postmaster"
+path = "src/lib.rs"
+
+[dependencies]
+# Its own inward seam crate (installed by init_seams).
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+
+# Directly-callable ported crate: pmchild owns ActiveChildList + the PMChild
+# slab; postmaster.c iterates/mutates those entries through its access
+# primitives. Acyclic: postmaster sits above pmchild in the bring-up order.
+backend-postmaster-pmchild = { path = "../backend-postmaster-pmchild" }
+
+[dev-dependencies]
+# Used by the behavioral test to stand up pmchild's slot pools (the same seam
+# fixture pmchild's own tests use).
+types-core = { path = "../types-core" }
+backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
+backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-postmaster-launch-backend-seams = { path = "../backend-postmaster-launch-backend-seams" }

@@ -549,6 +549,161 @@ pub fn FindPostmasterChildByPid(pid: i32) -> Option<PMChild> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// In-place mutators on live ActiveChildList entries
+//
+// postmaster.c iterates `ActiveChildList` and mutates `PMChild` fields through
+// the borrowed `PMChild *`. In this model the list + slab are pmchild-private,
+// so the in-place writes are exposed as focused primitives keyed by the live
+// entry's identity (its `pid`, unique among running children). These mirror the
+// exact field writes postmaster.c performs while holding a `PMChild *`.
+// ---------------------------------------------------------------------------
+
+/// Find the active child with the given `pid` and set its `bgworker_notify`
+/// flag to `true`, returning whether such a child was found.
+///
+/// This is the data-touching core of postmaster.c's
+/// `PostmasterMarkPIDForWorkerNotify(pid)`:
+///
+/// ```c
+/// dlist_foreach(iter, &ActiveChildList) {
+///     bp = dlist_container(PMChild, elem, iter.cur);
+///     if (bp->pid == pid) { bp->bgworker_notify = true; return true; }
+/// }
+/// return false;
+/// ```
+///
+/// `ActiveChildList` is pmchild-private here, so the iterate-find-and-set runs
+/// under the pmchild lock; postmaster.c's `PostmasterMarkPIDForWorkerNotify`
+/// wrapper delegates to this.
+pub fn MarkActiveChildBgworkerNotify(pid: i32) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    // Collect the slab index first to satisfy the borrow checker (the active
+    // list and the slab live in the same struct).
+    let mut found_idx: Option<usize> = None;
+    for &idx in &state.active_child_list {
+        if let Some(bp) = state.slab[idx] {
+            if bp.pid == pid {
+                found_idx = Some(idx);
+                break;
+            }
+        }
+    }
+    match found_idx {
+        Some(idx) => {
+            state.slab[idx]
+                .as_mut()
+                .expect("active child slab slot is live")
+                .bgworker_notify = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Set the `pid` of a live active child identified by `child_slot`
+/// (postmaster.c writes `bn->pid = pid` after a successful fork in
+/// `BackendStartup`/`StartChildProcess`/`StartBackgroundWorker`). Returns
+/// whether the entry was found. `child_slot` uniquely identifies a pool entry
+/// (dead-end children never have their pid set this way).
+pub fn SetActiveChildPid(child_slot: i32, pid: i32) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    let mut found_idx: Option<usize> = None;
+    for &idx in &state.active_child_list {
+        if let Some(bp) = state.slab[idx] {
+            if bp.child_slot != 0 && bp.child_slot == child_slot {
+                found_idx = Some(idx);
+                break;
+            }
+        }
+    }
+    match found_idx {
+        Some(idx) => {
+            state.slab[idx]
+                .as_mut()
+                .expect("active child slab slot is live")
+                .pid = pid;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Set the `bkend_type` of a live active child identified by `child_slot`
+/// (postmaster.c rewrites `bp->bkend_type = B_WAL_SENDER` in place when it
+/// notices a backend has become a walsender, in `SignalChildren`/
+/// `CountChildren`; and sets `bn->bkend_type = B_BG_WORKER` in
+/// `StartBackgroundWorker`). Returns whether the entry was found.
+pub fn SetActiveChildBkendType(child_slot: i32, bkend_type: BackendType) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    let mut found_idx: Option<usize> = None;
+    for &idx in &state.active_child_list {
+        if let Some(bp) = state.slab[idx] {
+            if bp.child_slot != 0 && bp.child_slot == child_slot {
+                found_idx = Some(idx);
+                break;
+            }
+        }
+    }
+    match found_idx {
+        Some(idx) => {
+            state.slab[idx]
+                .as_mut()
+                .expect("active child slab slot is live")
+                .bkend_type = bkend_type;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Set the `rw` (bgworker registration index) and `bgworker_notify` flag of a
+/// live active child identified by `child_slot`. postmaster.c writes these
+/// together when forking a child: `bn->rw = NULL; bn->bgworker_notify = false`
+/// for ordinary/autovac backends, or `bn->rw = rw; bn->bgworker_notify = false`
+/// for a background worker (`StartBackgroundWorker`). Returns whether found.
+pub fn SetActiveChildBgworkerInfo(
+    child_slot: i32,
+    rw: Option<u32>,
+    bgworker_notify: bool,
+) -> bool {
+    let mut state = PMCHILD.lock().unwrap();
+    let mut found_idx: Option<usize> = None;
+    for &idx in &state.active_child_list {
+        if let Some(bp) = state.slab[idx] {
+            if bp.child_slot != 0 && bp.child_slot == child_slot {
+                found_idx = Some(idx);
+                break;
+            }
+        }
+    }
+    match found_idx {
+        Some(idx) => {
+            let bp = state.slab[idx]
+                .as_mut()
+                .expect("active child slab slot is live");
+            bp.rw = rw;
+            bp.bgworker_notify = bgworker_notify;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Snapshot the current `ActiveChildList` as a `Vec<PMChild>` (head-first
+/// order, matching C's `dlist_foreach` over the head-insertion list). Used by
+/// postmaster.c's read-only iterations (`SignalChildren`, `CountChildren`'s
+/// counting/logging passes); the in-place WAL-sender relabel those passes do is
+/// applied via [`SetActiveChildBkendType`].
+pub fn ActiveChildListSnapshot() -> Vec<PMChild> {
+    let state = PMCHILD.lock().unwrap();
+    state
+        .active_child_list
+        .iter()
+        .filter_map(|&idx| state.slab[idx])
+        .collect()
+}
+
 /// Locate the `ActiveChildList` slab index of `pmchild` by identity. Pool slots
 /// are uniquely keyed by `child_slot` (> 0); dead-end children (`child_slot ==
 /// 0`) are matched by full value equality.
