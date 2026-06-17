@@ -13642,6 +13642,7 @@ dependencies = [
  "backend-utils-fmgr-funcapi-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-dsa-seams",
  "interfaces-libpq-legacy-pqsignal",
  "libc",

@@ -1522,4 +1522,25 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     s::apply_launcher_shmem_size::set(ApplyLauncherShmemSize);
+
+    // GUC var accessors for the three logical-replication worker-count ints,
+    // whose C `conf->variable` backing lives in launcher.c (plain `int`
+    // globals read directly — not from ControlFile). The launcher owns the
+    // backing storage (the thread_local cells above), so it installs the
+    // get/set accessors the GUC engine drives at boot/SIGHUP.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::max_logical_replication_workers.install(GucVarAccessors {
+            get: max_logical_replication_workers,
+            set: set_max_logical_replication_workers,
+        });
+        vars::max_sync_workers_per_subscription.install(GucVarAccessors {
+            get: max_sync_workers_per_subscription,
+            set: set_max_sync_workers_per_subscription,
+        });
+        vars::max_parallel_apply_workers_per_subscription.install(GucVarAccessors {
+            get: max_parallel_apply_workers_per_subscription,
+            set: set_max_parallel_apply_workers_per_subscription,
+        });
+    }
 }
