@@ -21,6 +21,12 @@ types-numeric = { path = "../types-numeric" }
 # the path/text result buffers.
 mcx = { path = "../mcx" }
 
+# The fmgr/Datum boundary: the call frame, by-ref payload, and the builtin-table
+# registration the SQL-callable `fc_*` adapters cross.
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # The error spine (ereport builder / PgResult / SqlState constants).
 backend-utils-error = { path = "../backend-utils-error" }
 
