@@ -1789,27 +1789,39 @@ pub fn exec_build_projection_info_impl<'mcx>(
     mcx::alloc_in(mcx, proj_info)
 }
 
-/// `ExecBuildProjectionInfo(...)` (execExpr.c) — seam-facing variant that reads
-/// the target list off `planstate->plan->targetlist` and the result slot /
-/// econtext off `planstate`. The per-column step emission is fully implemented
-/// in [`exec_build_projection_info_impl`]; what is missing is the `Plan`
-/// base-struct `targetlist` view in `types-nodes` (only specific scan plan
-/// nodes model their own `targetlist`, not the generic `Plan.targetlist` the C
-/// reads via `planstate->plan->targetlist`). Until that lands this routes
-/// loudly; callers with an explicit target list use
-/// [`exec_build_projection_info_impl`].
+/// `ExecBuildProjectionInfo(targetList, econtext, slot, parent, inputDesc)`
+/// (execExpr.c) — seam-facing variant mirroring the C `ExecAssignProjectionInfo`
+/// call shape: it reads the target list off `planstate->plan->targetlist` and
+/// the expression context off `planstate->ps_ExprContext`, then emits the
+/// per-column projection program via [`exec_build_projection_info_impl`].
 pub fn exec_build_projection_info<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     input_desc: Option<&TupleDescData<'_>>,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
-    let _ = (planstate, estate, input_desc);
-    panic!(
-        "execExpr-core: ExecBuildProjectionInfo(planstate) needs the generic Plan.targetlist \
-         view in types-nodes (planstate->plan->targetlist) which is not modeled on the Node \
-         enum; the per-column ExecInitExprRec recursion + EEOP_ASSIGN_* emission are implemented \
-         in exec_build_projection_info_impl and reached by callers with an explicit target list"
-    );
+    // planstate->plan->targetlist — the generic `Plan` base targetlist, read off
+    // whichever plan-node variant the `PlanState` aliases, via the generic
+    // `Plan` base accessor `Node::plan_head` (which projects the embedded `Plan`
+    // struct's `targetlist` uniformly across every plan-node variant — Result,
+    // SeqScan, Agg, Sort, … — matching C's `((Plan *) node)->targetlist`). The
+    // plan tree is borrowed (`&'mcx Node`, never copied into the state), so the
+    // target-list slice outlives this call independently of the `&mut estate`
+    // borrow. `NIL` (modeled as `None`) is an empty tlist → a no-op projection.
+    let target_list: &[types_nodes::TargetEntry<'mcx>] = planstate
+        .plan
+        .as_deref()
+        .expect("ExecBuildProjectionInfo: PlanState has no plan")
+        .plan_head()
+        .targetlist
+        .as_deref()
+        .unwrap_or(&[]);
+
+    // planstate->ps_ExprContext — the node's expression-evaluation context.
+    let econtext = planstate
+        .ps_ExprContext
+        .expect("ExecBuildProjectionInfo: PlanState has no ps_ExprContext");
+
+    exec_build_projection_info_impl(estate, target_list, econtext, input_desc)
 }
 
 /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos, relDesc,
