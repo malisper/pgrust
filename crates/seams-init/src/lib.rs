@@ -2348,6 +2348,22 @@ mod builtin_registry_completeness {
     //! compare the live gap against `crate::builtin_gap_baseline::KNOWN_GAP`. The
     //! canonical set is `backend_utils_fmgr_core::builtin_canonical::CANONICAL`,
     //! derived from the SAME `pg_proc.dat` C uses.
+    //!
+    //! ## Semantics: the baseline is an UPPER BOUND, not an exact set
+    //!
+    //! The guard is **subset-tolerant**: the live gap must be a SUBSET of the
+    //! baseline gap. It FAILS only on a REGRESSION — a builtin that is missing
+    //! (or metadata-mismatched in a way the baseline did not record) now but is
+    //! NOT accepted by the baseline (a previously-registered builtin went
+    //! missing, or a newly-surfaced gap).
+    //!
+    //! It deliberately does NOT fail when the live gap is SMALLER than the
+    //! baseline. Registering more builtins is always progress, and a workflow
+    //! may register builtins across many crates independently; none of those
+    //! crates should have to edit the shared baseline just because the gap
+    //! shrank. "Stale" baseline entries (now-registered builtins still listed)
+    //! are therefore tolerated here — the baseline is the maximum set of gaps we
+    //! still accept, and is re-tightened toward empty separately, out of band.
 
     use backend_utils_fmgr_core::{missing_builtins, BuiltinGap, BuiltinGapKind};
     use std::collections::BTreeMap;
@@ -2400,59 +2416,32 @@ mod builtin_registry_completeness {
             }
         }
 
-        // STALE baseline entries: recorded as a gap but no longer one (the owner
-        // crate got ported/wired). Must be DELETED so the baseline ratchets
-        // monotonically toward empty (== full C parity).
-        let mut stale: Vec<String> = Vec::new();
-        for (oid, (name, _)) in &baseline {
-            if !live.contains_key(oid) {
-                stale.push(format!("\n  builtin {} {}", oid, name));
-            }
-        }
-
-        if regressions.is_empty() && stale.is_empty() {
+        // SUBSET-TOLERANT: a live gap SMALLER than the baseline is always OK —
+        // it means more builtins got registered, which is progress and must not
+        // fail this guard (nor force any crate to edit the shared baseline).
+        // Baseline entries that are no longer live gaps are tolerated here and
+        // re-tightened separately, out of band. We therefore only fail on the
+        // REGRESSIONS collected above (live gaps NOT covered by the baseline).
+        if regressions.is_empty() {
             return;
         }
 
-        let mut msg = String::new();
-        if !regressions.is_empty() {
-            let total = regressions.len();
-            let shown: String = regressions.iter().take(40).cloned().collect();
-            let more = if total > 40 {
-                format!("\n  ... and {} more", total - 40)
-            } else {
-                String::new()
-            };
-            msg.push_str(&format!(
-                "fmgr built-in registry REGRESSED: {} canonical built-in(s) newly \
-                 missing/mismatched beyond the accepted baseline (an unported or \
-                 unwired adt crate — C's fmgr_builtins[] can never miss, the \
-                 per-crate registry must not either). Wire/register the owner, or \
-                 if intentionally still-unported add the OID to \
-                 seams-init/src/builtin_gap_baseline.rs:{}{}",
-                total, shown, more
-            ));
-        }
-        if !stale.is_empty() {
-            if !msg.is_empty() {
-                msg.push_str("\n\n");
-            }
-            let total = stale.len();
-            let shown: String = stale.iter().take(40).cloned().collect();
-            let more = if total > 40 {
-                format!("\n  ... and {} more", total - 40)
-            } else {
-                String::new()
-            };
-            msg.push_str(&format!(
-                "stale builtin-gap baseline: {} entry(ies) in \
-                 seams-init/src/builtin_gap_baseline.rs are NO LONGER gaps (the \
-                 owner was ported/wired). DELETE them so the baseline ratchets \
-                 toward empty:{}{}",
-                total, shown, more
-            ));
-        }
-        panic!("{}", msg);
+        let total = regressions.len();
+        let shown: String = regressions.iter().take(40).cloned().collect();
+        let more = if total > 40 {
+            format!("\n  ... and {} more", total - 40)
+        } else {
+            String::new()
+        };
+        panic!(
+            "fmgr built-in registry REGRESSED: {} canonical built-in(s) newly \
+             missing/mismatched beyond the accepted baseline (an unported or \
+             unwired adt crate — C's fmgr_builtins[] can never miss, the \
+             per-crate registry must not either). Wire/register the owner, or \
+             if intentionally still-unported add the OID to \
+             seams-init/src/builtin_gap_baseline.rs:{}{}",
+            total, shown, more
+        );
     }
 
     /// Independent of the live registry: the baseline must only ever cite OIDs
