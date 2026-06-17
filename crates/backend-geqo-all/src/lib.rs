@@ -70,6 +70,7 @@ pub mod copy;
 pub mod cx;
 pub mod erx;
 pub mod eval;
+pub mod guc_state;
 #[path = "geqo_main.rs"]
 pub mod main;
 pub mod misc;
@@ -144,4 +145,11 @@ pub const operator: Operator = Operator::Erx;
 /// not modeled here). The planner externals GEQO *consumes* live in
 /// [`backend_geqo_all_seams`] and are installed by their owners
 /// (joinrels/joininfo/planner-memory), not here.
-pub fn init_seams() {}
+///
+/// GEQO *does* own the five GEQO GUC variables (`Geqo_effort`,
+/// `Geqo_pool_size`, `Geqo_generations`, `Geqo_selection_bias`, `Geqo_seed`),
+/// defined as file-scope globals in `geqo_main.c`. Their `conf->variable`
+/// accessors over this crate's backing store are installed here.
+pub fn init_seams() {
+    guc_state::install();
+}

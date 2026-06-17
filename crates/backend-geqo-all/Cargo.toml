@@ -13,3 +13,4 @@ types-core = { path = "../types-core" }
 types-pathnodes = { path = "../types-pathnodes" }
 pg-prng = { path = "../pg-prng" }
 backend-geqo-all-seams = { path = "../backend-geqo-all-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

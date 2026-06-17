@@ -10252,6 +10252,7 @@ name = "backend-geqo-all"
 version = "0.0.0"
 dependencies = [
  "backend-geqo-all-seams",
+ "backend-utils-misc-guc-tables",
  "pg-prng",
  "types-core",
  "types-pathnodes",
