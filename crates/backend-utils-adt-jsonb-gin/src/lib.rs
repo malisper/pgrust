@@ -58,6 +58,8 @@ pub use types_jsonb::jsonb_gin::{
 };
 use types_jsonpath::jsonpath::{jsp_is_scalar, JsonPathItemType};
 
+mod fmgr_builtins;
+
 #[cfg(test)]
 mod tests;
 
@@ -98,6 +100,10 @@ pub fn init_seams() {
     seams::gin_extract_jsonb_query_path::set(gin_extract_jsonb_query_path);
     seams::gin_consistent_jsonb_path::set(gin_consistent_jsonb_path);
     seams::gin_triconsistent_jsonb_path::set(gin_triconsistent_jsonb_path);
+
+    // Register the scalar fmgr builtins (C: fmgr_builtins[] rows) into the
+    // fmgr-core builtin table for by-OID fast-path dispatch.
+    fmgr_builtins::register_jsonb_gin_builtins();
 }
 
 // ===========================================================================
