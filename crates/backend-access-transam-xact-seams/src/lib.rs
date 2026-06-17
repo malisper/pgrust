@@ -14,6 +14,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentTransactionStopTimestamp()` (xact.c:891): the timestamp the
+    /// current transaction stopped, setting it to the current time on first
+    /// call if still unset. Read by `pgstat_relation_flush_cb` to stamp the
+    /// per-table `lastscan`. Backend-local transaction state.
+    pub fn get_current_transaction_stop_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `CommandCounterIncrement()` (xact.c): bump the command counter so
     /// in-progress catalog changes become visible. Can `ereport(ERROR)`
     /// (e.g. `cannot have more than 2^32-2 commands in a transaction`),

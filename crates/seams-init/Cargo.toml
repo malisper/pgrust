@@ -408,6 +408,7 @@ backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-
 backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
 backend-utils-activity-pgstat-database = { path = "../backend-utils-activity-pgstat-database" }
 backend-utils-activity-pgstat-function = { path = "../backend-utils-activity-pgstat-function" }
+backend-utils-activity-pgstat-relation = { path = "../backend-utils-activity-pgstat-relation" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }

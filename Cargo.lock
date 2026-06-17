@@ -16734,6 +16734,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-relation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-twophase-rmgr",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-catalog-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-backend",
+ "backend-utils-activity-pgstat-database",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-xact",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-replslot"
 version = "0.0.0"
 dependencies = [
@@ -21705,6 +21728,7 @@ dependencies = [
  "backend-utils-activity-pgstat-database",
  "backend-utils-activity-pgstat-function",
  "backend-utils-activity-pgstat-io",
+ "backend-utils-activity-pgstat-relation",
  "backend-utils-activity-pgstat-replslot",
  "backend-utils-activity-pgstat-slru",
  "backend-utils-activity-pgstat-subscription",

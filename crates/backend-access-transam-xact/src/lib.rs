@@ -1694,6 +1694,7 @@ pub fn init_seams() {
     seams::set_check_xid_alive::set(SetCheckXidAlive);
     seams::set_bsysscan::set(SetBsysscan);
     seams::get_current_statement_start_timestamp::set(GetCurrentStatementStartTimestamp);
+    seams::get_current_transaction_stop_timestamp::set(GetCurrentTransactionStopTimestamp);
     seams::is_in_parallel_mode::set(IsInParallelMode);
     seams::require_transaction_block::set(RequireTransactionBlock);
     seams::xact_redo::set(seam_xact_redo);
