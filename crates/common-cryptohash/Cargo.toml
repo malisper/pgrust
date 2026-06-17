@@ -1,0 +1,17 @@
+[package]
+name = "common-cryptohash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_cryptohash"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+common-cryptohash-seams = { path = "../common-cryptohash-seams" }
+common-md5 = { path = "../common-md5" }
+common-sha2 = { path = "../common-sha2" }
+types-core = { path = "../types-core" }
+types-crypto = { path = "../types-crypto" }

@@ -21295,6 +21295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-cryptohash"
+version = "0.0.0"
+dependencies = [
+ "common-cryptohash-seams",
+ "common-md5",
+ "common-sha2",
+ "types-core",
+ "types-crypto",
+]
+
+[[package]]
 name = "common-cryptohash-seams"
 version = "0.0.0"
 dependencies = [
@@ -22449,6 +22460,7 @@ dependencies = [
  "backend-utils-time-snapmgr",
  "common-blkreftable",
  "common-checksum-helper",
+ "common-cryptohash",
  "common-extra-encnames-fgram",
  "common-hashfn",
  "common-ip",

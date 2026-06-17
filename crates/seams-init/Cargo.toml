@@ -444,6 +444,7 @@ backend-utils-adt-jsonpath-gram = { path = "../backend-utils-adt-jsonpath-gram" 
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-cryptohashfuncs = { path = "../backend-utils-adt-cryptohashfuncs" }
 common-md5 = { path = "../common-md5" }
+common-cryptohash = { path = "../common-cryptohash" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-network-gist = { path = "../backend-utils-adt-network-gist" }
