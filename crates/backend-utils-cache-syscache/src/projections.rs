@@ -22,7 +22,7 @@ use crate::{
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, DATABASEOID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, PARAMETERACLNAME, PARAMETERACLOID,
+    LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, OPFAMILYOID, PARAMETERACLNAME, PARAMETERACLOID,
     PROCOID,
     RELNAMENSP, RELOID,
     RULERELNAME, STATRELATTINH, TYPEOID,
@@ -52,6 +52,7 @@ use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_namespace::OperRow;
+use types_namespace::{OidArrayDatum, ProcRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use types_catalog::pg_aggregate::{
@@ -87,6 +88,11 @@ const Anum_pg_opclass_opcname: i32 = 3;
 const Anum_pg_opclass_opcfamily: i32 = 6;
 const Anum_pg_opclass_opcintype: i32 = 7;
 const Anum_pg_opclass_opckeytype: i32 = 9;
+
+// `catalog/pg_opfamily.h` attribute numbers.
+const Anum_pg_opfamily_opfmethod: i32 = 2;
+const Anum_pg_opfamily_opfname: i32 = 3;
+const Anum_pg_opfamily_opfnamespace: i32 = 4;
 
 // `catalog/pg_operator.h` attribute numbers.
 const Anum_pg_operator_oid: i32 = 1;
@@ -323,6 +329,25 @@ pub(crate) fn search_opclass<'mcx>(
     };
     ReleaseSysCache(tup);
     Ok(Some(form))
+}
+
+/// `SearchSysCache1(OPFAMILYOID, ObjectIdGetDatum(opfid))` projected to
+/// `(opfnamespace, opfmethod, opfname)`; `Ok(None)` on a cache miss
+/// (`!HeapTupleIsValid`). The object-address / namespace-visibility callers read
+/// these three `Form_pg_opfamily` fields to form the operator family's name.
+pub(crate) fn opfamily_namespace_method_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    opfid: Oid,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    let tuple = SearchSysCache1(mcx, OPFAMILYOID, SysCacheKey::Value(KeyDatum::from_oid(opfid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let opfnamespace = getattr_oid(mcx, OPFAMILYOID, &tup, Anum_pg_opfamily_opfnamespace)?;
+    let opfmethod = getattr_oid(mcx, OPFAMILYOID, &tup, Anum_pg_opfamily_opfmethod)?;
+    let opfname = getattr_name(mcx, OPFAMILYOID, &tup, Anum_pg_opfamily_opfname)?;
+    ReleaseSysCache(tup);
+    Ok(Some((opfnamespace, opfmethod, opfname)))
 }
 
 /// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` + `GETSTRUCT` of the
@@ -1270,6 +1295,8 @@ const Anum_pg_proc_pronargs: i32 = 17;
 const Anum_pg_proc_pronargdefaults: i32 = 18;
 const Anum_pg_proc_prorettype: i32 = 19;
 const Anum_pg_proc_proargtypes: i32 = 20;
+const Anum_pg_proc_oid: i32 = 1;
+const Anum_pg_proc_proallargtypes: i32 = 21;
 const Anum_pg_proc_prosrc: i32 = 26;
 const Anum_pg_proc_probin: i32 = 27;
 const Anum_pg_proc_proconfig: i32 = 29;
@@ -1484,6 +1511,13 @@ pub(crate) fn rel_relkind(relid: Oid) -> PgResult<Option<u8>> {
 /// hash value for a `pg_constraint` row.
 pub(crate) fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32> {
     crate::GetSysCacheHashValue1(CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(oid)))
+}
+
+/// `GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(type_id))` — the catcache
+/// hash value of the `pg_type` row, as stored in `TypeCacheEntry.type_id_hash`
+/// (typcache.c `lookup_type_cache`).
+pub(crate) fn get_syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue1(TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(type_id)))
 }
 
 /// `GetSysCacheHashValue1(DATABASEOID, ObjectIdGetDatum(dbid))` (acl.c
@@ -1956,6 +1990,110 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         prolang_is_sql: prolang == SQL_LANGUAGE_ID,
         proconfig_isnull,
     })
+}
+
+/// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` projected to the
+/// [`ProcRow`] fields the function-resolution / namespace-visibility callers
+/// (`FuncnameGetCandidates`, `func_get_detail`, `FunctionIsVisibleExt`) read out
+/// of `Form_pg_proc`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
+pub(crate) fn proc_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<ProcRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let oid = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_oid)?;
+    let pronamespace = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_pronamespace)?;
+    let provariadic = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_provariadic)?;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)? as i32;
+    let pronargdefaults = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargdefaults)? as i32;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off
+    // the on-disk image (== C's `proc->proargtypes.values`).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let proargtypes_bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "syscache proc_row_by_oid: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, proargtypes_bytes)?;
+    let mut proargtypes = vec_with_capacity_in(mcx, proargtypes_vec.len())?;
+    for &t in proargtypes_vec.iter() {
+        proargtypes.push(t);
+    }
+
+    // proallargtypes (oid[]) may be SQL NULL (only set when OUT/INOUT/VARIADIC
+    // args are present). When present, project the raw ArrayType header + Oids.
+    let (allarg_value, allarg_isnull) =
+        SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proallargtypes)?;
+    let proallargtypes = if allarg_isnull {
+        None
+    } else {
+        match &allarg_value {
+            Datum::ByRef(b) => {
+                let (arr, ndim, hasnull, elemtype, dim0, data_off) =
+                    detoast_array_header(mcx, b)?;
+                let mut values = vec_with_capacity_in(mcx, dim0.max(0) as usize)?;
+                if ndim == 1 && !hasnull {
+                    let n = dim0.max(0) as usize;
+                    for i in 0..n {
+                        let off = data_off + i * 4;
+                        values.push(u32::from_ne_bytes([
+                            arr[off],
+                            arr[off + 1],
+                            arr[off + 2],
+                            arr[off + 3],
+                        ]));
+                    }
+                }
+                Some(OidArrayDatum {
+                    ndim,
+                    dim0,
+                    hasnull,
+                    elemtype,
+                    values,
+                })
+            }
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
+                return Err(PgError::error(
+                    "syscache proc_row_by_oid: proallargtypes is not a by-reference array",
+                ))
+            }
+        }
+    };
+
+    ReleaseSysCache(tup);
+    Ok(Some(ProcRow {
+        oid,
+        pronamespace,
+        provariadic,
+        pronargs,
+        pronargdefaults,
+        prorettype,
+        proargtypes,
+        proallargtypes,
+        proname,
+        prokind,
+        proretset,
+    }))
 }
 
 /// `SearchSysCache1(TYPEOID, oidtypeid)` projected to the type-dependent

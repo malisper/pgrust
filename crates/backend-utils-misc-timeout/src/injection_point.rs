@@ -57,6 +57,14 @@ pub fn injection_point_run(_name: &str, _arg: Option<&mut [u8]>) -> PgResult<()>
     elog(ERROR, UNSUPPORTED_UPPER)
 }
 
+/// The `INJECTION_POINT(name, arg)` *macro* itself (`utils/injection_point.h`).
+/// When `USE_INJECTION_POINTS` is **off** — this build — the macro expands to
+/// `((void) name)`: a pure no-op that never calls `InjectionPointRun`. Call
+/// sites reach it through the `domains_seams::injection_point` seam.
+pub fn injection_point_macro(_name: &str) {
+    // ((void) name)
+}
+
 /// `InjectionPointCached` — `#else`: unsupported in this build.
 pub fn injection_point_cached(_name: &str, _arg: Option<&mut [u8]>) -> PgResult<()> {
     elog(ERROR, UNSUPPORTED_UPPER)

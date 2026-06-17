@@ -782,6 +782,12 @@ pub fn init_seams() {
     backend_storage_ipc_injection_point_seams::injection_point_shmem_init::set(
         injection_point::injection_point_shmem_init,
     );
+    // The INJECTION_POINT(name) macro itself — a pure no-op in this
+    // non-injection build (`#define INJECTION_POINT(name, arg) ((void) name)`).
+    // Call sites (e.g. typcache.c) reach it via the domains-seams declaration.
+    backend_utils_adt_domains_seams::injection_point::set(
+        injection_point::injection_point_macro,
+    );
 
     // tzparser.c: the file-access half of ParseTzFile (get_share_path +
     // AllocateFile + dir probe + line read).

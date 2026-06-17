@@ -61,11 +61,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
 use types_nodes::nodeindexscan::{Plan, Scan};
 use types_nodes::noderesult::Result as ResultNode;
 use types_nodes::nodeforeigncustom::Material as MaterialNode;
+use types_nodes::nodesort::Sort;
+use types_nodes::nodelimit::Limit as LimitNode;
 use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
 use types_nodes::nodes::{Node, NodeTag};
 use types_nodes::nodectescan::CteScan;
@@ -82,8 +84,10 @@ use types_nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
-    NodeId, Path, PathId, PathNode, PathTarget, PlannerInfo, RinfoId, RELOPT_BASEREL, RTE_RELATION,
+    NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
+    RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
 };
+use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 
 use backend_nodes_core::makefuncs::{make_orclause, make_target_entry};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
@@ -96,7 +100,12 @@ use backend_optimizer_util_pathnode_seams as pathnode;
 use backend_optimizer_util_placeholder_seams as placeholder;
 use backend_optimizer_util_plancat::build_physical_tlist;
 use backend_optimizer_util_relnode_seams as relnode;
-use backend_optimizer_util_vars::tlist::{apply_pathtarget_labeling_to_tlist, tlist_same_exprs};
+use backend_optimizer_util_vars::tlist::{
+    apply_pathtarget_labeling_to_tlist, get_sortgroupref_tle, tlist_same_exprs,
+};
+use backend_optimizer_path_equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
+use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_misc_guc_tables::vars;
 
 // ---------------------------------------------------------------------------
 // RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
@@ -2365,6 +2374,400 @@ fn create_material_plan<'mcx>(
     Ok(Node::Material(plan))
 }
 
+// ===========================================================================
+// Sort family: create_sort_plan + make_sort / make_sort_from_pathkeys /
+// prepare_sort_from_pathkeys / inject_projection_plan (createplan.c).
+// ===========================================================================
+
+/// `inject_projection_plan(subplan, tlist, parallel_safe)` (createplan.c ~2117)
+/// — stack a `Result` projection node atop `subplan` carrying `tlist`. Used by
+/// `prepare_sort_from_pathkeys` when the input plan can't do projection but a
+/// resjunk sort column must be computed.
+fn inject_projection_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    subplan: Node<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    parallel_safe: bool,
+) -> PgResult<Node<'mcx>> {
+    // plan = (Plan *) make_result(tlist, NULL, subplan);
+    // copy_plan_costsize(plan, subplan); plan->parallel_safe = parallel_safe;
+    let child_plan = subplan.plan_head().clone_in(mcx)?;
+    let mut node = make_result(mcx, tlist, None, Some(subplan))?;
+    copy_plan_costsize(&mut node.plan, &child_plan);
+    node.plan.parallel_safe = parallel_safe;
+    Ok(Node::Result(node))
+}
+
+/// `make_sort(lefttree, numCols, sortColIdx, sortOperators, collations,
+/// nullsFirst)` (createplan.c ~6203) — build a `Sort` plan node atop
+/// `lefttree`. The Sort's targetlist is the child's (it doesn't project).
+fn make_sort<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    sort_col_idx: PgVec<'mcx, AttrNumber>,
+    sort_operators: PgVec<'mcx, Oid>,
+    collations: PgVec<'mcx, Oid>,
+    nulls_first: PgVec<'mcx, bool>,
+) -> PgResult<Sort<'mcx>> {
+    let num_cols = sort_col_idx.len() as i32;
+    // plan->targetlist = lefttree->targetlist;
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    // plan->disabled_nodes = lefttree->disabled_nodes + (enable_sort == false);
+    let lefttree_disabled = lefttree.plan_head().disabled_nodes;
+    let enable_sort = (vars::enable_sort.get().get)();
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.disabled_nodes = lefttree_disabled + i32::from(!enable_sort);
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    Ok(Sort {
+        plan,
+        numCols: num_cols,
+        sortColIdx: sort_col_idx,
+        sortOperators: sort_operators,
+        collations,
+        nullsFirst: nulls_first,
+    })
+}
+
+/// `prepare_sort_from_pathkeys(lefttree, pathkeys, relids, reqColIdx,
+/// adjust_tlist_in_place, ...)` (createplan.c ~6300) — convert the pathkey list
+/// into executor sort-key arrays, adjusting the input plan's targetlist (adding
+/// resjunk sort columns, possibly injecting a `Result`) as needed.
+///
+/// Returns the (possibly replaced) input node plus the four parallel
+/// sort-key arrays (`sortColIdx` / `sortOperators` / `collations` /
+/// `nullsFirst`), all `numsortkeys` long.
+///
+/// `reqColIdx` (the MergeAppend child case) is not yet exercised; `None` here.
+/// `adjust_tlist_in_place` forces the lefttree tlist to be modified in place.
+type SortKeyArrays<'mcx> = (
+    Node<'mcx>,
+    PgVec<'mcx, AttrNumber>,
+    PgVec<'mcx, Oid>,
+    PgVec<'mcx, Oid>,
+    PgVec<'mcx, bool>,
+);
+
+fn prepare_sort_from_pathkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    mut lefttree: Node<'mcx>,
+    pathkeys: &[PathKey],
+    relids: &Relids,
+    req_col_idx: Option<&[AttrNumber]>,
+    mut adjust_tlist_in_place: bool,
+) -> PgResult<SortKeyArrays<'mcx>> {
+    // We will need at most list_length(pathkeys) sort columns; possibly less.
+    let mut sort_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, pathkeys.len())?;
+    let mut sort_operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, pathkeys.len())?;
+    let mut collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, pathkeys.len())?;
+    let mut nulls_first: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, pathkeys.len())?;
+
+    let mut numsortkeys: usize = 0;
+
+    for pathkey in pathkeys {
+        let ec_id = pathkey
+            .pk_eclass
+            .expect("prepare_sort_from_pathkeys: PathKey has no EquivalenceClass");
+        let ec = root.ec(ec_id);
+
+        // The matched/created tlist entry's resno + datatype.
+        let mut matched_resno: Option<AttrNumber> = None;
+        let mut pk_datatype: Oid = InvalidOid;
+
+        if ec.ec_has_volatile {
+            // If the pathkey's EquivalenceClass is volatile, it must have come
+            // from an ORDER BY clause, and we have to match it to that same
+            // targetlist entry.
+            if ec.ec_sortref == 0 {
+                return Err(PgError::error("volatile EquivalenceClass has no sortref"));
+            }
+            let tlist = lefttree
+                .plan_head()
+                .targetlist
+                .as_deref()
+                .unwrap_or(&[]);
+            let tle = get_sortgroupref_tle(ec.ec_sortref, tlist)?;
+            matched_resno = Some(tle.resno);
+            debug_assert_eq!(ec.ec_members.len(), 1);
+            let first_em = ec.ec_members[0];
+            pk_datatype = root.em(first_em).em_datatype;
+        } else if let Some(req) = req_col_idx {
+            // If we are given a sort column number to match, only consider the
+            // single TLE at that position.
+            let req_resno = req[numsortkeys];
+            let tlist = lefttree
+                .plan_head()
+                .targetlist
+                .as_deref()
+                .unwrap_or(&[]);
+            if let Some(tle) = tlist.iter().find(|t| t.resno == req_resno) {
+                let tle_expr = tle.expr.as_deref().cloned().unwrap_or(Expr::Var(Default::default()));
+                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, relids) {
+                    // found expr at right place in tlist
+                    pk_datatype = em.em_datatype;
+                    matched_resno = Some(tle.resno);
+                }
+            }
+        } else {
+            // Otherwise, we can sort by any non-constant expression listed in
+            // the pathkey's EquivalenceClass. Take the first tlist item found.
+            let tlist = lefttree
+                .plan_head()
+                .targetlist
+                .as_deref()
+                .unwrap_or(&[]);
+            for tle in tlist.iter() {
+                let tle_expr = tle.expr.as_deref().cloned().unwrap_or(Expr::Var(Default::default()));
+                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, relids) {
+                    // found expr already in tlist
+                    pk_datatype = em.em_datatype;
+                    matched_resno = Some(tle.resno);
+                    break;
+                }
+            }
+        }
+
+        let resno = match matched_resno {
+            Some(resno) => resno,
+            None => {
+                // No matching tlist item; look for a computable expression.
+                let em_id = find_computable_ec_member(root, ec_id, &[], relids, false)
+                    .ok_or_else(|| PgError::error("could not find pathkey item to sort"))?;
+                pk_datatype = root.em(em_id).em_datatype;
+                // em_expr to be copied into a resjunk targetentry.
+                let resjunk_expr = root.node(root.em(em_id).em_expr).clone();
+
+                // Do we need to insert a Result node? If we can't modify the
+                // tlist in place and the input plan can't project, stack a
+                // Result. (Append/MergeAppend pass adjust_tlist_in_place=true.)
+                if !adjust_tlist_in_place && !is_projection_capable_plan(&lefttree) {
+                    let tlist_copy = clone_plan_tlist(mcx, &lefttree)?;
+                    let parallel_safe = lefttree.plan_head().parallel_safe;
+                    lefttree = inject_projection_plan(mcx, lefttree, tlist_copy, parallel_safe)?;
+                }
+                // Don't bother testing is_projection_capable_plan again.
+                adjust_tlist_in_place = true;
+
+                // Add resjunk entry to input's tlist: resno = len + 1.
+                let new_resno = {
+                    let cur = lefttree.plan_head().targetlist.as_deref().map(|t| t.len()).unwrap_or(0);
+                    (cur + 1) as AttrNumber
+                };
+                let tle = make_target_entry(mcx, resjunk_expr, new_resno, None, true)?;
+                let plan = lefttree.plan_head_mut();
+                match plan.targetlist {
+                    Some(ref mut tl) => tl.push(tle),
+                    None => {
+                        let mut tl = vec_with_capacity_in(mcx, 1)?;
+                        tl.push(tle);
+                        plan.targetlist = Some(tl);
+                    }
+                }
+                new_resno
+            }
+        };
+
+        // Look up the correct sort operator from the PathKey's abstracted
+        // representation.
+        let sortop = lsyscache::get_opfamily_member_for_cmptype::call(
+            pathkey.pk_opfamily,
+            pk_datatype,
+            pk_datatype,
+            pathkey.pk_cmptype,
+        )?;
+        if sortop == InvalidOid {
+            return Err(PgError::error(alloc::format!(
+                "missing operator {}({},{}) in opfamily {}",
+                pathkey.pk_cmptype, pk_datatype, pk_datatype, pathkey.pk_opfamily
+            )));
+        }
+
+        // Add the column to the sort arrays.
+        sort_col_idx.push(resno);
+        sort_operators.push(sortop);
+        collations.push(ec.ec_collation);
+        nulls_first.push(pathkey.pk_nulls_first);
+        numsortkeys += 1;
+    }
+
+    let _ = numsortkeys;
+    Ok((lefttree, sort_col_idx, sort_operators, collations, nulls_first))
+}
+
+/// `make_sort_from_pathkeys(lefttree, pathkeys, relids)` (createplan.c ~6482) —
+/// create a `Sort` plan to sort `lefttree` according to `pathkeys`.
+fn make_sort_from_pathkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    lefttree: Node<'mcx>,
+    pathkeys: &[PathKey],
+    relids: &Relids,
+) -> PgResult<Sort<'mcx>> {
+    // Compute sort column info, and adjust lefttree as needed.
+    let (lefttree, sort_col_idx, sort_operators, collations, nulls_first) =
+        prepare_sort_from_pathkeys(mcx, root, lefttree, pathkeys, relids, None, false)?;
+    // Now build the Sort node.
+    make_sort(mcx, lefttree, sort_col_idx, sort_operators, collations, nulls_first)
+}
+
+/// `create_sort_plan(root, best_path, flags)` (createplan.c ~2177) — create a
+/// `Sort` plan and (recursively) the plan for its subpath.
+fn create_sort_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let subpath = match root.path(best_path) {
+        PathNode::SortPath(p) => p.subpath,
+        _ => unreachable!("create_sort_plan on non-SortPath"),
+    }
+    .expect("create_sort_plan: SortPath has no subpath");
+
+    // We don't want any excess columns in the sorted tuples, so request a
+    // smaller tlist. Otherwise, since Sort doesn't project, tlist requirements
+    // pass through.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags | CP_SMALL_TLIST)?;
+
+    // make_sort_from_pathkeys indirectly calls find_ec_member_matching_expr,
+    // which will ignore any child EC members that don't belong to the given
+    // relids. Thus, if this sort path is based on a child relation, we must
+    // pass its relids: IS_OTHER_REL(subpath->parent) ? path.parent->relids : NULL.
+    let subpath_parent = root.path(subpath).base().parent;
+    let relids: Relids = if root.rel(subpath_parent).reloptkind >= RELOPT_OTHER_MEMBER_REL {
+        let parent = root.path(best_path).base().parent;
+        root.rel(parent).relids.clone()
+    } else {
+        None
+    };
+
+    // Clone the pathkeys out so we can borrow root immutably while building.
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+    let mut plan = make_sort_from_pathkeys(mcx, root, subplan, &pathkeys, &relids)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Sort(plan))
+}
+
+// ===========================================================================
+// Limit family: create_limit_plan + make_limit (createplan.c).
+// ===========================================================================
+
+/// `make_limit(lefttree, limitOffset, limitCount, limitOption, uniqNumCols,
+/// uniqColIdx, uniqOperators, uniqCollations)` (createplan.c ~7101) — build a
+/// `Limit` plan node atop `lefttree`. Limit doesn't project; the targetlist
+/// passes through.
+#[allow(clippy::too_many_arguments)]
+fn make_limit<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    limit_offset: Option<PgBox<'mcx, Expr>>,
+    limit_count: Option<PgBox<'mcx, Expr>>,
+    limit_option: types_nodes::nodelimit::LimitOption,
+    uniq_num_cols: i32,
+    uniq_col_idx: Option<PgVec<'mcx, AttrNumber>>,
+    uniq_operators: Option<PgVec<'mcx, Oid>>,
+    uniq_collations: Option<PgVec<'mcx, Oid>>,
+) -> PgResult<LimitNode<'mcx>> {
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    let mut node = LimitNode::default();
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.targetlist = tlist;
+        plan.qual = None;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = None;
+    }
+    node.limitOffset = limit_offset;
+    node.limitCount = limit_count;
+    node.limitOption = limit_option;
+    node.uniqNumCols = uniq_num_cols;
+    node.uniqColIdx = uniq_col_idx;
+    node.uniqOperators = uniq_operators;
+    node.uniqCollations = uniq_collations;
+    Ok(node)
+}
+
+/// `create_limit_plan(root, best_path, flags)` (createplan.c ~2849) — create a
+/// `Limit` plan and (recursively) the plan for its subpath.
+fn create_limit_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, limit_offset_id, limit_count_id, limit_option) = match root.path(best_path) {
+        PathNode::LimitPath(p) => (p.subpath, p.limitOffset, p.limitCount, p.limitOption),
+        _ => unreachable!("create_limit_plan on non-LimitPath"),
+    };
+    let subpath = subpath.expect("create_limit_plan: LimitPath has no subpath");
+
+    // Limit doesn't project, so tlist requirements pass through.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags)?;
+
+    // Extract information necessary for comparing rows for WITH TIES. The
+    // LIMIT_OPTION_COUNT (plain LIMIT/OFFSET) case needs no uniq-key arrays.
+    // FETCH FIRST ... WITH TIES walks parse->sortClause matching each
+    // SortGroupClause to parse->targetList for uniqColIdx/uniqOperators; that
+    // requires the owned Query's sortClause/targetList (not yet threaded into
+    // create_limit_plan), so the WITH TIES sub-case loud-errors until then.
+    if limit_option == types_pathnodes::LIMIT_OPTION_WITH_TIES {
+        return Err(PgError::error(
+            "create_limit_plan: FETCH FIRST ... WITH TIES not yet supported",
+        ));
+    }
+    let uniq_num_cols: i32 = 0;
+    let uniq_col_idx: Option<PgVec<'mcx, AttrNumber>> = None;
+    let uniq_operators: Option<PgVec<'mcx, Oid>> = None;
+    let uniq_collations: Option<PgVec<'mcx, Oid>> = None;
+
+    // best_path->limitOffset / limitCount are bare expr node handles; clone the
+    // Expr out of the arena into the owned plan node.
+    let limit_offset = match limit_offset_id {
+        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone())?),
+        None => None,
+    };
+    let limit_count = match limit_count_id {
+        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone())?),
+        None => None,
+    };
+
+    let mut plan = make_limit(
+        mcx,
+        subplan,
+        limit_offset,
+        limit_count,
+        limit_option_to_node(limit_option),
+        uniq_num_cols,
+        uniq_col_idx,
+        uniq_operators,
+        uniq_collations,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Limit(plan))
+}
+
+/// Map the path-layer `LimitOption` (types-pathnodes) to the plan-node
+/// `LimitOption` (types-nodes). They are the same C enum; the two layers carry
+/// distinct Rust types.
+fn limit_option_to_node(
+    opt: types_pathnodes::LimitOption,
+) -> types_nodes::nodelimit::LimitOption {
+    if opt == types_pathnodes::LIMIT_OPTION_WITH_TIES {
+        types_nodes::nodelimit::LIMIT_OPTION_WITH_TIES
+    } else {
+        types_nodes::nodelimit::LIMIT_OPTION_COUNT
+    }
+}
+
 // ---------------------------------------------------------------------------
 // create_projection_plan (createplan.c ~2015)
 // ---------------------------------------------------------------------------
@@ -2551,6 +2954,9 @@ pub fn init_seams() {
     cp_seam::create_group_result_plan::set(create_group_result_plan);
     cp_seam::create_project_set_plan::set(create_project_set_plan);
     cp_seam::create_material_plan::set(create_material_plan);
+    // Sort / Limit upper converters.
+    cp_seam::create_sort_plan::set(create_sort_plan);
+    cp_seam::create_limit_plan::set(create_limit_plan);
 }
 
 #[cfg(test)]

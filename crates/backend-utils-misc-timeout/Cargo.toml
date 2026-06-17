@@ -25,6 +25,8 @@ backend-utils-error = { path = "../backend-utils-error" }
 types-misc-more2 = { path = "../types-misc-more2" }
 backend-utils-misc-conffiles-seams = { path = "../backend-utils-misc-conffiles-seams" }
 backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-injection-point-seams" }
+# The INJECTION_POINT(name) macro seam (no-op in this build), reached by typcache.c.
+backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 port-path-seams = { path = "../port-path-seams" }
 backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
 common-config-info-seams = { path = "../common-config-info-seams" }

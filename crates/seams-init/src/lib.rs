@@ -297,6 +297,7 @@ pub fn init_all() {
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_plan_analyzejoins::init_seams();
     backend_optimizer_plan_createplan::init_seams();
+    backend_catalog_pg_opclass::init_seams();
     backend_optimizer_plan_planner::init_seams();
     backend_optimizer_plan_setrefs::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();

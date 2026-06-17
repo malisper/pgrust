@@ -1526,6 +1526,12 @@ pub fn init_seams() {
     seams::get_sortgroupref_tle::set(seam_get_sortgroupref_tle);
     seams::get_sortgroupclause_expr::set(seam_get_sortgroupclause_expr);
     seams::get_sortgroupref_clause_noerr::set(seam_get_sortgroupref_clause_noerr);
+    // The pure `&Expr -> Oid/i32` reads (exprCollation / exprLocation) the
+    // pathkeys / equivclass leaves and several commands reach. The underlying
+    // impls are infallible for the node kinds reached; a propagated error is a
+    // loud panic (mirrors C's elog(ERROR) on an unrecognized node tag).
+    seams::exprCollation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
+    seams::exprLocation::set(|expr| expr_location(Some(expr)).expect("exprLocation"));
 
     // costsize.c reaches `exprType((Node *) expr)` / `exprTypmod(...)` over
     // arena-resolved planner nodes (set_rel_width, get_expr_width). The

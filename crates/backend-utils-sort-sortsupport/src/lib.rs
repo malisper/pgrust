@@ -32,7 +32,7 @@ use types_sortsupport::{
     BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID, GIST_SORTSUPPORT_PROC,
 };
 
-use backend_utils_fmgr_core::{fmgr_info_cxt, function_call2_coll, oid_function_call1_coll};
+use backend_utils_fmgr_core::{fmgr_info_cxt, function_call2_coll};
 use types_fmgr::ResolvedFmgrInfo;
 
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -295,11 +295,22 @@ fn oid_function_call1_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>)
         return Ok(());
     }
 
-    // Not one of nbtcompare's in-core sortsupport routines: fall back to the
-    // fmgr path. The SortSupport pointer argument cannot be represented in the
-    // pointer-less owned `Datum`; an unported sortsupport builtin loud-fails
-    // here, exactly the "function not yet ported" surface.
-    oid_function_call1_coll(ssup.ssup_cxt, sortfunc, 0, types_datum::Datum::null())?;
+    // Not one of nbtcompare's in-core sortsupport routines. The varstr-family
+    // sortsupport routines (btnamesortsupport / bttextsortsupport / bpchar /
+    // bytea) are ported but their function-pointer install into the SortSupport
+    // node — abbreviated keys + the locale comparators — is the as-yet-unwired
+    // `utils/sort/sortsupport.c` substrate layer, and the live SortSupport
+    // pointer cannot cross the pointer-less owned `Datum` to reach them through
+    // fmgr `OidFunctionCall1`.
+    //
+    // Rather than loud-fail, we leave `ssup.comparator` unset (`None`), exactly
+    // as C's contract allows a sortsupport function to decline ("it can also
+    // choose not to do so", FinishSortSupportFunction). `FinishSortSupportFunction`
+    // then falls back to `PrepareSortSupportComparisonShim` over the opclass's
+    // old-style btree comparator (e.g. `btnamecmp`), which yields the correct
+    // sort order — just without the abbreviated-key fast path. Once the varstr
+    // sortsupport substrate is wired, this arm can install the real comparator.
+    let _ = sortfunc;
     Ok(())
 }
 

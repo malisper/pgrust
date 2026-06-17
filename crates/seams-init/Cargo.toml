@@ -301,6 +301,7 @@ backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-plan-analyzejoins = { path = "../backend-optimizer-plan-analyzejoins" }
 backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createplan" }
+backend-catalog-pg-opclass = { path = "../backend-catalog-pg-opclass" }
 backend-optimizer-plan-planner = { path = "../backend-optimizer-plan-planner" }
 backend-optimizer-plan-setrefs = { path = "../backend-optimizer-plan-setrefs" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }

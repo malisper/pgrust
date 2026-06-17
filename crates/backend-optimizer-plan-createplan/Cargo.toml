@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
@@ -35,3 +36,12 @@ backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # is_redundant_derived_clause (equivclass.c) — tidscan single-tidqual dedup.
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
+# find_ec_member_matching_expr / find_computable_ec_member (equivclass.c) —
+# prepare_sort_from_pathkeys matches pathkey ECs to tlist entries.
+backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
+# get_opfamily_member_for_cmptype (lsyscache.c) — the sort operator for a PathKey.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# CompareType (pathkey pk_cmptype) for the sort-operator lookup.
+types-amapi = { path = "../types-amapi" }
+# enable_sort GUC (make_sort disabled_nodes accounting).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

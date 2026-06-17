@@ -5338,6 +5338,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-opclass"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-pg-opclass-seams",
+ "backend-parser-coerce",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-opclass-seams"
 version = "0.0.0"
 dependencies = [
@@ -11515,6 +11537,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-equivclass",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-util-joininfo",
@@ -11524,7 +11547,11 @@ dependencies = [
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode-seams",
  "backend-optimizer-util-vars",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
+ "types-amapi",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
@@ -20441,6 +20468,7 @@ dependencies = [
  "backend-storage-ipc-injection-point-seams",
  "backend-storage-ipc-latch-seams",
  "backend-utils-adt-datetime-seams",
+ "backend-utils-adt-domains-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
  "backend-utils-init-small",
@@ -21670,6 +21698,7 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
+ "backend-catalog-pg-opclass",
  "backend-catalog-pg-operator",
  "backend-catalog-pg-parameter-acl",
  "backend-catalog-pg-proc",

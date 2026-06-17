@@ -154,12 +154,15 @@ pub fn search_cat_cache_list<'mcx>(
             );
 
             // Bump the list's refcount and stamp it as touched this transaction
-            // (in C: ResourceOwnerEnlarge + record the borrowed CatCList).
+            // (in C: ResourceOwnerEnlarge + cl->refcount++ +
+            // ResourceOwnerRememberCatCacheListRef). C does NOT assert
+            // refcount > 0 here: an unreferenced-but-live cached list correctly
+            // sits at refcount 0 between uses, so the bump on a cache hit starts
+            // from 0. (The `refcount > 0` assert belongs to ReleaseCatCacheList,
+            // which runs after this bump.)
             let cl = arena.caches[cache_idx.0].lists[cl_idx.0]
                 .as_mut()
                 .expect("live list");
-            // Assert(cl->refcount > 0);
-            assert!(cl.refcount > 0);
             cl.refcount += 1;
         });
 
