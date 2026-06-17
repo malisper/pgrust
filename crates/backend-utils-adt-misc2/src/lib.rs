@@ -31,11 +31,17 @@
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
+// The `fmgr_builtins` registration layer (`Datum fn(PG_FUNCTION_ARGS)`) reads /
+// writes the fmgr call frame through the `std`-typed `types_fmgr` boundary
+// (`String`/`Vec`/`panic_any`), so this crate links `std` even though its
+// value-core families are `no_std`/`alloc`.
+extern crate std;
 
 pub mod admin;
 pub mod domains;
 pub mod expandeddatum;
 pub mod expandedrecord;
+pub mod fmgr_builtins;
 pub mod regproc;
 pub mod rowtypes;
 pub mod scalars;
@@ -69,6 +75,10 @@ pub fn init_seams() {
     backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(
         seam_string_to_qualified_name_list,
     );
+
+    // Register this unit's SQL-callable builtins into the fmgr-core builtin
+    // table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
+    fmgr_builtins::register_misc2_builtins();
 }
 
 /// Seam shim: the `regprocedurein(signature)` seam is the hard-error

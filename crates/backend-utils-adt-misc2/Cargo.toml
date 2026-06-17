@@ -16,6 +16,9 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-stringinfo = { path = "../types-stringinfo" }
 types-storage = { path = "../types-storage" }
+# The fmgr call-frame boundary + builtin-table registry (fmgr_builtins layer).
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
 
