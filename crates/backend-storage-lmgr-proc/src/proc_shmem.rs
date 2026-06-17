@@ -201,20 +201,35 @@ pub(crate) fn my_proc_is_set() -> bool {
     MY_PROC_NUMBER.with(|c| c.borrow().is_some())
 }
 
-/// `MyProc = GetPGProcByNumber(procno); MyProcNumber = procno`. (The single
-/// `MyProcNumber` backs both `MyProc` and `MyProcNumber` in C, since `MyProc`
-/// is just `&allProcs[MyProcNumber]`.)
+/// `MyProc = GetPGProcByNumber(procno); MyProcNumber = procno`. Sets both the
+/// owner-private `MyProc != NULL` flag and the globals.c `MyProcNumber` global
+/// (via the init-small owner), mirroring proc.c's
+/// `MyProcNumber = GetNumberFromPGProc(MyProc);`.
 pub(crate) fn set_my_proc_number(procno: ProcNumber) {
     MY_PROC_NUMBER.with(|c| *c.borrow_mut() = Some(procno));
+    backend_utils_init_small_seams::set_my_proc_number::call(procno);
 }
 
 /// `MyProc = NULL` / `MyProcNumber = INVALID_PROC_NUMBER`.
 pub(crate) fn clear_my_proc() {
     MY_PROC_NUMBER.with(|c| *c.borrow_mut() = None);
+    backend_utils_init_small_seams::set_my_proc_number::call(INVALID_PROC_NUMBER);
 }
 
-/// `GetNumberFromPGProc(MyProc)` — panics if `MyProc == NULL`.
+/// `MyProcNumber` (globals.c) — the pgprocno of the current backend, or
+/// `INVALID_PROC_NUMBER` when no `PGPROC` is attached. This reads the plain
+/// global and is tolerant of `MyProc == NULL` (pre-`InitProcess`), exactly like
+/// C: it does NOT deref `MyProc`. Code that genuinely needs a live `PGPROC`
+/// uses [`my_proc_is_set`] / [`with_my_proc`] instead.
 pub(crate) fn my_proc_number() -> ProcNumber {
+    backend_utils_init_small_seams::my_proc_number::call()
+}
+
+/// `GetNumberFromPGProc(MyProc)` for the strict-deref paths: returns the slot
+/// of the live `MyProc`, panicking when `MyProc == NULL`. Mirrors C code that
+/// derefs `MyProc` after asserting it is non-NULL (distinct from reading the
+/// tolerant `MyProcNumber` global, which may legitimately be -1).
+fn my_proc_number_strict() -> ProcNumber {
     MY_PROC_NUMBER.with(|c| c.borrow().expect("MyProc is NULL (no PGPROC claimed)"))
 }
 
@@ -223,13 +238,13 @@ pub(crate) fn my_proc_number() -> ProcNumber {
 /// `MyProc == NULL` or `ProcGlobal` is unbuilt, mirroring the C deref of a
 /// `MyProc` that must be non-NULL at the call site.
 pub(crate) fn with_my_proc<R>(f: impl FnOnce(&mut PGPROC) -> R) -> R {
-    let procno = my_proc_number();
+    let procno = my_proc_number_strict();
     with_proc_by_number(procno, f)
 }
 
 /// Run `f` with shared access to this backend's claimed `PGPROC` (`&*MyProc`).
 pub(crate) fn with_my_proc_ref<R>(f: impl FnOnce(&PGPROC) -> R) -> R {
-    let procno = my_proc_number();
+    let procno = my_proc_number_strict();
     with_proc_global(|pg| f(&pg.allProcs[procno as usize]))
 }
 

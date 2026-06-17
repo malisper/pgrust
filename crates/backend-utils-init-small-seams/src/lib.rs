@@ -25,6 +25,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyProcNumber = procno;` (globals.c global store). Written by proc.c's
+    /// `InitProcess`/`InitAuxiliaryProcess` (`GetNumberFromPGProc(MyProc)`) and
+    /// reset to `INVALID_PROC_NUMBER` on detach.
+    pub fn set_my_proc_number(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
     /// `MyCancelKey` / `MyCancelKeyLength` (globals.c globals): the backend's
     /// cancel key bytes (`MyCancelKey[..MyCancelKeyLength]`), copied into `mcx`.
     /// Passed to `ProcSignalInit`. `Err` carries OOM from the copy.
