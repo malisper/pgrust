@@ -66,6 +66,7 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
 backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }

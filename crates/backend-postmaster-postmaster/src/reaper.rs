@@ -88,6 +88,33 @@ pub fn process_pm_child_exit() {
             pm_mut().fatal_error = false;
             pm_mut().abort_start_time = 0;
             pm_mut().reached_normal_running = true;
+
+            /*
+             * Re-seed this (postmaster) process' copy of the cluster-wide
+             * TransamVariables / MultiXactState XID bounds from the control
+             * file's checkpoint.
+             *
+             * In C these are genuine shared memory, so the startup process'
+             * StartupXLOG seeding is already visible here. In this tree those
+             * "shared" singletons are process-local statics inherited by
+             * fork() copy-on-write, so the startup *child*'s writes died with
+             * it. We must re-seed the postmaster's own copy now — before any
+             * launcher/autovacuum/backend child is forked — so GetSnapshotData
+             * in those children sees a valid oldestXid horizon. (xlog.c
+             * StartupXLOG, 5634-5642 / 6144-6148.)
+             */
+            if let Err(e) =
+                backend_access_transam_xlog_seams::seed_transam_variables_from_checkpoint::call()
+            {
+                LogChildExit(LOG, "startup process", pid, exitstatus);
+                report(
+                    LOG,
+                    "process_pm_child_exit",
+                    format!("aborting startup: could not seed transaction-id bounds: {e:?}"),
+                );
+                statemachine::ExitPostmaster(1);
+            }
+
             statemachine::UpdatePMState(PMState::PmRun);
             pm_mut().conns_allowed = true;
             pm_mut().start_worker_needed = true;

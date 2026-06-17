@@ -13520,6 +13520,7 @@ dependencies = [
 name = "backend-postmaster-postmaster"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqsignal",
  "backend-postmaster-autovacuum-seams",

@@ -108,6 +108,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SeedTransamVariablesFromCheckpoint()` (xlog.c COW-model addition) —
+    /// re-seed the cluster-wide `TransamVariables` / `MultiXactState` bounds
+    /// from `ControlFile->checkPointCopy`, mirroring the shared-memory seeding
+    /// `StartupXLOG` performs (xlog.c:5634-5642, 6144-6148). The postmaster
+    /// calls this when the startup process reports success, so its
+    /// fork-copy-on-write copy of those singletons (and hence every later
+    /// child's) holds valid XID bounds before any snapshot is taken. Calls into
+    /// the same fallible owner seams `StartupXLOG` uses.
+    pub fn seed_transam_variables_from_checkpoint() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `bool RecoveryInProgress(void)` (xlog.c) — true if WAL recovery is
     /// still in progress (we are a standby / in crash recovery). Reads
     /// backend-local + shared state; cannot `ereport`.

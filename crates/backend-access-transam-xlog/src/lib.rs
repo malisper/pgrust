@@ -885,6 +885,11 @@ pub fn init_seams() {
     // `StartupXLOG()` — the WAL-engine startup driver (xlog.c). The startup
     // process reaches it through the xlog-seams `startup_xlog` slot.
     s::startup_xlog::set(startup::StartupXLOG);
+    // COW-model re-seed of the cluster XID/multixact bounds from the control
+    // file, called by the postmaster after the startup process succeeds so the
+    // postmaster's fork-inherited copy of `TransamVariables`/`MultiXactState` is
+    // valid before launcher/backend children take snapshots.
+    s::seed_transam_variables_from_checkpoint::set(startup::SeedTransamVariablesFromCheckpoint);
 
     s::xlog_put_next_oid::set(control_funcs::XLogPutNextOid);
     s::request_xlog_switch::set(control_funcs::RequestXLogSwitch);

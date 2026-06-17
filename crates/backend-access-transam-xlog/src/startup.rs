@@ -569,6 +569,77 @@ pub fn StartupXLOG() -> PgResult<()> {
     Ok(())
 }
 
+/// Seed the cluster-wide transaction-id / multixact bounds (`TransamVariables`
+/// and `MultiXactState`) from `ControlFile->checkPointCopy`, mirroring the
+/// shared-memory seeding `StartupXLOG` performs at xlog.c:5634-5642 (the
+/// XID/OID counters, multixact next/limit, CLOG oldest, `SetTransactionIdLimit`,
+/// `SetMultiXactIdLimit`, commit-ts limits) plus the `latestCompletedXid =
+/// nextXid - 1` initialization at xlog.c:6144-6148.
+///
+/// In C these writes land in genuine shared memory, so the startup process'
+/// seeding is visible to the postmaster and every later child. In this tree the
+/// "shared" `TransamVariables` / `MultiXactState` singletons are process-local
+/// statics that children inherit by `fork()` copy-on-write — so the writes the
+/// startup *child* makes inside `StartupXLOG` die with that child and never
+/// reach the postmaster's copy. The postmaster (which has already loaded the
+/// control file via `LocalProcessControlFile` and run
+/// `CreateSharedMemoryAndSemaphores`, so the singletons exist in its address
+/// space) must therefore re-seed its own copy from the same `checkPointCopy`
+/// once the startup process reports success, before it forks the
+/// logical-replication launcher / autovacuum launcher / backends that take
+/// snapshots. Without this, `GetSnapshotData` in those children reads
+/// `oldestXid == InvalidTransactionId` and the GlobalVis horizon computation
+/// (`FullXidRelativeTo`) trips on an invalid bound.
+///
+/// This calls the exact same installed owner seams `StartupXLOG` uses, in the
+/// same order, so the postmaster's copy ends up identical to what the startup
+/// child computed. It is idempotent and reads only the control file the caller
+/// already holds.
+pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
+    // checkPoint = ControlFile->checkPointCopy;
+    let check_point = control_file_mut().checkPointCopy;
+
+    // initialize shared memory variables from the checkpoint record.
+    // (xlog.c:5634-5642)
+    varsup_seam::set_transam_variables_at_startup::call(check_point.nextXid, check_point.nextOid);
+    multixact_seam::multi_xact_set_next_m_xact::call(
+        check_point.nextMulti,
+        check_point.nextMultiOffset,
+    )?;
+    varsup_seam::advance_oldest_clog_xid::call(check_point.oldestXid)?;
+    vacuum_seam::set_transaction_id_limit::call(check_point.oldestXid, check_point.oldestXidDB)?;
+    multixact_seam::set_multi_xact_id_limit::call(
+        check_point.oldestMulti,
+        check_point.oldestMultiDB,
+        true,
+    )?;
+    commit_ts_seam::set_commit_ts_limit::call(
+        check_point.oldestCommitTsXid,
+        check_point.newestCommitTsXid,
+    )?;
+
+    // also initialize latestCompletedXid, to nextXid - 1. (xlog.c:6144-6148)
+    // C takes ProcArrayLock here; the postmaster reseed runs single-threaded
+    // before any child that reads latestCompletedXid is forked, so the lock is
+    // not strictly required, but we mirror the C and acquire it.
+    {
+        let lwlock = backend_storage_lmgr_lwlock::main_lock_ref(PROC_ARRAY_LOCK);
+        backend_storage_lmgr_lwlock::LWLockAcquire(
+            lwlock,
+            types_storage::storage::LW_EXCLUSIVE,
+            globals::MyProcNumber(),
+        )?;
+        let next_xid = varsup_seam::read_next_full_transaction_id::call();
+        let mut latest = next_xid;
+        // FullTransactionIdRetreat(&latest)
+        latest.value -= 1;
+        varsup_seam::set_latest_completed_xid::call(latest);
+        backend_storage_lmgr_lwlock::LWLockRelease(lwlock)?;
+    }
+
+    Ok(())
+}
+
 /// The redo phase of `StartupXLOG` (xlog.c:5739-5916): the `if (InRecovery)`
 /// block. The hot-standby cluster + `PerformWalRecovery` it drives bottom out
 /// on unported owners (procarray, the per-AM redo dispatch via #157, the
