@@ -11590,6 +11590,7 @@ dependencies = [
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode-seams",
  "backend-optimizer-util-vars",
+ "backend-partitioning-partprune-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
@@ -13048,6 +13049,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -21613,6 +21615,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "interfaces-libpq-fe"
+version = "0.0.0"
+dependencies = [
+ "interfaces-libpq-fe-seams",
+ "libc",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-libpqwalreceiver",
+]
+
+[[package]]
 name = "interfaces-libpq-fe-seams"
 version = "0.0.0"
 dependencies = [
@@ -22388,6 +22402,7 @@ dependencies = [
  "common-string",
  "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
+ "interfaces-libpq-fe",
  "interfaces-libpq-legacy-pqsignal",
  "mcx",
  "port-crc32c",

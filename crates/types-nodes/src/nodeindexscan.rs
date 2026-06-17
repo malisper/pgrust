@@ -340,6 +340,10 @@ pub struct PlanInvalItem {
 pub struct PlannedStmt<'mcx> {
     /// `CmdType commandType` — select|insert|update|delete|merge|utility.
     pub commandType: crate::nodes::CmdType,
+    /// `int64 queryId` — query identifier (copied from the originating `Query`,
+    /// set by query-jumble plugins). `pgstat`/`EXPLAIN` read it; the
+    /// utility-wrapper path and `standard_planner` copy it from `query->queryId`.
+    pub queryId: i64,
     /// `Node *utilityStmt` — non-null if this is a `CMD_UTILITY` PlannedStmt;
     /// the utility parse node to dispatch.
     pub utilityStmt: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
@@ -427,6 +431,58 @@ impl<'mcx> PlannedStmt<'mcx> {
             Some(n) => n.plan_head().total_cost,
             None => 0.0,
         }
+    }
+
+    /// Build the trivial wrapper `PlannedStmt` for a `CMD_UTILITY` query —
+    /// `pg_plan_queries`' utility branch (postgres.c):
+    ///
+    /// ```c
+    /// stmt = makeNode(PlannedStmt);
+    /// stmt->commandType = CMD_UTILITY;
+    /// stmt->canSetTag = query->canSetTag;
+    /// stmt->utilityStmt = query->utilityStmt;
+    /// stmt->stmt_location = query->stmt_location;
+    /// stmt->stmt_len = query->stmt_len;
+    /// stmt->queryId = query->queryId;
+    /// ```
+    ///
+    /// Utility commands require no planning, so every other field is the
+    /// `makeNode` (`palloc0`) zero/`NULL`/`NIL` default. The C wrapper aliases
+    /// the query's `utilityStmt` node by pointer; the owned model deep-copies it
+    /// into `mcx` (the wrapper outlives the borrowed `Query` in our arena model,
+    /// `copyObject`-shape — same as the planner's non-utility path).
+    pub fn for_utility(
+        mcx: Mcx<'mcx>,
+        query: &crate::copy_query::Query<'mcx>,
+    ) -> PgResult<PlannedStmt<'mcx>> {
+        let utility_stmt = match &query.utilityStmt {
+            Some(u) => Some(alloc_in(mcx, u.clone_in(mcx)?)?),
+            None => None,
+        };
+        Ok(PlannedStmt {
+            commandType: crate::nodes::CmdType::CMD_UTILITY,
+            queryId: query.queryId,
+            utilityStmt: utility_stmt,
+            resultRelations: None,
+            relationOids: None,
+            planTree: None,
+            rowMarks: None,
+            canSetTag: query.canSetTag,
+            hasReturning: false,
+            hasModifyingCTE: false,
+            parallelModeNeeded: false,
+            jitFlags: 0,
+            permInfos: None,
+            paramExecTypes: None,
+            rtable: None,
+            unprunableRelids: None,
+            subplans: None,
+            stmt_location: query.stmt_location,
+            stmt_len: query.stmt_len,
+            transientPlan: false,
+            dependsOnRole: false,
+            invalItems: None,
+        })
     }
 }
 
@@ -519,6 +575,7 @@ impl PlannedStmt<'_> {
         };
         Ok(PlannedStmt {
             commandType: self.commandType,
+            queryId: self.queryId,
             utilityStmt: match &self.utilityStmt {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,

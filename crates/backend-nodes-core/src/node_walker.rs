@@ -278,6 +278,21 @@ fn unrecognized_expression_node(node: &Node) -> bool {
     )
 }
 
+/// A cheap, allocation-free transient `Expr` used to vacate a `&mut Expr` slot
+/// while its real value is moved into a `Node::Expr` wrapper for the in-place
+/// mutator. The real value is always written back before this sentinel can be
+/// observed; it exists only because `Expr` carries no `Default` and a plain
+/// `.clone()` of an `Aggref` child is a deliberate panic (deep-copy is
+/// `clone_in`, which needs an allocator the walker does not have).
+#[inline]
+fn expr_walk_sentinel() -> Expr {
+    Expr::CaseTestExpr(types_nodes::primnodes::CaseTestExpr {
+        typeId: 0,
+        typeMod: -1,
+        collation: 0,
+    })
+}
+
 // ===========================================================================
 // expression_tree_walker_mut (Node-level, in-place) — for parse_collate
 // ===========================================================================
@@ -330,7 +345,13 @@ pub fn expression_tree_walker_mut(
 
         Node::TargetEntry(te) => match te.expr.as_deref_mut() {
             Some(e) => {
-                let mut wrapped = Node::Expr(e.clone());
+                // C `T_TargetEntry` arm: `WALK(tle->expr)`, mutating in place.
+                // Move the child out (a plain `.clone()` hits `Aggref`'s
+                // deliberate panic-`Clone` — e.g. the count(*) tlist), wrap it,
+                // walk it, then move the result back. The transient sentinel is
+                // always overwritten before it can be observed.
+                let owned = core::mem::replace(e, expr_walk_sentinel());
+                let mut wrapped = Node::Expr(owned);
                 let aborted = walker(&mut wrapped);
                 if let Node::Expr(ne) = wrapped {
                     *e = ne;
@@ -398,7 +419,10 @@ fn walk_table_func_mut(
     walker: &mut dyn FnMut(&mut Node) -> bool,
 ) -> bool {
     fn one(e: &mut Expr, walker: &mut dyn FnMut(&mut Node) -> bool) -> bool {
-        let mut wrapped = Node::Expr(e.clone());
+        // Move the child out rather than `.clone()` it — an `Aggref` child's
+        // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
+        let owned = core::mem::replace(e, expr_walk_sentinel());
+        let mut wrapped = Node::Expr(owned);
         let aborted = walker(&mut wrapped);
         if let Node::Expr(ne) = wrapped {
             *e = ne;
@@ -456,7 +480,10 @@ fn walk_expr_children_mut(e: &mut Expr, walker: &mut dyn FnMut(&mut Node) -> boo
         if aborted {
             return;
         }
-        let mut wrapped = Node::Expr(child.clone());
+        // Move the child out rather than `.clone()` it — an `Aggref` child's
+        // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
+        let owned = core::mem::replace(child, expr_walk_sentinel());
+        let mut wrapped = Node::Expr(owned);
         if walker(&mut wrapped) {
             aborted = true;
         }

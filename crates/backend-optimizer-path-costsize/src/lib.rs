@@ -756,6 +756,66 @@ pub(crate) fn cost_incremental_sort_owned<'mcx>(
     Ok(())
 }
 
+/// `label_sort_with_costsize` cost half (createplan.c:5553) — re-figure a Sort
+/// plan node's cost via `cost_sort` over a dummy stack `Path`. C passes `NIL`
+/// pathkeys, `comparison_cost = 0.0`, and `work_mem` as `sort_mem`. Returns the
+/// `(startup_cost, total_cost)` the caller copies onto the Sort plan node. The
+/// dummy path's other fields (rows/disabled_nodes) are not read back by the
+/// caller, so we compute the costs directly via `cost_tuplesort`.
+pub fn cost_sort_label(
+    _root: &mut PlannerInfo,
+    input_disabled_nodes: i32,
+    input_total_cost: Cost,
+    input_rows: f64,
+    input_width: i32,
+    limit_tuples: f64,
+) -> (Cost, Cost) {
+    // cost_sort(&sort_path, root, NIL, plan->disabled_nodes,
+    //           lefttree->total_cost, lefttree->plan_rows, lefttree->plan_width,
+    //           0.0, work_mem, limit_tuples);
+    let _ = input_disabled_nodes;
+    let (mut startup_cost, run_cost) =
+        cost_tuplesort(input_rows, input_width, 0.0, work_mem(), limit_tuples);
+    startup_cost += input_total_cost;
+    (startup_cost, startup_cost + run_cost)
+}
+
+/// `label_incrementalsort_with_costsize` cost half (createplan.c:5581) —
+/// re-figure an IncrementalSort plan node's cost via `cost_incremental_sort`
+/// over a dummy stack `Path`. C passes `comparison_cost = 0.0` and `work_mem`.
+/// Returns the `(startup_cost, total_cost)` for the IncrementalSort plan node.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_incremental_sort_label<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    pathkeys: &[PathKey],
+    n_presorted_cols: i32,
+    _input_disabled_nodes: i32,
+    input_startup_cost: Cost,
+    input_total_cost: Cost,
+    input_rows: f64,
+    input_width: i32,
+    limit_tuples: f64,
+) -> PgResult<(Cost, Cost)> {
+    // cost_incremental_sort(&sort_path, root, pathkeys, plan->nPresortedCols,
+    //                       plan->disabled_nodes, lefttree->startup_cost,
+    //                       lefttree->total_cost, lefttree->plan_rows,
+    //                       lefttree->plan_width, 0.0, work_mem, limit_tuples);
+    cost_incremental_sort_compute(
+        run,
+        root,
+        pathkeys,
+        n_presorted_cols,
+        input_startup_cost,
+        input_total_cost,
+        input_rows,
+        input_width,
+        0.0,
+        work_mem(),
+        limit_tuples,
+    )
+}
+
 /// Shared arithmetic of `cost_incremental_sort`; returns `(startup, total)`.
 ///
 /// `run` + `&mut root` thread the distinct-group estimate (`estimate_num_groups`
