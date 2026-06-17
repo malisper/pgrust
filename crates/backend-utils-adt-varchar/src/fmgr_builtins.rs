@@ -1,0 +1,429 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for `varchar.c`'s
+//! SQL-callable `bpchar` / `varchar` functions: I/O (`*in`/`*out`/`*send`),
+//! typmod-out, the `bpchar()`/`varchar()` length-coercion casts, the
+//! `name`/`char`/`bpchar` conversions, the character/octet length helpers, the
+//! collation-aware comparison / hashing operators, and the `bpchar`
+//! `pattern_ops` ordering family.
+//!
+//! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
+//! call frame, calls the matching value core in [`crate`], and writes back the
+//! result. A `bpchar`/`varchar` arg arrives as its detoasted `VARDATA_ANY`
+//! payload on the by-ref lane (the boundary strips the varlena header), exactly
+//! the carrier the value cores consume; a `name` arg arrives as its fixed
+//! `NAMEDATALEN` buffer bytes. A `bpchar`/`varchar`/`name` result crosses
+//! header-stripped on the by-ref lane (symmetric with the arg lane); `*send`
+//! results carry the wire (header-bearing) `bytea` image; `*out`/`typmodout`
+//! results cross as a `cstring`. The collation is read from `fcinfo.fncollation`
+//! (C: `PG_GET_COLLATION()`). Scalars (`int4` typmod, `bool` is_explicit, the
+//! `"char"` byte, the `int8` hash seed) cross by value.
+//!
+//! [`register_varchar_builtins`] registers every row into the fmgr-core builtin
+//! table (C: `fmgr_builtins[]`), so by-OID dispatch (and the `fmgr_isbuiltin`
+//! fast path early catalog scankeys rely on) resolves them. OIDs / nargs /
+//! strict / retset are transcribed exactly from `pg_proc.dat` (every row here is
+//! `proisstrict => 't'` — the pg_proc default — and not retset).
+
+use types_core::Oid;
+use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+
+use crate::CoerceResult;
+
+// ---------------------------------------------------------------------------
+// Argument readers / result writers.
+// ---------------------------------------------------------------------------
+
+/// A `bpchar`/`varchar`/`name` arg's by-ref payload bytes (the boundary strips
+/// the varlena header for `bpchar`/`varchar`; for `name` this is the fixed
+/// `NAMEDATALEN` buffer, which the cores NUL-trim).
+#[inline]
+fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("varchar fn: by-ref arg missing from by-ref lane")
+}
+
+/// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
+#[inline]
+fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_cstring())
+        .expect("varchar fn: cstring arg missing from by-ref lane")
+}
+
+/// `PG_GETARG_INT32(i)`: the low 32 bits of arg `i`'s word.
+#[inline]
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo.arg(i).expect("varchar fn: missing arg").value.as_i32()
+}
+/// `PG_GETARG_INT64(i)`: arg `i`'s full word as a signed 64-bit int.
+#[inline]
+fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
+    fcinfo.arg(i).expect("varchar fn: missing arg").value.as_i64()
+}
+/// `PG_GETARG_BOOL(i)`.
+#[inline]
+fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).expect("varchar fn: missing arg").value.as_bool()
+}
+/// `PG_GETARG_CHAR(i)`: the 1-byte `"char"` scalar.
+#[inline]
+fn arg_char(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i8 {
+    fcinfo.arg(i).expect("varchar fn: missing arg").value.as_char()
+}
+
+/// `PG_GET_COLLATION()`: the collation the operator was invoked under.
+#[inline]
+fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
+    fcinfo.fncollation
+}
+
+#[inline]
+fn ret_bool(v: bool) -> Datum {
+    Datum::from_bool(v)
+}
+#[inline]
+fn ret_i32(v: i32) -> Datum {
+    Datum::from_i32(v)
+}
+#[inline]
+fn ret_i64(v: i64) -> Datum {
+    Datum::from_i64(v)
+}
+
+/// Set a `bpchar`/`varchar`/`name` (by-reference) result on the by-ref lane,
+/// header-stripped (symmetric with how the arg lane delivers it); `*send`
+/// results carry the wire bytes. Returns the dummy by-value word.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+/// Set a `cstring` (`*out`/`typmodout`) result on the by-ref lane. The cores
+/// build a NUL-terminated cstring payload; the trailing NUL is dropped here
+/// (the boundary `Cstring` carries the text without the terminator).
+#[inline]
+fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, bytes: &[u8]) -> Datum {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    fcinfo.set_ref_result(RefPayload::Cstring(
+        String::from_utf8_lossy(&bytes[..end]).into_owned(),
+    ));
+    Datum::from_usize(0)
+}
+
+/// A scratch context for cores that allocate their result through `Mcx`. The
+/// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
+/// palloc'd result lives in the caller's context; here it crosses by value).
+fn scratch_mcx() -> mcx::MemoryContext {
+    mcx::MemoryContext::new("varchar fmgr scratch")
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
+/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: types_error::PgError) -> ! {
+    let chars = types_error::unpack_sqlstate(err.sqlstate());
+    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
+    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+}
+
+/// Unwrap a `PgResult`, re-raising its error through `raise`.
+#[inline]
+fn ok<T>(r: types_error::PgResult<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => raise(e),
+    }
+}
+
+/// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.
+const VARHDRSZ: usize = 4;
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — bpchar I/O.
+// ---------------------------------------------------------------------------
+
+fn fc_bpcharin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: bpcharin(cstring, oid typelem, int4 atttypmod). Hard error context (no
+    // soft ErrorSaveContext is modeled on the fmgr frame), matching every adt *in.
+    let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
+    let typelem = fcinfo.arg(1).expect("bpcharin: missing typelem").value.as_oid();
+    let atttypmod = arg_i32(fcinfo, 2);
+    let m = scratch_mcx();
+    let res = ok(crate::bpcharin(m.mcx(), &s, typelem, atttypmod, None));
+    let out = res
+        .unwrap_or_else(|| raise(types_error::PgError::error("bpcharin returned NULL")))
+        .to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_bpcharout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::bpcharout(m.mcx(), arg_bytes(fcinfo, 0)));
+    ret_cstring(fcinfo, &out)
+}
+
+fn fc_bpcharsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let bytes = ok(crate::bpcharsend(m.mcx(), arg_bytes(fcinfo, 0))).as_bytes().to_vec();
+    ret_varlena(fcinfo, bytes)
+}
+
+fn fc_bpchartypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::bpchartypmodout(m.mcx(), arg_i32(fcinfo, 0)));
+    ret_cstring(fcinfo, &out)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — varchar I/O.
+// ---------------------------------------------------------------------------
+
+fn fc_varcharin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
+    let typelem = fcinfo.arg(1).expect("varcharin: missing typelem").value.as_oid();
+    let atttypmod = arg_i32(fcinfo, 2);
+    let m = scratch_mcx();
+    let res = ok(crate::varcharin(m.mcx(), &s, typelem, atttypmod, None));
+    let out = res
+        .unwrap_or_else(|| raise(types_error::PgError::error("varcharin returned NULL")))
+        .to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_varcharout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::varcharout(m.mcx(), arg_bytes(fcinfo, 0)));
+    ret_cstring(fcinfo, &out)
+}
+
+fn fc_varcharsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let bytes = ok(crate::varcharsend(m.mcx(), arg_bytes(fcinfo, 0))).as_bytes().to_vec();
+    ret_varlena(fcinfo, bytes)
+}
+
+fn fc_varchartypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::varchartypmodout(m.mcx(), arg_i32(fcinfo, 0)));
+    ret_cstring(fcinfo, &out)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — length-coercion casts + cross-type conversions.
+// ---------------------------------------------------------------------------
+
+fn fc_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: bpchar(bpchar source, int4 maxlen, bool isExplicit). On the "no work"
+    // fast path the source value is returned unchanged.
+    let maxlen = arg_i32(fcinfo, 1);
+    let is_explicit = arg_bool(fcinfo, 2);
+    let m = scratch_mcx();
+    let out = match ok(crate::bpchar(m.mcx(), arg_bytes(fcinfo, 0), maxlen, is_explicit)) {
+        CoerceResult::Source => arg_bytes(fcinfo, 0).to_vec(),
+        CoerceResult::New(v) => v.to_vec(),
+    };
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_varchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 1);
+    let is_explicit = arg_bool(fcinfo, 2);
+    let m = scratch_mcx();
+    let out = match ok(crate::varchar(m.mcx(), arg_bytes(fcinfo, 0), typmod, is_explicit)) {
+        CoerceResult::Source => arg_bytes(fcinfo, 0).to_vec(),
+        CoerceResult::New(v) => v.to_vec(),
+    };
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_char_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: char_bpchar("char" c) -> bpchar(1). arg0 is the 1-byte `"char"` scalar.
+    let m = scratch_mcx();
+    let out = ok(crate::char_bpchar(m.mcx(), arg_char(fcinfo, 0))).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_bpchar_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: bpchar_name(bpchar) -> name. The result is the fixed NAMEDATALEN buffer,
+    // crossed as its raw bytes on the by-ref lane.
+    let m = scratch_mcx();
+    let out = ok(crate::bpchar_name(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+fn fc_name_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: name_bpchar(name) -> bpchar. arg0 is the fixed NAMEDATALEN buffer.
+    let m = scratch_mcx();
+    let out = ok(crate::name_bpchar(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — length helpers.
+// ---------------------------------------------------------------------------
+
+fn fc_bpcharlen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_i32(ok(crate::bpcharlen(arg_bytes(fcinfo, 0))))
+}
+
+fn fc_bpcharoctetlen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: bpcharoctetlen = toast_raw_datum_size(arg) - VARHDRSZ. At this boundary
+    // the arg is the detoasted header-less payload, so the raw datum size is the
+    // payload length plus the (stripped) 4-byte header — yielding the payload
+    // length, exactly C's result.
+    let raw_total = arg_bytes(fcinfo, 0).len() + VARHDRSZ;
+    ret_i32(crate::bpcharoctetlen(raw_total))
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — collation-aware comparison + hashing.
+// ---------------------------------------------------------------------------
+
+fn fc_bpchareq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpchareq(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpcharne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpcharne(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpcharlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpcharlt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpcharle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpcharle(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpchargt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpchargt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpcharge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::bpcharge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpcharcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    ret_i32(ok(crate::bpcharcmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+}
+fn fc_bpchar_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: PG_RETURN_BPCHAR_P((cmp >= 0) ? arg1 : arg2). The core returns true to
+    // pick arg1, false to pick arg2; this returns the chosen value's bytes.
+    let c = collation(fcinfo);
+    let pick_first = ok(crate::bpchar_larger(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c));
+    let out = if pick_first { arg_bytes(fcinfo, 0) } else { arg_bytes(fcinfo, 1) }.to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_bpchar_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    let pick_first = ok(crate::bpchar_smaller(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c));
+    let out = if pick_first { arg_bytes(fcinfo, 0) } else { arg_bytes(fcinfo, 1) }.to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_hashbpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    let m = scratch_mcx();
+    // C: hashbpchar -> Datum (uint32 reinterpreted). PG_RETURN_INT32 of the hash.
+    ret_i32(ok(crate::hashbpchar(m.mcx(), arg_bytes(fcinfo, 0), c)) as i32)
+}
+fn fc_hashbpcharextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    // C: PG_GETARG_INT64(1) is the seed.
+    let seed = arg_i64(fcinfo, 1) as u64;
+    let m = scratch_mcx();
+    ret_i64(ok(crate::hashbpcharextended(m.mcx(), arg_bytes(fcinfo, 0), c, seed)) as i64)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — bpchar pattern-ops ordering family.
+// ---------------------------------------------------------------------------
+
+fn fc_bpchar_pattern_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::bpchar_pattern_lt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))
+}
+fn fc_bpchar_pattern_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::bpchar_pattern_le(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))
+}
+fn fc_bpchar_pattern_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::bpchar_pattern_ge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))
+}
+fn fc_bpchar_pattern_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::bpchar_pattern_gt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))
+}
+fn fc_btbpchar_pattern_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_i32(crate::btbpchar_pattern_cmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict: true,
+        retset: false,
+        func: Some(func),
+    }
+}
+
+/// Register every `varchar.c` fmgr builtin whose value core is ported and whose
+/// arg/result types are expressible at the fmgr boundary (C: their
+/// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`. OIDs/nargs
+/// from `pg_proc.dat`; every row here is `proisstrict => 't'` (the default) and
+/// not retset.
+pub fn register_varchar_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // ---- conversions ----
+        builtin(408, "bpchar", 1, fc_name_bpchar),
+        builtin(409, "name", 1, fc_bpchar_name),
+        builtin(860, "bpchar", 1, fc_char_bpchar),
+        // ---- length-coercion casts ----
+        builtin(668, "bpchar", 3, fc_bpchar),
+        builtin(669, "varchar", 3, fc_varchar),
+        // ---- I/O ----
+        builtin(1044, "bpcharin", 3, fc_bpcharin),
+        builtin(1045, "bpcharout", 1, fc_bpcharout),
+        builtin(1046, "varcharin", 3, fc_varcharin),
+        builtin(1047, "varcharout", 1, fc_varcharout),
+        builtin(2431, "bpcharsend", 1, fc_bpcharsend),
+        builtin(2433, "varcharsend", 1, fc_varcharsend),
+        builtin(2914, "bpchartypmodout", 1, fc_bpchartypmodout),
+        builtin(2916, "varchartypmodout", 1, fc_varchartypmodout),
+        // ---- comparison operators ----
+        builtin(1048, "bpchareq", 2, fc_bpchareq),
+        builtin(1049, "bpcharlt", 2, fc_bpcharlt),
+        builtin(1050, "bpcharle", 2, fc_bpcharle),
+        builtin(1051, "bpchargt", 2, fc_bpchargt),
+        builtin(1052, "bpcharge", 2, fc_bpcharge),
+        builtin(1053, "bpcharne", 2, fc_bpcharne),
+        builtin(1063, "bpchar_larger", 2, fc_bpchar_larger),
+        builtin(1064, "bpchar_smaller", 2, fc_bpchar_smaller),
+        builtin(1078, "bpcharcmp", 2, fc_bpcharcmp),
+        // ---- hashing ----
+        builtin(1080, "hashbpchar", 1, fc_hashbpchar),
+        builtin(972, "hashbpcharextended", 2, fc_hashbpcharextended),
+        // ---- length helpers ----
+        builtin(1318, "length", 1, fc_bpcharlen),
+        builtin(1367, "character_length", 1, fc_bpcharlen),
+        builtin(1372, "char_length", 1, fc_bpcharlen),
+        builtin(1375, "octet_length", 1, fc_bpcharoctetlen),
+        // ---- bpchar pattern_ops ordering ----
+        builtin(2174, "bpchar_pattern_lt", 2, fc_bpchar_pattern_lt),
+        builtin(2175, "bpchar_pattern_le", 2, fc_bpchar_pattern_le),
+        builtin(2177, "bpchar_pattern_ge", 2, fc_bpchar_pattern_ge),
+        builtin(2178, "bpchar_pattern_gt", 2, fc_bpchar_pattern_gt),
+        builtin(2180, "btbpchar_pattern_cmp", 2, fc_btbpchar_pattern_cmp),
+    ]);
+}
