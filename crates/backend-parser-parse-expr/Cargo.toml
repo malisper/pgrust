@@ -21,6 +21,10 @@ types-cluster = { path = "../types-cluster" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 
+# GUC engine variable-accessor table — parse_expr.c owns the `Transform_null_equals`
+# bool GUC backing storage and installs its accessors at init_seams() time.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # Owner of the inward seams this crate installs.
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
 

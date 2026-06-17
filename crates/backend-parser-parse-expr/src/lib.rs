@@ -126,12 +126,36 @@ use backend_utils_init_small_seams as globals_seams;
 /// `COMPARE_NE` (access/cmptype.h) — value 6, the "<>" comparison type.
 const COMPARE_NE: i32 = 6;
 
-/// `Transform_null_equals` (utils/misc/guc_tables.c): the legacy MS-SQL-compat
-/// GUC that rewrites `foo = NULL` into `foo IS NULL`. Defaults **off**, and the
-/// GUC subsystem is not wired in; the compiled-in default (`false`) is faithful
-/// to a stock server — the rewrite branch in [`transformAExprOp`] is dead, as
-/// it is in a server with the default GUC.
-const Transform_null_equals: bool = false;
+/// `bool Transform_null_equals = false;` (parse_expr.c) — the legacy MS-SQL-compat
+/// GUC that rewrites `foo = NULL` into `foo IS NULL`. In C this is a plain global
+/// owned by parse_expr.c and pointed at by the `transform_null_equals` entry in
+/// `guc_tables.c` (`&Transform_null_equals`); the GUC engine reads it via
+/// `*conf->variable` and writes it on `SET`. We mirror that with process-local
+/// backing storage here (boot value `false`) plus C-named accessors, and install
+/// them into the GUC engine's variable-accessor table from [`init_seams`] so the
+/// engine reads/writes this exact cell. [`transformAExprOp`] reads the live value
+/// through the GUC slot.
+pub mod transform_null_equals_storage {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// `bool Transform_null_equals = false;` backing storage. C keeps this as a
+    /// plain process-global `bool`; this crate is `#![no_std]`, so the cell is an
+    /// `AtomicBool` (boot value `false`) rather than a `thread_local!`.
+    static TRANSFORM_NULL_EQUALS: AtomicBool = AtomicBool::new(false);
+
+    /// Read `*conf->variable` for the `transform_null_equals` GUC.
+    #[inline]
+    pub fn get() -> bool {
+        TRANSFORM_NULL_EQUALS.load(Ordering::Relaxed)
+    }
+
+    /// Write `*conf->variable` for the `transform_null_equals` GUC (used by the
+    /// GUC engine on `SET`).
+    #[inline]
+    pub fn set(value: bool) {
+        TRANSFORM_NULL_EQUALS.store(value, Ordering::Relaxed);
+    }
+}
 
 // ===========================================================================
 // Small helpers (the C `strVal` / `IsA` idioms).
@@ -399,13 +423,17 @@ fn transformAExprOp<'mcx>(
     let rexpr = boxed_node(rexpr);
 
     // Special-case "foo = NULL" / "NULL = foo" only when Transform_null_equals
-    // is on (default off). The whole branch is therefore dead in a stock
-    // server; kept structurally for faithfulness.
+    // is on (default off). The live GUC value is read through the engine slot,
+    // which the GUC engine writes on `SET transform_null_equals = on`.
     let is_eq_name = name.len() == 1 && name.iter().next().and_then(str_val).as_deref() == Some("=");
     let either_null = exprIsNullConstant(lexpr.as_ref()) || exprIsNullConstant(rexpr.as_ref());
     let neither_casetest = !is_casetestexpr(lexpr.as_ref()) && !is_casetestexpr(rexpr.as_ref());
 
-    if Transform_null_equals && is_eq_name && either_null && neither_casetest {
+    if backend_utils_misc_guc_tables::vars::Transform_null_equals.read()
+        && is_eq_name
+        && either_null
+        && neither_casetest
+    {
         // Build a NullTest on the non-NULL side and recurse on its arg.
         let arg = if exprIsNullConstant(lexpr.as_ref()) {
             rexpr
@@ -3551,6 +3579,17 @@ pub fn init_seams() {
     me::parser_errposition::set(parser_errposition_impl);
     me::parse_expr_kind_name::set(ParseExprKindName);
     me::transformExpr::set(transformExpr);
+
+    // Install the GUC engine's variable accessors for `transform_null_equals`
+    // (guc_tables.c points its `&Transform_null_equals` slot at the C global
+    // owned by parse_expr.c). The engine reads `*conf->variable` via `get` and
+    // writes it on `SET` via `set`; both land on this crate's backing cell.
+    backend_utils_misc_guc_tables::vars::Transform_null_equals.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: transform_null_equals_storage::get,
+            set: transform_null_equals_storage::set,
+        },
+    );
 }
 
 #[cfg(test)]

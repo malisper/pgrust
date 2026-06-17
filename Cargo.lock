@@ -12449,6 +12449,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-cluster",
