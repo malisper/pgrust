@@ -214,18 +214,49 @@ thread_local! {
     static MY_REPLICATION_SLOT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-/// `int max_replication_slots = 10` — GUC default. Set once at init.
-static MAX_REPLICATION_SLOTS: OnceLock<i32> = OnceLock::new();
+/// `int max_replication_slots = 10` (slot.c). This is a process-wide
+/// `PGC_POSTMASTER` GUC, so a plain process-global mirrors the C `int`
+/// variable; the GUC machinery reads/writes it through the accessors
+/// installed in [`init_seams`].
+static MAX_REPLICATION_SLOTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(10);
 
 fn max_replication_slots() -> i32 {
-    *MAX_REPLICATION_SLOTS.get().unwrap_or(&10)
+    MAX_REPLICATION_SLOTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `int idle_replication_slot_timeout_secs = 0` — GUC.
-static IDLE_REPLICATION_SLOT_TIMEOUT_SECS: OnceLock<i32> = OnceLock::new();
+fn max_replication_slots_set(v: i32) {
+    MAX_REPLICATION_SLOTS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `int idle_replication_slot_timeout_secs = 0` (slot.c). Process-wide
+/// `PGC_SIGHUP` GUC; reached by the GUC machinery through the accessors
+/// installed in [`init_seams`].
+static IDLE_REPLICATION_SLOT_TIMEOUT_SECS: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
 
 fn idle_replication_slot_timeout_secs() -> i32 {
-    *IDLE_REPLICATION_SLOT_TIMEOUT_SECS.get().unwrap_or(&0)
+    IDLE_REPLICATION_SLOT_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn idle_replication_slot_timeout_secs_set(v: i32) {
+    IDLE_REPLICATION_SLOT_TIMEOUT_SECS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `char *synchronized_standby_slots` (slot.c) — the raw GUC string the
+/// `synchronized_standby_slots` setting stores. The parsed config lives in
+/// `SYNCHRONIZED_STANDBY_SLOTS_CONFIG` (computed by the check/assign hooks);
+/// this holds the verbatim string `*conf->variable` for the GUC machinery,
+/// reached through the accessors installed in [`init_seams`]. `None` mirrors
+/// the C `NULL`.
+static SYNCHRONIZED_STANDBY_SLOTS_RAW: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+fn synchronized_standby_slots_get() -> Option<String> {
+    SYNCHRONIZED_STANDBY_SLOTS_RAW.lock().unwrap().clone()
+}
+
+fn synchronized_standby_slots_set(v: Option<String>) {
+    *SYNCHRONIZED_STANDBY_SLOTS_RAW.lock().unwrap() = v;
 }
 
 fn ctl() -> &'static ReplicationSlotCtlData {
@@ -3260,4 +3291,27 @@ pub fn init_seams() {
 
     // Boolean-existence form consumed by genfile.c::pg_ls_replslotdir.
     s::SearchNamedReplicationSlot::set(seam_search_named_replication_slot_exists);
+
+    // GUC variable accessors — `int max_replication_slots`,
+    // `int idle_replication_slot_timeout_secs`, and the raw
+    // `char *synchronized_standby_slots` string all live in slot.c, so this
+    // owner installs the guc-tables slots' get/set accessors over the backing
+    // storage above (mirroring C's `conf->variable` pointer). They are read
+    // directly from the GUC slot (not the ControlFile).
+    {
+        use backend_utils_misc_guc_tables::vars;
+        use backend_utils_misc_guc_tables::GucVarAccessors;
+        vars::max_replication_slots.install(GucVarAccessors {
+            get: max_replication_slots,
+            set: max_replication_slots_set,
+        });
+        vars::idle_replication_slot_timeout_secs.install(GucVarAccessors {
+            get: idle_replication_slot_timeout_secs,
+            set: idle_replication_slot_timeout_secs_set,
+        });
+        vars::synchronized_standby_slots.install(GucVarAccessors {
+            get: synchronized_standby_slots_get,
+            set: synchronized_standby_slots_set,
+        });
+    }
 }

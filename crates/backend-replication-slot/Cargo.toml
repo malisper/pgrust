@@ -45,6 +45,7 @@ backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-wai
 backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
 port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 libc = "0.2"
 
 [dev-dependencies]
