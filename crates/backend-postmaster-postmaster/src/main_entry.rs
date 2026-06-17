@@ -303,8 +303,14 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
 
     /*
      * Create and switch into PostmasterContext; getInstallationPaths(argv[0]).
-     * (Folded into the runtime's path resolution; the postmaster's working
-     * context is its own MemoryContext, established by the boot driver.)
+     *
+     * `PostmasterContext = AllocSetContextCreate(TopMemoryContext, "Postmaster",
+     * ...); MemoryContextSwitchTo(PostmasterContext)` — the postmaster's working
+     * memory context, a child of TopMemoryContext, that backends recycle. Each
+     * forked child deletes it (delete_postmaster_context) after copying out the
+     * startup data it needs. The substrate (anchored on the per-process
+     * TopMemoryContext) lives with the mmgr owner (portalmem `top_context`).
+     * getInstallationPaths is folded into the runtime's path resolution.
      *
      * Set up the postmaster's signal handlers (pqinitmask / block / pqsignal /
      * unblock), the wait-event support, and the process-local latch. The
@@ -313,6 +319,8 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
      * these caller-side seams (fronting the not-yet-ported postmaster signal
      * setup + InitProcessLocalLatch in the boot driver).
      */
+    backend_utils_mmgr_portalmem::top_context::create_postmaster_context();
+
     sp::install_postmaster_signal_handlers::call();
     sp::init_process_local_latch::call();
 

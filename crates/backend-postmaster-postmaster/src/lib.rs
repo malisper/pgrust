@@ -169,6 +169,17 @@ pub fn init_seams() {
     // Postmaster-owned file writes from PostmasterMain (postmaster.c bodies).
     sp::create_opts_file::set(fileops::create_opts_file);
     sp::maybe_write_external_pid_file::set(fileops::maybe_write_external_pid_file);
+
+    // `MemoryContextDelete(PostmasterContext); PostmasterContext = NULL`
+    // (auxprocess.c / bgworker.c): a freshly-forked child releases the
+    // postmaster's working context. postmaster.c owns `PostmasterContext`, so
+    // its lifecycle is installed here; the MemoryContext substrate (anchored
+    // on the per-process TopMemoryContext root) lives with the mmgr owner
+    // (portalmem `top_context`), which the postmaster created the context in
+    // via `create_postmaster_context` at PostmasterMain entry.
+    sp::delete_postmaster_context::set(
+        backend_utils_mmgr_portalmem::top_context::delete_postmaster_context,
+    );
 }
 
 /// C: `PostmasterDeathSignalInit` core — `prctl(PR_SET_PDEATHSIG, signum)`

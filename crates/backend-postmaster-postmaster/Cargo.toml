@@ -38,6 +38,11 @@ backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
 # death-watch fd; the cloexec set is consumed by miscinit's InitPostmasterChild).
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 
+# portalmem (mmgr owner): the per-process TopMemoryContext/PostmasterContext
+# substrate. PostmasterMain creates PostmasterContext (create_postmaster_context)
+# and installs delete_postmaster_context delegating here.
+backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+
 # ereport surface.
 backend-utils-error = { path = "../backend-utils-error" }
 

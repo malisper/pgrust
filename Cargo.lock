@@ -13511,6 +13511,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-mmgr-portalmem",
  "libc",
  "mcx",
  "port-pqsignal",
