@@ -17,6 +17,12 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-wchar = { path = "../types-wchar" }
 types-tuple = { path = "../types-tuple" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+
+# fmgr builtin-table registration (C: fmgr_builtins[]) for this crate's
+# SQL-callable encoding functions.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 common-wchar = { path = "../common-wchar" }
 backend-utils-error = { path = "../backend-utils-error" }
