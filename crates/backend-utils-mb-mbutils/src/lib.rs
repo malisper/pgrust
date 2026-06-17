@@ -1410,9 +1410,10 @@ pub fn init_seams() {
     seams::get_database_encoding_name::set(GetDatabaseEncodingName);
     // NOTE: `is_encoding_supported_by_icu` is declared in this seam crate but is
     // `common/encnames.c` logic (it reads `pg_enc2icu_tbl`), not mbutils.c. Its
-    // real owner is the encnames unit (unported in this model); we deliberately
-    // do NOT install it here. Its sole consumer is `recomputeNamespacePath`'s ICU
-    // branch, which stays a frontier panic until encnames lands.
+    // real owner is the encnames unit (`common-extra-encnames-fgram`), which now
+    // installs it from ITS `init_seams()` — we deliberately do NOT install it
+    // here. (Cross-crate install: the seam's true C owner is encnames, so a
+    // `::set` there satisfies the install-completeness guard.)
     seams::set_database_encoding::set(SetDatabaseEncoding);
     seams::initialize_client_encoding::set(|| {
         // The seam carries no Mcx; FindDefaultConversionProc needs one. Run it in

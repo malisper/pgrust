@@ -20,6 +20,11 @@ pub use pgrust_pg_ffi::{
 pub fn init_seams() {
     common_encnames_seams::pg_char_to_encoding::set(pg_char_to_encoding);
     common_encnames_seams::pg_encoding_to_char::set(pg_encoding_to_char);
+    // `is_encoding_supported_by_icu` (encnames.c: reads pg_enc2icu_tbl) is
+    // declared in the mbutils seam slice but is encnames.c logic; this owning
+    // unit installs it (the mbutils owner deliberately defers to encnames).
+    // `pg_enc` is `i32`, matching the seam boundary verbatim.
+    backend_utils_mb_mbutils_seams::is_encoding_supported_by_icu::set(is_encoding_supported_by_icu);
 }
 
 const NAMEDATALEN: usize = 64;

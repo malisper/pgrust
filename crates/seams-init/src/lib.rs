@@ -1776,16 +1776,13 @@ mod recurrence_guard {
         // bare `::set` of the common body fits. Install + DELETE when the inval
         // owner adds the OID-keyed re-fetch wrapper.
         ("backend_utils_cache_inval", "cache_invalidate_heap_tuple"),
-        // DESIGN_DEBT (TD-ENCNAMES-ICU): `is_encoding_supported_by_icu` is declared
-        // in `backend-utils-mb-mbutils-seams` but its logic is `common/encnames.c`'s
-        // `pg_enc2icu_tbl` (encnames.c:461), NOT mbutils.c — mbutils.c never calls
-        // it. Its real owner is the encnames unit (unported in this model); the only
-        // consumer is `recomputeNamespacePath`'s ICU branch (namespace.c:2323).
-        // Wrong-homing the ICU name table in the mbutils owner would violate
-        // ownership-by-C-source, so the mbutils owner deliberately does NOT install
-        // it; it loud-panics until encnames lands. DELETE this entry when encnames is
-        // ported and installs the seam.
-        ("backend_utils_mb_mbutils", "is_encoding_supported_by_icu"),
+        // (TD-ENCNAMES-ICU RETIRED: `is_encoding_supported_by_icu` —
+        // `common/encnames.c`'s `pg_enc2icu_tbl` reader (encnames.c:461),
+        // declared in `backend-utils-mb-mbutils-seams` but mbutils.c never calls
+        // it — is now installed from its true C owner, the encnames unit
+        // `common-extra-encnames-fgram::init_seams()` (cross-crate install). The
+        // `recomputeNamespacePath` ICU branch (namespace.c:2323) reaches a real
+        // body.)
         // DESIGN_DEBT (TD-PGDATABASE-ACLNEWOWNER): `aclnewowner_datacl`
         // (declared in `backend-catalog-pg-database-seams`) is dbcommands.c's
         // AlterDatabaseOwner ACL rewrite — `aclnewowner(DatumGetAclP(datacl),
@@ -1880,12 +1877,13 @@ mod recurrence_guard {
         //    IndexInfo into the bootstrap IL context). Loud-panics until then;
         //    only reached during initdb's bootstrap, which the CREATE INDEX gate
         //    does not exercise.
-        //  * `relation_init_index_access_info` (relcache.c): the owner's
-        //    `RelationInitIndexAccessInfo(&mut RelationData)` runs inside the
-        //    registry build with a `&mut` entry; the relcache exposes no
-        //    mutable-by-OID registry accessor a by-OID seam could use. Needs the
-        //    registry-mutable-entry keystone. Bootstrap-only leg (non-bootstrap
-        //    rebuilds the entry via the sinval flush at CommandCounterIncrement).
+        //  ( `relation_init_index_access_info` RETIRED: the relcache owner now
+        //    installs it from `seams.rs` — the registry-mutable-entry accessor
+        //    `core_entry_store::with_relation_mut(oid, ..)` exists, so the by-OID
+        //    seam borrows the cell mutably and runs `RelationInitIndexAccessInfo`
+        //    on it. The body only re-reads OTHER catalogs; the one self-resolve
+        //    (rd_opcoptions priming) was already deferred to
+        //    `force_index_att_options`, so no re-entrant borrow. )
         //  * `create_unique_key_recheck_trigger` (the `CreateTrigger` call in
         //    index_constraint_create's deferrable leg): the trigger manager owner
         //    has not ported `CreateTrigger` yet. Loud-panics until trigger.c's
@@ -1893,7 +1891,6 @@ mod recurrence_guard {
         //
         // Delete each entry when its owner installs the seam.
         ("backend_bootstrap_bootstrap", "index_register"),
-        ("backend_utils_cache_relcache", "relation_init_index_access_info"),
         ("backend_commands_trigger", "create_unique_key_recheck_trigger"),
     ];
 

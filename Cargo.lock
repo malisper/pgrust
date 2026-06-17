@@ -20966,6 +20966,7 @@ dependencies = [
 name = "common-extra-encnames-fgram"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-mb-mbutils-seams",
  "common-encnames-seams",
  "pgrust-pg-ffi-fgram",
 ]

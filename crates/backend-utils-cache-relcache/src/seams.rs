@@ -116,6 +116,20 @@ pub fn init_seams() {
     sx::index_getprocid::set(index_getprocid);
     sx::relation_set_new_relfilenumber::set(crate::initfile::RelationSetNewRelfilenumber);
 
+    // --- catalog/index.c index_create bootstrap leg: set up an open index
+    //     entry's rd_index/rd_indam/opclass/support arrays. The relcache entry
+    //     is registry-owned, so the seam addresses it by OID and the install
+    //     borrows the cell mutably; RelationInitIndexAccessInfo only re-reads
+    //     OTHER catalogs (pg_index/pg_am/pg_opclass) — the one self-re-resolve
+    //     (rd_opcoptions priming) is deferred to force_index_att_options after
+    //     the entry is cache-resident, so no re-entrant borrow of this cell. ---
+    sx::relation_init_index_access_info::set(|index_id| {
+        crate::core_entry_store::with_relation_mut(index_id, |rd| {
+            crate::index::RelationInitIndexAccessInfo(rd)
+        })
+        .and_then(|r| r)
+    });
+
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
 
