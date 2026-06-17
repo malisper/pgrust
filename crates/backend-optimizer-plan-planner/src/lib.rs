@@ -2456,12 +2456,81 @@ fn datum_get_int64(c: &types_nodes::primnodes::Const) -> i64 {
 /// Install this crate's inward seams: `pg_plan_query` (the planner entry the
 /// COPY-TO driver / tcop call) and `plan_cluster_use_sort` (CLUSTER's
 /// seqscan-vs-indexscan decision).
+/// `apply_tlist_labeling(plan->targetlist, root->processed_tlist)` — the
+/// create_plan-tail invocation. Copies the labeling attributes
+/// (`resname`/`ressortgroupref`/`resorigtbl`/`resorigcol`/`resjunk`) of the
+/// query's processed targetlist onto the topmost plan node's targetlist,
+/// element-wise (tlist.c:327). The source `processed_tlist` is a list of arena
+/// `TargetEntryNode`s; the dest is the plan's owned `TargetEntry<'mcx>` list.
+fn apply_tlist_labeling_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    plan: &mut Node<'mcx>,
+) -> types_error::PgResult<()> {
+    // Snapshot the (label, resno) tuples from the arena source tlist first, so
+    // the immutable `root` borrow is released before we mutably borrow `plan`.
+    let src_labels: alloc::vec::Vec<_> = root
+        .processed_tlist
+        .iter()
+        .map(|id| {
+            let te = root.targetentry(*id);
+            (
+                te.resno,
+                te.resname.clone(),
+                te.ressortgroupref,
+                te.resorigtbl,
+                te.resorigcol,
+                te.resjunk,
+            )
+        })
+        .collect();
+
+    let dest = match plan.plan_head_mut().targetlist.as_deref_mut() {
+        Some(d) => d,
+        None => {
+            // An empty dest is only valid when the source is also empty.
+            assert!(
+                src_labels.is_empty(),
+                "apply_tlist_labeling: dest tlist is NIL but processed_tlist is not"
+            );
+            return Ok(());
+        }
+    };
+    assert_eq!(
+        dest.len(),
+        src_labels.len(),
+        "apply_tlist_labeling: tlist length mismatch"
+    );
+    for (dest_tle, (resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)) in
+        dest.iter_mut().zip(src_labels.into_iter())
+    {
+        debug_assert_eq!(dest_tle.resno, resno);
+        dest_tle.resname = match resname {
+            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+            None => None,
+        };
+        dest_tle.ressortgroupref = ressortgroupref;
+        dest_tle.resorigtbl = resorigtbl;
+        dest_tle.resorigcol = resorigcol;
+        dest_tle.resjunk = resjunk;
+    }
+    Ok(())
+}
+
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::vars;
     use backend_utils_misc_guc_tables::GucVarAccessors;
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
+
+    // create_plan-tail: apply_tlist_labeling(plan->targetlist,
+    // root->processed_tlist) (createplan.c create_plan, tlist.c:327). The
+    // generic two-tlist label-copy leaf lives in the tlist unit
+    // (backend_optimizer_util_vars::tlist::apply_tlist_labeling); this seam is
+    // the createplan-tail invocation, which the planner owns because the source
+    // tlist is `root->processed_tlist` (a Vec<NodeId> of arena TargetEntrys).
+    backend_optimizer_plan_createplan_seams::apply_tlist_labeling::set(apply_tlist_labeling_impl);
 
     // GUC `conf->variable` accessors for the three planner GUCs whose backing
     // globals live in planner.c / clauses.c. Per PG 18.3 guc_tables.c all three

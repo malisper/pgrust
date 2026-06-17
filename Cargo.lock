@@ -11592,6 +11592,7 @@ dependencies = [
  "backend-optimizer-path-costsize",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-plan-createplan",
+ "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-planner-seams",

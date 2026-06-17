@@ -24,6 +24,8 @@ backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-plann
 backend-optimizer-prep-prepunion-seams = { path = "../backend-optimizer-prep-prepunion-seams" }
 # create_plan dispatch spine.
 backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createplan" }
+# create_plan-tail apply_tlist_labeling seam (createplan calls it on the topmost plan).
+backend-optimizer-plan-createplan-seams = { path = "../backend-optimizer-plan-createplan-seams" }
 # set_plan_references.
 backend-optimizer-plan-setrefs = { path = "../backend-optimizer-plan-setrefs" }
 # query_planner.

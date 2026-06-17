@@ -65,6 +65,8 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgError, PgResult};
 use types_nodes::nodeindexscan::{Plan, Scan};
 use types_nodes::noderesult::Result as ResultNode;
+use types_nodes::nodeforeigncustom::Material as MaterialNode;
+use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
 use types_nodes::nodes::{Node, NodeTag};
 use types_nodes::nodectescan::CteScan;
 use types_nodes::nodefunctionscan::FunctionScan;
@@ -94,7 +96,7 @@ use backend_optimizer_util_pathnode_seams as pathnode;
 use backend_optimizer_util_placeholder_seams as placeholder;
 use backend_optimizer_util_plancat::build_physical_tlist;
 use backend_optimizer_util_relnode_seams as relnode;
-use backend_optimizer_util_vars::tlist::apply_pathtarget_labeling_to_tlist;
+use backend_optimizer_util_vars::tlist::{apply_pathtarget_labeling_to_tlist, tlist_same_exprs};
 
 // ---------------------------------------------------------------------------
 // RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
@@ -2151,6 +2153,321 @@ fn create_subqueryscan_plan<'mcx>(
     Ok(Node::SubqueryScan(scan_plan))
 }
 
+// ===========================================================================
+// Upper-plan converters (createplan.c create_plan_recurse non-scan/non-join
+// arms). These are reached from create_plan_recurse for the upper (post-scan)
+// portion of the path tree. The SELECT-1 path is ProjectionPath ->
+// GroupResultPath, so create_projection_plan + create_group_result_plan are the
+// minimal subset; the rest are ported for createplan.c completeness.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// make_material (createplan.c ~6641) / make_project_set (~7150).
+// ---------------------------------------------------------------------------
+
+/// `make_material(lefttree)` — build a `Material` plan node atop `lefttree`.
+/// The Material's targetlist is the child's targetlist (it doesn't project).
+fn make_material<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+) -> PgResult<MaterialNode<'mcx>> {
+    let mut node = MaterialNode::default();
+    // plan->targetlist = lefttree->targetlist;
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.targetlist = tlist;
+        plan.qual = None;
+        plan.righttree = None;
+    }
+    node.plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    Ok(node)
+}
+
+/// `make_project_set(tlist, subplan)` — build a `ProjectSet` plan node.
+fn make_project_set<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    subplan: Node<'mcx>,
+) -> PgResult<ProjectSetNode<'mcx>> {
+    let mut node = ProjectSetNode {
+        plan: Plan::default(),
+    };
+    let sub = mcx::alloc_in(mcx, subplan)?;
+    let plan: &mut Plan = &mut node.plan;
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(sub);
+    plan.righttree = None;
+    Ok(node)
+}
+
+/// Deep-copy a plan node's `targetlist` into a fresh `mcx` list (the C
+/// `plan->targetlist = lefttree->targetlist` aliases the same `List`; in this
+/// owned model the child plan is moved into `lefttree`, so the parent gets a
+/// clone of the tlist before the move).
+fn clone_plan_tlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    plan_node: &Node<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, TargetEntry<'mcx>>>> {
+    match plan_node.plan_head().targetlist {
+        None => Ok(None),
+        Some(ref tl) => {
+            let mut out = vec_with_capacity_in(mcx, tl.len())?;
+            for tle in tl.iter() {
+                out.push(tle.clone_in(mcx)?);
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// is_projection_capable_plan (createplan.c ~7442)
+// ---------------------------------------------------------------------------
+
+/// `is_projection_capable_plan(plan)` — can the given plan node do projection?
+/// Most plan types can; this lists the ones that can't (read off `nodeTag`).
+fn is_projection_capable_plan(plan: &Node<'_>) -> bool {
+    match plan {
+        Node::Hash(_)
+        | Node::Material(_)
+        | Node::Memoize(_)
+        | Node::Sort(_)
+        | Node::Unique(_)
+        | Node::SetOp(_)
+        // T_LockRows: has no `Node` arm yet (LockRows plan node unported); it
+        // can't be constructed, so it never reaches here. When the arm lands it
+        // must be added to this not-projection-capable list.
+        | Node::Limit(_)
+        | Node::ModifyTable(_)
+        | Node::Append(_)
+        | Node::MergeAppend(_)
+        | Node::RecursiveUnion(_) => false,
+        // CustomScan can project iff it advertises CUSTOMPATH_SUPPORT_PROJECTION.
+        Node::CustomScan(cs) => cs.flags & types_pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0,
+        // ProjectSet projects, but say "no" so the planner won't replace its
+        // tlist; the SRFs have to stay at top level.
+        Node::ProjectSet(_) => false,
+        _ => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// create_group_result_plan (createplan.c ~1588)
+// ---------------------------------------------------------------------------
+
+/// `create_group_result_plan(root, best_path)` — create a `Result` plan for a
+/// degenerate grouping case (no input rows / single group with HAVING quals).
+fn create_group_result_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let _ = run;
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // best_path->quals is just bare clauses.
+    let quals = match root.path(best_path) {
+        PathNode::GroupResultPath(grp) => grp.quals.clone(),
+        _ => unreachable!("create_group_result_plan on non-GroupResultPath"),
+    };
+    let quals = order_qual_clauses(root, &quals);
+
+    // make_result(tlist, (Node *) quals, NULL).
+    let resconstantqual = nodes_to_expr_qual(mcx, root, &quals)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut plan = make_result(mcx, tlist, resconstantqual, None)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Result(plan))
+}
+
+/// Convert a list of bare clause expression arena handles into an owned `Expr`
+/// qual list (the `make_result`/`make_*` `(Node *) quals` argument). An empty
+/// list is the C `NIL`, stored as `None`.
+fn nodes_to_expr_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    clauses: &[NodeId],
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    if clauses.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, clauses.len())?;
+    for &cid in clauses {
+        out.push(root.node(cid).clone());
+    }
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------------------
+// create_project_set_plan (createplan.c ~1613)
+// ---------------------------------------------------------------------------
+
+/// `create_project_set_plan(root, best_path)` — create a `ProjectSet` plan for
+/// a tlist containing set-returning functions.
+fn create_project_set_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let subpath = match root.path(best_path) {
+        PathNode::ProjectSetPath(p) => p.subpath,
+        _ => unreachable!("create_project_set_plan on non-ProjectSetPath"),
+    }
+    .expect("create_project_set_plan: ProjectSetPath has no subpath");
+
+    // Since we intend to project, we don't need to constrain child tlist.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, 0)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let mut plan = make_project_set(mcx, tlist, subplan)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::ProjectSet(plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_material_plan (createplan.c ~1639)
+// ---------------------------------------------------------------------------
+
+/// `create_material_plan(root, best_path, flags)` — create a `Material` plan
+/// and (recursively) plans for its subpaths.
+fn create_material_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let subpath = match root.path(best_path) {
+        PathNode::MaterialPath(p) => p.subpath,
+        _ => unreachable!("create_material_plan on non-MaterialPath"),
+    }
+    .expect("create_material_plan: MaterialPath has no subpath");
+
+    // We don't want any excess columns in the materialized tuples, so request a
+    // smaller tlist. Otherwise, since Material doesn't project, tlist
+    // requirements pass through.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags | CP_SMALL_TLIST)?;
+
+    let mut plan = make_material(mcx, subplan)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Material(plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_projection_plan (createplan.c ~2015)
+// ---------------------------------------------------------------------------
+
+/// `create_projection_plan(root, best_path, flags)` — create a plan tree to do
+/// a projection step. We may need a `Result` node, but often we can let the
+/// subplan do the projection itself.
+fn create_projection_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let subpath = match root.path(best_path) {
+        PathNode::ProjectionPath(p) => p.subpath,
+        _ => unreachable!("create_projection_plan on non-ProjectionPath"),
+    }
+    .expect("create_projection_plan: ProjectionPath has no subpath");
+
+    let mut needs_result_node = false;
+
+    // Convert our subpath to a Plan and determine whether we need a Result node.
+    // (See the long comment in createplan.c: dummypp is unreliable, recheck.)
+    let (mut subplan, tlist): (Node<'mcx>, Vec<TargetEntry<'mcx>>) =
+        if use_physical_tlist(root, best_path, flags) {
+            // Caller doesn't care what tlist we return — no need to project,
+            // though we may still need sortgroupref labels.
+            let subplan = create_plan_recurse(mcx, root, run, subpath, 0)?;
+            let mut tlist = clone_node_tlist_vec(mcx, &subplan)?;
+            if flags & CP_LABEL_TLIST != 0 {
+                let target = root
+                    .path(best_path)
+                    .base()
+                    .pathtarget
+                    .clone()
+                    .expect("create_projection_plan: path has no pathtarget");
+                apply_pathtarget_labeling_to_tlist(root, &mut tlist, &target)?;
+            }
+            (subplan, tlist)
+        } else if is_projection_capable_path(root, subpath) {
+            // Caller requires the exact tlist, but no separate Result node is
+            // needed because the subpath is projection-capable. Tell
+            // create_plan_recurse we'll ignore the tlist it produces.
+            let subplan = create_plan_recurse(mcx, root, run, subpath, CP_IGNORE_TLIST)?;
+            debug_assert!(is_projection_capable_plan(&subplan));
+            let tlist = build_path_tlist(mcx, root, best_path)?;
+            (subplan, tlist)
+        } else {
+            // It looks like we need a result node, unless by good fortune the
+            // requested tlist is exactly the one the child wants to produce.
+            let subplan = create_plan_recurse(mcx, root, run, subpath, 0)?;
+            let tlist = build_path_tlist(mcx, root, best_path)?;
+            let sub_tlist = subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+            needs_result_node = !tlist_same_exprs(&tlist, sub_tlist);
+            (subplan, tlist)
+        };
+
+    if !needs_result_node {
+        // Don't need a separate Result, just assign tlist to subplan, and label
+        // the subplan with the cost estimates we actually used.
+        let base = root.path(best_path).base().clone();
+        let width = base
+            .pathtarget
+            .as_ref()
+            .expect("create_projection_plan: path has no pathtarget")
+            .width;
+        let plan_hd: &mut Plan = subplan.plan_head_mut();
+        plan_hd.targetlist = tlist_to_plan_field(mcx, tlist)?;
+        plan_hd.startup_cost = base.startup_cost;
+        plan_hd.total_cost = base.total_cost;
+        plan_hd.plan_rows = base.rows;
+        plan_hd.plan_width = width;
+        plan_hd.parallel_safe = base.parallel_safe;
+        // ... but don't change subplan's parallel_aware flag.
+        Ok(subplan)
+    } else {
+        // We need a Result node.
+        let tlist = tlist_to_plan_field(mcx, tlist)?;
+        let mut plan = make_result(mcx, tlist, None, Some(subplan))?;
+        copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+        Ok(Node::Result(plan))
+    }
+}
+
+/// Clone a plan node's targetlist into an owned `Vec<TargetEntry>` (the C
+/// `tlist = subplan->targetlist` alias). Returns an empty `Vec` for `NIL`.
+fn clone_node_tlist_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+    plan_node: &Node<'mcx>,
+) -> PgResult<Vec<TargetEntry<'mcx>>> {
+    match plan_node.plan_head().targetlist {
+        None => Ok(Vec::new()),
+        Some(ref tl) => {
+            let mut out = Vec::with_capacity(tl.len());
+            for tle in tl.iter() {
+                out.push(tle.clone_in(mcx)?);
+            }
+            Ok(out)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seam installation (this crate OWNS create_scan_plan).
 // ---------------------------------------------------------------------------
@@ -2229,6 +2546,11 @@ pub fn init_seams() {
     cp_seam::create_ctescan_plan::set(create_ctescan_plan);
     cp_seam::create_worktablescan_plan::set(create_worktablescan_plan);
     cp_seam::create_subqueryscan_plan::set(create_subqueryscan_plan);
+    // Upper-plan converters (non-scan/non-join create_plan_recurse arms).
+    cp_seam::create_projection_plan::set(create_projection_plan);
+    cp_seam::create_group_result_plan::set(create_group_result_plan);
+    cp_seam::create_project_set_plan::set(create_project_set_plan);
+    cp_seam::create_material_plan::set(create_material_plan);
 }
 
 #[cfg(test)]
