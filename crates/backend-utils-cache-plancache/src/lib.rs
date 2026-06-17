@@ -1945,4 +1945,12 @@ pub fn ResOwnerReleaseCachedPlan(plan: CachedPlanHandle) -> PgResult<()> {
 /// (assemble/seam-wiring-guard pure-wiring fix).
 pub fn init_seams() {
     backend_utils_cache_plancache_seams::init_plan_cache::set(InitPlanCache);
+
+    // `plan_cache_mode` (plancache.c:138 `int plan_cache_mode`) is a USERSET enum
+    // GUC owned by this unit (guc_tables.c:5372 binds `&plan_cache_mode`).  C reads
+    // it straight from the GUC slot in choose_custom_plan(); mirror that by reading
+    // the guc-tables slot (GucEnumVar::read() -> i32).
+    backend_seams::plan_cache_mode::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::plan_cache_mode.read())
+    });
 }

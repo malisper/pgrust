@@ -28,3 +28,4 @@ backend-utils-cache-inval-pc-seams = { path = "../backend-utils-cache-inval-pc-s
 backend-utils-cache-syscache-pc-seams = { path = "../backend-utils-cache-syscache-pc-seams" }
 backend-utils-resowner-pc-seams = { path = "../backend-utils-resowner-pc-seams" }
 backend-utils-misc-backendstate-pc-seams = { path = "../backend-utils-misc-backendstate-pc-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

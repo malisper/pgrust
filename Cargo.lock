@@ -18943,6 +18943,7 @@ dependencies = [
  "backend-utils-cache-plancache-seams",
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-misc-backendstate-pc-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-mcxt-pc-seams",
  "backend-utils-resowner-pc-seams",
  "backend-utils-time-snapmgr-pc-seams",
