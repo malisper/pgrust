@@ -46,6 +46,9 @@
 #![allow(non_upper_case_globals)]
 
 extern crate alloc;
+// `std` for the GUC backing-store `thread_local!` cells (the `conf->variable`
+// process-private storage for this crate's three planner GUCs).
+extern crate std;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -85,9 +88,14 @@ use types_nodes::portalcmds::{
 // PGJIT_NONE (jit/jit.h).
 const PGJIT_NONE: i32 = 0;
 
-// `cursor_tuple_fraction` GUC; we use the documented default, since the GUC
-// table value is not threaded into the planner crate.
-const cursor_tuple_fraction: f64 = DEFAULT_CURSOR_TUPLE_FRACTION;
+// `cursor_tuple_fraction` GUC, read through the guc-tables slot (the planner
+// owns the `conf->variable` backing — see the GUC backing-storage block below
+// — so the live value reaches the C read site, defaulting to
+// `DEFAULT_CURSOR_TUPLE_FRACTION`).
+#[inline]
+fn cursor_tuple_fraction() -> f64 {
+    backend_utils_misc_guc_tables::vars::cursor_tuple_fraction.read()
+}
 
 // `debug_parallel_query` GUC. The parallel-Gather test path of
 // `standard_planner` only runs when this != OFF. It is not threaded into this
@@ -95,6 +103,68 @@ const cursor_tuple_fraction: f64 = DEFAULT_CURSOR_TUPLE_FRACTION;
 // skips the debug-only Gather injection.
 const fn debug_parallel_query() -> i32 {
     DEBUG_PARALLEL_OFF
+}
+
+// ===========================================================================
+// GUC variable backing storage.
+//
+// Three planner GUCs whose C `conf->variable` backing globals live in
+// planner.c / clauses.c:
+//
+//   * `double cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;`
+//     (planner.c) — the documented default.
+//   * `bool enable_distinct_reordering = true;` (clauses.c) — read by
+//     `standard_qp_callback`/grouping_planner via the planner.
+//   * `bool parallel_leader_participation = true;` (clauses.c) — read at
+//     plan/execute time for Gather and Gather Merge.
+//
+// Per PG 18.3 guc_tables.c all three are plain GUC slot variables read
+// directly from `conf->variable` (none come from the ControlFile). Each is a
+// process-private backend variable, mirrored here as a `thread_local!` cell
+// with C-named get/set accessors that the GUC engine installs and reads via
+// the guc-tables variable slot (`vars::<name>.read()/.write()`).
+// ===========================================================================
+
+std::thread_local! { // expanded via the std prelude macro
+    // `double cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;`
+    static CURSOR_TUPLE_FRACTION: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_CURSOR_TUPLE_FRACTION) };
+    // `bool enable_distinct_reordering = true;`
+    static ENABLE_DISTINCT_REORDERING: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(true) };
+    // `bool parallel_leader_participation = true;`
+    static PARALLEL_LEADER_PARTICIPATION: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(true) };
+}
+
+#[inline]
+fn get_cursor_tuple_fraction() -> f64 {
+    CURSOR_TUPLE_FRACTION.with(core::cell::Cell::get)
+}
+
+#[inline]
+fn set_cursor_tuple_fraction(value: f64) {
+    CURSOR_TUPLE_FRACTION.with(|c| c.set(value));
+}
+
+#[inline]
+fn get_enable_distinct_reordering() -> bool {
+    ENABLE_DISTINCT_REORDERING.with(core::cell::Cell::get)
+}
+
+#[inline]
+fn set_enable_distinct_reordering(value: bool) {
+    ENABLE_DISTINCT_REORDERING.with(|c| c.set(value));
+}
+
+#[inline]
+fn get_parallel_leader_participation() -> bool {
+    PARALLEL_LEADER_PARTICIPATION.with(core::cell::Cell::get)
+}
+
+#[inline]
+fn set_parallel_leader_participation(value: bool) {
+    PARALLEL_LEADER_PARTICIPATION.with(|c| c.set(value));
 }
 
 // ===========================================================================
@@ -150,7 +220,7 @@ fn standard_planner<'mcx>(
     // Determine tuple_fraction from cursor options (C:407-432).
     let mut tuple_fraction: f64;
     if (cursor_options & CURSOR_OPT_FAST_PLAN) != 0 {
-        tuple_fraction = cursor_tuple_fraction;
+        tuple_fraction = cursor_tuple_fraction();
         if tuple_fraction >= 1.0 {
             tuple_fraction = 0.0;
         } else if tuple_fraction <= 0.0 {
@@ -2387,8 +2457,29 @@ fn datum_get_int64(c: &types_nodes::primnodes::Const) -> i64 {
 /// COPY-TO driver / tcop call) and `plan_cluster_use_sort` (CLUSTER's
 /// seqscan-vs-indexscan decision).
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::vars;
+    use backend_utils_misc_guc_tables::GucVarAccessors;
+
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
+
+    // GUC `conf->variable` accessors for the three planner GUCs whose backing
+    // globals live in planner.c / clauses.c. Per PG 18.3 guc_tables.c all three
+    // are plain GUC slot variables (read directly from `conf->variable`, never
+    // from the ControlFile), so the GUC engine reads/writes them through the
+    // process-private cells installed here.
+    vars::cursor_tuple_fraction.install(GucVarAccessors {
+        get: get_cursor_tuple_fraction,
+        set: set_cursor_tuple_fraction,
+    });
+    vars::enable_distinct_reordering.install(GucVarAccessors {
+        get: get_enable_distinct_reordering,
+        set: set_enable_distinct_reordering,
+    });
+    vars::parallel_leader_participation.install(GucVarAccessors {
+        get: get_parallel_leader_participation,
+        set: set_parallel_leader_participation,
+    });
 }
 
 #[cfg(test)]
