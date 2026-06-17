@@ -332,12 +332,21 @@ pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
         // its real vtable into this router and returns the resulting handle.
         CommandDest::CopyOut => backend_commands_copyto_seams::create_copy_dest_receiver::call(),
 
-        // DestRemote / DestRemoteExecute / DestDebug -> printtup_create_DR
-        // (printtup.c): the owner registers its real vtable into this router
-        // (the same delegation copyto uses), so a SELECT to a wire client emits
-        // RowDescription + DataRow messages through `printtup`'s receiveSlot.
-        CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::Debug => {
+        // DestRemote / DestRemoteExecute -> printtup_create_DR (printtup.c): the
+        // owner registers its real vtable into this router (the same delegation
+        // copyto uses), so a SELECT to a wire client emits RowDescription +
+        // DataRow messages through `printtup`'s receiveSlot.
+        CommandDest::Remote | CommandDest::RemoteExecute => {
             backend_access_common_printtup_seams::printtup_create_dr::call(dest)
+        }
+
+        // DestDebug -> &debugtupDR (dest.c:133): the static debugtup receiver,
+        // whose callbacks (`debugtup` / `debugStartup`) live in printtup.c. The
+        // standalone (`--single`) backend's `whereToSendOutput = DestDebug`
+        // routes SELECT output here, printing each tuple to stdout. The owner
+        // registers its real vtable into this router via the seam.
+        CommandDest::Debug => {
+            backend_access_common_printtup_seams::create_debug_dest_receiver::call()
         }
 
         // DestRemoteSimple                     -> printsimpleDR             (printsimple.c)

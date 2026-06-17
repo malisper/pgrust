@@ -500,11 +500,23 @@ pub fn debugtup<'mcx>(
     slot: &mut SlotData<'mcx>,
     typeinfo: &TupleDescData,
 ) -> PgResult<(String, bool)> {
-    let natts = typeinfo.natts;
     // debugtup reads one attr at a time via slot_getattr; deconstruct the slot
     // so the per-attribute (value, isnull) columns are valid.
     let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
+    debugtup_emit(mcx, typeinfo, &columns)
+}
 
+/// The print half of C's `debugtup`, taking the already-deformed per-attribute
+/// `(value, isnull)` columns. Split out from [`debugtup`] so the dest-router
+/// `receiveSlot` callback can deform the slot (mutable borrow) and then read its
+/// descriptor (immutable borrow) without overlapping borrows — the same split
+/// [`printtup_emit`] uses.
+pub fn debugtup_emit<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeinfo: &TupleDescData,
+    columns: &[types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>],
+) -> PgResult<(String, bool)> {
+    let natts = typeinfo.natts;
     let mut out = String::new();
     for i in 0..natts as usize {
         let (attr, isnull) = &columns[i];
@@ -771,10 +783,101 @@ fn printtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
     Ok(())
 }
 
-/// Install this crate's inward seams (the printtup dest-router constructor and
-/// `SetRemoteDestReceiverParams`). Wired into `seams-init`.
+// ===========================================================================
+// debugtup DestReceiver router wiring (printtup.c's debugtup/debugStartup, the
+// static `debugtupDR` in dest.c, routed into tcop-dest)
+// ===========================================================================
+//
+// `tcop/dest.c`'s `CreateDestReceiver` returns the static
+// `debugtupDR = { debugtup, debugStartup, donothingCleanup, donothingCleanup,
+// DestDebug }` for `DestDebug`. The standalone (`--single`) backend's
+// `whereToSendOutput = DestDebug` (postgres.c:91) routes `SELECT` output here:
+// `debugStartup` prints the result column types (one `printatt(.., NULL)` per
+// attr) and `debugtup` prints each tuple's columns (`printatt(.., value)`),
+// both to **stdout** via C's `printf`.
+//
+// The C `debugtupDR` carries no per-receiver state (all four slots are static
+// functions, `donothingCleanup` for shutdown/destroy), so the owned receiver is
+// registered with the stateless `state = 0` token (mirroring `donothingDR`). The
+// vtable callbacks below print the strings `debugStartup` / `debugtup` build to
+// stdout, exactly as the C `printf` does.
+
+/// Write `s` to stdout, mirroring C's `printf("...")` in `printatt`. The
+/// standalone backend's tuples land on the process stdout stream.
+fn print_to_stdout(s: &str) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut h = stdout.lock();
+    // Best-effort like C printf (which ignores the return); a closed stdout in
+    // the standalone backend is not an ereport condition.
+    let _ = h.write_all(s.as_bytes());
+    let _ = h.flush();
+}
+
+/// `&debugtupDR` (dest.c:75) routed into the tcop-dest router: register the
+/// static debugtup receiver (callbacks `debugStartup` / `debugtup` /
+/// `donothingCleanup`) and return the [`DestReceiverHandle`] that names it.
+/// `tcop/dest.c`'s `CreateDestReceiver` reaches this through the
+/// `create_debug_dest_receiver` seam for `DestDebug`.
+pub fn create_debug_dest_receiver_routed() -> DestReceiverHandle {
+    backend_tcop_dest::register_dest_receiver(
+        CommandDest::Debug,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: debugtup_dest_startup,
+            receiveSlot: debugtup_dest_receive,
+            rShutdown: debugtup_dest_shutdown,
+        },
+        // The static debugtupDR carries no per-receiver state.
+        0,
+    )
+}
+
+/// The dest-router `rStartup` slot for `debugtupDR` — C's `debugStartup` reached
+/// through the router. Prints the result column types to stdout. Carries no
+/// state (the `_state` token is the `donothingDR`-style `0`).
+fn debugtup_dest_startup<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _state: u64,
+    _operation: CmdType,
+    typeinfo: &TupleDescData<'mcx>,
+) -> PgResult<()> {
+    let out = debugStartup(typeinfo);
+    print_to_stdout(&out);
+    Ok(())
+}
+
+/// The dest-router `receiveSlot` slot for `debugtupDR` — C's `debugtup` reached
+/// through the router. Prints one tuple's columns to stdout and returns `true`.
+fn debugtup_dest_receive<'mcx>(
+    mcx: Mcx<'mcx>,
+    _state: u64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // C: debugtup(slot, self). Deform the slot first (mutable borrow), then read
+    // its descriptor (immutable borrow) — the same split printtup uses.
+    let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
+    let typeinfo = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_deref()
+        .expect("debugtup: slot has no tuple descriptor");
+    let (out, ret) = debugtup_emit(mcx, typeinfo, &columns)?;
+    print_to_stdout(&out);
+    Ok(ret)
+}
+
+/// The dest-router `rShutdown` slot for `debugtupDR` — C's `donothingCleanup`.
+fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
+    Ok(())
+}
+
+/// Install this crate's inward seams (the printtup / debugtup dest-router
+/// constructors and `SetRemoteDestReceiverParams`). Wired into `seams-init`.
 pub fn init_seams() {
     backend_access_common_printtup_seams::printtup_create_dr::set(printtup_create_dr_routed);
+    backend_access_common_printtup_seams::create_debug_dest_receiver::set(
+        create_debug_dest_receiver_routed,
+    );
     backend_tcop_dest_seams::set_remote_dest_receiver_params::set(
         set_remote_dest_receiver_params_routed,
     );
