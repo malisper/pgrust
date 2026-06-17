@@ -716,7 +716,7 @@ std::thread_local! {
 pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<i32> {
     debug_assert!(logtli != 0);
 
-    let (fd, path) = XLogFileInitInternal(logsegno, logtli)?;
+    let (fd, path, _added) = XLogFileInitInternal(logsegno, logtli)?;
     if fd >= 0 {
         return Ok(fd);
     }
@@ -734,9 +734,15 @@ pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<i32> {
 }
 
 /// `XLogFileInitInternal(logsegno, logtli, *added, path)` (xlog.c:3211) —
-/// returns `(fd, path)`. `fd >= 0` means an existing segment was opened; `-1`
-/// means the segment was (pre-)created and the caller should open `path`.
-fn XLogFileInitInternal(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<(i32, std::string::String)> {
+/// returns `(fd, path, added)`. `fd >= 0` means an existing segment was opened;
+/// `-1` means the segment was (pre-)created and the caller should open `path`.
+/// `added` mirrors the C `*added` out-param: true when this call raised the
+/// extant-segment count (consumed by `PreallocXlogFiles` for
+/// `CheckpointStats.ckpt_segs_added`).
+pub(crate) fn XLogFileInitInternal(
+    logsegno: XLogSegNo,
+    logtli: TimeLineID,
+) -> PgResult<(i32, std::string::String, bool)> {
     debug_assert!(logtli != 0);
     let seg = wal_segment_size();
     let path = XLogFilePath(logtli, logsegno, seg);
@@ -745,7 +751,8 @@ fn XLogFileInitInternal(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<(i3
     let open_existing =
         O_RDWR | PG_BINARY | O_CLOEXEC | get_sync_bit(wal_sync_method());
     match fd::basic_open_file_flags::call(&path, open_existing) {
-        Ok(fd) => return Ok((fd, path)),
+        // *added = false (set above implicitly): an existent file was reused.
+        Ok(fd) => return Ok((fd, path, false)),
         Err(e) => {
             if e != ENOENT {
                 return Err(PgError::error(std::format!(
@@ -821,7 +828,45 @@ fn XLogFileInitInternal(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<(i3
         fd::unlink_file::call(&tmppath);
     }
 
-    Ok((-1, path))
+    Ok((-1, path, added))
+}
+
+/// `PreallocXlogFiles(endptr, tli)` (xlog.c:3710) — preallocate log files beyond
+/// the specified log endpoint. New segments are added to the [`CheckpointStats`]
+/// `ckpt_segs_added` counter. Caller-supplied `stats` mirrors the C file-static
+/// `CheckpointStats` global. `Err` is the `XLogFileInitInternal` ereport(ERROR)
+/// (a full filesystem etc.) — see the C comment block at xlog.c:3690.
+pub(crate) fn PreallocXlogFiles(
+    endptr: XLogRecPtr,
+    tli: TimeLineID,
+    stats: &mut crate::checkpoint::CheckpointStats,
+) -> PgResult<()> {
+    // if (!XLogCtl->InstallXLogFileSegmentActive) return; — unlocked check.
+    let ctl = xlog_ctl();
+    let active = if ctl.is_null() {
+        false
+    } else {
+        // SAFETY: live shmem region; the C does this read unlocked too.
+        unsafe { (*ctl).InstallXLogFileSegmentActive }
+    };
+    if !active {
+        return Ok(());
+    }
+
+    let seg = wal_segment_size();
+    let mut log_seg_no = XLByteToPrevSeg(endptr, seg);
+    let offset = XLogSegmentOffset(endptr.wrapping_sub(1), seg);
+    if offset >= (0.75 * seg as f64) as u32 {
+        log_seg_no += 1;
+        let (lf, _path, added) = XLogFileInitInternal(log_seg_no, tli)?;
+        if lf >= 0 {
+            close_bare_fd(lf);
+        }
+        if added {
+            stats.ckpt_segs_added += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Close a bare kernel fd (the `close(fd)` for a `BasicOpenFile` result that is

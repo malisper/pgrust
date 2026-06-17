@@ -456,7 +456,7 @@ pub fn StartupXLOG() -> PgResult<()> {
     }
 
     // Preallocate additional log files, if wanted.
-    crate::checkpoint::prealloc_xlog_files(end_of_log, new_tli);
+    crate::checkpoint::prealloc_xlog_files(end_of_log, new_tli)?;
 
     // Okay, we're officially UP. (InRecovery = false in the owner.)
 

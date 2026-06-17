@@ -49,6 +49,10 @@ pub struct CheckpointStats {
     pub ckpt_sync_t: TimestampTz,
     pub ckpt_sync_end_t: TimestampTz,
     pub ckpt_end_t: TimestampTz,
+    /// `ckpt_segs_added` — # of new xlog segments created (incremented by
+    /// `PreallocXlogFiles`). The other C `CheckpointStatsData` counters
+    /// (`ckpt_bufs_written`, `ckpt_segs_removed`, …) are not yet modeled.
+    pub ckpt_segs_added: i32,
 }
 
 /// The checkpoint process's owned file-scope state (xlog.c file-scope globals
@@ -311,7 +315,7 @@ pub fn CreateCheckPoint(st: &mut CheckpointState, flags: i32) -> PgResult<bool> 
     ext::RemoveOldXlogFiles(log_seg_no, st.RedoRecPtr, recptr, checkPoint.ThisTimeLineID);
 
     if !shutdown {
-        ext::PreallocXlogFiles(recptr, checkPoint.ThisTimeLineID);
+        crate::write::PreallocXlogFiles(recptr, checkPoint.ThisTimeLineID, &mut st.stats)?;
     }
 
     if !ext::RecoveryInProgress() {
@@ -432,7 +436,7 @@ pub fn CreateRestartPoint(st: &mut CheckpointState, flags: i32) -> PgResult<bool
     }
     ext::RemoveOldXlogFiles(log_seg_no, st.RedoRecPtr, endptr, replay_tli);
 
-    ext::PreallocXlogFiles(endptr, replay_tli);
+    crate::write::PreallocXlogFiles(endptr, replay_tli, &mut st.stats)?;
 
     if st.config.EnableHotStandby {
         ext::TruncateSUBTRANS(ext::GetOldestTransactionIdConsideredRunning());
@@ -450,12 +454,14 @@ pub fn CreateRestartPoint(st: &mut CheckpointState, flags: i32) -> PgResult<bool
 // Local helpers mirroring the inline file-scope macros / setters.
 // ===========================================================================
 
-/// `PreallocXlogFiles(endptr, tli)` (xlog.c) — the WAL-startup driver
-/// (`StartupXLOG`, xlog.c:6094) preallocates additional log files. The body is a
-/// still-deferred checkpoint-deps leg (`ext::PreallocXlogFiles`); reached here
-/// only post-recovery (after the unported `StartupReorderBuffer` wall).
-pub(crate) fn prealloc_xlog_files(endptr: XLogRecPtr, tli: TimeLineID) {
-    ext::PreallocXlogFiles(endptr, tli);
+/// `PreallocXlogFiles(EndOfLog, newTLI)` (xlog.c:6133) — the WAL-startup driver
+/// (`StartupXLOG`) preallocates additional log files past the end of WAL. In C
+/// this updates the file-static `CheckpointStats.ckpt_segs_added`; at this point
+/// in startup the global stats are scratch (reset by the next
+/// `LogCheckpointStart`), so we pass a throwaway counter here.
+pub(crate) fn prealloc_xlog_files(endptr: XLogRecPtr, tli: TimeLineID) -> PgResult<()> {
+    let mut stats = CheckpointStats::default();
+    crate::write::PreallocXlogFiles(endptr, tli, &mut stats)
 }
 
 /// `LocalSetXLogInsertAllowed()` (xlog.c) — set `LocalXLogInsertAllowed = 1`,
@@ -560,7 +566,6 @@ mod ext {
         pub fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: types_core::XLogSegNo) -> types_core::XLogSegNo;
         pub fn InvalidateObsoleteReplicationSlots(cause: i32, oldest_seg_no: types_core::XLogSegNo) -> bool;
         pub fn RemoveOldXlogFiles(segno: types_core::XLogSegNo, lastredoptr: XLogRecPtr, endptr: XLogRecPtr, insert_tli: TimeLineID);
-        pub fn PreallocXlogFiles(endptr: XLogRecPtr, tli: TimeLineID);
         pub fn TruncateSUBTRANS(oldest_xact: TransactionId);
         pub fn GetOldestTransactionIdConsideredRunning() -> TransactionId;
         pub fn CheckPointGutsCallbacks(checkpoint_redo: XLogRecPtr, flags: i32);
