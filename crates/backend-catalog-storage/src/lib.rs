@@ -1272,4 +1272,18 @@ pub fn init_seams() {
     storage_seam::relation_preserve_storage::set(RelationPreserveStorage);
     storage_seam::relation_set_new_filelocator_storage::set(relation_set_new_filelocator_storage);
     storage_seam::smgr_create_init_fork_and_log::set(smgr_create_init_fork_and_log);
+
+    // `int wal_skip_threshold = 2048;` (storage.c). Plain backend-local GUC int
+    // read directly from its variable at runtime (RelationNeedsWAL/
+    // smgrDoPendingSyncs compare the relation size in KB against
+    // wal_skip_threshold); it is NOT sourced from the ControlFile. The GUC
+    // engine seeds it from boot_val and drives reads/writes through these
+    // accessors backed by the owner-local storage above.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::wal_skip_threshold.install(GucVarAccessors {
+            get: wal_skip_threshold,
+            set: set_wal_skip_threshold,
+        });
+    }
 }
