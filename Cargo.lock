@@ -14104,6 +14104,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-worker"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-launcher",
+ "backend-replication-logical-launcher-seams",
+ "backend-replication-logical-worker-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-logical-worker-seams"
 version = "0.0.0"
 dependencies = [
@@ -21790,6 +21803,7 @@ dependencies = [
  "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
+ "backend-replication-logical-worker",
  "backend-replication-repl-scanner",
  "backend-replication-slot",
  "backend-replication-syncrep",

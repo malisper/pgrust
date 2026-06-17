@@ -333,6 +333,7 @@ pub fn init_all() {
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_decode::init_seams();
     backend_replication_logical_launcher::init_seams();
+    backend_replication_logical_worker::init_seams();
     backend_replication_logical_logical::init_seams();
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();

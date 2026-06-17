@@ -1,0 +1,24 @@
+[package]
+name = "backend-replication-logical-worker"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_replication_logical_worker"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+
+# Inward seams this crate owns and installs.
+backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }
+
+# Outward owner seam crates.
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+
+# Real launcher API (find/wakeup live here).
+backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
+backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }

@@ -349,4 +349,19 @@ pub fn install() {
     // --- check / assign hooks for `wal_consistency_checking` ---------------
     hooks::check_wal_consistency_checking.install(check_wal_consistency_checking);
     hooks::assign_wal_consistency_checking.install(assign_wal_consistency_checking);
+
+    // --- show hook for `in_hot_standby` (xlog.c:4884) ----------------------
+    hooks::show_in_hot_standby.install(show_in_hot_standby);
+}
+
+/// `show_in_hot_standby(void)` (xlog.c:4884) — GUC show_hook for
+/// `in_hot_standby`. Displays the actual state from shared memory so the GUC
+/// reports up-to-date state if examined intra-query: `RecoveryInProgress() ?
+/// "on" : "off"`.
+fn show_in_hot_standby() -> std::string::String {
+    if crate::shmem::RecoveryInProgress() {
+        "on".into()
+    } else {
+        "off".into()
+    }
 }

@@ -335,6 +335,7 @@ backend-replication-logical-applyparallelworker = { path = "../backend-replicati
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
 backend-replication-logical-decode = { path = "../backend-replication-logical-decode" }
 backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
+backend-replication-logical-worker = { path = "../backend-replication-logical-worker" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
