@@ -36,6 +36,7 @@
 extern crate alloc;
 
 pub mod entry_ref;
+pub mod guc;
 pub mod kind_info;
 pub mod local;
 pub mod pgstat_core;

@@ -73,4 +73,23 @@ pub fn install_seams() {
     // restore-on-clean-shutdown / discard-on-crash (StartupXLOG).
     pgstat_seam::pgstat_restore_stats::set(pgcore::pgstat_restore_stats);
     pgstat_seam::pgstat_discard_stats::set(pgcore::pgstat_discard_stats);
+
+    // ---- pgstat.c GUC variable backing (conf->variable accessors) ----
+    //
+    // `bool pgstat_track_counts` and `int pgstat_fetch_consistency` are plain
+    // process-global GUC variables declared in pgstat.c, read directly from the
+    // GUC slot (not the control file). Install the get/set accessors over this
+    // crate's `thread_local` backing storage so the GUC engine's `.read()` /
+    // `.write()` resolve to it.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::pgstat_track_counts.install(GucVarAccessors {
+            get: crate::guc::track_counts,
+            set: crate::guc::set_track_counts,
+        });
+        vars::pgstat_fetch_consistency.install(GucVarAccessors {
+            get: crate::guc::fetch_consistency,
+            set: crate::guc::set_fetch_consistency,
+        });
+    }
 }
