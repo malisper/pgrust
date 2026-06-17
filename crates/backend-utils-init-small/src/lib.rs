@@ -248,6 +248,13 @@ pub fn init_seams() {
         get: globals::hash_mem_multiplier,
         set: globals::set_hash_mem_multiplier,
     });
+    // `int MaxConnections` (globals.c) — the `max_connections` GUC's
+    // `conf->variable`. Read by xlog's control-file consistency check
+    // (control_funcs.c) at end-of-recovery, among others.
+    vars::MaxConnections.install(GucVarAccessors {
+        get: globals::MaxConnections,
+        set: globals::SetMaxConnections,
+    });
     vars::max_worker_processes.install(GucVarAccessors {
         get: globals::max_worker_processes,
         set: globals::set_max_worker_processes,
