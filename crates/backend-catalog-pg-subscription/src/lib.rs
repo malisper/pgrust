@@ -50,6 +50,7 @@ use backend_catalog_indexing::keystone::{
 
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table_seams as table_seams;
+use backend_access_transam_xact_seams as xact_seams;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
 use backend_utils_adt_arrayfuncs_seams as array_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
@@ -62,6 +63,11 @@ use types_cache::SysCacheKey;
 use types_datum::Datum as KeyDatum;
 use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_syscache::{SUBSCRIPTIONOID, SUBSCRIPTIONRELMAP};
+
+// The launcher's trimmed `Subscription` summary (`replication/launcher.c`'s
+// `get_subscription_list` local struct), distinct from the full
+// `types_catalog::pg_subscription::Subscription` re-exported below.
+use types_replication_launcher::Subscription as LauncherSubscription;
 
 pub use types_catalog::pg_subscription::{Subscription, SubscriptionRelState};
 
@@ -168,6 +174,77 @@ fn textarray_to_stringlist<'mcx>(
     for s in elems.iter() {
         res.push(PgString::from_str_in(s.as_str(), mcx)?);
     }
+    Ok(res)
+}
+
+/* ==========================================================================
+ * get_subscription_list (launcher.c) — the logical-replication launcher's
+ * private full scan of pg_subscription. Lives here (not launcher.c) because it
+ * is a catalog/heapam/xact read; the launcher only consumes the resulting list.
+ * ========================================================================== */
+
+/// `get_subscription_list(void)` (launcher.c): inside a fresh transaction, do a
+/// full sequential catalog scan of `pg_subscription` and build the list of
+/// launcher-relevant [`LauncherSubscription`] summaries (`oid`, `subdbid`,
+/// `subowner`, `subenabled`, `pstrdup(NameStr(subname))`). On a fresh database
+/// with no subscriptions this returns the empty list, which is what lets the
+/// launcher idle on its latch.
+fn get_subscription_list<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PgVec<'mcx, LauncherSubscription>> {
+    // This is the context that we will allocate our output data in. In C the
+    // caller's CurrentMemoryContext is the per-cycle sublist context; here it
+    // is the `mcx` the seam was handed. The transaction below runs in its own
+    // (transaction) context, and the list elements are owned (`String`), so
+    // there is no leak across the StartTransaction/CommitTransaction boundary.
+    let mut res: PgVec<'mcx, LauncherSubscription> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+    // Start a transaction so we can access pg_subscription.
+    xact_seams::start_transaction_command::call()?;
+
+    // rel = table_open(SubscriptionRelationId, AccessShareLock);
+    let rel = table_seams::table_open::call(mcx, cat::SubscriptionRelationId, AccessShareLock)?;
+
+    // scan = table_beginscan_catalog(rel, 0, NULL); — a keyless sequential
+    // catalog scan (the systable_beginscan analog with index_ok = false, nkeys
+    // = 0), driven with heap_getnext / ForwardScanDirection.
+    let keys: [ScanKeyData<'_>; 0] = [];
+    let mut scan = genam_seams::systable_beginscan::call(&rel, 0, false, None, &keys)?;
+
+    let desc = rel.rd_att_clone_in(mcx)?;
+    // while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
+    while let Some(tup) = genam_seams::systable_getnext::call(mcx, scan.desc_mut())? {
+        // subform = (Form_pg_subscription) GETSTRUCT(tup);
+        let cols = heap_deform_tuple(mcx, &tup.tuple, &desc, &tup.data)?;
+        let col = |attno: i32| &cols[(attno - 1) as usize];
+
+        // sub = palloc0(sizeof(Subscription));
+        // sub->oid = subform->oid; sub->dbid = subform->subdbid;
+        // sub->owner = subform->subowner; sub->enabled = subform->subenabled;
+        // sub->name = pstrdup(NameStr(subform->subname));
+        // (We don't fill fields we are not interested in.)
+        let name = name_to_string(mcx, col(cat::Anum_pg_subscription_subname))?;
+        let sub = LauncherSubscription {
+            oid: col(cat::Anum_pg_subscription_oid).0.as_oid(),
+            dbid: col(cat::Anum_pg_subscription_subdbid).0.as_oid(),
+            owner: col(cat::Anum_pg_subscription_subowner).0.as_oid(),
+            enabled: col(cat::Anum_pg_subscription_subenabled).0.as_bool(),
+            name: alloc::string::String::from(name.as_str()),
+        };
+
+        // res = lappend(res, sub);
+        res.push(sub);
+    }
+
+    // table_endscan(scan);
+    scan.end()?;
+    // table_close(rel, AccessShareLock);
+    rel.close(AccessShareLock)?;
+
+    // CommitTransactionCommand();
+    xact_seams::commit_transaction_command::call()?;
+
+    res.shrink_to_fit();
     Ok(res)
 }
 
@@ -790,6 +867,7 @@ pub fn init_seams() {
     use backend_catalog_pg_subscription_seams as s;
 
     s::get_subscription::set(GetSubscription);
+    s::get_subscription_list::set(get_subscription_list);
     s::count_db_subscriptions::set(|dbid| with_scratch(|mcx| CountDBSubscriptions(mcx, dbid)));
     s::disable_subscription::set(|subid| with_scratch(|mcx| DisableSubscription(mcx, subid)));
     s::add_subscription_rel_state::set(|subid, relid, state, sublsn, retain_lock| {

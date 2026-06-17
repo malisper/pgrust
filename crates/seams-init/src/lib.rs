@@ -1894,12 +1894,15 @@ mod recurrence_guard {
         ("backend_commands_vacuum", "vacuum_active_nworkers_sub"),
         ("backend_commands_vacuum", "vacuum_shared_cost_balance_read"),
 
-        // DESIGN_DEBT (TD-SUBSCRIPTION-UNPORTED): pg_subscription.c's
-        // GetSubscriptionList / CheckSubscriptionRelkind are not ported (the
-        // logical-replication launcher/relation callers seam-and-panic). No
-        // provider body in backend-catalog-pg-subscription. DELETE when ported.
+        // DESIGN_DEBT (TD-SUBSCRIPTION-CHECKRELKIND): CheckSubscriptionRelkind
+        // is declared here but actually lives in executor/execReplication.c
+        // (and is called from worker.c / relation.c / subscriptioncmds.c), not
+        // pg_subscription.c. Its faithful owner is the (unported) execReplication
+        // unit, so the backend-catalog-pg-subscription owner installs only the
+        // pg_subscription.c surface. get_subscription_list (launcher.c) IS now
+        // ported + installed by backend-catalog-pg-subscription. DELETE this
+        // entry when execReplication lands.
         ("backend_catalog_pg_subscription", "check_subscription_relkind"),
-        ("backend_catalog_pg_subscription", "get_subscription_list"),
 
         // DESIGN_DEBT (TD-BE-TLS-VTABLE-FLOOR): be-secure.c's TLS peer-cert
         // accessors (be_tls_get_peer_{subject,issuer}_name / _serial) dispatch
