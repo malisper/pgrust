@@ -30,4 +30,5 @@ backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

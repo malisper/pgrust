@@ -91,6 +91,31 @@ pub fn init_seams() {
         table_relation_set_new_filelocator,
     );
 
+    // GUC variable accessors over this unit's `thread_local` backing store —
+    // C's `conf->variable` pointer (`&synchronize_seqscans` /
+    // `&default_table_access_method` in guc_tables.c). Both are plain
+    // PGC_USERSET GUC-slot variables (read from the GUC machinery, not the
+    // ControlFile); the guc.c assign path writes them through `set`.
+    backend_utils_misc_guc_tables::vars::synchronize_seqscans.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: synchronize_seqscans,
+            set: set_synchronize_seqscans,
+        },
+    );
+    backend_utils_misc_guc_tables::vars::default_table_access_method.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            // `char *default_table_access_method` boots to "heap" and GUC
+            // string storage never returns to NULL afterwards
+            // (guc_tables.h), so `get` always yields `Some`.
+            get: || Some(default_table_access_method()),
+            set: |v| {
+                set_default_table_access_method(
+                    v.as_deref().unwrap_or(DEFAULT_TABLE_ACCESS_METHOD),
+                )
+            },
+        },
+    );
+
     // ANALYZE-sampling scan dispatch (acquire_sample_rows in commands/analyze.c).
     backend_access_table_tableam_seams::table_beginscan_analyze::set(table_beginscan_analyze);
     backend_access_table_tableam_seams::table_scan_analyze_next_block::set(
