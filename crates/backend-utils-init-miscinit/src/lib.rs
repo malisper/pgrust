@@ -849,6 +849,7 @@ pub fn init_seams() {
     s::process_shared_preload_libraries_in_progress::set(
         process_shared_preload_libraries_in_progress,
     );
+    s::process_shared_preload_libraries_done::set(process_shared_preload_libraries_done);
     s::is_bootstrap_processing_mode::set(IsBootstrapProcessingMode);
     s::is_init_processing_mode::set(IsInitProcessingMode);
     s::is_normal_processing_mode::set(IsNormalProcessingMode);

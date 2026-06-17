@@ -21,7 +21,10 @@ extern crate std;
 
 use core::cell::Cell;
 
-use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+use backend_utils_misc_guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+use types_error::PgResult;
+use types_guc::GucSource;
+use types_wal::rmgr::RM_N_IDS;
 
 std::thread_local! {
     /// `bool fullPageWrites = true` (xlog.c). `full_page_writes` GUC.
@@ -76,6 +79,174 @@ std::thread_local! {
     /// per-rmgr bool array is built by `assign_wal_consistency_checking`).
     static WAL_CONSISTENCY_CHECKING_STRING: std::cell::RefCell<Option<std::string::String>> =
         std::cell::RefCell::new(Some(std::string::String::new()));
+
+    /// `bool *wal_consistency_checking = NULL` (xlog.c:151) — the per-rmgr
+    /// boolean array, sized `RM_MAX_ID + 1` (== `RM_N_IDS`). NULL until
+    /// `assign_wal_consistency_checking` stores the array parsed by the check
+    /// hook. `None` mirrors the NULL pointer.
+    static WAL_CONSISTENCY_CHECKING: std::cell::RefCell<Option<[bool; RM_N_IDS]>> =
+        std::cell::RefCell::new(None);
+
+    /// `static bool check_wal_consistency_checking_deferred = false` (xlog.c:191).
+    static CHECK_WAL_CONSISTENCY_CHECKING_DEFERRED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `wal_consistency_checking[rmid]` (xlog.c) — the per-rmgr WAL-consistency
+/// flag, read by `XLogRecordAssemble` (xloginsert.c). C reads through the
+/// `bool *wal_consistency_checking` pointer; if the assign hook has not run
+/// (pointer still NULL) the array is treated as all-false (the boot default,
+/// before any `wal_consistency_checking` GUC is assigned).
+pub fn wal_consistency_checking(rmid: types_core::RmgrId) -> bool {
+    WAL_CONSISTENCY_CHECKING.with(|c| match &*c.borrow() {
+        Some(arr) => arr[rmid as usize],
+        None => false,
+    })
+}
+
+/// GUC check_hook for `wal_consistency_checking` (xlog.c:4731
+/// `check_wal_consistency_checking`). Parses the comma-list of resource-manager
+/// names into a `[bool; RM_N_IDS]` carried as the assign hook's `extra`. During
+/// startup (before `process_shared_preload_libraries_done`) an unrecognized
+/// token is not an error — it might be a not-yet-loaded custom rmgr — so the
+/// check is deferred to `InitializeWalConsistencyChecking`.
+fn check_wal_consistency_checking(
+    newval: &mut Option<std::string::String>,
+    extra: &mut Option<GucHookExtra>,
+    _source: GucSource,
+) -> PgResult<bool> {
+    use backend_access_transam_rmgr::{GetRmgr, RmgrIdExists};
+    use backend_utils_init_miscinit_seams as misc;
+    use port_pgstrcasecmp::pg_strcasecmp;
+
+    // C:4737-4740 — the new array, zero-initialized.
+    let mut newwalconsistency = [false; RM_N_IDS];
+
+    // C:4743 — a modifiable copy of the string. `*newval` is never NULL here
+    // (boot_val is ""); treat NULL as "".
+    let raw = newval.clone().unwrap_or_default();
+
+    // C:4746 — parse into a list of identifiers. The parse memory is transient
+    // (C: CurrentMemoryContext); use a throwaway context.
+    let parse_cx = mcx::MemoryContext::new("check_wal_consistency_checking");
+    let elemlist = match backend_utils_adt_varlena::split_format::split_identifier_string(
+        parse_cx.mcx(),
+        &raw,
+        ',',
+    )? {
+        Some(list) => list,
+        None => {
+            // C:4748-4752 — syntax error in list.
+            backend_utils_misc_guc::GUC_check_errdetail("List syntax is invalid.");
+            return Ok(false);
+        }
+    };
+
+    // C:4755-4802 — for each token.
+    for tok in elemlist.iter() {
+        let tok = tok.as_str();
+
+        // C:4761 — "all".
+        if pg_strcasecmp(tok.as_bytes(), b"all") == 0 {
+            for rmid in 0..RM_N_IDS {
+                if RmgrIdExists(rmid as types_core::RmgrId)
+                    && GetRmgr(rmid as types_core::RmgrId)?.rm_mask.is_some()
+                {
+                    newwalconsistency[rmid] = true;
+                }
+            }
+        } else {
+            // C:4770-4781 — match a known resource manager by name.
+            let mut found = false;
+            for rmid in 0..RM_N_IDS {
+                if RmgrIdExists(rmid as types_core::RmgrId) {
+                    let rm = GetRmgr(rmid as types_core::RmgrId)?;
+                    if rm.rm_mask.is_some()
+                        && rm
+                            .rm_name
+                            .is_some_and(|name| pg_strcasecmp(tok.as_bytes(), name.as_bytes()) == 0)
+                    {
+                        newwalconsistency[rmid] = true;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                // C:4784-4799 — during startup it might be a not-yet-loaded
+                // custom rmgr; defer. Otherwise it's an error.
+                if !misc::process_shared_preload_libraries_done::call() {
+                    CHECK_WAL_CONSISTENCY_CHECKING_DEFERRED.with(|c| c.set(true));
+                } else {
+                    backend_utils_misc_guc::GUC_check_errdetail(&std::format!(
+                        "Unrecognized key word: \"{tok}\"."
+                    ));
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    // C:4807-4812 — hand the parsed array to the assign hook as `extra`.
+    *extra = Some(std::boxed::Box::new(newwalconsistency));
+    Ok(true)
+}
+
+/// GUC assign_hook for `wal_consistency_checking` (xlog.c:4818
+/// `assign_wal_consistency_checking`): store the parsed array (C:
+/// `wal_consistency_checking = extra;`).
+fn assign_wal_consistency_checking(
+    _newval: Option<&str>,
+    extra: Option<&GucHookExtra>,
+) {
+    let arr = extra.and_then(|e| e.downcast_ref::<[bool; RM_N_IDS]>().copied());
+    WAL_CONSISTENCY_CHECKING.with(|c| *c.borrow_mut() = arr);
+}
+
+/// `InitializeWalConsistencyChecking()` (xlog.c:4846): run after custom
+/// resource managers are loaded. If the check was deferred, re-run the GUC now
+/// that `RmgrTable` is fully populated, then clear the deferred flag.
+pub fn InitializeWalConsistencyChecking() {
+    // C:4848 — Assert(process_shared_preload_libraries_done).
+    debug_assert!(
+        backend_utils_init_miscinit_seams::process_shared_preload_libraries_done::call()
+    );
+
+    if CHECK_WAL_CONSISTENCY_CHECKING_DEFERRED.with(Cell::get) {
+        // C:4854 — find_option("wal_consistency_checking", ...); read its
+        // scontext / source / srole for the reapply.
+        let (scontext, source, srole) =
+            backend_utils_misc_guc::live::with_store(|reg| {
+                let var = reg.find_option("wal_consistency_checking").unwrap_or_else(|| {
+                    panic!("InitializeWalConsistencyChecking: unrecognized configuration parameter \"wal_consistency_checking\"")
+                });
+                let gen = var.gen();
+                (gen.scontext, gen.source, gen.srole)
+            })
+            .expect("InitializeWalConsistencyChecking called before the global GUC store was seeded");
+
+        // C:4856 — clear before re-running (the re-run must not defer again).
+        CHECK_WAL_CONSISTENCY_CHECKING_DEFERRED.with(|c| c.set(false));
+
+        // C:4858-4861 — set_config_option_ext with the var's own scontext /
+        // source / srole, the current `wal_consistency_checking_string` value,
+        // changeVal=true, GUC_ACTION_SET, elevel=ERROR, is_reload=false.
+        let value = WAL_CONSISTENCY_CHECKING_STRING.with(|c| c.borrow().clone());
+        backend_utils_misc_guc::live::set_config_option_global(
+            "wal_consistency_checking",
+            value.as_deref(),
+            scontext,
+            source,
+            srole,
+            backend_utils_misc_guc::GUC_ACTION_SET,
+            true,
+            types_error::ERROR,
+            false,
+        )
+        .expect("InitializeWalConsistencyChecking: set_config_option failed");
+
+        // C:4864 — checking should not be deferred again.
+        debug_assert!(!CHECK_WAL_CONSISTENCY_CHECKING_DEFERRED.with(Cell::get));
+    }
 }
 
 /// Install the xlog.c-owned GUC variable accessors (`conf->variable`) for the
@@ -174,4 +345,8 @@ pub fn install() {
         get: || WAL_CONSISTENCY_CHECKING_STRING.with(|c| c.borrow().clone()),
         set: |v| WAL_CONSISTENCY_CHECKING_STRING.with(|c| *c.borrow_mut() = v),
     });
+
+    // --- check / assign hooks for `wal_consistency_checking` ---------------
+    hooks::check_wal_consistency_checking.install(check_wal_consistency_checking);
+    hooks::assign_wal_consistency_checking.install(assign_wal_consistency_checking);
 }

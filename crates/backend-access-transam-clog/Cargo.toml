@@ -32,4 +32,5 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }

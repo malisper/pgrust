@@ -28,7 +28,7 @@ extern crate std;
 use core::cell::Cell;
 
 use backend_utils_error::{PgError, PgResult};
-use types_core::{pg_time_t, RmgrId, TimeLineID, XLogRecPtr, XLogSegNo};
+use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
 use types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
 use types_wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
 
@@ -117,17 +117,9 @@ pub fn wal_compression() -> i32 {
     vars::wal_compression.read()
 }
 
-/// `wal_consistency_checking[rmid]` (xlog.c) — whether WAL consistency checking
-/// is enabled for `rmid`. The per-rmgr boolean array is built by
-/// `assign_wal_consistency_checking`, which is not yet ported; until it lands
-/// this seam-and-panics rather than silently returning `false` (mirror-pg-and-
-/// panic). Installed into the `wal_consistency_checking` seam.
-pub fn wal_consistency_checking(_rmid: RmgrId) -> bool {
-    panic!(
-        "wal_consistency_checking[rmid]: assign_wal_consistency_checking \
-         (the per-rmgr GUC array builder) is not yet ported"
-    );
-}
+// `wal_consistency_checking[rmid]` (xlog.c) is now REAL in [`crate::guc_vars`]
+// (the per-rmgr bool array built by `assign_wal_consistency_checking`), and is
+// installed into the `wal_consistency_checking` seam from there.
 
 /// `int wal_sync_method` (the `wal_sync_method` GUC).
 #[inline]

@@ -17,6 +17,7 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-core = { path = "../types-core" }
+types-guc = { path = "../types-guc" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }

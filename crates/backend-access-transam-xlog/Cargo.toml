@@ -27,6 +27,11 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-access-transam-rmgr = { path = "../backend-access-transam-rmgr" }
+backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+types-guc = { path = "../types-guc" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }

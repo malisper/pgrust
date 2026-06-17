@@ -44,9 +44,7 @@
 
 use std::sync::Mutex;
 
-use backend_utils_misc_guc_tables::consts::{
-    HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP,
-};
+use backend_utils_misc_guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP};
 use types_core::Size;
 use types_error::{PgError, PgResult, ERROR, FATAL};
 use types_storage::storage::{dsm_handle, PGShmemHeader, PGShmemMagic};
@@ -762,11 +760,56 @@ fn stat(path: &str) -> Result<libc::stat, libc::c_int> {
     }
 }
 
+// ===========================================================================
+// sysv_shmem.c-owned GUC variable storage (the `config_*` entries in
+// guc_tables.c point their `&variable` at these sysv_shmem.c symbols). Each is
+// read by C straight from its GUC slot (`*conf->variable`). Boot defaults
+// mirror the `boot_val` column of each guc_tables.c entry.
+// ===========================================================================
+std::thread_local! {
+    /// `int shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE` (sysv_shmem.c).
+    /// `shared_memory_type` enum GUC; boot_val SHMEM_TYPE_MMAP.
+    static SHARED_MEMORY_TYPE: std::cell::Cell<i32> =
+        const { std::cell::Cell::new(SHMEM_TYPE_MMAP) };
+}
+
+/// `check_huge_page_size(newval, extra, source)` (sysv_shmem.c:578) — GUC
+/// check_hook for `huge_page_size`. On platforms without `MAP_HUGE_*`
+/// (everything but recent Linux, incl. this darwin build) a non-zero value is
+/// rejected.
+fn check_huge_page_size(
+    newval: &mut i32,
+    _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    // !(MAP_HUGE_MASK && MAP_HUGE_SHIFT): not Linux, so reject non-zero.
+    if *newval != 0 {
+        backend_utils_misc_guc_seams::guc_check_errdetail::call(
+            "\"huge_page_size\" must be 0 on this platform.".to_string(),
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Install the inward `PGSharedMemory*` / `GetHugePageSize` seams consumed by
 /// ipci/postmaster/miscinit/shmem.
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
+
     backend_port_sysv_shmem_seams::pg_shared_memory_detach::set(PGSharedMemoryDetach);
     backend_port_sysv_shmem_seams::pg_shared_memory_is_in_use::set(PGSharedMemoryIsInUse);
     backend_port_sysv_shmem_seams::get_huge_page_size::set(GetHugePageSize);
     backend_port_sysv_shmem_seams::pg_shared_memory_create::set(PGSharedMemoryCreate);
+
+    // `shared_memory_type` is the one sysv_shmem.c-owned GUC variable whose
+    // backing store is not provided by guc-tables itself (the preset/computed
+    // `huge_pages` / `huge_pages_status` / `huge_page_size` are installed there).
+    vars::shared_memory_type.install(GucVarAccessors {
+        get: || SHARED_MEMORY_TYPE.with(std::cell::Cell::get),
+        set: |v| SHARED_MEMORY_TYPE.with(|c| c.set(v)),
+    });
+    // `check_huge_page_size` (sysv_shmem.c:578) is the C check_hook for the
+    // `huge_page_size` GUC.
+    hooks::check_huge_page_size.install(check_huge_page_size);
 }

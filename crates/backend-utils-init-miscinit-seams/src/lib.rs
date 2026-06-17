@@ -54,6 +54,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `process_shared_preload_libraries_done` (miscinit.c:1839) — whether the
+    /// `shared_preload_libraries` initialization has finished (custom resource
+    /// managers are loaded). A backend-local global read.
+    pub fn process_shared_preload_libraries_done() -> bool
+);
+
+seam_core::seam!(
     /// `IsBootstrapProcessingMode()` (miscadmin.h): `Mode == BootstrapProcessing`.
     /// A plain global read — infallible.
     pub fn is_bootstrap_processing_mode() -> bool

@@ -1074,6 +1074,29 @@ pub fn init_seams() {
     // clean DB_SHUTDOWNED / end-of-recovery path.
     clog_seams::startup_clog::set(StartupCLOG);
     clog_seams::trim_clog::set(TrimCLOG);
+
+    // GUC check_hook for `transaction_buffers` (clog.c check_transaction_buffers).
+    // Fired e.g. by CLOGShmemInit's auto-sizing SetConfigOption. The variable's
+    // backing store + accessors live in backend-utils-init-small (the
+    // `transaction_buffers` global); clog owns only the check hook.
+    fn check_hook(
+        newval: &mut i32,
+        _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+        _source: types_guc::guc::GucSource,
+    ) -> PgResult<bool> {
+        let (ok, detail) = check_transaction_buffers(*newval);
+        if ok {
+            Ok(true)
+        } else {
+            // C sets GUC_check_errdetail and returns false; carry the detail on
+            // Err per the GUC check-hook contract (mirrors subtrans).
+            match detail {
+                Some(d) => Err(types_error::PgError::error(d)),
+                None => Ok(false),
+            }
+        }
+    }
+    backend_utils_misc_guc_tables::hooks::check_transaction_buffers.install(check_hook);
 }
 
 /// `CLOGShmemSize()` wrapper for the `clog_shmem_size` seam (`PgResult<Size>`:

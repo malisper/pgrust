@@ -665,8 +665,6 @@ xlog_driver_deferred! {
 
     /// `GetActiveWalLevelOnStandby()` — the wal_level a standby replays with.
     pub fn GetActiveWalLevelOnStandby() -> WalLevel;
-    /// `InitializeWalConsistencyChecking()` — finalise the deferred GUC.
-    pub fn InitializeWalConsistencyChecking();
 
     // --- BootStrapXLOG + its cross-subsystem in-memory updates ---
     /// `BootStrapXLOG(data_checksum_version)` — create the initial WAL +
@@ -747,6 +745,15 @@ pub fn init_seams() {
     // exists. Real body in [`crate::shmem`].
     backend_tcop_postgres_seams::local_process_control_file::set(shmem::LocalProcessControlFile);
 
+    // InitializeWalConsistencyChecking() (xlog.c:4846) — reapply the
+    // wal_consistency_checking GUC after shared_preload_libraries are loaded
+    // (so custom resource managers are known). Called from
+    // PostgresSingleUserMain. Real body in [`crate::guc_vars`].
+    backend_tcop_postgres_seams::initialize_wal_consistency_checking::set(|| {
+        guc_vars::InitializeWalConsistencyChecking();
+        Ok(())
+    });
+
     // XLogCtl shmem position readers + control-file-backed predicates (xlog.c).
     s::get_redo_rec_ptr::set(shmem::GetRedoRecPtr);
     s::get_xlog_insert_rec_ptr::set(shmem::GetXLogInsertRecPtr);
@@ -772,7 +779,7 @@ pub fn init_seams() {
     s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
     s::get_full_page_write_info::set(driver::GetFullPageWriteInfo);
     s::wal_compression::set(write::wal_compression);
-    s::wal_consistency_checking::set(write::wal_consistency_checking);
+    s::wal_consistency_checking::set(guc_vars::wal_consistency_checking);
     s::proc_last_rec_ptr::set(insert::proc_last_rec_ptr);
     s::xact_last_rec_end::set(insert::xact_last_rec_end);
     s::set_xact_last_rec_end::set(insert::set_xact_last_rec_end);
