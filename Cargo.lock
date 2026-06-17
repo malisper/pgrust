@@ -7495,6 +7495,7 @@ dependencies = [
  "backend-utils-init-miscinit",
  "backend-utils-init-small",
  "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-superuser-seams",
  "mcx",
  "seam-core",

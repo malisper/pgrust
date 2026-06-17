@@ -35,6 +35,7 @@ backend-access-transam-xloginsert = { path = "../backend-access-transam-xloginse
 backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 
 # Owner's own seam crate.

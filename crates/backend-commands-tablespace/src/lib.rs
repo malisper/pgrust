@@ -1734,6 +1734,27 @@ pub fn init_seams() {
     });
     backend_commands_tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
 
+    // --- GUC string/bool variable readers (guc_tables) -----------------------
+    // These three are ordinary GUC-slot variables in C (guc_tables.c declares
+    // them with `&default_tablespace` / `&temp_tablespaces` /
+    // `&allow_in_place_tablespaces` backing pointers — not ControlFile reads),
+    // so each reader returns the live value held in the GUC slot. The two string
+    // GUCs boot to "" and a NULL slot is mapped to "" (C reads `char *` whose
+    // boot_val is the empty string).
+    glob::default_tablespace::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::default_tablespace
+            .read()
+            .unwrap_or_default())
+    });
+    glob::temp_tablespaces::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::temp_tablespaces
+            .read()
+            .unwrap_or_default())
+    });
+    glob::allow_in_place_tablespaces::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::allow_in_place_tablespaces.read())
+    });
+
     // --- ProcessUtility dispatch arms (utility.c tablespace globals) ---------
     backend_tcop_utility_out_seams::create_table_space::set(create_table_space_arm);
     backend_tcop_utility_out_seams::drop_table_space::set(drop_table_space_arm);
