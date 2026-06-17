@@ -623,6 +623,232 @@ fn fc_binary_upgrade_logical_slot_has_caught_up(fcinfo: &mut FunctionCallInfoBas
     }
 }
 
+// ===========================================================================
+// rowtypes.c — record / row-as-value I/O, comparison, image-compare, hash.
+//
+// A composite value crosses the fmgr boundary on the by-reference side channel
+// as a `RefPayload::Composite` — the flat `HeapTupleHeader` Datum image C points
+// a record `Datum` at. `arg_record` reconstructs the [`FormedTuple`] the value
+// cores take; `ret_record` serializes a `FormedTuple` result back onto the lane.
+// ===========================================================================
+
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+
+/// `PG_GETARG_HEAPTUPLEHEADER(i)` → the composite arg's [`FormedTuple`],
+/// reconstructed from its flat `HeapTupleHeader` Datum image on the by-ref lane.
+fn arg_record<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> FormedTuple<'mcx> {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_composite())
+        .expect("rowtypes fn: composite arg missing from by-ref lane");
+    match FormedTuple::from_datum_image(mcx, image) {
+        Ok(t) => t,
+        Err(e) => raise(e),
+    }
+}
+
+/// Set a composite (`record`) result on the by-ref lane as its flat
+/// `HeapTupleHeader` Datum image (`PG_RETURN_HEAPTUPLEHEADER`).
+#[inline]
+fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, t: &FormedTuple<'_>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+    Datum::from_usize(0)
+}
+
+/// Set a `bytea` result (`record_send`) on the by-ref lane. The boundary's
+/// `RefPayload::Varlena` for a result carries the header-less payload; the core
+/// returns the full varlena image, so strip `VARHDRSZ`.
+#[inline]
+fn ret_bytea_image(fcinfo: &mut FunctionCallInfoBaseData, image: &[u8]) -> Datum {
+    let payload = image
+        .get(types_datum::varlena::VARHDRSZ..)
+        .unwrap_or(&[])
+        .to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(payload));
+    Datum::from_usize(0)
+}
+
+#[inline]
+fn ret_i32(v: i32) -> Datum {
+    Datum::from_i32(v)
+}
+#[inline]
+fn ret_i64(v: i64) -> Datum {
+    Datum::from_i64(v)
+}
+
+/// A `(mcx, &FormedTuple, &FormedTuple) -> PgResult<bool>` comparison adapter
+/// (`record_eq`/`ne`/`lt`/`gt`/`le`/`ge` and the `record_image_*` family).
+fn fc_record_cmp_bool(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    core: for<'m> fn(
+        mcx::Mcx<'m>,
+        &FormedTuple<'_>,
+        &FormedTuple<'_>,
+    ) -> types_error::PgResult<bool>,
+) -> Datum {
+    let m = scratch_mcx();
+    let left = arg_record(m.mcx(), fcinfo, 0);
+    let right = arg_record(m.mcx(), fcinfo, 1);
+    match core(m.mcx(), &left, &right) {
+        Ok(b) => ret_bool(b),
+        Err(e) => raise(e),
+    }
+}
+
+/// A `(mcx, &FormedTuple, &FormedTuple) -> PgResult<i32>` comparison adapter
+/// (`btrecordcmp` / `record_cmp`).
+fn fc_record_cmp_i32(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    core: for<'m> fn(
+        mcx::Mcx<'m>,
+        &FormedTuple<'_>,
+        &FormedTuple<'_>,
+    ) -> types_error::PgResult<i32>,
+) -> Datum {
+    let m = scratch_mcx();
+    let left = arg_record(m.mcx(), fcinfo, 0);
+    let right = arg_record(m.mcx(), fcinfo, 1);
+    match core(m.mcx(), &left, &right) {
+        Ok(v) => ret_i32(v),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_record_eq(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_eq)
+}
+fn fc_record_ne(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_ne)
+}
+fn fc_record_lt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_lt)
+}
+fn fc_record_gt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_gt)
+}
+fn fc_record_le(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_le)
+}
+fn fc_record_ge(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_ge)
+}
+fn fc_btrecordcmp(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_i32(f, crate::rowtypes::btrecordcmp)
+}
+
+fn fc_record_image_eq(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_eq)
+}
+fn fc_record_image_ne(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_ne)
+}
+fn fc_record_image_lt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_lt)
+}
+fn fc_record_image_gt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_gt)
+}
+fn fc_record_image_le(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_le)
+}
+fn fc_record_image_ge(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_cmp_bool(f, crate::rowtypes::record_image_ge)
+}
+
+/// `record_larger`/`record_smaller`: `(mcx, FormedTuple, FormedTuple) ->
+/// PgResult<FormedTuple>` (returns one of the inputs as a composite result).
+fn fc_record_larger_smaller(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    core: for<'m> fn(
+        mcx::Mcx<'m>,
+        FormedTuple<'m>,
+        FormedTuple<'m>,
+    ) -> types_error::PgResult<FormedTuple<'m>>,
+) -> Datum {
+    let m = scratch_mcx();
+    let left = arg_record(m.mcx(), fcinfo, 0);
+    let right = arg_record(m.mcx(), fcinfo, 1);
+    let r = core(m.mcx(), left, right);
+    match r {
+        Ok(t) => ret_record(fcinfo, &t),
+        Err(e) => raise(e),
+    }
+}
+fn fc_record_larger(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_larger_smaller(f, crate::rowtypes::record_larger)
+}
+fn fc_record_smaller(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_record_larger_smaller(f, crate::rowtypes::record_smaller)
+}
+
+/// `hash_record(record) -> int4`.
+fn fc_hash_record(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let rec = arg_record(m.mcx(), fcinfo, 0);
+    match crate::rowtypes::hash_record(m.mcx(), &rec) {
+        Ok(h) => ret_i32(h as i32),
+        Err(e) => raise(e),
+    }
+}
+
+/// `hash_record_extended(record, int8) -> int8`.
+fn fc_hash_record_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let seed = arg_i64(fcinfo, 1) as u64;
+    match crate::rowtypes::hash_record_extended(m.mcx(), &rec, seed) {
+        Ok(h) => ret_i64(h as i64),
+        Err(e) => raise(e),
+    }
+}
+
+/// `record_in(cstring, oid, int4) -> record`. The soft-error context is `None`
+/// (a hard parse — `fcinfo->context` soft folding is not modeled on the frame,
+/// matching every other adt `_in`). A `None` (soft-error) result is NULL.
+fn fc_record_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0);
+    let tupioparam = arg_oid(fcinfo, 1);
+    let tup_typmod = arg_i32(fcinfo, 2);
+    let m = scratch_mcx();
+    let r = crate::rowtypes::record_in(m.mcx(), Some(s), tupioparam, tup_typmod, None);
+    match r {
+        Ok(Some(t)) => ret_record(fcinfo, &t),
+        Ok(None) => ret_null(fcinfo),
+        Err(e) => raise(e),
+    }
+}
+
+/// `record_out(record) -> cstring`.
+fn fc_record_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let r = crate::rowtypes::record_out(m.mcx(), &rec);
+    match r {
+        Ok(bytes) => {
+            let s = String::from_utf8(bytes.as_slice().to_vec())
+                .expect("record_out: result not valid UTF-8");
+            ret_cstring(fcinfo, s)
+        }
+        Err(e) => raise(e),
+    }
+}
+
+/// `record_send(record) -> bytea`.
+fn fc_record_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let r = crate::rowtypes::record_send(m.mcx(), &rec);
+    match r {
+        Ok(bytes) => ret_bytea_image(fcinfo, bytes.as_slice()),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -737,5 +963,212 @@ pub fn register_misc2_builtins() {
         builtin(4083, "binary_upgrade_set_record_init_privs", 1, false, false, fc_binary_upgrade_set_record_init_privs),
         builtin(4101, "binary_upgrade_set_missing_value", 3, false, false, fc_binary_upgrade_set_missing_value),
         builtin(6312, "binary_upgrade_logical_slot_has_caught_up", 1, false, false, fc_binary_upgrade_logical_slot_has_caught_up),
+        // ---- rowtypes.c: record I/O (record_recv deferred — `internal`
+        //      StringInfo arg0 is not on the fmgr frame) ----
+        builtin(2290, "record_in", 3, true, false, fc_record_in),
+        builtin(2291, "record_out", 1, true, false, fc_record_out),
+        builtin(2403, "record_send", 1, true, false, fc_record_send),
+        // ---- rowtypes.c: record comparison / btree support ----
+        builtin(2981, "record_eq", 2, true, false, fc_record_eq),
+        builtin(2982, "record_ne", 2, true, false, fc_record_ne),
+        builtin(2983, "record_lt", 2, true, false, fc_record_lt),
+        builtin(2984, "record_gt", 2, true, false, fc_record_gt),
+        builtin(2985, "record_le", 2, true, false, fc_record_le),
+        builtin(2986, "record_ge", 2, true, false, fc_record_ge),
+        builtin(2987, "btrecordcmp", 2, true, false, fc_btrecordcmp),
+        // ---- rowtypes.c: record image comparison ----
+        builtin(3181, "record_image_eq", 2, true, false, fc_record_image_eq),
+        builtin(3182, "record_image_ne", 2, true, false, fc_record_image_ne),
+        builtin(3183, "record_image_lt", 2, true, false, fc_record_image_lt),
+        builtin(3184, "record_image_gt", 2, true, false, fc_record_image_gt),
+        builtin(3185, "record_image_le", 2, true, false, fc_record_image_le),
+        builtin(3186, "record_image_ge", 2, true, false, fc_record_image_ge),
+        // ---- rowtypes.c: record hashing ----
+        builtin(6192, "hash_record", 1, true, false, fc_hash_record),
+        builtin(6193, "hash_record_extended", 2, true, false, fc_hash_record_extended),
+        // ---- rowtypes.c: record min/max aggregate transition helpers ----
+        builtin(6375, "record_larger", 2, true, false, fc_record_larger),
+        builtin(6376, "record_smaller", 2, true, false, fc_record_smaller),
     ]);
+}
+
+// ===========================================================================
+// Tests — drive the record by-ref builtins through the fmgr registry by OID,
+// proving a composite `Datum` genuinely crosses the boundary via
+// `RefPayload::Composite` (serialized with `FormedTuple::to_datum_image`,
+// reconstructed with `from_datum_image` in the bridge / `arg_record`).
+// ===========================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
+    use backend_access_common_heaptuple::heap_form_tuple;
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    use types_tuple::heaptuple::{
+        CompactAttribute, FormData_pg_attribute, TupleDescData,
+    };
+
+    /// A synthetic one-column `int4` composite type for the tests.
+    const TEST_ROWTYPE_OID: u32 = 100_000;
+
+    /// Build a fresh one-column `int4` `TupleDescData` in `mcx`. This is the
+    /// descriptor our installed `lookup_rowtype_tupdesc` seam hands back, so the
+    /// `deform_record` path in the comparison cores finds it.
+    fn int4_tupdesc(mcx: mcx::Mcx<'_>) -> mcx::PgBox<'_, TupleDescData<'_>> {
+        let mut att = FormData_pg_attribute::default();
+        att.atttypid = 23; // INT4OID
+        att.attlen = 4;
+        att.attnum = 1;
+        att.atttypmod = -1;
+        att.attbyval = true;
+        att.attalign = b'i' as i8;
+        att.attstorage = b'p' as i8;
+        att.attcollation = 0;
+
+        let catt = CompactAttribute {
+            attcacheoff: -1,
+            attlen: 4,
+            attbyval: true,
+            attispackable: false,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby: b'i',
+        };
+
+        let mut attrs = mcx::PgVec::new_in(mcx);
+        attrs.push(att);
+        let mut compact = mcx::PgVec::new_in(mcx);
+        compact.push(catt);
+
+        let td = TupleDescData {
+            natts: 1,
+            tdtypeid: TEST_ROWTYPE_OID,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        };
+        mcx::alloc_in(mcx, td).expect("alloc tupdesc")
+    }
+
+    /// Install the seams the comparison cores reach (idempotent across tests):
+    /// `lookup_rowtype_tupdesc` (return our test descriptor) and the by-value
+    /// `datum_image_eq_v` (word equality — the faithful by-value path of
+    /// scalar-datum-core's real impl, which `record_image_eq` calls per column).
+    /// Then register the misc2 builtins.
+    fn setup() {
+        // `std::sync::Once` so the one-shot seams install exactly once even when
+        // the test threads race (the seam `::set` panics on a double install).
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(
+                |mcx, type_id, _typmod| {
+                    assert_eq!(type_id, TEST_ROWTYPE_OID, "test seam: unexpected rowtype");
+                    Ok(int4_tupdesc(mcx))
+                },
+            );
+            backend_utils_adt_datum_seams::datum_image_eq_v::set(|v1, v2, typ_byval, _typ_len| {
+                // The int4 columns under test are by-value: word equality.
+                assert!(typ_byval, "test datum_image_eq_v: only by-value path used");
+                match (v1, v2) {
+                    (CanonDatum::ByVal(a), CanonDatum::ByVal(b)) => Ok(a == b),
+                    _ => panic!("test datum_image_eq_v: by-value attribute deformed as by-reference"),
+                }
+            });
+        });
+        register_misc2_builtins();
+    }
+
+    /// Build the flat `HeapTupleHeader` Datum image of a one-column `int4`
+    /// composite holding `v`, via `heap_form_tuple` + `to_datum_image`.
+    fn int4_record_image(v: i32) -> Vec<u8> {
+        let m = scratch_mcx();
+        let td = int4_tupdesc(m.mcx());
+        let values = [CanonDatum::from_i32(v)];
+        let nulls = [false];
+        let tuple = heap_form_tuple(m.mcx(), &td, &values, &nulls)
+            .expect("heap_form_tuple");
+        tuple.to_datum_image()
+    }
+
+    /// Dispatch a 2-arg record comparison builtin by OID, passing two composite
+    /// images on the by-ref `Composite` lane.
+    fn call_record_cmp2(oid: u32, a: &[u8], b: &[u8]) -> Datum {
+        setup();
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, 2, 0, None, None);
+        fcinfo.args = vec![
+            types_datum::NullableDatum::value(Datum::null()),
+            types_datum::NullableDatum::value(Datum::null()),
+        ];
+        fcinfo.ref_args = vec![
+            Some(RefPayload::Composite(a.to_vec())),
+            Some(RefPayload::Composite(b.to_vec())),
+        ];
+        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
+        (entry.func.unwrap())(&mut fcinfo)
+    }
+
+    #[test]
+    fn record_image_eq_through_registry() {
+        let five = int4_record_image(5);
+        let seven = int4_record_image(7);
+        // record_image_eq (OID 3181) -> bool.
+        assert!(call_record_cmp2(3181, &five, &five).as_bool());
+        assert!(!call_record_cmp2(3181, &five, &seven).as_bool());
+        // record_image_ne (OID 3182).
+        assert!(call_record_cmp2(3182, &five, &seven).as_bool());
+        assert!(!call_record_cmp2(3182, &five, &five).as_bool());
+    }
+
+    #[test]
+    fn record_image_order_through_registry() {
+        let five = int4_record_image(5);
+        let seven = int4_record_image(7);
+        // record_image_lt (3183) / gt (3184) / le (3185) / ge (3186).
+        assert!(call_record_cmp2(3183, &five, &seven).as_bool());
+        assert!(!call_record_cmp2(3183, &seven, &five).as_bool());
+        assert!(call_record_cmp2(3184, &seven, &five).as_bool());
+        assert!(call_record_cmp2(3185, &five, &five).as_bool());
+        assert!(call_record_cmp2(3186, &seven, &seven).as_bool());
+    }
+
+    /// Prove the *result* Composite lane: the bridge's `ref_out_to_datum`
+    /// reconstructs a `RefPayload::Composite` result back into a canonical
+    /// `Datum::Composite`, and the round-trip preserves the row's typeid/typmod
+    /// and user data (the same path `record_in`/`record_larger` results take).
+    #[test]
+    fn composite_result_lane_roundtrips() {
+        let m = scratch_mcx();
+        let td = int4_tupdesc(m.mcx());
+        let values = [CanonDatum::from_i32(42)];
+        let tuple = heap_form_tuple(m.mcx(), &td, &values, &[false]).expect("form");
+        let image = tuple.to_datum_image();
+
+        // Reconstruct exactly as the fmgr-core bridge does for a composite
+        // result/argument.
+        let rebuilt =
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                m.mcx(),
+                &image,
+            )
+            .expect("from_datum_image");
+
+        let hdr = rebuilt.tuple.t_data.as_ref().expect("header");
+        assert_eq!(
+            types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
+            TEST_ROWTYPE_OID
+        );
+        assert_eq!(
+            types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
+            -1
+        );
+        // The user-data area (the int4 word) is preserved byte-for-byte.
+        assert_eq!(rebuilt.data.as_slice(), tuple.data.as_slice());
+        // And the re-serialized image is identical (full round-trip).
+        assert_eq!(rebuilt.to_datum_image(), image);
+    }
 }

@@ -515,6 +515,139 @@ impl<'mcx> FormedTuple<'mcx> {
             data,
         })
     }
+
+    /// Serialize this composite value into the flat `HeapTupleHeader` varlena
+    /// image C points a composite `Datum` at — a single contiguous palloc block:
+    /// the fixed 23-byte header (`SizeofHeapTupleHeader`), then the `t_bits` null
+    /// bitmap, then the user-data area, padded to `t_hoff`. The first four bytes
+    /// are the `datum_len_` varlena length word (`VARSIZE`), exactly as
+    /// `heap_form_tuple` / `HeapTupleHeaderSetDatumLength` lay it out.
+    ///
+    /// This is the inverse of [`FormedTuple::from_datum_image`]: the header's
+    /// `t_choice` is written 1:1 (the composite-Datum `TDatum` arm carries
+    /// `datum_len_`/`datum_typmod`/`datum_typeid`; a stray `THeap` header
+    /// serializes its `t_xmin`/`t_xmax`/`t_field3` words instead).
+    pub fn to_datum_image(&self) -> alloc::vec::Vec<u8> {
+        use crate::heaptuple::{HeapTupleHeaderChoice, ON_PAGE_HEADER_SIZE};
+
+        let td = self
+            .tuple
+            .t_data
+            .as_ref()
+            .expect("FormedTuple::to_datum_image: header is None");
+        let t_hoff = td.t_hoff as usize;
+        let total = t_hoff + self.data.len();
+        let mut image = alloc::vec![0u8; total];
+
+        // Fixed 23-byte header. The first 12 bytes are the union; write whichever
+        // arm is live (composite Datums always carry `TDatum`).
+        let (w0, w4, w8) = match &td.t_choice {
+            HeapTupleHeaderChoice::TDatum(d) => {
+                (d.datum_len_ as u32, d.datum_typmod as u32, d.datum_typeid)
+            }
+            HeapTupleHeaderChoice::THeap(f) => {
+                let raw = match f.t_field3 {
+                    crate::heaptuple::HeapTupleField3::TCid(c) => c,
+                    crate::heaptuple::HeapTupleField3::TXvac(x) => x,
+                };
+                (f.t_xmin, f.t_xmax, raw)
+            }
+        };
+        image[0..4].copy_from_slice(&w0.to_ne_bytes());
+        image[4..8].copy_from_slice(&w4.to_ne_bytes());
+        image[8..12].copy_from_slice(&w8.to_ne_bytes());
+        image[12..14].copy_from_slice(&td.t_ctid.ip_blkid.bi_hi.to_ne_bytes());
+        image[14..16].copy_from_slice(&td.t_ctid.ip_blkid.bi_lo.to_ne_bytes());
+        image[16..18].copy_from_slice(&td.t_ctid.ip_posid.to_ne_bytes());
+        image[18..20].copy_from_slice(&td.t_infomask2.to_ne_bytes());
+        image[20..22].copy_from_slice(&td.t_infomask.to_ne_bytes());
+        image[22] = td.t_hoff;
+
+        // Null bitmap (the bytes between the fixed header and `t_hoff`).
+        let bits_end = core::cmp::min(ON_PAGE_HEADER_SIZE + td.t_bits.len(), t_hoff);
+        if bits_end > ON_PAGE_HEADER_SIZE {
+            image[ON_PAGE_HEADER_SIZE..bits_end].copy_from_slice(&td.t_bits[..(bits_end - ON_PAGE_HEADER_SIZE)]);
+        }
+        // (Any padding between the bitmap end and `t_hoff` stays zero.)
+
+        // User-data area.
+        image[t_hoff..].copy_from_slice(&self.data);
+        image
+    }
+
+    /// Reconstruct a composite value from the flat `HeapTupleHeader` varlena
+    /// image C points a composite `Datum` at (the inverse of
+    /// [`FormedTuple::to_datum_image`]). The first 12 bytes are decoded as the
+    /// `DatumTupleFields` (`datum_len_`/`datum_typmod`/`datum_typeid`) union arm
+    /// a composite Datum always carries — `HeapTupleHeaderGetTypeId`/`...TypMod`
+    /// read those fields back out. `t_len` is the image length.
+    pub fn from_datum_image(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<FormedTuple<'mcx>> {
+        use crate::heaptuple::{
+            DatumTupleFields, HeapTupleData, HeapTupleHeaderChoice, HeapTupleHeaderData,
+            ItemPointerData, BlockIdData, HEAP_HASNULL, ON_PAGE_HEADER_SIZE,
+        };
+
+        if image.len() < ON_PAGE_HEADER_SIZE {
+            return Err(types_error::PgError::error(
+                "composite Datum image shorter than header",
+            ));
+        }
+        let u32_at = |o: usize| u32::from_ne_bytes([image[o], image[o + 1], image[o + 2], image[o + 3]]);
+        let u16_at = |o: usize| u16::from_ne_bytes([image[o], image[o + 1]]);
+
+        let datum_len_ = u32_at(0) as i32;
+        let datum_typmod = u32_at(4) as i32;
+        let datum_typeid = u32_at(8);
+        let bi_hi = u16_at(12);
+        let bi_lo = u16_at(14);
+        let ip_posid = u16_at(16);
+        let t_infomask2 = u16_at(18);
+        let t_infomask = u16_at(20);
+        let t_hoff = image[22];
+        let t_hoff_usize = t_hoff as usize;
+
+        let mut t_bits = PgVec::new_in(mcx);
+        if (t_infomask & HEAP_HASNULL) != 0 {
+            let end = core::cmp::min(t_hoff_usize, image.len());
+            if end > ON_PAGE_HEADER_SIZE {
+                t_bits = slice_in(mcx, &image[ON_PAGE_HEADER_SIZE..end])?;
+            }
+        }
+
+        let data = if t_hoff_usize <= image.len() {
+            slice_in(mcx, &image[t_hoff_usize..])?
+        } else {
+            PgVec::new_in(mcx)
+        };
+
+        let hdr = HeapTupleHeaderData {
+            t_choice: HeapTupleHeaderChoice::TDatum(DatumTupleFields {
+                datum_len_,
+                datum_typmod,
+                datum_typeid,
+            }),
+            t_ctid: ItemPointerData {
+                ip_blkid: BlockIdData { bi_hi, bi_lo },
+                ip_posid,
+            },
+            t_infomask2,
+            t_infomask,
+            t_hoff,
+            t_bits,
+        };
+
+        let tuple = HeapTupleData {
+            t_len: image.len() as u32,
+            t_self: ItemPointerData::new(0, 0),
+            t_tableOid: types_core::INVALID_OID,
+            t_data: Some(alloc_in(mcx, hdr)?),
+        };
+
+        Ok(FormedTuple {
+            tuple: alloc_in(mcx, tuple)?,
+            data,
+        })
+    }
 }
 
 /// A fully-formed minimal tuple: the owned [`MinimalTupleData`] header (incl. its

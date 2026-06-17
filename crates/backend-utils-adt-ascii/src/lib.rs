@@ -190,7 +190,9 @@ fn arg_text<'a>(arg: FmgrArg<'a, '_>) -> &'a [u8] {
     match arg {
         FmgrArg::Ref(RefPayload::Varlena(b)) => b.as_slice(),
         FmgrArg::Ref(RefPayload::Cstring(s)) => s.as_bytes(),
-        FmgrArg::Ref(RefPayload::Expanded(_)) | FmgrArg::ByVal(_) => &[],
+        FmgrArg::Ref(RefPayload::Composite(_))
+        | FmgrArg::Ref(RefPayload::Expanded(_))
+        | FmgrArg::ByVal(_) => &[],
     }
 }
 

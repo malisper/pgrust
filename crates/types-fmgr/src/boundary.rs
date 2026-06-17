@@ -44,6 +44,14 @@ pub enum RefPayload {
     Cstring(String),
     /// A C varlena: the owned byte image (also covers fixed-length-by-ref types).
     Varlena(Vec<u8>),
+    /// A composite / record value (C: a `Datum` that is a pointer to a
+    /// `HeapTupleHeader`, itself a varlena-tagged contiguous block). The owned
+    /// byte image is the flat `HeapTupleHeader` Datum image — the first four
+    /// bytes are the `datum_len_` varlena length word, exactly the block C would
+    /// `DatumGetHeapTupleHeader` from. (Serialized via
+    /// `FormedTuple::to_datum_image`; reconstructed via
+    /// `FormedTuple::from_datum_image`.)
+    Composite(Vec<u8>),
     /// A live expanded object (PG `VARATT_IS_EXPANDED`).
     Expanded(Box<dyn ExpandedObject>),
 }
@@ -61,6 +69,15 @@ impl RefPayload {
     pub fn as_varlena(&self) -> Option<&[u8]> {
         match self {
             RefPayload::Varlena(b) => Some(b.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the payload as a composite `HeapTupleHeader` Datum image, if it
+    /// is one.
+    pub fn as_composite(&self) -> Option<&[u8]> {
+        match self {
+            RefPayload::Composite(b) => Some(b.as_slice()),
             _ => None,
         }
     }
@@ -90,6 +107,7 @@ impl RefPayload {
     pub fn flatten(self) -> Vec<u8> {
         match self {
             RefPayload::Varlena(b) => b,
+            RefPayload::Composite(b) => b,
             RefPayload::Cstring(s) => s.into_bytes(),
             RefPayload::Expanded(eo) => {
                 let n = eo.get_flat_size();
@@ -106,6 +124,7 @@ impl RefPayload {
         match self {
             RefPayload::Cstring(s) => RefPayload::Cstring(s.clone()),
             RefPayload::Varlena(b) => RefPayload::Varlena(b.clone()),
+            RefPayload::Composite(b) => RefPayload::Composite(b.clone()),
             RefPayload::Expanded(eo) => {
                 let n = eo.get_flat_size();
                 let mut dst = vec![0u8; n];
@@ -127,6 +146,7 @@ impl core::fmt::Debug for RefPayload {
         match self {
             RefPayload::Cstring(s) => f.debug_tuple("Cstring").field(s).finish(),
             RefPayload::Varlena(b) => f.debug_tuple("Varlena").field(b).finish(),
+            RefPayload::Composite(b) => f.debug_tuple("Composite").field(b).finish(),
             RefPayload::Expanded(eo) => f
                 .debug_struct("Expanded")
                 .field("flat_size", &eo.get_flat_size())
@@ -140,8 +160,12 @@ impl PartialEq for RefPayload {
         match (self, other) {
             (RefPayload::Cstring(a), RefPayload::Cstring(b)) => a == b,
             (RefPayload::Varlena(a), RefPayload::Varlena(b)) => a == b,
+            (RefPayload::Composite(a), RefPayload::Composite(b)) => a == b,
             (RefPayload::Cstring(_), RefPayload::Varlena(_))
             | (RefPayload::Varlena(_), RefPayload::Cstring(_)) => false,
+            // A composite image only equals another composite image (never a
+            // bare cstring/varlena, even byte-for-byte).
+            (RefPayload::Composite(_), _) | (_, RefPayload::Composite(_)) => false,
             (a, b) => a.clone_flat().flatten() == b.clone_flat().flatten(),
         }
     }

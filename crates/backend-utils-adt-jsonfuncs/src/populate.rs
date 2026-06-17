@@ -187,6 +187,14 @@ fn fmgr_out_to_datum<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'mcx>) -> PgResult<Datum
                 Ok(Datum::ByRef(v))
             }
             types_fmgr::boundary::RefPayload::Cstring(s) => Ok(Datum::Cstring(s)),
+            // A composite result reconstructs into the canonical `Composite`
+            // arm from its flat HeapTupleHeader Datum image (the same mapping
+            // the fmgr-core bridge `ref_out_to_datum` performs).
+            types_fmgr::boundary::RefPayload::Composite(image) => Ok(Datum::Composite(
+                types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                    mcx, &image,
+                )?,
+            )),
             types_fmgr::boundary::RefPayload::Expanded(eo) => Ok(Datum::Expanded(eo)),
         },
     }

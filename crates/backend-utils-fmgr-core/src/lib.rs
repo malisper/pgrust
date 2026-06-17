@@ -2212,8 +2212,14 @@ fn tuple_value_to_arg(
         ),
         // A cstring referent maps directly to the cstring boundary arm.
         CanonDatum::Cstring(s) => (Datum::null(), Some(RefPayload::Cstring(s.clone()))),
-        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
-            panic!("tuple_value_to_arg: Composite/Expanded/Internal Datum not yet produced — wave 2")
+        // A composite value crosses as its flat HeapTupleHeader Datum image (C:
+        // the `struct varlena *`-tagged `HeapTupleHeader` pointer).
+        CanonDatum::Composite(t) => (
+            Datum::null(),
+            Some(RefPayload::Composite(t.to_datum_image())),
+        ),
+        CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("tuple_value_to_arg: Expanded/Internal Datum not yet produced — wave 2")
         }
     }
 }
@@ -2308,8 +2314,14 @@ pub fn datum_to_ref_arg(
             NullableDatum::value(Datum::null()),
             Some(RefPayload::Cstring(s.clone())),
         ),
-        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
-            panic!("datum_to_ref_arg: Composite/Expanded/Internal Datum not yet produced — wave 2")
+        // A composite value crosses as its flat HeapTupleHeader Datum image (C:
+        // the `struct varlena *`-tagged `HeapTupleHeader` pointer).
+        CanonDatum::Composite(t) => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Composite(t.to_datum_image())),
+        ),
+        CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("datum_to_ref_arg: Expanded/Internal Datum not yet produced — wave 2")
         }
     }
 }
@@ -2331,6 +2343,14 @@ fn ref_out_to_datum<'mcx>(
             bytes.push(0);
             Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
         }
+        // A composite result reconstructs into the canonical `Composite` arm
+        // (C: the `HeapTupleHeader` Datum is a fully-formed tuple, not raw
+        // varlena bytes) so downstream consumers see the row, not bytes.
+        Some(RefPayload::Composite(image)) => Ok(CanonDatum::Composite(
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                mcx, &image,
+            )?,
+        )),
         Some(payload) => {
             let bytes: Vec<u8> = payload.flatten();
             Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
@@ -2525,8 +2545,17 @@ fn oid_output_function_call_datum_seam<'mcx>(
                 FmgrArg::Ref(&payload),
             )?
         }
-        CanonDatum::Composite(_) | CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
-            panic!("output_function_call (datum) on Composite/Expanded/Internal Datum not yet produced — wave 2")
+        CanonDatum::Composite(t) => {
+            let payload = types_fmgr::boundary::RefPayload::Composite(t.to_datum_image());
+            output_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::Ref(&payload),
+            )?
+        }
+        CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+            panic!("output_function_call (datum) on Expanded/Internal Datum not yet produced — wave 2")
         }
     };
     PgString::from_str_in(&s, mcx)
