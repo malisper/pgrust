@@ -44,6 +44,14 @@
 #[cfg(test)]
 mod tests;
 
+pub mod fmgr_builtins;
+
+/// Install this crate's seams. Called by `seams-init::init_all`. Registers every
+/// `oracle_compat.c` SQL-callable builtin into the fmgr-core builtin table.
+pub fn init_seams() {
+    fmgr_builtins::register_oracle_compat_builtins();
+}
+
 use backend_utils_adt_formatting::{str_casefold, str_initcap, str_tolower, str_toupper};
 use common_wchar::{pg_encoding_max_length, pg_utf8_islegal};
 use mcx::{Mcx, PgVec};
