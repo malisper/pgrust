@@ -61,6 +61,36 @@ pub fn init_seams() {
     backend_utils_adt_float_seams::float_underflow_error::set(float_underflow_error);
     backend_utils_adt_float_seams::float8in_internal_endptr::set(float8in_internal_endptr_seam);
     backend_utils_adt_float_seams::float8out_internal::set(float8out_internal);
+
+    // `extra_float_digits` GUC (float.c:40, `int extra_float_digits = 1`). C
+    // exports the storage as a plain global that the GUC machinery writes
+    // (`&extra_float_digits` in guc_tables.c, CLIENT_CONN_LOCALE) and that the
+    // float-output functions read live. Install the accessors bridging this
+    // crate's backing store into the `extra_float_digits` GUC var slot.
+    backend_utils_misc_guc_tables::vars::extra_float_digits.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: get_extra_float_digits,
+            set: set_extra_float_digits,
+        },
+    );
+}
+
+thread_local! {
+    /// Backing store for the `extra_float_digits` GUC (float.c:40). Boot value
+    /// is C's static initializer `int extra_float_digits = 1`; the GUC
+    /// machinery overwrites it via the installed accessor on assignment.
+    static EXTRA_FLOAT_DIGITS: core::cell::Cell<i32> = const { core::cell::Cell::new(1) };
+}
+
+/// Read the live `extra_float_digits` GUC value (C's `extra_float_digits`
+/// global), as the float-output functions do.
+pub fn get_extra_float_digits() -> i32 {
+    EXTRA_FLOAT_DIGITS.with(|c| c.get())
+}
+
+/// Write the `extra_float_digits` backing store (the GUC assign path).
+pub fn set_extra_float_digits(v: i32) {
+    EXTRA_FLOAT_DIGITS.with(|c| c.set(v));
 }
 
 /// Adapter for the `float8in_internal_endptr` seam: the seam carries owned

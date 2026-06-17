@@ -17204,6 +17204,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-float-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "common-ryu",
  "mcx",
  "types-core",

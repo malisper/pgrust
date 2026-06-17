@@ -17,3 +17,4 @@ common-ryu = { path = "../common-ryu" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-float-seams = { path = "../backend-utils-adt-float-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

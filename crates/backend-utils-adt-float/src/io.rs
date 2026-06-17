@@ -19,7 +19,7 @@ use types_error::{
 };
 
 use crate::{get_float4_infinity, get_float4_nan, get_float8_infinity, get_float8_nan};
-use crate::{DBL_DIG, DEFAULT_EXTRA_FLOAT_DIGITS, FLT_DIG};
+use crate::{DBL_DIG, FLT_DIG};
 
 /// `pg_strncasecmp(s, lit, n) == 0` over ASCII.
 fn strncasecmp_eq(s: &[u8], lit: &[u8]) -> bool {
@@ -525,9 +525,10 @@ pub fn float4in(num: &str) -> PgResult<f32> {
     float4in_internal(num, None, "real", num)
 }
 
-/// `float8out_internal()` (float.c:536) with the default GUC.
+/// `float8out_internal()` (float.c:536). Reads the live `extra_float_digits`
+/// GUC global (C's `extra_float_digits`), exactly as the C function does.
 pub fn float8out_internal(num: f64) -> String {
-    float8out_internal_with(num, DEFAULT_EXTRA_FLOAT_DIGITS)
+    float8out_internal_with(num, crate::get_extra_float_digits())
 }
 
 /// `float8out_internal()` parameterized by `extra_float_digits`.
@@ -544,9 +545,10 @@ pub fn float8out(num: f64) -> String {
     float8out_internal(num)
 }
 
-/// `float4out()` core (float.c:318) with the default GUC.
+/// `float4out()` core (float.c:318). Reads the live `extra_float_digits` GUC
+/// global (C's `extra_float_digits`), exactly as the C function does.
 pub fn float4out(num: f32) -> String {
-    float4out_with(num, DEFAULT_EXTRA_FLOAT_DIGITS)
+    float4out_with(num, crate::get_extra_float_digits())
 }
 
 /// `float4out()` parameterized by `extra_float_digits`.
