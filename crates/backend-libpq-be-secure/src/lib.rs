@@ -567,6 +567,8 @@ pub fn init_seams() {
     s::secure_read::set(secure_read);
     s::secure_write::set(secure_write);
     s::secure_close::set(secure_close);
+    s::secure_raw_read::set(secure_raw_read);
+    s::secure_raw_write::set(secure_raw_write);
     s::ssl_supported::set(ssl_supported);
     s::gss_supported::set(gss_supported);
     s::ssl_negotiation_disabled::set(ssl_negotiation_disabled);

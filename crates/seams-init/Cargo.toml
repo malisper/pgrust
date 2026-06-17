@@ -252,6 +252,7 @@ backend-libpq-be-gssapi-common = { path = "../backend-libpq-be-gssapi-common" }
 backend-libpq-be-secure-common = { path = "../backend-libpq-be-secure-common" }
 backend-libpq-be-secure = { path = "../backend-libpq-be-secure" }
 backend-libpq-be-secure-openssl = { path = "../backend-libpq-be-secure-openssl" }
+backend-libpq-be-secure-openssl-ffi = { path = "../backend-libpq-be-secure-openssl-ffi" }
 backend-libpq-auth-scram = { path = "../backend-libpq-auth-scram" }
 backend-libpq-crypt = { path = "../backend-libpq-crypt" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }

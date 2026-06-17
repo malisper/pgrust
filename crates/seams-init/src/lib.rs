@@ -250,6 +250,10 @@ pub fn init_all() {
     backend_libpq_be_secure_common::init_seams();
     backend_libpq_be_secure::init_seams();
     backend_libpq_be_secure_openssl::init_seams();
+    // OpenSSL provider (`--with-ssl=openssl`): binds libssl + libcrypto and
+    // installs the outward OpenSSL FFI seams. With its `ssl-openssl` feature off
+    // this is a no-op and the seams stay loud-panicking (faithful USE_SSL off).
+    backend_libpq_be_secure_openssl_ffi::init_seams();
     backend_libpq_auth_scram::init_seams();
     backend_libpq_crypt::init_seams();
     backend_libpq_pqcomm::init_seams();

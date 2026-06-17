@@ -383,6 +383,35 @@ seam_core::seam!(
 );
 
 /* ========================================================================= *
+ *  Inbound BIO bridge (port_bio_read / port_bio_write)
+ *
+ *  The custom `port_bio` BIO's read/write callbacks live in the OpenSSL
+ *  provider (real `extern "C" fn`s registered with `BIO_meth_set_read/write`),
+ *  but the bytes must route back through PostgreSQL's socket layer
+ *  (`secure_raw_read`/`secure_raw_write`), which needs the live `Port`. These
+ *  inbound seams are installed by `backend-libpq-be-secure-openssl` — which
+ *  owns the handshake/IO entry points where the `&mut Port` is on the stack and
+ *  scopes a thread-local `sock -> Port` pointer around every libssl call — and
+ *  are CALLED by the provider's BIO callbacks, keyed by `port_token` (the
+ *  socket fd the C stores via `BIO_set_data(bio, port)`).
+ * ========================================================================= */
+
+seam_core::seam!(
+    /// `port_bio_read(h, buf, size)` body: `res = secure_raw_read((Port *)
+    /// BIO_get_data(h), buf, size)`, the BIO retry-flag handling done in the
+    /// provider. Returns `(res, bytes)`: `res` is the `ssize_t`, `bytes` carries
+    /// the `res` raw-transport bytes on `res > 0` for the provider to copy into
+    /// the libssl-supplied buffer.
+    pub fn port_bio_read(port_token: u64, size: usize) -> (isize, Vec<u8>)
+);
+
+seam_core::seam!(
+    /// `port_bio_write(h, buf, size)` body: `secure_raw_write((Port *)
+    /// BIO_get_data(h), buf, size)`. Returns the `ssize_t` directly.
+    pub fn port_bio_write(port_token: u64, buf: &[u8]) -> isize
+);
+
+/* ========================================================================= *
  *  I/O (be_tls_read / be_tls_write)
  * ========================================================================= */
 

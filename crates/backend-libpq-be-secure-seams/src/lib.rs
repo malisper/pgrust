@@ -42,6 +42,25 @@ seam_core::seam!(
     pub fn secure_close(port: &mut types_net::Port)
 );
 
+seam_core::seam!(
+    /// `ssize_t secure_raw_read(Port *port, void *ptr, size_t len)` — read the
+    /// raw (still-encrypted) bytes off the socket, consuming the Port's
+    /// startup-packet `raw_buf` first. The OpenSSL `port_bio_read` BIO callback
+    /// routes the TLS transport's reads through here. Returns the `ssize_t`
+    /// directly (`> 0` bytes, `0` EOF, `-1` error with the process `errno`
+    /// set), matching the C: the BIO consumer reads `errno` itself.
+    pub fn secure_raw_read(port: &mut types_net::Port, buf: &mut [u8]) -> isize
+);
+
+seam_core::seam!(
+    /// `ssize_t secure_raw_write(Port *port, const void *ptr, size_t len)` —
+    /// write raw (already-encrypted) bytes to the socket. The OpenSSL
+    /// `port_bio_write` BIO callback routes the TLS transport's writes through
+    /// here. Returns the `ssize_t` directly (same convention as
+    /// [`secure_raw_read`]).
+    pub fn secure_raw_write(port: &mut types_net::Port, buf: &[u8]) -> isize
+);
+
 // --- backend-utils-init-postinit consumer (be-secure.c TLS accessors) ---
 
 seam_core::seam!(

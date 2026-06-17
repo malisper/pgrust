@@ -10785,6 +10785,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure-openssl-ffi"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-openssl",
+ "backend-libpq-be-secure-openssl-ffi-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-openssl-ffi-seams"
 version = "0.0.0"
 dependencies = [
@@ -22200,6 +22211,7 @@ dependencies = [
  "backend-libpq-be-secure",
  "backend-libpq-be-secure-common",
  "backend-libpq-be-secure-openssl",
+ "backend-libpq-be-secure-openssl-ffi",
  "backend-libpq-crypt",
  "backend-libpq-hba",
  "backend-libpq-pqcomm",

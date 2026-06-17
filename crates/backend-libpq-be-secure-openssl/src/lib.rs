@@ -136,6 +136,85 @@ fn clear_port_ssl(sock: i32) {
     });
 }
 
+thread_local! {
+    /// `sock -> Port` raw pointer, scoped (via [`PortScope`]) for the duration of
+    /// each libssl call that can drive the custom `port_bio` BIO (the C stores
+    /// the `Port *` in the BIO with `BIO_set_data`; the BIO callbacks recover it
+    /// with `BIO_get_data`). The provider's `port_bio_read`/`port_bio_write`
+    /// callbacks call the [`port_bio_read`]/[`port_bio_write`] seams keyed by the
+    /// socket fd, which resolve the live `&mut Port` through this map and
+    /// delegate to `secure_raw_read`/`secure_raw_write`. The pointer is valid
+    /// only inside the scope (the OpenSSL state machine calls the BIO
+    /// synchronously, on this thread, before `SSL_accept`/`SSL_read`/`SSL_write`
+    /// returns), mirroring the C `Port *` lifetime exactly.
+    static PORT_BIO: RefCell<HashMap<i32, *mut Port>> = RefCell::new(HashMap::new());
+}
+
+/// RAII guard publishing `*mut Port` keyed by `sock` for the BIO callbacks, for
+/// the duration of one synchronous libssl call.
+struct PortScope {
+    sock: i32,
+}
+impl PortScope {
+    fn new(port: &mut Port) -> Self {
+        let sock = port.sock;
+        let p: *mut Port = port;
+        PORT_BIO.with(|m| {
+            m.borrow_mut().insert(sock, p);
+        });
+        PortScope { sock }
+    }
+}
+impl Drop for PortScope {
+    fn drop(&mut self) {
+        PORT_BIO.with(|m| {
+            m.borrow_mut().remove(&self.sock);
+        });
+    }
+}
+
+/// `port_bio_read` seam body: resolve the scoped `Port` for `port_token` (the
+/// socket fd) and run `secure_raw_read`.
+fn port_bio_read(port_token: u64, size: usize) -> (isize, Vec<u8>) {
+    let sock = port_token as i32;
+    let p = PORT_BIO.with(|m| m.borrow().get(&sock).copied().unwrap_or(std::ptr::null_mut()));
+    if p.is_null() {
+        return (-1, Vec::new());
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: the pointer is published by a live `PortScope` on this thread for
+    // exactly the synchronous span of the libssl call that drove this BIO read.
+    let port: &mut Port = unsafe { &mut *p };
+    let n = backend_libpq_be_secure_seams::secure_raw_read::call(port, &mut buf);
+    if n > 0 {
+        buf.truncate(n as usize);
+        (n, buf)
+    } else {
+        (n, Vec::new())
+    }
+}
+
+/// `port_bio_write` seam body: resolve the scoped `Port` and run
+/// `secure_raw_write`.
+fn port_bio_write(port_token: u64, buf: &[u8]) -> isize {
+    let sock = port_token as i32;
+    let p = PORT_BIO.with(|m| m.borrow().get(&sock).copied().unwrap_or(std::ptr::null_mut()));
+    if p.is_null() {
+        return -1;
+    }
+    // SAFETY: see `port_bio_read`.
+    let port: &mut Port = unsafe { &mut *p };
+    backend_libpq_be_secure_seams::secure_raw_write::call(port, buf)
+}
+
+/// Install the inbound BIO-bridge seams the OpenSSL provider's BIO callbacks
+/// call back through. (The outward OpenSSL FFI seams are installed by the
+/// provider crate.)
+pub fn init_bio_bridge_seams() {
+    backend_libpq_be_secure_openssl_ffi_seams::port_bio_read::set(port_bio_read);
+    backend_libpq_be_secure_openssl_ffi_seams::port_bio_write::set(port_bio_write);
+}
+
 /* ========================================================================= *
  *  Result carrier types for the be-secure.c dispatch boundary.
  * ========================================================================= */
@@ -490,7 +569,10 @@ pub fn be_tls_open_server(
 
     // aloop:
     loop {
-        let acc = ffi::ssl_accept::call(ssl);
+        let acc = {
+            let _scope = PortScope::new(port);
+            ffi::ssl_accept::call(ssl)
+        };
         if acc.r <= 0 {
             let err = acc.err;
             let ecode = acc.ecode;
@@ -670,7 +752,10 @@ pub fn be_tls_close(port: &mut Port) {
 /// `ssize_t be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)`.
 pub fn be_tls_read(port: &mut Port, len: usize) -> (TlsIo, Vec<u8>) {
     let ssl = port_ssl(port.sock);
-    let (res, data) = ffi::ssl_read::call(ssl, len);
+    let (res, data) = {
+        let _scope = PortScope::new(port);
+        ffi::ssl_read::call(ssl, len)
+    };
     let mut n = res.n;
     let mut errno = 0;
     let mut waitfor = 0;
@@ -720,7 +805,10 @@ pub fn be_tls_read(port: &mut Port, len: usize) -> (TlsIo, Vec<u8>) {
 /// `ssize_t be_tls_write(Port *port, const void *ptr, size_t len, int *waitfor)`.
 pub fn be_tls_write(port: &mut Port, buf: &[u8]) -> TlsIo {
     let ssl = port_ssl(port.sock);
-    let res = ffi::ssl_write::call(ssl, buf);
+    let res = {
+        let _scope = PortScope::new(port);
+        ffi::ssl_write::call(ssl, buf)
+    };
     let mut n = res.n;
     let mut errno = 0;
     let mut waitfor = 0;
@@ -1113,4 +1201,5 @@ pub fn init_seams() {
     backend_libpq_be_secure_seams::be_tls_get_version::set(be_tls_get_version);
     backend_libpq_be_secure_seams::be_tls_get_cipher::set(be_tls_get_cipher);
     backend_libpq_be_secure_seams::be_tls_get_cipher_bits::set(be_tls_get_cipher_bits);
+    init_bio_bridge_seams();
 }

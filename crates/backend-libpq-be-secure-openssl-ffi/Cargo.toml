@@ -1,0 +1,31 @@
+[package]
+name = "backend-libpq-be-secure-openssl-ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "backend_libpq_be_secure_openssl_ffi"
+path = "src/lib.rs"
+
+[features]
+# Mirrors PostgreSQL's `--with-ssl=openssl` configure option. When OFF, this
+# crate binds nothing and installs no seams, so the outward OpenSSL FFI seams
+# stay loud-panicking (faithful `#ifdef USE_SSL` == off). When ON, `init_seams`
+# binds libssl + libcrypto and installs all the seam slots.
+default = ["ssl-openssl"]
+ssl-openssl = []
+
+[dependencies]
+libc = "0.2"
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+
+# The outward OpenSSL FFI seams this provider binds + installs.
+backend-libpq-be-secure-openssl-ffi-seams = { path = "../backend-libpq-be-secure-openssl-ffi-seams" }
+
+# The ported pure-logic owner whose extern "C" callbacks (verify_cb / info_cb /
+# the external-passphrase command) the provider's real OpenSSL C callbacks
+# delegate into, plus its inbound BIO bridge.
+backend-libpq-be-secure-openssl = { path = "../backend-libpq-be-secure-openssl" }
