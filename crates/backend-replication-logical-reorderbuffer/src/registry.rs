@@ -103,6 +103,127 @@ pub(crate) fn txn_handle_for_xid(xid: TransactionId) -> TxnHandle {
 }
 
 // ---------------------------------------------------------------------------
+// Output-plugin handle facade: RelationHandle / RelationsHandle / ChangeHandle.
+//
+// `ReorderBufferProcessTXN` resolves the change's relation OID(s) via
+// `RelidByRelfilenumber`/`RelationIdGetRelation` and dispatches the change to
+// the output plugin synchronously. The plugin reads the relation descriptor and
+// the decoded old/new tuples through the opaque handles the callback carries (in
+// C these are the live `Relation`/`Relation[]`/`ReorderBufferChange *`
+// pointers). We publish the live values in a backend-local scratch slot for the
+// duration of the synchronous callback so the resolver seams can recover them.
+//
+// A `RelationHandle` carries `1 + reloid` (`0` is C NULL). A `RelationsHandle`
+// indexes the scratch's `relations` vector; a `ChangeHandle` indexes the
+// scratch's `change`.
+// ---------------------------------------------------------------------------
+
+use types_core::Oid;
+use types_logical::{ChangeHandle, MessageHandle, PrefixHandle, RelationHandle, RelationsHandle};
+
+/// Live values published for the in-flight output-plugin callback.
+#[derive(Default)]
+struct DispatchScratch {
+    /// The decoded payload of the change currently being applied
+    /// (`ChangeHandle` resolves here). `1` is the only handle handed out.
+    change: Option<seams::ResolvedChange>,
+    /// The truncate `relations[]` OIDs (`RelationsHandle` resolves here).
+    relations: alloc::vec::Vec<Oid>,
+    /// The logical-message `prefix` bytes (`PrefixHandle` resolves here).
+    prefix: alloc::vec::Vec<u8>,
+    /// The logical-message body bytes (`MessageHandle` resolves here).
+    message: alloc::vec::Vec<u8>,
+}
+
+use backend_replication_logical_reorderbuffer_seams as seams;
+
+::std::thread_local! {
+    static DISPATCH: RefCell<DispatchScratch> = RefCell::new(DispatchScratch::default());
+}
+
+fn reloid_to_relation_handle(reloid: Oid) -> RelationHandle {
+    RelationHandle(reloid as usize + 1)
+}
+fn relation_handle_to_reloid(h: RelationHandle) -> Oid {
+    debug_assert!(h.0 != 0, "NULL RelationHandle");
+    (h.0 - 1) as Oid
+}
+
+/// Publish `change` as the in-flight change, run `f` (the synchronous callback
+/// dispatch), then clear the scratch. Returns the `ChangeHandle` for `change`.
+pub(crate) fn with_change_published<R>(
+    change: seams::ResolvedChange,
+    f: impl FnOnce(ChangeHandle) -> R,
+) -> R {
+    DISPATCH.with(|d| d.borrow_mut().change = Some(change));
+    let out = f(ChangeHandle(1));
+    DISPATCH.with(|d| d.borrow_mut().change = None);
+    out
+}
+
+/// Publish the truncate `relations[]` OIDs, run `f` with the
+/// `RelationsHandle`, then clear the scratch.
+pub(crate) fn with_relations_published<R>(
+    relations: alloc::vec::Vec<Oid>,
+    f: impl FnOnce(RelationsHandle) -> R,
+) -> R {
+    DISPATCH.with(|d| d.borrow_mut().relations = relations);
+    let out = f(RelationsHandle(1));
+    DISPATCH.with(|d| d.borrow_mut().relations = alloc::vec::Vec::new());
+    out
+}
+
+/// `RelationHandle` for a resolved relation OID (the change/truncate callbacks
+/// carry it; the plugin re-`RelationIdGetRelation`s the OID).
+pub(crate) fn relation_handle_for_oid(reloid: Oid) -> RelationHandle {
+    reloid_to_relation_handle(reloid)
+}
+
+fn seam_resolve_relation_handle(relation: RelationHandle) -> Oid {
+    relation_handle_to_reloid(relation)
+}
+fn seam_resolve_relations_handle(_relations: RelationsHandle, index: i32) -> Oid {
+    DISPATCH.with(|d| d.borrow().relations[index as usize])
+}
+fn seam_resolve_change_handle(_change: ChangeHandle) -> seams::ResolvedChange {
+    DISPATCH.with(|d| {
+        d.borrow()
+            .change
+            .clone()
+            .expect("ChangeHandle resolved outside an in-flight apply callback")
+    })
+}
+
+/// Publish the logical-message `prefix`/body bytes, run `f` with their handles,
+/// then clear the scratch. Mirrors C passing `change->data.msg.{prefix,message}`
+/// (`const char *`) straight into the synchronous message callback.
+pub(crate) fn with_message_published<R>(
+    prefix: alloc::vec::Vec<u8>,
+    message: alloc::vec::Vec<u8>,
+    f: impl FnOnce(PrefixHandle, MessageHandle) -> R,
+) -> R {
+    DISPATCH.with(|d| {
+        let mut s = d.borrow_mut();
+        s.prefix = prefix;
+        s.message = message;
+    });
+    let out = f(PrefixHandle(1), MessageHandle(1));
+    DISPATCH.with(|d| {
+        let mut s = d.borrow_mut();
+        s.prefix = alloc::vec::Vec::new();
+        s.message = alloc::vec::Vec::new();
+    });
+    out
+}
+
+fn seam_resolve_prefix_handle(_prefix: PrefixHandle) -> alloc::vec::Vec<u8> {
+    DISPATCH.with(|d| d.borrow().prefix.clone())
+}
+fn seam_resolve_message_handle(_message: MessageHandle) -> alloc::vec::Vec<u8> {
+    DISPATCH.with(|d| d.borrow().message.clone())
+}
+
+// ---------------------------------------------------------------------------
 // Inward seam adapters
 // ---------------------------------------------------------------------------
 
@@ -599,6 +720,13 @@ pub fn init_seams() {
     s::ReorderBufferImmediateInvalidation::set(seam_immediate_invalidation);
     s::ReorderBufferAddInvalidations::set(seam_add_invalidations);
     s::ReorderBufferRememberPrepareInfo::set(seam_remember_prepare_info);
+
+    // Output-plugin handle-resolver facade (the change-replay apply path).
+    s::resolve_relation_handle::set(seam_resolve_relation_handle);
+    s::resolve_relations_handle::set(seam_resolve_relations_handle);
+    s::resolve_change_handle::set(seam_resolve_change_handle);
+    s::resolve_prefix_handle::set(seam_resolve_prefix_handle);
+    s::resolve_message_handle::set(seam_resolve_message_handle);
 
     // WAL-startup cleanup of leftover on-disk spill files (StartupXLOG).
     s::startup_reorder_buffer::set(crate::spill::startup_reorder_buffer);

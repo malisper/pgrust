@@ -709,6 +709,52 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsToastRelation(relation)` (catalog.c): true if the relation lives in a
+    /// `pg_toast` namespace (`IsToastNamespace(RelationGetNamespace(relation))`).
+    /// `RelationGetNamespace` reads `rd_rel->relnamespace`, and the
+    /// `pg_toast`-namespace test belongs to the catalog owner; both live behind
+    /// the relcache owner here. Keyed by OID (the open relation the logical-
+    /// decoding apply path holds is identified by its relid). `Err` only on a
+    /// relcache miss.
+    pub fn is_toast_relation(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `RelationIsLogicallyLogged(relation)` (rel.h): `XLogLogicalInfoActive()
+    /// && RelationNeedsWAL(relation) && relkind != RELKIND_FOREIGN_TABLE &&
+    /// !IsCatalogRelation(relation)`. The `wal_level` GUC + `RelationNeedsWAL`
+    /// (`rd_createSubid`/`rd_firstRelfilelocatorSubid`) + the catalog-relation
+    /// test are the relcache owner's. Keyed by OID. `Err` only on a relcache
+    /// miss.
+    pub fn relation_is_logically_logged(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `relation->rd_rel->relrewrite` (pg_class): the OID of the table this is a
+    /// transient rewrite copy of during a heap rewrite (e.g. ALTER TABLE), or
+    /// `InvalidOid`. Read by the logical-decoding apply path
+    /// (`ReorderBufferProcessTXN`) to skip transient DDL heaps unless the plugin
+    /// asked for them. Keyed by OID. `Err` only on a relcache miss.
+    pub fn rd_rel_relrewrite(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `relation->rd_rel->relkind` (pg_class), keyed by OID — the relation's
+    /// `RELKIND_*`. The by-`&Relation` [`rd_rel_relkind`] needs a live handle;
+    /// this OID-keyed variant serves the logical-decoding apply path, which
+    /// holds the relation only by the relid it resolved. `Err` only on a miss.
+    pub fn rd_rel_relkind_by_oid(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<i8>
+);
+
+seam_core::seam!(
     /// `rel->rd_indcollation[attno - 1]` — the collation OID of the index
     /// column `attno` (1-based, as in C). The hash AM reads `rd_indcollation[0]`
     /// for its single-column hash. `Err` only on a relcache miss.

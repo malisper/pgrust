@@ -676,13 +676,30 @@ impl ReorderBuffer {
             | ReorderBufferChangeType::Insert
             | ReorderBufferChangeType::Update
             | ReorderBufferChangeType::Delete => {
-                // SPEC_CONFIRM falls through to INSERT in C, reusing the stashed
-                // specinsert; both reach the decoded-tuple apply path below.
-                self.apply_decoded_change(txn_xid, &change, streaming);
-                // (unreachable past the panic until the apply facade lands;
-                // the specinsert free / RelationClose tail lives there too.)
-                let _ = (specinsert, &change);
-                Ok(())
+                // SPEC_CONFIRM: "Confirmation for speculative insertion arrived.
+                // Simply use as a normal record." The C does
+                // `change = specinsert; change->action = INSERT;` and falls
+                // through. specinsert is the stashed REORDER_BUFFER_CHANGE_INSERT.
+                let mut change = if change.action
+                    == ReorderBufferChangeType::InternalSpecConfirm
+                {
+                    let mut sc = specinsert
+                        .take()
+                        .ok_or_else(|| {
+                            types_error::PgError::error(
+                                "invalid ordering of speculative insertion changes",
+                            )
+                        })?;
+                    debug_assert!(matches!(
+                        &sc.data,
+                        ReorderBufferChangeData::Tp { oldtuple: None, .. }
+                    ));
+                    sc.action = ReorderBufferChangeType::Insert;
+                    sc
+                } else {
+                    change
+                };
+                self.process_tp_change(txn_xid, streaming, &mut change, specinsert)
             }
             ReorderBufferChangeType::InternalSpecInsert => {
                 // Delay the insert until the confirm arrives: stash the change
@@ -703,8 +720,7 @@ impl ReorderBuffer {
                 Ok(())
             }
             ReorderBufferChangeType::Truncate => {
-                self.apply_decoded_change(txn_xid, &change, streaming);
-                Ok(())
+                self.process_truncate_change(txn_xid, streaming, &change)
             }
             ReorderBufferChangeType::Message => {
                 self.apply_message(txn_xid, &change, streaming);
@@ -758,6 +774,256 @@ impl ReorderBuffer {
             ReorderBufferChangeType::InternalTupleCid => {
                 Err(types_error::PgError::error("tuplecid value in changequeue"))
             }
+        }
+    }
+
+    /// The INSERT/UPDATE/DELETE/SPEC_CONFIRM arm of `ReorderBufferProcessTXN`
+    /// (reorderbuffer.c:2322-2429): resolve the change's relation from its
+    /// relfilenumber, screen it (logically-logged, not a rewrite heap unless
+    /// asked, not a sequence), then reassemble TOAST and dispatch the change to
+    /// the output plugin (or, for TOAST inserts, collect the chunk). The
+    /// `change_done` tail frees a confirmed speculative insert and closes the
+    /// relation.
+    ///
+    /// `change` is `&mut` because `ReorderBufferToastReplace` rewrites the
+    /// tuple's external pointers in place; the SPEC_CONFIRM swap already happened
+    /// in the caller.
+    fn process_tp_change(
+        &mut self,
+        txn_xid: TransactionId,
+        streaming: bool,
+        change: &mut ReorderBufferChange,
+        specinsert: &mut Option<ReorderBufferChange>,
+    ) -> Result<(), types_error::PgError> {
+        use backend_utils_cache_relcache_seams as relcache;
+
+        let (rlocator, clear_toast_afterwards) = match &change.data {
+            ReorderBufferChangeData::Tp {
+                rlocator,
+                clear_toast_afterwards,
+                ..
+            } => (*rlocator, *clear_toast_afterwards),
+            _ => unreachable!("INSERT/UPDATE/DELETE change carries a tp payload"),
+        };
+        let (has_oldtuple, has_newtuple) = match &change.data {
+            ReorderBufferChangeData::Tp {
+                oldtuple, newtuple, ..
+            } => (oldtuple.is_some(), newtuple.is_some()),
+            _ => unreachable!(),
+        };
+
+        // reloid = RelidByRelfilenumber(rlocator.spcOid, rlocator.relNumber).
+        let my_database_tablespace =
+            backend_utils_init_small_seams::my_database_table_space::call();
+        let reloid = backend_utils_cache_relfilenumbermap::RelidByRelfilenumber(
+            rlocator.spcOid,
+            rlocator.relNumber,
+            my_database_tablespace,
+        )?;
+
+        // A mapped catalog tuple without data emitted during a catalog rewrite
+        // can fail the relfilenumber lookup; that is OK because we don't decode
+        // catalog changes. Skip it (goto change_done). Otherwise it is an error.
+        if reloid == types_core::InvalidOid && !has_newtuple && !has_oldtuple {
+            return self.tp_change_done(txn_xid, specinsert, None);
+        } else if reloid == types_core::InvalidOid {
+            // change_done is reached after raising; mirror C: free specinsert.
+            self.tp_change_done(txn_xid, specinsert, None)?;
+            return Err(types_error::PgError::error(
+                "could not map filenumber to relation OID",
+            ));
+        }
+
+        // relation = RelationIdGetRelation(reloid); pins rd_refcnt. We only need
+        // the pin + the live-entry existence check (NULL == no pg_class row);
+        // the relation's fields are read via the OID-keyed screening seams
+        // below, so use the shared (mcx-free) entry point.
+        let opened = relcache::relation_id_get_relation_shared::call(reloid)?;
+        if opened.is_none() {
+            self.tp_change_done(txn_xid, specinsert, None)?;
+            return Err(types_error::PgError::error(
+                "could not open relation with OID (for filenumber)",
+            ));
+        }
+        // The relation stays pinned for the duration of the apply; the OID is
+        // the open handle's identity. `change_done` issues the RelationClose.
+
+        // Screen the relation. On any "goto change_done" we close + free below.
+        if !relcache::relation_is_logically_logged::call(reloid)? {
+            return self.tp_change_done(txn_xid, specinsert, Some(reloid));
+        }
+        // Ignore temporary heaps created during DDL unless the plugin asked.
+        let relrewrite = relcache::rd_rel_relrewrite::call(reloid)?;
+        let output_rewrites = self.output_rewrites_pub();
+        if relrewrite != types_core::InvalidOid && !output_rewrites {
+            return self.tp_change_done(txn_xid, specinsert, Some(reloid));
+        }
+        // Ignore sequence changes entirely.
+        const RELKIND_SEQUENCE: i8 = b'S' as i8;
+        if relcache::rd_rel_relkind_by_oid::call(reloid)? == RELKIND_SEQUENCE {
+            return self.tp_change_done(txn_xid, specinsert, Some(reloid));
+        }
+
+        if !relcache::is_toast_relation::call(reloid)? {
+            // user-triggered change
+            self.toast_replace(txn_xid, reloid, change);
+
+            // Build the ChangeHandle payload from the (possibly toast-rewritten)
+            // change and dispatch ReorderBufferApplyChange.
+            let resolved = self.resolved_change(change);
+            let relation_h = crate::registry::relation_handle_for_oid(reloid);
+            let change_lsn = change.lsn;
+            crate::registry::with_change_published(resolved, |change_h| {
+                self.apply_decoded_change(txn_xid, relation_h, change_h, change_lsn, streaming);
+            });
+
+            // Only clear reassembled toast chunks if the tuple's creator told us
+            // they are no longer required.
+            if clear_toast_afterwards {
+                self.toast_reset(txn_xid);
+            }
+        } else if change.action == ReorderBufferChangeType::Insert {
+            // We're not interested in toast deletions; for a toast INSERT,
+            // reassemble the full toasted Datum: stash the chunk change.
+            debug_assert!(has_newtuple);
+            // dlist_delete(&change->node): the change is already owned here (the
+            // iterator handed it to us), so there is nothing to unlink; hand the
+            // owned change to the chunk collector. We must clone it out of the
+            // `&mut` borrow since AppendChunk takes ownership.
+            let owned = core::mem::replace(change, ReorderBufferChange::alloc());
+            self.toast_append_chunk(txn_xid, reloid, owned);
+        }
+
+        // change_done: free a confirmed specinsert and close the relation.
+        self.tp_change_done(txn_xid, specinsert, Some(reloid))
+    }
+
+    /// `change_done:` of the `ReorderBufferProcessTXN` tp arm — free a confirmed
+    /// speculative insert and `RelationClose` the open relation (if any).
+    fn tp_change_done(
+        &mut self,
+        _txn_xid: TransactionId,
+        specinsert: &mut Option<ReorderBufferChange>,
+        reloid: Option<types_core::Oid>,
+    ) -> Result<(), types_error::PgError> {
+        if let Some(prev) = specinsert.take() {
+            self.free_change(prev, true);
+        }
+        if let Some(reloid) = reloid {
+            backend_utils_cache_relcache_seams::relation_close::call(reloid)?;
+        }
+        Ok(())
+    }
+
+    /// The TRUNCATE arm of `ReorderBufferProcessTXN`
+    /// (reorderbuffer.c:2475-2512): open each relid, drop the ones that are not
+    /// logically logged, dispatch `ReorderBufferApplyTruncate`, then close them.
+    fn process_truncate_change(
+        &mut self,
+        txn_xid: TransactionId,
+        streaming: bool,
+        change: &ReorderBufferChange,
+    ) -> Result<(), types_error::PgError> {
+        use backend_utils_cache_relcache_seams as relcache;
+
+        let relids = match &change.data {
+            ReorderBufferChangeData::Truncate { relids, .. } => relids.clone(),
+            _ => unreachable!("TRUNCATE change carries a truncate payload"),
+        };
+
+        // relations = palloc0(nrelids); collect the logically-logged ones.
+        let mut relations: alloc::vec::Vec<types_core::Oid> = alloc::vec::Vec::new();
+        for relid in &relids {
+            let opened = relcache::relation_id_get_relation_shared::call(*relid)?;
+            if opened.is_none() {
+                // Close the ones already opened before raising, matching the C
+                // error path (it leaks in C; here drop the pins faithfully).
+                for r in &relations {
+                    let _ = relcache::relation_close::call(*r);
+                }
+                return Err(types_error::PgError::error(
+                    "could not open relation with OID",
+                ));
+            }
+            if !relcache::relation_is_logically_logged::call(*relid)? {
+                // C: `continue;` — the skipped relation is NOT added to
+                // `relations[]` and is NOT RelationClose'd in this loop (its pin
+                // is released when the decoding transaction's resource owner is
+                // torn down). Mirror that: leave the pin to the xact teardown.
+                continue;
+            }
+            relations.push(*relid);
+        }
+
+        let nrelations = relations.len() as i32;
+        let change_lsn = change.lsn;
+        let relations_for_close = relations.clone();
+        crate::registry::with_relations_published(relations, |relations_h| {
+            // Publish the change payload too, so the truncate callback's
+            // ChangeHandle resolves.
+            let resolved = self.resolved_change(change);
+            crate::registry::with_change_published(resolved, |change_h| {
+                self.apply_truncate(
+                    txn_xid,
+                    nrelations,
+                    relations_h,
+                    change_h,
+                    change_lsn,
+                    streaming,
+                );
+            });
+        });
+
+        // RelationClose(relations[i]) for each.
+        for relid in &relations_for_close {
+            relcache::relation_close::call(*relid)?;
+        }
+        Ok(())
+    }
+
+    /// Project a [`ReorderBufferChange`] into the seam-boundary
+    /// [`ResolvedChange`](backend_replication_logical_reorderbuffer_seams::ResolvedChange)
+    /// the output-plugin facade hands to a change/truncate callback.
+    fn resolved_change(
+        &self,
+        change: &ReorderBufferChange,
+    ) -> backend_replication_logical_reorderbuffer_seams::ResolvedChange {
+        use backend_replication_logical_reorderbuffer_seams as seams;
+        use types_storage::RelFileLocator;
+
+        let kind = match change.action {
+            ReorderBufferChangeType::Insert => seams::DecodedChangeKind::Insert,
+            ReorderBufferChangeType::Update => seams::DecodedChangeKind::Update,
+            ReorderBufferChangeType::Delete => seams::DecodedChangeKind::Delete,
+            ReorderBufferChangeType::InternalSpecInsert => seams::DecodedChangeKind::SpecInsert,
+            ReorderBufferChangeType::InternalSpecConfirm => seams::DecodedChangeKind::SpecConfirm,
+            ReorderBufferChangeType::InternalSpecAbort => seams::DecodedChangeKind::SpecAbort,
+            ReorderBufferChangeType::Truncate => seams::DecodedChangeKind::Truncate,
+            other => unreachable!("resolved_change on non-apply action {:?}", other),
+        };
+        let (rlocator, oldtuple, newtuple, clear_toast_afterwards) = match &change.data {
+            ReorderBufferChangeData::Tp {
+                rlocator,
+                clear_toast_afterwards,
+                oldtuple,
+                newtuple,
+            } => (
+                *rlocator,
+                oldtuple.as_ref().map(crate::buf_to_decoded_tuple),
+                newtuple.as_ref().map(crate::buf_to_decoded_tuple),
+                *clear_toast_afterwards,
+            ),
+            // TRUNCATE has no per-tuple payload; the relids cross via the
+            // RelationsHandle. Use a zero locator placeholder.
+            _ => (RelFileLocator::default(), None, None, false),
+        };
+        seams::ResolvedChange {
+            lsn: change.lsn,
+            kind,
+            rlocator,
+            oldtuple,
+            newtuple,
+            clear_toast_afterwards,
         }
     }
 

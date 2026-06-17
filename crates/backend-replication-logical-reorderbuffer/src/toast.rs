@@ -104,13 +104,24 @@ impl ReorderBuffer {
     /// `rd_rel->reltoastrelid`), and the varlena/toast pointer machinery — all
     /// gated on the same decoded-tuple carrier keystone as
     /// [`ReorderBuffer::toast_append_chunk`]. Mirror-PG-and-panic until it lands.
-    #[allow(dead_code)]
     pub(crate) fn toast_replace(
         &mut self,
-        _xid: TransactionId,
+        xid: TransactionId,
         _relation: Oid,
         _change: &mut ReorderBufferChange,
     ) {
+        // C: `if (txn->toast_hash == NULL) return;` — no out-of-line attribute
+        // was reassembled for this txn, so the main tuple needs no rewrite. This
+        // is the common path for tuples with no TOASTed values.
+        let has_toast = self
+            .by_txn_get(xid)
+            .is_some_and(|t| t.toast_hash.is_some());
+        if !has_toast {
+            return;
+        }
+        // The reassembly path (heap_deform/form + detoast over the decoded main
+        // tuple and the collected chunks) is gated on the decoded-tuple carrier
+        // keystone; mirror-PG-and-panic until it lands.
         panic!(
             "ReorderBufferToastReplace: decoded-tuple reassembly (heap_form/\
              deform + detoast) not yet modeled (change-replay tuple-decode \

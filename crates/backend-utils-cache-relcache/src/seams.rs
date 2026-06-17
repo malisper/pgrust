@@ -27,6 +27,10 @@ pub fn init_seams() {
     sx::relation_rd_tableam_by_oid::set(relation_rd_tableam_by_oid);
     sx::relation_needs_wal::set(relation_needs_wal);
     sx::relation_is_accessible_in_logical_decoding::set(relation_is_accessible_in_logical_decoding);
+    sx::is_toast_relation::set(is_toast_relation);
+    sx::relation_is_logically_logged::set(relation_is_logically_logged);
+    sx::rd_rel_relrewrite::set(rd_rel_relrewrite);
+    sx::rd_rel_relkind_by_oid::set(rd_rel_relkind_by_oid);
     sx::relation_is_local::set(relation_is_local);
     sx::relation_rd_indam::set(relation_rd_indam);
     sx::relation_increment_reference_count::set(relation_increment_reference_count);
@@ -439,6 +443,49 @@ fn relation_is_accessible_in_logical_decoding(
             && (backend_catalog_catalog_seams::is_catalog_relation_oid::call(rd.rd_id)
                 || used_as_catalog_table)
     })
+}
+
+fn is_toast_relation(relation_id: Oid) -> PgResult<bool> {
+    // IsToastRelation(relation) (catalog.c): IsToastNamespace(
+    //   RelationGetNamespace(relation)). RelationGetNamespace is
+    // `rd_rel->relnamespace`; the pg_toast-namespace test is the catalog owner's.
+    let relnamespace =
+        crate::core_entry_store::with_relation(relation_id, |rd| rd.rd_rel.relnamespace)?;
+    Ok(backend_catalog_catalog_seams::is_toast_namespace::call(relnamespace))
+}
+
+fn relation_is_logically_logged(relation_id: Oid) -> PgResult<bool> {
+    // RelationIsLogicallyLogged(relation) (rel.h):
+    //   XLogLogicalInfoActive() && RelationNeedsWAL(relation) &&
+    //   relkind != RELKIND_FOREIGN_TABLE && !IsCatalogRelation(relation)
+    // expanded exactly as the C macros. XLogLogicalInfoActive() is
+    // `wal_level >= WAL_LEVEL_LOGICAL`; RelationNeedsWAL is the permanent &&
+    // (XLogIsNeeded() || not-newly-created) test; both read owned-store fields
+    // and the wal_level GUC, so resolve the live entry (Err propagates a miss).
+    use types_core::xact::InvalidSubTransactionId;
+    use types_wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
+    const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
+    const RELKIND_FOREIGN_TABLE: i8 = b'f' as i8;
+    let wal = backend_access_transam_xlog_seams::wal_level::call();
+    let xlog_logical_info_active = wal >= WAL_LEVEL_LOGICAL;
+    crate::core_entry_store::with_relation(relation_id, |rd| {
+        let relation_needs_wal = rd.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+            && (wal >= WAL_LEVEL_REPLICA
+                || (rd.rd_createSubid == InvalidSubTransactionId
+                    && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId));
+        xlog_logical_info_active
+            && relation_needs_wal
+            && rd.rd_rel.relkind != RELKIND_FOREIGN_TABLE
+            && !backend_catalog_catalog_seams::is_catalog_relation_oid::call(rd.rd_id)
+    })
+}
+
+fn rd_rel_relrewrite(relation_id: Oid) -> PgResult<Oid> {
+    crate::core_entry_store::with_relation(relation_id, |rd| rd.rd_rel.relrewrite)
+}
+
+fn rd_rel_relkind_by_oid(relation_id: Oid) -> PgResult<i8> {
+    crate::core_entry_store::with_relation(relation_id, |rd| rd.rd_rel.relkind as i8)
 }
 
 fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool {

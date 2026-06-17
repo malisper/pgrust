@@ -1349,6 +1349,13 @@ impl ReorderBuffer {
         self.output_rewrites = value;
     }
 
+    /// `rb->output_rewrites` — whether the output plugin asked to receive the
+    /// transient heaps created during DDL rewrites (the change-replay screening
+    /// reads it to decide whether to skip `relrewrite` relations).
+    pub(crate) fn output_rewrites_pub(&self) -> bool {
+        self.output_rewrites
+    }
+
     /// Read the eight stat counters (`UpdateDecodingStats`).
     pub fn stats(&self) -> types_logical::ReorderBufferStats {
         types_logical::ReorderBufferStats {
@@ -1650,29 +1657,120 @@ impl ReorderBuffer {
         panic!("ReorderBuffer stream_stop callback: logical.c dispatch not yet modeled");
     }
 
-    /// `ReorderBufferApplyChange`/`ApplyTruncate` + the surrounding decoded
-    /// INSERT/UPDATE/DELETE/SPEC/TRUNCATE relcache + TOAST path.
+    /// `ReorderBufferApplyChange(rb, txn, relation, change, streaming)`
+    /// (reorderbuffer.c:2070) — dispatch one decoded heap change to the output
+    /// plugin's `stream_change`/`apply_change` callback. The relation has been
+    /// resolved+pinned and the change published (its `ChangeHandle`) by the
+    /// caller [`process_tp_change`]; this mirrors the C 2-line helper.
     pub(crate) fn apply_decoded_change(
         &mut self,
-        _xid: TransactionId,
-        _change: &ReorderBufferChange,
-        _streaming: bool,
+        xid: TransactionId,
+        relation: types_logical::RelationHandle,
+        change: types_logical::ChangeHandle,
+        change_lsn: XLogRecPtr,
+        streaming: bool,
     ) {
-        panic!(
-            "ReorderBuffer decoded-change apply path: decoded-tuple carrier + \
-             relcache (RelidByRelfilenumber/RelationIdGetRelation) + TOAST \
-             reassembly + apply_change/apply_truncate dispatch not yet modeled"
-        );
+        let txn = crate::registry::txn_handle_for_xid(xid);
+        let cb = if streaming {
+            types_logical::ReorderBufferCallback::StreamChange {
+                txn,
+                txn_xid: xid,
+                relation,
+                change,
+                change_lsn,
+            }
+        } else {
+            types_logical::ReorderBufferCallback::ApplyChange {
+                txn,
+                txn_xid: xid,
+                relation,
+                change,
+                change_lsn,
+            }
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+            .expect("apply_change/stream_change output-plugin callback");
     }
 
-    /// `ReorderBufferApplyMessage(rb, txn, change, streaming)`.
+    /// `ReorderBufferApplyTruncate(rb, txn, nrelations, relations, change,
+    /// streaming)` (reorderbuffer.c:2085) — dispatch a decoded TRUNCATE to the
+    /// output plugin's `stream_truncate`/`apply_truncate` callback.
+    pub(crate) fn apply_truncate(
+        &mut self,
+        xid: TransactionId,
+        nrelations: i32,
+        relations: types_logical::RelationsHandle,
+        change: types_logical::ChangeHandle,
+        change_lsn: XLogRecPtr,
+        streaming: bool,
+    ) {
+        let txn = crate::registry::txn_handle_for_xid(xid);
+        let cb = if streaming {
+            types_logical::ReorderBufferCallback::StreamTruncate {
+                txn,
+                txn_xid: xid,
+                nrelations,
+                relations,
+                change,
+                change_lsn,
+            }
+        } else {
+            types_logical::ReorderBufferCallback::ApplyTruncate {
+                txn,
+                txn_xid: xid,
+                nrelations,
+                relations,
+                change,
+                change_lsn,
+            }
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+            .expect("apply_truncate/stream_truncate output-plugin callback");
+    }
+
+    /// `ReorderBufferApplyMessage(rb, txn, change, streaming)`
+    /// (reorderbuffer.c:2099) — dispatch a decoded logical message to the output
+    /// plugin's `stream_message`/`message` callback. For a transactional message
+    /// the callback carries the owning txn (`txn != NULL` in C); the
+    /// `transactional` flag is always `true` here because the in-band MESSAGE
+    /// change only exists for a transactional message (non-transactional ones go
+    /// straight to `ReorderBufferQueueMessage`'s immediate dispatch).
     pub(crate) fn apply_message(
         &mut self,
-        _xid: TransactionId,
-        _change: &ReorderBufferChange,
-        _streaming: bool,
+        xid: TransactionId,
+        change: &ReorderBufferChange,
+        streaming: bool,
     ) {
-        panic!("ReorderBuffer message/stream_message callback: logical.c dispatch not yet modeled");
+        let (prefix, message) = match &change.data {
+            ReorderBufferChangeData::Msg { prefix, message } => (prefix.clone(), message.clone()),
+            _ => unreachable!("MESSAGE change carries a msg payload"),
+        };
+        let message_size = message.len();
+        let txn = crate::registry::txn_handle_for_xid(xid);
+        let change_lsn = change.lsn;
+        crate::registry::with_message_published(prefix, message, |prefix_h, message_h| {
+            let cb = if streaming {
+                types_logical::ReorderBufferCallback::StreamMessage {
+                    txn: Some((txn, xid)),
+                    message_lsn: change_lsn,
+                    transactional: true,
+                    prefix: prefix_h,
+                    message_size,
+                    message: message_h,
+                }
+            } else {
+                types_logical::ReorderBufferCallback::Message {
+                    txn: Some((txn, xid)),
+                    message_lsn: change_lsn,
+                    transactional: true,
+                    prefix: prefix_h,
+                    message_size,
+                    message: message_h,
+                }
+            };
+            backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+                .expect("message/stream_message output-plugin callback");
+        });
     }
 
     /// `rb->update_progress_txn(rb, txn, lsn)` keepalive.
@@ -1711,6 +1809,21 @@ fn decoded_tuple_to_buf(
         t_self: t.t_self,
         t_table_oid: t.t_table_oid,
         data: t.data,
+    }
+}
+
+/// The inverse of [`decoded_tuple_to_buf`]: project the owner's
+/// [`ReorderBufferTupleBuf`] back into the seam-boundary `DecodedTuple` image
+/// the output-plugin facade hands to a change callback (`ChangeHandle`
+/// resolution). Same fields on both sides.
+fn buf_to_decoded_tuple(
+    buf: &ReorderBufferTupleBuf,
+) -> backend_replication_logical_reorderbuffer_seams::DecodedTuple {
+    backend_replication_logical_reorderbuffer_seams::DecodedTuple {
+        t_len: buf.t_len,
+        t_self: buf.t_self,
+        t_table_oid: buf.t_table_oid,
+        data: buf.data.clone(),
     }
 }
 

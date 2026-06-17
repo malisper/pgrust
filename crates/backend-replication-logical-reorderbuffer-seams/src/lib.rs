@@ -425,3 +425,80 @@ seam_core::seam!(
     /// Fallible: the directory scan / unlink paths `ereport(ERROR)`.
     pub fn startup_reorder_buffer() -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Output-plugin handle-resolver facade (the change-replay apply path).
+//
+// `ReorderBufferProcessTXN` dispatches INSERT/UPDATE/DELETE/TRUNCATE/MESSAGE
+// changes to the output plugin through `logical.c`'s `*_cb_wrapper` callbacks,
+// which carry opaque `RelationHandle`/`RelationsHandle`/`ChangeHandle` tokens
+// (in C these are the live `Relation`/`Relation[]`/`ReorderBufferChange *`
+// pointers). The output plugin (`pgoutput`) dereferences them to read the
+// relation descriptor and the decoded old/new tuple images.
+//
+// The reorder-buffer owner publishes these resolver seams so the (not-yet-
+// ported) output plugin can recover the underlying values from a handle:
+//   * a `RelationHandle` carries the relation OID the owner resolved via
+//     `RelidByRelfilenumber`; `resolve_relation_handle` hands back that OID so
+//     the plugin can `RelationIdGetRelation` it (faithful: the relation is
+//     kept open across the synchronous callback by ProcessTXN).
+//   * a `ChangeHandle` indexes the change currently being applied; the owner
+//     keeps it live for the duration of the callback, and
+//     `resolve_change_handle` projects the decoded payload the plugin reads.
+// ---------------------------------------------------------------------------
+
+/// The decoded-change payload an output-plugin callback reads off a
+/// `ChangeHandle` (`change->lsn` + `change->data.tp.{rlocator,oldtuple,
+/// newtuple,clear_toast_afterwards}` for the heap-change actions, the truncate
+/// relids for TRUNCATE). Mirrors the subset of `ReorderBufferChange` the plugin
+/// touches without exposing the owner-private struct (which would cycle).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedChange {
+    /// `change->lsn`.
+    pub lsn: XLogRecPtr,
+    /// `change->action` as the decoded discriminant.
+    pub kind: DecodedChangeKind,
+    /// `change->data.tp.rlocator`.
+    pub rlocator: RelFileLocator,
+    /// `change->data.tp.oldtuple` (NULL for plain INSERT).
+    pub oldtuple: Option<DecodedTuple>,
+    /// `change->data.tp.newtuple` (NULL for DELETE).
+    pub newtuple: Option<DecodedTuple>,
+    /// `change->data.tp.clear_toast_afterwards`.
+    pub clear_toast_afterwards: bool,
+}
+
+seam_core::seam!(
+    /// Resolve a `RelationHandle` carried into an output-plugin change/truncate
+    /// callback back to its relation OID (the owner resolved it via
+    /// `RelidByRelfilenumber` and kept the relation open). The plugin then
+    /// `RelationIdGetRelation`s the OID.
+    pub fn resolve_relation_handle(
+        relation: types_logical::RelationHandle,
+    ) -> types_core::primitive::Oid
+);
+seam_core::seam!(
+    /// Resolve the `i`-th relation OID of a `RelationsHandle` (the truncate
+    /// callback's `relations[]`). `nrelations` is carried alongside in the
+    /// callback args.
+    pub fn resolve_relations_handle(
+        relations: types_logical::RelationsHandle,
+        index: i32,
+    ) -> types_core::primitive::Oid
+);
+seam_core::seam!(
+    /// Resolve a `ChangeHandle` to the decoded-change payload the output plugin
+    /// reads. Valid only for the duration of the synchronous callback the owner
+    /// is driving (the change is kept live by `ReorderBufferProcessTXN`).
+    pub fn resolve_change_handle(change: types_logical::ChangeHandle) -> ResolvedChange
+);
+seam_core::seam!(
+    /// Resolve a `PrefixHandle` (the logical-message `prefix` `const char *`) to
+    /// its bytes. Valid only for the duration of the in-flight message callback.
+    pub fn resolve_prefix_handle(prefix: types_logical::PrefixHandle) -> Vec<u8>
+);
+seam_core::seam!(
+    /// Resolve a `MessageHandle` (the logical-message body `const char *`) to
+    /// its bytes. Valid only for the duration of the in-flight message callback.
+    pub fn resolve_message_handle(message: types_logical::MessageHandle) -> Vec<u8>
+);

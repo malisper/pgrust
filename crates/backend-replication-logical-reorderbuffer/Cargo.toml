@@ -56,3 +56,11 @@ backend-replication-logical-reorderbuffer-seams = { path = "../backend-replicati
 # through this inward seam (the `rb->private_data == ctx` bridge) to drive the
 # begin/commit/message/prepare/stream/update_progress output-plugin callbacks.
 backend-replication-logical-logical-seams = { path = "../backend-replication-logical-logical-seams" }
+
+# change-replay relcache resolution: ReorderBufferProcessTXN resolves each
+# decoded change's relation from its relfilenumber (RelidByRelfilenumber) and
+# screens it (RelationIsLogicallyLogged / IsToastRelation / relrewrite /
+# relkind) before dispatching to the output plugin.
+backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
