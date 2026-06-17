@@ -19,6 +19,8 @@
 
 #![allow(non_snake_case)]
 
+mod fmgr_builtins;
+
 use std::cell::{Cell, RefCell};
 
 use mcx::Mcx;
@@ -254,6 +256,8 @@ thread_local! {
 pub fn init_seams() {
     backend_jit_jit_seams::jit_release_context::set(jit_release_context);
     backend_jit_jit_seams::jit_reset_after_error::set(jit_reset_after_error);
+
+    fmgr_builtins::register_jit_builtins();
 
     use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
 
