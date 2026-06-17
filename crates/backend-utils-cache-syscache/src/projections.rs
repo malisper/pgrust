@@ -15,17 +15,24 @@ use types_datum::Datum as KeyDatum;
 
 use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCache3,
+    SearchSysCache4,
     SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
-    SysCacheGetAttrNotNull, AGGFNOID, AMOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM,
-    AUTHNAME, AUTHOID,
-    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, DATABASEOID, ENUMOID, ENUMTYPOIDNAME,
+    SysCacheGetAttrNotNull, AGGFNOID, AMNAME, AMOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM,
+    AUTHMEMMEMROLE, AUTHNAME, AUTHOID,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLNAMEENCNSP, COLLOID, CONNAMENSP, CONSTROID, CONVOID,
+    DATABASEOID, ENUMOID, ENUMTYPOIDNAME, EVENTTRIGGEROID,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, OPFAMILYOID, PARAMETERACLNAME, PARAMETERACLOID,
-    PROCNAMEARGSNSP, PROCOID,
+    LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, OPFAMILYAMNAMENSP, OPFAMILYOID,
+    PARAMETERACLNAME, PARAMETERACLOID,
+    PROCNAMEARGSNSP, PROCOID, PUBLICATIONNAME, PUBLICATIONNAMESPACE, PUBLICATIONOID, PUBLICATIONREL,
+    RANGEMULTIRANGE, RANGETYPE,
     RELNAMENSP, RELOID,
-    RULERELNAME, STATRELATTINH, TYPEOID,
+    RULERELNAME, SEQRELID, STATEXTDATASTXOID, STATEXTNAMENSP, STATEXTOID, STATRELATTINH,
+    SUBSCRIPTIONNAME, SUBSCRIPTIONOID, TABLESPACEOID, TRFOID, TRFTYPELANG,
+    TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TSPARSERNAMENSP, TSPARSEROID,
+    TSTEMPLATENAMENSP, TSTEMPLATEOID, TYPENAMENSP, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
 use types_statistics::{
@@ -46,7 +53,12 @@ use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted};
 use types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
     EnumTupleData};
-use backend_utils_cache_syscache_seams::{AmopOpidRow, PgClassFullForm, PgOperatorForm, PgProcForm};
+use backend_utils_cache_syscache_seams::{
+    AmopOpidRow, PgClassExtra, PgClassFullForm, PgIndexFlags, PgOperatorForm, PgProcForm,
+    PgRangeFields,
+};
+use crate::PARTRELID;
+use types_cache::typcache::PgRangeRow;
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
@@ -3484,4 +3496,1371 @@ pub(crate) fn pg_statistic_stawidth(
     let stawidth = getattr_i32(mcx, STATRELATTINH, &tup, Anum_pg_statistic_stawidth as i32)?;
     ReleaseSysCache(tup);
     Ok(Some(stawidth))
+}
+
+// ===========================================================================
+// Additional caller-shaped syscache projections (batch 2026-06-17). Each
+// mirrors the corresponding `SearchSysCache*` / `GetSysCacheOid*` /
+// `SearchSysCacheExists*` of utils/cache/syscache.c projected to the fields
+// the consumer reads. Attribute numbers transcribed from the PostgreSQL 18.3
+// `catalog/pg_*_d.h` headers. A cache miss is `Ok(None)` / `InvalidOid` /
+// `false` per the C `!HeapTupleIsValid` branch; by-value projections live in a
+// scratch `MemoryContext` dropped before return, name copies land in the
+// caller's `mcx`.
+// ===========================================================================
+
+// --- catalog attribute numbers (catalog/pg_*_d.h) -------------------------
+const Anum_pg_namespace_oid_b2: i32 = 1;
+const Anum_pg_namespace_nspname_b2: i32 = 2;
+const Anum_pg_namespace_nspowner_b2: i32 = 3;
+const Anum_pg_am_oid_b2: i32 = 1;
+const Anum_pg_am_amname_b2: i32 = 2;
+const Anum_pg_am_amtype_b2: i32 = 4;
+const Anum_pg_type_oid_b2: i32 = 1;
+const Anum_pg_type_typname_b2: i32 = 2;
+const Anum_pg_type_typnamespace_b2: i32 = 3;
+const Anum_pg_class_relname_b2: i32 = 2;
+const Anum_pg_class_relnamespace_b2: i32 = 3;
+const Anum_pg_class_relpersistence_b2: i32 = 17;
+const Anum_pg_class_relrowsecurity_b2: i32 = 24;
+const Anum_pg_class_relforcerowsecurity_b2: i32 = 25;
+const Anum_pg_collation_oid_b2: i32 = 1;
+const Anum_pg_collation_collname_b2: i32 = 2;
+const Anum_pg_collation_collnamespace_b2: i32 = 3;
+const Anum_pg_collation_collprovider_b2: i32 = 5;
+const Anum_pg_collation_collisdeterministic_b2: i32 = 6;
+const Anum_pg_conversion_oid_b2: i32 = 1;
+const Anum_pg_conversion_conname_b2: i32 = 2;
+const Anum_pg_conversion_connamespace_b2: i32 = 3;
+const Anum_pg_statistic_ext_oid_b2: i32 = 1;
+const Anum_pg_statistic_ext_stxrelid_b2: i32 = 2;
+const Anum_pg_statistic_ext_stxname_b2: i32 = 3;
+const Anum_pg_statistic_ext_stxnamespace_b2: i32 = 4;
+const Anum_pg_ts_parser_oid_b2: i32 = 1;
+const Anum_pg_ts_parser_prsname_b2: i32 = 2;
+const Anum_pg_ts_parser_prsnamespace_b2: i32 = 3;
+const Anum_pg_ts_dict_oid_b2: i32 = 1;
+const Anum_pg_ts_dict_dictname_b2: i32 = 2;
+const Anum_pg_ts_dict_dictnamespace_b2: i32 = 3;
+const Anum_pg_ts_template_oid_b2: i32 = 1;
+const Anum_pg_ts_template_tmplname_b2: i32 = 2;
+const Anum_pg_ts_template_tmplnamespace_b2: i32 = 3;
+const Anum_pg_ts_config_oid_b2: i32 = 1;
+const Anum_pg_ts_config_cfgname_b2: i32 = 2;
+const Anum_pg_ts_config_cfgnamespace_b2: i32 = 3;
+const Anum_pg_opclass_oid_b2: i32 = 1;
+const Anum_pg_opclass_opcmethod_b2: i32 = 2;
+const Anum_pg_opclass_opcname_b2: i32 = 3;
+const Anum_pg_opclass_opcnamespace_b2: i32 = 4;
+const Anum_pg_opclass_opcfamily_b2: i32 = 6;
+const Anum_pg_opclass_opcintype_b2: i32 = 7;
+const Anum_pg_opclass_opckeytype_b2: i32 = 9;
+const Anum_pg_opfamily_oid_b2: i32 = 1;
+const Anum_pg_amop_oid_b2: i32 = 1;
+const Anum_pg_amop_amopstrategy_b2: i32 = 5;
+const Anum_pg_amop_amopsortfamily_b2: i32 = 9;
+const Anum_pg_amop_amopmethod_b2: i32 = 8;
+const Anum_pg_amop_amopfamily_b2: i32 = 2;
+const Anum_pg_amop_amoplefttype_b2: i32 = 3;
+const Anum_pg_amop_amoprighttype_b2: i32 = 4;
+const Anum_pg_amop_amopopr_b2: i32 = 7;
+const Anum_pg_amproc_oid_b2: i32 = 1;
+const Anum_pg_authid_rolsuper_b2: i32 = 3;
+const Anum_pg_database_datdba_b2: i32 = 3;
+const Anum_pg_constraint_conname_b2: i32 = 2;
+const Anum_pg_constraint_contype_b2: i32 = 4;
+const Anum_pg_constraint_conrelid_b2: i32 = 9;
+const Anum_pg_constraint_contypid_b2: i32 = 10;
+const Anum_pg_constraint_conindid_b2: i32 = 11;
+const Anum_pg_language_lanname_b2: i32 = 2;
+const Anum_pg_range_rngtypid_b2: i32 = 1;
+const Anum_pg_range_rngsubtype_b2: i32 = 2;
+const Anum_pg_range_rngmultitypid_b2: i32 = 3;
+const Anum_pg_range_rngcollation_b2: i32 = 4;
+const Anum_pg_range_rngsubopc_b2: i32 = 5;
+const Anum_pg_range_rngcanonical_b2: i32 = 6;
+const Anum_pg_range_rngsubdiff_b2: i32 = 7;
+const Anum_pg_index_indrelid_b2: i32 = 2;
+const Anum_pg_index_indisprimary_b2: i32 = 7;
+const Anum_pg_index_indisclustered_b2: i32 = 10;
+const Anum_pg_index_indisvalid_b2: i32 = 11;
+const Anum_pg_index_indisreplident_b2: i32 = 15;
+const Anum_pg_attribute_attnum_b2: i32 = 5;
+const Anum_pg_attribute_attnotnull_b2: i32 = 12;
+const Anum_pg_attribute_attname_b2: i32 = 2;
+const Anum_pg_attribute_attisdropped_b2: i32 = 17;
+const Anum_pg_class_relchecks_b2: i32 = 20;
+const Anum_pg_class_relnatts_b2: i32 = 19;
+const Anum_pg_class_reltype_b2: i32 = 4;
+const Anum_pg_class_reltablespace_b2: i32 = 9;
+const Anum_pg_class_relam_b2: i32 = 7;
+const Anum_pg_transform_trftype_b2: i32 = 2;
+const Anum_pg_transform_trflang_b2: i32 = 3;
+const Anum_pg_transform_trffromsql_b2: i32 = 4;
+const Anum_pg_transform_trftosql_b2: i32 = 5;
+const Anum_pg_event_trigger_evtname_b2: i32 = 2;
+const Anum_pg_publication_rel_prpubid_b2: i32 = 2;
+const Anum_pg_publication_rel_prrelid_b2: i32 = 3;
+const Anum_pg_publication_namespace_pnpubid_b2: i32 = 2;
+const Anum_pg_publication_namespace_pnnspid_b2: i32 = 3;
+const Anum_pg_user_mapping_umuser_b2: i32 = 2;
+const Anum_pg_user_mapping_umserver_b2: i32 = 3;
+const Anum_pg_proc_proargnames_b2: i32 = 23;
+const Anum_pg_subscription_oid_anum_b2: i32 = 1;
+const Anum_pg_subscription_subname_b2: i32 = 4;
+const Anum_pg_publication_oid_anum_b2: i32 = 1;
+const Anum_pg_publication_pubname_b2: i32 = 2;
+
+// ---------------------------------------------------------------------------
+// SearchSysCacheExists* probes (bool).
+// ---------------------------------------------------------------------------
+
+fn exists1(cache_id: i32, key: SysCacheKey<'_>) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache exists1 probe");
+    SearchSysCacheExists(
+        scratch.mcx(),
+        cache_id,
+        key,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn exists2(cache_id: i32, k1: SysCacheKey<'_>, k2: SysCacheKey<'_>) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache exists2 probe");
+    SearchSysCacheExists(
+        scratch.mcx(),
+        cache_id,
+        k1,
+        k2,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn exists3(
+    cache_id: i32,
+    k1: SysCacheKey<'_>,
+    k2: SysCacheKey<'_>,
+    k3: SysCacheKey<'_>,
+) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache exists3 probe");
+    SearchSysCacheExists(scratch.mcx(), cache_id, k1, k2, k3, SysCacheKey::UNUSED)
+}
+
+pub(crate) fn reloid_exists(relid: Oid) -> PgResult<bool> {
+    exists1(RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))
+}
+
+pub(crate) fn tablespace_exists(tblspc: Oid) -> PgResult<bool> {
+    exists1(TABLESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(tblspc)))
+}
+
+pub(crate) fn auth_oid_exists(roleid: Oid) -> PgResult<bool> {
+    exists1(AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))
+}
+
+pub(crate) fn namespace_name_exists(nsp_name: &str) -> PgResult<bool> {
+    exists1(NAMESPACENAME, SysCacheKey::Str(nsp_name))
+}
+
+pub(crate) fn procoid_exists(proc_oid: Oid) -> PgResult<bool> {
+    exists1(PROCOID, SysCacheKey::Value(KeyDatum::from_oid(proc_oid)))
+}
+
+pub(crate) fn operoid_exists(oper_oid: Oid) -> PgResult<bool> {
+    exists1(OPEROID, SysCacheKey::Value(KeyDatum::from_oid(oper_oid)))
+}
+
+pub(crate) fn typeoid_exists(type_oid: Oid) -> PgResult<bool> {
+    exists1(TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(type_oid)))
+}
+
+pub(crate) fn colloid_exists(coll_oid: Oid) -> PgResult<bool> {
+    exists1(COLLOID, SysCacheKey::Value(KeyDatum::from_oid(coll_oid)))
+}
+
+pub(crate) fn tsconfigoid_exists(cfg_oid: Oid) -> PgResult<bool> {
+    exists1(TSCONFIGOID, SysCacheKey::Value(KeyDatum::from_oid(cfg_oid)))
+}
+
+pub(crate) fn tsdictoid_exists(dict_oid: Oid) -> PgResult<bool> {
+    exists1(TSDICTOID, SysCacheKey::Value(KeyDatum::from_oid(dict_oid)))
+}
+
+pub(crate) fn namespaceoid_exists(nsp_oid: Oid) -> PgResult<bool> {
+    exists1(NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(nsp_oid)))
+}
+
+pub(crate) fn type_exists(typname: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        TYPENAMENSP,
+        SysCacheKey::Str(typname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn statext_exists(stats_name: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        STATEXTNAMENSP,
+        SysCacheKey::Str(stats_name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn ts_parser_exists(name: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        TSPARSERNAMENSP,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn ts_dict_exists(name: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        TSDICTNAMENSP,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn ts_template_exists(name: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        TSTEMPLATENAMENSP,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn ts_config_exists(name: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists2(
+        TSCONFIGNAMENSP,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn opfamily_exists(amoid: Oid, opfname: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists3(
+        OPFAMILYAMNAMENSP,
+        SysCacheKey::Value(KeyDatum::from_oid(amoid)),
+        SysCacheKey::Str(opfname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn opclass_exists(amoid: Oid, opcname: &str, namespace_id: Oid) -> PgResult<bool> {
+    exists3(
+        CLAAMNAMENSP,
+        SysCacheKey::Value(KeyDatum::from_oid(amoid)),
+        SysCacheKey::Str(opcname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+/// `SearchSysCacheExists3(AMOPOPID, opno, AMOP_SEARCH, opfamily)` — `'s'` is
+/// `AMOP_SEARCH` (`access/amapi.h`).
+pub(crate) fn amop_search_exists(opno: Oid, opfamily: Oid) -> PgResult<bool> {
+    const AMOP_SEARCH: i8 = b's' as i8;
+    exists3(
+        AMOPOPID,
+        SysCacheKey::Value(KeyDatum::from_oid(opno)),
+        SysCacheKey::Value(KeyDatum::from_char(AMOP_SEARCH)),
+        SysCacheKey::Value(KeyDatum::from_oid(opfamily)),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// GetSysCacheOid* probes (Oid; InvalidOid on miss).
+// ---------------------------------------------------------------------------
+
+pub(crate) fn get_type_oid(typname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_type_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        TYPENAMENSP,
+        Anum_pg_type_oid_b2 as i16,
+        SysCacheKey::Str(typname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_opfamily_oid(amid: Oid, opfname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_opfamily_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        OPFAMILYAMNAMENSP,
+        Anum_pg_opfamily_oid_b2 as i16,
+        SysCacheKey::Value(KeyDatum::from_oid(amid)),
+        SysCacheKey::Str(opfname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn amop_oid(
+    opfamilyoid: Oid,
+    lefttype: Oid,
+    righttype: Oid,
+    strategy: i16,
+) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache amop_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        AMOPSTRATEGY,
+        Anum_pg_amop_oid_b2 as i16,
+        SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(KeyDatum::from_oid(lefttype)),
+        SysCacheKey::Value(KeyDatum::from_oid(righttype)),
+        SysCacheKey::Value(KeyDatum::from_i16(strategy)),
+    )
+}
+
+pub(crate) fn amproc_oid(
+    opfamilyoid: Oid,
+    lefttype: Oid,
+    righttype: Oid,
+    procnum: i16,
+) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache amproc_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        AMPROCNUM,
+        Anum_pg_amproc_oid_b2 as i16,
+        SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(KeyDatum::from_oid(lefttype)),
+        SysCacheKey::Value(KeyDatum::from_oid(righttype)),
+        SysCacheKey::Value(KeyDatum::from_i16(procnum)),
+    )
+}
+
+pub(crate) fn get_conversion_oid_cached(conname: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_conversion_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        CONNAMENSP,
+        Anum_pg_conversion_oid_b2 as i16,
+        SysCacheKey::Str(conname),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_statext_oid(stats_name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_statext_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        STATEXTNAMENSP,
+        Anum_pg_statistic_ext_oid_b2 as i16,
+        SysCacheKey::Str(stats_name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_ts_parser_oid_cached(name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_ts_parser_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        TSPARSERNAMENSP,
+        Anum_pg_ts_parser_oid_b2 as i16,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_ts_dict_oid_cached(name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_ts_dict_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        TSDICTNAMENSP,
+        Anum_pg_ts_dict_oid_b2 as i16,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_ts_template_oid_cached(name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_ts_template_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        TSTEMPLATENAMENSP,
+        Anum_pg_ts_template_oid_b2 as i16,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_ts_config_oid_cached(name: &str, namespace_id: Oid) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_ts_config_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        TSCONFIGNAMENSP,
+        Anum_pg_ts_config_oid_b2 as i16,
+        SysCacheKey::Str(name),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_collation_oid_by_name_enc_nsp(
+    collname: &str,
+    encoding: i32,
+    namespace_id: Oid,
+) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_collation_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        COLLNAMEENCNSP,
+        Anum_pg_collation_oid_b2 as i16,
+        SysCacheKey::Str(collname),
+        SysCacheKey::Value(KeyDatum::from_i32(encoding)),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_am_oid_by_name(amname: &str) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_am_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        AMNAME,
+        Anum_pg_am_oid_b2 as i16,
+        SysCacheKey::Str(amname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid> {
+    // Anum_pg_cast_oid == 1 (pg_cast.h).
+    let scratch = MemoryContext::new("syscache cast_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        CASTSOURCETARGET,
+        1,
+        SysCacheKey::Value(KeyDatum::from_oid(sourcetypeid)),
+        SysCacheKey::Value(KeyDatum::from_oid(targettypeid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_publication_oid_syscache(pubname: &str) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache get_publication_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        PUBLICATIONNAME,
+        Anum_pg_publication_oid_anum_b2 as i16,
+        SysCacheKey::Str(pubname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+pub(crate) fn get_subscription_oid_syscache(subname: &str) -> PgResult<Oid> {
+    let my_database_id = backend_utils_init_small_seams::my_database_id::call();
+    let scratch = MemoryContext::new("syscache get_subscription_oid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        SUBSCRIPTIONNAME,
+        Anum_pg_subscription_oid_anum_b2 as i16,
+        SysCacheKey::Value(KeyDatum::from_oid(my_database_id)),
+        SysCacheKey::Str(subname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// name lookups (SearchSysCache1 + NameStr -> PgString copied into mcx).
+// ---------------------------------------------------------------------------
+
+fn lookup_name1<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    key: SysCacheKey<'_>,
+    name_attno: i32,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, cache_id, key)?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let name = getattr_name(mcx, cache_id, &tup, name_attno)?;
+    ReleaseSysCache(tup);
+    Ok(Some(name))
+}
+
+pub(crate) fn search_type_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    typoid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typoid)), Anum_pg_type_typname_b2)
+}
+
+pub(crate) fn search_namespace_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    nspid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(nspid)), Anum_pg_namespace_nspname_b2)
+}
+
+pub(crate) fn search_am_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    am_oid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, AMOID, SysCacheKey::Value(KeyDatum::from_oid(am_oid)), Anum_pg_am_amname_b2)
+}
+
+pub(crate) fn am_name<'mcx>(mcx: Mcx<'mcx>, amid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, AMOID, SysCacheKey::Value(KeyDatum::from_oid(amid)), Anum_pg_am_amname_b2)
+}
+
+pub(crate) fn rel_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)), Anum_pg_class_relname_b2)
+}
+
+pub(crate) fn language_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    langoid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, LANGOID, SysCacheKey::Value(KeyDatum::from_oid(langoid)), Anum_pg_language_lanname_b2)
+}
+
+pub(crate) fn constraint_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)), Anum_pg_constraint_conname_b2)
+}
+
+pub(crate) fn event_trigger_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    evtid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, EVENTTRIGGEROID, SysCacheKey::Value(KeyDatum::from_oid(evtid)), Anum_pg_event_trigger_evtname_b2)
+}
+
+pub(crate) fn get_publication_name_syscache<'mcx>(
+    mcx: Mcx<'mcx>,
+    pubid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, PUBLICATIONOID, SysCacheKey::Value(KeyDatum::from_oid(pubid)), Anum_pg_publication_pubname_b2)
+}
+
+pub(crate) fn get_subscription_name_syscache<'mcx>(
+    mcx: Mcx<'mcx>,
+    subid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, SUBSCRIPTIONOID, SysCacheKey::Value(KeyDatum::from_oid(subid)), Anum_pg_subscription_subname_b2)
+}
+
+pub(crate) fn search_attnum_attname<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let name = getattr_name(mcx, ATTNUM, &tup, Anum_pg_attribute_attname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(name))
+}
+
+pub(crate) fn parameter_acl_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    paramaclid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    // Anum_pg_parameter_acl_parname == 2 (pg_parameter_acl.h); a `text` column,
+    // rendered via text_to_cstring.
+    const Anum_pg_parameter_acl_parname_b2: i32 = 2;
+    let tuple = SearchSysCache1(mcx, PARAMETERACLOID, SysCacheKey::Value(KeyDatum::from_oid(paramaclid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let datum = SysCacheGetAttrNotNull(mcx, PARAMETERACLOID, &tup, Anum_pg_parameter_acl_parname_b2)?;
+    let s = varlena_seams::text_to_cstring_v::call(mcx, &datum)?;
+    ReleaseSysCache(tup);
+    Ok(Some(s))
+}
+
+// ---------------------------------------------------------------------------
+// (namespace, name) projections -> CatalogObjectName.
+// ---------------------------------------------------------------------------
+
+fn namespace_and_name1<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    key: Oid,
+    nsp_attno: i32,
+    name_attno: i32,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, cache_id, SysCacheKey::Value(KeyDatum::from_oid(key)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let namespace = getattr_oid(mcx, cache_id, &tup, nsp_attno)?;
+    let name = getattr_name(mcx, cache_id, &tup, name_attno)?;
+    ReleaseSysCache(tup);
+    Ok(Some(types_namespace::CatalogObjectName { namespace, name }))
+}
+
+pub(crate) fn relation_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, RELOID, relid, Anum_pg_class_relnamespace_b2, Anum_pg_class_relname_b2)
+}
+
+pub(crate) fn type_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, TYPEOID, typid, Anum_pg_type_typnamespace_b2, Anum_pg_type_typname_b2)
+}
+
+pub(crate) fn collation_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    collid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, COLLOID, collid, Anum_pg_collation_collnamespace_b2, Anum_pg_collation_collname_b2)
+}
+
+pub(crate) fn conversion_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    conid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, CONVOID, conid, Anum_pg_conversion_connamespace_b2, Anum_pg_conversion_conname_b2)
+}
+
+pub(crate) fn statext_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    stxid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, STATEXTOID, stxid, Anum_pg_statistic_ext_stxnamespace_b2, Anum_pg_statistic_ext_stxname_b2)
+}
+
+pub(crate) fn ts_parser_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    prsid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, TSPARSEROID, prsid, Anum_pg_ts_parser_prsnamespace_b2, Anum_pg_ts_parser_prsname_b2)
+}
+
+pub(crate) fn ts_dict_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    dictid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, TSDICTOID, dictid, Anum_pg_ts_dict_dictnamespace_b2, Anum_pg_ts_dict_dictname_b2)
+}
+
+pub(crate) fn ts_template_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    tmplid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, TSTEMPLATEOID, tmplid, Anum_pg_ts_template_tmplnamespace_b2, Anum_pg_ts_template_tmplname_b2)
+}
+
+pub(crate) fn ts_config_namespace_and_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    cfgid: Oid,
+) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+    namespace_and_name1(mcx, TSCONFIGOID, cfgid, Anum_pg_ts_config_cfgnamespace_b2, Anum_pg_ts_config_cfgname_b2)
+}
+
+// ---------------------------------------------------------------------------
+// (namespace, owner, name) namespace projections.
+// ---------------------------------------------------------------------------
+
+fn namespace_owner_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    key: SysCacheKey<'_>,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    let tuple = SearchSysCache1(mcx, cache_id, key)?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oid = getattr_oid(mcx, cache_id, &tup, Anum_pg_namespace_oid_b2)?;
+    let nspowner = getattr_oid(mcx, cache_id, &tup, Anum_pg_namespace_nspowner_b2)?;
+    let name = getattr_name(mcx, cache_id, &tup, Anum_pg_namespace_nspname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((oid, nspowner, name)))
+}
+
+pub(crate) fn namespace_owner_row_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    namespace_owner_row(mcx, NAMESPACENAME, SysCacheKey::Str(name))
+}
+
+pub(crate) fn namespace_owner_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    schemaoid: Oid,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    namespace_owner_row(mcx, NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(schemaoid)))
+}
+
+// ---------------------------------------------------------------------------
+// scalar / small-tuple field projections.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn search_attname_attnum(
+    relid: Oid,
+    colname: &str,
+) -> PgResult<Option<(AttrNumber, bool)>> {
+    let scratch = MemoryContext::new("syscache attname attnum");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNAME,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Str(colname),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let attnum = getattr_i16(mcx, ATTNAME, &tup, Anum_pg_attribute_attnum_b2)?;
+    let attisdropped = getattr_bool(mcx, ATTNAME, &tup, Anum_pg_attribute_attisdropped_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((attnum, attisdropped)))
+}
+
+pub(crate) fn search_attnum_attisdropped(
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache attnum attisdropped");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let attisdropped = getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attisdropped_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(attisdropped))
+}
+
+pub(crate) fn att_get_attnotnull<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<(bool, PgString<'mcx>)>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let attnotnull = getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attnotnull_b2)?;
+    let attname = getattr_name(mcx, ATTNUM, &tup, Anum_pg_attribute_attname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((attnotnull, attname)))
+}
+
+pub(crate) fn search_relation_rls_flags(relid: Oid) -> PgResult<Option<(bool, bool)>> {
+    let scratch = MemoryContext::new("syscache rls flags");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let rowsecurity = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relrowsecurity_b2)?;
+    let forcerowsecurity = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relforcerowsecurity_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((rowsecurity, forcerowsecurity)))
+}
+
+pub(crate) fn search_authid_rolsuper(roleid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache authid rolsuper");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let rolsuper = getattr_bool(mcx, AUTHOID, &tup, Anum_pg_authid_rolsuper_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(rolsuper))
+}
+
+pub(crate) fn database_datdba(dbid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache database datdba");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, DATABASEOID, SysCacheKey::Value(KeyDatum::from_oid(dbid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let datdba = getattr_oid(mcx, DATABASEOID, &tup, Anum_pg_database_datdba_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(datdba))
+}
+
+pub(crate) fn collation_isdeterministic(colloid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache collation isdeterministic");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(colloid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let isdet = getattr_bool(mcx, COLLOID, &tup, Anum_pg_collation_collisdeterministic_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(isdet))
+}
+
+pub(crate) fn collation_any_encoding_row(
+    collname: &str,
+    namespace_id: Oid,
+) -> PgResult<Option<(Oid, u8)>> {
+    let scratch = MemoryContext::new("syscache collation any-encoding");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache3(
+        mcx,
+        COLLNAMEENCNSP,
+        SysCacheKey::Str(collname),
+        SysCacheKey::Value(KeyDatum::from_i32(-1)),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oid = getattr_oid(mcx, COLLNAMEENCNSP, &tup, Anum_pg_collation_oid_b2)?;
+    let provider = getattr_char(mcx, COLLNAMEENCNSP, &tup, Anum_pg_collation_collprovider_b2)? as u8;
+    ReleaseSysCache(tup);
+    Ok(Some((oid, provider)))
+}
+
+pub(crate) fn oper_exact(
+    opername: &str,
+    oprleft: Oid,
+    oprright: Oid,
+    namespace_id: Oid,
+) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache oper exact");
+    GetSysCacheOid(
+        scratch.mcx(),
+        OPERNAMENSP,
+        1, // Anum_pg_operator_oid (pg_operator.h)
+        SysCacheKey::Str(opername),
+        SysCacheKey::Value(KeyDatum::from_oid(oprleft)),
+        SysCacheKey::Value(KeyDatum::from_oid(oprright)),
+        SysCacheKey::Value(KeyDatum::from_oid(namespace_id)),
+    )
+}
+
+pub(crate) fn constraint_type_index(conoid: Oid) -> PgResult<Option<(u8, Oid)>> {
+    let scratch = MemoryContext::new("syscache constraint type/index");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let contype = getattr_char(mcx, CONSTROID, &tup, Anum_pg_constraint_contype_b2)? as u8;
+    let conindid = getattr_oid(mcx, CONSTROID, &tup, Anum_pg_constraint_conindid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((contype, conindid)))
+}
+
+pub(crate) fn constraint_relid(conoid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache constraint relid");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let conrelid = getattr_oid(mcx, CONSTROID, &tup, Anum_pg_constraint_conrelid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(conrelid))
+}
+
+pub(crate) fn constraint_identity<'mcx>(
+    mcx: Mcx<'mcx>,
+    conid: Oid,
+) -> PgResult<Option<(PgString<'mcx>, Oid, Oid)>> {
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let conname = getattr_name(mcx, CONSTROID, &tup, Anum_pg_constraint_conname_b2)?;
+    let conrelid = getattr_oid(mcx, CONSTROID, &tup, Anum_pg_constraint_conrelid_b2)?;
+    let contypid = getattr_oid(mcx, CONSTROID, &tup, Anum_pg_constraint_contypid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((conname, conrelid, contypid)))
+}
+
+pub(crate) fn transform_funcs(typid: Oid, langid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache transform funcs");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        TRFTYPELANG,
+        SysCacheKey::Value(KeyDatum::from_oid(typid)),
+        SysCacheKey::Value(KeyDatum::from_oid(langid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let fromsql = getattr_oid(mcx, TRFTYPELANG, &tup, Anum_pg_transform_trffromsql_b2)?;
+    let tosql = getattr_oid(mcx, TRFTYPELANG, &tup, Anum_pg_transform_trftosql_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((fromsql, tosql)))
+}
+
+pub(crate) fn transform_type_lang(transformid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache transform type/lang");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, TRFOID, SysCacheKey::Value(KeyDatum::from_oid(transformid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let trftype = getattr_oid(mcx, TRFOID, &tup, Anum_pg_transform_trftype_b2)?;
+    let trflang = getattr_oid(mcx, TRFOID, &tup, Anum_pg_transform_trflang_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((trftype, trflang)))
+}
+
+pub(crate) fn user_mapping_user_server(umid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache user-mapping user/server");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, USERMAPPINGOID, SysCacheKey::Value(KeyDatum::from_oid(umid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let umuser = getattr_oid(mcx, USERMAPPINGOID, &tup, Anum_pg_user_mapping_umuser_b2)?;
+    let umserver = getattr_oid(mcx, USERMAPPINGOID, &tup, Anum_pg_user_mapping_umserver_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((umuser, umserver)))
+}
+
+pub(crate) fn statext_get_relid(stats_oid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache statext relid");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, STATEXTOID, SysCacheKey::Value(KeyDatum::from_oid(stats_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let stxrelid = getattr_oid(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxrelid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(stxrelid))
+}
+
+pub(crate) fn statext_namespace(statextid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache statext namespace");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, STATEXTOID, SysCacheKey::Value(KeyDatum::from_oid(statextid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let stxnamespace = getattr_oid(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxnamespace_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(stxnamespace))
+}
+
+pub(crate) fn publication_rel_pub_rel(pubrelid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    publication_rel_ids(pubrelid)
+}
+
+pub(crate) fn publication_rel_ids(pubrelid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache publication rel ids");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PUBLICATIONREL, SysCacheKey::Value(KeyDatum::from_oid(pubrelid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let prpubid = getattr_oid(mcx, PUBLICATIONREL, &tup, Anum_pg_publication_rel_prpubid_b2)?;
+    let prrelid = getattr_oid(mcx, PUBLICATIONREL, &tup, Anum_pg_publication_rel_prrelid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((prpubid, prrelid)))
+}
+
+pub(crate) fn publication_namespace_pub_nsp(pubschemaid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    publication_namespace_ids(pubschemaid)
+}
+
+pub(crate) fn publication_namespace_ids(pubnspid: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache publication namespace ids");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PUBLICATIONNAMESPACE, SysCacheKey::Value(KeyDatum::from_oid(pubnspid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let pnpubid = getattr_oid(mcx, PUBLICATIONNAMESPACE, &tup, Anum_pg_publication_namespace_pnpubid_b2)?;
+    let pnnspid = getattr_oid(mcx, PUBLICATIONNAMESPACE, &tup, Anum_pg_publication_namespace_pnnspid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((pnpubid, pnnspid)))
+}
+
+// ---------------------------------------------------------------------------
+// pg_index / pg_range / pg_opclass / pg_class extra-field projections.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn index_isclustered(index_oid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache index isclustered");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisclustered_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn index_get_relid(index_oid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache index relid");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_oid(mcx, INDEXRELID, &tup, Anum_pg_index_indrelid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn index_get_indisprimary(index_oid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache index isprimary");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisprimary_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn pg_index_flags(index_oid: Oid) -> PgResult<Option<PgIndexFlags>> {
+    let scratch = MemoryContext::new("syscache index flags");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let flags = PgIndexFlags {
+        indisreplident: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisreplident_b2)?,
+        indisvalid: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisvalid_b2)?,
+        indisclustered: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisclustered_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(flags))
+}
+
+pub(crate) fn pg_range_form(rngtypid: Oid) -> PgResult<Option<PgRangeRow>> {
+    let scratch = MemoryContext::new("syscache pg_range form");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RANGETYPE, SysCacheKey::Value(KeyDatum::from_oid(rngtypid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = PgRangeRow {
+        rngsubtype: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngsubtype_b2)?,
+        rngcollation: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngcollation_b2)?,
+        rngsubopc: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngsubopc_b2)?,
+        rngcanonical: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngcanonical_b2)?,
+        rngsubdiff: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngsubdiff_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+pub(crate) fn pg_range_fields(range_oid: Oid) -> PgResult<Option<PgRangeFields>> {
+    let scratch = MemoryContext::new("syscache pg_range fields");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RANGETYPE, SysCacheKey::Value(KeyDatum::from_oid(range_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let fields = PgRangeFields {
+        rngsubtype: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngsubtype_b2)?,
+        rngcollation: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngcollation_b2)?,
+        rngmultitypid: getattr_oid(mcx, RANGETYPE, &tup, Anum_pg_range_rngmultitypid_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(fields))
+}
+
+pub(crate) fn pg_range_rngtypid_of_multirange(mltrngtypid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache multirange rngtypid");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RANGEMULTIRANGE, SysCacheKey::Value(KeyDatum::from_oid(mltrngtypid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_oid(mcx, RANGEMULTIRANGE, &tup, Anum_pg_range_rngtypid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn pg_opclass_form(opclass: Oid) -> PgResult<Option<(Oid, Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache opclass form");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(KeyDatum::from_oid(opclass)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let opcfamily = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcfamily_b2)?;
+    let opcintype = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcintype_b2)?;
+    let opcmethod = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcmethod_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((opcfamily, opcintype, opcmethod)))
+}
+
+pub(crate) fn pg_opclass_keytype<'mcx>(
+    mcx: Mcx<'mcx>,
+    opclass: Oid,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(KeyDatum::from_oid(opclass)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let opckeytype = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opckeytype_b2)?;
+    let opcintype = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcintype_b2)?;
+    let opcname = getattr_name(mcx, CLAOID, &tup, Anum_pg_opclass_opcname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((opckeytype, opcintype, opcname)))
+}
+
+pub(crate) fn opclass_namespace_method_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    opcid: Oid,
+) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>> {
+    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(KeyDatum::from_oid(opcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let opcnamespace = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcnamespace_b2)?;
+    let opcmethod = getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcmethod_b2)?;
+    let opcname = getattr_name(mcx, CLAOID, &tup, Anum_pg_opclass_opcname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((opcnamespace, opcmethod, opcname)))
+}
+
+pub(crate) fn pg_class_extra(relid: Oid) -> PgResult<Option<PgClassExtra>> {
+    let scratch = MemoryContext::new("syscache pg_class extra");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let extra = PgClassExtra {
+        relnatts: getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relnatts_b2)?,
+        reltype: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltype_b2)?,
+        reltablespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltablespace_b2)?,
+        relpersistence: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence_b2)? as u8,
+        relam: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(extra))
+}
+
+pub(crate) fn rel_relispartition(relid: Oid) -> PgResult<Option<bool>> {
+    const Anum_pg_class_relispartition_b2: i32 = 28;
+    let scratch = MemoryContext::new("syscache rel relispartition");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispartition_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn rel_namespace(relid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache rel namespace");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+pub(crate) fn search_partrelid_partdefid(parent_id: Oid) -> PgResult<Option<Oid>> {
+    const Anum_pg_partitioned_table_partdefid_b2: i32 = 4;
+    let scratch = MemoryContext::new("syscache partrelid partdefid");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PARTRELID, SysCacheKey::Value(KeyDatum::from_oid(parent_id)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let v = getattr_oid(mcx, PARTRELID, &tup, Anum_pg_partitioned_table_partdefid_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+// ---------------------------------------------------------------------------
+// pg_amop strategy/sortfamily projections.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn amop_by_opr_purpose(
+    opno: Oid,
+    purpose: u8,
+    opfamily: Oid,
+) -> PgResult<Option<(i16, Oid)>> {
+    let scratch = MemoryContext::new("syscache amop by opr/purpose");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache3(
+        mcx,
+        AMOPOPID,
+        SysCacheKey::Value(KeyDatum::from_oid(opno)),
+        SysCacheKey::Value(KeyDatum::from_char(purpose as i8)),
+        SysCacheKey::Value(KeyDatum::from_oid(opfamily)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let amopstrategy = getattr_i16(mcx, AMOPOPID, &tup, Anum_pg_amop_amopstrategy_b2)?;
+    let amopsortfamily = getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amopsortfamily_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((amopstrategy, amopsortfamily)))
+}
+
+pub(crate) fn amop_by_opr_purpose_family(
+    opno: Oid,
+    purpose: i8,
+    opfamily: Oid,
+) -> PgResult<Option<AmopOpidRow>> {
+    let scratch = MemoryContext::new("syscache amop by opr/purpose/family");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache3(
+        mcx,
+        AMOPOPID,
+        SysCacheKey::Value(KeyDatum::from_oid(opno)),
+        SysCacheKey::Value(KeyDatum::from_char(purpose)),
+        SysCacheKey::Value(KeyDatum::from_oid(opfamily)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = AmopOpidRow {
+        amopmethod: getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amopmethod_b2)?,
+        amopfamily: getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amopfamily_b2)?,
+        amopstrategy: getattr_i16(mcx, AMOPOPID, &tup, Anum_pg_amop_amopstrategy_b2)?,
+        amoplefttype: getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amoplefttype_b2)?,
+        amoprighttype: getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amoprighttype_b2)?,
+        amopopr: getattr_oid(mcx, AMOPOPID, &tup, Anum_pg_amop_amopopr_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+// ---------------------------------------------------------------------------
+// pg_proc projections.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn proc_proargnames_isnull(funcid: Oid) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache proc proargnames isnull");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Err(PgError::error("cache lookup failed for function in proc_proargnames_isnull"));
+    };
+    let (_value, is_null) = SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proargnames_b2)?;
+    ReleaseSysCache(tup);
+    Ok(is_null)
+}
+
+// NOTE: `search_pg_proc_fastpath` deferred — `FastpathProcRow.proargtypes`
+// needs faithful `oidvector`-into-`PgVec` decode; left to the same lane that
+// ports `proc_row_by_oid`'s proargtypes path.
+
+// ---------------------------------------------------------------------------
+// follow-on simple projections (batch 2026-06-17).
+// ---------------------------------------------------------------------------
+
+pub(crate) fn collation_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    colloid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    lookup_name1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(colloid)), Anum_pg_collation_collname_b2)
+}
+
+pub(crate) fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<types_storage::PgClassShape>> {
+    // Anum_pg_class_oid == 1; Anum_pg_class_relisshared == 16 (pg_class.h).
+    const Anum_pg_class_oid_b2: i32 = 1;
+    const Anum_pg_class_relisshared_b2: i32 = 16;
+    let scratch = MemoryContext::new("syscache pg_class shape");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oid = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_oid_b2)?;
+    let relisshared = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some(types_storage::PgClassShape { oid, relisshared }))
+}
+
+pub(crate) fn search_am_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    amname: &str,
+) -> PgResult<Option<types_namespace::backend_catalog_namespace::PgAmInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, AMNAME, SysCacheKey::Str(amname))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let info = types_namespace::backend_catalog_namespace::PgAmInfo {
+        oid: getattr_oid(mcx, AMNAME, &tup, Anum_pg_am_oid_b2)?,
+        amtype: getattr_char(mcx, AMNAME, &tup, Anum_pg_am_amtype_b2)? as u8,
+        amname: getattr_name(mcx, AMNAME, &tup, Anum_pg_am_amname_b2)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(info))
+}
+
+pub(crate) fn auth_members_of_member(
+    memberid: Oid,
+) -> PgResult<Vec<types_cache::AuthMembersRow>> {
+    // pg_auth_members attnos: roleid=2, member=3, admin_option=5,
+    // inherit_option=6, set_option=7 (pg_auth_members.h).
+    const Anum_pg_auth_members_roleid_b2: i32 = 2;
+    const Anum_pg_auth_members_admin_option_b2: i32 = 5;
+    const Anum_pg_auth_members_inherit_option_b2: i32 = 6;
+    const Anum_pg_auth_members_set_option_b2: i32 = 7;
+    let scratch = MemoryContext::new("syscache auth_members list");
+    let mcx = scratch.mcx();
+    let list = SearchSysCacheList1(mcx, AUTHMEMMEMROLE, SysCacheKey::Value(KeyDatum::from_oid(memberid)))?;
+    let mut rows = Vec::with_capacity(list.len());
+    for tup in list.iter() {
+        rows.push(types_cache::AuthMembersRow {
+            roleid: getattr_oid(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_roleid_b2)?,
+            admin_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_admin_option_b2)?,
+            inherit_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_inherit_option_b2)?,
+            set_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_set_option_b2)?,
+        });
+    }
+    Ok(rows)
 }
