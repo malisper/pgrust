@@ -750,10 +750,17 @@ fn indeterminate_collation(op: &str) -> PgError {
     .with_hint("Use the COLLATE clause to set the collation explicitly.")
 }
 
-/// `<unit>` owns no inward seams (its functions are called by the fmgr
-/// dispatcher, which depends on this crate directly), so there is nothing to
-/// install.  Present for the `seams-init` aggregator's uniform contract.
-pub fn init_seams() {}
+/// The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+/// `LIKE`/`ILIKE` operators and `like_escape` normalizers.
+pub mod fmgr_builtins;
+
+/// This unit owns no inward seams (its value cores are called by the fmgr
+/// dispatcher, which depends on this crate directly).  It does register its
+/// `fmgr_builtins[]` rows into the fmgr-core builtin table so by-OID dispatch
+/// resolves them.  Called by the `seams-init` aggregator.
+pub fn init_seams() {
+    fmgr_builtins::register_like_builtins();
+}
 
 #[cfg(test)]
 mod tests;
