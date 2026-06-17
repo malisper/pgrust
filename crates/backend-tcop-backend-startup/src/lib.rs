@@ -1113,6 +1113,28 @@ pub fn init_seams() {
     backend_tcop_backend_startup_seams::set_conn_timing_child::set(set_conn_timing_child);
     backend_tcop_backend_startup_seams::set_conn_timing_auth_start::set(globals::conn_timing::set_auth_start);
     backend_tcop_backend_startup_seams::set_conn_timing_auth_end::set(globals::conn_timing::set_auth_end);
+
+    // GUC variable accessors (`conf->variable`) for the two GUC variables this
+    // unit owns (backend_startup.c:46-47, guc_tables.c:1253/4991). The GUC
+    // machinery seeds them from boot_val during InitializeGUCOptions and reads
+    // them through these accessors.
+    //
+    //   `bool Trace_connection_negotiation` (DEVELOPER_OPTIONS) — the GUC slot
+    //   IS the variable; read directly at pre-auth handshake time.
+    //
+    //   `char *log_connections_string` (LOGGING_WHAT, GUC_LIST_INPUT) — the raw
+    //   string the GUC machinery owns; `check_log_connections`/
+    //   `assign_log_connections` parse it into the separate `log_connections`
+    //   int flag mask (the latter is set by the assign hook, not a GUC slot).
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::Trace_connection_negotiation.install(GucVarAccessors {
+        get: globals::trace_connection_negotiation::get,
+        set: globals::trace_connection_negotiation::set,
+    });
+    vars::log_connections_string.install(GucVarAccessors {
+        get: globals::log_connections_string::get,
+        set: globals::log_connections_string::set,
+    });
 }
 
 /// `set_conn_timing_child` (the inward seam): transfer launch timings into the

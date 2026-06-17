@@ -30,6 +30,10 @@ backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 # Own inward seams.
 backend-tcop-backend-startup-seams = { path = "../backend-tcop-backend-startup-seams" }
 
+# GUC table slots: this unit owns the `Trace_connection_negotiation` and
+# `log_connections_string` GUC variables, so it installs their var accessors.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # Outward seams (owner not directly dependable, or not yet ported).
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }

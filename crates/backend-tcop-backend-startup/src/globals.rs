@@ -43,6 +43,28 @@ pub mod log_connections {
     }
 }
 
+/// `char *log_connections_string;` — the raw string backing store for the
+/// `log_connections` GUC (guc_tables.c:4991, `&log_connections_string`). The
+/// GUC machinery owns this `char *`; `check_log_connections`/
+/// `assign_log_connections` parse it into the `log_connections` int above. The
+/// boot default is `""` (an empty, non-NULL string). Mirror it as an owned
+/// `Option<String>` so NULL stays distinguishable from empty.
+pub mod log_connections_string {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static VALUE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub fn get() -> Option<String> {
+        VALUE.with(|c| c.borrow().clone())
+    }
+
+    pub fn set(value: Option<String>) {
+        VALUE.with(|c| *c.borrow_mut() = value);
+    }
+}
+
 /// `ConnectionTiming conn_timing = {.ready_for_use = TIMESTAMP_MINUS_INFINITY};`
 /// (backend_startup.c:58). `ready_for_use` starts at the
 /// `TIMESTAMP_MINUS_INFINITY` sentinel so `PostgresMain` can tell whether it

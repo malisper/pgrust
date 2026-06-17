@@ -15995,6 +15995,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-more-seams",
  "backend-utils-misc-ps-status-seams",
  "backend-utils-misc-timeout-seams",
