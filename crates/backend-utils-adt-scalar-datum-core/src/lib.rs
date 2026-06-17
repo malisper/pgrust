@@ -735,7 +735,12 @@ pub fn init_seams() {
     // `datum_transfer` / `datum_image_eq_word` word-codec has been retired.
     backend_utils_adt_datum_seams::datum_serialize::set(datum_serialize);
     backend_utils_adt_datum_seams::datum_restore::set(datum_restore);
+
+    // Register this crate's SQL-callable fmgr builtins (C: `fmgr_builtins[]`).
+    fmgr_builtins::register_datum_core_builtins();
 }
+
+mod fmgr_builtins;
 
 #[cfg(test)]
 mod tests;
