@@ -11,11 +11,16 @@
 //! fmgr-core builtin table (C: `fmgr_builtins[]`). OIDs / nargs / strict /
 //! retset are transcribed exactly from `pg_proc.dat`.
 //!
-//! Only `cstring_in` / `cstring_out` / `cstring_send` are registered here. The
-//! other pseudo-type I/O functions are either the `ereport(ERROR)` dummies (no
-//! SQL-callable value), or `recv`/delegating outputs over `Datum` arms (array /
-//! enum / range / multirange) whose arg/result types are not expressible at the
-//! current fmgr boundary.
+//! `cstring_in` / `cstring_out` / `cstring_send` are registered here, along with
+//! the `void` working I/O (`void_in` / `void_out` / `void_send`) and the `shell`
+//! type dummies (`shell_in` / `shell_out`) — all of whose arg/result types are
+//! expressible at the current fmgr boundary (`cstring` on the by-ref lane, the
+//! 0-width by-value `void`, the `bytea` send result on the by-ref lane).
+//!
+//! The remaining pseudo-type I/O functions are either the `ereport(ERROR)`
+//! dummies (no SQL-callable value), or `recv`/delegating outputs over `Datum`
+//! arms (array / enum / range / multirange) whose arg/result types are not
+//! expressible at the current fmgr boundary.
 
 extern crate std;
 
@@ -104,6 +109,59 @@ fn fc_cstring_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_varlena(fcinfo, bytes)
 }
 
+/// `void_in` (pseudotypes.c:263): `PG_RETURN_VOID()`. Accepts any cstring and
+/// returns the 0-width by-value `void` word.
+fn fc_void_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let _s = arg_cstring(fcinfo, 0);
+    match crate::void_in(_s) {
+        Ok(d) => d,
+        Err(e) => raise(e),
+    }
+}
+
+/// `void_out` (pseudotypes.c:269): `PG_RETURN_CSTRING(pstrdup(""))`. The `void`
+/// argument is a 0-width by-value word that carries no payload.
+fn fc_void_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let owned = match crate::void_out(m.mcx()) {
+        Ok(out) => out.as_str().to_string(),
+        Err(e) => raise(e),
+    };
+    ret_cstring(fcinfo, owned)
+}
+
+/// `void_send` (pseudotypes.c:285): send an empty string,
+/// `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))`.
+fn fc_void_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let bytes = match crate::void_send(m.mcx()) {
+        Ok(bytea) => bytea.as_bytes().to_vec(),
+        Err(e) => raise(e),
+    };
+    ret_varlena(fcinfo, bytes)
+}
+
+/// `shell_in` (pseudotypes.c:303): `errmsg("cannot accept a value of a shell
+/// type")` — always raises.
+fn fc_shell_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0);
+    match crate::shell_in(s) {
+        Ok(d) => d,
+        Err(e) => raise(e),
+    }
+}
+
+/// `shell_out` (pseudotypes.c:313): `errmsg("cannot display a value of a shell
+/// type")` — always raises. Its `opaque` argument is an unread by-value word.
+fn fc_shell_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let value = fcinfo.arg(0).map(|a| a.value).unwrap_or_else(Datum::null);
+    let owned = match crate::shell_out(value) {
+        Ok(out) => out.as_str().to_string(),
+        Err(e) => raise(e),
+    };
+    ret_cstring(fcinfo, owned)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -134,5 +192,12 @@ pub fn register_pseudotypes_builtins() {
         builtin(2292, "cstring_in", 1, true, false, fc_cstring_in),
         builtin(2293, "cstring_out", 1, true, false, fc_cstring_out),
         builtin(2501, "cstring_send", 1, true, false, fc_cstring_send),
+        // ---- void working I/O ----
+        builtin(2298, "void_in", 1, true, false, fc_void_in),
+        builtin(2299, "void_out", 1, true, false, fc_void_out),
+        builtin(3121, "void_send", 1, true, false, fc_void_send),
+        // ---- shell type dummies ----
+        builtin(2398, "shell_in", 1, true, false, fc_shell_in),
+        builtin(2399, "shell_out", 1, true, false, fc_shell_out),
     ]);
 }
