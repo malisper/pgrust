@@ -117,6 +117,22 @@ pub fn init_seams() {
             get: || core::proc_get(|p| p.max_wal_senders),
             set: |v| core::with_proc(|p| p.max_wal_senders = v),
         });
+
+        // `int wal_sender_timeout = 60 * 1000;` GUC (walsender.c). A plain GUC
+        // global read from its slot throughout the WAL-sender loop (e.g.
+        // WalSndComputeSleeptime / ProcessRepliesIfAny timeout checks); seeded
+        // by the GUC engine from boot_val.
+        vars::wal_sender_timeout.install(GucVarAccessors {
+            get: || core::proc_get(|p| p.wal_sender_timeout),
+            set: |v| core::with_proc(|p| p.wal_sender_timeout = v),
+        });
+
+        // `bool log_replication_commands = false;` GUC (walsender.c). Read from
+        // its slot when deciding LOG vs DEBUG1 for a replication command.
+        vars::log_replication_commands.install(GucVarAccessors {
+            get: || core::proc_get(|p| p.log_replication_commands),
+            set: |v| core::with_proc(|p| p.log_replication_commands = v),
+        });
     }
 
     ws::wal_snd_set_state::set(crate::init::WalSndSetState);
