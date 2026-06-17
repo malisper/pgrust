@@ -20825,6 +20825,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-utils-cache-plancache-portal-seams",
  "backend-utils-error",
+ "backend-utils-init-small-seams",
  "backend-utils-mmgr-mcxt-seams",
  "backend-utils-mmgr-portalmem-seams",
  "backend-utils-resowner-seams",

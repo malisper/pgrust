@@ -19,6 +19,10 @@ types-snapshot = { path = "../types-snapshot" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 
+# `InterruptPending` / `MyProcPid` substrate for the mcxt-interrupt seam trio
+# (HandleLogMemoryContextInterrupt / ProcessLogMemoryContextInterrupt).
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
 # inward seams installed by this crate
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
 

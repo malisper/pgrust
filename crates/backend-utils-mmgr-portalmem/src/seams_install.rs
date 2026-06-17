@@ -104,6 +104,26 @@ pub fn init_seams() {
     backend_utils_mmgr_mcxt_seams::switch_to_top_memory_context::set(
         crate::top_context::switch_to_top_memory_context,
     );
+
+    // The mcxt.c memory-context-logging interrupt trio
+    // (`HandleLogMemoryContextInterrupt` / `ProcessLogMemoryContextInterrupt` +
+    // the `LogMemoryContextPending` read). Homed here alongside the
+    // TopMemoryContext substrate (`crate::top_context`) because the dump targets
+    // `MemoryContextStatsDetail(TopMemoryContext, ...)` and mcxt.c has no
+    // dedicated body crate in the mcx world. The READ is default-false (the
+    // happy path never sets the flag, so this unblocks every aux-process *Main
+    // loop and CHECK_FOR_INTERRUPTS). HANDLE raises InterruptPending +
+    // sets the per-backend pending flag; PROCESS clears the flag and emits the
+    // per-context LOG_SERVER_ONLY stats dump.
+    backend_utils_mmgr_mcxt_seams::log_memory_context_pending::set(
+        crate::top_context::log_memory_context_pending,
+    );
+    backend_utils_mmgr_mcxt_seams::handle_log_memory_context_interrupt::set(
+        crate::top_context::handle_log_memory_context_interrupt,
+    );
+    backend_utils_mmgr_mcxt_seams::process_log_memory_context_interrupt::set(
+        crate::top_context::process_log_memory_context_interrupt,
+    );
 }
 
 /// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`
