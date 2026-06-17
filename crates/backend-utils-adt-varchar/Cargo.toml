@@ -13,6 +13,8 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-stringinfo = { path = "../types-stringinfo" }
 types-sortsupport = { path = "../types-sortsupport" }
 common-hashfn = { path = "../common-hashfn" }

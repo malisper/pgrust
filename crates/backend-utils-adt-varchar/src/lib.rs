@@ -61,6 +61,15 @@ extern crate alloc;
 
 use alloc::format;
 
+pub mod fmgr_builtins;
+
+/// Install this unit's inward seams and register its `varchar.c` fmgr builtins
+/// (so `fmgr_isbuiltin` resolves them on the by-OID fast path). Called by
+/// `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_varchar_builtins();
+}
+
 use backend_utils_adt_varlena::comparison::varstr_cmp;
 use backend_utils_adt_varlena::keystone::{check_collation_set, cstring_to_text_with_len};
 use backend_utils_adt_varlena::sortsupport::{bpchartruelen, varstr_sortsupport};
