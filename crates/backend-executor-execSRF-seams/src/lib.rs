@@ -98,7 +98,7 @@ seam_core::seam!(
     pub fn exec_make_table_function_result<'mcx>(
         setexpr: &mut types_nodes::execexpr::SetExprState<'mcx>,
         econtext: types_nodes::EcxtId,
-        arg_context: &mcx::MemoryContext,
+        arg_context: &mut mcx::MemoryContext,
         expected_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
         random_access: bool,
         estate: &mut types_nodes::EStateData<'mcx>,

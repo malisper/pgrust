@@ -1,0 +1,47 @@
+[package]
+name = "backend-executor-execSRF"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_execSRF"
+path = "src/lib.rs"
+
+[dependencies]
+# The set-returning-function evaluation seams this owner installs.
+backend-executor-execSRF-seams = { path = "../backend-executor-execSRF-seams" }
+
+# Outward calls through per-owner seam crates.
+# Argument-expression compile/eval (execExpr/execExprInterp), result-type and
+# expression-type lookups (nodes-core / lsyscache), descriptor construction
+# (tupdesc), the materialized tuplestore (sort-storage), the cross-call SRF
+# call-frame machinery (funcapi: init/per/end MultiFuncCall), and the work_mem
+# budget (init-small).
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
+# The generate_series(int4/int8) SRFs registered in the executor-frame table:
+# their value cores + the value-per-call funcapi machinery.
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+backend-utils-adt-int = { path = "../backend-utils-adt-int" }
+backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
+
+# Shared type stack + allocator + error.
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+backend-utils-error = { path = "../backend-utils-error" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+
+[dev-dependencies]
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

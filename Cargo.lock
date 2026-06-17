@@ -8803,6 +8803,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execSRF"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "backend-access-common-tupdesc",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execSRF-seams",
+ "backend-nodes-core",
+ "backend-utils-adt-int",
+ "backend-utils-adt-int8",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execSRF-seams"
 version = "0.0.0"
 dependencies = [
@@ -22008,6 +22035,7 @@ dependencies = [
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
  "backend-executor-execReplication",
+ "backend-executor-execSRF",
  "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",
@@ -22021,6 +22049,7 @@ dependencies = [
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeFunctionscan",
  "backend-executor-nodeGather",
  "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",

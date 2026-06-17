@@ -298,7 +298,7 @@ fn make_table_function_result_into<'mcx>(
         ..
     } = &mut *node;
     let argcontext = argcontext
-        .as_ref()
+        .as_mut()
         .expect("FunctionNext: argcontext not initialized");
     let fs = &mut funcstates[funcno];
     let setexpr = fs
