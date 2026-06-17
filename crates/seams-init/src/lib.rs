@@ -132,6 +132,7 @@ pub fn init_all() {
     backend_commands_analyze::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_tablecmds::init_seams();
+    backend_commands_user::init_seams();
     backend_commands_vacuum::init_seams();
     backend_commands_vacuumparallel::init_seams();
     backend_commands_variable::init_seams();
@@ -1304,23 +1305,14 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
-        // DESIGN_DEBT (TD-BUFMGR-AIO-GUC): three bufmgr-seams `::call`ed in live
-        // consumers (backend-storage-aio-read-stream; the bgwriter loop) whose
-        // values come from the unported aio.c / GUC machinery, not this owner:
-        //   * maintenance_io_concurrency — the `maintenance_io_concurrency` GUC
-        //     value; no backing GUC variable exists in the owner (only a doc note).
+        // DESIGN_DEBT (TD-BUFMGR-AIO-GUC): one bufmgr-seam `::call`ed in a live
+        // consumer (backend-storage-aio-read-stream) whose value comes from the
+        // unported aio.c machinery, not this owner:
         //   * io_method_sync — the `io_method == IOMETHOD_SYNC` test; the `io_method`
         //     GUC/enum lives in the unported aio.c, not this owner.
-        //   * bgwriter_flush_after — the `bgwriter_flush_after` GUC value (a
-        //     bufmgr.c `int` global). The bgwriter loop reads it via
-        //     WritebackContextInit; like checkpoint_flush_after it has no backing
-        //     GUC variable installed in this owner (the guc-tables boot value is
-        //     seeded in the GUC store but the seam is not `::set` by the owner —
-        //     the GUC machinery installs it when it fully ports). Same class as
-        //     maintenance_io_concurrency / io_method_sync. (checkpoint_flush_after
-        //     escapes the guard only because it is `::call`ed inside this owner
-        //     crate — the OUTWARD-seam exclusion — whereas bgwriter_flush_after is
-        //     called from the bgwriter consumer.)
+        // (maintenance_io_concurrency / bgwriter_flush_after RETIRED: the GUC owner
+        // crate now `::set`s both accessors from their backing GUC variables, so
+        // the seams are installed and these allowlist entries no longer fire.)
         // (buffer_manager_shmem_size / buffer_manager_shmem_init RETIRED: the owner
         // now installs both — BufferManagerShmemSize is the faithful add_size/
         // mul_size accumulator and BufferManagerShmemInit allocate-or-attaches the
@@ -1328,8 +1320,6 @@ mod recurrence_guard {
         // process-local pool view, mirroring procarray's ProcArrayShmemInit.)
         // DELETE each entry as the aio GUC source lands.
         ("backend_storage_buffer_bufmgr", "io_method_sync"),
-        ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
-        ("backend_storage_buffer_bufmgr", "bgwriter_flush_after"),
         // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
         // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
         // The latch<->proc handle spaces were unified: a `LatchHandle` is a

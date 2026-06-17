@@ -146,6 +146,7 @@ backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-analyze = { path = "../backend-commands-analyze" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-tablecmds = { path = "../backend-commands-tablecmds" }
+backend-commands-user = { path = "../backend-commands-user" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }
 backend-commands-vacuumparallel = { path = "../backend-commands-vacuumparallel" }
 backend-commands-variable = { path = "../backend-commands-variable" }
