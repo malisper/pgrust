@@ -254,6 +254,13 @@ impl BufferManager {
             ));
         }
 
+        // `ReadBuffer_common(reln, RelationGetSmgr(reln), ...)` — the C inline
+        // `RelationGetSmgr(reln)` lazily `smgropen`s the relation and caches it
+        // on `reln->rd_smgr` before the smgr op. `smgropen`/`cache_open` is
+        // idempotent, so call it here to guarantee the SMgrRelation cache entry
+        // exists prior to the `smgrreadv`/`smgrnblocks` inside read_buffer_common.
+        smgr::smgropen(rel.rd_locator, rel.rd_backend)?;
+
         // Read the buffer, and update pgstat counters to reflect a cache hit or
         // miss (done inside ReadBuffer_common / PinBufferForBlock).
         self.read_buffer_common(
