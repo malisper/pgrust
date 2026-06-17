@@ -18,6 +18,7 @@ types-storage = { path = "../types-storage" }
 types-catalog = { path = "../types-catalog" }
 types-wal = { path = "../types-wal" }
 types-guc = { path = "../types-guc" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 mcx = { path = "../mcx" }
 libc = "0.2"
 pg-prng = { path = "../pg-prng" }

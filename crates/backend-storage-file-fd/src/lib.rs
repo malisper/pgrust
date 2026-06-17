@@ -156,4 +156,36 @@ pub fn init_seams() {
     file_seams::fsync_fname::set(seams::seam_fsync_fname);
     file_seams::data_sync_elevel::set(seams::seam_data_sync_elevel);
     file_seams::durable_rename::set(seams::seam_durable_rename);
+
+    // -- GUC var accessors (fd.c file-scope globals) ------------------------
+    //
+    // fd.c declares `max_files_per_process`, `data_sync_retry`,
+    // `recovery_init_sync_method` and `file_extend_method` as plain process-local
+    // C globals seeded from their boot_val by the GUC engine and read directly
+    // from those globals (PG 18.3 fd.c:146/162/165/168 — none come from the
+    // ControlFile). `max_files_per_process` is read by set_max_safe_fds
+    // (fd.c:1058-1061), `data_sync_retry` by data_sync_elevel (fd.c:4003),
+    // `recovery_init_sync_method` by SyncDataDirectory (fd.c:3636), and
+    // `file_extend_method` by the file-extend path. The owner storage is the
+    // per-backend `vfd_core` global; install accessors so the GUC engine
+    // reads/writes the same storage this unit reads.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::max_files_per_process.install(GucVarAccessors {
+            get: vfd_core::max_files_per_process,
+            set: vfd_core::set_max_files_per_process,
+        });
+        vars::data_sync_retry.install(GucVarAccessors {
+            get: vfd_core::data_sync_retry,
+            set: vfd_core::set_data_sync_retry,
+        });
+        vars::recovery_init_sync_method.install(GucVarAccessors {
+            get: vfd_core::recovery_init_sync_method,
+            set: vfd_core::set_recovery_init_sync_method,
+        });
+        vars::file_extend_method.install(GucVarAccessors {
+            get: vfd_core::file_extend_method,
+            set: vfd_core::set_file_extend_method,
+        });
+    }
 }
