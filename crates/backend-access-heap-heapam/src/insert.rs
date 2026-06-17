@@ -522,8 +522,8 @@ pub fn heap_multi_insert<'mcx>(
         let mut all_visible_cleared = false;
         let mut all_frozen_set = false;
 
-        // CHECK_FOR_INTERRUPTS();
-        page_seam::check_for_interrupts::call()?;
+        // CHECK_FOR_INTERRUPTS(); — owned by tcop/postgres.c.
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
         /*
          * Compute number of pages needed to fit the to-be-inserted tuples in

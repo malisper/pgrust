@@ -33,6 +33,7 @@ backend-access-transam-multixact-seams = { path = "../backend-access-transam-mul
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-access-transam-transam = { path = "../backend-access-transam-transam" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 types-vacuum = { path = "../types-vacuum" }

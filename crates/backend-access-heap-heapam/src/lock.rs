@@ -963,8 +963,8 @@ fn heap_lock_updated_tuple_rec<'mcx>(
 
         // 'l4 restart label.
         'l4: loop {
-            // CHECK_FOR_INTERRUPTS()
-            page_seam::check_for_interrupts::call()?;
+            // CHECK_FOR_INTERRUPTS() — owned by tcop/postgres.c.
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
             /*
              * Before locking the buffer, pin the VM page if it appears

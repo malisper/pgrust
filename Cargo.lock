@@ -1407,6 +1407,7 @@ dependencies = [
  "backend-storage-lmgr-predicate-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
+ "backend-tcop-postgres-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-scalar-datum-core",
  "backend-utils-cache-inval",

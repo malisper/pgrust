@@ -77,7 +77,6 @@ use backend_access_heap_pruneheap_seams as prune_seam;
 use backend_utils_cache_relcache_seams as relcache_seam;
 use backend_utils_activity_pgstat_seams as pgstat_seam;
 use backend_utils_init_small_seams as initsmall_seam;
-use backend_access_heap_vacuumlazy_seams as vacuumlazy_seam;
 use backend_access_transam_xact_seams as xact_seam;
 use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_access_table_tableam as tableam;
@@ -522,7 +521,8 @@ fn heap_fetch_next_buffer(sscan: &mut TableScanDescData<'_>, dir: ScanDirection)
     }
 
     // Be sure to check for interrupts at least once per page.
-    vacuumlazy_seam::check_for_interrupts::call()?;
+    // CHECK_FOR_INTERRUPTS() (miscadmin.h) — owned by tcop/postgres.c.
+    backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
     // If the scan direction is changing, reset the prefetch block to the current
     // block (the read_stream_reset semantics).
