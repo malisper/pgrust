@@ -572,4 +572,75 @@ pub fn init_seams() {
     s::ssl_negotiation_disabled::set(ssl_negotiation_disabled);
     s::gss_negotiation_disabled::set(gss_negotiation_disabled);
     s::secure_open_server::set(|port| secure_open_server(port).expect("secure_open_server"));
+
+    // The SSL GUC variables declared in be-secure.c — `conf->variable` targets
+    // that guc_tables.c points into this translation unit. Each reads from the
+    // GUC slot (none come from the ControlFile); install the backend-local
+    // get/set accessors backing each one.
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
+    vars::ssl_library.install(GucVarAccessors {
+        get: config::ssl_library,
+        set: config::set_ssl_library,
+    });
+    vars::ssl_cert_file.install(GucVarAccessors {
+        get: config::ssl_cert_file,
+        set: config::set_ssl_cert_file,
+    });
+    vars::ssl_ca_file.install(GucVarAccessors {
+        get: config::ssl_ca_file,
+        set: config::set_ssl_ca_file,
+    });
+    vars::ssl_crl_file.install(GucVarAccessors {
+        get: config::ssl_crl_file,
+        set: config::set_ssl_crl_file,
+    });
+    vars::ssl_crl_dir.install(GucVarAccessors {
+        get: config::ssl_crl_dir,
+        set: config::set_ssl_crl_dir,
+    });
+    vars::ssl_dh_params_file.install(GucVarAccessors {
+        get: config::ssl_dh_params_file,
+        set: config::set_ssl_dh_params_file,
+    });
+    vars::ssl_passphrase_command.install(GucVarAccessors {
+        get: config::ssl_passphrase_command,
+        set: config::set_ssl_passphrase_command,
+    });
+    // `ssl_tls13_ciphers` GUC backs the C global `SSLCipherSuites`.
+    vars::SSLCipherSuites.install(GucVarAccessors {
+        get: config::ssl_cipher_suites,
+        set: config::set_ssl_cipher_suites,
+    });
+    // `ssl_ciphers` GUC backs the C global `SSLCipherList`.
+    vars::SSLCipherList.install(GucVarAccessors {
+        get: config::ssl_cipher_list,
+        set: config::set_ssl_cipher_list,
+    });
+    // `ssl_groups` GUC backs the C global `SSLECDHCurve`.
+    vars::SSLECDHCurve.install(GucVarAccessors {
+        get: config::ssl_ecdh_curve,
+        set: config::set_ssl_ecdh_curve,
+    });
+
+    vars::ssl_passphrase_command_supports_reload.install(GucVarAccessors {
+        get: config::ssl_passphrase_command_supports_reload,
+        set: config::set_ssl_passphrase_command_supports_reload,
+    });
+    // `ssl_prefer_server_ciphers` GUC backs the C global `SSLPreferServerCiphers`.
+    vars::SSLPreferServerCiphers.install(GucVarAccessors {
+        get: config::ssl_prefer_server_ciphers,
+        set: config::set_ssl_prefer_server_ciphers,
+    });
+
+    vars::ssl_min_protocol_version.install(GucVarAccessors {
+        get: config::ssl_min_protocol_version,
+        set: config::set_ssl_min_protocol_version,
+    });
+    vars::ssl_max_protocol_version.install(GucVarAccessors {
+        get: config::ssl_max_protocol_version,
+        set: config::set_ssl_max_protocol_version,
+    });
 }
+
+mod config;
