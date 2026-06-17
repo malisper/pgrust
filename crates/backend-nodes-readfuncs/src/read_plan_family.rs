@@ -1066,24 +1066,78 @@ fn read_windowagg<'mcx>(
     })
 }
 
+/// `_readNestLoopParam` (readfuncs.funcs.c) — read the body of a framed
+/// `{NESTLOOPPARAM ...}` node (the `{` and `NESTLOOPPARAM` label already
+/// consumed by the caller). `NestLoopParam` is a typed struct, not a `Node`
+/// arm, so it is read directly here (mirroring the OUT side's hand-emitted
+/// framed list element).
+fn read_nestloopparam_body() -> PgResult<types_nodes::nodenestloop::NestLoopParam> {
+    let paramno = read_int_field()?;
+    // READ_NODE_FIELD(paramval): a `Var *` carried as a framed `{VAR ...}`.
+    let _label = next_tok()?; // skip :paramval
+    let open = next_tok()?;
+    if open.bytes != b"{" {
+        return Err(elog_error(
+            "readNestLoopParam: expected '{' before paramval Var",
+        ));
+    }
+    let label = next_tok()?;
+    if label.bytes != b"VAR" {
+        return Err(elog_error("readNestLoopParam: paramval is not a VAR node"));
+    }
+    let paramval = crate::read_var()?;
+    let close = next_tok()?;
+    if close.bytes != b"}" {
+        return Err(elog_error(
+            "readNestLoopParam: expected '}' after paramval Var",
+        ));
+    }
+    Ok(types_nodes::nodenestloop::NestLoopParam { paramno, paramval })
+}
+
 fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodenestloop::NestLoop<'mcx>> {
     let join = read_join_fields(mcx)?;
-    // nestParams: the OUT side emits `<>` only (NestLoopParam unmodeled);
-    // read it back as the empty list.
+    // READ_NODE_FIELD(nestParams): `List *` of `NestLoopParam`. `<>` (NIL) is the
+    // empty list; otherwise the bare `({NESTLOOPPARAM ...} ...)` list form. Each
+    // element is read directly (NestLoopParam is not a `Node` arm), mirroring the
+    // OUT side's hand-emitted list.
     let _label = next_tok()?; // skip :nestParams
-    match read::node_read(mcx, None)? {
-        None => {}
-        Some(_) => {
+    let mut nestParams = Vec::new();
+    let first = next_tok()?;
+    if !first.bytes.is_empty() {
+        // Not `<>`: must be `(`.
+        if first.bytes != b"(" {
             return Err(elog_error(
-                "readNestLoop: non-empty nestParams (NestLoopParam) is unmodeled \
-                 in this serialization stage (out side panics on a non-empty list)",
-            ))
+                "readNestLoop: expected '(' or '<>' for nestParams list",
+            ));
+        }
+        loop {
+            let t = next_tok()?;
+            if t.bytes == b")" {
+                break;
+            }
+            if t.bytes != b"{" {
+                return Err(elog_error(
+                    "readNestLoop: expected '{' or ')' in nestParams list",
+                ));
+            }
+            let label = next_tok()?;
+            if label.bytes != b"NESTLOOPPARAM" {
+                return Err(elog_error(
+                    "readNestLoop: nestParams element is not a NESTLOOPPARAM node",
+                ));
+            }
+            let p = read_nestloopparam_body()?;
+            let close = next_tok()?;
+            if close.bytes != b"}" {
+                return Err(elog_error(
+                    "readNestLoop: expected '}' after NESTLOOPPARAM body",
+                ));
+            }
+            nestParams.push(p);
         }
     }
-    Ok(types_nodes::nodenestloop::NestLoop {
-        join,
-        nestParams: Vec::new(),
-    })
+    Ok(types_nodes::nodenestloop::NestLoop { join, nestParams })
 }
 
 fn read_mergejoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodemergejoin::MergeJoin<'mcx>> {
@@ -1650,5 +1704,64 @@ mod tests {
         assert!(text.contains(":sortColIdx ( 1 2)"), "{text}");
         assert!(text.contains(":sortOperators ( 97 521)"), "{text}");
         assert!(text.contains(":nullsFirst ( false true)"), "{text}");
+    }
+
+    #[test]
+    fn nestloop_empty_nestparams_round_trips() {
+        // NIL nestParams → `<>`.
+        let mut nl = types_nodes::nodenestloop::NestLoop::default();
+        nl.join.jointype = JoinType::JOIN_INNER;
+        let text = assert_framed_round_trip(&Node::NestLoop(nl));
+        assert!(text.starts_with("{NESTLOOP :join.plan.disabled_nodes 0"), "{text}");
+        assert!(text.ends_with(":nestParams <>}"), "{text}");
+    }
+
+    #[test]
+    fn nestloop_with_nestparams_round_trips() {
+        // A NestLoop with two NestLoopParam entries, each carrying a Var paramval.
+        // Exercises the framed `({NESTLOOPPARAM ...} ...)` list (out) and the
+        // hand-rolled list reader (read), byte-stable across both.
+        let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("nestloop")));
+        let mcx = ctx.mcx();
+        let mut v1 = types_nodes::primnodes::Var::default();
+        v1.varno = 1;
+        v1.varattno = 2;
+        v1.vartype = 23;
+        let mut v2 = types_nodes::primnodes::Var::default();
+        v2.varno = 1;
+        v2.varattno = 5;
+        v2.vartype = 25;
+        let mut nl = types_nodes::nodenestloop::NestLoop::default();
+        nl.join.jointype = JoinType::JOIN_LEFT;
+        nl.nestParams = std::vec![
+            types_nodes::nodenestloop::NestLoopParam {
+                paramno: 0,
+                paramval: v1,
+            },
+            types_nodes::nodenestloop::NestLoopParam {
+                paramno: 1,
+                paramval: v2,
+            },
+        ];
+        let text = assert_framed_round_trip(&Node::NestLoop(nl));
+        assert!(
+            text.contains(":nestParams ({NESTLOOPPARAM :paramno 0 :paramval {VAR :varno 1"),
+            "{text}"
+        );
+        assert!(text.contains("{NESTLOOPPARAM :paramno 1 :paramval {VAR :varno 1"), "{text}");
+
+        // Read it back and confirm the params survived.
+        ensure_seams();
+        let parsed = string_to_node(mcx, &text).expect("read");
+        match PgBox::into_inner(parsed) {
+            Node::NestLoop(nl) => {
+                assert_eq!(nl.nestParams.len(), 2);
+                assert_eq!(nl.nestParams[0].paramno, 0);
+                assert_eq!(nl.nestParams[0].paramval.varattno, 2);
+                assert_eq!(nl.nestParams[1].paramno, 1);
+                assert_eq!(nl.nestParams[1].paramval.vartype, 25);
+            }
+            other => panic!("expected NestLoop, got {:?}", other.node_tag()),
+        }
     }
 }

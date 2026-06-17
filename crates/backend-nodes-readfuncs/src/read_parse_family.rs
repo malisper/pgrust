@@ -2,10 +2,10 @@
 //! the exact order the OUT side wrote them. `try_read` returns `Some(result)`
 //! iff this family owns `label`.
 //!
-//! Mirror of `out_parse_family` — see that module's header for the covered/
-//! seam-panicked node inventory. `TABLEFUNC` and `COMMONTABLEEXPR` return the
-//! C `elog(ERROR, ...)` (mirror-pg-and-panic, surfaced as the exact error)
-//! because their carriers cannot round-trip.
+//! Mirror of `out_parse_family` — see that module's header for the covered
+//! node inventory. `COMMONTABLEEXPR` reads its `search_clause` (a typed
+//! `CTESearchClause`, not a `Node` arm) as a framed `{CTESEARCHCLAUSE ...}`
+//! sub-node directly, mirroring the OUT side.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -23,7 +23,8 @@ use types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
 use types_nodes::primnodes::Expr;
 use types_nodes::rawnodes::{
     A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, Alias,
-    CTECycleClause, CollateClause, ColumnDef, ColumnRef, DeleteStmt, FromExpr,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, CollateClause, ColumnDef,
+    ColumnRef, DeleteStmt, FromExpr,
     FuncCall, GroupingSet, GroupingSetKind, InferClause, InsertStmt, JoinExpr, LockClauseStrength,
     LockWaitPolicy, LockingClause, MergeAction, MergeStmt, MergeWhenClause, MultiAssignRef,
     OnConflictClause, OnConflictExpr, ParamRef, RangeFunction, RangeSubselect, RangeTableSample,
@@ -969,6 +970,97 @@ fn read_cte_cycle_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CTECycleClause<'mcx>>
     })
 }
 
+fn cte_materialize_from(c: i32) -> CTEMaterialize {
+    match c {
+        0 => CTEMaterialize::CTEMaterializeDefault,
+        1 => CTEMaterialize::CTEMaterializeAlways,
+        _ => CTEMaterialize::CTEMaterializeNever,
+    }
+}
+
+/// `_readCTESearchClause` (readfuncs.funcs.c) — read the body of a framed
+/// `{CTESEARCHCLAUSE ...}` node (the `{` and `CTESEARCHCLAUSE` label already
+/// consumed by the caller). `CTESearchClause` is a typed struct, not a `Node`
+/// arm, so it is read directly here (mirroring the OUT side's framed field).
+fn read_cte_search_clause_body<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CTESearchClause<'mcx>> {
+    let search_col_list = read_node_vec_field(mcx)?;
+    let search_breadth_first = read_bool_field()?;
+    let search_seq_column = read_string_field(mcx)?;
+    let location = read_location_field()?;
+    Ok(CTESearchClause {
+        search_col_list,
+        search_breadth_first,
+        search_seq_column,
+        location,
+    })
+}
+
+/// `READ_NODE_FIELD(search_clause)` over the framed `{CTESEARCHCLAUSE ...}` /
+/// `<>` form. Reads the `:search_clause` label then either `<>` (None) or the
+/// framed body directly (CTESearchClause is not a `Node` arm, so it cannot go
+/// through `node_read`).
+fn read_search_clause_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, CTESearchClause<'mcx>>>> {
+    let _label = next_token()?; // skip :search_clause
+    let t = next_token()?;
+    if t.bytes.is_empty() {
+        // `<>` — NULL.
+        return Ok(None);
+    }
+    if t.bytes != b"{" {
+        return Err(elog_error(
+            "readCommonTableExpr: expected '{' or '<>' for search_clause".to_string(),
+        ));
+    }
+    let label = next_token()?;
+    if label.bytes != b"CTESEARCHCLAUSE" {
+        return Err(elog_error(
+            "readCommonTableExpr: search_clause is not a CTESEARCHCLAUSE node".to_string(),
+        ));
+    }
+    let body = read_cte_search_clause_body(mcx)?;
+    let close = next_token()?;
+    if close.bytes != b"}" {
+        return Err(elog_error(
+            "readCommonTableExpr: expected '}' after CTESEARCHCLAUSE body".to_string(),
+        ));
+    }
+    Ok(Some(mcx::alloc_in(mcx, body)?))
+}
+
+/// `_readCommonTableExpr` (readfuncs.funcs.c).
+fn read_common_table_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CommonTableExpr<'mcx>> {
+    let ctename = read_string_field(mcx)?;
+    let aliascolnames = read_node_vec_field(mcx)?;
+    let ctematerialized = cte_materialize_from(read_enum_field()?);
+    let ctequery = read_opt_node(mcx)?;
+    let search_clause = read_search_clause_field(mcx)?;
+    let cycle_clause = read_opt_node(mcx)?;
+    let location = read_location_field()?;
+    let cterecursive = read_bool_field()?;
+    let cterefcount = read_int_field()?;
+    let ctecolnames = read_node_vec_field(mcx)?;
+    let ctecoltypes = read_oid_list_field(mcx)?;
+    let ctecoltypmods = read_int_scalar_list_field(mcx)?;
+    let ctecolcollations = read_oid_list_field(mcx)?;
+    Ok(CommonTableExpr {
+        ctename,
+        aliascolnames,
+        ctematerialized,
+        ctequery,
+        search_clause,
+        cycle_clause,
+        location,
+        cterecursive,
+        cterefcount,
+        ctecolnames,
+        ctecoltypes,
+        ctecoltypmods,
+        ctecolcollations,
+    })
+}
+
 // ===========================================================================
 // _readSetOperationStmt
 // ===========================================================================
@@ -1863,15 +1955,7 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
 
         b"TABLEFUNC" => read_table_func(mcx).map(Node::TableFunc),
 
-        // --- seam-panic (carrier cannot round-trip): surface the exact C error.
-        // NOTE: CommonTableExpr.search_clause is a CTESearchClause, not a Node arm.
-        b"COMMONTABLEEXPR" => {
-            return Some(Err(elog_error(
-                "readCommonTableExpr: search_clause is a CTESearchClause, which is not a \
-                 Node enum variant — cannot reconstruct search_clause"
-                    .to_string(),
-            )))
-        }
+        b"COMMONTABLEEXPR" => read_common_table_expr(mcx).map(Node::CommonTableExpr),
 
         _ => return None,
     };
@@ -1968,5 +2052,66 @@ mod tests {
         assert!(text.contains(":inFromCl true"), "{text}");
         // touch VarReturningType so the import is used (mirrors lib-test style).
         let _ = VarReturningType::VAR_RETURNING_DEFAULT;
+    }
+
+    #[test]
+    fn common_table_expr_with_search_clause_round_trips() {
+        // A CTE carrying a CTESearchClause (a typed struct, not a Node arm) and
+        // scalar coltype/typmod/collation lists — exercises the framed
+        // {CTESEARCHCLAUSE ...} sub-node round-trip (out + read) and the scalar
+        // list fields, byte-stable across both.
+        ensure_seams();
+        let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("cte")));
+        let mcx = ctx.mcx();
+        let sc = CTESearchClause {
+            search_col_list: PgVec::new_in(mcx),
+            search_breadth_first: true,
+            search_seq_column: Some(PgString::from_str_in("seq", mcx).unwrap()),
+            location: -1,
+        };
+        let mut coltypes = PgVec::new_in(mcx);
+        coltypes.push(23u32);
+        let mut coltypmods = PgVec::new_in(mcx);
+        coltypmods.push(-1i32);
+        let mut colcollations = PgVec::new_in(mcx);
+        colcollations.push(0u32);
+        let cte = CommonTableExpr {
+            ctename: Some(PgString::from_str_in("w", mcx).unwrap()),
+            aliascolnames: PgVec::new_in(mcx),
+            ctematerialized: CTEMaterialize::CTEMaterializeAlways,
+            ctequery: None,
+            search_clause: Some(mcx::alloc_in(mcx, sc).unwrap()),
+            cycle_clause: None,
+            location: -1,
+            cterecursive: true,
+            cterefcount: 1,
+            ctecolnames: PgVec::new_in(mcx),
+            ctecoltypes: coltypes,
+            ctecoltypmods: coltypmods,
+            ctecolcollations: colcollations,
+        };
+        let text = assert_framed_round_trip(&Node::CommonTableExpr(cte));
+        assert!(text.starts_with("{COMMONTABLEEXPR :ctename w"), "{text}");
+        assert!(
+            text.contains(":search_clause {CTESEARCHCLAUSE :search_col_list <> :search_breadth_first true :search_seq_column seq"),
+            "{text}"
+        );
+        assert!(text.contains(":ctematerialized 1"), "{text}");
+        assert!(text.contains(":cterecursive true"), "{text}");
+        assert!(text.contains(":ctecoltypes (o 23)"), "{text}");
+
+        // Read it back and confirm the search_clause survived.
+        let parsed = string_to_node(mcx, &text).expect("read");
+        match PgBox::into_inner(parsed) {
+            Node::CommonTableExpr(c) => {
+                let sc = c.search_clause.expect("search_clause lost");
+                assert!(sc.search_breadth_first);
+                assert_eq!(sc.search_seq_column.as_ref().map(|s| s.as_str()), Some("seq"));
+                assert_eq!(c.ctecoltypes.len(), 1);
+                assert_eq!(c.ctecoltypes[0], 23);
+                assert!(c.cterecursive);
+            }
+            other => panic!("expected CommonTableExpr, got {:?}", other.node_tag()),
+        }
     }
 }

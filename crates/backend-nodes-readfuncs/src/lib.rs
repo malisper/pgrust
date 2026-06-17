@@ -452,7 +452,7 @@ fn var_returning_from(code: i32) -> VarReturningType {
 
 /// `_readVar` (readfuncs.funcs.c). Reads fields in the exact order `_outVar`
 /// wrote them.
-fn read_var() -> PgResult<Var> {
+pub(crate) fn read_var() -> PgResult<Var> {
     let varno = read_int_field()?;
     let varattno = read_int_field()? as i16;
     let vartype = read_oid_field()?;

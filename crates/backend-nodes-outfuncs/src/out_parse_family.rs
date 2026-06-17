@@ -594,6 +594,39 @@ fn out_cte_cycle_clause(buf: &mut String, n: &types_nodes::rawnodes::CTECycleCla
     write_oid_field(buf, "cycle_mark_neop", n.cycle_mark_neop);
 }
 
+/// `_outCTESearchClause` (outfuncs.funcs.c) — the framed `{CTESEARCHCLAUSE ...}`
+/// body. `CTESearchClause` is a typed struct (not a `Node` enum arm), so it is
+/// serialized directly here and emitted via [`write_opt_framed`] from the
+/// parent `_outCommonTableExpr`; this is byte-identical to C's
+/// `WRITE_NODE_FIELD(search_clause)`.
+fn out_cte_search_clause(buf: &mut String, n: &types_nodes::rawnodes::CTESearchClause<'_>, wl: bool) {
+    buf.push_str("CTESEARCHCLAUSE");
+    write_node_vec_field(buf, "search_col_list", &n.search_col_list, wl);
+    write_bool_field(buf, "search_breadth_first", n.search_breadth_first);
+    write_string_field(buf, "search_seq_column", n.search_seq_column.as_ref().map(|s| s.as_str()));
+    write_location_field(buf, "location", n.location, wl);
+}
+
+/// `_outCommonTableExpr` (outfuncs.funcs.c).
+fn out_common_table_expr(buf: &mut String, n: &types_nodes::rawnodes::CommonTableExpr<'_>, wl: bool) {
+    buf.push_str("COMMONTABLEEXPR");
+    write_string_field(buf, "ctename", n.ctename.as_ref().map(|s| s.as_str()));
+    write_node_vec_field(buf, "aliascolnames", &n.aliascolnames, wl);
+    write_enum_field(buf, "ctematerialized", n.ctematerialized as i32);
+    write_opt_node_field(buf, "ctequery", &n.ctequery, wl);
+    // search_clause: a CTESearchClause (typed struct, not a `Node` arm) — framed
+    // directly. cycle_clause: a `Node *` (`Node::CTECycleClause`).
+    write_opt_framed(buf, "search_clause", &n.search_clause, wl, out_cte_search_clause);
+    write_opt_node_field(buf, "cycle_clause", &n.cycle_clause, wl);
+    write_location_field(buf, "location", n.location, wl);
+    write_bool_field(buf, "cterecursive", n.cterecursive);
+    write_int_field(buf, "cterefcount", n.cterefcount);
+    write_node_vec_field(buf, "ctecolnames", &n.ctecolnames, wl);
+    write_oid_vec_field(buf, "ctecoltypes", &n.ctecoltypes);
+    write_int_vec_field(buf, "ctecoltypmods", &n.ctecoltypmods);
+    write_oid_vec_field(buf, "ctecolcollations", &n.ctecolcollations);
+}
+
 // ===========================================================================
 // _outSetOperationStmt
 // ===========================================================================
@@ -1181,13 +1214,7 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
 
         Node::TableFunc(n) => framed(buf, |b| out_table_func(b, n, wl)),
 
-        // --- seam-panic: carrier cannot round-trip ---
-        // NOTE: CommonTableExpr.search_clause is a CTESearchClause, which is NOT a
-        // `Node` enum variant — it cannot be framed/round-tripped.
-        Node::CommonTableExpr(_) => panic!(
-            "_outCommonTableExpr: search_clause is a CTESearchClause, which is not a \
-             Node enum variant — cannot frame search_clause for serialization"
-        ),
+        Node::CommonTableExpr(n) => framed(buf, |b| out_common_table_expr(b, n, wl)),
 
         _ => return false,
     }

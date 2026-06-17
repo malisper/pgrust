@@ -404,7 +404,7 @@ pub(crate) fn write_expr_list_field(buf: &mut String, name: &str, args: &[Expr],
 // ---------------------------------------------------------------------------
 
 /// `_outVar` (outfuncs.funcs.c).
-fn out_var(buf: &mut String, node: &Var, write_loc: bool) {
+pub(crate) fn out_var(buf: &mut String, node: &Var, write_loc: bool) {
     buf.push_str("VAR");
     write_int_field(buf, "varno", node.varno);
     write_int_field(buf, "varattno", node.varattno as i32);

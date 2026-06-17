@@ -569,21 +569,44 @@ fn out_agg(buf: &mut String, n: &types_nodes::nodeagg::Agg<'_>, wl: bool) {
     }
 }
 
+/// `_outNestLoopParam` (outfuncs.funcs.c) — the framed `{NESTLOOPPARAM ...}`
+/// body. `NestLoopParam` is carried as a typed struct (not a `Node` enum arm),
+/// so it is serialized directly here rather than dispatched through `outNode`;
+/// the parent `_outNestLoop` emits the `:nestParams (...)` list of these framed
+/// forms by hand, which is byte-identical to C's `WRITE_NODE_FIELD(nestParams)`
+/// (`outNode` of the `List` → `({NESTLOOPPARAM ...} ...)`).
+fn out_nestloopparam(buf: &mut String, p: &types_nodes::nodenestloop::NestLoopParam, wl: bool) {
+    buf.push_str("NESTLOOPPARAM");
+    write_int_field(buf, "paramno", p.paramno);
+    // WRITE_NODE_FIELD(paramval): a `Var *` (always non-null in C).
+    buf.push_str(" :paramval ");
+    buf.push('{');
+    crate::out_var(buf, &p.paramval, wl);
+    buf.push('}');
+}
+
 fn out_nestloop(buf: &mut String, n: &types_nodes::nodenestloop::NestLoop<'_>, wl: bool) {
     buf.push_str("NESTLOOP");
     out_join_fields(buf, &n.join, "join.", wl);
-    // nestParams: `List *` of `NestLoopParam` nodes. NestLoopParam is not a
-    // serialization `Node` arm in this enum, so a populated list cannot be
-    // emitted faithfully; the planner always sets this for parameterized
-    // nestloops. mirror-pg-and-panic on a non-empty list, `<>` when empty.
+    // WRITE_NODE_FIELD(nestParams): `List *` of `NestLoopParam` nodes. NIL (the
+    // empty vec) renders `<>` (outNode of a NULL List); otherwise the bare
+    // `({NESTLOOPPARAM ...} ...)` list form (`_outList` for T_List).
+    buf.push_str(" :nestParams ");
     if n.nestParams.is_empty() {
-        buf.push_str(" :nestParams <>");
+        buf.push_str("<>");
     } else {
-        panic!(
-            "_outNestLoop: nestParams carries NestLoopParam, which is not a \
-             serialization Node arm in this enum (no _outNestLoopParam writer); \
-             field unmodeled for non-empty lists"
-        );
+        buf.push('(');
+        let mut first = true;
+        for p in &n.nestParams {
+            if !first {
+                buf.push(' ');
+            }
+            first = false;
+            buf.push('{');
+            out_nestloopparam(buf, p, wl);
+            buf.push('}');
+        }
+        buf.push(')');
     }
 }
 
