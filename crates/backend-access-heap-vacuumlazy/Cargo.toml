@@ -15,3 +15,4 @@ types-storage = { path = "../types-storage" }
 types-vacuum = { path = "../types-vacuum" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }

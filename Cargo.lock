@@ -1784,6 +1784,7 @@ name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-vacuumlazy-seams",
+ "backend-commands-vacuum-seams",
  "backend-utils-error",
  "types-core",
  "types-error",

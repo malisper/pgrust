@@ -75,12 +75,26 @@ pub use core::{LVRelState, LVSavedErrInfo, VacErrPhase};
 pub use vacuum_rel::heap_vacuum_rel;
 
 /// Install this crate's implementation into its seam crate. The driver's
-/// public entry `heap_vacuum_rel` is the one inward seam (called by the
-/// not-yet-ported `commands/vacuum.c` across a dependency cycle); the outward
+/// public entry `heap_vacuum_rel` is the one inward seam; the outward
 /// seams in `backend-access-heap-vacuumlazy-seams` belong to other,
 /// not-yet-ported owners and are installed by them when they land.
+///
+/// `heap_vacuum_rel` is also this crate's body for the heap table AM's
+/// `relation_vacuum` callback (`heapam_relation_vacuum` in `heapam_handler.c`,
+/// which is a one-line `heap_vacuum_rel(rel, params, bstrategy)`). The
+/// command layer (`commands/vacuum.c`'s `vacuum_rel`) dispatches a heap
+/// relation through the table-AM `table_relation_vacuum` seam, so we install
+/// that seam here to delegate to the in-crate driver — the heap AM being the
+/// only ported table AM, this is the heap provider's vtable entry.
 pub fn init_seams() {
     backend_access_heap_vacuumlazy_seams::heap_vacuum_rel::set(|rel, params, bstrategy| {
+        heap_vacuum_rel(rel, &params, bstrategy)
+    });
+
+    // heapam_relation_vacuum — the heap table AM's `relation_vacuum`
+    // callback. `vacuum.c` (`vacuum_rel`) reaches the heap vacuum driver
+    // through this table-AM dispatch seam.
+    backend_commands_vacuum_seams::table_relation_vacuum::set(|rel, params, bstrategy| {
         heap_vacuum_rel(rel, &params, bstrategy)
     });
 }
