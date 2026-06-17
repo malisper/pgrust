@@ -2829,13 +2829,22 @@ pub(crate) fn parameter_acl_by_oid<'mcx>(
 /// reads, exactly as the C syscache keeps the `HeapTuple` alive until
 /// `ReleaseSysCache`.
 struct StatsTupleHolder {
-    /// The arena the tuple's bytes live in. Kept alive (not dropped) for as
-    /// long as the holder is leaked; dropped on `release_stats_tuple`.
-    _ctx: MemoryContext,
-    /// The pinned `pg_statistic` tuple. Its `'static` lifetime is sound only
-    /// because `_ctx` outlives every borrow (the holder owns both, and is only
-    /// dropped wholesale in `release_stats_tuple`).
+    /// The arena the tuple's bytes live in, behind a `Box` so its address is
+    /// *stable*. The tuple's `Mcx` allocator handles (`&MemoryContext`) are
+    /// captured during the search and promoted to `'static`; they must keep
+    /// pointing at this exact `MemoryContext` even after the holder is moved
+    /// (e.g. boxed). A bare `MemoryContext` field would move with the struct,
+    /// dangling those handles (read as a garbage `""` context on drop, the
+    /// `uncharging N with only 0 charged` panic). The `Box` indirection pins the
+    /// `MemoryContext` on the heap so moving the holder only moves the pointer.
+    /// Kept alive (not dropped) for as long as the holder is leaked; dropped on
+    /// `release_stats_tuple`. Field-order matters: `tuple` is declared first so
+    /// it is dropped before `_ctx`, returning its charged bytes to a live arena.
     tuple: FormedTuple<'static>,
+    /// Boxed for a stable address; see `tuple`. The pinned tuple's `'static`
+    /// lifetime is sound only because `_ctx` outlives every borrow (the holder
+    /// owns both and is dropped wholesale in `release_stats_tuple`).
+    _ctx: Box<MemoryContext>,
 }
 
 /// Reborrow the [`StatsTupleHolder`] behind a [`StatsTuple`] pointer. Safe given
@@ -2859,12 +2868,17 @@ pub(crate) fn search_statrelattinh<'mcx>(
     inherit: bool,
 ) -> PgResult<Option<types_selfuncs::StatsTuple>> {
     // The pinned tuple must outlive the search's transient `mcx`, so it gets its
-    // own arena (held by the leaked holder, freed in release_stats_tuple).
-    let ctx = MemoryContext::new("pg_statistic syscache pin");
+    // own arena (held by the leaked holder, freed in release_stats_tuple). It is
+    // boxed FIRST so the `MemoryContext` has a stable heap address: the tuple's
+    // `Mcx` allocator handles captured below borrow `&*ctx` and are promoted to
+    // `'static`, so that address must not change when the holder is later moved
+    // into its own `Box`. A bare `MemoryContext` value would move with the
+    // holder, dangling those handles (the `uncharging .. with only 0 charged`
+    // panic). With the `Box`, moving the holder moves only the pointer.
+    let ctx: Box<MemoryContext> = Box::new(MemoryContext::new("pg_statistic syscache pin"));
     // Extend the tuple's lifetime to `'static` as it crosses out of the search's
-    // borrow of `ctx`: it lives in `ctx`, which the holder owns and keeps alive
-    // until `release_stats_tuple`. Decoupling the borrow here also lets `ctx` be
-    // moved into the holder below.
+    // borrow of `*ctx`: it lives in `*ctx`, which the holder owns and keeps alive
+    // until `release_stats_tuple`.
     let result: Option<FormedTuple<'static>> = {
         let mcx = ctx.mcx();
         let found = SearchSysCache3(
@@ -2882,7 +2896,7 @@ pub(crate) fn search_statrelattinh<'mcx>(
         // !HeapTupleIsValid: drop the empty arena and report the miss.
         return Ok(None);
     };
-    let holder = Box::new(StatsTupleHolder { _ctx: ctx, tuple });
+    let holder = Box::new(StatsTupleHolder { tuple, _ctx: ctx });
     let ptr = Box::into_raw(holder) as *mut core::ffi::c_void;
     Ok(Some(types_selfuncs::StatsTuple { ptr }))
 }

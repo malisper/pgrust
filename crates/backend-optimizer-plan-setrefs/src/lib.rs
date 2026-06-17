@@ -361,17 +361,19 @@ fn add_rte_to_flat_rtable<'mcx>(
         g.all_relids = relids_add_member(g.all_relids.take(), new_len as i32);
     }
 
-    // Copy the RTEPermissionInfo, if any. addRTEPermissionInfo would set
-    // newrte->perminfoindex; parse_relation owns the perminfo node space, so the
-    // copy is performed by the owner over the opaque NodeId list.
+    // Copy the RTEPermissionInfo, if any (setrefs.c:579 `addRTEPermissionInfo`).
+    // C deep-copies the source query's perminfo (`copyObject`) into
+    // `glob->finalrteperminfos` and resets `newrte->perminfoindex` to the new
+    // 1-based list length. The source query `q` owns its `rteperminfos` list
+    // value-typed in the planner run; clone `rteperminfos[perminfoindex - 1]`
+    // into the run's perminfo store and record the handle.
     if perminfoindex > 0 {
-        let new_index = glob_ref(root)?.finalrteperminfos.len();
-        let g = glob_mut(root)?;
-        ext::copy_rte_permission_info::call(
-            &mut g.finalrteperminfos,
-            new_index,
-            (perminfoindex - 1) as usize,
-        )?;
+        let src = run.resolve(q).rteperminfos[(perminfoindex - 1) as usize].clone_in(mcx)?;
+        let perm_id = run.intern_rte_perminfo(src);
+        glob_mut(root)?.finalrteperminfos.push(perm_id);
+        let new_perm_index = glob_ref(root)?.finalrteperminfos.len();
+        // newrte->perminfoindex = list_length(glob->finalrteperminfos)
+        run.resolve_rte_mut(new_id).perminfoindex = new_perm_index as Index;
     }
     Ok(())
 }

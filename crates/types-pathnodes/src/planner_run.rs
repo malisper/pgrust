@@ -41,11 +41,13 @@ use types_core::primitive::Index;
 use types_nodes::copy_query::Query;
 use types_nodes::nodelockrows::PlanRowMark;
 use types_nodes::nodes::Node;
-use types_nodes::parsenodes::RangeTblEntry;
+use types_nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo};
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::FromExpr;
 
-use crate::{PathId, PlanId, PlanRowMarkId, PlannerInfo, QueryId, RangeTblEntryId};
+use crate::{
+    PathId, PlanId, PlanRowMarkId, PlannerInfo, QueryId, RangeTblEntryId, RtePermInfoId,
+};
 
 /// The query store for one planner invocation — the resolver behind every
 /// [`QueryId`].
@@ -105,6 +107,18 @@ pub struct PlannerRun<'mcx> {
     /// planner-run [`Mcx`] so the store shares the run's context lifetime, the
     /// same shape as the RTE store.
     rowmarks: PgVec<'mcx, PlanRowMark>,
+    /// Backing store for every flat-copied [`RTEPermissionInfo`]; a
+    /// [`RtePermInfoId`] indexes here. This is the value resolver behind
+    /// `PlannerGlobal::finalrteperminfos` (C `List *finalrteperminfos` of owned
+    /// `RTEPermissionInfo *`). `set_plan_references`'s `add_rte_to_flat_rtable`
+    /// clones each source-query perminfo (`copyObject` over `RTEPermissionInfo`)
+    /// into this store and appends the returned [`RtePermInfoId`] to
+    /// `glob->finalrteperminfos`; `standard_planner` resolves the handles back
+    /// into the finished `PlannedStmt::permInfos`. Same shape as the RTE/rowmark
+    /// stores — allocated in the planner-run [`Mcx`], so the owned
+    /// `RTEPermissionInfo<'mcx>` (with its `Bitmapset` columns) shares the run's
+    /// context lifetime.
+    rteperminfos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -129,6 +143,7 @@ impl<'mcx> PlannerRun<'mcx> {
             subroots: PgVec::new_in(mcx),
             subpaths: PgVec::new_in(mcx),
             rowmarks: PgVec::new_in(mcx),
+            rteperminfos: PgVec::new_in(mcx),
         }
     }
 
@@ -315,6 +330,33 @@ impl<'mcx> PlannerRun<'mcx> {
     #[inline]
     pub fn rowmark_len(&self) -> usize {
         self.rowmarks.len()
+    }
+
+    /// Intern an [`RTEPermissionInfo`] into the store, returning the
+    /// [`RtePermInfoId`] handle that resolves to it. The producer path:
+    /// `set_plan_references`'s `add_rte_to_flat_rtable` clones each source-query
+    /// perminfo (`addRTEPermissionInfo`'s `copyObject`) here and appends the
+    /// returned id to `PlannerGlobal::finalrteperminfos`.
+    #[inline]
+    pub fn intern_rte_perminfo(&mut self, perminfo: RTEPermissionInfo<'mcx>) -> RtePermInfoId {
+        let id = RtePermInfoId(self.rteperminfos.len() as u32);
+        self.rteperminfos.push(perminfo);
+        id
+    }
+
+    /// Resolve a [`RtePermInfoId`] to its [`RTEPermissionInfo`] — the safe-Rust
+    /// rendering of an `RTEPermissionInfo *` deref. Panics on an out-of-range
+    /// handle (a handle never produced by
+    /// [`intern_rte_perminfo`](Self::intern_rte_perminfo) is a planner bug).
+    #[inline]
+    pub fn resolve_rte_perminfo(&self, id: RtePermInfoId) -> &RTEPermissionInfo<'mcx> {
+        &self.rteperminfos[id.0 as usize]
+    }
+
+    /// Number of interned [`RTEPermissionInfo`]s.
+    #[inline]
+    pub fn rte_perminfo_len(&self) -> usize {
+        self.rteperminfos.len()
     }
 
     /* --------------------------------------------------------------------

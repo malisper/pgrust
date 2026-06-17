@@ -510,6 +510,21 @@ pub struct RangeTblEntryId(pub u32);
 #[repr(transparent)]
 pub struct PlanRowMarkId(pub u32);
 
+/// `RTEPermissionInfo *` — an element of `PlannerGlobal::finalrteperminfos`
+/// (C `List *finalrteperminfos`, the flat-copied perminfo list `set_plan_
+/// references` builds via `add_rte_to_flat_rtable`'s `addRTEPermissionInfo`).
+/// `RTEPermissionInfo<'mcx>` carries `Bitmapset` columns, so it pins to `'mcx`;
+/// [`PlannerGlobal`] is a deliberately lifetime-free arena world, so the owned
+/// values live in the [`planner_run::PlannerRun`] perminfo store and the list
+/// carries [`RtePermInfoId`] handles, resolved with
+/// [`planner_run::PlannerRun::resolve_rte_perminfo`] — exactly as
+/// [`RangeTblEntryId`] backs `finalrtable` and [`PlanRowMarkId`] backs
+/// `finalrowmarks` (was `NodeId`, the wrong id-space — a perminfo is not a
+/// `node_arena` `Expr`). A [`RtePermInfoId`] is the dense 0-based intern index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct RtePermInfoId(pub u32);
+
 /* ==========================================================================
  * PlannerGlobal (pathnodes.h:95-182) — global state for an entire planner
  * invocation, shared across all sub-Query levels. Trimmed to the scalar/handle
@@ -552,8 +567,14 @@ pub struct PlannerGlobal {
     pub all_relids: Relids,
     /// `Bitmapset *prunableRelids`.
     pub prunable_relids: Relids,
-    /// `List *finalrteperminfos`.
-    pub finalrteperminfos: Vec<NodeId>,
+    /// `List *finalrteperminfos` — the flat-copied `RTEPermissionInfo` list for
+    /// the finished plan (`set_plan_references`'s `add_rte_to_flat_rtable` runs
+    /// `addRTEPermissionInfo` for every RTE with a `perminfoindex`). C holds
+    /// owned `RTEPermissionInfo *`; the owned values live in the
+    /// [`planner_run::PlannerRun`] perminfo store and this list carries the
+    /// [`RtePermInfoId`] handles, resolved with
+    /// [`planner_run::PlannerRun::resolve_rte_perminfo`].
+    pub finalrteperminfos: Vec<RtePermInfoId>,
     /// `List *finalrowmarks` — the rowmarks for the finished plan
     /// (`set_plan_references` flat-copies each `root->rowMarks` `PlanRowMark`
     /// here). C holds owned `PlanRowMark *`; the owned values live in the

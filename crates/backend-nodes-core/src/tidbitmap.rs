@@ -1986,6 +1986,14 @@ pub fn init_seams() {
     backend_nodes_core_tidbitmap_seams::tbm_free_shared_area::set(provide_tbm_free_shared_area);
     backend_nodes_core_tidbitmap_seams::tbm_intersect::set(tbm_intersect);
     backend_nodes_core_tidbitmap_seams::tbm_is_empty::set(tbm_is_empty);
+
+    // `tbm_calculate_entries(maxbytes)` (tidbitmap.c) — the cost code
+    // (`cost_bitmap_heap_scan` / `compute_bitmap_pages`) consumes the estimated
+    // max pagetable entries as a float; the in-crate function returns the C
+    // `int`, so the seam adapter widens it to f64.
+    backend_optimizer_path_costsize_seams::tbm_calculate_entries::set(|maxbytes| {
+        tbm_calculate_entries(maxbytes) as f64
+    });
 }
 
 #[cfg(test)]

@@ -333,6 +333,21 @@ fn standard_planner<'mcx>(
         rtable.push(run.resolve_rte(*id).clone_in(mcx)?);
     }
 
+    // permInfos: resolve glob->finalrteperminfos (Vec<RtePermInfoId>) to owned
+    // RTEPermissionInfos (C `result->permInfos = glob->finalrteperminfos`).
+    let final_perminfos: Vec<types_pathnodes::RtePermInfoId> = root
+        .glob
+        .as_ref()
+        .map(|g| g.finalrteperminfos.clone())
+        .unwrap_or_default();
+    let mut perm_infos: mcx::PgVec<
+        'mcx,
+        types_nodes::parsenodes::RTEPermissionInfo<'mcx>,
+    > = mcx::PgVec::new_in(mcx);
+    for id in &final_perminfos {
+        perm_infos.push(run.resolve_rte_perminfo(*id).clone_in(mcx)?);
+    }
+
     // subplans: resolve glob->subplans (Vec<PlanId>) to owned Node trees.
     let subplan_ids: Vec<types_pathnodes::PlanId> = root
         .glob
@@ -437,7 +452,7 @@ fn standard_planner<'mcx>(
         hasModifyingCTE: parse.hasModifyingCTE,
         parallelModeNeeded: glob_parallel_mode_needed,
         jitFlags: jit_flags,
-        permInfos: None,
+        permInfos: if perm_infos.is_empty() { None } else { Some(perm_infos) },
         paramExecTypes: param_exec_types,
         rtable: if rtable.is_empty() { None } else { Some(rtable) },
         unprunableRelids: unprunable_relids,

@@ -8,9 +8,12 @@
 //   * joinpath-seams: initial_cost_{nestloop,mergejoin,hashjoin},
 //     compute_semi_anti_join_factors.
 //
-// It does NOT install work_mem / get_hash_memory_limit (owned by misc-guc /
-// nodeHash; consumed via `ps::`), nor any cost GUC getter (those are costsize.c
-// globals backed by module statics here), nor compare_path_costs (pathnode's).
+// It wires the pathnode-seams `work_mem` alias to the canonical GUC getter
+// (value owned by backend-utils-init-small `globals::work_mem`; delegation, not
+// a value owned here). It does NOT install get_hash_memory_limit (owned by
+// nodeHash; consumed via `ps::`), nor compare_path_costs (pathnode's). The cost
+// GUC getters proper (cpu_tuple_cost, ...) are costsize.c globals backed by
+// module statics here.
 
 // NOTE: this file is `include!`d into lib.rs, so it shares lib.rs's imports
 // (`cz`, `ps`, `PlannerInfo`, `PathId`, `RelId`, `QualCost`, ...). Only the
@@ -97,6 +100,12 @@ pub fn init_seams() {
     ps::cpu_operator_cost::set(|| crate::CPU_OPERATOR_COST);
     ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG);
     ps::sizeof_minimal_tuple_header::set(|| SIZEOF_MINIMAL_TUPLE_HEADER);
+    // `work_mem` (utils/guc.c GUC, default 4 MB) read by the cost estimators
+    // (`compute_bitmap_pages`, sort/hash sizing). The value is owned by the GUC
+    // global in backend-utils-init-small (`globals::work_mem`), exposed through
+    // its getter seam; this wires the pathnode-seams alias the cost code calls to
+    // that canonical getter (delegation, not a duplicate value here).
+    ps::work_mem::set(|| backend_utils_init_small_seams::work_mem::call());
 
     /* ---- costsize-seams: the cost_qual_eval per-node recursion --------- */
     // `cost_qual_eval` (in-crate) routes the whole walk through this single-node

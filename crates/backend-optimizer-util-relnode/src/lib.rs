@@ -2419,6 +2419,56 @@ fn bms_is_subset(a: &Relids, b: &Relids) -> bool {
     true
 }
 
+/// `bms_subset_compare(a, b)` (bitmapset.c) — the subset relationship between
+/// `a` and `b`: `BMS_EQUAL`, `BMS_SUBSET1` (a ⊂ b), `BMS_SUBSET2` (b ⊂ a), or
+/// `BMS_DIFFERENT`. With this model's normalized (trailing-zero-trimmed) words,
+/// the C `shortlen` loop plus tail-length comparison reduce to: scan the common
+/// words tracking which direction is strictly-larger, then let the (normalized)
+/// word-count difference break ties.
+fn bms_subset_compare(a: &Relids, b: &Relids) -> pathnode::BMS_Comparison {
+    use pathnode::BMS_Comparison::*;
+    let (a, b) = match (a, b) {
+        (None, None) => return BMS_EQUAL,
+        (None, Some(_)) => return BMS_SUBSET1,
+        (Some(_), None) => return BMS_SUBSET2,
+        (Some(a), Some(b)) => (a, b),
+    };
+    let mut result = BMS_EQUAL;
+    let shortlen = core::cmp::min(a.words.len(), b.words.len());
+    for i in 0..shortlen {
+        let aword = a.words[i];
+        let bword = b.words[i];
+        if aword & !bword != 0 {
+            // a has a member not in b
+            if result == BMS_SUBSET1 {
+                return BMS_DIFFERENT;
+            }
+            result = BMS_SUBSET2;
+        }
+        if bword & !aword != 0 {
+            // b has a member not in a
+            if result == BMS_SUBSET2 {
+                return BMS_DIFFERENT;
+            }
+            result = BMS_SUBSET1;
+        }
+    }
+    // Check leftover words; since sets are normalized, extra words carry real
+    // members, so the longer set has members the shorter lacks.
+    if a.words.len() > b.words.len() {
+        if result == BMS_SUBSET1 {
+            return BMS_DIFFERENT;
+        }
+        return BMS_SUBSET2;
+    } else if a.words.len() < b.words.len() {
+        if result == BMS_SUBSET2 {
+            return BMS_DIFFERENT;
+        }
+        return BMS_SUBSET1;
+    }
+    result
+}
+
 /// `bms_overlap(a, b)` (bitmapset.c) — `a` and `b` share a member.
 fn bms_overlap(a: &Relids, b: &Relids) -> bool {
     let (a, b) = match (a, b) {
@@ -2496,6 +2546,7 @@ pub fn init_seams() {
     bms::relids_is_subset::set(bms_is_subset);
     bms::relids_overlap::set(bms_overlap);
     bms::relids_nonempty_difference::set(bms_nonempty_difference);
+    pathnode::relids_subset_compare::set(bms_subset_compare);
 }
 
 fn seam_find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {
