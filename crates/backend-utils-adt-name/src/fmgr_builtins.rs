@@ -12,11 +12,11 @@
 //!
 //! A `name` value is pass-by-reference; it crosses the boundary as a
 //! `NAMEDATALEN`-byte varlena image (C passes the whole `NameData` by pointer).
-//! `PG_GET_COLLATION()` is `fcinfo->fncollation`. `btnamesortsupport` (an
-//! `internal` SortSupport arg) and `current_user`/`session_user`/
-//! `current_schema(s)` (no fmgr-frame inputs but seam-backed catalog reads) are
-//! NOT registered here — they are not part of the early catalog-scan fast path
-//! and `current_schemas` needs the array carrier.
+//! `PG_GET_COLLATION()` is `fcinfo->fncollation`. The no-argument SQL functions
+//! `getpgusername`/`current_user`/`session_user`/`current_schema` (zero fmgr-frame
+//! inputs, seam-backed catalog reads, `name` result) are registered here too.
+//! `btnamesortsupport` (an `internal` SortSupport arg) and `current_schemas`
+//! (needs the array carrier) are NOT registered.
 
 use types_core::{Oid, NAMEDATALEN};
 use types_datum::Datum;
@@ -26,6 +26,7 @@ use types_stringinfo::StringInfo;
 use types_tuple::heaptuple::NameData;
 
 use crate::{btnamecmp, nameconcatoid, namein, nameout, namerecv, namesend};
+use crate::{current_schema, current_user, session_user};
 use crate::{nameeq, namege, namegt, namele, namelt, namene};
 
 // ---------------------------------------------------------------------------
@@ -189,6 +190,38 @@ fn fc_nameconcatoid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// No-argument SQL functions (name result; seam-backed catalog reads).
+// ---------------------------------------------------------------------------
+
+/// `current_user()` (name.c:275). `getpgusername`/`current_user` share this
+/// `prosrc => 'current_user'` body.
+fn fc_current_user(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let nd = ok_or_raise!(current_user(m.mcx()));
+    ret_name(fcinfo, &nd)
+}
+
+/// `session_user()` (name.c:281).
+fn fc_session_user(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let nd = ok_or_raise!(session_user(m.mcx()));
+    ret_name(fcinfo, &nd)
+}
+
+/// `current_schema()` (name.c:291). Returns SQL NULL (`PG_RETURN_NULL()`) when
+/// the active search path is empty / its head namespace was recently deleted.
+fn fc_current_schema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    match ok_or_raise!(current_schema(m.mcx())) {
+        Some(nd) => ret_name(fcinfo, &nd),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -204,6 +237,26 @@ fn builtin(
         nargs,
         strict: true,
         retset: false,
+        func: Some(func),
+    }
+}
+
+/// Like [`builtin`] but with explicit `strict`/`retset` — the no-argument SQL
+/// functions are `proisstrict => 'f'` in `pg_proc.dat`.
+fn builtin_full(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    retset: bool,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset,
         func: Some(func),
     }
 }
@@ -228,5 +281,12 @@ pub fn register_name_builtins() {
         builtin(359, "btnamecmp", 2, fc_btnamecmp),
         // ---- misc ----
         builtin(266, "nameconcatoid", 2, fc_nameconcatoid),
+        // ---- no-argument SQL functions (name result) ----
+        // pg_proc.dat: proargtypes => '' (nargs 0), no proisstrict (strict 'f'),
+        // no proretset (retset 'f').
+        builtin_full(710, "getpgusername", 0, false, false, fc_current_user),
+        builtin_full(745, "current_user", 0, false, false, fc_current_user),
+        builtin_full(746, "session_user", 0, false, false, fc_session_user),
+        builtin_full(1402, "current_schema", 0, false, false, fc_current_schema),
     ]);
 }
