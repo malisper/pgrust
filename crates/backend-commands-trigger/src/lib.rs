@@ -23,10 +23,12 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod firing;
+pub mod fmgr_builtins;
 pub mod queue;
 
 /// Install every implementation in `backend-commands-trigger-seams` (and the
 /// trigger-firing seams `nodeModifyTable` consumes through that crate).
 pub fn init_seams() {
     firing::init_seams();
+    fmgr_builtins::register_trigger_builtins();
 }
