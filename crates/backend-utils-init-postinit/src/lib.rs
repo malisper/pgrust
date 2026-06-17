@@ -707,7 +707,7 @@ pub fn InitPostgres(
     if !backend_utils_init_small_seams::is_under_postmaster::call() {
         backend_utils_resowner_resowner_seams::create_aux_process_resource_owner::call()?;
 
-        backend_access_transam_xlog::StartupXLOG();
+        backend_access_transam_xlog::StartupXLOG()?;
         // Release (and warn about) any buffer pins leaked in StartupXLOG.
         backend_utils_resowner_resowner_seams::release_aux_process_resources::call(true)?;
         // Reset CurrentResourceOwner to nothing for the moment.
