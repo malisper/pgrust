@@ -7434,6 +7434,7 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-inherits-seams",
  "backend-catalog-toasting",
+ "backend-commands-cluster-seams",
  "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-commands-tablespace-seams",

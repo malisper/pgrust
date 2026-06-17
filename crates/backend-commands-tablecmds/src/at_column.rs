@@ -6,6 +6,11 @@
 //!   - `ATExecCookedColumnDefault` (tablecmds.c:8210) — add a pre-cooked default
 //!   - `ATExecSetStatistics` (tablecmds.c:8906) — ALTER COLUMN SET STATISTICS
 //!   - `ATExecSetOptions` (tablecmds.c:9050) — ALTER COLUMN SET / RESET OPTIONS
+//!   - `ATExecClusterOn` (tablecmds.c) — ALTER TABLE CLUSTER ON `<index>`
+//!     (`get_relname_relid` + `check_index_is_clusterable` +
+//!     `mark_index_clustered`, all landed cluster.c / lsyscache.c seams)
+//!   - `ATExecDropCluster` (tablecmds.c) — ALTER TABLE SET WITHOUT CLUSTER
+//!     (`mark_index_clustered(rel, InvalidOid)`)
 //!
 //! These last two perform the C `SearchSysCacheAttName(ATTNAME, relid, colName)`
 //! → modify the `Form_pg_attribute` field → `heap_modify_tuple(repl_val/null/repl)`
@@ -485,6 +490,61 @@ pub fn ATExecSetStorage<'mcx>(
          indrel->rd_index->indkey.values[0..indnatts] and the trimmed \
          types_rel::FormData_pg_index carries only indkey0 (out-of-lane carrier widen)",
     );
+}
+
+// ===========================================================================
+// ATExecClusterOn (tablecmds.c) — ALTER TABLE CLUSTER ON <index>
+// ATExecDropCluster (tablecmds.c) — ALTER TABLE SET WITHOUT CLUSTER
+// ===========================================================================
+
+/// `ATExecClusterOn(rel, indexName, lockmode)` (tablecmds.c). Marks the named
+/// index as the clustered index of `rel` via `mark_index_clustered`.
+pub fn ATExecClusterOn<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    indexName: &str,
+    lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // indexOid = get_relname_relid(indexName, rel->rd_rel->relnamespace);
+    let index_oid = backend_utils_cache_lsyscache_seams::get_relname_relid::call(
+        indexName,
+        rel.rd_rel.relnamespace,
+    )?;
+
+    if index_oid == types_core::InvalidOid {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!(
+                "index \"{}\" for table \"{}\" does not exist",
+                indexName,
+                rel.name()
+            ))
+            .finish(here("ATExecClusterOn"))
+            .map(|()| unreachable!());
+    }
+
+    // Check index is valid to cluster on.
+    backend_commands_cluster_seams::check_index_is_clusterable::call(mcx, rel, index_oid, lockmode)?;
+
+    // And do the work.
+    backend_commands_cluster_seams::mark_index_clustered::call(mcx, rel, index_oid, false)?;
+
+    // ObjectAddressSet(address, RelationRelationId, indexOid);
+    Ok(crate::helpers::object_address_set(RelationRelationId, index_oid))
+}
+
+/// `ATExecDropCluster(rel, lockmode)` (tablecmds.c). Clears the clustered-index
+/// flag on all of `rel`'s indexes (`mark_index_clustered(rel, InvalidOid)`).
+pub fn ATExecDropCluster<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // mark_index_clustered(rel, InvalidOid, false);
+    backend_commands_cluster_seams::mark_index_clustered::call(mcx, rel, types_core::InvalidOid, false)?;
+
+    // C returns void / InvalidObjectAddress; the dispatch records no address.
+    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
 /// `ATExecSetRelOptions` (tablecmds.c:16645). See module docs.

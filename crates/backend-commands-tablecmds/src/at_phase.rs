@@ -727,7 +727,8 @@ fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW,
             )?;
-            unported("CLUSTER ON / SET WITHOUT CLUSTER");
+            // These commands never recurse; no command-specific prep needed.
+            pass = AT_PASS_MISC;
         }
         AT_SetLogged | AT_SetUnLogged => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_SEQUENCE)?;
@@ -1102,8 +1103,19 @@ fn ATExecCmd<'mcx>(
         AT_AlterColumnGenericOptions => {
             unported("ALTER COLUMN OPTIONS (ATExecAlterColumnGenericOptions)")
         }
-        AT_ClusterOn => unported("CLUSTER ON (ATExecClusterOn)"),
-        AT_DropCluster => unported("SET WITHOUT CLUSTER (ATExecDropCluster)"),
+        AT_ClusterOn => {
+            // ATExecClusterOn(rel, cmd->name, lockmode)
+            let indexname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("CLUSTER ON requires an index name");
+            _address = crate::at_column::ATExecClusterOn(mcx, rel, indexname, lockmode)?;
+        }
+        AT_DropCluster => {
+            // ATExecDropCluster(rel, lockmode)
+            _address = crate::at_column::ATExecDropCluster(mcx, rel, lockmode)?;
+        }
         AT_SetLogged | AT_SetUnLogged => unported("SET LOGGED/UNLOGGED (persistence change)"),
         AT_SetAccessMethod => unported("SET ACCESS METHOD"),
         AT_SetTableSpace => unported("SET TABLESPACE (ATExecSetTableSpace)"),

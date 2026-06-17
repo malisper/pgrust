@@ -56,4 +56,5 @@ backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-commands-cluster-seams = { path = "../backend-commands-cluster-seams" }
 types-statistics = { path = "../types-statistics" }
