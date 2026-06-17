@@ -7679,11 +7679,13 @@ dependencies = [
  "backend-catalog-catalog-seams",
  "backend-commands-user-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-authid",
  "types-catalog",
  "types-core",
  "types-error",
+ "types-guc",
  "types-nodes",
  "types-parsenodes",
 ]

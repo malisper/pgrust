@@ -2634,13 +2634,136 @@ fn make_current_rolespec() -> RoleSpec {
 }
 
 /* -------------------------------------------------------------------------
+ * GUC-backed globals owned by commands/user.c.
+ *
+ * In C these live as file-scope globals in user.c:
+ *   int                Password_encryption = PASSWORD_TYPE_SCRAM_SHA_256;
+ *   char              *createrole_self_grant = "";
+ *   static bool        createrole_self_grant_enabled = false;
+ *   static GrantRoleOptions createrole_self_grant_options;
+ * The GUC machinery's `conf->variable` points at `Password_encryption`, and
+ * the `createrole_self_grant` check/assign hooks derive the parsed
+ * `_enabled` / `_options` state from the raw string. We hold the same
+ * backing store here (one slot per backend, like the `thread_local` mirror
+ * of `max_prepared_xacts`), drive it from the GUC machinery (var accessor +
+ * check/assign hooks), and expose it through the crate's read seams.
+ * ------------------------------------------------------------------------- */
+
+use std::cell::Cell;
+
+thread_local! {
+    /// `Password_encryption` — the GUC's `conf->variable` storage. C boots it
+    /// to `PASSWORD_TYPE_SCRAM_SHA_256` (= 2); the GUC machinery overwrites it
+    /// via the installed var accessor.
+    static PASSWORD_ENCRYPTION: Cell<i32> = const {
+        Cell::new(PasswordType::ScramSha256 as i32)
+    };
+    /// `createrole_self_grant_enabled` — derived by the assign hook. Boots
+    /// false (the `""` boot value disables self-grants).
+    static CREATEROLE_SELF_GRANT_ENABLED: Cell<bool> = const { Cell::new(false) };
+    /// `createrole_self_grant_options` — derived by the assign hook. C
+    /// zero-inits the static struct (all bits clear) before any assignment.
+    static CREATEROLE_SELF_GRANT_OPTIONS: Cell<GrantRoleOptions> = const {
+        Cell::new(GrantRoleOptions {
+            specified: 0,
+            admin: false,
+            inherit: false,
+            set: false,
+        })
+    };
+}
+
+/// Read `Password_encryption` (`*conf->variable`).
+fn get_password_encryption() -> i32 {
+    PASSWORD_ENCRYPTION.with(Cell::get)
+}
+
+/// Write `Password_encryption` — the GUC machinery's assignment path.
+fn set_password_encryption(value: i32) {
+    PASSWORD_ENCRYPTION.with(|c| c.set(value));
+}
+
+/// `createrole_self_grant_enabled`.
+fn get_createrole_self_grant_enabled() -> bool {
+    CREATEROLE_SELF_GRANT_ENABLED.with(Cell::get)
+}
+
+/// `createrole_self_grant_options` projected to the seam's tuple shape
+/// `(specified, admin, inherit, set)`.
+fn get_createrole_self_grant_options() -> (u32, bool, bool, bool) {
+    let o = CREATEROLE_SELF_GRANT_OPTIONS.with(Cell::get);
+    (o.specified, o.admin, o.inherit, o.set)
+}
+
+/// GUC `check_hook` wrapper for `createrole_self_grant`.
+///
+/// Mirrors C's `check_createrole_self_grant`: parse/validate the raw string
+/// and stash the parsed option bitmask in `*extra` for the paired assign
+/// hook. `Ok(false)` is the C `return false` rejection (the detail string is
+/// recorded by `check_createrole_self_grant`'s `GUC_check_errdetail`).
+fn check_createrole_self_grant_hook(
+    newval: &mut Option<String>,
+    extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    /* C copies `*newval`, which is never NULL for this GUC (boot_val ""). */
+    let raw = newval.as_deref().unwrap_or("");
+    match check_createrole_self_grant(raw)? {
+        Some(options) => {
+            *extra = Some(Box::new(options));
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// GUC `assign_hook` wrapper for `createrole_self_grant`.
+///
+/// Mirrors C's `assign_createrole_self_grant`: read the parsed option bitmask
+/// from `extra` and update the `_enabled` / `_options` backing store.
+fn assign_createrole_self_grant_hook(
+    _newval: Option<&str>,
+    extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    /* The paired check hook always produces a `u32` extra. */
+    let options = extra
+        .and_then(|e| e.downcast_ref::<u32>())
+        .copied()
+        .unwrap_or(0);
+    let (enabled, opts) = assign_createrole_self_grant(options);
+    CREATEROLE_SELF_GRANT_ENABLED.with(|c| c.set(enabled));
+    CREATEROLE_SELF_GRANT_OPTIONS.with(|c| c.set(opts));
+}
+
+/* -------------------------------------------------------------------------
  * Seam installation.
  * ------------------------------------------------------------------------- */
 
 /// Install this crate's seams. `commands/user.c`'s own functions are called
-/// by `tcop`'s utility dispatch via a direct dependency, so there are no
-/// inward seams to install here.
-pub fn init_seams() {}
+/// by `tcop`'s utility dispatch via a direct dependency, so the command
+/// entry points need no inward seams. The GUC-backed globals owned by
+/// `user.c` are wired here: the `Password_encryption` var accessor and the
+/// `createrole_self_grant` check/assign hooks connect the GUC machinery to
+/// this crate's backing store, and the three read seams expose that store to
+/// consumers.
+pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
+
+    /* `int Password_encryption` — the GUC slot's `conf->variable`. */
+    vars::Password_encryption.install(GucVarAccessors {
+        get: get_password_encryption,
+        set: set_password_encryption,
+    });
+
+    /* `createrole_self_grant` check/assign hooks (user.c). */
+    hooks::check_createrole_self_grant.install(check_createrole_self_grant_hook);
+    hooks::assign_createrole_self_grant.install(assign_createrole_self_grant_hook);
+
+    /* Read seams consumed within this crate's command paths. */
+    seam::password_encryption::set(|| Ok(get_password_encryption()));
+    seam::createrole_self_grant_enabled::set(|| Ok(get_createrole_self_grant_enabled()));
+    seam::createrole_self_grant_options::set(|| Ok(get_createrole_self_grant_options()));
+}
 
 #[cfg(test)]
 mod tests;
