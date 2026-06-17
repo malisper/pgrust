@@ -17193,9 +17193,12 @@ name = "backend-utils-adt-amutils"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-amutils-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]

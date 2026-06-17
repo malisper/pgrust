@@ -37,7 +37,9 @@
 //! which is deferred; these functions take/return the already-unmarshalled
 //! scalar values.
 
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// raises `ereport(ERROR)` via `std::panic::panic_any`, the one dispatch point
+// every builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -476,6 +478,15 @@ pub fn pg_indexam_progress_phasename(amoid: Oid, phasenum: i64) -> PgResult<Opti
 
     // name = routine->ambuildphasename(phasenum); if (!name) PG_RETURN_NULL();
     seam::am_buildphasename::call(amoid, phasenum)
+}
+
+pub mod fmgr_builtins;
+
+/// Register this crate's SQL-callable `amutils.c` builtins into the fmgr-core
+/// builtin table (C: their `fmgr_builtins[]` rows). Invoked by
+/// `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_amutils_builtins();
 }
 
 #[cfg(test)]
