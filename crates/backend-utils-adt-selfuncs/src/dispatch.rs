@@ -40,6 +40,12 @@ const F_MULTIRANGESEL: Oid = 4243;
 const F_NETWORKSEL: Oid = 3560;
 const F_NETWORKJOINSEL: Oid = 3561;
 const F_ARRAYCONTSEL: Oid = 3817;
+const F_AREASEL: Oid = 139;
+const F_AREAJOINSEL: Oid = 140;
+const F_POSITIONSEL: Oid = 1300;
+const F_POSITIONJOINSEL: Oid = 1301;
+const F_CONTSEL: Oid = 1302;
+const F_CONTJOINSEL: Oid = 1303;
 
 /// `OidFunctionCall4Coll(oprrest, inputcollid, root, operatorid, args,
 /// varRelid)` (plancat.c `restriction_selectivity` body) — dispatch a
@@ -77,6 +83,11 @@ pub fn call_oprrest<'mcx>(
         F_ARRAYCONTSEL => backend_utils_adt_array_selfuncs::arraycontsel(
             mcx, run, root, operatorid, args, var_relid,
         ),
+        // geo_selfuncs.c — bogus constant geometric restriction estimators
+        // (ignore all arguments, return a fixed selectivity).
+        F_AREASEL => Ok(backend_utils_adt_geo_selfuncs::areasel()),
+        F_POSITIONSEL => Ok(backend_utils_adt_geo_selfuncs::positionsel()),
+        F_CONTSEL => Ok(backend_utils_adt_geo_selfuncs::contsel()),
         other => panic!(
             "selfuncs: call_oprrest dispatch has no ported estimator for oprrest OID {other} \
              (operator {operatorid}) — the operator's restriction-selectivity PGFunction is \
@@ -110,6 +121,11 @@ pub fn call_oprjoin<'mcx>(
         F_NETWORKJOINSEL => backend_utils_adt_network_selfuncs::networkjoinsel(
             mcx, run, root, operatorid, args, sjinfo,
         ),
+        // geo_selfuncs.c — bogus constant geometric join estimators (ignore all
+        // arguments, return a fixed selectivity).
+        F_AREAJOINSEL => Ok(backend_utils_adt_geo_selfuncs::areajoinsel()),
+        F_POSITIONJOINSEL => Ok(backend_utils_adt_geo_selfuncs::positionjoinsel()),
+        F_CONTJOINSEL => Ok(backend_utils_adt_geo_selfuncs::contjoinsel()),
         other => panic!(
             "selfuncs: call_oprjoin dispatch has no ported estimator for oprjoin OID {other} \
              (operator {operatorid}) — the operator's join-selectivity PGFunction is unported"

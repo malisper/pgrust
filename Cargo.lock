@@ -17359,6 +17359,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-geo-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
 name = "backend-utils-adt-geo-spgist-only"
 version = "0.0.0"
 dependencies = [
@@ -18402,6 +18409,7 @@ dependencies = [
  "backend-parser-relation",
  "backend-statistics-mvdistinct",
  "backend-utils-adt-array-selfuncs",
+ "backend-utils-adt-geo-selfuncs",
  "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-selfuncs-seams",
@@ -21549,6 +21557,7 @@ dependencies = [
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",
+ "backend-utils-adt-geo-selfuncs",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-jsonfuncs",

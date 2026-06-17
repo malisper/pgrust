@@ -1,0 +1,12 @@
+[package]
+name = "backend-utils-adt-geo-selfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_geo_selfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }

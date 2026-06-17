@@ -42,3 +42,4 @@ backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-s
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
+backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
