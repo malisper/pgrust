@@ -45,6 +45,8 @@
 // shape so the port reads 1:1 against pg_proc.c.
 #![allow(clippy::needless_late_init)]
 
+mod fmgr_builtins;
+
 use mcx::MemoryContext;
 
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
@@ -1247,6 +1249,7 @@ fn pg_mblen(s: &[u8]) -> PgResult<i32> {
 /// `procedure_create`. pg_proc.c owns the C function, so it installs the seam.
 pub fn init_seams() {
     backend_commands_functioncmds_seams::procedure_create::set(procedure_create_from_args);
+    fmgr_builtins::register_pg_proc_builtins();
 }
 
 /// Adapt the `functioncmds.c` `ProcedureCreateArgs` bundle to the positional
