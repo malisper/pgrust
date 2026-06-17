@@ -179,6 +179,40 @@ fn addDatum<'mcx>(keys: &mut KeyArray<'mcx>, datum: Datum<'mcx>, category: GinNu
 pub fn init_seams() {
     backend_access_gin_gininsert_seams::gin_get_use_fast_update::set(gin_get_use_fast_update);
     backend_access_gin_gininsert_seams::gin_fast_insert::set(gin_fast_insert);
+
+    // `int gin_pending_list_limit = 0;` (ginfast.c:39) — the process-global
+    // `conf->variable` backing for the `gin_pending_list_limit` GUC. The GUC
+    // engine seeds it from `boot_val` (4096), users SET it, and
+    // `GinGetPendingListCleanupSize` reads it directly (ginutil.c:611 fallback
+    // when the per-index `pendingListCleanupSize` reloption is -1). It is NOT a
+    // ControlFile value — the GUC table entry points `variable` straight at this
+    // global. Backing lives here in the owning crate.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::gin_pending_list_limit.install(GucVarAccessors {
+            get: gin_pending_list_limit,
+            set: set_gin_pending_list_limit,
+        });
+    }
+}
+
+// `int gin_pending_list_limit = 0;` (ginfast.c:39) — process-local backing for
+// the GUC. Modeled as a thread-local cell mirroring the C global (cf. the
+// globals.c-backed GUC ints in init-small); seeded to the `boot_val` (4096 kB)
+// the GUC table declares so reads before the GUC engine assigns are still
+// faithful to PG's default.
+std::thread_local! {
+    static GIN_PENDING_LIST_LIMIT: core::cell::Cell<i32> = const { core::cell::Cell::new(4096) };
+}
+
+/// Read `gin_pending_list_limit` (the GUC `conf->variable`).
+fn gin_pending_list_limit() -> i32 {
+    GIN_PENDING_LIST_LIMIT.with(|c| c.get())
+}
+
+/// Assign `gin_pending_list_limit` (the GUC engine's `assign` path).
+fn set_gin_pending_list_limit(v: i32) {
+    GIN_PENDING_LIST_LIMIT.with(|c| c.set(v));
 }
 
 /// `GinGetUseFastUpdate(index)` (gin_private.h): read the `fastupdate` reloption

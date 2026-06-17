@@ -804,6 +804,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",

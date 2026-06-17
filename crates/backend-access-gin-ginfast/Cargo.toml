@@ -38,4 +38,5 @@ backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xl
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
