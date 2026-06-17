@@ -369,10 +369,44 @@ fn substitute_path_macro(s: &str, macro_: &str, value: &str) -> PgResult<String>
     Ok(format!("{value}{}", &s[sep..]))
 }
 
+// ---------------------------------------------------------------------------
+// `Extension_control_path` GUC backing storage (extension.c:76 `char *`).
+//
+// C declares `char *Extension_control_path;` as the storage for the
+// `extension_control_path` GUC (guc_tables.c). The value is read from this GUC
+// slot — not from ControlFile. The GUC machinery sets it to the `$system`
+// boot value at startup, so we seed our backing store with the same default.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// C's `char *Extension_control_path`. A string GUC's storage is never NULL
+    /// once booted (the `$system` boot value is non-NULL), hence the seed.
+    static EXTENSION_CONTROL_PATH: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn extension_control_path_init() {
+    EXTENSION_CONTROL_PATH.with(|c| {
+        if c.borrow().is_none() {
+            *c.borrow_mut() = Some(String::from("$system"));
+        }
+    });
+}
+
+/// The `conf->variable` getter for the `extension_control_path` GUC slot.
+fn extension_control_path_get() -> Option<String> {
+    extension_control_path_init();
+    EXTENSION_CONTROL_PATH.with(|c| c.borrow().clone())
+}
+
+/// The `conf->variable` setter for the `extension_control_path` GUC slot.
+fn extension_control_path_set(value: Option<String>) {
+    EXTENSION_CONTROL_PATH.with(|c| *c.borrow_mut() = value);
+}
+
 /// `Extension_control_path` GUC read (the colon-separated control path).
 fn extension_control_path() -> String {
-    let accessors = backend_utils_misc_guc_tables::vars::Extension_control_path.get();
-    (accessors.get)().unwrap_or_default()
+    extension_control_path_get().unwrap_or_default()
 }
 
 /// `get_extension_control_directories` (C 472-533). When the
@@ -2210,6 +2244,17 @@ fn error_conflicting_def_elem(
 /// (`backend-commands-extension-seams`).
 pub fn init_seams() {
     use backend_commands_extension_seams as s;
+
+    // `extension_control_path` GUC slot (`char *Extension_control_path`,
+    // extension.c:76) — install its `conf->variable` get/set accessors over
+    // this unit's backing store.
+    backend_utils_misc_guc_tables::vars::Extension_control_path.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: extension_control_path_get,
+            set: extension_control_path_set,
+        },
+    );
+
     s::creating_extension::set(creating_extension);
     s::current_extension_object::set(current_extension_object);
     s::get_extension_name::set(get_extension_name);
