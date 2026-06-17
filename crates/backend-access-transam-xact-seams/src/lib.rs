@@ -356,6 +356,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bool DefaultXactReadOnly` (xact.c GUC) — backing variable for the
+    /// `default_transaction_read_only` GUC (guc_tables.c). The default
+    /// read-only status applied to new transactions at StartTransaction.
+    pub fn default_transaction_read_only() -> bool
+);
+
+seam_core::seam!(
+    /// `bool DefaultXactDeferrable` (xact.c GUC) — backing variable for the
+    /// `default_transaction_deferrable` GUC (guc_tables.c). The default
+    /// deferrable status applied to new transactions at StartTransaction.
+    pub fn default_transaction_deferrable() -> bool
+);
+
+seam_core::seam!(
+    /// `int DefaultXactIsoLevel` (xact.c GUC) — backing variable for the
+    /// `default_transaction_isolation` GUC (guc_tables.c). The default
+    /// isolation level applied to new transactions at StartTransaction.
+    pub fn default_transaction_isolation() -> i32
+);
+
+seam_core::seam!(
     /// `int synchronous_commit` (xact.c GUC) — the current
     /// `synchronous_commit` level; `SyncRepRequested()` compares it against
     /// `SYNCHRONOUS_COMMIT_LOCAL_FLUSH`.

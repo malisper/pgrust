@@ -1726,6 +1726,12 @@ pub fn init_seams() {
     seams::xact_iso_level::set(XactIsoLevel);
     // `int synchronous_commit` (xact.c GUC) — read by walsender's SyncRepRequested.
     seams::synchronous_commit::set(synchronous_commit);
+    // GUC default_transaction_* backing-variable accessors (guc_tables.c reads
+    // the slot vars DefaultXactReadOnly/DefaultXactDeferrable/DefaultXactIsoLevel,
+    // which StartTransaction copies into the per-xact XactReadOnly/Deferrable/IsoLevel).
+    seams::default_transaction_read_only::set(DefaultXactReadOnly);
+    seams::default_transaction_deferrable::set(DefaultXactDeferrable);
+    seams::default_transaction_isolation::set(DefaultXactIsoLevel);
 }
 
 #[cfg(test)]
