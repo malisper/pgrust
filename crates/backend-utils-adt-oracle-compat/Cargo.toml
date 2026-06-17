@@ -17,3 +17,6 @@ common-wchar = { path = "../common-wchar" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
