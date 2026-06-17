@@ -323,15 +323,13 @@ pub(crate) fn ident_file_name() -> String {
 // auth.c seam entry points.
 // ---------------------------------------------------------------------------
 
-/// `hba_getauthmethod()` seam (auth.c consumes it): read the ambient
-/// `MyProcPort` and run `check_hba`.
-pub(crate) fn hba_getauthmethod_entry() -> PgResult<()> {
-    let mut result: PgResult<()> = Ok(());
-    backend_utils_init_small_seams::with_my_proc_port::call(&mut |port| {
-        let port = port.expect("hba_getauthmethod: MyProcPort is NULL");
-        result = hba_getauthmethod(port);
-    });
-    result
+/// `hba_getauthmethod(port)` seam (auth.c consumes it): run `check_hba` against
+/// the caller-supplied `Port`. C threads the live `Port *` down from
+/// `ClientAuthentication` (auth.c:390); the caller already holds the port (taken
+/// out of the `MyProcPort` cell by `client_authentication`'s `with_my_proc_port`
+/// frame), so a re-entrant ambient `MyProcPort` read here would observe it unset.
+pub(crate) fn hba_getauthmethod_entry(port: &mut types_net::Port) -> PgResult<()> {
+    hba_getauthmethod(port)
 }
 
 /// `check_usermap(usermap_name, pg_role, auth_user, case_insensitive)` seam.

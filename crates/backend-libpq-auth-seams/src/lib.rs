@@ -58,9 +58,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `hba_getauthmethod(port)` (hba.c): resolve the matched `pg_hba.conf`
-    /// line and store it in `port->hba`. Re-reads ambient `MyProcPort` inside
-    /// the owner.
-    pub fn hba_getauthmethod() -> PgResult<()>
+    /// line and store it in `port->hba`. C passes the live `Port *` straight
+    /// down from `ClientAuthentication` (auth.c:390), so the caller's `&mut Port`
+    /// is threaded through here rather than re-read from the ambient
+    /// `MyProcPort` — the caller already holds the port taken out of the
+    /// `MyProcPort` cell, and a re-entrant cell read would observe it as unset.
+    pub fn hba_getauthmethod(port: &mut types_net::Port) -> PgResult<()>
 );
 
 seam_core::seam!(

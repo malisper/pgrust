@@ -426,7 +426,8 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
     let mut logdetail: Option<String> = None;
 
     // Resolve the auth method for this frontend/database combination.
-    seams::hba_getauthmethod::call()?;
+    // C: hba_getauthmethod(port) — pass the live Port straight through (auth.c:390).
+    seams::hba_getauthmethod::call(port)?;
 
     backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
@@ -824,6 +825,15 @@ pub fn init_seams() {
     backend_libpq_auth_seams::authentication_timeout::set(authentication_timeout_entry);
     backend_libpq_auth_seams::log_connection_authorization::set(log_connection_authorization_entry);
     backend_libpq_auth_seams::client_authn_id::set(client_authn_id_entry);
+
+    // `ClientAuthentication_hook` (auth.c global function pointer) — the optional
+    // auth-extension plugin point. It is NULL unless a loadable module assigns it
+    // (`auth_delay`, custom auth modules); the C call site is guarded
+    // `if (ClientAuthentication_hook) (*ClientAuthentication_hook)(port, status)`.
+    // No such module is loaded in this build, so the hook is NULL and the call is
+    // a no-op. The global lives in this unit, so the seam is installed here to the
+    // NULL-hook behavior (do nothing, succeed).
+    backend_libpq_auth_seams::client_authentication_hook::set(|_status| Ok(()));
 
     // GUC variable accessors over auth.c's `conf->variable` backing storage.
     // Read directly by auth.c at runtime (none come from the ControlFile);

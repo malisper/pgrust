@@ -10665,6 +10665,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-net",
 ]
 
 [[package]]
@@ -16367,6 +16368,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
+ "backend-libpq-auth-seams",
  "backend-libpq-be-secure-seams",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqformat",
