@@ -130,13 +130,19 @@ seam_core::seam!(
 seam_core::seam!(
     /// `mergejoinscansel(root, clause, opfamily, cmptype, nulls_first)` —
     /// returns `(leftstartsel, leftendsel, rightstartsel, rightendsel)`.
-    pub fn mergejoinscansel(
-        root: &PlannerInfo,
+    ///
+    /// The owner (selfuncs.c) calls `examine_variable`, which needs the
+    /// planner-run RTE store and the `&mut PlannerInfo` node arena; the cost
+    /// call sites (`initial_cost_mergejoin` / `final_cost_mergejoin`) already
+    /// thread both. Returns `PgResult` because the stats path can `ereport`.
+    pub fn mergejoinscansel<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         clause: NodeId,
         opfamily: Oid,
         cmptype: i32,
         nulls_first: bool,
-    ) -> (Selectivity, Selectivity, Selectivity, Selectivity)
+    ) -> PgResult<(Selectivity, Selectivity, Selectivity, Selectivity)>
 );
 seam_core::seam!(
     /// `label_sort_with_costsize` cost half (createplan.c:5553): re-figure a
@@ -174,11 +180,17 @@ seam_core::seam!(
 seam_core::seam!(
     /// `estimate_hash_bucket_stats(root, hashkey, nbuckets, &mcvfreq, &bucketsize)`
     /// — returns `(mcvfreq, bucketsize)`.
-    pub fn estimate_hash_bucket_stats(
-        root: &PlannerInfo,
+    ///
+    /// The owner (selfuncs.c) calls `examine_variable`, which needs the
+    /// planner-run RTE store and the `&mut PlannerInfo` node arena; the cost
+    /// call site (`final_cost_hashjoin`) already threads both. Returns
+    /// `PgResult` because the stats path can `ereport`.
+    pub fn estimate_hash_bucket_stats<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         hashkey: NodeId,
         nbuckets: f64,
-    ) -> (Selectivity, Selectivity)
+    ) -> PgResult<(Selectivity, Selectivity)>
 );
 seam_core::seam!(
     /// `estimate_multivariate_bucketsize(root, inner_rel, hashclauses, &out)` —

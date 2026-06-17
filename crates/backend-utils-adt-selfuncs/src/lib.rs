@@ -49,6 +49,7 @@ pub mod entry;
 pub mod examine;
 pub mod ineq;
 pub mod join;
+pub mod mergejoin;
 pub mod misc;
 pub mod node_sel;
 pub mod scalar;
@@ -91,6 +92,32 @@ pub fn init_seams() {
     // reached through costsize.c's `amcostestimate` dispatch.
     backend_optimizer_path_costsize_seams::amcostestimate::set(
         |root, run, path, loop_count| cost::seam_amcostestimate(root, run, path, loop_count),
+    );
+
+    // The merge-join scan selectivity and hash-bucket statistics estimators
+    // (selfuncs.c) costsize.c reaches to cost merge joins / hash joins. Each
+    // opens its own per-call MemoryContext for detoasted-stats allocations
+    // (the result is a scalar), matching C running these in the planner's
+    // context.
+    backend_optimizer_path_costsize_seams::mergejoinscansel::set(
+        |run, root, clause, opfamily, cmptype, nulls_first| {
+            let cx = mcx::MemoryContext::new("selfuncs mergejoinscansel");
+            mergejoin::mergejoinscansel(
+                cx.mcx(),
+                run,
+                root,
+                clause,
+                opfamily,
+                cmptype,
+                nulls_first,
+            )
+        },
+    );
+    backend_optimizer_path_costsize_seams::estimate_hash_bucket_stats::set(
+        |run, root, hashkey, nbuckets| {
+            let cx = mcx::MemoryContext::new("selfuncs estimate_hash_bucket_stats");
+            mergejoin::estimate_hash_bucket_stats(cx.mcx(), run, root, hashkey, nbuckets)
+        },
     );
 }
 

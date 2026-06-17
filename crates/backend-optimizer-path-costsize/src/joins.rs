@@ -75,15 +75,22 @@ struct ScanSel {
 /// the cache lookup is not field-resolvable here; we compute via the
 /// `mergejoinscansel` seam each time (behaviour-preserving: same computed value,
 /// only the rinfo-internal cache hit differs).
-fn cached_scansel(root: &PlannerInfo, rinfo: RinfoId, pathkey: &PathKey) -> ScanSel {
+fn cached_scansel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rinfo: RinfoId,
+    pathkey: &PathKey,
+) -> ScanSel {
     let clause = root.rinfo(rinfo).clause;
     let (ls, le, rs, re) = cz::mergejoinscansel::call(
+        run,
         root,
         clause,
         pathkey.pk_opfamily,
         pathkey.pk_cmptype,
         pathkey.pk_nulls_first,
-    );
+    )
+    .expect("mergejoinscansel");
     ScanSel {
         leftstartsel: ls,
         leftendsel: le,
@@ -378,7 +385,7 @@ pub fn initial_cost_mergejoin<'mcx>(
             );
         }
 
-        let cache = cached_scansel(root, firstclause, opathkey);
+        let cache = cached_scansel(run, root, firstclause, opathkey);
 
         let first_left_relids = root.rinfo(firstclause).left_relids.clone();
         if bms_is_subset(&first_left_relids, &root.rel(outer.parent).relids) {
@@ -853,8 +860,10 @@ pub fn final_cost_hashjoin<'mcx>(
 
             if bms_is_subset(&right_relids, &inner_relids) {
                 if right_bucketsize < 0.0 {
+                    let hashkey = get_rightop(root, clause);
                     let (mcv, bs) =
-                        cz::estimate_hash_bucket_stats::call(root, get_rightop(root, clause), virtualbuckets);
+                        cz::estimate_hash_bucket_stats::call(run, root, hashkey, virtualbuckets)
+                            .expect("estimate_hash_bucket_stats");
                     thismcvfreq = mcv;
                     thisbucketsize = bs;
                 } else {
@@ -864,8 +873,10 @@ pub fn final_cost_hashjoin<'mcx>(
             } else {
                 debug_assert!(bms_is_subset(&left_relids, &inner_relids));
                 if left_bucketsize < 0.0 {
+                    let hashkey = get_leftop(root, clause);
                     let (mcv, bs) =
-                        cz::estimate_hash_bucket_stats::call(root, get_leftop(root, clause), virtualbuckets);
+                        cz::estimate_hash_bucket_stats::call(run, root, hashkey, virtualbuckets)
+                            .expect("estimate_hash_bucket_stats");
                     thismcvfreq = mcv;
                     thisbucketsize = bs;
                 } else {
@@ -940,15 +951,36 @@ pub fn final_cost_hashjoin<'mcx>(
     p.total_cost = startup_cost + run_cost;
 }
 
-/// `get_leftop` (clauses.h) — the OpExpr hashclause's left operand. The arg is
-/// an inline `Expr`; the estimate seam reads it from the clause node directly,
-/// so we pass the clause node handle.
-fn get_leftop(_root: &PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
-    clause
+/// `get_leftop((Expr *) clause)` (nodeFuncs.c) — the OpExpr hashclause's left
+/// operand (`linitial(op->args)`). Interns the inline `Expr` arg into the
+/// planner node arena and returns its `NodeId` (what `estimate_hash_bucket_stats`'
+/// `examine_variable` looks up stats for).
+fn get_leftop(root: &mut PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
+    op_arg(root, clause, 0)
 }
-/// `get_rightop` (clauses.h) — analogous (the estimate seam reads `args[1]`).
-fn get_rightop(_root: &PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
-    clause
+/// `get_rightop((Expr *) clause)` (nodeFuncs.c) — analogous, `lsecond(op->args)`.
+fn get_rightop(root: &mut PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
+    op_arg(root, clause, 1)
+}
+/// Intern `op->args[i]` of the OpExpr `clause` into the node arena.
+fn op_arg(
+    root: &mut PlannerInfo,
+    clause: types_pathnodes::NodeId,
+    i: usize,
+) -> types_pathnodes::NodeId {
+    use types_nodes::primnodes::Expr;
+    let arg = match root.node(clause) {
+        Expr::OpExpr(op) => op
+            .args
+            .get(i)
+            .cloned()
+            .expect("get_leftop/get_rightop: OpExpr missing operand"),
+        other => panic!(
+            "get_leftop/get_rightop: hash clause is not an OpExpr: {:?}",
+            core::mem::discriminant(other)
+        ),
+    };
+    root.alloc_node(arg)
 }
 
 /* ==========================================================================
