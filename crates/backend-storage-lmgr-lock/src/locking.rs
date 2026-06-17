@@ -1693,6 +1693,22 @@ fn with_locallock_mut<R>(
 }
 
 // ===========================================================================
+// Virtual transaction locks (fast-path VXID lock on MyProc).
+// ===========================================================================
+
+/// `VirtualXactLockTableInsert(VirtualTransactionId vxid)` (lock.c): take the
+/// fast-path VXID lock for `vxid` on `MyProc`. The guarded `MyProc` mutation
+/// (under `MyProc->fpInfoLock`) is performed by proc.c, which owns the
+/// `MyProc`-private `fpInfoLock` / `fp*` PGPROC storage.
+pub(crate) fn VirtualXactLockTableInsert(
+    vxid: types_storage::VirtualTransactionId,
+) -> types_error::PgResult<()> {
+    debug_assert!(vxid.is_valid());
+
+    proc::vxid_lock_table_insert_my_proc::call(vxid.procNumber, vxid.localTransactionId)
+}
+
+// ===========================================================================
 // Error-surface helpers.
 // ===========================================================================
 

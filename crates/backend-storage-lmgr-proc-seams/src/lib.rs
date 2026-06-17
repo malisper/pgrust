@@ -152,6 +152,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The fast-path VXID-lock set inside `VirtualXactLockTableInsert(vxid)`
+    /// (lock.c): under `MyProc->fpInfoLock` (LW_EXCLUSIVE), assert the proc's
+    /// vxid procNumber matches `vxid_proc_number` and that no fast-path VXID
+    /// lock is already held, then set `MyProc->fpVXIDLock = true` and
+    /// `MyProc->fpLocalTransactionId = lxid`. The whole critical section is
+    /// owned by proc.c because `fpInfoLock` and the `fp*` fields are
+    /// `MyProc`-private PGPROC storage. `Err` carries the LWLock acquire's
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn vxid_lock_table_insert_my_proc(
+        vxid_proc_number: types_core::ProcNumber,
+        lxid: LocalTransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// Read the `transaction_timeout` GUC (`int TransactionTimeout`, proc.c).
     pub fn transaction_timeout() -> i32
 );

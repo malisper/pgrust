@@ -306,6 +306,8 @@ pub fn init_seams() {
     seams::lock_wait_queue_waiters_snapshot::set(locking::seam_lock_wait_queue_waiters_snapshot);
     seams::get_lock_holders_and_waiters::set(locking::get_lock_holders_and_waiters_seam);
 
+    seams::virtual_xact_lock_table_insert::set(locking::VirtualXactLockTableInsert);
+
     // `describe_lock_tag` (proc.c's log path): delegate to lmgr.c's owner.
     seams::describe_lock_tag::set(|tag| {
         backend_storage_lmgr_lmgr_seams::describe_lock_tag::call(tag)

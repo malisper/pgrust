@@ -11,7 +11,9 @@
 //! `LatchHandle` convention, twophase's dummy-PGPROC init) remain Class-B
 //! panic-through until their owners land.
 
+use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_storage_lmgr_proc_seams as seams;
+use types_core::InvalidLocalTransactionId;
 use types_core::xact::XidStatus;
 use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::PgResult;
@@ -141,6 +143,43 @@ fn my_proc_lxid() -> LocalTransactionId {
 
 fn set_my_proc_lxid(lxid: LocalTransactionId) {
     with_my_proc(|p| p.vxid.lxid = lxid);
+}
+
+/// The fast-path VXID-lock critical section inside
+/// `VirtualXactLockTableInsert(vxid)` (lock.c). Faithful to the C body:
+/// ```c
+/// LWLockAcquire(&MyProc->fpInfoLock, LW_EXCLUSIVE);
+/// Assert(MyProc->vxid.procNumber == vxid.procNumber);
+/// Assert(MyProc->fpLocalTransactionId == InvalidLocalTransactionId);
+/// Assert(MyProc->fpVXIDLock == false);
+/// MyProc->fpVXIDLock = true;
+/// MyProc->fpLocalTransactionId = vxid.localTransactionId;
+/// LWLockRelease(&MyProc->fpInfoLock);
+/// ```
+/// proc.c owns the critical section because `fpInfoLock` and the `fp*` fields
+/// are `MyProc`-private PGPROC storage.
+fn vxid_lock_table_insert_my_proc(
+    vxid_proc_number: ProcNumber,
+    lxid: LocalTransactionId,
+) -> PgResult<()> {
+    let my_procno = crate::proc_shmem::my_proc_number();
+    with_my_proc(|p| {
+        // LWLockAcquire(&MyProc->fpInfoLock, LW_EXCLUSIVE); the guard releases
+        // the lock when dropped at the end of this closure (LWLockRelease).
+        let _guard = lwlock::lwlock_acquire::call(
+            &p.fpInfoLock,
+            LWLockMode::LW_EXCLUSIVE,
+            my_procno,
+        )?;
+
+        debug_assert_eq!(p.vxid.procNumber, vxid_proc_number);
+        debug_assert_eq!(p.fpLocalTransactionId, InvalidLocalTransactionId);
+        debug_assert!(!p.fpVXIDLock);
+
+        p.fpVXIDLock = true;
+        p.fpLocalTransactionId = lxid;
+        Ok(())
+    })
 }
 
 fn lock_error_cleanup() {
@@ -911,6 +950,7 @@ pub(crate) fn install() {
     seams::my_proc_wait_start::set(my_proc_wait_start);
     seams::set_my_proc_wait_start::set(set_my_proc_wait_start);
     seams::set_my_proc_vxid_proc_number::set(set_my_proc_vxid_proc_number);
+    seams::vxid_lock_table_insert_my_proc::set(vxid_lock_table_insert_my_proc);
     seams::set_my_proc_temp_namespace_id::set(set_my_proc_temp_namespace_id);
     seams::my_proc_lxid::set(my_proc_lxid);
     seams::set_my_proc_lxid::set(set_my_proc_lxid);
