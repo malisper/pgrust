@@ -7782,6 +7782,7 @@ name = "backend-commands-vacuum"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-xact-seams",
  "backend-commands-analyze-seams",
  "backend-commands-define-seams",
  "backend-commands-vacuum-seams",
