@@ -20,6 +20,7 @@ backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams
 # var.c also owns the pull_var_clause/pull_var_clause_list/pull_varnos the
 # equivclass-ext consumer crate declares for initsplan.c/equivclass.c.
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # fix_indexqual_operand reaches indxpath.c's strip_phvs_in_index_operand by a
 # direct edge (indxpath depends only on var-SEAMS, not this owner, so no cycle).

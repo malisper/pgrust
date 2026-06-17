@@ -17,11 +17,13 @@ use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCache3,
     SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
-    SysCacheGetAttrNotNull, AGGFNOID, AMOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
+    SysCacheGetAttrNotNull, AGGFNOID, AMOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM,
+    AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, DATABASEOID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, NAMESPACENAME, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID,
+    LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, PARAMETERACLNAME, PARAMETERACLOID,
+    PROCOID,
     RELNAMENSP, RELOID,
     RULERELNAME, STATRELATTINH, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
@@ -31,6 +33,7 @@ use types_statistics::{
     Anum_pg_statistic_stanullfrac, Anum_pg_statistic_staop1,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
+use backend_optimizer_util_clauses_seams as clauses_seams;
 use types_core::AttrNumber;
 use types_fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
@@ -48,6 +51,7 @@ use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
+use types_namespace::OperRow;
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use types_catalog::pg_aggregate::{
@@ -85,6 +89,8 @@ const Anum_pg_opclass_opcintype: i32 = 7;
 const Anum_pg_opclass_opckeytype: i32 = 9;
 
 // `catalog/pg_operator.h` attribute numbers.
+const Anum_pg_operator_oid: i32 = 1;
+const Anum_pg_operator_oprnamespace: i32 = 3;
 const Anum_pg_operator_oprname: i32 = 2;
 const Anum_pg_operator_oprkind: i32 = 5;
 const Anum_pg_operator_oprcanmerge: i32 = 6;
@@ -408,6 +414,28 @@ pub(crate) fn amop_by_strategy_full(
     Ok(Some(row))
 }
 
+/// `SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opno))` member rows, each
+/// projected to [`AmopOpidRow`] in catlist order (`get_ordering_op_properties`
+/// / `get_op_btree_interpretation` / `get_op_hash_functions`, lsyscache.c).
+pub(crate) fn amop_list_by_opr<'mcx>(
+    mcx: Mcx<'mcx>,
+    opno: Oid,
+) -> PgResult<PgVec<'mcx, AmopOpidRow>> {
+    let members = SearchSysCacheList1(mcx, AMOPOPID, SysCacheKey::Value(KeyDatum::from_oid(opno)))?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push(AmopOpidRow {
+            amopmethod: getattr_oid(mcx, AMOPOPID, tup, Anum_pg_amop_amopmethod)?,
+            amopfamily: getattr_oid(mcx, AMOPOPID, tup, Anum_pg_amop_amopfamily)?,
+            amopstrategy: getattr_i16(mcx, AMOPOPID, tup, Anum_pg_amop_amopstrategy)?,
+            amoplefttype: getattr_oid(mcx, AMOPOPID, tup, Anum_pg_amop_amoplefttype)?,
+            amoprighttype: getattr_oid(mcx, AMOPOPID, tup, Anum_pg_amop_amoprighttype)?,
+            amopopr: getattr_oid(mcx, AMOPOPID, tup, Anum_pg_amop_amopopr)?,
+        });
+    }
+    Ok(rows)
+}
+
 /// `SearchSysCacheList1(AMPROCNUM, ObjectIdGetDatum(opfamilyoid))` member
 /// rows, projected.
 pub(crate) fn search_amproc_list<'mcx>(
@@ -480,6 +508,172 @@ pub(crate) fn search_opclass_list_by_am<'mcx>(
         ));
     }
     Ok(rows)
+}
+
+/// Project one `pg_operator` catlist member tuple to an [`OperRow`].
+fn project_oper_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &FormedTuple<'mcx>,
+) -> PgResult<OperRow<'mcx>> {
+    Ok(OperRow {
+        oid: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oid)?,
+        oprnamespace: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprnamespace)?,
+        // `oprkind` is the raw C `char` (`b`/`l`); OperRow carries it as `u8`.
+        oprkind: getattr_char(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprkind)? as u8,
+        oprleft: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprleft)?,
+        oprright: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprright)?,
+        oprresult: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprresult)?,
+        oprcode: getattr_oid(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprcode)?,
+        oprname: getattr_name(mcx, OPERNAMENSP, tup, Anum_pg_operator_oprname)?,
+    })
+}
+
+/// `SearchSysCache1(OPEROID, ObjectIdGetDatum(oprid))` projected to an
+/// [`OperRow`] (`get_op...` / `OperatorIsVisibleExt`, parse_oper.c / namespace.c).
+/// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
+pub(crate) fn oper_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    oprid: Oid,
+) -> PgResult<Option<OperRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, OPEROID, SysCacheKey::Value(KeyDatum::from_oid(oprid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // OPEROID and OPERNAMENSP read the same `pg_operator` columns; the attnums
+    // are identical, so the shared `project_oper_row` helper applies.
+    let row = OperRow {
+        oid: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oid)?,
+        oprnamespace: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprnamespace)?,
+        oprkind: getattr_char(mcx, OPEROID, &tup, Anum_pg_operator_oprkind)? as u8,
+        oprleft: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprleft)?,
+        oprright: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprright)?,
+        oprresult: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprresult)?,
+        oprcode: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprcode)?,
+        oprname: getattr_name(mcx, OPEROID, &tup, Anum_pg_operator_oprname)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache1(OPEROID, opno)` + `GETSTRUCT->oprcode` (`get_opcode`,
+/// lsyscache.c). `Ok(None)` on a cache miss.
+pub(crate) fn oper_oprcode(opno: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache oper_oprcode projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, OPEROID, SysCacheKey::Value(KeyDatum::from_oid(opno)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+    let v = getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprcode)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+/// `SearchSysCache1(OPEROID, opno)` + `GETSTRUCT->oprcom` (`get_commutator`,
+/// lsyscache.c). `Ok(None)` on a cache miss.
+pub(crate) fn oper_oprcom(opno: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache oper_oprcom projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, OPEROID, SysCacheKey::Value(KeyDatum::from_oid(opno)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+    let v = getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprcom)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+/// `SearchSysCache1(OPEROID, opno)` + `GETSTRUCT->(oprleft, oprright)`
+/// (`op_input_types`, lsyscache.c). `Ok(None)` on a cache miss.
+pub(crate) fn oper_input_types(opno: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let scratch = MemoryContext::new("syscache oper_input_types projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, OPEROID, SysCacheKey::Value(KeyDatum::from_oid(opno)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+    let l = getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprleft)?;
+    let r = getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprright)?;
+    ReleaseSysCache(tup);
+    Ok(Some((l, r)))
+}
+
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT->(procost, prorows,
+/// proretset, prosupport)` (plancat.c `add_function_cost`/`get_function_rows`).
+/// `Err` on a cache miss (caller always holds a valid funcid).
+pub(crate) fn proc_cost_rows(
+    funcid: Oid,
+) -> PgResult<backend_utils_cache_syscache_seams::ProcCostRows> {
+    let scratch = MemoryContext::new("syscache proc_cost_rows projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for function {}",
+            funcid
+        )));
+    };
+    let row = backend_utils_cache_syscache_seams::ProcCostRows {
+        procost: getattr_f32(mcx, PROCOID, &tup, Anum_pg_proc_procost)?,
+        prorows: getattr_f32(mcx, PROCOID, &tup, Anum_pg_proc_prorows)?,
+        proretset: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?,
+        prosupport: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prosupport)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(row)
+}
+
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT->proisstrict` (`func_strict`,
+/// lsyscache.c). `Ok(None)` on a cache miss.
+pub(crate) fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache proc_isstrict projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+    let v = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proisstrict)?;
+    ReleaseSysCache(tup);
+    Ok(Some(v))
+}
+
+/// `SearchSysCacheList3(OPERNAMENSP, opername, oprleft, oprright)` — member
+/// rows in catlist order plus `catlist->ordered` (`OpernameGetOprid`,
+/// namespace.c). The keys are `(opername, oprleft, oprright)`.
+///
+/// `ordered`: C reads `catlist->ordered` (an index-scan ordering hint that lets
+/// the caller short-circuit). The underlying `SearchSysCacheList` wrapper does
+/// not surface that flag through the catcache seam, so this projection reports
+/// `false` — the always-correct value, forcing the consumer's full-scan branch
+/// (namespace.c: "If we have an unordered list, we have to scan the whole
+/// list"). The result set is identical; only the short-circuit optimization is
+/// declined. `OpernameGetOprid` (this query's caller) ignores `ordered`.
+pub(crate) fn oper_catlist3<'mcx>(
+    mcx: Mcx<'mcx>,
+    opername: &str,
+    oprleft: Oid,
+    oprright: Oid,
+) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)> {
+    let members = SearchSysCacheList(
+        mcx,
+        OPERNAMENSP,
+        3,
+        SysCacheKey::Str(opername),
+        SysCacheKey::Value(KeyDatum::from_oid(oprleft)),
+        SysCacheKey::Value(KeyDatum::from_oid(oprright)),
+    )?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push(project_oper_row(mcx, tup)?);
+    }
+    Ok((rows, false))
+}
+
+/// `SearchSysCacheList1(OPERNAMENSP, opername)` — member rows in catlist order
+/// plus `catlist->ordered` (`OpernameGetCandidates`, namespace.c). See
+/// [`oper_catlist3`] for the `ordered` semantics (reported `false`).
+pub(crate) fn oper_catlist1<'mcx>(
+    mcx: Mcx<'mcx>,
+    opername: &str,
+) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)> {
+    let members = SearchSysCacheList1(mcx, OPERNAMENSP, SysCacheKey::Str(opername))?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push(project_oper_row(mcx, tup)?);
+    }
+    Ok((rows, false))
 }
 
 /// `func_get_detail`'s default-argument extraction (`parse_func.c`):
@@ -1070,7 +1264,10 @@ const Anum_pg_proc_proparallel: i32 = 16;
 const Anum_pg_proc_proowner: i32 = 4;
 const Anum_pg_proc_prolang: i32 = 5;
 const Anum_pg_proc_prosecdef: i32 = 11;
+const Anum_pg_proc_procost: i32 = 6;
+const Anum_pg_proc_prorows: i32 = 7;
 const Anum_pg_proc_pronargs: i32 = 17;
+const Anum_pg_proc_pronargdefaults: i32 = 18;
 const Anum_pg_proc_prorettype: i32 = 19;
 const Anum_pg_proc_proargtypes: i32 = 20;
 const Anum_pg_proc_prosrc: i32 = 26;
@@ -1690,6 +1887,75 @@ pub(crate) fn pg_proc_form<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option
     };
     ReleaseSysCache(tup);
     Ok(Some(form))
+}
+
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT(Form_pg_proc)` projected to
+/// the [`PgProcSimple`] subset `optimizer/util/clauses.c`'s const-folding engine
+/// reads (`simplify_function` / `evaluate_function` / `expand_function_arguments`
+/// / `inline_function`). `Err` carries the C `elog(ERROR, "cache lookup failed
+/// for function %u")` (clauses.c always holds a valid funcid, so a miss is an
+/// error rather than `Ok(None)`).
+pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple> {
+    let scratch = MemoryContext::new("syscache get_func_form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        // elog(ERROR, "cache lookup failed for function %u", funcid)
+        return Err(PgError::error(format!(
+            "cache lookup failed for function {}",
+            funcid
+        )));
+    };
+
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let pronargdefaults = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargdefaults)?;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let proisstrict = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proisstrict)?;
+    let provolatile = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_provolatile)? as u8;
+    let prosecdef = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_prosecdef)?;
+    let prosupport = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prosupport)?;
+    let prolang = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prolang)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off the
+    // on-disk image (== C's vec->values).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "syscache get_func_form: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+    // PgProcSimple.proargtypes is a `std`/`alloc::vec::Vec<Oid>` (the seam type),
+    // so copy the mcx-allocated OIDs out into an owned Vec.
+    let proargtypes: std::vec::Vec<Oid> = proargtypes_vec.iter().copied().collect();
+
+    // proconfig (text[]) NULL test — clauses.c folds only when there's no
+    // per-function GUC override (`fexpr->funcvariadic`/config gate).
+    let (_proconfig, proconfig_isnull) =
+        SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proconfig)?;
+
+    ReleaseSysCache(tup);
+    Ok(clauses_seams::PgProcSimple {
+        pronargs,
+        pronargdefaults,
+        prorettype,
+        proretset,
+        proisstrict,
+        provolatile,
+        prosecdef,
+        prosupport,
+        proargtypes,
+        prolang_is_sql: prolang == SQL_LANGUAGE_ID,
+        proconfig_isnull,
+    })
 }
 
 /// `SearchSysCache1(TYPEOID, oidtypeid)` projected to the type-dependent

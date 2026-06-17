@@ -423,6 +423,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ARR_ELEMTYPE(DatumGetArrayTypeP(bytes))` (arrayfuncs.c) operating on the
+    /// on-disk array byte image `bytes` (a `Datum::ByRef` attribute image),
+    /// like [`array_get_elemtype`] but reading the bytes directly instead of a
+    /// pointer-word `Datum`. The image is detoasted (`detoast_attr`) and the
+    /// element type OID is read out of the array header. Fallible only on the
+    /// detoast surface.
+    pub fn array_get_elemtype_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `deconstruct_array(DatumGetArrayTypeP(bytes), elmtype, elmlen, elmbyval,
     /// elmalign, ...)` (arrayfuncs.c) operating on the on-disk array byte image
     /// `bytes`, like [`deconstruct_array_bytes`], but returning each element as

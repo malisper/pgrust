@@ -164,12 +164,17 @@ pub fn make_const<'mcx>(
     // a pointer across the lifetime boundary.
     let constvalue: Datum<'static> = match constvalue {
         Datum::ByVal(word) => Datum::ByVal(word),
+        // A `cstring` value (e.g. the UNKNOWN const make_const builds for an
+        // unadorned string literal) carries its text in an OWNED `String` — it
+        // borrows nothing from `mcx`, so it is freely a `'static` value, exactly
+        // like C's `Const.constvalue` cstring pointer that outlives the parse.
+        Datum::Cstring(s) => Datum::Cstring(s),
         Datum::ByRef(_) => panic!(
             "make_const: by-reference Const value requires a lifetime-carrying \
              Const carrier (execTuples canonical-carrier follow-on, #113)"
         ),
-        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
-            "make_const: Cstring/Composite/Expanded/Internal Const value requires a \
+        Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
+            "make_const: Composite/Expanded/Internal Const value requires a \
              lifetime-carrying Const carrier — not yet produced — wave 2"
         ),
     };

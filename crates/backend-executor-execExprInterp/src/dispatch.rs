@@ -28,7 +28,9 @@
 
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_core::primitive::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
+use types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_COLUMN};
+use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 use types_nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, EEO_FLAG_DIRECT_THREADED,
     EEO_FLAG_INTERPRETER_INITIALIZED,
@@ -531,28 +533,67 @@ pub fn CheckVarSlotCompatibility(
     // System attributes don't require checking since their types never change.
     if attnum > 0 {
         // TupleDesc slot_tupdesc = slot->tts_tupleDescriptor;
-        // if (attnum > slot_tupdesc->natts) elog(ERROR, "attribute number %d
-        //     exceeds number of columns %d", attnum, slot_tupdesc->natts);
+        // The slot descriptor model has landed (`TupleTableSlot.tts_tupleDescriptor`
+        // carries a real `TupleDescData`), so the C checks are expressible.
+        let slot_tupdesc = slot
+            .tts_tupleDescriptor
+            .as_ref()
+            .expect("CheckVarSlotCompatibility: slot has no tuple descriptor");
+
+        // if (attnum > slot_tupdesc->natts)
+        //     elog(ERROR, "attribute number %d exceeds number of columns %d",
+        //          attnum, slot_tupdesc->natts);
+        if attnum > slot_tupdesc.natts {
+            return Err(PgError::error(format!(
+                "attribute number {} exceeds number of columns {}",
+                attnum,
+                slot_tupdesc.natts
+            )));
+        }
+
         // attr = TupleDescAttr(slot_tupdesc, attnum - 1);
-        // if (attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL) elog(ERROR, ...);
-        // if (attr->attisdropped) ereport(ERROR, ERRCODE_UNDEFINED_COLUMN, ...);
-        // if (vartype != attr->atttypid) ereport(ERROR, ERRCODE_DATATYPE_MISMATCH, ...);
-        //
-        // Every branch here dereferences slot->tts_tupleDescriptor and its
-        // per-attribute Form_pg_attribute (natts / attgenerated / attisdropped /
-        // atttypid). The shared TupleTableSlot is trimmed to its header bits
-        // (tts_flags / tts_tid / tts_ops / tts_tableOid); its descriptor and the
-        // value arrays are owned by the execTuples unit, which has not landed (no
-        // seam exposes a slot's tts_tupleDescriptor). The error messages also
-        // route through format_type_be on slot_tupdesc->tdtypeid. Faithful as
-        // soon as execTuples lands the slot descriptor model on TupleTableSlot.
-        let _ = (slot, vartype);
-        panic!(
-            "CheckVarSlotCompatibility: reading slot->tts_tupleDescriptor (natts / \
-             TupleDescAttr attgenerated/attisdropped/atttypid) needs the execTuples \
-             slot descriptor model (the trimmed TupleTableSlot has no descriptor); \
-             blocked until execTuples lands"
-        )
+        let attr = slot_tupdesc.attr((attnum - 1) as usize);
+
+        // if (attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+        //     elog(ERROR, "trying to fetch a virtual generated column ...");
+        if attr.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+            return Err(PgError::error(format!(
+                "trying to fetch a virtual generated column from attribute number {}",
+                attnum
+            )));
+        }
+
+        // if (attr->attisdropped)
+        //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_COLUMN),
+        //             "attribute %d of type %s has been dropped", attnum,
+        //             format_type_be(slot_tupdesc->tdtypeid));
+        if attr.attisdropped {
+            return Err(PgError::error(format!(
+                "attribute {} of type {} has been dropped",
+                attnum,
+                slot_tupdesc.tdtypeid
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_COLUMN));
+        }
+
+        // if (vartype != attr->atttypid)
+        //     ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
+        //             "attribute %d of type %s has wrong type", attnum,
+        //             format_type_be(slot_tupdesc->tdtypeid)),
+        //             errdetail("Table has type %s, but query expects %s.",
+        //                       format_type_be(attr->atttypid),
+        //                       format_type_be(vartype));
+        if vartype != attr.atttypid {
+            return Err(PgError::error(format!(
+                "attribute {} of type {} has wrong type (table has type OID {}, \
+                 but query expects type OID {})",
+                attnum,
+                slot_tupdesc.tdtypeid,
+                attr.atttypid,
+                vartype
+            ))
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+        }
     }
 
     Ok(())

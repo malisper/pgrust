@@ -167,5 +167,9 @@ pub fn install_seams() {
             get: crate::guc::fetch_consistency,
             set: crate::guc::set_fetch_consistency,
         });
+        vars::pgstat_track_functions.install(GucVarAccessors {
+            get: crate::guc::track_functions,
+            set: crate::guc::set_track_functions,
+        });
     }
 }

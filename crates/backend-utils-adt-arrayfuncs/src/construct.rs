@@ -2251,6 +2251,14 @@ pub fn array_get_elemtype<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<O
     Ok(foundation::arr_elemtype(&arr))
 }
 
+/// Seam `array_get_elemtype_bytes` — `ARR_ELEMTYPE(DatumGetArrayTypeP(bytes))`
+/// over the on-disk array byte image (a `Datum::ByRef`), mirroring
+/// [`array_get_elemtype`] but reading the bytes directly.
+pub fn array_get_elemtype_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Oid> {
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    Ok(foundation::arr_elemtype(&arr))
+}
+
 /// Project the `ArrayType` header fields (`ndim`/`dim0`/`hasnull`/`elemtype`)
 /// out of a detoasted array buffer. Shared by the funcapi `*_array_datum`
 /// seams. The shape-validity checks (and the `elog(ERROR)`) stay on the funcapi

@@ -1220,6 +1220,12 @@ pub fn init_seams() {
     backend_nodes_equalfuncs_seams::equal_expr_list::set(equal_expr_list_impl);
     backend_nodes_equalfuncs_seams::equal_targetentry_list::set(equal_targetentry_list_impl);
     backend_nodes_equalfuncs_seams::equal_sortgroupclause_list::set(equal_sortgroupclause_list_impl);
+
+    // equivclass-ext cycle-break leg owned by equalfuncs.c: `equal(a, b)` over
+    // two owned `&Expr` (equivclass.c `process_equivalence` /
+    // `get_eclass_for_sort_expr` member matching). Same impl as the
+    // `equal_expr` seam.
+    backend_optimizer_path_equivclass_ext_seams::equal::set(equal_expr);
 }
 
 #[cfg(test)]

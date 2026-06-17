@@ -101,6 +101,7 @@ pub fn init_seams() {
     seams::construct_int4_array::set(construct::construct_int4_array);
     seams::array_get_ndim::set(construct::array_get_ndim);
     seams::array_get_elemtype::set(construct::array_get_elemtype);
+    seams::array_get_elemtype_bytes::set(construct::array_get_elemtype_bytes);
     seams::oid_array_datum::set(construct::oid_array_datum);
     seams::char_array_datum::set(construct::char_array_datum);
     seams::text_array_datum::set(construct::text_array_datum);

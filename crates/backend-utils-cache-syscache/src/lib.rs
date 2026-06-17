@@ -908,6 +908,16 @@ pub fn init_seams() {
         projections::search_opclass_list_by_am,
     );
     backend_utils_cache_syscache_seams::pg_operator_form::set(projections::pg_operator_form);
+    backend_utils_cache_syscache_seams::oper_catlist3::set(projections::oper_catlist3);
+    backend_utils_cache_syscache_seams::oper_catlist1::set(projections::oper_catlist1);
+    backend_utils_cache_syscache_seams::oper_row_by_oid::set(projections::oper_row_by_oid);
+    backend_optimizer_util_clauses_seams::get_func_form::set(projections::get_func_form);
+    backend_utils_cache_syscache_seams::amop_list_by_opr::set(projections::amop_list_by_opr);
+    backend_utils_cache_syscache_seams::oper_oprcode::set(projections::oper_oprcode);
+    backend_utils_cache_syscache_seams::oper_oprcom::set(projections::oper_oprcom);
+    backend_utils_cache_syscache_seams::oper_input_types::set(projections::oper_input_types);
+    backend_utils_cache_syscache_seams::proc_isstrict::set(projections::proc_isstrict);
+    backend_utils_cache_syscache_seams::proc_cost_rows::set(projections::proc_cost_rows);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
     backend_utils_cache_syscache_seams::agg_form_by_oid::set(projections::agg_form_by_oid);

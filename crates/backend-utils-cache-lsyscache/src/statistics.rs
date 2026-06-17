@@ -104,10 +104,14 @@ pub fn get_attstatsslot<'mcx>(
         // arrayelemtype = ARR_ELEMTYPE(statarray);
         // sslot->valuetype = arrayelemtype;
         // The syscache projection yields the canonical unified `Datum<'mcx>`;
-        // the arrayfuncs seams still take the bare scalar word — bridge at the
-        // edge (the array Datum is a pass-by-ref pointer word).
-        let val = Datum::from_usize(val.as_usize());
-        let arrayelemtype = arrayfuncs_seams::array_get_elemtype::call(mcx, val)?;
+        // the stavalues column is a pass-by-reference `anyarray`, so `val` is a
+        // `Datum::ByRef` carrying the on-disk array image bytes (NOT a pointer
+        // word). Read the element type + deconstruct directly off those bytes
+        // via the byte-based arrayfuncs seams (the bare-word `array_get_elemtype`
+        // / `deconstruct_array` seams expect a pointer-word Datum and would
+        // panic on a `ByRef`).
+        let array_bytes = val.as_ref_bytes();
+        let arrayelemtype = arrayfuncs_seams::array_get_elemtype_bytes::call(mcx, array_bytes)?;
         valuetype = arrayelemtype;
 
         // typeTuple = SearchSysCache1(TYPEOID, arrayelemtype); ... typeForm;
@@ -118,9 +122,9 @@ pub fn get_attstatsslot<'mcx>(
         // deconstruct_array(statarray, arrayelemtype, typlen, typbyval,
         //                   typalign, &sslot->values, NULL, &sslot->nvalues);
         // NULLs not expected, so the per-element isnull is ignored.
-        let elems = arrayfuncs_seams::deconstruct_array::call(
+        let elems = arrayfuncs_seams::deconstruct_array_bytes::call(
             mcx,
-            val,
+            array_bytes,
             arrayelemtype,
             type_form.typlen,
             type_form.typbyval,

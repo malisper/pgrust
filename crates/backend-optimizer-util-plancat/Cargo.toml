@@ -30,4 +30,5 @@ backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

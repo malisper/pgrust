@@ -133,10 +133,14 @@ pub fn exec_func_step<'mcx>(
 
     // C (the _STRICT opcodes): for (argno = 0; argno < nargs; argno++)
     //                              if (args[argno].isnull) { *op->resnull = true; return; }
+    //
+    // Write through `write_cell`, which routes `STATE_RESULT_CELL` (== id 0) to
+    // the `ExprState`'s own `resvalue`/`resnull` rather than the auxiliary
+    // `result_cells[0]`. The raw `result_cells.set` bypassed that, so a step
+    // whose result slot is the ExprState's own cell (e.g. a top-level qual's
+    // FUNCEXPR) wrote into the wrong location and the EEOP_QUAL reader saw zero.
     if strict && args.iter().any(|a| a.isnull) {
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
         return Ok(());
     }
 
@@ -144,13 +148,7 @@ pub fn exec_func_step<'mcx>(
     let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell {
-            value: DatumV::from_usize(word.as_usize()),
-            isnull,
-        },
-    );
+    crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_usize(word.as_usize()), isnull);
     Ok(())
 }
 

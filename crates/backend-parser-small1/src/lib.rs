@@ -540,15 +540,15 @@ pub fn make_const<'mcx>(
             // val = BoolGetDatum(boolVal(&aconst->val));
             (Datum::from_bool(b.boolval), BOOLOID, 1, true)
         }
-        Node::String(_s) => {
-            // val = CStringGetDatum(strVal(&aconst->val)); UNKNOWN is cstring-like.
-            // CStringGetDatum yields a by-reference (cstring pointer) Datum.
-            panic!(
-                "make_const: T_String arm builds an UNKNOWN const from \
-                 CStringGetDatum(strVal), a by-reference (cstring pointer) Datum; \
-                 the by-reference Datum bridge is unported workspace-wide \
-                 (parse_node.c:445)"
-            );
+        Node::String(s) => {
+            // C (parse_node.c make_const, T_String arm):
+            //   val = CStringGetDatum(strVal(&aconst->val));
+            //   typeid = UNKNOWNOID; /* will be coerced later */
+            //   typelen = -2;        /* cstring-style varwidth */
+            //   typebyval = false;
+            // `CStringGetDatum` yields a by-reference (cstring pointer) Datum;
+            // here the canonical `Datum::Cstring` arm carries the owned text.
+            (Datum::from_cstring(alloc::string::String::from(s.sval.as_str())), UNKNOWNOID, -2, false)
         }
         Node::BitString(_b) => {
             // bit_in() via DirectFunctionCall3 returns a by-ref Datum.

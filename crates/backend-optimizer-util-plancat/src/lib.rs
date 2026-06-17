@@ -47,6 +47,7 @@ use backend_optimizer_util_relnode_seams as bms;
 use backend_optimizer_util_predtest_seams as predtest;
 use backend_optimizer_rte_seams as rte;
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_syscache_seams as syscache_seams;
 
 /* --------------------------------------------------------------------------
  * Constants mirrored from C headers (not present in the trimmed types crates).
@@ -1428,17 +1429,80 @@ pub fn function_selectivity<'mcx>(
 
 /// `add_function_cost(root, funcid, node, &cost)` (plancat.c) — returns the
 /// `(startup, per_tuple)` cost to *add* (the caller accumulates).
+///
+/// C:
+///   proctup = SearchSysCache1(PROCOID, funcid);
+///   procform = GETSTRUCT(proctup);
+///   if (OidIsValid(procform->prosupport)) {
+///       SupportRequestCost req; ... OidFunctionCall1(prosupport, &req); ...
+///       cost->startup += req.startup;
+///       cost->per_tuple += req.per_tuple;
+///   } else {
+///       cost->per_tuple += procform->procost * cpu_operator_cost;
+///   }
 pub fn add_function_cost(
-    root: &PlannerInfo,
+    _root: &PlannerInfo,
     funcid: Oid,
-    node: Option<NodeId>,
+    _node: Option<NodeId>,
 ) -> PgResult<(f64, f64)> {
-    ext::add_function_cost_impl::call(root, funcid, node)
+    let form = syscache_seams::proc_cost_rows::call(funcid)?;
+
+    if form.prosupport != InvalidOid {
+        // The planner-support cost path (`SupportRequestCost` over the
+        // `prosupport` function via `OidFunctionCall1`) rides the planner
+        // support-request fmgr machinery, which is unported workspace-wide (no
+        // `SupportRequestCost` carrier / support-request dispatch). Functions
+        // reached by the current query path (e.g. `chareq`) have
+        // `prosupport == InvalidOid`, so this leg is unreachable here; mirror-PG
+        // and panic until the support-request machinery lands.
+        panic!(
+            "add_function_cost: prosupport={} cost-support path needs the \
+             SupportRequestCost planner-support fmgr machinery (unported \
+             workspace-wide)",
+            form.prosupport
+        );
+    }
+
+    // cost->per_tuple += procform->procost * cpu_operator_cost;
+    // The `cpu_operator_cost` GUC global is owned by costsize.c; read it through
+    // its installed costsize seam (the raw GUC-slot path is unwired tree-wide,
+    // costsize keeps the value as a const and exposes it via this seam).
+    let cpu_operator_cost = backend_optimizer_path_costsize_seams::cpu_operator_cost::call();
+    Ok((0.0, form.procost as f64 * cpu_operator_cost))
 }
 
 /// `get_function_rows(root, funcid, node)` (plancat.c).
-pub fn get_function_rows(root: &PlannerInfo, funcid: Oid, node: Option<NodeId>) -> PgResult<f64> {
-    ext::get_function_rows_impl::call(root, funcid, node)
+///
+/// C:
+///   proctup = SearchSysCache1(PROCOID, funcid);
+///   procform = GETSTRUCT(proctup);
+///   Assert(procform->proretset);     /* else caller error */
+///   if (OidIsValid(procform->prosupport)) { ... SupportRequestRows ... }
+///   else result = procform->prorows;
+pub fn get_function_rows(
+    _root: &PlannerInfo,
+    funcid: Oid,
+    _node: Option<NodeId>,
+) -> PgResult<f64> {
+    let form = syscache_seams::proc_cost_rows::call(funcid)?;
+
+    // Assert(procform->proretset);
+    debug_assert!(form.proretset);
+
+    if form.prosupport != InvalidOid {
+        // The `SupportRequestRows` planner-support path is unported (same
+        // machinery as add_function_cost's support leg). Unreachable for the
+        // current query path; mirror-PG and panic until it lands.
+        panic!(
+            "get_function_rows: prosupport={} rows-support path needs the \
+             SupportRequestRows planner-support fmgr machinery (unported \
+             workspace-wide)",
+            form.prosupport
+        );
+    }
+
+    // result = procform->prorows;
+    Ok(form.prorows as f64)
 }
 
 /* ==========================================================================
@@ -1545,6 +1609,17 @@ pub fn init_seams() {
     backend_optimizer_path_allpaths::seams::relation_excluded_by_constraints::set(
         seam_relation_excluded_by_constraints,
     );
+    // `const_is_false_or_null` — the inline const-FALSE/NULL restriction test in
+    // C's `relation_excluded_by_constraints`. Homed in the plancat-ext stub
+    // because it resolves the arena `NodeId` to a `Const`; plancat owns the
+    // call site, so it installs the body. C:
+    //   IsA(clause, Const) && (((Const *) clause)->constisnull ||
+    //                          !DatumGetBool(((Const *) clause)->constvalue))
+    ext::const_is_false_or_null::set(|root, node| match root.node(node) {
+        types_nodes::primnodes::Expr::Const(c) => c.constisnull || !c.constvalue.as_bool(),
+        _ => false,
+    });
+
     backend_optimizer_util_clauses_seams::get_function_rows::set(seam_get_function_rows);
     backend_optimizer_path_costsize_seams::add_function_cost::set(seam_add_function_cost);
     backend_optimizer_path_costsize_seams::get_relation_data_width::set(

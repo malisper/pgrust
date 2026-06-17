@@ -1543,6 +1543,19 @@ pub fn init_seams() {
     // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
     // lookup spine is not part of this pure-node-inspection family, so the seam
     // stays installed by its real owner. Not set here.
+
+    // The equivclass-ext cycle-break seams initsplan.c / equivclass.c call into
+    // nodeFuncs.c (`exprType`/`exprTypmod`/`exprCollation`) over an owned
+    // rootless `&Expr`. var.c installs its pull_var_clause* legs of this same
+    // ext-seam crate; nodeFuncs.c owns these accessor legs. The impls are
+    // infallible for valid trees; a propagated error is a loud panic (mirrors
+    // C's elog(ERROR) on an unrecognized node tag).
+    {
+        use backend_optimizer_path_equivclass_ext_seams as eqext;
+        eqext::expr_type::set(|expr| expr_type(Some(expr)).expect("exprType"));
+        eqext::expr_typmod::set(|expr| expr_typmod(Some(expr)).expect("exprTypmod"));
+        eqext::expr_collation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
+    }
 }
 
 /// `exprType((Node *) expr)` (nodeFuncs.c) over an arena-resolved planner node.

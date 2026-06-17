@@ -1057,6 +1057,15 @@ seam_core::seam!(
     pub fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>>
 );
 
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` +
+    /// `GETSTRUCT(Form_pg_proc)->(procost, prorows, proretset, prosupport)`
+    /// (the `Form_pg_proc` fields `add_function_cost` / `get_function_rows`
+    /// read in plancat.c). `Err` carries the C `elog(ERROR, "cache lookup
+    /// failed for function %u")`. The installer owns the `ReleaseSysCache`.
+    pub fn proc_cost_rows(funcid: Oid) -> PgResult<ProcCostRows>
+);
+
 /* ---- lsyscache.c collation / constraint / language / cast / transform reads */
 
 seam_core::seam!(
@@ -1385,6 +1394,20 @@ seam_core::seam!(
 // `cache lookup failed` / returns the C "not found" sentinel. These panic
 // loudly until the catcache/syscache owner installs them.
 // ===========================================================================
+
+/// The `Form_pg_proc` cost/rows columns `add_function_cost` /
+/// `get_function_rows` (plancat.c) read off `SearchSysCache1(PROCOID, ...)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcCostRows {
+    /// `procost` — per-call execution cost estimate (cpu_operator_cost units).
+    pub procost: f32,
+    /// `prorows` — estimated result rows for a set-returning function.
+    pub prorows: f32,
+    /// `proretset` — does the function return a set?
+    pub proretset: bool,
+    /// `prosupport` — planner support function OID (`InvalidOid` if none).
+    pub prosupport: Oid,
+}
 
 /// The fixed-width `Form_pg_operator` columns lsyscache.c reads off
 /// `SearchSysCache1(OPEROID, ...)`. `oprname` rides as an owned `String`

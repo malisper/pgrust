@@ -22,7 +22,7 @@ use types_error::{
 };
 use types_nodes::primnodes::{
     ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr,
-    ConvertRowtypeExpr, Expr, RowExpr,
+    Const, ConvertRowtypeExpr, Expr, RowExpr,
 };
 use types_parsenodes::CoercionContext;
 use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
@@ -553,30 +553,94 @@ fn coerce_unknown_const<'mcx>(
 
     let baseType = parse_type::typeidType(baseTypeId)?;
 
-    // Set up parse error position pointing at the constant; the C
-    // setup/cancel_parser_errposition_callback model is the retired
-    // error_context_stack propagation (small1 documents this). The
-    // stringTypeDatum failure surface carries the location via the seam.
-    let _ = (
-        pstate, location, mcx, baseType, inputTypeMod, baseTypeMod, ccontext, cformat, &con,
-    );
+    // newcon->consttype = baseTypeId; newcon->consttypmod = inputTypeMod;
+    // newcon->constcollid = typeTypeCollation(baseType);
+    // newcon->constlen = typeLen(baseType);
+    // newcon->constbyval = typeByVal(baseType);
+    // newcon->constisnull = con->constisnull;
+    // newcon->location = con->location;
+    let consttype = baseTypeId;
+    let consttypmod = inputTypeMod;
+    let constcollid = parse_type::typeTypeCollation(baseType.clone());
+    let constlen = parse_type::typeLen(baseType.clone()) as i32;
+    let constbyval = parse_type::typeByVal(baseType.clone());
+    let constisnull = con.constisnull;
+    let conloc = con.location;
 
-    // The C builds `newcon->constvalue = stringTypeDatum(baseType,
-    // DatumGetCString(con->constvalue), inputTypeMod)` — feeding the UNKNOWN
-    // literal's C-string through the target's typinput. Two pieces are blocked
-    // on the execTuples canonical-carrier (#113): (1) DatumGetCString reads the
-    // literal text out of `con.constvalue`, but the trimmed `Const` stores a
-    // bare-word `Datum<'static>` with no cstring decode path; and (2)
-    // stringTypeDatum yields a call-frame `Datum` whose by-reference image
-    // cannot be stored back into the `Datum<'static>` Const field. The whole
-    // unknown-literal-to-typed-Const arm therefore mirror-PG-and-panics until
-    // the carrier widens; every other coerce_type arm is fully ported.
-    panic!(
-        "coerce_type UNKNOWN-Const arm: building a typed Const from an UNKNOWN \
-         literal (DatumGetCString + stringTypeDatum) needs the execTuples \
-         canonical-carrier (#113); the trimmed Const carries a bare-word \
-         Datum<'static> with no cstring decode/store path"
-    )
+    // We pass the string to stringTypeDatum() to run the type's input function.
+    //
+    // C:
+    //   setup_parser_errposition_callback(&pcbstate, pstate, con->location);
+    //   if (!con->constisnull)
+    //       newcon->constvalue = stringTypeDatum(baseType,
+    //                               DatumGetCString(con->constvalue), inputTypeMod);
+    //   else
+    //       newcon->constvalue = stringTypeDatum(baseType, NULL, inputTypeMod);
+    //   cancel_parser_errposition_callback(&pcbstate);
+    //
+    // `DatumGetCString(con->constvalue)` reads the UNKNOWN literal's text out of
+    // the (now `Datum::Cstring`-carrying) Const; a SQL-NULL literal passes
+    // `NULL` through (a non-strict input function may accept it). The
+    // setup/cancel_parser_errposition_callback pair is the retired
+    // error_context_stack propagation model (documented in small1); the
+    // location rides through `con.location` / the input-function error surface.
+    let _ = (pstate, location, ccontext, cformat);
+    let string: Option<&str> = if constisnull {
+        None
+    } else {
+        // DatumGetCString(con->constvalue)
+        Some(con.constvalue.as_cstring().expect(
+            "coerce_unknown_const: UNKNOWN Const constvalue must be a cstring \
+             (make_const builds the T_String UNKNOWN const as Datum::Cstring)",
+        ))
+    };
+    // `stringTypeDatum` returns the raw call-frame `Datum` word C produces (the
+    // bare-word shim type), mirroring C's `Datum stringTypeDatum(...)`.
+    let datum = parse_type::stringTypeDatum(mcx, baseType, string, inputTypeMod)?;
+
+    // The new Const lives in its plan node's long-lived context, so its value
+    // carries `'static` (the `Const.constvalue` field type). For a by-value
+    // target (`constbyval`, e.g. `char`) the bare word IS the value — store it
+    // as the canonical `ByVal` arm, exactly as C's `Const.constvalue`. A
+    // pass-by-reference (varlena) target would yield a pointer word that cannot
+    // be safely stored into the lifetime-free Const without the canonical
+    // by-reference Const carrier (#113); not reachable for the scalar targets
+    // this arm coerces (the catalog `WHERE relkind = 'r'` path resolves to
+    // `char`, which is pass-by-value).
+    if !constbyval && !constisnull {
+        panic!(
+            "coerce_unknown_const: pass-by-reference coercion target ({} bytes) \
+             requires the by-reference Const carrier (#113); stringTypeDatum \
+             returned a pointer-word Datum with no lifetime-free Const store path",
+            constlen
+        );
+    }
+    let constvalue: TupleDatum<'static> = TupleDatum::ByVal(datum.as_usize());
+
+    let newcon = Const {
+        consttype,
+        consttypmod,
+        constcollid,
+        constlen,
+        constvalue,
+        constisnull,
+        constbyval,
+        location: conloc,
+    };
+
+    // result = (Node *) newcon;
+    let mut result = Expr::Const(newcon);
+
+    // if (baseTypeId != targetTypeId)
+    //     result = coerce_to_domain(result, baseTypeId, baseTypeMod, targetTypeId,
+    //                               ccontext, cformat, location, false);
+    if baseTypeId != targetTypeId {
+        result = coerce_to_domain(
+            mcx, result, baseTypeId, baseTypeMod, targetTypeId, ccontext, cformat, location, false,
+        )?;
+    }
+
+    Ok(Some(result))
 }
 
 // ===========================================================================

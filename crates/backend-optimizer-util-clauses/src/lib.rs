@@ -87,4 +87,26 @@ pub use srf_inline::inline_set_returning_function;
 /// installed by their real owners, not here.
 pub fn init_seams() {
     backend_optimizer_util_clauses_seams::contain_subplans::set(grounded::contain_subplans_slice);
+
+    // The init-subselect cycle-break seam `find_forced_null_var_expr`
+    // (`find_forced_null_var((Node *) clause)`, clauses.c) — owned here (the
+    // impl is `grounded::find_forced_null_var`), installed for
+    // `backend-optimizer-plan-init-subselect`'s `check_redundant_nullability_qual`
+    // caller. The seam contract returns the forced-null `Var` by VALUE
+    // (`Option<Expr>`); `find_forced_null_var` returns a borrow into the input
+    // clause, so the adapter clones the matched `Expr::Var` (a leaf node).
+    backend_optimizer_plan_init_subselect_ext_seams::find_forced_null_var_expr::set(|clause| {
+        grounded::find_forced_null_var(Some(clause)).cloned()
+    });
+
+    // The equivclass-ext cycle-break leg owned by clauses.c:
+    // `contain_volatile_functions((Node *) clause)` over a rootless `&Expr`
+    // (initsplan.c `check_mergejoinable`/`check_hashjoinable` reject clauses with
+    // volatile functions in their args). The impl is fallible only on a catalog
+    // miss for a func OID in the tree; a propagated error is a loud panic
+    // (mirrors C's elog/ereport).
+    backend_optimizer_path_equivclass_ext_seams::contain_volatile_functions::set(|clause| {
+        grounded::contain_volatile_functions(Some(clause))
+            .expect("contain_volatile_functions")
+    });
 }

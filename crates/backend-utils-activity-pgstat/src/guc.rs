@@ -30,6 +30,12 @@ thread_local! {
     /// `PGSTAT_FETCH_CONSISTENCY_CACHE` (`1`); the GUC engine overrides it from
     /// the `stats_fetch_consistency` `boot_val` (also `cache`).
     static FETCH_CONSISTENCY: Cell<i32> = const { Cell::new(1) };
+
+    /// `int pgstat_track_functions` (pgstat.c). Boot default `TRACK_FUNC_NONE`
+    /// (`0`); the GUC engine overrides it from the `track_functions` `boot_val`
+    /// (also `none`). Read by `ExecInitFunc` (execExpr.c) to decide whether to
+    /// wrap a function call in stats-usage accounting.
+    static TRACK_FUNCTIONS: Cell<i32> = const { Cell::new(0) };
 }
 
 /// Read `pgstat_track_counts`.
@@ -50,4 +56,14 @@ pub fn fetch_consistency() -> i32 {
 /// Write `pgstat_fetch_consistency` (GUC assign).
 pub fn set_fetch_consistency(v: i32) {
     FETCH_CONSISTENCY.with(|c| c.set(v));
+}
+
+/// Read `pgstat_track_functions`.
+pub fn track_functions() -> i32 {
+    TRACK_FUNCTIONS.with(|c| c.get())
+}
+
+/// Write `pgstat_track_functions` (GUC assign).
+pub fn set_track_functions(v: i32) {
+    TRACK_FUNCTIONS.with(|c| c.set(v));
 }

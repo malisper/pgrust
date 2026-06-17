@@ -873,6 +873,12 @@ pub fn init_seams() {
     eqext::pull_var_clause::set(seam_eqext_pull_var_clause);
     eqext::pull_var_clause_list::set(seam_eqext_pull_var_clause_list);
     eqext::pull_varnos::set(seam_eqext_pull_varnos);
+
+    // joininfo.c's `pull_varnos((Node *) ...)` cycle-break (its `add_join_clause_
+    // to_rels`/`have_relevant_joinclause` callers ride this no-owner ext stub).
+    // Same `root`-threading shape as the equivclass-ext seam; var.c is the owner.
+    use backend_optimizer_util_joininfo_ext_seams as joinext;
+    joinext::pull_varnos_expr::set(seam_eqext_pull_varnos);
 }
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam

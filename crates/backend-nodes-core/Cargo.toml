@@ -44,3 +44,4 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 # `(root, NodeId)` seams resolve via PlannerInfo and dispatch to nodeFuncs.c
 # (this owner). Leaf seam crate — no cycle.
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }

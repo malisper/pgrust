@@ -484,9 +484,17 @@ fn scan_members(
     let scan_mcx = scratch.mcx();
 
     // relation = table_open(cache->cc_reloid, AccessShareLock);
-    let relation =
-        backend_utils_cache_relcache_seams::relation_id_get_relation::call(scan_mcx, cc_reloid)?
-            .expect("SearchCatCacheList: catalog relation must exist");
+    // The catalog must be locked (AccessShareLock) before the scan: genam's
+    // systable_beginscan re-opens the heap relation with NoLock, asserting the
+    // caller already holds the lock (the C `table_open(cc_reloid,
+    // AccessShareLock)`). Mirrors the single-search path (search_path.rs); a
+    // bare relcache lookup (`relation_id_get_relation`) does NOT take the lock
+    // and trips the `finish_open` lock-held-by-me assertion.
+    let relation = backend_access_common_relation::relation_open(
+        scan_mcx,
+        cc_reloid,
+        types_storage::lock::AccessShareLock,
+    )?;
 
     // memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey));
     // cur_skey[0..nkeys].sk_argument = v1..vN;  (only the first nkeys are used)
@@ -567,9 +575,9 @@ fn scan_members(
         ctlist.push(ct_idx);
     }
 
-    // systable_endscan(scandesc); (surfacing its error) and table_close.
+    // systable_endscan(scandesc); table_close(relation, AccessShareLock);
     guard.end()?;
-    backend_utils_cache_relcache_seams::relation_close::call(cc_reloid)?;
+    relation.close(types_storage::lock::AccessShareLock)?;
 
     let _ = cc_nbuckets;
     Ok(())
