@@ -167,3 +167,11 @@ seam_core::seam!(
     /// plain shared-memory read.
     pub fn get_oldest_xid() -> TransactionId
 );
+
+seam_core::seam!(
+    /// `ForceTransactionIdLimitUpdate()` (varsup.c) — whether
+    /// `SetTransactionIdLimit` should force-refresh the wraparound limits even
+    /// when datfrozenxid did not move (e.g. the oldest-database row vanished).
+    /// Called from vacuum's `vac_update_datfrozenxid`.
+    pub fn force_transaction_id_limit_update() -> PgResult<bool>
+);

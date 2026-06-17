@@ -147,12 +147,9 @@ seam_core::seam!(
 seam_core::seam!(pub fn is_in_transaction_block(is_top_level: bool) -> PgResult<bool>);
 
 // ---- utils/snapmgr.h ---------------------------------------------------
-// `active_snapshot_set` stays here: vacuum's call wants `PgResult<bool>`, which
-// diverges from the snapmgr base crate's bare `bool` contract (the owner's
-// `pc-seams` carries the `PgResult<bool>` variant, but this is vacuum's local
-// fallible shape). `pop_active_snapshot` / `push_active_snapshot_transaction`
-// are owned by snapmgr.c and called through `backend-utils-time-snapmgr-seams`.
-seam_core::seam!(pub fn active_snapshot_set() -> PgResult<bool>);
+// `active_snapshot_set` / `pop_active_snapshot` / `push_active_snapshot_transaction`
+// are owned by snapmgr.c and called through `backend-utils-time-snapmgr-seams`
+// (the vacuum caller adopts the owner's bare-`bool` `ActiveSnapshotSet` contract).
 
 // ---- postmaster/autovacuum.h + cost globals ---------------------------
 seam_core::seam!(pub fn am_autovacuum_worker_process() -> PgResult<bool>);
@@ -179,9 +176,9 @@ seam_core::seam!(pub fn search_syscache_class<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
 ) -> PgResult<Option<FormData_pg_class<'mcx>>>);
-seam_core::seam!(pub fn find_all_inheritors(relid: Oid, lockmode: i32) -> PgResult<Vec<Oid>>);
+// `find_all_inheritors` -> backend-catalog-pg-inherits-seams (owner-installed).
 seam_core::seam!(pub fn unlock_relation_oid(relid: Oid, lockmode: i32) -> PgResult<()>);
-seam_core::seam!(pub fn relation_close(rel: Oid, lockmode: i32) -> PgResult<()>);
+// `relation_close` -> backend-access-table-table-seams (owner-installed).
 seam_core::seam!(pub fn lock_relation_id_for_session(rel: Oid, lockmode: i32) -> PgResult<()>);
 seam_core::seam!(pub fn unlock_relation_id_for_session(rel: Oid, lockmode: i32) -> PgResult<()>);
 
@@ -189,11 +186,10 @@ seam_core::seam!(pub fn unlock_relation_id_for_session(rel: Oid, lockmode: i32) 
 seam_core::seam!(pub fn scan_all_pg_class<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<PgClassScanRow<'mcx>>>);
 
 // ---- procarray.h / transam.h / multixact.h ----------------------------
-seam_core::seam!(pub fn get_oldest_non_removable_transaction_id(rel: Option<Oid>) -> PgResult<TransactionId>);
-seam_core::seam!(pub fn get_oldest_multixact_id() -> PgResult<MultiXactId>);
-seam_core::seam!(pub fn read_next_transaction_id() -> PgResult<TransactionId>);
-seam_core::seam!(pub fn read_next_multixact_id() -> PgResult<MultiXactId>);
-seam_core::seam!(pub fn multixact_member_freeze_threshold() -> PgResult<i32>);
+// `get_oldest_non_removable_transaction_id` -> backend-storage-ipc-procarray-seams.
+// `read_next_transaction_id` -> backend-access-transam-varsup-seams.
+// `get_oldest_multixact_id` (get_oldest_multi_xact_id) / `read_next_multixact_id` /
+// `multixact_member_freeze_threshold` -> backend-access-transam-multixact-seams.
 
 // ---- GUCs (utils/guc.h, guc_hooks) ------------------------------------
 seam_core::seam!(pub fn autovacuum_freeze_max_age() -> PgResult<i32>);
@@ -231,20 +227,19 @@ seam_core::seam!(pub fn vac_update_datfrozenxid_apply(
 seam_core::seam!(pub fn scan_pg_class_frozenids() -> PgResult<Vec<PgClassFrozenRow>>);
 seam_core::seam!(pub fn scan_pg_database_frozenids() -> PgResult<Vec<PgDatabaseFrozenRow>>);
 seam_core::seam!(pub fn lock_database_frozen_ids() -> PgResult<()>);
-seam_core::seam!(pub fn force_transaction_id_limit_update() -> PgResult<bool>);
+// `force_transaction_id_limit_update` -> backend-access-transam-varsup-seams.
 
 // ---- vac_truncate_clog leaves -----------------------------------------
 seam_core::seam!(pub fn lock_wraplimits_vacuum() -> PgResult<()>);
 seam_core::seam!(pub fn unlock_wraplimits_vacuum() -> PgResult<()>);
-seam_core::seam!(pub fn my_database_id() -> PgResult<Oid>);
+// `my_database_id` -> backend-utils-init-small-seams.
 seam_core::seam!(pub fn elog_debug2_skip_invalid_db(datname: String) -> PgResult<()>);
 seam_core::seam!(pub fn async_notify_freeze_xids(frozen_xid: TransactionId) -> PgResult<()>);
-seam_core::seam!(pub fn advance_oldest_commit_ts_xid(frozen_xid: TransactionId) -> PgResult<()>);
-seam_core::seam!(pub fn truncate_clog(frozen_xid: TransactionId, oldest_xid_datoid: Oid) -> PgResult<()>);
-seam_core::seam!(pub fn truncate_commit_ts(frozen_xid: TransactionId) -> PgResult<()>);
-seam_core::seam!(pub fn truncate_multixact(min_multi: MultiXactId, minmulti_datoid: Oid) -> PgResult<()>);
+// `advance_oldest_commit_ts_xid` / `truncate_commit_ts` -> backend-access-transam-commit-ts-seams.
+// `truncate_clog` -> backend-access-transam-clog-seams.
+// `truncate_multixact` / `set_multixact_id_limit` (set_multi_xact_id_limit)
+//   -> backend-access-transam-multixact-seams.
 seam_core::seam!(pub fn set_transaction_id_limit(frozen_xid: TransactionId, oldest_xid_datoid: Oid) -> PgResult<()>);
-seam_core::seam!(pub fn set_multixact_id_limit(min_multi: MultiXactId, minmulti_datoid: Oid, is_startup: bool) -> PgResult<()>);
 
 // ---- vacuum_rel leaves ------------------------------------------------
 seam_core::seam!(pub fn set_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()>);
@@ -253,10 +248,10 @@ seam_core::seam!(pub fn injection_point(name: String) -> PgResult<()>);
 seam_core::seam!(pub fn cluster_rel_for_vacuum_full(rel: Oid, verbose: bool) -> PgResult<()>);
 seam_core::seam!(pub fn table_relation_vacuum(rel: Oid, params: VacuumParams, bstrategy: StrategyHandle) -> PgResult<()>);
 seam_core::seam!(pub fn at_eoxact_guc(is_commit: bool, nestlevel: i32) -> PgResult<()>);
-seam_core::seam!(pub fn get_user_id_and_sec_context() -> PgResult<(Oid, i32)>);
+// `get_user_id_and_sec_context` -> backend-utils-init-miscinit-seams.
 seam_core::seam!(pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32) -> PgResult<()>);
 seam_core::seam!(pub fn new_guc_nest_level() -> PgResult<i32>);
-seam_core::seam!(pub fn restrict_search_path() -> PgResult<()>);
+// `restrict_search_path` -> backend-utils-misc-guc-seams.
 
 // ---- vac_open_indexes / vac_*_one_index leaves ------------------------
 seam_core::seam!(pub fn relation_get_index_list(relation: Oid) -> PgResult<Vec<Oid>>);

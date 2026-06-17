@@ -84,3 +84,14 @@ seam_core::seam!(
     /// write can `ereport(ERROR)`, carried on `Err`.
     pub fn trim_clog() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TruncateCLOG(oldestXact, oldestxid_datoid)` (clog.c) — truncate pg_xact
+    /// up to (but not including) the page holding `oldestXact`. Called from
+    /// vacuum's `vac_truncate_clog`. The SLRU truncation can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn truncate_clog(
+        oldest_xact: TransactionId,
+        oldestxid_datoid: types_core::Oid,
+    ) -> PgResult<()>
+);

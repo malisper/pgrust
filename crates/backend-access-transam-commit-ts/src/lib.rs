@@ -1023,4 +1023,10 @@ pub fn init_seams() {
         with_commit_ts_state(CompleteCommitTsInitialization)
     });
     seams::set_commit_ts_limit::set(SetCommitTsLimit);
+
+    // vacuum's `vac_truncate_clog` commitTS truncation entry points.
+    seams::truncate_commit_ts::set(|oldest| {
+        with_commit_ts_state(|state| TruncateCommitTs(state, oldest))
+    });
+    seams::advance_oldest_commit_ts_xid::set(AdvanceOldestCommitTsXid);
 }

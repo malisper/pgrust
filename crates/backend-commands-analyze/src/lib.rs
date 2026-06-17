@@ -2611,7 +2611,7 @@ fn vacuum_delay_point() -> PgResult<()> {
 
 /// `RestrictSearchPath()` (guc.c).
 fn RestrictSearchPath() -> PgResult<()> {
-    backend_commands_vacuum_seams::restrict_search_path::call()
+    backend_utils_misc_guc_seams::restrict_search_path::call()
 }
 
 /// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c).

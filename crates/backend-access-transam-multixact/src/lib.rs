@@ -2615,6 +2615,11 @@ pub fn init_seams() {
     mx_seams::startup_multixact::set(StartupMultiXact);
     mx_seams::trim_multixact::set(TrimMultiXact);
     mx_seams::set_multi_xact_id_limit::set(SetMultiXactIdLimit);
+
+    // vacuum freeze-cutoff + `vac_truncate_clog` entry points.
+    mx_seams::read_next_multixact_id::set(ReadNextMultiXactId);
+    mx_seams::multixact_member_freeze_threshold::set(MultiXactMemberFreezeThreshold);
+    mx_seams::truncate_multixact::set(TruncateMultiXact);
 }
 
 /// `get_multi_xact_id_members` seam: the inward contract returns a `PgVec` in

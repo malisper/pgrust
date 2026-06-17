@@ -94,3 +94,17 @@ seam_core::seam!(
     /// shared-memory store under `CommitTsLock`; fallible to match the channel.
     pub fn set_commit_ts_limit(oldest_xact: TransactionId, newest_xact: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TruncateCommitTs(oldestXact)` (commit_ts.c) — truncate the commitTS SLRU
+    /// up to the page holding `oldestXact`. Called from vacuum's
+    /// `vac_truncate_clog`. The SLRU truncation can `ereport(ERROR)`.
+    pub fn truncate_commit_ts(oldest_xact: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AdvanceOldestCommitTsXid(oldestXact)` (commit_ts.c) — bump the oldest
+    /// XID for which commit timestamps are retained. Called from vacuum's
+    /// `vac_truncate_clog` before truncation.
+    pub fn advance_oldest_commit_ts_xid(oldest_xact: TransactionId) -> PgResult<()>
+);

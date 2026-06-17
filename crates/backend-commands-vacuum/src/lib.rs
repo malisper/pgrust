@@ -81,6 +81,19 @@ use backend_commands_vacuum_seams as rt;
 use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_parser_small1_seams as parse_node;
 
+// L1 re-home owners
+use backend_access_table_table_seams as table_seam;
+use backend_storage_ipc_procarray_seams as procarray_seam;
+use backend_access_transam_varsup_seams as varsup_seam;
+use backend_catalog_pg_inherits_seams as pg_inherits_seam;
+use backend_utils_misc_guc_seams as guc_seam;
+use backend_utils_init_miscinit_seams as miscinit_seam;
+use backend_utils_init_small_seams as init_small_seam;
+// L4 export+rehome owners
+use backend_access_transam_clog_seams as clog_seam;
+use backend_access_transam_commit_ts_seams as commit_ts_seam;
+use backend_access_transam_multixact_seams as multixact_seam;
+
 mod seams_install;
 pub use seams_install::init_seams;
 
@@ -803,7 +816,7 @@ pub fn vacuum<'mcx>(
         debug_assert!(!in_outer_xact);
 
         /* ActiveSnapshot is not set by autovacuum */
-        if rt::active_snapshot_set::call()? {
+        if snapmgr_seam::active_snapshot_set::call() {
             snapmgr_seam::pop_active_snapshot::call()?;
         }
 
@@ -1225,9 +1238,9 @@ fn expand_vacuum_rel<'mcx>(
          * have to skip that.
          */
         if include_children {
-            let part_oids = rt::find_all_inheritors::call(relid, NoLock)?;
+            let part_oids = pg_inherits_seam::find_all_inheritors::call(mcx, relid, NoLock)?;
 
-            for part_oid in part_oids {
+            for &part_oid in part_oids.iter() {
                 if part_oid == relid {
                     continue; /* ignore original table */
                 }
@@ -1339,22 +1352,22 @@ pub fn vacuum_get_cutoffs(
     /*
      * Acquire OldestXmin.
      */
-    c.OldestXmin = rt::get_oldest_non_removable_transaction_id::call(Some(rel))?;
+    c.OldestXmin = procarray_seam::get_oldest_non_removable_transaction_id::call(rel)?;
 
     debug_assert!(TransactionIdIsNormal(c.OldestXmin));
 
     /* Acquire OldestMxact */
-    c.OldestMxact = rt::get_oldest_multixact_id::call()?;
+    c.OldestMxact = multixact_seam::get_oldest_multi_xact_id::call()?;
     debug_assert!(MultiXactIdIsValid(c.OldestMxact));
 
     /* Acquire next XID/next MXID values used to apply age-based settings */
-    nextXID = rt::read_next_transaction_id::call()?;
-    nextMXID = rt::read_next_multixact_id::call()?;
+    nextXID = varsup_seam::read_next_transaction_id::call();
+    nextMXID = multixact_seam::read_next_multixact_id::call()?;
 
     /*
      * Also compute the multixact age for which freezing is urgent.
      */
-    effective_multixact_freeze_max_age = rt::multixact_member_freeze_threshold::call()?;
+    effective_multixact_freeze_max_age = multixact_seam::multixact_member_freeze_threshold::call()?;
 
     /*
      * Almost ready to set freeze output parameters; check if OldestXmin or
@@ -1500,7 +1513,7 @@ pub fn vacuum_xid_failsafe_check(cutoffs: VacuumCutoffs) -> PgResult<bool> {
         (rt::autovacuum_freeze_max_age::call()? as f64 * 1.05) as i32,
     );
 
-    let mut xsl = rt::read_next_transaction_id::call()?.wrapping_sub(skip_index_vacuum as u32);
+    let mut xsl = varsup_seam::read_next_transaction_id::call().wrapping_sub(skip_index_vacuum as u32);
     if !TransactionIdIsNormal(xsl) {
         xsl = FirstNormalTransactionId;
     }
@@ -1521,7 +1534,7 @@ pub fn vacuum_xid_failsafe_check(cutoffs: VacuumCutoffs) -> PgResult<bool> {
         (rt::autovacuum_multixact_freeze_max_age::call()? as f64 * 1.05) as i32,
     );
 
-    let mut msl = rt::read_next_multixact_id::call()?.wrapping_sub(skip_index_vacuum as u32);
+    let mut msl = multixact_seam::read_next_multixact_id::call()?.wrapping_sub(skip_index_vacuum as u32);
     if msl < FirstMultiXactId {
         msl = FirstMultiXactId;
     }
@@ -1672,19 +1685,19 @@ pub fn vac_update_datfrozenxid() -> PgResult<()> {
      * Initialize the "min" calculation with
      * GetOldestNonRemovableTransactionId() ...
      */
-    newFrozenXid = rt::get_oldest_non_removable_transaction_id::call(None)?;
+    newFrozenXid = procarray_seam::get_oldest_non_removable_transaction_id::call(InvalidOid)?;
 
     /*
      * Similarly, initialize the MultiXact "min" ...
      */
-    newMinMulti = rt::get_oldest_multixact_id::call()?;
+    newMinMulti = multixact_seam::get_oldest_multi_xact_id::call()?;
 
     /*
      * Identify the latest relfrozenxid and relminmxid values that we could
      * validly see during the scan. ...
      */
-    lastSaneFrozenXid = rt::read_next_transaction_id::call()?;
-    lastSaneMinMulti = rt::read_next_multixact_id::call()?;
+    lastSaneFrozenXid = varsup_seam::read_next_transaction_id::call();
+    lastSaneMinMulti = multixact_seam::read_next_multixact_id::call()?;
 
     /*
      * We must seqscan pg_class to find the minimum Xid ...
@@ -1767,7 +1780,7 @@ pub fn vac_update_datfrozenxid() -> PgResult<()> {
      * If we were able to advance datfrozenxid or datminmxid, see if we can
      * truncate pg_xact and/or pg_multixact. ...
      */
-    if dirty || rt::force_transaction_id_limit_update::call()? {
+    if dirty || varsup_seam::force_transaction_id_limit_update::call()? {
         vac_truncate_clog(
             newFrozenXid,
             newMinMulti,
@@ -1792,7 +1805,7 @@ fn vac_truncate_clog(
     lastSaneFrozenXid: TransactionId,
     lastSaneMinMulti: MultiXactId,
 ) -> PgResult<()> {
-    let nextXID = rt::read_next_transaction_id::call()?;
+    let nextXID = varsup_seam::read_next_transaction_id::call();
     let mut oldestxid_datoid: Oid;
     let mut minmulti_datoid: Oid;
     let mut bogus = false;
@@ -1802,7 +1815,7 @@ fn vac_truncate_clog(
     rt::lock_wraplimits_vacuum::call()?;
 
     /* init oldest datoids to sync with my frozenXID/minMulti values */
-    let my_database_id = rt::my_database_id::call()?;
+    let my_database_id = init_small_seam::my_database_id::call();
     oldestxid_datoid = my_database_id;
     minmulti_datoid = my_database_id;
 
@@ -1876,21 +1889,21 @@ fn vac_truncate_clog(
     /*
      * Advance the oldest value for commit timestamps before truncating ...
      */
-    rt::advance_oldest_commit_ts_xid::call(frozenXID)?;
+    commit_ts_seam::advance_oldest_commit_ts_xid::call(frozenXID)?;
 
     /*
      * Truncate CLOG, multixact and CommitTs to the oldest computed value.
      */
-    rt::truncate_clog::call(frozenXID, oldestxid_datoid)?;
-    rt::truncate_commit_ts::call(frozenXID)?;
-    rt::truncate_multixact::call(minMulti, minmulti_datoid)?;
+    clog_seam::truncate_clog::call(frozenXID, oldestxid_datoid)?;
+    commit_ts_seam::truncate_commit_ts::call(frozenXID)?;
+    multixact_seam::truncate_multixact::call(minMulti, minmulti_datoid)?;
 
     /*
      * Update the wrap limit for GetNewTransactionId and creation of new
      * MultiXactIds. ...
      */
     rt::set_transaction_id_limit::call(frozenXID, oldestxid_datoid)?;
-    rt::set_multixact_id_limit::call(minMulti, minmulti_datoid, false)?;
+    multixact_seam::set_multi_xact_id_limit::call(minMulti, minmulti_datoid, false)?;
 
     rt::unlock_wraplimits_vacuum::call()?;
 
@@ -1991,7 +2004,7 @@ fn vacuum_rel<'mcx>(
         PgError::error("vacuum_rel: cache lookup failed for opened relation")
     })?;
     if !vacuum_is_permitted_for_relation(priv_relid, &rd_rel, p.options & !VACOPT_ANALYZE)? {
-        rt::relation_close::call(rel_handle, lmode)?;
+        table_seam::relation_close::call(rel_handle, lmode)?;
         snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
@@ -2013,7 +2026,7 @@ fn vacuum_rel<'mcx>(
                 relname
             ))
             .finish(here("vacuum_rel"))?;
-        rt::relation_close::call(rel_handle, lmode)?;
+        table_seam::relation_close::call(rel_handle, lmode)?;
         snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
@@ -2023,7 +2036,7 @@ fn vacuum_rel<'mcx>(
      * Silently ignore tables that are temp tables of other backends ...
      */
     if rt::relation_is_other_temp::call(rel_handle)? {
-        rt::relation_close::call(rel_handle, lmode)?;
+        table_seam::relation_close::call(rel_handle, lmode)?;
         snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
@@ -2033,7 +2046,7 @@ fn vacuum_rel<'mcx>(
      * Silently ignore partitioned tables as there is no work to be done. ...
      */
     if relkind == RELKIND_PARTITIONED_TABLE {
-        rt::relation_close::call(rel_handle, lmode)?;
+        table_seam::relation_close::call(rel_handle, lmode)?;
         snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         /* It's OK to proceed with ANALYZE on this table */
@@ -2129,7 +2142,7 @@ fn vacuum_rel<'mcx>(
     /*
      * Switch to the table owner's userid ...
      */
-    let (su, ssc) = rt::get_user_id_and_sec_context::call()?;
+    let (su, ssc) = miscinit_seam::get_user_id_and_sec_context::call();
     save_userid = su;
     save_sec_context = ssc;
     rt::set_user_id_and_sec_context::call(
@@ -2137,7 +2150,7 @@ fn vacuum_rel<'mcx>(
         save_sec_context | SECURITY_RESTRICTED_OPERATION,
     )?;
     save_nestlevel = rt::new_guc_nest_level::call()?;
-    rt::restrict_search_path::call()?;
+    guc_seam::restrict_search_path::call()?;
 
     /*
      * If PROCESS_MAIN is set (the default), it's time to vacuum the main
@@ -2171,7 +2184,7 @@ fn vacuum_rel<'mcx>(
 
     /* all done with this class, but hold lock until commit */
     if let Some(open_rel) = rel {
-        rt::relation_close::call(open_rel, NoLock)?;
+        table_seam::relation_close::call(open_rel, NoLock)?;
     }
 
     /*

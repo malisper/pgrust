@@ -40,3 +40,17 @@ backend-access-common-tidstore-seams = { path = "../backend-access-common-tidsto
 backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+
+# L1 re-home targets (rebind to already-installed owners)
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
+# L4 export+rehome targets (xact owners)
+backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
+backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }

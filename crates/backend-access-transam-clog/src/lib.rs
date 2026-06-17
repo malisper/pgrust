@@ -1075,6 +1075,9 @@ pub fn init_seams() {
     clog_seams::startup_clog::set(StartupCLOG);
     clog_seams::trim_clog::set(TrimCLOG);
 
+    // vacuum's `vac_truncate_clog` truncation entry point.
+    clog_seams::truncate_clog::set(TruncateCLOG);
+
     // GUC check_hook for `transaction_buffers` (clog.c check_transaction_buffers).
     // Fired e.g. by CLOGShmemInit's auto-sizing SetConfigOption. The variable's
     // backing store + accessors live in backend-utils-init-small (the

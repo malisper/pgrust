@@ -235,3 +235,27 @@ seam_core::seam!(
         is_startup: bool,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ReadNextMultiXactId()` (multixact.c) — the next-to-be-assigned multixact
+    /// ID (read under `MultiXactGenLock`). Used by vacuum to compute freeze
+    /// cutoffs.
+    pub fn read_next_multixact_id() -> types_error::PgResult<types_core::primitive::MultiXactId>
+);
+
+seam_core::seam!(
+    /// `MultiXactMemberFreezeThreshold()` (multixact.c) — the effective
+    /// `autovacuum_multixact_freeze_max_age`, reduced when member-space usage is
+    /// high. Used by vacuum's `vacuum_get_cutoffs`.
+    pub fn multixact_member_freeze_threshold() -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `TruncateMultiXact(newOldestMulti, newOldestMultiDB)` (multixact.c) —
+    /// truncate the multixact SLRUs up to `newOldestMulti`. Called from vacuum's
+    /// `vac_truncate_clog`. Fallible (SLRU truncation / WAL).
+    pub fn truncate_multixact(
+        new_oldest_multi: types_core::primitive::MultiXactId,
+        new_oldest_multi_db: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);

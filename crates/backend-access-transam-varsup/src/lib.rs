@@ -885,6 +885,9 @@ pub fn init_seams() {
         VarsupShmemInit();
         Ok(())
     });
+
+    // vacuum's `vac_update_datfrozenxid` wraparound-limit refresh predicate.
+    seams::force_transaction_id_limit_update::set(ForceTransactionIdLimitUpdate);
 }
 
 #[cfg(test)]
