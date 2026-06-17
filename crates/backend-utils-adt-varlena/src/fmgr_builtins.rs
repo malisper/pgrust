@@ -593,6 +593,109 @@ fn fc_unistr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — additional text/bytea by-ref builtins (the broadest type-area
+// fan-out leg of the fmgr by-ref builtin-registration lever). Same header
+// convention as the rest of this file: a `text`/`bytea` arg arrives
+// header-stripped on the by-ref lane (`arg_bytes`); `text`/`bytea` results cross
+// header-stripped (`ret_varlena`). `unknown` is a cstring-representation type
+// (typlen -2), so it crosses on the cstring lane (`arg_cstring`/`ret_cstring`).
+// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`.
+// ---------------------------------------------------------------------------
+
+// --- bytea get/set byte/bit (bytea.rs: byteaGetByte/Bit, byteaSetByte/Bit) ---
+
+fn fc_byteaGetByte(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let n = arg_i32(fcinfo, 1);
+    ret_i32(ok(crate::bytea::bytea_get_byte(arg_bytes(fcinfo, 0), n)))
+}
+fn fc_byteaGetBit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let n = arg_i64(fcinfo, 1);
+    ret_i32(ok(crate::bytea::bytea_get_bit(arg_bytes(fcinfo, 0), n)))
+}
+fn fc_byteaSetByte(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let n = arg_i32(fcinfo, 1);
+    let newbyte = arg_i32(fcinfo, 2);
+    let out = ok(crate::bytea::bytea_set_byte(m.mcx(), arg_bytes(fcinfo, 0), n, newbyte)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_byteaSetBit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let n = arg_i64(fcinfo, 1);
+    let newbit = arg_i32(fcinfo, 2);
+    let out = ok(crate::bytea::bytea_set_bit(m.mcx(), arg_bytes(fcinfo, 0), n, newbit)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+// --- text substring / overlay (position_ops.rs: text_substring/text_overlay) ---
+
+fn fc_text_substr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: text_substr -> text_substring(str, start, length, false).
+    let m = scratch_mcx();
+    let start = arg_i32(fcinfo, 1);
+    let length = arg_i32(fcinfo, 2);
+    let out = ok(crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, length, false)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_text_substr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: text_substr_no_len -> text_substring(str, start, -1, true).
+    let m = scratch_mcx();
+    let start = arg_i32(fcinfo, 1);
+    let out = ok(crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, -1, true)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_textoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: textoverlay -> text_overlay(t1, t2, sp, sl).
+    let m = scratch_mcx();
+    let sp = arg_i32(fcinfo, 2);
+    let sl = arg_i32(fcinfo, 3);
+    let out = ok(crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp, sl)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_textoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: textoverlay_no_len -> text_overlay computes sl = textlen(t2) internally.
+    // The value core `text_overlay` requires the explicit `sl`; C's no-len
+    // variant passes `text_length(PG_GETARG_DATUM(1))`. Compute the replacement
+    // string's character length (textlen core) and forward.
+    let m = scratch_mcx();
+    let t2 = arg_bytes(fcinfo, 1);
+    let sl = ok(crate::wire_io::textlen(t2));
+    let sp = arg_i32(fcinfo, 2);
+    let out = ok(crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), t2, sp, sl)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+// --- unknown I/O (wire_io.rs: unknownin/unknownout). `unknown` is a
+// cstring-representation type (typlen -2): both the arg and the result are the
+// raw cstring bytes on the by-ref cstring lane. ---
+
+fn fc_unknownin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: unknownin(cstring) -> unknown == pstrdup(str). `unknown` crosses on the
+    // cstring lane (typlen -2), so the result is the raw bytes as a cstring.
+    let m = scratch_mcx();
+    let out = ok(crate::wire_io::unknownin(m.mcx(), arg_cstring(fcinfo, 0).as_bytes())).to_vec();
+    ret_cstring(fcinfo, cstring_lane(&out))
+}
+fn fc_unknownout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: unknownout(unknown) -> cstring == pstrdup(str). The `unknown` arg is a
+    // cstring on the by-ref lane.
+    let m = scratch_mcx();
+    let out = ok(crate::wire_io::unknownout(m.mcx(), arg_cstring(fcinfo, 0).as_bytes())).to_vec();
+    ret_cstring(fcinfo, cstring_lane(&out))
+}
+
+/// The `unknown`/`cstring` cores `pstrdup` their argument, so the returned bytes
+/// carry a trailing C NUL. The by-ref cstring lane carries the logical string
+/// (no embedded NUL), so drop one trailing NUL if present.
+fn cstring_lane(bytes: &[u8]) -> String {
+    let body = match bytes.last() {
+        Some(0) => &bytes[..bytes.len() - 1],
+        _ => bytes,
+    };
+    String::from_utf8_lossy(body).into_owned()
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -746,4 +849,211 @@ pub fn register_varlena_more_builtins() {
         builtin(4351, "is_normalized", 2, fc_unicode_is_normalized),
         builtin(6198, "unistr", 1, fc_unistr),
     ]);
+}
+
+/// Register the additional `text`/`bytea`/`unknown` by-reference builtins whose
+/// value cores are ported and expressible at the fmgr boundary but were not yet
+/// in the fmgr fast-path table: `bytea` get/set byte/bit, `text` `substring`
+/// (with/without length), `text` `overlay` (with/without length), and the
+/// `unknown` I/O pair. Called from this crate's `init_seams()`. OIDs / nargs /
+/// strict / retset transcribed exactly from `pg_proc.dat`; every row here is
+/// `proisstrict => 't'` and not `proretset`.
+pub fn register_varlena_text_bytea_byref_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // ---- bytea get/set byte/bit (bytea.rs) ----
+        builtin(721, "get_byte", 2, fc_byteaGetByte),
+        builtin(723, "get_bit", 2, fc_byteaGetBit),
+        builtin(722, "set_byte", 3, fc_byteaSetByte),
+        builtin(724, "set_bit", 3, fc_byteaSetBit),
+        // ---- text substring (position_ops.rs) ----
+        builtin(936, "substring", 3, fc_text_substr),
+        builtin(937, "substring", 2, fc_text_substr_no_len),
+        // ---- text overlay (position_ops.rs) ----
+        builtin(1404, "overlay", 4, fc_textoverlay),
+        builtin(1405, "overlay", 3, fc_textoverlay_no_len),
+        // ---- unknown I/O (wire_io.rs) ----
+        builtin(109, "unknownin", 1, fc_unknownin),
+        builtin(110, "unknownout", 1, fc_unknownout),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end proof: invoke the newly-registered text/bytea/unknown by-ref
+// builtins BY OID through the fmgr registry (`fmgr_isbuiltin(oid).func`),
+// passing args on `fcinfo.ref_args` and reading the result off
+// `fcinfo.take_ref_result()` / the returned by-value word — the canonical
+// numeric test pattern from the fmgr by-ref recipe.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_datum::NullableDatum;
+
+    fn register() {
+        // The fmgr builtin table is thread-local in the test harness, so each
+        // helper re-registers (mirroring the numeric test pattern's per-call
+        // `register_numeric_builtins()`).
+        register_varlena_text_bytea_byref_builtins();
+        // text_substring/text_overlay consult the database encoding's max bytes
+        // per char; under the test (SQL_ASCII-equivalent) it is 1. The mbutils
+        // seam OnceLock panics on a second install, so guard it.
+        if !backend_utils_mb_mbutils_seams::pg_database_encoding_max_length::is_installed() {
+            backend_utils_mb_mbutils_seams::pg_database_encoding_max_length::set(|| 1);
+        }
+    }
+
+    /// Call a registered by-ref builtin by OID: `n` by-ref `Varlena` args (raw
+    /// header-stripped payloads, the form the cores consume) plus optional
+    /// trailing by-value int args. Returns the produced `Varlena` payload.
+    fn call_varlena_result(
+        oid: u32,
+        ref_args: &[&[u8]],
+        val_args: &[Datum],
+    ) -> Vec<u8> {
+        register();
+        let nargs = (ref_args.len() + val_args.len()) as i16;
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, nargs, 0, None, None);
+        let mut args: Vec<NullableDatum> = Vec::new();
+        let mut refs: Vec<Option<RefPayload>> = Vec::new();
+        for b in ref_args {
+            args.push(NullableDatum::value(Datum::null()));
+            refs.push(Some(RefPayload::Varlena(b.to_vec())));
+        }
+        for v in val_args {
+            args.push(NullableDatum::value(*v));
+            refs.push(None);
+        }
+        fcinfo.args = args;
+        fcinfo.ref_args = refs;
+        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
+        (entry.func.unwrap())(&mut fcinfo);
+        match fcinfo.take_ref_result().expect("by-ref result produced") {
+            RefPayload::Varlena(b) => b,
+            other => panic!("unexpected result lane {other:?}"),
+        }
+    }
+
+    /// Call a registered builtin returning a by-value int (get_byte/get_bit).
+    fn call_int_result(oid: u32, ref_args: &[&[u8]], val_args: &[Datum]) -> i32 {
+        register();
+        let nargs = (ref_args.len() + val_args.len()) as i16;
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, nargs, 0, None, None);
+        let mut args: Vec<NullableDatum> = Vec::new();
+        let mut refs: Vec<Option<RefPayload>> = Vec::new();
+        for b in ref_args {
+            args.push(NullableDatum::value(Datum::null()));
+            refs.push(Some(RefPayload::Varlena(b.to_vec())));
+        }
+        for v in val_args {
+            args.push(NullableDatum::value(*v));
+            refs.push(None);
+        }
+        fcinfo.args = args;
+        fcinfo.ref_args = refs;
+        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
+        let d = (entry.func.unwrap())(&mut fcinfo);
+        d.as_i32()
+    }
+
+    /// `get_byte('\x010203', 1) == 2` through the registry (oid 721).
+    #[test]
+    fn byref_byteaGetByte_through_registry() {
+        let v = [0x01u8, 0x02, 0x03];
+        assert_eq!(call_int_result(721, &[&v], &[Datum::from_i32(1)]), 2);
+    }
+
+    /// `get_bit('\x80', 7) == 1` (MSB of 0x80, bit index 7) through oid 723.
+    #[test]
+    fn byref_byteaGetBit_through_registry() {
+        let v = [0x80u8];
+        assert_eq!(call_int_result(723, &[&v], &[Datum::from_i64(7)]), 1);
+    }
+
+    /// `set_byte('\x010203', 1, 0xff) == '\x01ff03'` through oid 722, then read
+    /// the changed byte back via get_byte — a real in->op->out round-trip.
+    #[test]
+    fn byref_byteaSetByte_through_registry() {
+        let v = [0x01u8, 0x02, 0x03];
+        let out = call_varlena_result(722, &[&v], &[Datum::from_i32(1), Datum::from_i32(0xff)]);
+        assert_eq!(out, vec![0x01, 0xff, 0x03]);
+        assert_eq!(call_int_result(721, &[&out], &[Datum::from_i32(1)]), 0xff);
+    }
+
+    /// `set_bit('\x00', 0, 1) == '\x01'` through oid 724 (bit 0 is the LSB:
+    /// C uses `byte | (1 << (n % 8))`), then read it back via get_bit.
+    #[test]
+    fn byref_byteaSetBit_through_registry() {
+        let v = [0x00u8];
+        let out = call_varlena_result(724, &[&v], &[Datum::from_i64(0), Datum::from_i32(1)]);
+        assert_eq!(out, vec![0x01]);
+        assert_eq!(call_int_result(723, &[&out], &[Datum::from_i64(0)]), 1);
+    }
+
+    /// `substring('hello', 2, 3) == 'ell'` through oid 936 (text_substr).
+    #[test]
+    fn byref_text_substring_through_registry() {
+        let out = call_varlena_result(
+            936,
+            &[b"hello"],
+            &[Datum::from_i32(2), Datum::from_i32(3)],
+        );
+        assert_eq!(out, b"ell".to_vec());
+    }
+
+    /// `substring('hello', 3) == 'llo'` through oid 937 (text_substr_no_len).
+    #[test]
+    fn byref_text_substring_no_len_through_registry() {
+        let out = call_varlena_result(937, &[b"hello"], &[Datum::from_i32(3)]);
+        assert_eq!(out, b"llo".to_vec());
+    }
+
+    /// `overlay('Txxxxas' placing 'hom' from 2 for 4) == 'Thomas'` (the SQL
+    /// docs' canonical example) through oid 1404 (textoverlay).
+    #[test]
+    fn byref_textoverlay_through_registry() {
+        let out = call_varlena_result(
+            1404,
+            &[b"Txxxxas", b"hom"],
+            &[Datum::from_i32(2), Datum::from_i32(4)],
+        );
+        assert_eq!(out, b"Thomas".to_vec());
+    }
+
+    /// `overlay('Txxxxas' placing 'hom' from 2) == 'Thomxas'` (no-len defaults
+    /// `for` to length('hom') = 3, so only 3 of the x's are replaced) through
+    /// oid 1405 (textoverlay_no_len).
+    #[test]
+    fn byref_textoverlay_no_len_through_registry() {
+        let out = call_varlena_result(1405, &[b"Txxxxas", b"hom"], &[Datum::from_i32(2)]);
+        assert_eq!(out, b"Thomxas".to_vec());
+    }
+
+    /// `unknownout(unknownin('abc')) == 'abc'` through oids 109/110, with the
+    /// `unknown` value crossing on the cstring lane.
+    #[test]
+    fn byref_unknown_io_round_trip_through_registry() {
+        register();
+        // unknownin (109): cstring -> unknown.
+        let mut fc = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
+        fc.args = vec![NullableDatum::value(Datum::null())];
+        fc.ref_args = vec![Some(RefPayload::Cstring("abc".to_string()))];
+        let e_in = backend_utils_fmgr_core::fmgr_isbuiltin(109).expect("unknownin registered");
+        (e_in.func.unwrap())(&mut fc);
+        let mid = match fc.take_ref_result().expect("unknownin result") {
+            RefPayload::Cstring(s) => s,
+            other => panic!("unexpected lane {other:?}"),
+        };
+        assert_eq!(mid, "abc");
+        // unknownout (110): unknown -> cstring.
+        let mut fc2 = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
+        fc2.args = vec![NullableDatum::value(Datum::null())];
+        fc2.ref_args = vec![Some(RefPayload::Cstring(mid))];
+        let e_out = backend_utils_fmgr_core::fmgr_isbuiltin(110).expect("unknownout registered");
+        (e_out.func.unwrap())(&mut fc2);
+        let out = match fc2.take_ref_result().expect("unknownout result") {
+            RefPayload::Cstring(s) => s,
+            other => panic!("unexpected lane {other:?}"),
+        };
+        assert_eq!(out, "abc");
+    }
 }

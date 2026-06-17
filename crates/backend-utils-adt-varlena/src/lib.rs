@@ -476,6 +476,11 @@ pub fn init_seams() {
     // + int casts, text_pattern_ops, base conversions, unicode/unistr).
     fmgr_builtins::register_varlena_more_builtins();
 
+    // The broadest by-ref fan-out leg: additional text/bytea/unknown by-reference
+    // builtins whose value cores are ported but were not yet in the fast-path
+    // table (bytea get/set byte/bit, text substring/overlay, unknown I/O).
+    fmgr_builtins::register_varlena_text_bytea_byref_builtins();
+
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC
     // machinery reads/writes through these accessors and `byteaout` reads the
