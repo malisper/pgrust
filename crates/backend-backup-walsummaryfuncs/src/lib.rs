@@ -57,7 +57,7 @@ use mcx::Mcx;
 use backend_backup_walsummary_seams as walsummary;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_fmgr_funcapi_seams as funcapi;
-use common_blkreftable_seams as blkreftable;
+use common_blkreftable as blkreftable;
 
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
@@ -177,7 +177,7 @@ pub fn pg_wal_summary_contents<'mcx>(
     // while (BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
     //                                        &limit_block)) { ... }
     while let Some((rlocator, forknum, limit_block)) =
-        blkreftable::block_ref_table_reader_next_relation::call(&mut reader)?
+        blkreftable::block_ref_table_reader_next_relation(&mut reader)?
     {
         // CHECK_FOR_INTERRUPTS();
         tcop::check_for_interrupts::call()?;
@@ -219,7 +219,7 @@ pub fn pg_wal_summary_contents<'mcx>(
             // nblocks = BlockRefTableReaderGetBlocks(reader, blocks,
             //                                        MAX_BLOCKS_PER_CALL);
             // if (nblocks == 0) break;
-            let blocks = blkreftable::block_ref_table_reader_get_blocks::call(
+            let blocks = blkreftable::block_ref_table_reader_get_blocks(
                 mcx,
                 &mut reader,
                 MAX_BLOCKS_PER_CALL,
@@ -250,7 +250,7 @@ pub fn pg_wal_summary_contents<'mcx>(
     // Cleanup
     //   DestroyBlockRefTableReader(reader);
     //   FileClose(io.file);
-    blkreftable::destroy_block_ref_table_reader::call(reader);
+    blkreftable::destroy_block_ref_table_reader(reader);
     walsummary::wal_summary_reader_file_close::call(file);
 
     // return (Datum) 0;

@@ -580,12 +580,12 @@ fn write_entry(buffer: &mut WriteBuffer, entry: &BlockRefTableEntry) {
 /// `CreateEmptyBlockRefTable()` (seam `create_empty_block_ref_table`). The
 /// backend palloc's the table in `CurrentMemoryContext`; here it is a plain
 /// owned value the caller keeps for the lifetime of its operation.
-fn create_empty_block_ref_table(_mcx: Mcx<'_>) -> PgResult<BlockRefTable> {
+pub fn create_empty_block_ref_table(_mcx: Mcx<'_>) -> PgResult<BlockRefTable> {
     Ok(BlockRefTable::new())
 }
 
 /// `BlockRefTableSetLimitBlock(brtab, rlocator, forknum, limit_block)`.
-fn block_ref_table_set_limit_block(
+pub fn block_ref_table_set_limit_block(
     brtab: &mut BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
@@ -606,7 +606,7 @@ fn block_ref_table_set_limit_block(
 }
 
 /// `BlockRefTableMarkBlockModified(brtab, rlocator, forknum, blknum)`.
-fn block_ref_table_mark_block_modified(
+pub fn block_ref_table_mark_block_modified(
     brtab: &mut BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
@@ -627,7 +627,7 @@ fn block_ref_table_mark_block_modified(
 /// `BlockRefTableGetEntry(brtab, rlocator, forknum, &limit_block)`
 /// (seam `block_ref_table_get_entry`): look up the entry; return its
 /// `limit_block` if present, else `None`.
-fn block_ref_table_get_entry(
+pub fn block_ref_table_get_entry(
     brtab: &BlockRefTable,
     rlocator: RelFileLocator,
     forknum: ForkNumber,
@@ -641,7 +641,7 @@ fn block_ref_table_get_entry(
 /// (seam `block_ref_table_get_entry_blocks`): look up the entry and, if it
 /// exists, extract the modified block numbers in `[start_blkno, stop_blkno)`
 /// (at most `nblocks`).
-fn block_ref_table_get_entry_blocks<'mcx>(
+pub fn block_ref_table_get_entry_blocks<'mcx>(
     mcx: Mcx<'mcx>,
     brtab: &BlockRefTable,
     rlocator: RelFileLocator,
@@ -671,7 +671,7 @@ fn block_ref_table_get_entry_blocks<'mcx>(
 /// `WriteBlockRefTable(brtab, write_callback, write_callback_arg)`
 /// (seam `write_block_ref_table`): serialize the whole table and return the
 /// bytes (the backend would stream them through its write callback).
-fn write_block_ref_table<'mcx>(
+pub fn write_block_ref_table<'mcx>(
     mcx: Mcx<'mcx>,
     brtab: &BlockRefTable,
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -768,7 +768,7 @@ pub fn create_block_ref_table_reader(
 // ---------------------------------------------------------------------------
 
 /// `BlockRefTableReaderNextRelation(reader, &rlocator, &forknum, &limit_block)`.
-fn block_ref_table_reader_next_relation(
+pub fn block_ref_table_reader_next_relation(
     reader: &mut BlockRefTableReader,
 ) -> PgResult<Option<(RelFileLocator, ForkNumber, BlockNumber)>> {
     let fname = reader.error_filename.clone();
@@ -826,7 +826,7 @@ fn block_ref_table_reader_next_relation(
 /// `BlockRefTableReaderGetBlocks(reader, blocks, nblocks)` — fetch up to
 /// `nblocks` modified block numbers of the current relation fork. The seam
 /// returns them as a vector; empty means the current fork is exhausted.
-fn block_ref_table_reader_get_blocks<'mcx>(
+pub fn block_ref_table_reader_get_blocks<'mcx>(
     mcx: Mcx<'mcx>,
     reader: &mut BlockRefTableReader,
     nblocks: usize,
@@ -903,7 +903,7 @@ fn block_ref_table_reader_get_blocks<'mcx>(
 /// `DestroyBlockRefTableReader(reader)`. The reader is dropped (freeing its
 /// buffers + the boxed read callback) when the owned value passed by the caller
 /// goes out of scope; the seam takes it by value to mirror the C `pfree`.
-fn destroy_block_ref_table_reader(_reader: BlockRefTableReader) {
+pub fn destroy_block_ref_table_reader(_reader: BlockRefTableReader) {
     // Dropping `_reader` frees the buffers and the boxed read callback.
 }
 
@@ -990,25 +990,11 @@ impl Default for BlockRefTableWriter {
 // ---------------------------------------------------------------------------
 
 /// Install this crate's seams. Called once at startup by `seams-init`.
-pub fn init_seams() {
-    common_blkreftable_seams::create_empty_block_ref_table::set(create_empty_block_ref_table);
-    common_blkreftable_seams::block_ref_table_set_limit_block::set(block_ref_table_set_limit_block);
-    common_blkreftable_seams::block_ref_table_mark_block_modified::set(
-        block_ref_table_mark_block_modified,
-    );
-    common_blkreftable_seams::block_ref_table_get_entry::set(block_ref_table_get_entry);
-    common_blkreftable_seams::block_ref_table_get_entry_blocks::set(
-        block_ref_table_get_entry_blocks,
-    );
-    common_blkreftable_seams::write_block_ref_table::set(write_block_ref_table);
-    common_blkreftable_seams::block_ref_table_reader_next_relation::set(
-        block_ref_table_reader_next_relation,
-    );
-    common_blkreftable_seams::block_ref_table_reader_get_blocks::set(
-        block_ref_table_reader_get_blocks,
-    );
-    common_blkreftable_seams::destroy_block_ref_table_reader::set(destroy_block_ref_table_reader);
-}
+///
+/// All former outward seams of this unit are now called directly by their
+/// consumers (`backend-backup-incremental`, `backend-backup-walsummaryfuncs`,
+/// `backend-postmaster-walsummarizer`), so there is nothing to install.
+pub fn init_seams() {}
 
 #[cfg(test)]
 mod tests {

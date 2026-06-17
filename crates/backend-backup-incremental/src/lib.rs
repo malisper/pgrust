@@ -38,7 +38,7 @@ use types_storage::smgr::RELSEG_SIZE;
 use types_storage::RelFileLocator;
 use types_wal::BackupState;
 
-use common_blkreftable_seams as blkreftable;
+use common_blkreftable as blkreftable;
 use common_parse_manifest_seams as parse_manifest;
 use backend_backup_walsummary_seams as walsummary;
 use backend_postmaster_walsummarizer_seams as walsummarizer;
@@ -537,7 +537,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
 
         // Read all of the required block reference table files and merge all of
         // the data into a single in-memory block reference table.
-        let mut brtab = blkreftable::create_empty_block_ref_table::call(self.mcx)?;
+        let mut brtab = blkreftable::create_empty_block_ref_table(self.mcx)?;
         for ws in &required_wslist {
             // OpenWalSummaryFile(ws, false) + CreateBlockRefTableReader(
             // ReadWalSummary, &io, FilePathName(io.file), ReportWalSummaryError,
@@ -559,14 +559,14 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
                 .finish(here("PrepareForIncrementalBackup"))?;
 
             while let Some((rlocator, forknum, limit_block)) =
-                blkreftable::block_ref_table_reader_next_relation::call(&mut reader)?
+                blkreftable::block_ref_table_reader_next_relation(&mut reader)?
             {
-                blkreftable::block_ref_table_set_limit_block::call(
+                blkreftable::block_ref_table_set_limit_block(
                     &mut brtab, rlocator, forknum, limit_block,
                 )?;
 
                 loop {
-                    let blocks = blkreftable::block_ref_table_reader_get_blocks::call(
+                    let blocks = blkreftable::block_ref_table_reader_get_blocks(
                         self.mcx,
                         &mut reader,
                         BLOCKS_PER_READ,
@@ -575,7 +575,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
                         break;
                     }
                     for &blkno in blocks.iter() {
-                        blkreftable::block_ref_table_mark_block_modified::call(
+                        blkreftable::block_ref_table_mark_block_modified(
                             &mut brtab, rlocator, forknum, blkno,
                         )?;
                     }
@@ -585,7 +585,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
             // DestroyBlockRefTableReader(reader) + FileClose(wsio.file). The
             // reader is consumed (dropped, freeing its buffers + read callback);
             // the File is threaded back to its FileClose teardown.
-            blkreftable::destroy_block_ref_table_reader::call(reader);
+            blkreftable::destroy_block_ref_table_reader(reader);
             walsummary::wal_summary_reader_file_close::call(file);
         }
         self.brtab = Some(brtab);
@@ -659,7 +659,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
         // Look up the special block reference table entry for the database as a
         // whole.
         let rlocator = RelFileLocator::new(spcoid, dboid, 0);
-        if blkreftable::block_ref_table_get_entry::call(brtab, rlocator, MAIN_FORKNUM).is_some() {
+        if blkreftable::block_ref_table_get_entry(brtab, rlocator, MAIN_FORKNUM).is_some() {
             // According to the WAL summary, this database OID/tablespace OID
             // pairing has been created since the previous backup. So, everything
             // in it must be backed up fully.
@@ -669,7 +669,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
         // Look up the block reference table entry for this relfilenode.
         let rlocator = RelFileLocator::new(spcoid, dboid, relfilenumber);
         let limit_block =
-            match blkreftable::block_ref_table_get_entry::call(brtab, rlocator, forknum) {
+            match blkreftable::block_ref_table_get_entry(brtab, rlocator, forknum) {
                 // If there is no entry, then there have been no WAL-logged
                 // changes to the relation since the predecessor backup was
                 // taken, so we can back it up incrementally and need not include
@@ -717,7 +717,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
         // we'll transpose them below. The combined GetEntry+GetBlocks seam
         // re-looks-up the entry (confirmed to exist above) inside the owner and
         // returns its blocks in `[start_blkno, stop_blkno)`.
-        let blocks = blkreftable::block_ref_table_get_entry_blocks::call(
+        let blocks = blkreftable::block_ref_table_get_entry_blocks(
             self.mcx,
             brtab,
             rlocator,

@@ -56,7 +56,7 @@ backend-access-rmgrdesc-xactdesc-seams = { path = "../backend-access-rmgrdesc-xa
 backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
-common-blkreftable-seams = { path = "../common-blkreftable-seams" }
+common-blkreftable = { path = "../common-blkreftable" }
 types-guc = { path = "../types-guc" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }

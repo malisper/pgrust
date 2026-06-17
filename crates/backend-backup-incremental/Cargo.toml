@@ -19,7 +19,7 @@ types-parse-manifest = { path = "../types-parse-manifest" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-common-relpath = { path = "../backend-common-relpath" }
 common-hashfn = { path = "../common-hashfn" }
-common-blkreftable-seams = { path = "../common-blkreftable-seams" }
+common-blkreftable = { path = "../common-blkreftable" }
 common-parse-manifest-seams = { path = "../common-parse-manifest-seams" }
 backend-backup-walsummary = { path = "../backend-backup-walsummary" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }

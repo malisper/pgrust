@@ -18,7 +18,7 @@ types-walsummarizer = { path = "../types-walsummarizer" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }
-common-blkreftable-seams = { path = "../common-blkreftable-seams" }
+common-blkreftable = { path = "../common-blkreftable" }
 backend-postmaster-walsummarizer = { path = "../backend-postmaster-walsummarizer" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 types-nodes = { path = "../types-nodes" }
