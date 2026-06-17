@@ -27,6 +27,8 @@
 //! result, the `palloc`-into-the-caller's-context analog). It is grown
 //! OOM-safely with `try_reserve_exact` against the validated input length.
 
+pub mod fmgr_builtins;
+
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_UNDEFINED_OBJECT,
@@ -235,6 +237,13 @@ fn invalid_encoding_code(enc: pg_enc) -> PgError {
 /// directly rather than via an `Mcx` handle.
 fn out_of_memory() -> PgError {
     PgError::error("out of memory").with_sqlstate(ERRCODE_OUT_OF_MEMORY)
+}
+
+/// Install this crate's seams. Registers the `to_ascii` SQL builtins into the
+/// fmgr-core builtin table (C: `fmgr_builtins[]`). Called once at startup by
+/// `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_ascii_builtins();
 }
 
 #[cfg(test)]
