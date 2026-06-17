@@ -826,6 +826,8 @@ pub fn init_seams() {
     backend_catalog_catalog_seams::relation_invalidates_snapshots_only::set(
         RelationInvalidatesSnapshotsOnly,
     );
+
+    fmgr_builtins::register_catalog_builtins();
 }
 
 /// Seam adapter for `GetNewRelFileNumber`: the relcache caller
@@ -851,6 +853,8 @@ fn is_system_relation_seam(rel: &Relation<'_>) -> PgResult<bool> {
 fn is_system_class_seam(relid: Oid, form: &PgClassForm) -> PgResult<bool> {
     Ok(IsSystemClass(relid, form))
 }
+
+mod fmgr_builtins;
 
 #[cfg(test)]
 mod tests;
