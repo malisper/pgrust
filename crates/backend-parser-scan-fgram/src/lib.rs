@@ -50,6 +50,99 @@ pub const BACKSLASH_QUOTE_OFF: i32 = 0;
 pub const BACKSLASH_QUOTE_ON: i32 = 1;
 pub const BACKSLASH_QUOTE_SAFE_ENCODING: i32 = 2;
 
+/// The three scanner-owned GUC globals.
+///
+/// In C these are plain mutable globals defined in `scan.l`:
+///
+/// ```c
+/// int  backslash_quote = BACKSLASH_QUOTE_SAFE_ENCODING;  // scan.l:68
+/// bool escape_string_warning = true;                     // scan.l:69
+/// bool standard_conforming_strings = true;               // scan.l:70
+/// ```
+///
+/// They are ordinary GUC variables (`conf->variable` backing) read/written
+/// directly by the GUC engine and copied into each scanner instance by
+/// `scanner_init` (scan.l:1265-1267) — none come from the control file. This
+/// module is the `conf->variable` backing store: a `thread_local!` `Cell` per
+/// global with C-named getter and setter, mirroring the `scalar_global!`
+/// pattern (e.g. `twophase` `max_prepared_xacts`). `init_seams` installs them
+/// as the GUC slots' [`GucVarAccessors`].
+pub mod gucs {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `int backslash_quote = BACKSLASH_QUOTE_SAFE_ENCODING;` (scan.l:68).
+        static BACKSLASH_QUOTE: Cell<i32> =
+            const { Cell::new(super::BACKSLASH_QUOTE_SAFE_ENCODING) };
+        /// `bool escape_string_warning = true;` (scan.l:69).
+        static ESCAPE_STRING_WARNING: Cell<bool> = const { Cell::new(true) };
+        /// `bool standard_conforming_strings = true;` (scan.l:70).
+        static STANDARD_CONFORMING_STRINGS: Cell<bool> = const { Cell::new(true) };
+    }
+
+    #[inline]
+    pub fn backslash_quote() -> i32 {
+        BACKSLASH_QUOTE.get()
+    }
+
+    #[inline]
+    pub fn set_backslash_quote(value: i32) {
+        BACKSLASH_QUOTE.set(value);
+    }
+
+    #[inline]
+    pub fn escape_string_warning() -> bool {
+        ESCAPE_STRING_WARNING.get()
+    }
+
+    #[inline]
+    pub fn set_escape_string_warning(value: bool) {
+        ESCAPE_STRING_WARNING.set(value);
+    }
+
+    #[inline]
+    pub fn standard_conforming_strings() -> bool {
+        STANDARD_CONFORMING_STRINGS.get()
+    }
+
+    #[inline]
+    pub fn set_standard_conforming_strings(value: bool) {
+        STANDARD_CONFORMING_STRINGS.set(value);
+    }
+}
+
+/// Install this crate's seam providers.
+///
+/// Installs the [`GucVarAccessors`](backend_utils_misc_guc_tables::GucVarAccessors)
+/// for the three scanner-owned GUCs (`backslash_quote`, `escape_string_warning`,
+/// `standard_conforming_strings`) over the [`gucs`] backing store, so the GUC
+/// engine's `.read()`/`.set()` reach the `conf->variable` C globals. Also wires
+/// [`ScannerSettings`]' live provider to read the same store, matching scan.l's
+/// `scanner_init` (scan.l:1265-1267) which copies the globals into the scanner.
+pub fn init_seams() {
+    use backend_utils_misc_guc_tables::vars;
+    use backend_utils_misc_guc_tables::GucVarAccessors;
+
+    vars::backslash_quote.install(GucVarAccessors {
+        get: gucs::backslash_quote,
+        set: gucs::set_backslash_quote,
+    });
+    vars::escape_string_warning.install(GucVarAccessors {
+        get: gucs::escape_string_warning,
+        set: gucs::set_escape_string_warning,
+    });
+    vars::standard_conforming_strings.install(GucVarAccessors {
+        get: gucs::standard_conforming_strings,
+        set: gucs::set_standard_conforming_strings,
+    });
+
+    ScannerSettings::set_live_provider(|| ScannerSettings {
+        backslash_quote: gucs::backslash_quote(),
+        escape_string_warning: gucs::escape_string_warning(),
+        standard_conforming_strings: gucs::standard_conforming_strings(),
+    });
+}
+
 /// `MAX_UNICODE_EQUIVALENT_STRING` (mb/pg_wchar.h) -- the longest server-
 /// encoding byte sequence a single Unicode code point can map to.
 pub const MAX_UNICODE_EQUIVALENT_STRING: usize = 16;

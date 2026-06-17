@@ -12681,6 +12681,7 @@ dependencies = [
  "backend-utils-adt-numutils-fgram",
  "backend-utils-error-fgram",
  "backend-utils-mb-fgram",
+ "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-fgram",
  "common-keywords-fgram",
  "libc",
