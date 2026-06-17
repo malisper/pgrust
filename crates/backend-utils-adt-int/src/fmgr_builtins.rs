@@ -34,6 +34,10 @@ fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
     fcinfo.arg(i).expect("int fn: missing arg").value.as_i32()
 }
 #[inline]
+fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
+    fcinfo.arg(i).expect("int fn: missing arg").value.as_i64()
+}
+#[inline]
 fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
     fcinfo.arg(i).expect("int fn: missing arg").value.as_bool()
 }
@@ -406,6 +410,24 @@ fn fc_in_range_int2_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         arg_bool(fcinfo, 4),
     )))
 }
+fn fc_in_range_int4_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(ok_or_raise!(crate::in_range_int4_int8(
+        arg_i32(fcinfo, 0),
+        arg_i32(fcinfo, 1),
+        arg_i64(fcinfo, 2),
+        arg_bool(fcinfo, 3),
+        arg_bool(fcinfo, 4),
+    )))
+}
+fn fc_in_range_int2_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(ok_or_raise!(crate::in_range_int2_int8(
+        arg_i16(fcinfo, 0),
+        arg_i16(fcinfo, 1),
+        arg_i64(fcinfo, 2),
+        arg_bool(fcinfo, 3),
+        arg_bool(fcinfo, 4),
+    )))
+}
 
 // ---------------------------------------------------------------------------
 // Registration.
@@ -431,11 +453,10 @@ fn builtin(
 /// Called from this crate's `init_seams()`. OIDs/nargs from `pg_proc.dat`; all
 /// are `proisstrict => 't'` and not retset.
 ///
-/// `in_range_int2_int8` / `in_range_int4_int8` are NOT registered: the
-/// `int8`-offset cores live in this crate but the offset arg is an `int8`
-/// (i64), which `int.c` delegates to `int8` arithmetic — they are registered by
-/// the `int8.c` owner alongside the other `int8` `in_range`s. (Kept here as
-/// value cores for that owner to call.)
+/// `in_range_int4_int8` / `in_range_int2_int8` are `int.c` functions (prosrc
+/// `in_range_int4_int8`/`in_range_int2_int8`); their `int8` (i64) offset arg is
+/// read on the by-val word via `as_i64`, so they register here alongside the
+/// other `in_range`s.
 pub fn register_int_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // ---- I/O ----
@@ -522,10 +543,18 @@ pub fn register_int_builtins() {
         builtin(1895, "int2not", 1, fc_int2not),
         builtin(1896, "int2shl", 2, fc_int2shl),
         builtin(1897, "int2shr", 2, fc_int2shr),
+        // ---- mod / abs SQL aliases (share the int2mod/int4mod/int4abs/int2abs
+        //      value cores; distinct pg_proc OIDs `mod`/`abs`) ----
+        builtin(940, "mod", 2, fc_int2mod),
+        builtin(941, "mod", 2, fc_int4mod),
+        builtin(1397, "abs", 1, fc_int4abs),
+        builtin(1398, "abs", 1, fc_int2abs),
         // ---- in_range ----
         builtin(4128, "in_range_int4_int4", 5, fc_in_range_int4_int4),
         builtin(4129, "in_range_int4_int2", 5, fc_in_range_int4_int2),
         builtin(4132, "in_range_int2_int2", 5, fc_in_range_int2_int2),
         builtin(4131, "in_range_int2_int4", 5, fc_in_range_int2_int4),
+        builtin(4127, "in_range_int4_int8", 5, fc_in_range_int4_int8),
+        builtin(4130, "in_range_int2_int8", 5, fc_in_range_int2_int8),
     ]);
 }
