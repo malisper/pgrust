@@ -1174,6 +1174,26 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
                     None => return read_failed(rels),
                 }
             };
+            // C: InitIndexAmRoutine(rel) reads rel->rd_amhandler, which in C is
+            // restored for free by the whole-RelationData struct fread. This port
+            // reconstructs the entry field-by-field and never read rd_amhandler,
+            // so resolve it from the (restored) rd_rel->relam via the pg_am
+            // (AMOID) syscache, exactly as RelationInitIndexAccessInfo does, before
+            // the handler call. (C's struct memcpy also avoids the lookup, but the
+            // field-wise reconstruction must do it; pg_am is always heap-scannable.)
+            debug_assert!(rel.rd_rel.relam != InvalidOid);
+            rel.rd_amhandler =
+                match backend_utils_cache_syscache_seams::search_am_handler::call(rel.rd_rel.relam)? {
+                    Some(h) => h,
+                    None => {
+                        return Err(ereport(ERROR)
+                            .errmsg_internal(format!(
+                                "cache lookup failed for access method {}",
+                                rel.rd_rel.relam
+                            ))
+                            .into_error());
+                    }
+                };
             // C: InitIndexAmRoutine(rel) — index family (on the local entry).
             crate::index::InitIndexAmRoutine(&mut rel)?;
             // C: rd_opfamily / rd_opcintype / rd_support / rd_indcollation /
