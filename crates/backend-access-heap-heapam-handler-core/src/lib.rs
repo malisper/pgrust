@@ -246,7 +246,7 @@ fn heapam_index_fetch_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexFetchTableData<'mcx>,
     tid: &ItemPointerData,
-    snapshot: &Snapshot,
+    snapshot: &mut Snapshot,
     slot: &mut SlotData<'mcx>,
     call_again: &mut bool,
     mut all_dead: Option<&mut bool>,
@@ -255,8 +255,12 @@ fn heapam_index_fetch_tuple<'mcx>(
     debug_assert!(matches!(slot, SlotData::BufferHeap(_)));
 
     let rel = scan.rel.alias();
+    // C passes `snapshot` (a pointer) straight through; the dirty-snapshot
+    // visibility check writes xmin/xmax/speculativeToken back into it, and the
+    // index scan's owner reads those out of `scan->xs_snapshot` to decide
+    // whether to wait on a concurrent inserter. Thread it by `&mut`.
     let snap = snapshot
-        .as_ref()
+        .as_mut()
         .expect("heapam_index_fetch_tuple: index scans require a real snapshot");
 
     // We can skip the buffer-switching logic if we're in mid-HOT chain.
@@ -298,7 +302,7 @@ fn heapam_index_fetch_tuple<'mcx>(
     if res.found {
         // Only in a non-MVCC snapshot can more than one member of the HOT
         // chain be visible.
-        *call_again = !types_snapshot::snapshot::IsMVCCSnapshot(snap);
+        *call_again = !types_snapshot::snapshot::IsMVCCSnapshot(&*snap);
 
         let mut tuple = res
             .heap_tuple

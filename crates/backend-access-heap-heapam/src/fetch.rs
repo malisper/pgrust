@@ -244,7 +244,7 @@ pub fn heap_hot_search_buffer<'mcx>(
     tid: ItemPointerData,
     relation: &Relation<'mcx>,
     buffer: Buffer,
-    snapshot: &SnapshotData,
+    snapshot: &mut SnapshotData,
     want_all_dead: bool,
     first_call: bool,
 ) -> PgResult<HotSearchResult<'mcx>> {
@@ -305,8 +305,11 @@ pub fn heap_hot_search_buffer<'mcx>(
         // Return the first match we find (skip the just-returned one on later
         // passes to avoid an infinite loop / duplicate).
         if !skip {
+            // Pass the real snapshot (not a clone): HeapTupleSatisfiesDirty
+            // writes the in-progress xmin/xmax/speculativeToken back into it,
+            // and the index scan's owner reads those to decide on conflict wait.
             let valid =
-                HeapTupleSatisfiesVisibility(&mut heap_tuple.tuple, &mut snapshot.clone(), buffer)?;
+                HeapTupleSatisfiesVisibility(&mut heap_tuple.tuple, snapshot, buffer)?;
             predicate_seam::heap_check_for_serializable_conflict_out::call(
                 valid, relid, &heap_tuple.tuple, buffer, snapshot,
             )?;

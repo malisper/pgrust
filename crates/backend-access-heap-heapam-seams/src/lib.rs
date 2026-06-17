@@ -273,12 +273,17 @@ seam_core::seam!(
     /// on `buf` is retained on return. `Err` carries the clog/multixact
     /// `ereport(ERROR)` surface. **Owned by the heapam scan family (heapam.c);
     /// uninstalled — and panics — until that family lands.**
+    ///
+    /// `snapshot` is `&mut` because the per-member visibility check
+    /// (`HeapTupleSatisfiesDirty`, for a non-MVCC dirty snapshot) writes the
+    /// in-progress inserter/deleter's `xmin`/`xmax`/`speculativeToken` back
+    /// into it — the conflict info `index_fetch_heap`'s caller waits on.
     pub fn heap_hot_search_buffer<'mcx>(
         mcx: Mcx<'mcx>,
         tid: ItemPointerData,
         rel: &Relation<'mcx>,
         buf: Buffer,
-        snapshot: &SnapshotData,
+        snapshot: &mut SnapshotData,
         want_all_dead: bool,
         first_call: bool,
     ) -> PgResult<HotSearchResult<'mcx>>

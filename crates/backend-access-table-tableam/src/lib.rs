@@ -583,7 +583,7 @@ pub fn table_index_fetch_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexFetchTableData<'mcx>,
     tid: &ItemPointerData,
-    snapshot: &Snapshot,
+    snapshot: &mut Snapshot,
     slot: &mut SlotData<'mcx>,
     call_again: &mut bool,
     all_dead: Option<&mut bool>,
@@ -612,11 +612,15 @@ pub fn table_index_fetch_tuple<'mcx>(
 /// Note that `tid` may be modified when we return true if the AM supports
 /// storing multiple row versions reachable via a single index entry (like
 /// heap's HOT).
+///
+/// `snapshot` is `&mut` for the same reason as [`table_index_fetch_tuple`]: a
+/// dirty snapshot is used as an output param, and `_bt_check_unique` reads the
+/// conflict info (`xmin`/`xmax`/`speculativeToken`) back out of it on return.
 pub fn table_index_fetch_tuple_check<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     tid: &mut ItemPointerData,
-    snapshot: Snapshot,
+    snapshot: &mut Snapshot,
     all_dead: Option<&mut bool>,
 ) -> PgResult<bool> {
     let mut call_again = false;
@@ -627,7 +631,7 @@ pub fn table_index_fetch_tuple_check<'mcx>(
         mcx,
         &mut scan,
         tid,
-        &snapshot,
+        snapshot,
         &mut slot,
         &mut call_again,
         all_dead,

@@ -342,7 +342,11 @@ pub fn heap_index_delete_tuples<'mcx>(
     let mut bottomup_final_block = false;
 
     /* InitNonVacuumableSnapshot(SnapshotNonVacuumable, GlobalVisTestFor(rel)) */
-    let snapshot_non_vacuumable = init_non_vacuumable_snapshot(rel)?;
+    // `mut` because heap_hot_search_buffer now takes `&mut` snapshot (it is the
+    // dirty-snapshot output param). HeapTupleSatisfiesNonVacuumable does not
+    // write the xmin/xmax/speculativeToken fields, so reusing it across the
+    // HOT-chain loop stays faithful.
+    let mut snapshot_non_vacuumable = init_non_vacuumable_snapshot(rel)?;
 
     /* Sort caller's deltids array by TID for further processing */
     index_delete_sort(delstate);
@@ -580,7 +584,7 @@ pub fn heap_index_delete_tuples<'mcx>(
                 tmp,
                 rel,
                 buf,
-                &snapshot_non_vacuumable,
+                &mut snapshot_non_vacuumable,
                 false, /* all_dead == NULL */
                 true,  /* first_call */
             )?;

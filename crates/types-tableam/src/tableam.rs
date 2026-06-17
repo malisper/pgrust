@@ -206,11 +206,18 @@ pub struct TableAmRoutine {
     /// `index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
     /// — fetch the tuple at `tid` into `slot`, returning true on a
     /// snapshot-visible match.
+    ///
+    /// `snapshot` is `&mut` because C passes `Snapshot` by pointer and the
+    /// visibility check (`HeapTupleSatisfiesDirty`, reached for a non-MVCC
+    /// dirty snapshot) writes the concurrent inserter/deleter's
+    /// `xmin`/`xmax`/`speculativeToken` back into `*snapshot`. The index scan's
+    /// caller (`_bt_check_unique` / `check_exclusion_or_unique_constraint`)
+    /// reads those back to decide whether to wait on the conflicting xact.
     pub index_fetch_tuple: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         scan: &mut IndexFetchTableData<'mcx>,
         tid: &ItemPointerData,
-        snapshot: &Snapshot,
+        snapshot: &mut Snapshot,
         slot: &mut SlotData<'mcx>,
         call_again: &mut bool,
         all_dead: Option<&mut bool>,

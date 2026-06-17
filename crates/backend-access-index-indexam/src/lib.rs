@@ -907,9 +907,19 @@ pub fn index_fetch_heap<'mcx>(
 
     // table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
     //   scan->xs_snapshot, slot, &scan->xs_heap_continue, &all_dead).
+    //
+    // The snapshot crosses by `&mut`, not a clone: C passes `scan->xs_snapshot`
+    // by pointer, and for a dirty (non-MVCC) snapshot the visibility check
+    // (HeapTupleSatisfiesDirty) writes the in-progress inserter/deleter's
+    // xmin/xmax/speculativeToken back into it. The scan's owner
+    // (`_bt_check_unique` / `check_exclusion_or_unique_constraint`) reads those
+    // out of `scan->xs_snapshot` to decide whether to wait on the conflicting
+    // xact. Cloning here (the previous behaviour) silently discarded the
+    // write-back, so unique/exclusion conflict-wait never fired.
     let heaptid = scan.xs_heaptid;
-    let snapshot: types_tableam::Snapshot = scan.xs_snapshot.clone();
     let mut heap_continue = scan.xs_heap_continue;
+    // Disjoint field borrows: `xs_snapshot` (&mut) and `xs_heapfetch` (&mut).
+    let snapshot = &mut scan.xs_snapshot;
     let heapfetch = scan
         .xs_heapfetch
         .as_deref_mut()
@@ -918,7 +928,7 @@ pub fn index_fetch_heap<'mcx>(
         mcx,
         heapfetch,
         &heaptid,
-        &snapshot,
+        snapshot,
         slot,
         &mut heap_continue,
         Some(&mut all_dead),

@@ -246,13 +246,16 @@ pub fn unique_key_recheck(
         {
             let mut scan = tableam::table_index_fetch_begin(mcx, &heap)?;
             let mut call_again = false;
-            let snapshot_self = Some(SnapshotData::sentinel(SnapshotType::SNAPSHOT_SELF));
+            // `mut` because table_index_fetch_tuple now takes `&mut` snapshot
+            // (the dirty-snapshot output param). HeapTupleSatisfiesSelf does not
+            // write xmin/xmax/speculativeToken, so this stays faithful.
+            let mut snapshot_self = Some(SnapshotData::sentinel(SnapshotType::SNAPSHOT_SELF));
 
             let found = tableam::table_index_fetch_tuple(
                 mcx,
                 &mut scan,
                 &tmptid,
-                &snapshot_self,
+                &mut snapshot_self,
                 estate.slot_data_mut(slot),
                 &mut call_again,
                 None,
