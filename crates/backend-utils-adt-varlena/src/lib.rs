@@ -70,6 +70,33 @@ pub mod split_format;
 pub mod wire_io;
 
 use mcx::{Mcx, PgString, PgVec};
+
+// ---------------------------------------------------------------------------
+// `bytea_output` GUC backing store (varlena.c: `int bytea_output =
+// BYTEA_OUTPUT_HEX;`). In C the `config_enum` entry binds its `variable`
+// pointer straight at this int, so the GUC machinery reads/writes it in place
+// and `byteaout` reads the same global. Here the storage lives in this owning
+// unit and the `guc_tables` enum slot reaches it through the installed
+// `GucVarAccessors` (wired from `init_seams`).
+// ---------------------------------------------------------------------------
+use std::cell::Cell;
+
+thread_local! {
+    /// C: `int bytea_output = BYTEA_OUTPUT_HEX;` (varlena.c:48).
+    static BYTEA_OUTPUT: Cell<i32> =
+        const { Cell::new(backend_utils_misc_guc_tables::consts::BYTEA_OUTPUT_HEX) };
+}
+
+/// Read `bytea_output` (`*conf->variable`).
+pub fn get_bytea_output() -> i32 {
+    BYTEA_OUTPUT.with(|v| v.get())
+}
+
+/// Write `bytea_output` (the GUC assign path stores through `conf->variable`).
+pub fn set_bytea_output(value: i32) {
+    BYTEA_OUTPUT.with(|v| v.set(value));
+}
+
 // The bare-word newtype `types_datum::Datum` (aliased `BareDatum`) survives only
 // at the externally pinned, still-bare-word seam ABI edges (the `cstring_to_text`
 // / `bytes_to_varlena` / `text_to_cstring` shims — the `CStringGetTextDatum` /
@@ -435,6 +462,18 @@ fn seam_replace_text_regexp<'mcx>(
 /// seams so the declared-seams-are-set recurrence guard passes.
 pub fn init_seams() {
     use backend_utils_adt_varlena_seams as s;
+
+    // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
+    // guc_tables.c binds the config_enum's `variable` pointer here). The GUC
+    // machinery reads/writes through these accessors and `byteaout` reads the
+    // same store. Mirrors the aio.c io_method pattern.
+    backend_utils_misc_guc_tables::vars::bytea_output.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: get_bytea_output,
+            set: set_bytea_output,
+        },
+    );
+
     // Canonical value seams (migration target) + their bare-word transitional
     // shims (still pinned by unmigrated consumers + the genfile.c bytea path).
     s::cstring_to_text::set(seam_cstring_to_text);
