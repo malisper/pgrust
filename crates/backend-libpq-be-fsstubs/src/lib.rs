@@ -85,6 +85,7 @@ use types_error::{
 };
 use types_storage::large_object::{IFS_RDLOCK, IFS_WRLOCK, LargeObjectDesc};
 
+pub mod fmgr_builtins;
 pub mod state;
 
 #[cfg(test)]
@@ -886,8 +887,10 @@ fn invalid_descriptor(fd: i32) -> PgError {
  * init_seams — install the outward transaction-end hooks consumed by xact.c.
  * ========================================================================= */
 
-/// Install the `AtEOXact_LargeObject` / `AtEOSubXact_LargeObject` seams.
+/// Install the `AtEOXact_LargeObject` / `AtEOSubXact_LargeObject` seams, and
+/// register the SQL-callable `lo_*` fmgr builtins (C: `fmgr_builtins[]` rows).
 pub fn init_seams() {
     backend_libpq_be_fsstubs_seams::at_eoxact_large_object::set(AtEOXact_LargeObject);
     backend_libpq_be_fsstubs_seams::at_eosubxact_large_object::set(AtEOSubXact_LargeObject);
+    crate::fmgr_builtins::register_be_fsstubs_builtins();
 }
