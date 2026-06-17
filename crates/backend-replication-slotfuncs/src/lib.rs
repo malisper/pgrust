@@ -1180,5 +1180,18 @@ fn namedata_from_str(s: &str) -> NameData {
     nd
 }
 
+// ---------------------------------------------------------------------------
+// fmgr builtin registration
+// ---------------------------------------------------------------------------
+
+mod fmgr_builtins;
+
+/// Register the `slotfuncs.c` fmgr builtins (so `fmgr_isbuiltin` / by-OID
+/// dispatch resolves them). This crate owns no inward seam crate, so this is the
+/// only initialization it performs; `seams-init::init_all` calls it.
+pub fn init_seams() {
+    fmgr_builtins::register_slotfuncs_builtins();
+}
+
 #[cfg(test)]
 mod tests;

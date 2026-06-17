@@ -22,6 +22,8 @@ types-wal = { path = "../types-wal" }
 types-logical = { path = "../types-logical" }
 types-replication-slot = { path = "../types-replication-slot" }
 
+# fmgr builtin table (by-OID dispatch registration).
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 # Same-subsystem landed owners (acyclic: none of these call slotfuncs).
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
