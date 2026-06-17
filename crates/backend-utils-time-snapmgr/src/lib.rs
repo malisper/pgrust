@@ -48,6 +48,8 @@ use types_storage::VirtualTransactionId;
 
 mod state;
 
+mod fmgr_builtins;
+
 pub use state::SnapHandle;
 pub use types_logical::{
     ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash,
@@ -1634,6 +1636,9 @@ pub fn init_seams() {
     pc_seams::set_transaction_xmin::set(|xmin| with_state(|s| s.transaction_xmin = xmin));
     // `RecentXmin` — read by procarray.c's GlobalVis horizon machinery.
     pc_seams::recent_xmin::set(RecentXmin);
+
+    // Register this crate's SQL-callable builtins (C: `fmgr_builtins[]`).
+    fmgr_builtins::register_snapmgr_builtins();
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket

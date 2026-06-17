@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-utils-error = { path = "../backend-utils-error" }
+# fmgr builtin table registration (C: fmgr_builtins[]).
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 # Its own outward seams, installed from init_seams().
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 # plancache/xact/standby/subtrans's split slice of snapmgr's active-snapshot +
@@ -30,7 +32,9 @@ backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" 
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
 # Owns the historic-snapshot tuplecid map types (`ReorderBufferTupleCidKey/Ent`,
 # `TupleCidHash`) — the real owned value behind C's `static HTAB *tuplecid_data`,
 # homed in `types-logical` so snapmgr can store it without depending on the
