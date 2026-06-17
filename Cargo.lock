@@ -18602,11 +18602,13 @@ dependencies = [
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-misc2-seams",
  "backend-utils-adt-scalar-seams",
+ "backend-utils-fmgr-core",
  "common-hashfn",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-tuple",
 ]
 
