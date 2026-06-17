@@ -854,6 +854,7 @@ fn decode_snapshot(r: &mut Reader) -> types_snapshot::SnapshotData {
         active_count: 0,
         regd_count: 0,
         snapXactCompletionCount: 0,
+        reg_id: 0,
     }
 }
 
@@ -1035,6 +1036,7 @@ mod tests {
             active_count: 3,
             regd_count: 4,
             snapXactCompletionCount: 5,
+            reg_id: 0,
         };
         let change = ReorderBufferChange {
             lsn: 3,

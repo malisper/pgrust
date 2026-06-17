@@ -130,11 +130,34 @@ fn pg_lfind32(value: TransactionId, base: &[TransactionId]) -> bool {
  * ---------------------------------------------------------------------- */
 
 fn registered_add(s: &mut SnapMgrState, snap: SnapHandle) {
+    // Give the snapshot a stable registration identity if it doesn't already
+    // have one. C reaches a registered snapshot through its stable palloc'd
+    // address (the intrusive `ph_node`); the snapmgr seams marshal snapshots by
+    // value, losing pointer identity across the boundary, so we stamp a unique
+    // id here that the round-tripped value carries back to `registered_remove`.
+    if snap.borrow().reg_id == 0 {
+        s.next_reg_id += 1;
+        snap.borrow_mut().reg_id = s.next_reg_id;
+    }
     s.registered.push(snap);
 }
 
 fn registered_remove(s: &mut SnapMgrState, snap: &SnapHandle) {
-    if let Some(pos) = s
+    // Match on the registration identity rather than `Rc` pointer identity: the
+    // caller round-trips a `SnapshotData` *value* (the seam contract), so the
+    // handle passed here is a fresh `Rc` whose `reg_id` is the one stamped at
+    // registration. (Rc-identical callers — the catalog snapshot — match too,
+    // since they carry the same `reg_id`.)
+    let reg_id = snap.borrow().reg_id;
+    if reg_id != 0 {
+        if let Some(pos) = s
+            .registered
+            .iter()
+            .position(|h| h.borrow().reg_id == reg_id)
+        {
+            s.registered.swap_remove(pos);
+        }
+    } else if let Some(pos) = s
         .registered
         .iter()
         .position(|h| SnapHandle::ptr_eq(h, snap))
@@ -562,6 +585,10 @@ pub fn CopySnapshot(snapshot: &SnapHandle) -> SnapHandle {
     newsnap.active_count = 0;
     newsnap.copied = true;
     newsnap.snapXactCompletionCount = 0;
+    // A copy is a fresh physical snapshot (C: a new palloc with a zeroed
+    // ph_node); it is not yet a member of the registered set, so it must start
+    // with no registration identity.
+    newsnap.reg_id = 0;
 
     new_handle(newsnap)
 }

@@ -26,6 +26,7 @@ fn mk_snapshot(xmin: TransactionId) -> SnapshotData {
         active_count: 0,
         regd_count: 0,
         snapXactCompletionCount: 0,
+        reg_id: 0,
     }
 }
 

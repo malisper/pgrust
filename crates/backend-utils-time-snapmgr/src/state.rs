@@ -54,6 +54,7 @@ pub fn new_snapshot_data(snapshot_type: SnapshotType) -> SnapshotData {
         active_count: 0,
         regd_count: 0,
         snapXactCompletionCount: 0,
+        reg_id: 0,
     }
 }
 
@@ -131,6 +132,12 @@ pub struct SnapMgrState {
 
     /// `TransactionId RecentXmin = FirstNormalTransactionId` (snapmgr.c:159).
     pub recent_xmin: TransactionId,
+
+    /// Monotonic counter handing out `SnapshotData::reg_id` values. Stands in
+    /// for the stable palloc'd-pointer identity C uses to key the
+    /// `RegisteredSnapshots` heap, which the value-marshalling seams can't
+    /// preserve. Never reset; `reg_id == 0` always means "unregistered".
+    pub next_reg_id: u64,
 }
 
 impl SnapMgrState {
@@ -151,6 +158,7 @@ impl SnapMgrState {
             exported_snapshots: Vec::new(),
             transaction_xmin: FirstNormalTransactionId,
             recent_xmin: FirstNormalTransactionId,
+            next_reg_id: 0,
         }
     }
 }

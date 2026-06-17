@@ -72,7 +72,7 @@ pub struct ResolveCminCmaxResult {
 /// `xip`/`subxip` are owned `Vec`s rather than raw arrays; `xcnt`/`subxcnt`
 /// remain explicit (their lengths) to mirror the C field-by-field semantics
 /// the manager relies on.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SnapshotData {
     /// `snapshot_type` — what these values mean.
     pub snapshot_type: SnapshotType,
@@ -118,6 +118,18 @@ pub struct SnapshotData {
     /// `snapXactCompletionCount` — the transaction completion count at the time
     /// `GetSnapshotData()` built this snapshot.
     pub snapXactCompletionCount: u64,
+
+    /// Snapshot-manager registration identity. C reaches a registered snapshot
+    /// through its stable `palloc`'d address (the `pairingheap_node ph_node`
+    /// linked into `RegisteredSnapshots`). The snapmgr seams marshal snapshots
+    /// *by value*, so that pointer identity is lost across the boundary; this
+    /// field carries a stable id the manager assigns when it first shoves a
+    /// snapshot into the registered set, so the matching `UnregisterSnapshot`
+    /// — which round-trips the same value — can locate and remove the right
+    /// entry. `0` means "not in the registered set" (the C NULL/zeroed
+    /// `ph_node`). Like `ph_node`, it is bookkeeping, not snapshot content, so
+    /// it is excluded from value equality.
+    pub reg_id: u64,
 }
 
 impl SnapshotData {
@@ -144,9 +156,37 @@ impl SnapshotData {
             active_count: 0,
             regd_count: 0,
             snapXactCompletionCount: 0,
+            reg_id: 0,
         }
     }
 }
+
+// `reg_id` is snapmgr registration bookkeeping (the value-seam analog of the
+// intrusive `pairingheap_node ph_node`), not part of the snapshot's logical
+// content, so — exactly as `ph_node` is never compared in C — it is excluded
+// from `SnapshotData` value equality.
+impl PartialEq for SnapshotData {
+    fn eq(&self, other: &Self) -> bool {
+        self.snapshot_type == other.snapshot_type
+            && self.vistest == other.vistest
+            && self.xmin == other.xmin
+            && self.xmax == other.xmax
+            && self.xip == other.xip
+            && self.xcnt == other.xcnt
+            && self.subxip == other.subxip
+            && self.subxcnt == other.subxcnt
+            && self.suboverflowed == other.suboverflowed
+            && self.takenDuringRecovery == other.takenDuringRecovery
+            && self.copied == other.copied
+            && self.curcid == other.curcid
+            && self.speculativeToken == other.speculativeToken
+            && self.active_count == other.active_count
+            && self.regd_count == other.regd_count
+            && self.snapXactCompletionCount == other.snapXactCompletionCount
+    }
+}
+
+impl Eq for SnapshotData {}
 
 /// `IsMVCCSnapshot(snapshot)` (`utils/snapmgr.h`).
 #[inline]
