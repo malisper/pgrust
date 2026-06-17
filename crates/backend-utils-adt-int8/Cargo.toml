@@ -1,0 +1,14 @@
+[package]
+name = "backend-utils-adt-int8"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_int8"
+path = "src/lib.rs"
+
+[dependencies]
+types-error = { path = "../types-error" }
+# pg_strtoint64_safe / pg_lltoa (numutils.c): the int8 text I/O cores, owner ported.
+backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
