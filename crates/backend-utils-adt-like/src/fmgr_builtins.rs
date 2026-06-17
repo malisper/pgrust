@@ -205,6 +205,13 @@ pub fn register_like_builtins() {
         builtin(1634, "texticnlike", 2, true, false, fc_texticnlike),
         builtin(1635, "nameiclike", 2, true, false, fc_nameiclike),
         builtin(1636, "nameicnlike", 2, true, false, fc_nameicnlike),
+        // ---- bpchar LIKE/ILIKE (prosrc = textlike/textnlike/texticlike/
+        //      texticnlike; bpchar is binary-compatible with text as a varlena,
+        //      so the same value cores apply to the detoasted by-ref payload) ----
+        builtin(1631, "bpcharlike", 2, true, false, fc_textlike),
+        builtin(1632, "bpcharnlike", 2, true, false, fc_textnlike),
+        builtin(1660, "bpchariclike", 2, true, false, fc_texticlike),
+        builtin(1661, "bpcharicnlike", 2, true, false, fc_texticnlike),
         // ---- like_escape (text) ----
         builtin(1637, "like_escape", 2, true, false, fc_like_escape),
         // ---- bytea LIKE ----
