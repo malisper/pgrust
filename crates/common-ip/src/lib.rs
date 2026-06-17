@@ -229,7 +229,20 @@ fn getnameinfo_unix(
     }
 
     if let Some(s) = service {
-        let sun = unsafe { &*(addr.addr.as_ptr().cast::<libc::sockaddr_un>()) };
+        /*
+         * `addr.addr` is an unaligned byte buffer; copy it into a properly
+         * aligned local `sockaddr_un` (as C effectively has, since its structs
+         * are aligned) rather than forming a misaligned reference.
+         */
+        let mut sun: libc::sockaddr_un = unsafe { MaybeUninit::zeroed().assume_init() };
+        let n = (addr.salen as usize).min(size_of::<libc::sockaddr_un>());
+        unsafe {
+            ptr::copy_nonoverlapping(
+                addr.addr.as_ptr(),
+                (&mut sun as *mut libc::sockaddr_un).cast::<u8>(),
+                n,
+            );
+        }
         let path: Vec<u8> = sun.sun_path.iter().map(|c| *c as u8).collect();
         /*
          * Check whether it looks like an abstract socket, but it could also
@@ -297,9 +310,15 @@ fn getnameinfo_system(
 }
 
 /// Read `ss_family` from a `SockAddr`'s `sockaddr_storage` bytes.
+///
+/// `addr.addr` is a raw byte buffer with no guaranteed alignment, so we read
+/// `ss_family` (offset 0) with an unaligned read rather than forming a
+/// reference to a misaligned `sockaddr_storage` (which is UB and aborts under
+/// Rust's misaligned-pointer-dereference check).
 fn sockaddr_family(addr: &SockAddr) -> i32 {
-    let ss = unsafe { &*(addr.addr.as_ptr().cast::<libc::sockaddr_storage>()) };
-    ss.ss_family as i32
+    let p = addr.addr.as_ptr().cast::<libc::sockaddr_storage>();
+    let fam = unsafe { ptr::addr_of!((*p).ss_family).read_unaligned() };
+    fam as i32
 }
 
 /// Build a `struct addrinfo` hint from the lookup-relevant fields C passes.
@@ -463,6 +482,31 @@ mod tests {
         let rc = pg_getnameinfo_all(&out[0].addr, None, Some(&mut service), 0);
         assert_eq!(rc, libc::EAI_MEMORY);
         assert_eq!(service, "???");
+    }
+
+    #[test]
+    fn sockaddr_family_reads_from_misaligned_buffer() {
+        /*
+         * Build a SockAddr whose `addr` bytes are deliberately offset so the
+         * sockaddr_storage view is misaligned, then confirm sockaddr_family
+         * reads ss_family without forming a misaligned reference (no abort).
+         */
+        // Build a real (aligned) sockaddr_in, then copy its bytes into the
+        // SockAddr byte buffer so the family sits at the platform-correct
+        // offset within sockaddr_storage (e.g. offset 1 on macOS).
+        let mut sin: libc::sockaddr_in = unsafe { MaybeUninit::zeroed().assume_init() };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        let mut sa = SockAddr::zeroed();
+        let n = size_of::<libc::sockaddr_in>();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                (&sin as *const libc::sockaddr_in).cast::<u8>(),
+                sa.addr.as_mut_ptr(),
+                n,
+            );
+        }
+        sa.salen = n as u32;
+        assert_eq!(sockaddr_family(&sa), libc::AF_INET);
     }
 
     #[test]
