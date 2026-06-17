@@ -29,8 +29,16 @@ use types_tsearch::tsearch::{
     TS_EXEC_PHRASE_NO_POS,
 };
 
+pub mod fmgr_builtins;
+
 #[cfg(test)]
 mod tests;
+
+/// Install this crate's fmgr builtin rows into the fmgr-core table. Invoked by
+/// `seams-init::init_all` (registers `gin_cmp_tslexeme`, oid 3724).
+pub fn init_seams() {
+    fmgr_builtins::register_tsginidx_builtins();
+}
 
 // ---------------------------------------------------------------------------
 // ts_type.h header-macro accessors over the raw (detoasted) datum byte slices.
