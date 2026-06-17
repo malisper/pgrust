@@ -96,6 +96,8 @@ pub static ENABLE_MATERIAL: bool = true;
 pub static ENABLE_MERGEJOIN: bool = true;
 pub static ENABLE_HASHJOIN: bool = true;
 pub static ENABLE_GATHERMERGE: bool = true;
+// enable_partitionwise_* GUCs default OFF (costsize.c lines 159-160).
+pub static ENABLE_PARTITIONWISE_JOIN: bool = false;
 
 // Inline GUC accessors so the cost arithmetic reads like the C source.
 #[inline]

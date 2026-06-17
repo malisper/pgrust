@@ -45,6 +45,21 @@ pub fn init_seams() {
     cz::cost_bitmap_tree_node::set(crate::scans::cost_bitmap_tree_node);
     cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN);
 
+    /* ---- other costsize.c-owned GUC getters consumed elsewhere -------- */
+    // `enable_partitionwise_join` (costsize.c GUC, default OFF) read by
+    // relnode.c/joinrels.c through the relnode-ext consumer-side seam crate
+    // (no owner directory; costsize installs it as the GUC owner).
+    backend_optimizer_util_relnode_ext_seams::enable_partitionwise_join::set(
+        || crate::ENABLE_PARTITIONWISE_JOIN,
+    );
+    // `cpu_operator_cost` (costsize.c GUC) — plancache reads it through the
+    // planner-pc seam crate; planner.c (the rest of that crate's seams) is
+    // unported, but costsize.c owns this GUC global, so install it here. The
+    // seam signature is `() -> PgResult<f64>` (infallible read).
+    backend_optimizer_plan_planner_pc_seams::cpu_operator_cost::set(
+        || Ok(crate::CPU_OPERATOR_COST),
+    );
+
     /* ---- pathnode-seams: cost GUC getters + sizing helpers owned here -- */
     ps::cpu_tuple_cost::set(|| crate::CPU_TUPLE_COST);
     ps::cpu_operator_cost::set(|| crate::CPU_OPERATOR_COST);
