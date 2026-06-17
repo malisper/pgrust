@@ -17,11 +17,19 @@ types-pgstat = { path = "../types-pgstat" }
 types-storage = { path = "../types-storage" }
 types-adt-misc = { path = "../types-adt-misc" }
 
+# fmgr boundary: the call-frame carrier (FunctionCallInfoBaseData / RefPayload),
+# the Datum word, and the builtin-table registrar this crate's fc_ adapters use.
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # Real owners reached directly (no cycle: nothing depends on this leaf adt crate).
 common-keywords = { path = "../common-keywords" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+# Backend global `MyDatabaseId` (current_database).
+backend-utils-init-small = { path = "../backend-utils-init-small" }
 
 # Cross-unit / unported owners reached through their seam crates (panic until
 # the owner lands).
@@ -34,6 +42,8 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+# `SearchSysCache1(TYPEOID)` projection pg_basetype's domain-walk step reads.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 
 # This unit's own SRF data-production seams (fd.c walk / system_fk_info table).
 backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }

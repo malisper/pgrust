@@ -54,6 +54,8 @@ use backend_storage_ipc_latch_seams::{
     reset_latch_my_latch as reset_latch_my_latch_seam, wait_latch_my_latch as wait_latch_my_latch_seam,
 };
 
+pub mod fmgr_builtins;
+
 #[cfg(test)]
 mod tests;
 
@@ -863,6 +865,15 @@ pub fn any_value_transfn<T>(state: T) -> T {
     state
 }
 
-// This crate owns no inward seams: its functions are SQL-callable leaves that no
-// other crate calls across a cycle, so there is no `-seams` crate and no
-// `init_seams()` to wire into `seams-init`.
+// This crate owns no inward seams: its `misc.c` functions are SQL-callable
+// leaves that no other crate calls across a cycle, so there is no `-seams` crate
+// for it. `init_seams()` exists solely to register this crate's `fmgr_builtins`
+// rows into the fmgr-core builtin table (C: `fmgr_builtins[]`), matching the
+// other adt crates (`oid`/`dbsize`/`mcxtfuncs`/...). `seams-init::init_all` calls
+// it alongside the rest.
+
+/// Register this crate's fmgr builtins into the fmgr-core builtin table. Called
+/// once at startup by `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_misc_builtins();
+}
