@@ -291,14 +291,24 @@ fn set_my_replication_slot(idx: Option<usize>) {
 // Named-lock helpers (route through the lwlock main-array seams).
 // ---------------------------------------------------------------------------
 
+// slot.c acquires the named ReplicationSlotAllocationLock / ControlLock with
+// `LWLockAcquire` and releases them later with an explicit `LWLockRelease`,
+// often spanning a whole function body. The seam's `MainLWLockGuard` would
+// release the lock the instant it is dropped (RAII), so we must NOT let it drop
+// here — `std::mem::forget` the guard and let the matching `unlock_*` helper do
+// the explicit `LWLockRelease`, exactly mirroring C's acquire/release pairing.
 fn lock_allocation(mode: LWLockMode) -> PgResult<()> {
-    lwlock::lwlock_acquire_main::call(REPLICATION_SLOT_ALLOCATION_LOCK, mode).map(|_| ())
+    let guard = lwlock::lwlock_acquire_main::call(REPLICATION_SLOT_ALLOCATION_LOCK, mode)?;
+    std::mem::forget(guard);
+    Ok(())
 }
 fn unlock_allocation() -> PgResult<()> {
     lwlock::lwlock_release_main::call(REPLICATION_SLOT_ALLOCATION_LOCK)
 }
 fn lock_control(mode: LWLockMode) -> PgResult<()> {
-    lwlock::lwlock_acquire_main::call(REPLICATION_SLOT_CONTROL_LOCK, mode).map(|_| ())
+    let guard = lwlock::lwlock_acquire_main::call(REPLICATION_SLOT_CONTROL_LOCK, mode)?;
+    std::mem::forget(guard);
+    Ok(())
 }
 fn unlock_control() -> PgResult<()> {
     lwlock::lwlock_release_main::call(REPLICATION_SLOT_CONTROL_LOCK)
