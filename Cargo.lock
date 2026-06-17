@@ -21750,6 +21750,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-noblock"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "port-noblock-seams",
+ "types-core",
+]
+
+[[package]]
 name = "port-noblock-seams"
 version = "0.0.0"
 dependencies = [
@@ -22423,6 +22432,7 @@ dependencies = [
  "interfaces-libpq-legacy-pqsignal",
  "mcx",
  "port-crc32c",
+ "port-noblock",
  "port-pg-strong-random",
  "port-pgsleep",
  "port-pqsignal",
