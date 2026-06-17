@@ -15,6 +15,8 @@ backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 common-string = { path = "../common-string" }
 
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
 types-error = { path = "../types-error" }
 types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }
@@ -24,6 +26,7 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-tuple = { path = "../types-tuple" }
 types-wchar = { path = "../types-wchar" }
 
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }

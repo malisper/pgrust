@@ -1088,7 +1088,13 @@ fn pg_strcasecmp(s1: &str, s2: &str) -> i32 {
     a.len() as i32 - b.len() as i32
 }
 
+mod fmgr_builtins;
+
 /// `pub fn init_seams()` — collationcmds owns no inward seam (no crate calls
 /// into it across a cycle). Its `*-seams` crate holds only OUTWARD declarations,
-/// installed by their real owners. Empty by design.
-pub fn init_seams() {}
+/// installed by their real owners. It does register its SQL-callable fmgr
+/// builtins (the two collation-management functions) into the fmgr-core builtin
+/// table, so by-OID dispatch resolves them.
+pub fn init_seams() {
+    fmgr_builtins::register_collationcmds_builtins();
+}
