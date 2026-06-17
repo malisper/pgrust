@@ -696,6 +696,7 @@ fn decode_orderby_points(orderbys: &[types_scan::scankey::ScanKeyData<'_>]) -> V
 use backend_access_spg_kdtree as kd;
 use backend_access_spg_text as text;
 use backend_utils_adt_network_spgist as inet;
+use backend_utils_adt_rangetypes_spgist as range;
 
 /// `unrecognized SP-GiST support function OID` — a dispatch to an OID no
 /// installed opclass owns (mirror-PG-and-panic: the SP-GiST core only ever
@@ -734,6 +735,12 @@ fn dispatch_config(
             // The inet opclass writes its config straight into the typed out
             // (CIDROID prefix / VOIDOID label / no explicit leaf type).
             inet::inet_spg_config(_in, out);
+            return Ok(());
+        }
+        range::F_SPG_RANGE_QUAD_CONFIG => {
+            // The range opclass writes its config straight into the typed out
+            // (ANYRANGEOID prefix / VOIDOID label / no explicit leaf type).
+            range::spg_range_quad_config(_in, out);
             return Ok(());
         }
         _ => return Err(unrecognized_proc(proc_oid, "config")),
@@ -801,6 +808,7 @@ fn dispatch_choose<'mcx>(
         }
         text::F_SPG_TEXT_CHOOSE => text::spg_text_choose(mcx, in_, out),
         inet::F_INET_SPG_CHOOSE => inet::inet_spg_choose(mcx, in_, out),
+        range::F_SPG_RANGE_QUAD_CHOOSE => range::spg_range_quad_choose(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "choose")),
     }
 }
@@ -862,6 +870,7 @@ fn dispatch_picksplit<'mcx>(
         }
         text::F_SPG_TEXT_PICKSPLIT => text::spg_text_picksplit(mcx, in_, out),
         inet::F_INET_SPG_PICKSPLIT => inet::inet_spg_picksplit(mcx, in_, out),
+        range::F_SPG_RANGE_QUAD_PICKSPLIT => range::spg_range_quad_picksplit(mcx, in_, out),
         _ => Err(unrecognized_proc(proc_oid, "picksplit")),
     }
 }
@@ -920,6 +929,9 @@ fn dispatch_inner_consistent<'mcx>(
         }
         text::F_SPG_TEXT_INNER_CONSISTENT => text::spg_text_inner_consistent(_mcx, in_, out),
         inet::F_INET_SPG_INNER_CONSISTENT => inet::inet_spg_inner_consistent(in_, out),
+        range::F_SPG_RANGE_QUAD_INNER_CONSISTENT => {
+            range::spg_range_quad_inner_consistent(_mcx, in_, out)
+        }
         _ => Err(unrecognized_proc(proc_oid, "inner_consistent")),
     }
 }
@@ -973,6 +985,9 @@ fn dispatch_leaf_consistent<'mcx>(
         }
         text::F_SPG_TEXT_LEAF_CONSISTENT => text::spg_text_leaf_consistent(mcx, in_, out),
         inet::F_INET_SPG_LEAF_CONSISTENT => inet::inet_spg_leaf_consistent(mcx, in_, out),
+        range::F_SPG_RANGE_QUAD_LEAF_CONSISTENT => {
+            range::spg_range_quad_leaf_consistent(mcx, in_, out)
+        }
         _ => Err(unrecognized_proc(proc_oid, "leaf_consistent")),
     }
 }

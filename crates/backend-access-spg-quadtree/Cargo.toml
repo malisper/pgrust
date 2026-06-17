@@ -21,3 +21,4 @@ backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 backend-access-spg-kdtree = { path = "../backend-access-spg-kdtree" }
 backend-access-spg-text = { path = "../backend-access-spg-text" }
 backend-utils-adt-network-spgist = { path = "../backend-utils-adt-network-spgist" }
+backend-utils-adt-rangetypes-spgist = { path = "../backend-utils-adt-rangetypes-spgist" }
