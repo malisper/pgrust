@@ -13,6 +13,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod fmgr_builtins;
 pub mod pg_controldata;
 pub mod ps_status;
 pub mod rls;
@@ -26,6 +27,10 @@ pub use superuser::*;
 /// Install every seam this crate owns. One installer per seam; see AGENTS.md.
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
+    // Register this crate's SQL-callable fmgr builtins (rls.c) into the
+    // fmgr-core builtin table (C: `fmgr_builtins[]`).
+    fmgr_builtins::register_backend_utils_misc_more_builtins();
 
     // utils/misc/ps_status.c inward seams.
     backend_utils_misc_more_seams::init_ps_display::set(|fixed_part| {
