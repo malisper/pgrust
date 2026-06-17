@@ -18336,10 +18336,13 @@ dependencies = [
  "backend-commands-variable-seams",
  "backend-utils-adt-numeric",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-fmgr-core",
  "backend-utils-init-small-seams",
  "mcx",
  "pg-prng",
+ "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]
