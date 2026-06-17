@@ -876,7 +876,18 @@ seam_core::seam!(pub fn cost_seqscan(root: &mut PlannerInfo, path: PathId, rel: 
 seam_core::seam!(pub fn cost_samplescan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(
     /// `cost_index(IndexPath *path, root, loop_count, partial_path)`.
-    pub fn cost_index(root: &mut PlannerInfo, path: PathId, loop_count: f64, partial_path: bool)
+    ///
+    /// `run` threads the planner-run RTE/Query store so the index-AM
+    /// `amcostestimate` callback can reach `examine_variable` /
+    /// `clauselist_selectivity` (selfuncs.c) — exactly as C's `root` carries
+    /// the parse/range-table the cost estimator walks.
+    pub fn cost_index<'mcx>(
+        root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        path: PathId,
+        loop_count: f64,
+        partial_path: bool,
+    )
 );
 seam_core::seam!(
     /// `cost_bitmap_heap_scan(path, root, rel, bitmapqual, loop_count)`.

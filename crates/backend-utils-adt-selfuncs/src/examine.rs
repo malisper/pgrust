@@ -379,6 +379,48 @@ fn examine_simple_variable<'mcx, 'run>(
     Ok(())
 }
 
+/// `examine_indexcol_variable(root, index, indexcol, vardata)` (selfuncs.c) —
+/// look up statistical data about an index column/expression and fill
+/// `*vardata` (1:1 with the C body). For a simple index column we look to the
+/// stats for the underlying table column; for an expression column we look to
+/// the index's own pg_statistic rows. (The `get_relation_stats_hook` /
+/// `get_index_stats_hook` extension hooks are not modeled — they are always
+/// NULL in the repo.)
+pub(crate) fn examine_indexcol_variable<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &PlannerInfo,
+    index: &types_pathnodes::IndexOptInfo,
+    indexcol: usize,
+    vardata: &mut VariableStatData,
+) -> PgResult<()> {
+    if index.indexkeys[indexcol] != 0 {
+        // Simple variable --- look to stats for the underlying table.
+        let index_rel = index
+            .rel
+            .expect("examine_indexcol_variable: index.rel must be set");
+        let onerel_relid = root.rel(index_rel).relid as Index;
+        let rte = planner_rt_fetch(run, root, onerel_relid);
+        debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+        let relid = rte.relid;
+        let rte_inh = rte.inh;
+        debug_assert!(OidIsValid(relid));
+        let colnum = index.indexkeys[indexcol] as AttrNumber;
+        vardata.rel = Some(index_rel);
+
+        vardata.stats_tuple = search_statrelattinh(mcx, relid, colnum, rte_inh)?;
+        vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+    } else {
+        // Expression --- maybe there are stats for the index itself.
+        let relid = index.indexoid;
+        let colnum = (indexcol + 1) as AttrNumber;
+
+        vardata.stats_tuple = search_statrelattinh(mcx, relid, colnum, false)?;
+        vardata.freefunc = Some(StatsTupleFreeFunc::ReleaseSysCache);
+    }
+    Ok(())
+}
+
 /// The `RTE_SUBQUERY` / `RTE_CTE` recursion branch of [`examine_simple_variable`].
 fn examine_subquery_variable<'mcx, 'run>(
     mcx: Mcx<'mcx>,

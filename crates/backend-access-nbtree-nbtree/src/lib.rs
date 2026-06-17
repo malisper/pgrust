@@ -511,15 +511,24 @@ fn btbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> Pg
     btbuildempty(index_relation)
 }
 
-/// `amcostestimate` adapter — `btcostestimate` (selfuncs.c) is not reachable
-/// from this crate; reached via the #341 dispatch with the real planner nodes.
+/// `amcostestimate` adapter slot. The live index-cost path does NOT flow
+/// through this erased vtable field (the planner has no `types_tableam`-erased
+/// IndexPath to hand it). Instead `cost_index` (costsize.c) calls the
+/// costsize-owned `amcostestimate` seam over the real planner nodes, which
+/// dispatches on `index->relam` into `btcostestimate`/`genericcostestimate`
+/// (selfuncs.c, owned by `backend-utils-adt-selfuncs`). This vtable slot stays
+/// a (currently unreachable) #341 placeholder until the AM vtable carries the
+/// real planner state; reaching it would be a bug, so it guards loudly.
 fn btcostestimate_am<'mcx>(
     _mcx: Mcx<'mcx>,
     _root: &mut PlannerInfo,
     _path: &mut IndexPath,
     _loop_count: f64,
 ) -> PgResult<AmCostEstimate> {
-    panic!("btcostestimate: index cost estimation (selfuncs.c) not yet reachable from nbtree (#341)")
+    panic!(
+        "btcostestimate_am: erased vtable cost slot is not on the live path; \
+         index cost flows through the costsize `amcostestimate` seam into selfuncs.c (#341)"
+    )
 }
 
 /// `amgettreeheight` adapter — wires this crate's `btgettreeheight`.

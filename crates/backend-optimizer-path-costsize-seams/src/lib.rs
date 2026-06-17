@@ -210,8 +210,41 @@ seam_core::seam!(
     pub fn get_tablespace_page_costs(spcid: Oid) -> TablespacePageCosts
 );
 seam_core::seam!(
+    /// `cpu_operator_cost` (costsize.c GUC global) — read by `genericcostestimate`
+    /// / `btcostestimate` (selfuncs.c) across the dependency cycle.
+    pub fn cpu_operator_cost() -> f64
+);
+seam_core::seam!(
+    /// `cpu_index_tuple_cost` (costsize.c GUC global) — read by
+    /// `genericcostestimate` (selfuncs.c) across the dependency cycle.
+    pub fn cpu_index_tuple_cost() -> f64
+);
+seam_core::seam!(
+    /// `index_pages_fetched(tuples_fetched, pages, index_pages, root)`
+    /// (costsize.c) — the Mackert and Lohman cache-effect page-fetch estimate.
+    /// `genericcostestimate` (selfuncs.c) calls this across the dependency
+    /// cycle (selfuncs sits below costsize).
+    pub fn index_pages_fetched(
+        tuples_fetched: f64,
+        pages: u32,
+        index_pages: f64,
+        root: &PlannerInfo,
+    ) -> f64
+);
+seam_core::seam!(
     /// `OidFunctionCall...` the index AM's `amcostestimate` (index AM dispatch).
-    pub fn amcostestimate(root: &PlannerInfo, path: PathId, loop_count: f64) -> AmCostEstimate
+    ///
+    /// `run` threads the planner-run RTE/Query store the AM cost routine
+    /// (`btcostestimate`/`genericcostestimate`, selfuncs.c) needs to reach
+    /// `examine_variable` / `clauselist_selectivity`. `root` is `&mut` because
+    /// those examine the variable stats (re-interning stripped exprs into the
+    /// planner node arena).
+    pub fn amcostestimate<'mcx>(
+        root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        path: PathId,
+        loop_count: f64,
+    ) -> AmCostEstimate
 );
 seam_core::seam!(
     /// `compute_parallel_worker(rel, heap_pages, index_pages, max_workers)`.

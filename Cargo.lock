@@ -18730,6 +18730,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-joinpath-seams",
@@ -18737,6 +18738,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-plancat-ext-seams",
+ "backend-optimizer-util-predtest-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-optimizer-util-var-seams",
  "backend-parser-clause",
@@ -18758,6 +18760,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-scan",
  "types-selfuncs",
  "types-statistics",
 ]

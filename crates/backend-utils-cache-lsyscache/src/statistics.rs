@@ -22,6 +22,14 @@ use types_selfuncs::{
 };
 
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
+
+/// `FLOAT4OID` (`pg_type.dat`) — the `float4` (`real`) type OID. The
+/// `pg_statistic.stanumbers` array is always `float4[]`.
+const FLOAT4OID: Oid = 700;
+/// `pg_type` storage attributes of `float4` (`pg_type.dat`): 4-byte, pass-by-
+/// value, int-aligned. `get_attstatsslot`'s NUMBERS slot decodes with these.
+const FLOAT4_TYPLEN: i16 = 4;
+const FLOAT4_TYPALIGN: u8 = b'i';
 use backend_utils_cache_lsyscache_seams as own_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_cache_syscache_seams::STATISTIC_NUM_SLOTS;
@@ -138,12 +146,26 @@ pub fn get_attstatsslot<'mcx>(
 
         // statarray = DatumGetArrayTypePCopy(val);
         // verify 1-D float4 no-nulls array; sslot->numbers = ARR_DATA_PTR;
-        // sslot->nnumbers = narrayelem;  (the validation + extraction is the
-        // arrayfuncs owner's concern). In C `numbers` points into the detoasted
-        // array kept in numbers_arr; the owned model holds an mcx copy whose
-        // Drop subsumes free_attstatsslot's pfree.
-        let val = Datum::from_usize(val.as_usize());
-        numbers = arrayfuncs_seams::array_get_float4_values::call(mcx, val)?;
+        // sslot->nnumbers = narrayelem.  The `stanumbers` attribute is always a
+        // 1-D `float4[]` (pg_statistic.h). The syscache projection yields the
+        // value as the canonical `Datum::ByRef` on-disk array byte image; decode
+        // it directly via the bytes-form `deconstruct_array_values_bytes` (which,
+        // unlike the pointer-word `array_get_float4_values`, accepts the owned
+        // byte image rather than a C pointer word). Each element is a `float4`
+        // by-value `Datum`. The mcx copies subsume `free_attstatsslot`'s pfree.
+        let elems = arrayfuncs_seams::deconstruct_array_values_bytes::call(
+            mcx,
+            val.as_ref_bytes(),
+            FLOAT4OID,
+            FLOAT4_TYPLEN,
+            true,
+            FLOAT4_TYPALIGN as core::ffi::c_char,
+        )?;
+        let mut out: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+        for (datum, _isnull) in elems.iter() {
+            out.push(datum.as_f32());
+        }
+        numbers = out;
     }
 
     Ok(Some(AttStatsSlot {

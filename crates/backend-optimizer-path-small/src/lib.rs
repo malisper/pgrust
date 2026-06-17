@@ -361,6 +361,29 @@ pub fn clauselist_selectivity<'mcx>(
     clauselist_selectivity_ext(run, root, clauses, var_relid, jointype, sjinfo, true)
 }
 
+/// `clauselist_selectivity(root, clauses, ...)` (clausesel.c) — the
+/// **mixed-list** seam form, where `clauses` may contain both `RestrictInfo`
+/// handles and bare `Expr` predicate elements (the C `selectivityQuals` that
+/// `add_predicate_to_index_quals` returns). Maps each
+/// [`ClauseListEntry`](seam::ClauseListEntry) to the internal [`ListEntry`].
+pub fn clauselist_selectivity_mixed<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clauses: &[seam::ClauseListEntry],
+    var_relid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> PgResult<f64> {
+    let entries: Vec<ListEntry> = clauses
+        .iter()
+        .map(|e| match e {
+            seam::ClauseListEntry::Rinfo(r) => ListEntry::Rinfo(*r),
+            seam::ClauseListEntry::Bare(x) => ListEntry::Bare(x.clone()),
+        })
+        .collect();
+    clauselist_selectivity_ext_entries(run, root, &entries, var_relid, jointype, sjinfo, true)
+}
+
 /// `clauselist_selectivity_ext(root, clauses, varRelid, jointype, sjinfo,
 /// use_extended_stats)` (clausesel.c). Public entry over the [`RinfoId`] list
 /// (the seam form); delegates to the [`ListEntry`] core.
@@ -1735,6 +1758,7 @@ fn clause_selectivity_nodes<'mcx>(
 /// single-threaded startup from `seams-init`.
 pub fn init_seams() {
     seam::clauselist_selectivity::set(clauselist_selectivity);
+    seam::clauselist_selectivity_mixed::set(clauselist_selectivity_mixed);
     seam::clause_selectivity::set(clause_selectivity);
     seam::clause_selectivity_node::set(clause_selectivity_node);
     // costsize.c selectivity seams (bare clause-node form).

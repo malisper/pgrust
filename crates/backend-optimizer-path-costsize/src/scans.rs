@@ -162,7 +162,13 @@ fn extract_nonindex_conditions(
 }
 
 /// `cost_index` (costsize.c:559) — fills an `IndexPath` (by `PathId`).
-pub fn cost_index(root: &mut PlannerInfo, path_id: PathId, loop_count: f64, partial_path: bool) {
+pub fn cost_index<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    path_id: PathId,
+    loop_count: f64,
+    partial_path: bool,
+) {
     let (baserel_id, indexonly, index_total_pages, indrestrictinfo) = {
         let ip = expect_index_path(root, path_id);
         let index = ip
@@ -212,8 +218,8 @@ pub fn cost_index(root: &mut PlannerInfo, path_id: PathId, loop_count: f64, part
 
     set_index_disabled(root, path_id, if ENABLE_INDEXSCAN { 0 } else { 1 });
 
-    // amcostestimate (M1-gated index-AM cost callback).
-    let am = cz::amcostestimate::call(root, path_id, loop_count);
+    // amcostestimate (index-AM cost callback).
+    let am = cz::amcostestimate::call(root, run, path_id, loop_count);
     let index_startup_cost = am.index_startup_cost;
     let index_total_cost = am.index_total_cost;
     let index_selectivity = am.index_selectivity;

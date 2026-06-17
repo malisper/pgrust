@@ -249,7 +249,7 @@ pub fn create_index_path<'mcx>(
         indexselectivity: 0.0,
     };
     let id = root.alloc_path(PathNode::IndexPath(pathnode));
-    seam::cost_index::call(root, id, loop_count, partial_path);
+    seam::cost_index::call(root, run, id, loop_count, partial_path);
     Ok(id)
 }
 

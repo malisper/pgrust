@@ -17,6 +17,7 @@ types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }
 types-statistics = { path = "../types-statistics" }
+types-scan = { path = "../types-scan" }
 types-acl = { path = "../types-acl" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
@@ -39,6 +40,8 @@ backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-claus
 backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }

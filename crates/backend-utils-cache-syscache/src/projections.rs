@@ -43,7 +43,7 @@ use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted};
 use types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
     EnumTupleData};
-use backend_utils_cache_syscache_seams::{PgClassFullForm, PgOperatorForm, PgProcForm};
+use backend_utils_cache_syscache_seams::{AmopOpidRow, PgClassFullForm, PgOperatorForm, PgProcForm};
 use types_cache::AuthIdRow;
 use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
@@ -104,6 +104,8 @@ const Anum_pg_amop_amoprighttype: i32 = 4;
 const Anum_pg_amop_amopstrategy: i32 = 5;
 const Anum_pg_amop_amoppurpose: i32 = 6;
 const Anum_pg_amop_amopopr: i32 = 7;
+const Anum_pg_amop_amopmethod: i32 = 8;
+const Anum_pg_amop_amopfamily: i32 = 2;
 const Anum_pg_amop_amopsortfamily: i32 = 9;
 
 // `catalog/pg_proc.h` attribute numbers.
@@ -369,6 +371,41 @@ pub(crate) fn search_amop_list<'mcx>(
         });
     }
     Ok(rows)
+}
+
+/// `SearchSysCache4(AMOPSTRATEGY, ObjectIdGetDatum(opfamily),
+/// ObjectIdGetDatum(lefttype), ObjectIdGetDatum(righttype),
+/// Int16GetDatum(strategy))` projected to [`AmopOpidRow`] (`get_opfamily_member`,
+/// lsyscache.c). `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
+pub(crate) fn amop_by_strategy_full(
+    opfamily: Oid,
+    lefttype: Oid,
+    righttype: Oid,
+    strategy: i16,
+) -> PgResult<Option<AmopOpidRow>> {
+    let scratch = MemoryContext::new("syscache amop_by_strategy_full projection");
+    let mcx = scratch.mcx();
+    let tuple = crate::SearchSysCache(
+        mcx,
+        AMOPSTRATEGY,
+        SysCacheKey::Value(KeyDatum::from_oid(opfamily)),
+        SysCacheKey::Value(KeyDatum::from_oid(lefttype)),
+        SysCacheKey::Value(KeyDatum::from_oid(righttype)),
+        SysCacheKey::Value(KeyDatum::from_i16(strategy)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = AmopOpidRow {
+        amopmethod: getattr_oid(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amopmethod)?,
+        amopfamily: getattr_oid(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amopfamily)?,
+        amopstrategy: getattr_i16(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amopstrategy)?,
+        amoplefttype: getattr_oid(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amoplefttype)?,
+        amoprighttype: getattr_oid(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amoprighttype)?,
+        amopopr: getattr_oid(mcx, AMOPSTRATEGY, &tup, Anum_pg_amop_amopopr)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
 }
 
 /// `SearchSysCacheList1(AMPROCNUM, ObjectIdGetDatum(opfamilyoid))` member

@@ -118,8 +118,12 @@ pub(crate) fn cpu_tuple_cost() -> f64 {
     CPU_TUPLE_COST
 }
 #[inline]
-pub(crate) fn cpu_operator_cost() -> f64 {
+pub fn cpu_operator_cost() -> f64 {
     CPU_OPERATOR_COST
+}
+#[inline]
+pub fn cpu_index_tuple_cost() -> f64 {
+    CPU_INDEX_TUPLE_COST
 }
 #[inline]
 pub(crate) fn parallel_tuple_cost() -> f64 {

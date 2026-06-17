@@ -57,6 +57,34 @@ seam_core::seam!(
     ) -> PgResult<f64>
 );
 
+/// An element of a `clauselist_selectivity` clause `List` that mixes
+/// `RestrictInfo *` elements with bare `Expr *` elements (the C
+/// `rinfo == NULL` elements). `selfuncs.c`'s `add_predicate_to_index_quals`
+/// builds exactly such a mixed list (the index-bound RestrictInfos plus the
+/// partial-index predicate, which is a bare `Node *`).
+#[derive(Clone)]
+pub enum ClauseListEntry {
+    /// A `RestrictInfo` element (an index-qual RestrictInfo handle).
+    Rinfo(RinfoId),
+    /// A bare `Expr *` element (a partial-index predicate clause).
+    Bare(Expr),
+}
+
+seam_core::seam!(
+    /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)`
+    /// (clausesel.c) — the **mixed-list** form, where `clauses` may contain
+    /// both `RestrictInfo` handles and bare `Expr` predicate elements (the C
+    /// `selectivityQuals` that `add_predicate_to_index_quals` returns).
+    pub fn clauselist_selectivity_mixed<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        clauses: &[ClauseListEntry],
+        var_relid: i32,
+        jointype: JoinType,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> PgResult<f64>
+);
+
 seam_core::seam!(
     /// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)`
     /// (clausesel.c): selectivity of a single `RestrictInfo`, identified by its

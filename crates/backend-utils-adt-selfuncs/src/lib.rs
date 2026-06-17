@@ -43,6 +43,7 @@
 
 extern crate alloc;
 
+pub mod cost;
 pub mod dispatch;
 pub mod entry;
 pub mod examine;
@@ -85,6 +86,12 @@ pub fn init_seams() {
     backend_optimizer_path_small_seams::nulltestsel::set(node_sel::seam_nulltestsel);
     backend_optimizer_path_small_seams::nulltestsel_var::set(node_sel::seam_nulltestsel);
     backend_optimizer_path_small_seams::rowcomparesel::set(node_sel::seam_rowcomparesel);
+
+    // The index-AM cost-estimation family (genericcostestimate/btcostestimate),
+    // reached through costsize.c's `amcostestimate` dispatch.
+    backend_optimizer_path_costsize_seams::amcostestimate::set(
+        |root, run, path, loop_count| cost::seam_amcostestimate(root, run, path, loop_count),
+    );
 }
 
 /* ---------------------------------------------------------------------------

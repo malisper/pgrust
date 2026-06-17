@@ -71,6 +71,11 @@ pub fn init_seams() {
         .expect("get_tablespace_page_costs");
         cz::TablespacePageCosts { spc_random_page_cost, spc_seq_page_cost }
     });
+    cz::index_pages_fetched::set(|tuples_fetched, pages, index_pages, root| {
+        crate::index_pages_fetched(tuples_fetched, pages, index_pages, root)
+    });
+    cz::cpu_operator_cost::set(crate::cpu_operator_cost);
+    cz::cpu_index_tuple_cost::set(crate::cpu_index_tuple_cost);
 
     /* ---- other costsize.c-owned GUC getters consumed elsewhere -------- */
     // `enable_partitionwise_join` (costsize.c GUC, default OFF) read by

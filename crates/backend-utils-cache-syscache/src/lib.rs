@@ -895,6 +895,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);
     backend_utils_cache_syscache_seams::search_opclass::set(projections::search_opclass);
     backend_utils_cache_syscache_seams::search_amop_list::set(projections::search_amop_list);
+    backend_utils_cache_syscache_seams::amop_by_strategy_full::set(projections::amop_by_strategy_full);
     backend_utils_cache_syscache_seams::search_amproc_list::set(projections::search_amproc_list);
     backend_utils_cache_syscache_seams::search_amproc_list2::set(projections::search_amproc_list2);
     backend_utils_cache_syscache_seams::search_opclass_list_by_am::set(
