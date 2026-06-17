@@ -343,6 +343,17 @@ fn install_guc_tables_owned_vars() {
         set: backing::set_num_os_semaphores,
     });
 
+    // postmaster.c-owned connection-limit GUCs (backed here until postmaster
+    // lands as a GUC owner). Read by InitPostgres/CheckRequiredParameterValues.
+    vars::SuperuserReservedConnections.install(GucVarAccessors {
+        get: backing::SuperuserReservedConnections,
+        set: backing::set_SuperuserReservedConnections,
+    });
+    vars::ReservedConnections.install(GucVarAccessors {
+        get: backing::ReservedConnections,
+        set: backing::set_ReservedConnections,
+    });
+
     // --- enum (stored as int) ---
     vars::huge_pages.install(GucVarAccessors {
         get: backing::huge_pages,

@@ -218,6 +218,24 @@ int_var!(
 );
 int_var!(I_num_os_semaphores, num_os_semaphores, set_num_os_semaphores, 0);
 
+// ---- int GUCs whose C `conf->variable` lives in postmaster.c -------------
+// (`SuperuserReservedConnections`, `ReservedConnections`). The postmaster unit
+// is not yet ported as a GUC owner, so the process-global backing lives here
+// (the same shape as the guc_tables.c-owned ints above); init-small's globals.c
+// reader shims read them through the GUC slot. Boot vals from guc_tables.c.
+int_var!(
+    I_SuperuserReservedConnections,
+    SuperuserReservedConnections,
+    set_SuperuserReservedConnections,
+    3
+);
+int_var!(
+    I_ReservedConnections,
+    ReservedConnections,
+    set_ReservedConnections,
+    0
+);
+
 // ---- enum GUCs (guc_tables.c) — stored as the int the enum maps to -------
 
 // HUGE_PAGES_OFF=0, ON=1, TRY=2 (boot for huge_pages), UNKNOWN=3 (boot for
