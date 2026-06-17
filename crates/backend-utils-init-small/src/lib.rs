@@ -200,14 +200,17 @@ pub fn init_seams() {
     // is `&NBuffers`, already installed above via `vars::NBuffers`.
     // `max_connections` is likewise absent: it has no `vars::` slot, only its
     // globals.c-seam accessor (installed above).
-    vars::serializable_buffers.install(GucVarAccessors {
-        get: globals::serializable_buffers,
-        set: globals::set_serializable_buffers,
-    });
-    vars::commit_timestamp_buffers.install(GucVarAccessors {
-        get: globals::commit_timestamp_buffers,
-        set: globals::set_commit_timestamp_buffers,
-    });
+    // `serializable_buffers` is intentionally absent here: although its C
+    // `conf->variable` is the `globals.c` int, the `serializable_buffers` GUC
+    // accessor is already installed by the predicate.c owner crate
+    // (backend-storage-lmgr-predicate), which reads it at shmem-sizing time
+    // (PredicateLockShmemSize). Installing it here too would double-install the
+    // same slot. Single owner = predicate.
+    // `commit_timestamp_buffers` is intentionally absent here: like
+    // `serializable_buffers`, its C `conf->variable` is the `globals.c` int, but
+    // the GUC accessor is already installed by its consuming SLRU owner crate
+    // (backend-access-transam-commit-ts), which reads it at shmem-sizing time
+    // (CommitTsShmemBuffers). Single owner = commit-ts.
     vars::VacuumBufferUsageLimit.install(GucVarAccessors {
         get: globals::VacuumBufferUsageLimit,
         set: globals::SetVacuumBufferUsageLimit,
