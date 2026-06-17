@@ -29,3 +29,6 @@ backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" 
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-prepjointree-seams" }
+# tlist.c owns create_empty_pathtarget(); relnode.c reaches it through the
+# relnode-ext consumer-side seam crate (no owner dir). This is its real owner.
+backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }

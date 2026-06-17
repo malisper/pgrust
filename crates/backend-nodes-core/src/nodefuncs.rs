@@ -1526,11 +1526,41 @@ pub fn init_seams() {
     seams::get_sortgroupref_tle::set(seam_get_sortgroupref_tle);
     seams::get_sortgroupclause_expr::set(seam_get_sortgroupclause_expr);
     seams::get_sortgroupref_clause_noerr::set(seam_get_sortgroupref_clause_noerr);
+
+    // costsize.c reaches `exprType((Node *) expr)` / `exprTypmod(...)` over
+    // arena-resolved planner nodes (set_rel_width, get_expr_width). The
+    // `(root, NodeId)` costsize-seams resolve the node here and dispatch to this
+    // unit's nodeFuncs.c port. The underlying impls are infallible for the
+    // node kinds reached; a propagated error is a loud panic (mirrors C's
+    // elog(ERROR) on an unrecognized node tag).
+    {
+        use backend_optimizer_path_costsize_seams as cz;
+        cz::expr_type::set(seam_costsize_expr_type);
+        cz::expr_typmod::set(seam_costsize_expr_typmod);
+    }
     // `get_expr_result_type_node` reaches into funcapi/tupdesc catalog machinery
     // owned by backend-utils-fmgr-funcapi (CreateTemplateTupleDesc /
     // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
     // lookup spine is not part of this pure-node-inspection family, so the seam
     // stays installed by its real owner. Not set here.
+}
+
+/// `exprType((Node *) expr)` (nodeFuncs.c) over an arena-resolved planner node.
+/// costsize.c's `expr_type` seam: resolve the `NodeId` to its `Expr` in the
+/// planner node arena, then call this unit's `expr_type`.
+fn seam_costsize_expr_type(
+    root: &types_pathnodes::PlannerInfo,
+    node: types_pathnodes::NodeId,
+) -> Oid {
+    expr_type(Some(root.node(node))).expect("exprType")
+}
+
+/// `exprTypmod((Node *) expr)` (nodeFuncs.c) over an arena-resolved planner node.
+fn seam_costsize_expr_typmod(
+    root: &types_pathnodes::PlannerInfo,
+    node: types_pathnodes::NodeId,
+) -> i32 {
+    expr_typmod(Some(root.node(node))).expect("exprTypmod")
 }
 
 /// `sortgroupclause_info(root, sortcl)` seam — read the `SortGroupClause` fields

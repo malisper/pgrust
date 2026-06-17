@@ -81,4 +81,9 @@ pub fn init_seams() {
     backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::set(
         flatten::flatten_join_alias_vars,
     );
+    // `create_empty_pathtarget` lives in tlist.c (this owner); relnode.c reaches
+    // it via the relnode-ext consumer-side seam crate.
+    backend_optimizer_util_relnode_ext_seams::create_empty_pathtarget::set(
+        tlist::create_empty_pathtarget,
+    );
 }

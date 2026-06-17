@@ -23,3 +23,11 @@ backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-r
 backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 types-selfuncs = { path = "../types-selfuncs" }
+# cost_qual_eval_walker dispatches on the Expr node vocabulary (nodeFuncs.c
+# expression_tree_walker / exprType), resolves opfuncid via get_opcode and type
+# I/O funcs (lsyscache.c), and reads array lengths (clauses.c
+# estimate_array_length over an inline &Expr). These owners depend only on
+# *-seams leaves of costsize, never on this owner crate — no cycle.
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }

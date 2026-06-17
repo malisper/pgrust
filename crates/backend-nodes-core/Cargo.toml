@@ -40,3 +40,7 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-nodes-readfuncs-seams = { path = "../backend-nodes-readfuncs-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+# costsize.c calls exprType/exprTypmod over arena-resolved planner nodes; the
+# `(root, NodeId)` seams resolve via PlannerInfo and dispatch to nodeFuncs.c
+# (this owner). Leaf seam crate — no cycle.
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }

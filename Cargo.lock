@@ -10990,6 +10990,7 @@ dependencies = [
  "backend-nodes-params-seams",
  "backend-nodes-read-seams",
  "backend-nodes-readfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ruleutils-seams",
@@ -11247,13 +11248,16 @@ dependencies = [
 name = "backend-optimizer-path-costsize"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-core",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-plan-planner-pc-seams",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-ext-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -12031,6 +12035,7 @@ dependencies = [
 name = "backend-optimizer-util-pathnode"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-equalfuncs-seams",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-pathnode-seams",
@@ -12199,6 +12204,7 @@ dependencies = [
  "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-prep-prepjointree-seams",
+ "backend-optimizer-util-relnode-ext-seams",
  "backend-optimizer-util-var-seams",
  "backend-rewrite-core",
  "backend-rewrite-rewritemanip-seams",
@@ -16289,6 +16295,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-main-main-seams",
  "backend-optimizer-plan-planner-seams",
+ "backend-optimizer-util-pathnode-seams",
  "backend-parser-analyze",
  "backend-parser-analyze-seams",
  "backend-parser-driver",
@@ -19188,6 +19195,7 @@ dependencies = [
  "backend-nodes-copyfuncs-pc-seams",
  "backend-nodes-makefuncs-seams",
  "backend-nodes-read-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",

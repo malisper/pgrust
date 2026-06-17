@@ -206,4 +206,19 @@ pub fn init_seams() {
     seams::get_publication_name::set(namespace_range_index_pubsub::get_publication_name);
     seams::get_subscription_oid::set(namespace_range_index_pubsub::get_subscription_oid);
     seams::get_subscription_name::set(namespace_range_index_pubsub::get_subscription_name);
+
+    // costsize.c reaches get_typavgwidth/get_attavgwidth (lsyscache.c, this
+    // owner) through the costsize-seams' infallible variants. Both C callers
+    // (set_rel_width / set_pathtarget_cost_width) use the value directly; an
+    // error here is a loud panic mirroring lsyscache.c's elog(ERROR) on a
+    // missing/corrupt pg_type/pg_statistic row.
+    {
+        use backend_optimizer_path_costsize_seams as cz;
+        cz::get_typavgwidth::set(|typid, typmod| {
+            type_::get_typavgwidth(typid, typmod).expect("get_typavgwidth")
+        });
+        cz::get_attavgwidth::set(|relid, attnum| {
+            statistics::get_attavgwidth(relid, attnum).expect("get_attavgwidth")
+        });
+    }
 }

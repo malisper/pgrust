@@ -2162,7 +2162,56 @@ fn create_subqueryscan_plan<'mcx>(
 /// (index/bitmap/tid/subquery/function/cte/foreign/…), `create_gating_plan`,
 /// and the non-scan converter arms are installed by the later scan / join /
 /// append / upper F-families.
+/// `is_projection_capable_path(path)` (createplan.c:7392) — can the plan this
+/// Path would produce do projection? Most plan types can; this lists the ones
+/// that can't. Read off `path->pathtype` (the plan-node tag), with the two
+/// data-dependent cases (CustomScan flags, dummy Append) inspecting the
+/// `PathNode` variant.
+pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
+    use types_nodes::nodes as ntag;
+    let node = root.path(path);
+    let pathtype = node.base().pathtype;
+
+    // T_Hash / T_Material / T_Memoize / T_Sort / T_IncrementalSort / T_Unique /
+    // T_SetOp / T_LockRows / T_Limit / T_ModifyTable / T_MergeAppend /
+    // T_RecursiveUnion — these can't project.
+    if pathtype == types_nodes::nodehashjoin::T_Hash
+        || pathtype == ntag::T_Material
+        || pathtype == types_nodes::nodememoize::T_Memoize
+        || pathtype == ntag::T_Sort
+        || pathtype == types_nodes::nodeincrementalsort::T_IncrementalSort
+        || pathtype == types_nodes::nodeunique::T_Unique
+        || pathtype == ntag::T_SetOp
+        || pathtype == ntag::T_LockRows
+        || pathtype == ntag::T_Limit
+        || pathtype == types_nodes::modifytable::T_ModifyTable
+        || pathtype == ntag::T_MergeAppend
+        || pathtype == types_nodes::noderecursiveunion::T_RecursiveUnion
+    {
+        return false;
+    }
+    if pathtype == ntag::T_CustomScan {
+        // CustomScan can project iff it advertises CUSTOMPATH_SUPPORT_PROJECTION.
+        if let PathNode::CustomPath(cp) = node {
+            return cp.flags & types_pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0;
+        }
+        return false;
+    }
+    if pathtype == ntag::T_Append {
+        // Append can't project, but a dummy AppendPath actually generates a
+        // Result, which can. IS_DUMMY_APPEND(p): IsA(p, AppendPath) && subpaths==NIL.
+        return matches!(node, PathNode::AppendPath(ap) if ap.subpaths.is_empty());
+    }
+    if pathtype == types_nodes::nodeprojectset::T_ProjectSet {
+        // ProjectSet projects, but say "no" so the planner won't replace its
+        // tlist; the SRFs must stay at top level.
+        return false;
+    }
+    true
+}
+
 pub fn init_seams() {
+    pathnode::is_projection_capable_path::set(is_projection_capable_path);
     cp_seam::create_scan_plan::set(create_scan_plan);
     // F2c simple scan converters.
     cp_seam::create_seqscan_plan::set(create_seqscan_plan);

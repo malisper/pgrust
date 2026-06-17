@@ -39,3 +39,6 @@ backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" 
 types-nodes = { path = "../types-nodes" }
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+# costsize.c reaches get_typavgwidth/get_attavgwidth (lsyscache.c, this owner)
+# through these costsize-seams. Leaf seam crate — no cycle.
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }

@@ -988,10 +988,34 @@ const Anum_pg_class_relfrozenxid: i32 = 30;
 const Anum_pg_class_relminmxid: i32 = 31;
 
 // `catalog/pg_type.h` attribute numbers.
+const Anum_pg_type_oid: i32 = 1;
+const Anum_pg_type_typname: i32 = 2;
+const Anum_pg_type_typnamespace: i32 = 3;
+const Anum_pg_type_typowner: i32 = 4;
 const Anum_pg_type_typlen: i32 = 5;
 const Anum_pg_type_typbyval: i32 = 6;
+const Anum_pg_type_typtype: i32 = 7;
+const Anum_pg_type_typcategory: i32 = 8;
+const Anum_pg_type_typispreferred: i32 = 9;
+const Anum_pg_type_typisdefined: i32 = 10;
+const Anum_pg_type_typdelim: i32 = 11;
+const Anum_pg_type_typrelid: i32 = 12;
+const Anum_pg_type_typsubscript: i32 = 13;
+const Anum_pg_type_typelem: i32 = 14;
+const Anum_pg_type_typarray: i32 = 15;
+const Anum_pg_type_typinput: i32 = 16;
+const Anum_pg_type_typoutput: i32 = 17;
+const Anum_pg_type_typreceive: i32 = 18;
+const Anum_pg_type_typsend: i32 = 19;
+const Anum_pg_type_typmodin: i32 = 20;
+const Anum_pg_type_typmodout: i32 = 21;
+const Anum_pg_type_typanalyze: i32 = 22;
 const Anum_pg_type_typalign: i32 = 23;
 const Anum_pg_type_typstorage: i32 = 24;
+const Anum_pg_type_typnotnull: i32 = 25;
+const Anum_pg_type_typbasetype: i32 = 26;
+const Anum_pg_type_typtypmod: i32 = 27;
+const Anum_pg_type_typndims: i32 = 28;
 const Anum_pg_type_typcollation: i32 = 29;
 
 // `catalog/pg_proc.h` attribute numbers.
@@ -1648,6 +1672,56 @@ pub(crate) fn search_type_attr_info(oidtypeid: Oid) -> PgResult<Option<PgTypeInf
     };
     ReleaseSysCache(tup);
     Ok(Some(info))
+}
+
+/// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid))` + `GETSTRUCT(Form_pg_type)`
+/// (`utils/cache/lsyscache.c` reads). Projects the fixed-width `pg_type` columns
+/// by value (every field through `typcollation`), `Ok(None)` on a cache miss so
+/// the caller raises its own `cache lookup failed for type %u` `elog(ERROR)`.
+pub(crate) fn pg_type_form(
+    typid: Oid,
+) -> PgResult<Option<types_tuple::pg_type::FormData_pg_type>> {
+    let scratch = MemoryContext::new("pg_type_form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_tuple::pg_type::FormData_pg_type {
+        oid: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_oid)?,
+        typname: types_tuple::heaptuple::NameData {
+            data: getattr_namedata(mcx, TYPEOID, &tup, Anum_pg_type_typname)?,
+        },
+        typnamespace: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typnamespace)?,
+        typowner: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typowner)?,
+        typlen: getattr_i16(mcx, TYPEOID, &tup, Anum_pg_type_typlen)?,
+        typbyval: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typbyval)?,
+        typtype: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typtype)?,
+        typcategory: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typcategory)?,
+        typispreferred: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typispreferred)?,
+        typisdefined: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typisdefined)?,
+        typdelim: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typdelim)?,
+        typrelid: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typrelid)?,
+        typsubscript: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typsubscript)?,
+        typelem: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typelem)?,
+        typarray: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typarray)?,
+        typinput: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typinput)?,
+        typoutput: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typoutput)?,
+        typreceive: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typreceive)?,
+        typsend: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typsend)?,
+        typmodin: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typmodin)?,
+        typmodout: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typmodout)?,
+        typanalyze: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typanalyze)?,
+        typalign: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typalign)?,
+        typstorage: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typstorage)?,
+        typnotnull: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typnotnull)?,
+        typbasetype: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typbasetype)?,
+        typtypmod: getattr_i32(mcx, TYPEOID, &tup, Anum_pg_type_typtypmod)?,
+        typndims: getattr_i32(mcx, TYPEOID, &tup, Anum_pg_type_typndims)?,
+        typcollation: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typcollation)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
 }
 
 /// `GetSysCacheOid3(CLAAMNAMENSP, Anum_pg_opclass_oid, amid, opcname, nsp)`.
@@ -2395,12 +2469,9 @@ const Anum_pg_class_relacl: i32 = 13;
 const Anum_pg_attribute_attacl: i32 = 22;
 const Anum_pg_attribute_attisdropped_acl: i32 = 17;
 
-// `catalog/pg_type.h` attribute numbers (ACL path).
-const Anum_pg_type_typowner: i32 = 4;
-const Anum_pg_type_typtype: i32 = 7;
-const Anum_pg_type_typsubscript: i32 = 13;
-const Anum_pg_type_typelem: i32 = 14;
-const Anum_pg_type_oid: i32 = 1;
+// `catalog/pg_type.h` attribute numbers (ACL path). The shared columns
+// (`oid`/`typowner`/`typtype`/`typsubscript`/`typelem`) are defined once in the
+// consolidated `pg_type.h` block above.
 const Anum_pg_type_typacl: i32 = 32;
 
 // `catalog/pg_parameter_acl.h` ACL attribute number (`paracl[1]`).

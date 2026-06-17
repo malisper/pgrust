@@ -91,6 +91,13 @@ fn quickdie_handler(signo: i32) {
 pub fn init_seams() {
     // --- F3: interrupt / signal machinery ---
     s::check_for_interrupts::set(interrupt::check_for_interrupts);
+    // pathnode.c (the optimizer) calls the same `CHECK_FOR_INTERRUPTS()` macro
+    // through pathnode-seams' infallible `()` variant. The body is identical; a
+    // genuine pending cancel surfaces (mirroring C's longjmp) rather than being
+    // silently swallowed, so unwrap rather than drop the error.
+    backend_optimizer_util_pathnode_seams::check_for_interrupts::set(|| {
+        interrupt::check_for_interrupts().expect("CHECK_FOR_INTERRUPTS")
+    });
     s::process_client_read_interrupt::set(interrupt::ProcessClientReadInterrupt);
     s::process_client_write_interrupt::set(interrupt::ProcessClientWriteInterrupt);
     s::handle_recovery_conflict_interrupt::set(interrupt::HandleRecoveryConflictInterrupt);

@@ -750,6 +750,20 @@ pub fn init_seams() {
     ps::reparameterize_path::set(create::reparameterize_path);
     ps::reparameterize_path_by_child::set(create::reparameterize_path_by_child);
     ps::path_is_reparameterizable_by_child::set(create::path_is_reparameterizable_by_child);
+    ps::equal_exprs::set(equal_exprs);
+}
+
+/// `equal((Node *) a, (Node *) b)` over two tlists of expression handles
+/// (`apply_projection_to_path`, pathnode.c). `equal()` on two Lists compares
+/// length first, then element-wise; here each element is an `Expr` resolved
+/// from the planner node arena and compared via the equalfuncs.c `equal` seam.
+fn equal_exprs(root: &PlannerInfo, a: &[types_pathnodes::NodeId], b: &[types_pathnodes::NodeId]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .all(|(&x, &y)| backend_nodes_equalfuncs_seams::equal_expr::call(root.node(x), root.node(y)))
 }
 
 /// Seam wrapper: resolve the two `PathId`s and run [`compare_path_costs`].

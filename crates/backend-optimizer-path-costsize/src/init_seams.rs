@@ -66,6 +66,11 @@ pub fn init_seams() {
     ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG);
     ps::sizeof_minimal_tuple_header::set(|| SIZEOF_MINIMAL_TUPLE_HEADER);
 
+    /* ---- costsize-seams: the cost_qual_eval per-node recursion --------- */
+    // `cost_qual_eval` (in-crate) routes the whole walk through this single-node
+    // walker (costsize.c:4796). This unit owns it.
+    cz::cost_qual_eval_walker::set(crate::qualcost::cost_qual_eval_walker);
+
     /* ---- pathnode-seams: cost_qual_eval + expression_returns_set_rows -- */
     ps::cost_qual_eval::set(cost_qual_eval_seam);
     ps::expression_returns_set_rows::set(expression_returns_set_rows_seam);

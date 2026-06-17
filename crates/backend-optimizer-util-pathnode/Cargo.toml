@@ -19,3 +19,6 @@ backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-join
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# apply_projection_to_path (pathnode.c) compares two PathTarget tlists with
+# equal() (equalfuncs.c). Leaf seam crate — no cycle.
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }

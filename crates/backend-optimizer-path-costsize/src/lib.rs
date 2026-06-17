@@ -41,6 +41,7 @@ use backend_utils_adt_selfuncs_seams as selfuncs;
 
 pub mod exprcost;
 pub mod joins;
+pub mod qualcost;
 pub mod scans;
 pub mod sizeest;
 

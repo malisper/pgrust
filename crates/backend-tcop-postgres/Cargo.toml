@@ -77,6 +77,9 @@ backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+# pathnode.c's CHECK_FOR_INTERRUPTS() is the miscadmin macro owned here; the
+# optimizer reaches it through pathnode-seams' infallible () variant.
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
