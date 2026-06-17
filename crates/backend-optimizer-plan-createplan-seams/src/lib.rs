@@ -1,43 +1,40 @@
 //! Seam declarations for the `backend-optimizer-plan-createplan` unit — the
-//! per-`Path`-subtype `create_*_plan` converter family of `createplan.c`.
+//! `createplan.c` converter arms whose owner is NOT this crate.
 //!
 //! `create_plan_recurse` (in the owning `backend-optimizer-plan-createplan`
 //! crate) is the `best_path->pathtype` dispatch over the 36-variant
-//! [`PathNode`](types_pathnodes::PathNode) enum. The dispatch itself is the F1
-//! deliverable and ships whole; every leaf converter arm
-//! (`create_seqscan_plan`, `create_indexscan_plan`, `create_nestloop_plan`,
-//! `create_agg_plan`, …) is one of the seams declared here, so the dispatch
-//! compiles before any family is ported.
+//! [`PathNode`](types_pathnodes::PathNode) enum. createplan.c is a single
+//! translation unit, so the converters that ARE ported here
+//! (`create_seqscan_plan`, `create_nestloop_plan`, `create_mergejoin_plan`,
+//! `create_append_plan`, the sort/group/setop/gather upper converters, …) are
+//! reached by `create_plan_recurse` / `create_scan_plan` as **direct in-crate
+//! calls** — they are no longer indirection seams.
 //!
-//! Until a family lands, its seam has no installer and loud-panics on the first
-//! call (the seam-and-panic contract). The later F-families
-//! (scan / join / append / upper) each install the converters they own from
-//! their `init_seams()`. None is reachable yet: `create_plan` itself is only
-//! invoked from `standard_planner` / `subquery_planner` (unported), so these
-//! panics are latent.
+//! The seams that REMAIN here are the genuine cross-/forward-boundary arms:
 //!
-//! ## Model (arena handles, lifetime-free `PlannerInfo`)
+//! * scan converters whose owner is an unported / separate unit
+//!   (`create_indexscan_plan`, `create_bitmap_scan_plan`,
+//!   `create_tablefuncscan_plan`, `create_foreignscan_plan` (FDW floor),
+//!   `create_customscan_plan` (custom-scan floor));
+//! * upper converters not yet ported (`create_minmaxagg_plan`,
+//!   `create_memoize_plan`, `create_windowagg_plan`, `create_lockrows_plan`
+//!   (PlanRowMark carrier gap), `create_modifytable_plan`);
+//! * the `create_plan` tail steps owned by the tlist / subselect / planner
+//!   keystones (`apply_tlist_labeling`, `ss_attach_initplans`) — installed by
+//!   those crates; and
+//! * the SubPlan-init / subroot-recursion legs of the cte / worktable /
+//!   subquery scan converters (`resolve_cte_subplan`,
+//!   `resolve_worktable_param`, `create_subqueryscan_subplan`).
 //!
-//! Each converter mirrors the C `create_*_plan(root, (XxxPath *) best_path,
-//! flags)`. In this repo a `Path *` is a [`PathId`](types_pathnodes::PathId)
-//! into `PlannerInfo::path_arena`; the concrete subtype is recovered by the
-//! owner from the [`PathNode`] variant (the analogue of the C up-cast). So every
-//! converter takes `best_path: PathId` rather than a typed pointer, plus the
-//! `mcx` the produced [`Node`](types_nodes::nodes::Node) plan tree is allocated
-//! in. Every converter also receives `run: &PlannerRun<'mcx>` — the
-//! `'mcx`-scoped planner-run store (queries + range-table entries) that the
-//! lifetime-free [`PlannerInfo`] cannot hold (see
-//! [`types_pathnodes::planner_run::PlannerRun`]). It is the safe-Rust rendering
-//! of `root` reaching `simple_rte_array`: the scan converters call
-//! [`planner_rt_fetch`](types_pathnodes::planner_run::planner_rt_fetch)`(run,
-//! root, scanrelid)` to read their `RangeTblEntry`
-//! (`rtekind`/`functions`/`values_lists`/`ctename`/…), exactly as C dereferences
-//! `planner_rt_fetch(scanrelid, root)`. The scan-family converters also receive
-//! the already-decided `tlist` and
-//! resolved `scan_clauses` that `create_scan_plan` computed (the C
-//! `create_scan_plan` passes `tlist` + `scan_clauses` into each
-//! `create_*scan_plan`). `Err` carries each converter's `ereport(ERROR)`
-//! surface.
+//! Each remaining converter mirrors the C `create_*_plan(root, (XxxPath *)
+//! best_path, flags)`: a `Path *` is a [`PathId`](types_pathnodes::PathId) into
+//! `PlannerInfo::path_arena` (the owner recovers the subtype from the
+//! [`PathNode`] variant), plus the `mcx` the produced
+//! [`Node`](types_nodes::nodes::Node) plan tree is allocated in and `run:
+//! &PlannerRun<'mcx>` (the `'mcx`-scoped planner-run store the lifetime-free
+//! [`PlannerInfo`] cannot hold). The scan converters also receive the
+//! already-decided `tlist` and resolved `scan_clauses` that `create_scan_plan`
+//! computed. `Err` carries each converter's `ereport(ERROR)` surface.
 
 #![allow(non_snake_case)]
 
@@ -48,84 +45,16 @@ use alloc::vec::Vec;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::TargetEntry;
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{NodeId, PathId, PlannerInfo, RinfoId};
-
-// ---------------------------------------------------------------------------
-// Secondary dispatchers (createplan.c create_scan_plan / create_join_plan).
-//
-// These two are themselves dispatchers over a path-subtype family; they are
-// ported in F2 (scan) / a later join family. The top dispatch
-// `create_plan_recurse` routes the scan and join `pathtype`s here.
-// ---------------------------------------------------------------------------
-
-seam_core::seam!(
-    /// `create_scan_plan(root, best_path, flags)` (createplan.c:558): the scan
-    /// dispatch — extract restriction clauses, pick the tlist (physical vs path),
-    /// route to the per-scan-type `create_*scan_plan`, and add a gating `Result`
-    /// for pseudoconstant quals. Filled by the F2 scan family.
-    pub fn create_scan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_join_plan(root, (JoinPath *) best_path)` (createplan.c:1080): the
-    /// join dispatch (`MergeJoin` / `HashJoin` / `NestLoop`) + gating `Result`.
-    /// Filled by the join family.
-    pub fn create_join_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
+use types_pathnodes::{PathId, PlannerInfo, RinfoId};
 
 // ---------------------------------------------------------------------------
 // Per-scan-type converters reached from `create_scan_plan`'s second switch
-// (createplan.c:677). `create_scan_plan` (now installed by F2b) computes the
-// `tlist` (physical-vs-path) and resolved `scan_clauses` and routes to one of
-// these `create_*scan_plan` converters; each is filled by the F2c scan-converter
-// family and loud-panics until then (the seam-and-panic contract).
-//
-// In the C the converter takes the typed up-cast `(XxxPath *) best_path`; here
-// it takes `best_path: PathId` (the owner recovers the [`PathNode`] subtype),
-// plus the already-decided `tlist` (`Vec<TargetEntry<'mcx>>`, empty = the C
-// `NIL`) and the relation's `scan_clauses` (`Vec<RinfoId>` — the RestrictInfo
-// list, exactly as C passes `scan_clauses`; each converter does its own
-// `order_qual_clauses` / `extract_actual_clauses` / `replace_nestloop_params`).
-// `IndexScan` / `IndexOnlyScan` share `create_indexscan_plan`
-// (the C `indexonly` bool); the dispatch routes both `pathtype`s here with the
-// flag. `T_Result` (a `RTE_RESULT` base relation Path) routes to
-// `create_resultscan_plan`.
+// (createplan.c:677) whose owner is unported or a separate unit. The ported
+// scan converters (seqscan/samplescan/tid/tidrange/subquery/function/values/
+// cte/namedtuplestore/result/worktable) are direct in-crate calls and no longer
+// declared here. `IndexScan` / `IndexOnlyScan` share `create_indexscan_plan`
+// (the C `indexonly` bool).
 // ---------------------------------------------------------------------------
-
-seam_core::seam!(
-    /// `create_seqscan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_seqscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_samplescan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_samplescan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
 
 seam_core::seam!(
     /// `create_indexscan_plan(root, (IndexPath *) best_path, tlist,
@@ -156,56 +85,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `create_tidscan_plan(root, (TidPath *) best_path, tlist, scan_clauses)`.
-    pub fn create_tidscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_tidrangescan_plan(root, (TidRangePath *) best_path, tlist,
-    /// scan_clauses)`.
-    pub fn create_tidrangescan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_subqueryscan_plan(root, (SubqueryScanPath *) best_path, tlist,
-    /// scan_clauses)`.
-    pub fn create_subqueryscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_functionscan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_functionscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
     /// `create_tablefuncscan_plan(root, best_path, tlist, scan_clauses)`.
     pub fn create_tablefuncscan_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -218,69 +97,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `create_valuesscan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_valuesscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_ctescan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_ctescan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_namedtuplestorescan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_namedtuplestorescan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_resultscan_plan(root, best_path, tlist, scan_clauses)` — the
-    /// `RTE_RESULT` base-relation `T_Result` arm of `create_scan_plan`.
-    pub fn create_resultscan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_worktablescan_plan(root, best_path, tlist, scan_clauses)`.
-    pub fn create_worktablescan_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        tlist: Vec<TargetEntry<'mcx>>,
-        scan_clauses: Vec<RinfoId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
     /// `create_foreignscan_plan(root, (ForeignPath *) best_path, tlist,
-    /// scan_clauses)`.
+    /// scan_clauses)` — FDW floor (GetForeignPlan vtable).
     pub fn create_foreignscan_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
@@ -293,7 +111,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `create_customscan_plan(root, (CustomPath *) best_path, tlist,
-    /// scan_clauses)`.
+    /// scan_clauses)` — custom-scan provider floor.
     pub fn create_customscan_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
@@ -305,44 +123,9 @@ seam_core::seam!(
 );
 
 // ---------------------------------------------------------------------------
-// Result / non-scan-non-join arms reached directly from create_plan_recurse.
-// (createplan.c create_plan_recurse switch.)
+// Non-scan / non-join create_plan_recurse arms not yet ported in the owning
+// crate. (createplan.c create_plan_recurse switch.)
 // ---------------------------------------------------------------------------
-
-seam_core::seam!(
-    /// `create_append_plan(root, (AppendPath *) best_path, flags)`
-    /// (createplan.c). Append family.
-    pub fn create_append_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_merge_append_plan(root, (MergeAppendPath *) best_path, flags)`.
-    pub fn create_merge_append_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_projection_plan(root, (ProjectionPath *) best_path, flags)`
-    /// (the `T_Result` / `IsA(best_path, ProjectionPath)` arm).
-    pub fn create_projection_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
 
 seam_core::seam!(
     /// `create_minmaxagg_plan(root, (MinMaxAggPath *) best_path)`
@@ -352,38 +135,6 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         run: &PlannerRun<'mcx>,
         best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_group_result_plan(root, (GroupResultPath *) best_path)`
-    /// (the `T_Result` / `IsA(best_path, GroupResultPath)` arm).
-    pub fn create_group_result_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_project_set_plan(root, (ProjectSetPath *) best_path)`.
-    pub fn create_project_set_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_material_plan(root, (MaterialPath *) best_path, flags)`.
-    pub fn create_material_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
     ) -> types_error::PgResult<Node<'mcx>>
 );
 
@@ -399,75 +150,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The `T_Unique` arm: `create_upper_unique_plan` /
-    /// `create_unique_plan` (chosen by `IsA(best_path, UpperUniquePath)`).
-    /// The sub-discrimination is internal to the owning family; the dispatch
-    /// routes the whole `T_Unique` `pathtype` here.
-    pub fn create_unique_dispatch_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_gather_plan(root, (GatherPath *) best_path)`.
-    pub fn create_gather_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_sort_plan(root, (SortPath *) best_path, flags)`.
-    pub fn create_sort_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_incrementalsort_plan(root, (IncrementalSortPath *) best_path, flags)`.
-    pub fn create_incrementalsort_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_group_plan(root, (GroupPath *) best_path)`.
-    pub fn create_group_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// The `T_Agg` arm: `create_groupingsets_plan` / `create_agg_plan`
-    /// (chosen by `IsA(best_path, GroupingSetsPath)`). The sub-discrimination is
-    /// internal to the owning family; the dispatch routes the whole `T_Agg`
-    /// `pathtype` here.
-    pub fn create_agg_dispatch_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
     /// `create_windowagg_plan(root, (WindowAggPath *) best_path)`.
     pub fn create_windowagg_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -478,28 +160,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `create_setop_plan(root, (SetOpPath *) best_path, flags)`.
-    pub fn create_setop_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_recursiveunion_plan(root, (RecursiveUnionPath *) best_path)`.
-    pub fn create_recursiveunion_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_lockrows_plan(root, (LockRowsPath *) best_path, flags)`.
+    /// `create_lockrows_plan(root, (LockRowsPath *) best_path, flags)` —
+    /// blocked on the `PlanRowMark` carrier (LockRowsPath.rowMarks is bare
+    /// `Vec<NodeId>` with no arena->PlanRowMark resolver).
     pub fn create_lockrows_plan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
@@ -519,53 +182,10 @@ seam_core::seam!(
     ) -> types_error::PgResult<Node<'mcx>>
 );
 
-seam_core::seam!(
-    /// `create_limit_plan(root, (LimitPath *) best_path, flags)`.
-    pub fn create_limit_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-        flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_gather_merge_plan(root, (GatherMergePath *) best_path)`.
-    pub fn create_gather_merge_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_gating_plan(root, path, plan, gating_quals)` (createplan.c:1022) —
-    /// stack a gating `Result` node carrying the pseudoconstant
-    /// `gating_quals` atop the already-built `plan`. `create_scan_plan` (and the
-    /// join family) routes here; the body builds the `Result` via `make_result`
-    /// over `build_path_tlist(root, path)`, which lives in the F2c
-    /// scan-converter / `make_*` plan-node family. Declared here so
-    /// `create_scan_plan` compiles before that family lands. `path` is the
-    /// [`PathId`] (the C `Path *path`); `plan` is the built subplan node;
-    /// `gating_quals` is the resolved pseudoconstant clause list (arena
-    /// [`NodeId`]s).
-    pub fn create_gating_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        path: PathId,
-        plan: Node<'mcx>,
-        gating_quals: Vec<NodeId>,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
 // ---------------------------------------------------------------------------
 // Final-finish steps owned by the planner / tlist / subselect keystones.
 // (createplan.c create_plan tail.) These mutate / attach to the produced
-// topmost plan and are routed through their owners' seams; the F2 scan family
-// or the planner unit installs them. Declared here so create_plan compiles
-// whole.
+// topmost plan and are installed by their owners' crates.
 // ---------------------------------------------------------------------------
 
 seam_core::seam!(

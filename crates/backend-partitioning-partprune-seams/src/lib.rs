@@ -6,10 +6,32 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+extern crate alloc;
+
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
 use types_nodes::partition::PartitionPruneContext;
 use types_nodes::{Bitmapset, EStateData};
+
+seam_core::seam!(
+    /// `make_partition_pruneinfo(root, parentrel, subpaths, prunequal)`
+    /// (partprune.c:226): build a `PartitionPruneInfo` describing how the
+    /// executor should prune `subpaths` of the partitioned `parentrel` using
+    /// `prunequal`, append it to `root->glob->partPruneInfos`, and return its
+    /// list index (stored into the Append/MergeAppend `part_prune_index`).
+    /// `subpaths` are `PathId` handles into the planner path arena; `prunequal`
+    /// are bare-clause expression-node handles. Owned by `partprune.c`, which is
+    /// keystone-blocked on the `PartitionPruneStep` carrier (see the
+    /// partprune-blocked memory note), so this currently panics when reached —
+    /// the planner only reaches it for a partitioned rel with a non-empty
+    /// prunequal.
+    pub fn make_partition_pruneinfo(
+        root: &mut types_pathnodes::PlannerInfo,
+        parentrel: types_pathnodes::RelId,
+        subpaths: &[types_pathnodes::PathId],
+        prunequal: &[types_pathnodes::NodeId],
+    ) -> PgResult<i32>
+);
 
 seam_core::seam!(
     /// `get_matching_partitions(context, pruning_steps)` (partprune.c): run the
