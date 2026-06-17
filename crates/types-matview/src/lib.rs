@@ -121,25 +121,13 @@ impl QueryDescHandle {
 // Read-out value bundles the in-crate logic branches on.
 // ---------------------------------------------------------------------------
 
-/// The relcache fields of the open matview that `RefreshMatViewByOid` branches
-/// on, read once after `table_open`. Mirrors the `matviewRel->rd_rel->...` and
-/// the rule inspection the C does inline (`rd_rules->rules[0]`).
+/// The matview's rewrite-rule shape that `RefreshMatViewByOid` validates
+/// (matview.c 211-262). The `rd_rel->...` fields are read off the real open
+/// [`Relation`] in-crate; only the `rd_rules` rewrite-rule inspection lives here,
+/// because `RelationData` does not model `rd_rules` (the RuleLock-carrier
+/// keystone). The relcache owner reports this from the open matview handle.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MatViewRelInfo {
-    /// `matviewRel->rd_rel->relkind`.
-    pub relkind: i8,
-    /// `RelationIsPopulated(matviewRel)` (`relispopulated`).
-    pub is_populated: bool,
-    /// `matviewRel->rd_rel->relowner`.
-    pub relowner: Oid,
-    /// `matviewRel->rd_rel->relam`.
-    pub relam: Oid,
-    /// `matviewRel->rd_rel->reltablespace`.
-    pub reltablespace: Oid,
-    /// `matviewRel->rd_rel->relpersistence`.
-    pub relpersistence: i8,
-    /// `RelationGetRelationName(matviewRel)`.
-    pub relname: String,
+pub struct MatViewRuleInfo {
     /// `matviewRel->rd_rel->relhasrules`.
     pub relhasrules: bool,
     /// `matviewRel->rd_rules->numLocks` (`< 0` when `rd_rules` is NULL).

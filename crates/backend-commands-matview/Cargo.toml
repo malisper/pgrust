@@ -29,8 +29,20 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+
+# The relcache/index-AM/catalog read-bundle de-tokenization: real owners the
+# matview body reads off its open relations (no OID-token re-resolution).
+backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-activity-pgstat-relation = { path = "../backend-utils-activity-pgstat-relation" }
+
+# ruleutils (quote_qualified_identifier) — unported, seam panics until it lands;
+# tablecmds (CheckTableNotInUse) — a real ported owner (takes the real Relation).
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 
 # matview's own inward seams (it installs every one of these)
 backend-commands-matview-seams = { path = "../backend-commands-matview-seams" }

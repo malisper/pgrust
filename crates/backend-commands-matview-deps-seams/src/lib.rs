@@ -1,16 +1,30 @@
 //! Outward (frontier) seam declarations for `backend-commands-matview`.
 //!
-//! `matview.c` is a thin driver over a wide set of subsystems — the relcache,
-//! the table-AM, the lock manager, the pg_class catalog, SPI, the planner, the
-//! executor, the snapshot manager, cluster's heap-swap, command/GUC/security
-//! context, transam/multixact, pgstat, and the lsyscache/ruleutils helpers —
-//! and ALL of them are still unported. Every call out of matview crosses one of
-//! the seams declared here; until each owner lands, the seam panics with its
-//! path (mirror-PG-and-panic). The matview-shaped read-bundles
-//! (`matview_rel_info`, `index_usability_info`, `index_match_merge_quals`,
-//! `update_pg_class_populated`) mirror the inline relcache/catalog reads the C
-//! does — no single ported owner exposes them yet, so they live on matview's
-//! frontier and the real owners install them when they arrive.
+//! `matview.c` is a thin driver over a wide set of subsystems. The relcache /
+//! table-AM / index-AM read-bundle the C inspects off its open `Relation`s is
+//! NOT here any more: the matview/index/transient relations are opened as real
+//! [`types_rel::Relation`] values (via the canonical
+//! `backend_access_table_table::table_open` /
+//! `backend_access_index_indexam::index_open`) and their `rd_rel`/`rd_att`
+//! fields are read directly in the ported body. `RelationGetIndexList`,
+//! `CheckTableNotInUse`, the pgstat counters, and `GetDefaultTablespace` are
+//! likewise reached through their real ported owners.
+//!
+//! What remains here is the genuine frontier into still-unported owners (GUC /
+//! security context, SPI, planner / executor, snapshot, cluster heap-swap,
+//! rangevar resolution, the pg_class populated-state update), plus the three
+//! reads that bottom out off the trimmed relcache carrier and so cannot be read
+//! off the open `Relation`:
+//!
+//!   - `matview_rule_info` / `matview_data_query` — the matview's `rd_rules`
+//!     rewrite-rule shape and stored `dataQuery` (`RelationData` does not model
+//!     `rd_rules`; the RuleLock-carrier keystone — see rewriteHandler).
+//!   - `index_usability_info` / `index_match_merge_quals` — the index's full
+//!     `indkey[]` array, the `RelationGetIndexPredicate == NIL` test, and the
+//!     `rd_indextuple` opclass reads (the trimmed `FormData_pg_index` projection
+//!     carries only `indkey0`; the opclass/ruleutils side is unported). These
+//!     take the real index/matview `Relation` (no OID re-resolution); the owner
+//!     reads the off-carrier fields from the open handle.
 //!
 //! Where the real subsystem can `ereport(ERROR)`, the seam returns
 //! [`PgResult`]; otherwise it returns a bare value.
@@ -20,69 +34,32 @@
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_matview::{
-    IndexUsabilityInfo, MatViewRelInfo, MatchMergeQual, PlannedStmtHandle, QueryDescHandle,
+    IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual, PlannedStmtHandle, QueryDescHandle,
     QueryHandle,
 };
+use types_rel::Relation;
 
-// --- relcache / table-AM / lock ------------------------------------------------
+// --- matview rewrite-rule shape (RuleLock-carrier keystone) --------------------
 
 seam_core::seam!(
-    /// `table_open(oid, lockmode)` -> the opened relation, modeled by its OID
-    /// (the relcache owner re-resolves the descriptor for the read seams).
-    pub fn table_open(oid: Oid, lockmode: i32) -> PgResult<Oid>
+    /// The `matviewRel->rd_rules->...` rewrite-rule shape `RefreshMatViewByOid`
+    /// branches on (matview.c 211-262). `RelationData` does not model `rd_rules`
+    /// (the RuleLock-carrier keystone), so the relcache owner reports it from the
+    /// open handle, keyed by the matview OID. See [`MatViewRuleInfo`].
+    pub fn matview_rule_info(rel: Oid) -> PgResult<MatViewRuleInfo>
 );
 seam_core::seam!(
-    /// `table_close(rel, lockmode)`.
-    pub fn table_close(rel: Oid, lockmode: i32) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `index_open(indexoid, lockmode)` -> opened index relation OID.
-    pub fn index_open(indexoid: Oid, lockmode: i32) -> PgResult<Oid>
-);
-seam_core::seam!(
-    /// `index_close(indexRel, lockmode)`.
-    pub fn index_close(index_rel: Oid, lockmode: i32) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `RelationGetIndexList(rel)` — the OID list of the relation's indexes
-    /// (iterated in-crate; the in-crate `list_free` is the owned `Vec` drop).
-    pub fn relation_get_index_list(rel: Oid) -> PgResult<Vec<Oid>>
-);
-seam_core::seam!(
-    /// `relation->rd_rel->relkind` for the `SetMatViewPopulatedState` assert.
-    pub fn relation_get_relkind(rel: Oid) -> PgResult<i8>
-);
-seam_core::seam!(
-    /// `RelationGetRelid(relation)`.
-    pub fn relation_get_relid(rel: Oid) -> PgResult<Oid>
-);
-seam_core::seam!(
-    /// `RelationGetRelationName(rel)` — the bare relation name (for the
-    /// match-merge error messages, which use the unqualified name).
-    pub fn relation_get_relname(rel: Oid) -> PgResult<String>
-);
-seam_core::seam!(
-    /// `quote_qualified_identifier(get_namespace_name(RelationGetNamespace(rel)),
-    /// RelationGetRelationName(rel))` — the schema-qualified name for the SQL.
-    pub fn quote_qualified_relname(rel: Oid) -> PgResult<String>
-);
-seam_core::seam!(
-    /// `RelationGetNumberOfAttributes(rel)` (`relnatts`).
-    pub fn relation_num_attrs(rel: Oid) -> PgResult<i16>
-);
-seam_core::seam!(
-    /// Read the relcache fields + first-rewrite-rule shape `RefreshMatViewByOid`
-    /// branches on (matview.c 184-283; see [`MatViewRelInfo`]).
-    pub fn matview_rel_info(rel: Oid) -> PgResult<MatViewRelInfo>
-);
-seam_core::seam!(
-    /// `linitial_node(Query, rule->actions)` — the matview's stored `dataQuery`.
+    /// `linitial_node(Query, rule->actions)` — the matview's stored `dataQuery`,
+    /// reached off `rd_rules` (the same RuleLock keystone).
     pub fn matview_data_query(rel: Oid) -> PgResult<QueryHandle>
 );
 seam_core::seam!(
-    /// Read the `pg_index` relcache fields `is_usable_unique_index` inspects (the
-    /// predicate logic stays in-crate; see [`IndexUsabilityInfo`]).
-    pub fn index_usability_info(index_rel: Oid) -> PgResult<IndexUsabilityInfo>
+    /// Read the `pg_index` fields `is_usable_unique_index` inspects that are NOT
+    /// on the trimmed relcache projection — the full `indkey[]` array and
+    /// `RelationGetIndexPredicate(indexRel) == NIL` (the carrier-widen keystone).
+    /// The predicate logic stays in-crate. Takes the real open index relation.
+    /// See [`IndexUsabilityInfo`].
+    pub fn index_usability_info(index_rel: &Relation<'_>) -> PgResult<IndexUsabilityInfo>
 );
 
 // --- pg_class populated-state update + command counter -------------------------
@@ -138,10 +115,6 @@ seam_core::seam!(
 // --- table maintenance / tablespace / new heap ---------------------------------
 
 seam_core::seam!(
-    /// `CheckTableNotInUse(rel, stmt_kind)`.
-    pub fn check_table_not_in_use(rel: Oid, stmt_kind: String) -> PgResult<()>
-);
-seam_core::seam!(
     /// `GetDefaultTablespace(relpersistence, false)`.
     pub fn get_default_tablespace(relpersistence: i8) -> PgResult<Oid>
 );
@@ -164,17 +137,6 @@ seam_core::seam!(
         oid_new_heap: Oid,
         relpersistence: i8,
     ) -> PgResult<()>
-);
-
-// --- pgstat --------------------------------------------------------------------
-
-seam_core::seam!(
-    /// `pgstat_count_truncate(matviewRel)`.
-    pub fn pgstat_count_truncate(rel: Oid) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `pgstat_count_heap_insert(matviewRel, n)`.
-    pub fn pgstat_count_heap_insert(rel: Oid, n: u64) -> PgResult<()>
 );
 
 // --- refresh_matview_datafill: rewrite / plan / executor / snapshot ------------
@@ -226,7 +188,7 @@ seam_core::seam!(
 
 // --- transientrel_* DestReceiver: the table-AM bulk-insert flush ---------------
 //
-// The `DR_transientrel` receiver itself is now owned in-crate by
+// The `DR_transientrel` receiver itself is owned in-crate by
 // `backend-commands-matview` and registered into the `backend-tcop-dest`
 // value-router (mirroring `createas.c`'s `DR_intorel`): `transientrel_startup`
 // reaches `table_open`/`GetBulkInsertState`, `transientrel_receive` reaches
@@ -280,10 +242,12 @@ seam_core::seam!(
     /// (matview.c 741-817). For each key column: `indclass` ->
     /// `SearchSysCache1(CLAOID, opclass)` -> `opcfamily`/`opcintype` ->
     /// `get_opfamily_member_for_cmptype(.., COMPARE_EQ)` -> [`MatchMergeQual`].
-    /// Errors surface here; quals are returned in index-key order.
+    /// Reads off the index's raw `rd_indextuple` + the matview tuple descriptor,
+    /// so it takes the real open index/matview relations. Errors surface here;
+    /// quals are returned in index-key order.
     pub fn index_match_merge_quals(
-        index_rel: Oid,
-        matview_rel: Oid,
+        index_rel: &Relation<'_>,
+        matview_rel: &Relation<'_>,
     ) -> PgResult<Vec<MatchMergeQual>>
 );
 seam_core::seam!(

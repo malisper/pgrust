@@ -9,10 +9,20 @@
 //! This crate owns the refresh orchestration, the match-merge SQL-text
 //! construction with its per-unique-index equality-qual loop, the
 //! populated-state control flow, `is_usable_unique_index`'s predicate, and the
-//! `matview_maintenance_depth` counter. Every genuine cross-subsystem external
-//! crosses a seam in `backend_commands_matview_deps_seams` (all owners are still
-//! unported, so those seams panic until they land — mirror-PG-and-panic). The
-//! 16 C functions (5 extern + 11 static) are all present.
+//! `matview_maintenance_depth` counter. The 16 C functions (5 extern + 11
+//! static) are all present.
+//!
+//! The relcache/table-AM read-bundle that the C driver inspects off its open
+//! `Relation`s is de-tokenized: the matview/index/transient relations are opened
+//! as real [`Relation`] values (via the canonical `table_open`/`index_open`),
+//! and their `rd_rel`/`rd_att` fields are read directly. Only the genuinely
+//! off-carrier reads stay on a seam: the matview's `rd_rules` rewrite-rule shape
+//! and stored `dataQuery` (the RuleLock-carrier keystone — `RelationData` does
+//! not model `rd_rules`), and, on the CONCURRENTLY match-merge leg, the index's
+//! full `indkey[]`/`indpred`/`rd_indextuple` opclass reads (the trimmed
+//! `FormData_pg_index` projection + unported ruleutils/opclass). The remaining
+//! cross-subsystem externals (GUC/security context, SPI, planner/executor,
+//! snapshot, heap-swap, rangevar resolution) cross seams into their owners.
 
 use std::cell::{Cell, RefCell};
 
@@ -43,11 +53,11 @@ use types_tableam::tableam::BulkInsertStateData;
 use types_tuple::access::{RELKIND_MATVIEW, RELPERSISTENCE_TEMP};
 use types_tuple::heaptuple::{MaxHeapAttributeNumber, TupleDescData};
 
+use backend_access_index_indexam::{index_close, index_open};
+use backend_access_table_table::{table_close, table_open};
+
 /// `RelationRelationId` — `pg_class` OID (`catalog/pg_class.h`).
 const RelationRelationId: Oid = 1259;
-
-/// `RELKIND_MATVIEW` as the signed `char` `pg_class.relkind` carries.
-const RELKIND_MATVIEW_I8: i8 = RELKIND_MATVIEW as i8;
 
 /// `SECURITY_RESTRICTED_OPERATION` / `SECURITY_LOCAL_USERID_CHANGE`
 /// (`miscadmin.h`).
@@ -90,21 +100,36 @@ thread_local! {
 // SetMatViewPopulatedState (matview.c 78-110)
 // ---------------------------------------------------------------------------
 
-/// `SetMatViewPopulatedState` — mark a materialized view as populated, or not.
+/// `SetMatViewPopulatedState` — mark a materialized view as populated, or not,
+/// from an already-open relation. The C reads `relation->rd_rel->relkind` and
+/// `RelationGetRelid(relation)` off the open handle; the owned form does the
+/// same off the real [`Relation`].
 ///
 /// NOTE: caller must be holding an appropriate lock on the relation.
-pub fn SetMatViewPopulatedState(mcx: Mcx<'_>, relation: Oid, newstate: bool) -> PgResult<()> {
-    debug_assert_eq!(
-        seam::relation_get_relkind::call(relation)?,
-        RELKIND_MATVIEW_I8
-    );
+fn set_matview_populated_state(
+    mcx: Mcx<'_>,
+    relation: &Relation<'_>,
+    newstate: bool,
+) -> PgResult<()> {
+    debug_assert_eq!(relation.rd_rel.relkind, RELKIND_MATVIEW);
+    set_matview_populated_state_by_oid(mcx, relation.rd_id, newstate)
+}
 
+/// The by-OID body of `SetMatViewPopulatedState`: the `pg_class` `relispopulated`
+/// update (the C `table_open(RelationRelationId, ..)` / `SearchSysCacheCopy1` /
+/// `CatalogTupleUpdate` / `CommandCounterIncrement` block, which is keyed by the
+/// relation OID only). Also the inward seam entry point that `createas.c` calls
+/// with a matview OID.
+fn set_matview_populated_state_by_oid(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    newstate: bool,
+) -> PgResult<()> {
     /*
      * Update relation's pg_class entry.  Crucial side-effect: other backends
      * (and this one too!) are sent SI message to make them rebuild relcache
      * entries.
      */
-    let relid = seam::relation_get_relid::call(relation)?;
     if !seam::update_pg_class_populated::call(relid, newstate)? {
         return Err(ereport(ERROR)
             .errmsg_internal(fmt(mcx, format_args!("cache lookup failed for relation {relid}"))?)
@@ -115,6 +140,14 @@ pub fn SetMatViewPopulatedState(mcx: Mcx<'_>, relation: Oid, newstate: bool) -> 
     seam::command_counter_increment::call()?;
 
     Ok(())
+}
+
+/// `SetMatViewPopulatedState(relation, newstate)` — the inward-seam form
+/// `createas.c` calls with the matview OID (it opens pg_class by OID internally;
+/// the C `Assert(relkind == RELKIND_MATVIEW)` is a debug-only check on an
+/// already-validated matview, elided on the by-OID path).
+pub fn SetMatViewPopulatedState(mcx: Mcx<'_>, relation: Oid, newstate: bool) -> PgResult<()> {
+    set_matview_populated_state_by_oid(mcx, relation, newstate)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +208,8 @@ pub fn RefreshMatViewByOid(
 ) -> PgResult<(ObjectAddress, Option<QueryCompletion>)> {
     let mut processed: u64 = 0;
 
-    let matviewRel = seam::table_open::call(matviewOid, NoLock)?;
-    let info = seam::matview_rel_info::call(matviewRel)?;
-    let relowner = info.relowner;
+    let matviewRel = table_open(mcx, matviewOid, NoLock)?;
+    let relowner = matviewRel.rd_rel.relowner;
 
     /*
      * Switch to the owner's userid, so that any functions are run as that user.
@@ -193,15 +225,15 @@ pub fn RefreshMatViewByOid(
     backend_utils_misc_guc_seams::restrict_search_path::call()?;
 
     /* Make sure it is a materialized view. */
-    if info.relkind != RELKIND_MATVIEW_I8 {
+    if matviewRel.rd_rel.relkind != RELKIND_MATVIEW {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(fmt(mcx, format_args!("\"{}\" is not a materialized view", info.relname))?)
+            .errmsg(fmt(mcx, format_args!("\"{}\" is not a materialized view", matviewRel.name()))?)
             .into_error());
     }
 
     /* Check that CONCURRENTLY is not specified if not populated. */
-    if concurrent && !info.is_populated {
+    if concurrent && !matviewRel.rd_rel.relispopulated {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("CONCURRENTLY cannot be used when the materialized view is not populated")
@@ -222,42 +254,49 @@ pub fn RefreshMatViewByOid(
     /*
      * Check that everything is correct for a refresh. Problems at this point are
      * internal errors, so elog is sufficient.
+     *
+     * The rewrite-rule shape (`matviewRel->rd_rules->...` and the first rule's
+     * stored `dataQuery`) is read through the rule seam: `RelationData` does not
+     * model `rd_rules` (the RuleLock-carrier keystone), so the relcache owner
+     * reports it from the open handle.
      */
-    if !info.relhasrules || info.num_rules < 1 {
+    let rule = seam::matview_rule_info::call(matviewRel.rd_id)?;
+
+    if !rule.relhasrules || rule.num_rules < 1 {
         return Err(ereport(ERROR)
             .errmsg_internal(fmt(
                 mcx,
-                format_args!("materialized view \"{}\" is missing rewrite information", info.relname),
+                format_args!("materialized view \"{}\" is missing rewrite information", matviewRel.name()),
             )?)
             .into_error());
     }
 
-    if info.num_rules > 1 {
+    if rule.num_rules > 1 {
         return Err(ereport(ERROR)
             .errmsg_internal(fmt(
                 mcx,
-                format_args!("materialized view \"{}\" has too many rules", info.relname),
+                format_args!("materialized view \"{}\" has too many rules", matviewRel.name()),
             )?)
             .into_error());
     }
 
-    if !info.rule_is_select || !info.rule_is_instead {
+    if !rule.rule_is_select || !rule.rule_is_instead {
         return Err(ereport(ERROR)
             .errmsg_internal(fmt(
                 mcx,
                 format_args!(
                     "the rule for materialized view \"{}\" is not a SELECT INSTEAD OF rule",
-                    info.relname
+                    matviewRel.name()
                 ),
             )?)
             .into_error());
     }
 
-    if info.rule_actions_length != 1 {
+    if rule.rule_actions_length != 1 {
         return Err(ereport(ERROR)
             .errmsg_internal(fmt(
                 mcx,
-                format_args!("the rule for materialized view \"{}\" is not a single action", info.relname),
+                format_args!("the rule for materialized view \"{}\" is not a single action", matviewRel.name()),
             )?)
             .into_error());
     }
@@ -267,15 +306,15 @@ pub fn RefreshMatViewByOid(
      * columns of the materialized view if CONCURRENTLY is specified.
      */
     if concurrent {
-        let indexoidlist = seam::relation_get_index_list::call(matviewRel)?;
+        let indexoidlist = backend_utils_cache_relcache::derived::RelationGetIndexList(matviewRel.rd_id)?;
         let mut hasUniqueIndex = false;
 
         debug_assert!(!is_create);
 
         for &indexoid in &indexoidlist {
-            let indexRel = seam::index_open::call(indexoid, AccessShareLock)?;
-            hasUniqueIndex = is_usable_unique_index(indexRel)?;
-            seam::index_close::call(indexRel, AccessShareLock)?;
+            let indexRel = index_open(mcx, indexoid, AccessShareLock)?;
+            hasUniqueIndex = is_usable_unique_index(&indexRel)?;
+            index_close(indexRel, AccessShareLock)?;
             if hasUniqueIndex {
                 break;
             }
@@ -290,7 +329,7 @@ pub fn RefreshMatViewByOid(
                     mcx,
                     format_args!(
                         "cannot refresh materialized view \"{}\" concurrently",
-                        seam::quote_qualified_relname::call(matviewRel)?
+                        quote_qualified_relname(mcx, &matviewRel)?
                     ),
                 )?)
                 .errhint("Create a unique index with no WHERE clause on one or more columns of the materialized view.")
@@ -301,8 +340,11 @@ pub fn RefreshMatViewByOid(
     /*
      * The stored query was rewritten at the time of the MV definition, but has
      * not been scribbled on by the planner.
+     *
+     * dataQuery = linitial_node(Query, rule->actions); the matview's stored
+     * `Query` lives behind the RuleLock keystone, so it crosses the seam.
      */
-    let dataQuery = seam::matview_data_query::call(matviewRel)?;
+    let dataQuery = seam::matview_data_query::call(matviewRel.rd_id)?;
 
     /*
      * Check for active uses of the relation in the current transaction, such as
@@ -311,12 +353,12 @@ pub fn RefreshMatViewByOid(
      * NB: We count on this to protect us against problems with refreshing the
      * data using TABLE_INSERT_FROZEN.
      */
-    seam::check_table_not_in_use::call(
-        matviewRel,
+    backend_commands_tablecmds_seams::check_table_not_in_use::call(
+        &matviewRel,
         if is_create {
-            "CREATE MATERIALIZED VIEW".to_string()
+            "CREATE MATERIALIZED VIEW"
         } else {
-            "REFRESH MATERIALIZED VIEW".to_string()
+            "REFRESH MATERIALIZED VIEW"
         },
     )?;
 
@@ -324,17 +366,17 @@ pub fn RefreshMatViewByOid(
      * Tentatively mark the matview as populated or not (this will roll back if
      * we fail later).
      */
-    SetMatViewPopulatedState(mcx, matviewRel, !skipData)?;
+    set_matview_populated_state(mcx, &matviewRel, !skipData)?;
 
     /* Concurrent refresh builds new data in temp tablespace, and does diff. */
     let tableSpace;
     let relpersistence;
     if concurrent {
         tableSpace = seam::get_default_tablespace::call(RELPERSISTENCE_TEMP as i8)?;
-        relpersistence = RELPERSISTENCE_TEMP as i8;
+        relpersistence = RELPERSISTENCE_TEMP;
     } else {
-        tableSpace = info.reltablespace;
-        relpersistence = info.relpersistence;
+        tableSpace = matviewRel.rd_rel.reltablespace;
+        relpersistence = matviewRel.rd_rel.relpersistence;
     }
 
     /*
@@ -342,7 +384,12 @@ pub fn RefreshMatViewByOid(
      * against access by any other process until commit (by which time it will be
      * gone).
      */
-    let OIDNewHeap = seam::make_new_heap::call(matviewOid, tableSpace, info.relam, relpersistence)?;
+    let OIDNewHeap = seam::make_new_heap::call(
+        matviewOid,
+        tableSpace,
+        matviewRel.rd_rel.relam,
+        relpersistence as i8,
+    )?;
 
     /* Generate the data, if wanted. */
     if !skipData {
@@ -375,13 +422,22 @@ pub fn RefreshMatViewByOid(
          * path above doesn't need to worry about this because the inserts and
          * deletes it issues get counted by lower-level code.)
          */
-        seam::pgstat_count_truncate::call(matviewRel)?;
+        backend_utils_activity_pgstat_relation::pgstat_count_truncate(
+            matviewRel.rd_id,
+            matviewRel.rd_rel.relisshared,
+            matviewRel.pgstat_enabled,
+        )?;
         if !skipData {
-            seam::pgstat_count_heap_insert::call(matviewRel, processed)?;
+            backend_utils_activity_pgstat_relation::pgstat_count_heap_insert(
+                matviewRel.rd_id,
+                matviewRel.rd_rel.relisshared,
+                matviewRel.pgstat_enabled,
+                processed as i64,
+            )?;
         }
     }
 
-    seam::table_close::call(matviewRel, NoLock)?;
+    table_close(matviewRel, NoLock)?;
 
     /* Roll back any GUC changes */
     seam::at_eoxact_guc::call(false, save_nestlevel)?;
@@ -677,7 +733,7 @@ fn transientrel_startup<'mcx>(
     let st = receiver_state::<'mcx>(state);
 
     /* Open the transient relation we are about to fill. */
-    let transientrel = backend_access_table_table::table_open(mcx, st.transientoid, NoLock)?;
+    let transientrel = table_open(mcx, st.transientoid, NoLock)?;
 
     /*
      * Valid smgr_targblock implies something already wrote to the relation. This
@@ -766,7 +822,7 @@ fn transientrel_shutdown<'mcx>(mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
 
     /* close transientrel, but keep lock until commit */
     if let Some(rel) = st.transientrel.take() {
-        backend_access_table_table::table_close(rel, NoLock)?;
+        table_close(rel, NoLock)?;
     }
 
     /* myState->transientrel = NULL: release the run-bound state pointer. */
@@ -814,6 +870,25 @@ fn make_temptable_name_n(mcx: Mcx<'_>, tempname: &str, n: i32) -> PgResult<Strin
     Ok(namebuf.as_str().to_string())
 }
 
+/// `quote_qualified_identifier(get_namespace_name(RelationGetNamespace(rel)),
+/// RelationGetRelationName(rel))` — the schema-qualified name for the SQL,
+/// composed from the real open [`Relation`]. The namespace OID and relation name
+/// come off `rel->rd_rel` directly; `get_namespace_name` is the real
+/// lsyscache lookup and `quote_qualified_identifier` is the ruleutils helper
+/// (seamed — ruleutils is unported, so it panics until it lands).
+fn quote_qualified_relname(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult<String> {
+    let nspname = backend_utils_cache_lsyscache::namespace_range_index_pubsub::get_namespace_name(
+        mcx,
+        rel.rd_rel.relnamespace,
+    )?;
+    let qualified = backend_utils_adt_ruleutils_seams::quote_qualified_identifier::call(
+        mcx,
+        nspname.as_ref().map(|s| s.as_str()),
+        rel.name(),
+    )?;
+    Ok(qualified.as_str().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // refresh_by_match_merge (matview.c 613-897)
 // ---------------------------------------------------------------------------
@@ -831,13 +906,13 @@ fn refresh_by_match_merge(
     /* StringInfoData querybuf — the working SQL buffer, rebuilt at each use. */
     let mut querybuf = PgString::new_in(mcx);
 
-    let matviewRel = seam::table_open::call(matviewOid, NoLock)?;
-    let matviewname = seam::quote_qualified_relname::call(matviewRel)?;
-    let tempRel = seam::table_open::call(tempOid, NoLock)?;
-    let tempname = seam::quote_qualified_relname::call(tempRel)?;
+    let matviewRel = table_open(mcx, matviewOid, NoLock)?;
+    let matviewname = quote_qualified_relname(mcx, &matviewRel)?;
+    let tempRel = table_open(mcx, tempOid, NoLock)?;
+    let tempname = quote_qualified_relname(mcx, &tempRel)?;
     let diffname = make_temptable_name_n(mcx, &tempname, 2)?;
 
-    let relnatts = seam::relation_num_attrs::call(matviewRel)?;
+    let relnatts = matviewRel.rd_att.attrs.len() as i16;
 
     /* `resetStringInfo(&querybuf); appendStringInfo(&querybuf, ...)` */
     macro_rules! set_querybuf {
@@ -898,7 +973,7 @@ fn refresh_by_match_merge(
          * the mat view (or a superuser) and therefore there is no need to check
          * for access to data in the mat view.
          */
-        let matviewRelName = seam::relation_get_relname::call(matviewRel)?;
+        let matviewRelName = matviewRel.name();
         let row = seam::spi_getvalue_first::call()?;
         return Err(ereport(ERROR)
             .errcode(ERRCODE_CARDINALITY_VIOLATION)
@@ -976,20 +1051,23 @@ fn refresh_by_match_merge(
     }
     let mut foundUniqueIndex = false;
 
-    let indexoidlist = seam::relation_get_index_list::call(matviewRel)?;
+    let indexoidlist = backend_utils_cache_relcache::derived::RelationGetIndexList(matviewRel.rd_id)?;
 
     for &indexoid in &indexoidlist {
-        let indexRel = seam::index_open::call(indexoid, RowExclusiveLock)?;
-        if is_usable_unique_index(indexRel)? {
+        let indexRel = index_open(mcx, indexoid, RowExclusiveLock)?;
+        if is_usable_unique_index(&indexRel)? {
             /*
              * Resolve, for each key column of this usable unique index, the
              * equality operator + the leftop/rightop/attrtype (matview.c
              * 741-817).  The opclass / pg_opclass / get_opfamily_member /
-             * attribute reads are the genuine cross-subsystem externals; the
+             * attribute reads are the genuine cross-subsystem externals reaching
+             * off the index's raw pg_index tuple (`rd_indextuple`, not on the
+             * trimmed relcache projection) and the unported ruleutils/opclass; the
              * opUsedForQual de-dup and the generate_operator_clause emission stay
-             * in-crate.
+             * in-crate. The index relation crosses the seam as the real
+             * [`Relation`] (no OID re-resolution).
              */
-            let quals = seam::index_match_merge_quals::call(indexRel, matviewRel)?;
+            let quals = seam::index_match_merge_quals::call(&indexRel, &matviewRel)?;
 
             /* Add quals for all columns from this index. */
             for qual in &quals {
@@ -1032,7 +1110,7 @@ fn refresh_by_match_merge(
         }
 
         /* Keep the locks, since we're about to run DML which needs them. */
-        seam::index_close::call(indexRel, NoLock)?;
+        index_close(indexRel, NoLock)?;
     }
 
     drop(indexoidlist); /* list_free(indexoidlist) */
@@ -1047,7 +1125,7 @@ fn refresh_by_match_merge(
      * silly thing to do.)
      */
     if !foundUniqueIndex {
-        let matviewRelName = seam::relation_get_relname::call(matviewRel)?;
+        let matviewRelName = matviewRel.name();
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(fmt(
@@ -1111,8 +1189,8 @@ fn refresh_by_match_merge(
 
     /* We're done maintaining the materialized view. */
     CloseMatViewIncrementalMaintenance();
-    seam::table_close::call(tempRel, NoLock)?;
-    seam::table_close::call(matviewRel, NoLock)?;
+    table_close(tempRel, NoLock)?;
+    table_close(matviewRel, NoLock)?;
 
     /* Clean up temp tables. */
     set_querybuf!("DROP TABLE {diffname}, {tempname}");
@@ -1138,14 +1216,14 @@ fn refresh_by_match_merge(
 
 /// `refresh_by_heap_swap` — swap the physical files of the target and transient
 /// tables, rebuild the target's indexes, and throw away the transient table.
-fn refresh_by_heap_swap(matviewOid: Oid, OIDNewHeap: Oid, relpersistence: i8) -> PgResult<()> {
+fn refresh_by_heap_swap(matviewOid: Oid, OIDNewHeap: Oid, relpersistence: u8) -> PgResult<()> {
     /*
      * finish_heap_swap(matviewOid, OIDNewHeap, false, false, true, true,
      *                  RecentXmin, ReadNextMultiXactId(), relpersistence);
      * The fixed boolean flags and the RecentXmin / ReadNextMultiXactId() args are
      * read by the runtime; only the variable args cross the seam.
      */
-    seam::finish_heap_swap::call(matviewOid, OIDNewHeap, relpersistence)
+    seam::finish_heap_swap::call(matviewOid, OIDNewHeap, relpersistence as i8)
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,7 +1232,14 @@ fn refresh_by_heap_swap(matviewOid: Oid, OIDNewHeap: Oid, relpersistence: i8) ->
 
 /// `is_usable_unique_index` — whether the specified index is usable for match
 /// merge (unique, valid, immediate, non-partial, plain user columns only).
-fn is_usable_unique_index(indexRel: Oid) -> PgResult<bool> {
+///
+/// The `indisunique`/`indimmediate`/`indisvalid`/`indnatts` flags are read off
+/// the real index [`Relation`]'s `rd_index`; the index's full `indkey[]` array
+/// and the `RelationGetIndexPredicate(indexRel) == NIL` test are NOT on the
+/// trimmed `FormData_pg_index` projection (the carrier-widen keystone), so they
+/// cross the [`IndexUsabilityInfo`] seam (which the relcache owner fills from the
+/// open handle — taking the real index relation, not an OID token).
+fn is_usable_unique_index(indexRel: &Relation<'_>) -> PgResult<bool> {
     /* Form_pg_index indexStruct = indexRel->rd_index; (+ index predicate) */
     let indexStruct: IndexUsabilityInfo = seam::index_usability_info::call(indexRel)?;
 
@@ -1275,7 +1360,6 @@ pub fn init_seams() {
 
     // The DR_transientrel receiver (CreateTransientRelDestReceiver +
     // transientrel_startup/receive/shutdown/destroy) is owned in-crate and
-    // registered into the backend-tcop-dest value-router at receiver-creation
-    // time (see CreateTransientRelDestReceiver), mirroring createas's DR_intorel.
-    // It is not a cross-crate seam, so nothing is installed here for it.
+    // registered into the backend-tcop-dest value-router (see
+    // CreateTransientRelDestReceiver), mirroring createas's DR_intorel.
 }

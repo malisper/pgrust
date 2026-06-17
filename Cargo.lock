@@ -6923,12 +6923,18 @@ name = "backend-commands-matview"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heapam",
+ "backend-access-index-indexam",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xact",
  "backend-commands-matview-deps-seams",
  "backend-commands-matview-seams",
+ "backend-commands-tablecmds-seams",
  "backend-tcop-dest",
+ "backend-utils-activity-pgstat-relation",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-relcache",
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "backend-utils-time-snapmgr-seams",

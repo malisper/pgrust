@@ -2871,7 +2871,7 @@ fn reindex_index<'mcx>(
      * Also check for active uses of the index in the current transaction; we
      * don't want to reindex underneath an open indexscan.
      */
-    matview::check_table_not_in_use::call(i_rel.rd_id, alloc::string::String::from("REINDEX INDEX"))?;
+    tablecmds::check_table_not_in_use::call(&i_rel, "REINDEX INDEX")?;
 
     /* Set new tablespace, if requested */
     if set_tablespace {
