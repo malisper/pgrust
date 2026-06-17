@@ -686,4 +686,34 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::buffer_manager_shmem_init::set(
         mgr::BufferManagerShmemInit,
     );
+
+    // GUC var accessors. Each of these globals is a plain process-global GUC
+    // variable defined in bufmgr.c (none is read from the ControlFile), so the
+    // faithful read is `vars::<name>.read()` off the live GUC slot. These getter
+    // seams exist because the contract boundary the consumer crosses
+    // (`GetAccessStrategy(btype)` ring sizing in buffer-support, the read_stream
+    // builder in aio, and the bgwriter/checkpoint flush loops here) cannot carry
+    // these process-global knobs as parameters.
+    use backend_utils_misc_guc_tables::vars;
+    backend_storage_buffer_bufmgr_seams::io_combine_limit::set(|| {
+        vars::io_combine_limit_guc.read()
+    });
+    backend_storage_buffer_bufmgr_seams::effective_io_concurrency::set(|| {
+        vars::effective_io_concurrency.read()
+    });
+    backend_storage_buffer_bufmgr_seams::maintenance_io_concurrency::set(|| {
+        vars::maintenance_io_concurrency.read()
+    });
+    backend_storage_buffer_bufmgr_seams::bgwriter_lru_maxpages::set(|| {
+        vars::bgwriter_lru_maxpages.read()
+    });
+    backend_storage_buffer_bufmgr_seams::bgwriter_lru_multiplier::set(|| {
+        vars::bgwriter_lru_multiplier.read()
+    });
+    backend_storage_buffer_bufmgr_seams::checkpoint_flush_after::set(|| {
+        vars::checkpoint_flush_after.read()
+    });
+    backend_storage_buffer_bufmgr_seams::bgwriter_flush_after::set(|| {
+        vars::bgwriter_flush_after.read()
+    });
 }
