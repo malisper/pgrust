@@ -28,6 +28,7 @@ use types_error::{
 };
 
 mod boot_paths;
+mod fmgr_builtins;
 mod lockfile;
 mod process;
 mod startup_paths;
@@ -829,6 +830,10 @@ pub fn pg_bindtextdomain(_domain: &str) {}
 /// Install every seam declared in `backend-utils-init-miscinit-seams`.
 pub fn init_seams() {
     use backend_utils_init_miscinit_seams as s;
+
+    // Register this crate's SQL-callable builtins into the fmgr-core builtin
+    // table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
+    fmgr_builtins::register_miscinit_builtins();
 
     s::create_socket_lock_file::set(|socketfile, am_postmaster, socket_dir| {
         create_socket_lock_file(socketfile, am_postmaster, socket_dir)
