@@ -12,3 +12,9 @@ path = "src/lib.rs"
 types-error = { path = "../types-error" }
 # pg_strtoint64_safe / pg_lltoa (numutils.c): the int8 text I/O cores, owner ported.
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+# fmgr builtin layer (Datum fn(PG_FUNCTION_ARGS)): the call frame + Datum codec +
+# the fmgr-core builtin table the int8 SQL-callable functions register into.
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
