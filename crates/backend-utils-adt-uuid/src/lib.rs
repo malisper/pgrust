@@ -701,8 +701,14 @@ pub fn uuid_extract_version(uuid: &pg_uuid_t) -> Option<i16> {
 }
 
 /// This crate owns no inward seams (no cyclic caller reaches into uuid.c yet).
-/// It installs nothing; the aggregator still calls this for uniformity.
-pub fn init_seams() {}
+/// It registers the by-reference fmgr builtin wrappers (C: their
+/// `fmgr_builtins[]` rows) so by-OID dispatch resolves the SQL-callable `uuid`
+/// I/O, comparison, and hash functions; the aggregator calls this at boot.
+pub fn init_seams() {
+    fmgr_builtins::register_uuid_builtins();
+}
+
+pub mod fmgr_builtins;
 
 #[cfg(test)]
 mod tests;

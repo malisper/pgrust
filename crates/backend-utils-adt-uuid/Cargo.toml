@@ -12,10 +12,13 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
 types-uuid = { path = "../types-uuid" }
 types-datetime = { path = "../types-datetime" }
 types-stringinfo = { path = "../types-stringinfo" }
 backend-utils-error = { path = "../backend-utils-error" }
+# fmgr builtin registry (fmgr.c) — by-OID dispatch table for the by-ref wrappers.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 # Hashing (common/hashfn.c) — ported leaf, depend directly.
 common-hashfn = { path = "../common-hashfn" }
 # HyperLogLog (lib/hyperloglog.c) — ported, depend directly.
