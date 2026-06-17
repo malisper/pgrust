@@ -100,6 +100,18 @@ fn fc_int4random(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `setseed(PG_FUNCTION_ARGS)` — `setseed(float8)`, returns `void`.
+///
+/// C reads `PG_GETARG_FLOAT8(0)`, calls `setseed`, then `PG_RETURN_VOID()`
+/// (which is `(Datum) 0`).
+fn fc_setseed(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let seed = arg_f64(fcinfo, 0);
+    match crate::setseed(seed) {
+        Ok(()) => Datum::from_usize(0),
+        Err(e) => raise(e),
+    }
+}
+
 /// `int8random(PG_FUNCTION_ARGS)` — `random(int8 min, int8 max)`, returns `int8`.
 fn fc_int8random(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let rmin = arg_i64(fcinfo, 0);
@@ -140,6 +152,7 @@ fn builtin(
 pub fn register_pseudorandomfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins([
         builtin(1598, "drandom", 0, true, false, fc_drandom),
+        builtin(1599, "setseed", 1, true, false, fc_setseed),
         builtin(6212, "drandom_normal", 2, true, false, fc_drandom_normal),
         builtin(6339, "int4random", 2, true, false, fc_int4random),
         builtin(6340, "int8random", 2, true, false, fc_int8random),
