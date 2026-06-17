@@ -167,6 +167,36 @@ fn fc_texticregexne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — bpchar regex operators.
+// ---------------------------------------------------------------------------
+//
+// `bpchar` shares `text`'s physical varlena representation, and C reuses the
+// `text` cores by name (pg_proc.dat `prosrc => 'textregexeq'` etc.); the
+// bpchar payload bytes are passed straight through (no trailing-blank trim),
+// exactly as the `text*` functions receive them.
+
+fn fc_bpcharregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::textregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c)))
+}
+fn fc_bpcharregexne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::textregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c)))
+}
+fn fc_bpcharicregexeq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::texticregexeq(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c)))
+}
+fn fc_bpcharicregexne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    ret_bool(ok(crate::texticregexne(m.mcx(), arg_text(fcinfo, 0), arg_text(fcinfo, 1), c)))
+}
+
+// ---------------------------------------------------------------------------
 // fc_ adapters — substring(string from pattern).
 // ---------------------------------------------------------------------------
 
@@ -567,6 +597,11 @@ pub fn register_regexp_builtins() {
         builtin(1239, "texticregexne", 2, true, fc_texticregexne),
         builtin(1240, "nameicregexeq", 2, true, fc_nameicregexeq),
         builtin(1241, "nameicregexne", 2, true, fc_nameicregexne),
+        // ---- bpchar regex operators (C reuses the text* cores) ----
+        builtin(1656, "bpcharicregexeq", 2, true, fc_bpcharicregexeq),
+        builtin(1657, "bpcharicregexne", 2, true, fc_bpcharicregexne),
+        builtin(1658, "bpcharregexeq", 2, true, fc_bpcharregexeq),
+        builtin(1659, "bpcharregexne", 2, true, fc_bpcharregexne),
         // ---- substring(string from pattern) ----
         builtin(2073, "substring", 2, true, fc_textregexsubstr),
         // ---- SIMILAR TO escape converters ----
