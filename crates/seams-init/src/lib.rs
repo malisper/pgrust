@@ -1342,7 +1342,10 @@ mod recurrence_guard {
         // `with_proc_latch` seam — no separate side-table for proc latches.
         // `set_latch_for_proc_pid` maps PID->ProcNumber via procarray's
         // `BackendPidGetProc`.)
-        ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
+        // (set_postmaster_death_watch_cloexec RETIRED: the postmaster unit now
+        // installs it — the death-watch fd (`postmaster_alive_fds`) is
+        // postmaster.c's own, so the `fcntl(.., F_SETFD, FD_CLOEXEC)` runs in the
+        // postmaster crate and is consumed by miscinit's InitPostmasterChild.)
         // DESIGN_DEBT: `initialize_fast_path_locks` is declared + consumed but the
         // owner (backend-storage-lmgr-proc, audited) has no impl yet — it needs the
         // lock.c fast-path lock table (per-PGPROC fpLockBits/fpRelId group layout)
