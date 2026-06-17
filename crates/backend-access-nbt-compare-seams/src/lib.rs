@@ -59,6 +59,34 @@ seam_core::seam!(
 );
 
 // ===========================================================================
+// run_skipsupport — invoke the type's `*skipsupport` strategy routine.
+//
+// INWARD seam owned by `nbtcompare`. This is the owned-model stand-in for the
+// C `OidFunctionCall1(skipSupportFunction, PointerGetDatum(sksup))` in
+// `PrepareSkipSupportFromOpclass` (utils/adt/skipsupport.c): the C type-specific
+// skipsupport function receives the live `SkipSupport` and fills
+// `sksup->low_elem` / `high_elem` / `decrement` / `increment`. An owned `Datum`
+// cannot carry the `SkipSupport` pointer, so the dispatch crosses as a typed
+// `&mut SkipSupportData` here, keyed by the function OID, instead of through the
+// (pointer-less) fmgr boundary.
+//
+// Returns `true` if `skipfunc` is a skipsupport routine this crate implements
+// (it ran and filled `sksup`); `false` if the OID is not one of nbtcompare's
+// in-core skipsupport functions, so the caller can fall through to its fmgr path
+// (which loud-fails for an as-yet-unported skipsupport builtin, matching C
+// reaching an unregistered/undefined function).
+// ===========================================================================
+
+seam_core::seam!(
+    /// `OidFunctionCall1(skipfunc, PointerGetDatum(sksup))` for an in-core btree
+    /// `*skipsupport` routine: dispatch by OID to
+    /// `btbool/int2/int4/int8/oid/charskipsupport`, each of which fills every
+    /// `sksup` field. Returns whether `skipfunc` was a recognized nbtcompare
+    /// skipsupport function.
+    pub fn run_skipsupport(skipfunc: Oid, sksup: &mut SkipSupportData) -> bool
+);
+
+// ===========================================================================
 // sortsupport: install the type's fast comparator into `ssup.comparator`.
 //
 // Each routine corresponds to `ssup->comparator = <fastcmp>;` in C. The
