@@ -1,4 +1,6 @@
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// registers the `char.c` builtins into the fmgr-core table (C: `fmgr_builtins[]`),
+// which uses `String`/`std`.
 #![allow(clippy::result_large_err)]
 
 //! Port of PostgreSQL 18.3 `src/backend/utils/adt/char.c`: the built-in type
@@ -22,6 +24,8 @@
 //! helpers are non-cyclic and called directly.
 
 extern crate alloc;
+
+mod fmgr_builtins;
 
 use backend_libpq_pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgbyte, pq_sendbyte};
 use backend_utils_adt_varlena_seams::cstring_to_text;
@@ -219,9 +223,13 @@ pub fn char_text(mcx: Mcx<'_>, arg1: i8) -> PgResult<Datum> {
 }
 
 /// This unit has no inbound cyclic callers, so it owns no seam crate and
-/// installs no seams. The empty `init_seams()` keeps the uniform
-/// `seams-init::init_all()` wiring (one line per ported crate).
-pub fn init_seams() {}
+/// installs no seams. `init_seams()` registers the `char.c` builtins into the
+/// fmgr fast-path table (C: `fmgr_builtins[]`) so `fmgr_isbuiltin` resolves
+/// `chareq` (and the rest of the family) during early catalog scans without
+/// recursing into the not-yet-built syscache.
+pub fn init_seams() {
+    fmgr_builtins::register_char_builtins();
+}
 
 #[cfg(test)]
 mod tests;

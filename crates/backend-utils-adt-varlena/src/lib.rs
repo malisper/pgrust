@@ -61,6 +61,7 @@ pub mod keystone;
 
 pub mod bytea;
 pub mod comparison;
+mod fmgr_builtins;
 pub mod misc_encoding;
 pub mod name_pattern;
 pub mod position_ops;
@@ -462,6 +463,12 @@ fn seam_replace_text_regexp<'mcx>(
 /// seams so the declared-seams-are-set recurrence guard passes.
 pub fn init_seams() {
     use backend_utils_adt_varlena_seams as s;
+
+    // Register the boot-critical text / name<->text comparison builtins into the
+    // fmgr fast-path table (C: `fmgr_builtins[]`) so `fmgr_isbuiltin` resolves
+    // `texteq`/`bttextcmp` and the name<->text comparators during early catalog
+    // scans without recursing into the not-yet-built syscache.
+    fmgr_builtins::register_varlena_compare_builtins();
 
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC

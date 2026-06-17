@@ -12,6 +12,10 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
+
+# fmgr builtin fast-path registration (text / name<->text comparators).
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }

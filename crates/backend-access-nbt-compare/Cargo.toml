@@ -13,6 +13,10 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-sortsupport = { path = "../types-sortsupport" }
 
+# fmgr builtin fast-path registration (the btree BTORDER_PROC comparators).
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # Outward seam crate: the sort/skip substrate installs the comparator /
 # increment / decrement field writes; nbtcompare only calls them.
 backend-access-nbt-compare-seams = { path = "../backend-access-nbt-compare-seams" }

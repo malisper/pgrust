@@ -30,7 +30,9 @@
 //! `*overflow` / `*underflow` flag. On the overflow/underflow path the returned
 //! `Datum` is undefined (C returns `(Datum) 0`), exactly as C documents.
 
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer
+// (`fmgr_builtins`) registers the btree comparison functions into the
+// fmgr-core builtin table (C: `fmgr_builtins[]`), which uses `String`/`std`.
 #![allow(non_snake_case)]
 
 use types_core::primitive::{InvalidOid, Oid};
@@ -38,6 +40,8 @@ use types_datum::Datum;
 use types_sortsupport::{SkipSupportData, SortSupportData};
 
 use backend_access_nbt_compare_seams as sort;
+
+mod fmgr_builtins;
 
 /// `A_LESS_THAN_B` in the non-`STRESS_SORT_INT_MIN` (production) build.
 const A_LESS_THAN_B: i32 = -1;
@@ -83,6 +87,10 @@ fn run_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData) -> bool {
 /// install seams are OUTWARD (owned by the substrate).
 pub fn init_seams() {
     sort::run_sortsupport::set(run_sortsupport);
+    // Register the btree comparison builtins into the fmgr fast-path table so
+    // `fmgr_isbuiltin` resolves the catalog-index `BTORDER_PROC`s at boot
+    // without recursing into the not-yet-built syscache.
+    fmgr_builtins::register_nbtcompare_builtins();
 }
 
 // ---------------------------------------------------------------------------
