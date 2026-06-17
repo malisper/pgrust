@@ -9,7 +9,10 @@
 //! dispatch (and the `fmgr_isbuiltin` fast path) resolves them. OIDs / nargs /
 //! strict / retset are transcribed exactly from `pg_proc.dat`.
 //!
-//! Only the four functions named below are registered here. The remaining
+//! Only the six recovery-control functions named below are registered here
+//! (`pg_wal_replay_pause`/`pg_wal_replay_resume` return `void`,
+//! `pg_is_wal_replay_paused`/`pg_is_in_recovery`/`pg_promote` return `bool`,
+//! `pg_get_wal_replay_pause_state` returns `text`). The remaining
 //! `xlogfuncs.c` SQL functions are NOT registered: the WAL-control /
 //! file-name / backup / LSN-diff functions return `pg_lsn`, `numeric`, or
 //! composite rows, and several take `pg_lsn` / `bool` defaults whose argument or
@@ -96,6 +99,24 @@ fn fc_pg_get_wal_replay_pause_state(fcinfo: &mut FunctionCallInfoBaseData) -> Da
     ret_text(fcinfo, bytes)
 }
 
+/// `pg_wal_replay_pause()` (xlogfuncs.c:518) — `void` result
+/// (C: `PG_RETURN_VOID()` = Datum 0).
+fn fc_pg_wal_replay_pause(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::pg_wal_replay_pause() {
+        Ok(()) => Datum::from_usize(0),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_wal_replay_resume()` (xlogfuncs.c:548) — `void` result
+/// (C: `PG_RETURN_VOID()` = Datum 0).
+fn fc_pg_wal_replay_resume(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::pg_wal_replay_resume() {
+        Ok(()) => Datum::from_usize(0),
+        Err(e) => raise(e),
+    }
+}
+
 /// `pg_is_in_recovery()` (xlogfuncs.c:643) — infallible `bool`.
 fn fc_pg_is_in_recovery(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_bool(crate::pg_is_in_recovery())
@@ -133,14 +154,18 @@ fn builtin(
     }
 }
 
-/// Register the four expressible `xlogfuncs.c` recovery-control fmgr builtins
+/// Register the six expressible `xlogfuncs.c` recovery-control fmgr builtins
 /// (C: their `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 ///
-/// OIDs / nargs / strict / retset transcribed from `pg_proc.dat`: all four are
+/// OIDs / nargs / strict / retset transcribed from `pg_proc.dat`: all six are
 /// `provolatile => 'v'`, none is marked `proisstrict` (so `strict = false`), and
 /// none is `proretset` (so `retset = false`).
 pub fn register_xlogfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins([
+        // pg_wal_replay_pause() -> void
+        builtin(3071, "pg_wal_replay_pause", 0, false, false, fc_pg_wal_replay_pause),
+        // pg_wal_replay_resume() -> void
+        builtin(3072, "pg_wal_replay_resume", 0, false, false, fc_pg_wal_replay_resume),
         // pg_is_wal_replay_paused() -> bool
         builtin(3073, "pg_is_wal_replay_paused", 0, false, false, fc_pg_is_wal_replay_paused),
         // pg_get_wal_replay_pause_state() -> text
