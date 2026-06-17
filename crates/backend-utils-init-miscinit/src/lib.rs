@@ -881,6 +881,15 @@ pub fn init_seams() {
     s::change_to_data_dir::set(crate::process::ChangeToDataDir);
     s::create_data_dir_lock_file::set(crate::lockfile::create_data_dir_lock_file);
     s::add_to_data_dir_lock_file::set(crate::lockfile::AddToDataDirLockFile);
+    // `RecheckDataDirLockFile()` (miscinit.c:1697) is bodied in this crate; the
+    // postmaster's ServerLoop consumes it through backend-postmaster-postmaster-
+    // seams. C returns bool and never longjmps (its only ereports are LOG); the
+    // Rust port returns PgResult<bool>. Per the C contract ("return true if there
+    // is any doubt: we do not want to cause a panic shutdown unnecessarily"), an
+    // unexpected Err maps to true.
+    backend_postmaster_postmaster_seams::recheck_data_dir_lock_file::set(|| {
+        crate::lockfile::RecheckDataDirLockFile().unwrap_or(true)
+    });
     s::set_processing_mode_bootstrap::set(|| {
         SetProcessingMode(ProcessingMode::BootstrapProcessing)
     });
@@ -895,23 +904,16 @@ pub fn init_seams() {
     // brackets below).
     s::is_binary_upgrade::set(backend_utils_init_small::globals::IsBinaryUpgrade);
 
-    // `TouchSocketLockFiles()` / `RecheckDataDirLockFile()` are miscinit.c
-    // bodies, but the postmaster's ServerLoop calls them through seams declared
-    // on backend-postmaster-postmaster-seams. The real owner is miscinit, so it
-    // installs those postmaster-side seam slots here (delegating to its own
-    // fns), mirroring the cross-crate-install pattern the syslogger owner uses
-    // for the postmaster's logrotate seams.
+    // `TouchSocketLockFiles()` is a miscinit.c body that the postmaster's
+    // ServerLoop calls through a seam declared on
+    // backend-postmaster-postmaster-seams. The real owner is miscinit, so it
+    // installs that postmaster-side seam slot here (delegating to its own fn),
+    // mirroring the cross-crate-install pattern the syslogger owner uses for the
+    // postmaster's logrotate seams. (RecheckDataDirLockFile is already installed
+    // above.)
     backend_postmaster_postmaster_seams::touch_socket_lock_files::set(
         crate::lockfile::touch_socket_lock_files,
     );
-    backend_postmaster_postmaster_seams::recheck_data_dir_lock_file::set(|| {
-        // `RecheckDataDirLockFile()` returns bool; its `PgResult` Err surface is
-        // a LOG-level ereport that does not longjmp (it returns Ok), so the
-        // value is always the carried bool. Conservatively treat any unexpected
-        // error as "lock still OK" (true), matching C's bias against an
-        // unnecessary shutdown.
-        crate::lockfile::RecheckDataDirLockFile().unwrap_or(true)
-    });
 
     // Non-miscinit seams an earlier consumer declared here. Until their real
     // owners (globals.c counters, superuser.c) land in this repo, install thin
