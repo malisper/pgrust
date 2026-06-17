@@ -51,6 +51,8 @@ const BPCHAROID: Oid = 1042;
 const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
 /// `F_RAW_ARRAY_SUBSCRIPT_HANDLER` (`fmgroids.h`) — `raw_array_subscript_handler`.
 const F_RAW_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
+/// `F_JSONB_SUBSCRIPT_HANDLER` (`fmgroids.h`) — `jsonb_subscript_handler`.
+const F_JSONB_SUBSCRIPT_HANDLER: Oid = 6098;
 
 /// `IsTrueArrayType(typeForm)` (`catalog/pg_type.h`): a "true" array type has a
 /// valid `typelem` and the `array_subscript_handler` as its `typsubscript`.
@@ -814,14 +816,23 @@ pub fn get_subscripting_routines(
             fetch_leakproof: true,
             store_leakproof: false,
         },
-        // Any other subscripting handler (e.g. jsonb_subscript_handler) is not
-        // modeled yet; OidFunctionCall0 would dispatch to its body. Mirror PG
-        // and panic at the unported owner.
+        // jsonb_subscript_handler (jsonbsubs.c):
+        //   .transform = jsonb_subscript_transform, .exec_setup = jsonb_exec_setup,
+        //   .fetch_strict = true (fetch returns NULL for NULL inputs),
+        //   .fetch_leakproof = true (fetch returns NULL for bad subscript),
+        //   .store_leakproof = false (assignment throws error)
+        F_JSONB_SUBSCRIPT_HANDLER => SubscriptRoutines {
+            handler: SubscriptHandler::Jsonb,
+            fetch_strict: true,
+            fetch_leakproof: true,
+            store_leakproof: false,
+        },
+        // Any other subscripting handler is not modeled yet; OidFunctionCall0
+        // would dispatch to its body. Mirror PG and panic at the unported owner.
         other => panic!(
             "getSubscriptingRoutines: typsubscript handler OID {} is not a modeled \
              subscript handler (only array_subscript_handler / \
-             raw_array_subscript_handler are ported; jsonb_subscript_handler and \
-             other type handlers remain unported)",
+             raw_array_subscript_handler / jsonb_subscript_handler are ported)",
             other
         ),
     };

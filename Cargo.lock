@@ -8389,6 +8389,7 @@ dependencies = [
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-jsonbsubs-seams",
  "backend-utils-adt-misc2-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -17827,6 +17828,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonbsubs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonbsubs-seams",
+ "backend-utils-adt-jsonfuncs",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-jsonb",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonbsubs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonfuncs"
 version = "0.0.0"
 dependencies = [
@@ -22084,6 +22110,7 @@ dependencies = [
  "backend-utils-adt-int",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb-gin",
+ "backend-utils-adt-jsonbsubs",
  "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-jsonpath-gram",
  "backend-utils-adt-like",
