@@ -7,6 +7,7 @@
 //! here.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use backend_utils_error::{config, elog, ereport};
 // The exit-callback `arg` is the canonical unified `Datum` (Datum-unification);
@@ -65,6 +66,23 @@ impl OnExitList {
     }
 }
 
+/// Set true by [`proc_exit`] immediately before `std::process::exit`, so the
+/// libc `atexit` backstop ([`atexit_callback`]) knows the cleanup already ran
+/// and must not re-run `proc_exit_prepare`.
+///
+/// This is a process-global `AtomicBool` rather than a `thread_local!` on
+/// purpose: on macOS, `std::process::exit` runs the libc `atexit` handlers
+/// AFTER the runtime has begun tearing down thread-local storage (the dyld TLV
+/// destructors), so reading any `thread_local!` from `atexit_callback` can hit
+/// an `AccessError` (and a panic there `abort()`s the process). A `static`
+/// atomic lives for the whole process and is always readable. This faithfully
+/// models C, where `proc_exit` runs the on-exit cleanup and the `atexit_callback`
+/// backstop only matters for a bare `exit()` that bypassed `proc_exit` — once
+/// `proc_exit` has cleaned up, the C re-run is a harmless no-op over already-empty
+/// lists, which is exactly what this short-circuit reproduces without touching the
+/// (now half-destroyed) TLS lists.
+static PROC_EXIT_DONE: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     /// `shmem_exit_inprogress`.
     static SHMEM_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) };
@@ -113,6 +131,10 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     // The PROFILE_PID_DIR gprof block is not ported (profiling build only).
 
     let _ = elog(DEBUG3, format!("exit({code})"));
+
+    // The cleanup has run; tell the libc `atexit` backstop not to re-run it
+    // (its TLS lists may already be mid-destruction by the time it fires).
+    PROC_EXIT_DONE.store(true, Ordering::SeqCst);
 
     std::process::exit(code)
 }
@@ -219,6 +241,18 @@ pub fn shmem_exit(code: i32) -> PgResult<()> {
 /// cleanup. (For a really uncooperative `_exit()` there's the pmsignal.c
 /// dead man switch.)
 extern "C" fn atexit_callback() {
+    // If proc_exit() already ran the cleanup, there is nothing to do — and we
+    // must NOT touch the thread-local on-exit lists / DSM segment list, which
+    // may already be (or be in the middle of being) destroyed when libc invokes
+    // this handler from std::process::exit on macOS. C's atexit_callback re-runs
+    // proc_exit_prepare unconditionally, but there the re-run is a harmless no-op
+    // over empty lists; here the empty-but-destroyed TLS would AccessError →
+    // abort. Short-circuiting on the proc_exit-done flag reproduces the C no-op
+    // faithfully. The backstop still fires for a bare exit() that bypassed
+    // proc_exit (flag still false), exactly as C intends.
+    if PROC_EXIT_DONE.load(Ordering::SeqCst) {
+        return;
+    }
     // Clean up everything that must be cleaned up.
     // ... too bad we don't know the real exit code ...
     proc_exit_prepare(-1);

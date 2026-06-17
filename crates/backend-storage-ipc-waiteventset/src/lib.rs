@@ -136,8 +136,24 @@ pub fn CreateWaitEventSet(nevents: i32) -> PgResult<WaitEventSetHandle> {
 }
 
 /// `FreeWaitEventSet(set)` — release the set's kernel object and memory.
+///
+/// The owned [`WaitEventSet`](backend_storage_ipc_waiteventset_seams::WaitEventSet)
+/// guard's `Drop` routes here, so this can run from a `thread_local!` destructor
+/// at process exit. By then the per-thread [`SETS`] registry's own `thread_local!`
+/// slot may ALREADY have been destroyed (TLS destruction order between distinct
+/// `thread_local!`s is unspecified), and a plain `SETS.with(..)` would panic with
+/// `AccessError` — and a panic out of a TLS destructor `abort()`s the process,
+/// which the postmaster reaper would misread as a child crash. So we use
+/// `try_with`: if the registry is gone we skip the bookkeeping/`close()`, which
+/// is faithful to C, where `proc_exit`/`exit()` never calls `FreeWaitEventSet`
+/// at all — the OS reclaims the kqueue/epoll fd (and the set's memory) on process
+/// teardown.
 pub fn FreeWaitEventSet(handle: WaitEventSetHandle) {
-    let set = SETS.with(|sets| sets.borrow_mut().remove(&handle.as_usize()));
+    let set = match SETS.try_with(|sets| sets.borrow_mut().remove(&handle.as_usize())) {
+        Ok(set) => set,
+        // Registry TLS already destroyed (process exit): the OS closes the fd.
+        Err(_) => return,
+    };
     if let Some(mut set) = set {
         backend::free(&mut set.backend);
     }
