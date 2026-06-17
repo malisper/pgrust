@@ -26,6 +26,7 @@ use types_error::PgResult;
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
+use types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 pub use types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
@@ -110,66 +111,65 @@ pub fn pgstat_bgwriter_init_shmem_cb(stats: &mut PgStatShared_BgWriter) {
     lwlock_initialize::call(&mut stats.lock, LWTRANCHE_PGSTATS_DATA);
 }
 
-/// Port of `void pgstat_bgwriter_reset_all_cb(TimestampTz ts)`.
-pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
-    let mut res: PgResult<()> = Ok(());
-    with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
-        res = (|| {
-            // see explanation above PgStatShared_BgWriter for the reset protocol
-            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE, my_proc_number::call())?;
-            {
-                // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
-                //                                 &stats_shmem->stats, sizeof(...),
-                //                                 &stats_shmem->changecount);
-                let PgStatShared_BgWriter {
-                    ref mut reset_offset,
-                    ref stats,
-                    ref changecount,
-                    ..
-                } = *stats_shmem;
-                pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
-            }
-            stats_shmem.stats.stat_reset_timestamp = ts;
-            guard.release()
-        })();
-    });
-    res
+/// Port of `void pgstat_bgwriter_reset_all_cb(TimestampTz ts)`. The adapter
+/// hands us the typed shared control; we project its `bgwriter` region
+/// (`&pgStatLocal.shmem->bgwriter`).
+pub fn pgstat_bgwriter_reset_all_cb(
+    ctl: &mut PgStat_ShmemControl,
+    ts: TimestampTz,
+) -> PgResult<()> {
+    // PgStatShared_BgWriter *stats_shmem = &pgStatLocal.shmem->bgwriter;
+    let stats_shmem = &mut ctl.bgwriter;
+
+    // see explanation above PgStatShared_BgWriter for the reset protocol
+    let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE, my_proc_number::call())?;
+    {
+        // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
+        //                                 &stats_shmem->stats, sizeof(...),
+        //                                 &stats_shmem->changecount);
+        let PgStatShared_BgWriter {
+            ref mut reset_offset,
+            ref stats,
+            ref changecount,
+            ..
+        } = *stats_shmem;
+        pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
+    }
+    stats_shmem.stats.stat_reset_timestamp = ts;
+    guard.release()
 }
 
-/// Port of `void pgstat_bgwriter_snapshot_cb(void)`.
-pub fn pgstat_bgwriter_snapshot_cb() -> PgResult<()> {
-    let mut snap = PgStat_BgWriterStats::default();
-    with_snapshot_bgwriter::call(&mut |s: &mut PgStat_BgWriterStats| snap = *s);
+/// Port of `void pgstat_bgwriter_snapshot_cb(void)`. The adapter hands us the
+/// typed shared control (read, `&pgStatLocal.shmem->bgwriter`) and the snapshot
+/// (write, `&pgStatLocal.snapshot.bgwriter`).
+pub fn pgstat_bgwriter_snapshot_cb(
+    ctl: &PgStat_ShmemControl,
+    snap: &mut PgStat_Snapshot,
+) -> PgResult<()> {
+    // PgStatShared_BgWriter *stats_shmem = &pgStatLocal.shmem->bgwriter;
+    let stats_shmem = &ctl.bgwriter;
+    let bgwriter_snap = &mut snap.bgwriter;
 
-    let mut shmem_res: PgResult<PgStat_BgWriterStats> = Ok(PgStat_BgWriterStats::default());
-    with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
-        shmem_res = (|| {
-            // pgstat_copy_changecounted_stats(&pgStatLocal.snapshot.bgwriter,
-            //                                 &stats_shmem->stats, sizeof(...),
-            //                                 &stats_shmem->changecount);
-            pgstat_copy_changecounted_stats(
-                &mut snap,
-                &stats_shmem.stats,
-                &stats_shmem.changecount,
-            );
+    // pgstat_copy_changecounted_stats(&pgStatLocal.snapshot.bgwriter,
+    //                                 &stats_shmem->stats, sizeof(...),
+    //                                 &stats_shmem->changecount);
+    pgstat_copy_changecounted_stats(
+        bgwriter_snap,
+        &stats_shmem.stats,
+        &stats_shmem.changecount,
+    );
 
-            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_SHARED, my_proc_number::call())?;
-            // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
-            let reset = stats_shmem.reset_offset;
-            guard.release()?;
-
-            Ok(reset)
-        })();
-    });
-    let reset: PgStat_BgWriterStats = shmem_res?;
+    let guard = lwlock_acquire::call(&stats_shmem.lock, LW_SHARED, my_proc_number::call())?;
+    // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
+    let reset = stats_shmem.reset_offset;
+    guard.release()?;
 
     // compensate by reset offsets
     // #define BGWRITER_COMP(fld) pgStatLocal.snapshot.bgwriter.fld -= reset.fld;
-    snap.buf_written_clean -= reset.buf_written_clean;
-    snap.maxwritten_clean -= reset.maxwritten_clean;
-    snap.buf_alloc -= reset.buf_alloc;
+    bgwriter_snap.buf_written_clean -= reset.buf_written_clean;
+    bgwriter_snap.maxwritten_clean -= reset.maxwritten_clean;
+    bgwriter_snap.buf_alloc -= reset.buf_alloc;
 
-    with_snapshot_bgwriter::call(&mut |s: &mut PgStat_BgWriterStats| *s = snap);
     Ok(())
 }
 
@@ -237,20 +237,15 @@ mod tests {
     #[test]
     fn reset_all_cb_copies_offset_and_sets_timestamp() {
         let env = setup();
-        {
-            let mut s = env.bgwriter_shmem.borrow_mut();
-            s.stats.buf_written_clean = 10;
-            s.stats.buf_alloc = 3;
-        }
+        let mut ctl = PgStat_ShmemControl::default();
+        ctl.bgwriter.stats.buf_written_clean = 10;
+        ctl.bgwriter.stats.buf_alloc = 3;
 
-        pgstat_bgwriter_reset_all_cb(777).unwrap();
+        pgstat_bgwriter_reset_all_cb(&mut ctl, 777).unwrap();
 
-        {
-            let shmem = env.bgwriter_shmem.borrow();
-            assert_eq!(shmem.reset_offset.buf_written_clean, 10);
-            assert_eq!(shmem.reset_offset.buf_alloc, 3);
-            assert_eq!(shmem.stats.stat_reset_timestamp, 777);
-        }
+        assert_eq!(ctl.bgwriter.reset_offset.buf_written_clean, 10);
+        assert_eq!(ctl.bgwriter.reset_offset.buf_alloc, 3);
+        assert_eq!(ctl.bgwriter.stats.stat_reset_timestamp, 777);
         assert_eq!(env.lwlock_acquires.borrow().clone(), vec![LW_EXCLUSIVE]);
         assert_eq!(env.lwlock_releases.get(), 1);
     }
@@ -258,8 +253,9 @@ mod tests {
     #[test]
     fn snapshot_cb_compensates_by_reset_offsets() {
         let env = setup();
+        let mut ctl = PgStat_ShmemControl::default();
         {
-            let mut s = env.bgwriter_shmem.borrow_mut();
+            let s = &mut ctl.bgwriter;
             s.stats.buf_written_clean = 10;
             s.stats.maxwritten_clean = 5;
             s.stats.buf_alloc = 20;
@@ -267,15 +263,13 @@ mod tests {
             s.reset_offset.maxwritten_clean = 5;
             s.reset_offset.buf_alloc = 1;
         }
+        let mut snap = PgStat_Snapshot::default();
 
-        pgstat_bgwriter_snapshot_cb().unwrap();
+        pgstat_bgwriter_snapshot_cb(&ctl, &mut snap).unwrap();
 
-        {
-            let snap = env.bgwriter_snapshot.borrow();
-            assert_eq!(snap.buf_written_clean, 6);
-            assert_eq!(snap.maxwritten_clean, 0);
-            assert_eq!(snap.buf_alloc, 19);
-        }
+        assert_eq!(snap.bgwriter.buf_written_clean, 6);
+        assert_eq!(snap.bgwriter.maxwritten_clean, 0);
+        assert_eq!(snap.bgwriter.buf_alloc, 19);
         assert_eq!(env.lwlock_acquires.borrow().clone(), vec![LW_SHARED]);
         assert_eq!(env.lwlock_releases.get(), 1);
     }

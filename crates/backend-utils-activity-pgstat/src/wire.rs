@@ -81,6 +81,75 @@ pub fn install_seams() {
     // caller stores into rel->pgstat_enabled.
     pgstat_seam::pgstat_init_relation::set(crate::pgstat_relation::pgstat_init_relation);
 
+    // ---- fixed-kind shared/snapshot field accessors ----
+    //
+    // The per-kind fixed crates (`pgstat_archiver.c` / `pgstat_bgwriter.c` /
+    // `pgstat_checkpointer.c`) reach their fixed-kind region through
+    // `&pgStatLocal.shmem-><kind>` (shared, mutated under its changecount lock)
+    // and `&pgStatLocal.snapshot.<kind>` (the materialized snapshot copy). The
+    // core dispatches those reports/fetches without passing the control block,
+    // so the per-kind crates reach them via these projection seams. Install the
+    // production accessors over the live `pgStatLocal` here (this crate owns that
+    // backend-local control), mirroring C's field projections.
+    //
+    // `pgStatLocal.shmem` is a `PgStat_ShmemControl *` in C: dereferencing it
+    // before `StatsShmemInit`/attach is undefined (NULL deref). On the boot
+    // path `stats_shmem_init` runs before any fixed kind reports, so `shmem` is
+    // `Some`; if it is `None` the closures panic, matching C's undefined NULL
+    // deref (never reached in a correct sequence).
+    pgstat_seam::with_shmem_archiver::set(|f| {
+        crate::local::with_local(|l| {
+            f(&mut l
+                .shmem
+                .as_mut()
+                .expect("pgStatLocal.shmem accessed before StatsShmemInit")
+                .archiver)
+        })
+    });
+    pgstat_seam::with_shmem_bgwriter::set(|f| {
+        crate::local::with_local(|l| {
+            f(&mut l
+                .shmem
+                .as_mut()
+                .expect("pgStatLocal.shmem accessed before StatsShmemInit")
+                .bgwriter)
+        })
+    });
+    pgstat_seam::with_shmem_checkpointer::set(|f| {
+        crate::local::with_local(|l| {
+            f(&mut l
+                .shmem
+                .as_mut()
+                .expect("pgStatLocal.shmem accessed before StatsShmemInit")
+                .checkpointer)
+        })
+    });
+
+    // `pgStatLocal.snapshot.<kind>` is a value-typed field of the always-present
+    // `PgStat_Snapshot snapshot` (not a pointer), so it is reachable whenever
+    // `pgStatLocal` exists, matching C's `&pgStatLocal.snapshot.<kind>`.
+    pgstat_seam::with_snapshot_archiver::set(|f| {
+        crate::local::with_local(|l| f(&mut l.snapshot.archiver))
+    });
+    pgstat_seam::with_snapshot_bgwriter::set(|f| {
+        crate::local::with_local(|l| f(&mut l.snapshot.bgwriter))
+    });
+    pgstat_seam::with_snapshot_checkpointer::set(|f| {
+        crate::local::with_local(|l| f(&mut l.snapshot.checkpointer))
+    });
+
+    // `pgStatLocal.shmem->is_shutdown` — read by the report-path `Assert`s. C
+    // dereferences `pgStatLocal.shmem` (NULL before attach); faithfully panic on
+    // `None` rather than substituting a value the C code never observes.
+    pgstat_seam::shmem_is_shutdown::set(|| {
+        crate::local::with_local(|l| {
+            l.shmem
+                .as_ref()
+                .expect("pgStatLocal.shmem accessed before StatsShmemInit")
+                .is_shutdown
+        })
+    });
+
     // ---- pgstat.c GUC variable backing (conf->variable accessors) ----
     //
     // `bool pgstat_track_counts` and `int pgstat_fetch_consistency` are plain

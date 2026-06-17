@@ -131,8 +131,8 @@ fn register_fixed_kinds() {
             ),
         )
         .init_shmem_cb(|ctl| bgwriter::pgstat_bgwriter_init_shmem_cb(&mut ctl.bgwriter))
-        .reset_all_cb(|_ctl, ts| bgwriter::pgstat_bgwriter_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| bgwriter::pgstat_bgwriter_snapshot_cb())
+        .reset_all_cb(|ctl, ts| bgwriter::pgstat_bgwriter_reset_all_cb(ctl, ts))
+        .snapshot_cb(|shmem, snap| bgwriter::pgstat_bgwriter_snapshot_cb(shmem, snap))
         // On-disk (de)serialization: the bytes are the C image of the
         // `PgStat_BgWriterStats` field of the shmem (read) / snapshot (write).
         .read_fixed_cb(|ctl, bytes| {
@@ -158,8 +158,8 @@ fn register_fixed_kinds() {
             ),
         )
         .init_shmem_cb(|ctl| archiver::pgstat_archiver_init_shmem_cb(&mut ctl.archiver))
-        .reset_all_cb(|_ctl, ts| archiver::pgstat_archiver_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| archiver::pgstat_archiver_snapshot_cb())
+        .reset_all_cb(|ctl, ts| archiver::pgstat_archiver_reset_all_cb(ctl, ts))
+        .snapshot_cb(|shmem, snap| archiver::pgstat_archiver_snapshot_cb(shmem, snap))
         .read_fixed_cb(|ctl, bytes| {
             ctl.archiver.stats = kind_info::pgstat_deserialize_pod::<
                 types_pgstat::activity_pgstat::PgStat_ArchiverStats,
@@ -186,8 +186,8 @@ fn register_fixed_kinds() {
         .init_shmem_cb(|ctl| {
             checkpointer::pgstat_checkpointer_init_shmem_cb(&mut ctl.checkpointer)
         })
-        .reset_all_cb(|_ctl, ts| checkpointer::pgstat_checkpointer_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| checkpointer::pgstat_checkpointer_snapshot_cb())
+        .reset_all_cb(|ctl, ts| checkpointer::pgstat_checkpointer_reset_all_cb(ctl, ts))
+        .snapshot_cb(|shmem, snap| checkpointer::pgstat_checkpointer_snapshot_cb(shmem, snap))
         .read_fixed_cb(|ctl, bytes| {
             ctl.checkpointer.stats = kind_info::pgstat_deserialize_pod::<
                 types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
