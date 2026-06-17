@@ -1293,6 +1293,14 @@ pub fn init_seams() {
     // backend's last activity string for the death-log detail. C passes a
     // fixed-size `char activity[1024]` buffer; mirror that here, copy out the
     // NUL-terminated result, and hand the postmaster an owned `Option<String>`.
+    // `pgstat_report_appname(newval)` (backend_status.c) — the
+    // `assign_application_name` GUC hook in variable.c forwards the new
+    // application_name here; install into the consumer's (variable.c's) seam
+    // crate, like the postmaster cross-install above.
+    backend_commands_variable_seams::pgstat_report_appname::set(|newval| {
+        pgstat_report_appname(newval.as_bytes());
+    });
+
     backend_postmaster_postmaster_seams::pgstat_get_crashed_backend_activity::set(|pid| {
         let mut activity = [0u8; 1024];
         pgstat_get_crashed_backend_activity(pid, &mut activity).map(|()| {

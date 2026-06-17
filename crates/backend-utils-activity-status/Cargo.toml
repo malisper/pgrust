@@ -9,6 +9,7 @@ name = "backend_utils_activity_status"
 path = "src/lib.rs"
 
 [dependencies]
+backend-commands-variable-seams = { path = "../backend-commands-variable-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

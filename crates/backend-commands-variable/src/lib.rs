@@ -1365,10 +1365,10 @@ mod install {
                 .finish(here("check_role"));
         });
 
-        // -------- backend_status.c (unported: todo) --------
-        own::pgstat_report_appname::set(|_newval| {
-            panic!("pgstat_report_appname (backend_status.c) not yet ported")
-        });
+        // -------- backend_status.c --------
+        // `pgstat_report_appname` is now installed by its real owner
+        // (backend_status.c = backend-utils-activity-status::init_seams), which
+        // cross-installs into this seam crate. Nothing to do here.
 
         // -------- io_combine_limit / xlogprefetcher --------
         own::am_startup_process::set(|| {
