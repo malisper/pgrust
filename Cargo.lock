@@ -11525,6 +11525,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-plan-createplan-seams",
@@ -11640,6 +11641,7 @@ dependencies = [
  "backend-optimizer-prep-prepunion-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
  "backend-parser-analyze",

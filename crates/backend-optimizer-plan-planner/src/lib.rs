@@ -1486,23 +1486,28 @@ fn grouping_planner<'mcx>(
     debug_assert!(!has_window);
     // With no activeWindows, grouping_target = sort_input_target (C:1703-1705).
     let grouping_target = sort_input_target.clone();
+    let grouping_target_parallel_safe = sort_input_target_parallel_safe;
 
     // Grouping/aggregation (C:1709-1726). have_grouping = groupClause ||
-    // groupingSets || hasAggs || hasHavingQual. The hasAggs / groupingSets
-    // legs already panicked above (preprocess_minmax_aggregates /
-    // preprocess_grouping_sets); a bare GROUP BY (groupClause without aggs)
-    // and a HAVING qual still need make_group_input_target +
-    // create_grouping_paths, which are not ported. Panic precisely.
+    // groupingSets || hasAggs || hasHavingQual. If we have grouping or
+    // aggregation, the topmost scan/join plan node must emit what the grouping
+    // step wants (make_group_input_target); otherwise it should emit
+    // grouping_target.
     let have_grouping =
-        has_group_clause || has_grouping_sets || has_aggs || root.hasHavingQual;
-    if have_grouping {
-        panic!(
-            "grouping_planner: grouping/aggregation (make_group_input_target + \
-             create_grouping_paths, planner.c:1718/1799) is not ported"
-        );
-    }
-    // With no grouping, scanjoin_target = grouping_target = final_target
-    // (C:1722-1725).
+        has_group_clause || has_grouping_sets || root.hasHavingQual || has_aggs;
+    // GROUPING SETS / window upper rels are gated out above (each loud-panics at
+    // its C site). A bare GROUP BY (groupClause) feeds make_group_input_target
+    // through to create_grouping_paths too, but its sorted-Group / numGroups
+    // estimation paths are exercised below; the plain-aggregate (hasAggs, no
+    // GROUP BY) path — `SELECT count(*) FROM t` — is the fully-ported one.
+    let (scanjoin_target, scanjoin_target_parallel_safe) = if have_grouping {
+        let sj = make_group_input_target(mcx, run, root, &final_target)?;
+        let safe = is_target_exprs_parallel_safe(root, &sj.exprs);
+        (sj, safe)
+    } else {
+        // With no grouping, scanjoin_target = grouping_target (C:1722-1725).
+        (grouping_target.clone(), grouping_target_parallel_safe)
+    };
 
     // Targetlist SRFs (C:1733-1768). split_pathtarget_at_srfs is not ported.
     if has_target_srfs {
@@ -1520,11 +1525,7 @@ fn grouping_planner<'mcx>(
         );
     }
 
-    // No grouping / window: scanjoin_target = grouping_target = sort_input_target
-    // (C:1722-1725). No SRFs: scanjoin_targets = list_make1(scanjoin_target)
-    // (C:1764-1767).
-    let scanjoin_target = grouping_target.clone();
-    let scanjoin_target_parallel_safe = sort_input_target_parallel_safe;
+    // No SRFs: scanjoin_targets = list_make1(scanjoin_target) (C:1764-1767).
 
     // scanjoin_target_same_exprs = list_length(scanjoin_targets) == 1
     //   && equal(scanjoin_target->exprs, current_rel->reltarget->exprs) (C:1771).
@@ -1561,8 +1562,24 @@ fn grouping_planner<'mcx>(
     root.upper_targets[UPPERREL_WINDOW as usize] = Some(Box::new(sort_input_target.clone()));
     root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(Box::new(grouping_target.clone()));
 
-    // No grouping / window / distinct upper rels on this path (C:1797-1841 all
-    // guarded out). current_rel is unchanged so far.
+    // If we have grouping and/or aggregation, consider ways to implement that;
+    // we build a new upperrel representing the output of this phase (C:1792-1809).
+    if have_grouping {
+        current_rel = create_grouping_paths(
+            mcx,
+            run,
+            root,
+            current_rel,
+            grouping_target.clone(),
+            grouping_target_parallel_safe,
+        )?;
+        // adjust_paths_for_srfs when grouping_target contains SRFs (C:1804-1808)
+        // is gated out: hasTargetSRFs loud-panics above before this point.
+        debug_assert!(!has_target_srfs);
+    }
+
+    // Window / DISTINCT upper rels on this path (C:1813-1841) are guarded out
+    // above (each loud-panics).
 
     // If ORDER BY was given, generate a new upperrel of paths that emit the
     // correct ordering and project final_target (C:1849-1866). We can apply the
@@ -1659,6 +1676,456 @@ fn grouping_planner<'mcx>(
 
     // Note: caller (subquery_planner) does set_cheapest(final_rel) (C:2169).
     Ok(())
+}
+
+// ===========================================================================
+// make_group_input_target (planner.c:5527)
+// ===========================================================================
+
+/// `make_group_input_target(root, final_target)` (planner.c:5527) — generate the
+/// `PathTarget` for the initial input to grouping nodes. We build a target
+/// containing all grouping columns, plus any other Vars mentioned in the query's
+/// targetlist and HAVING qual (with non-grouping expressions flattened into their
+/// component Vars). For a plain aggregate with no GROUP BY / HAVING (the
+/// `count(*)` path) the grouping columns are none and the aggregate's argument
+/// Vars are pulled out; `count(*)` has no argument Vars, so the result is an
+/// empty target.
+fn make_group_input_target<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    final_target: &PathTarget,
+) -> PgResult<PathTarget> {
+    use backend_optimizer_util_vars::tlist::{
+        add_column_to_pathtarget, add_new_columns_to_pathtarget, create_empty_pathtarget,
+        get_sortgroupref_clause_noerr,
+    };
+    use backend_optimizer_util_vars::var::{
+        pull_var_clause, PVC_INCLUDE_PLACEHOLDERS, PVC_RECURSE_AGGREGATES, PVC_RECURSE_WINDOWFUNCS,
+    };
+
+    // We must build a target containing all grouping columns, plus any other
+    // Vars mentioned in the query's targetlist and HAVING qual (C:5541).
+    let mut input_target = create_empty_pathtarget();
+
+    // Resolve processed_groupClause handles into SortGroupClause values once
+    // (the C `root->processed_groupClause` List). For a plain aggregate this is
+    // empty, so every column drops to the non-group path.
+    let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_groupClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+
+    // The parser/grouping-sets RT-index removal (parse->hasGroupRTE &&
+    // groupingSets) is gated out on this path (groupingSets loud-panics upstream).
+    let mut non_group_cols: Vec<types_pathnodes::NodeId> = Vec::new();
+    for (i, &expr_id) in final_target.exprs.iter().enumerate() {
+        let sgref = get_pathtarget_sortgroupref(final_target, i);
+        let is_group_col = sgref != 0
+            && !group_clauses.is_empty()
+            && get_sortgroupref_clause_noerr(sgref, &group_clauses).is_some();
+        if is_group_col {
+            // It's a grouping column; add it to the input target as-is.
+            add_column_to_pathtarget(&mut input_target, expr_id, sgref);
+        } else {
+            // Non-grouping column; remember the expression for the later
+            // pull_var_clause call.
+            non_group_cols.push(expr_id);
+        }
+    }
+
+    // If there's a HAVING clause, we'll need the Vars it uses, too (C:5586).
+    // havingQual is the concretely-typed owned `Option<PgBox<Expr>>` view; clone
+    // it into the arena to obtain a handle that pull_var_clause can walk.
+    let having_id: Option<types_pathnodes::NodeId> =
+        match run.resolve(root.parse).havingQual.as_deref() {
+            Some(e) => {
+                let cloned = e.clone_in(mcx)?;
+                Some(root.alloc_node(cloned))
+            }
+            None => None,
+        };
+    if let Some(id) = having_id {
+        non_group_cols.push(id);
+    }
+
+    // Pull out all the Vars mentioned in non-group cols (plus HAVING), and add
+    // them to the input target if not already present (C:5601). pull_var_clause
+    // walks a Node; here it walks each handle's resolved Expr and unions the
+    // results (equivalent to walking the C `List` node).
+    let mut non_group_var_ids: Vec<types_pathnodes::NodeId> = Vec::new();
+    let flags = PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS;
+    for &nid in &non_group_cols {
+        let node = Node::Expr(root.node(nid).clone());
+        let vars = pull_var_clause(&node, flags);
+        for v in vars {
+            non_group_var_ids.push(root.alloc_node(v));
+        }
+    }
+    add_new_columns_to_pathtarget(root, &mut input_target, &non_group_var_ids);
+
+    // XXX this causes some redundant cost calculation ... (C:5619).
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut input_target);
+    Ok(input_target)
+}
+
+// ===========================================================================
+// create_grouping_paths + helpers (planner.c:3779)
+// ===========================================================================
+
+/// `get_number_of_groups(root, path_rows, gd, target_list)` (planner.c:3658),
+/// restricted to the no-grouping-sets cases reachable here. For a plain GROUP BY
+/// it estimates from the optimized groupClause; for plain aggregation (no GROUP
+/// BY) it's a single result row.
+fn get_number_of_groups<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    _path_rows: f64,
+) -> PgResult<f64> {
+    let parse = run.resolve(root.parse);
+    let has_group_clause = !parse.groupClause.is_empty();
+    let has_grouping_sets = !parse.groupingSets.is_empty();
+    let has_aggs = parse.hasAggs;
+    if has_group_clause {
+        // Plain GROUP BY — estimate based on the optimized groupClause via
+        // estimate_num_groups (selfuncs.c). The GROUP BY path also needs
+        // AGG_SORTED group_pathkeys (and, for non-aggregate GROUP BY,
+        // create_group_path), which are not ported on this path; that gap is
+        // surfaced as a precise error in add_paths_to_grouping_rel before any
+        // group count is consumed, so the estimate is not reached here.
+        debug_assert!(!has_grouping_sets);
+        Err(PgError::error(
+            "get_number_of_groups: GROUP BY group-count estimation (estimate_num_groups) \
+             is reached only on the unported GROUP BY aggregation path",
+        ))
+    } else if has_grouping_sets {
+        // Empty grouping sets — gated out upstream.
+        panic!("get_number_of_groups: GROUPING SETS gated out upstream");
+    } else if has_aggs || root.hasHavingQual {
+        // Plain aggregation, one result row.
+        Ok(1.0)
+    } else {
+        // Not grouping.
+        Ok(1.0)
+    }
+}
+
+/// `create_grouping_paths(root, input_rel, target, target_parallel_safe, gd)`
+/// (planner.c:3779) — build a new upperrel containing Paths for grouping and/or
+/// aggregation. Restricted to the non-degenerate, non-grouping-sets,
+/// non-partitionwise, non-parallel cases reachable on this path: the sorted
+/// Agg / Group path over the cheapest input. Partial/partitionwise/degenerate
+/// legs loud-panic (they are gated out upstream or require unported machinery).
+fn create_grouping_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    target: PathTarget,
+    target_parallel_safe: bool,
+) -> PgResult<RelId> {
+    // MemSet(&agg_costs, 0); get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &agg_costs).
+    let mut agg_costs = types_pathnodes::AggClauseCosts::default();
+    backend_optimizer_prep_prepagg::get_agg_clause_costs(
+        root,
+        types_nodes::nodeagg::AGGSPLIT_SIMPLE,
+        &mut agg_costs,
+    )?;
+    let agg_costs_lite = agg_clause_costs_to_lite(&agg_costs);
+
+    // make_grouping_rel(root, input_rel, target, target_parallel_safe,
+    // parse->havingQual) (C:3798). IS_OTHER_REL(input_rel) is false here (top
+    // grouping rel), so the relids set is NULL.
+    let grouped_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_GROUP_AGG, &None);
+    root.rel_mut(grouped_rel).reltarget = Some(Box::new(target.clone()));
+    {
+        // consider_parallel: input_rel->consider_parallel && target_parallel_safe
+        // && is_parallel_safe(havingQual). is_parallel_safe(havingQual) folds into
+        // the target-expr check; on this path glob is parallel-unsafe so the input
+        // rel is never consider_parallel and this stays false.
+        let input_cp = root.rel(input_rel).consider_parallel;
+        let cp = input_cp && target_parallel_safe;
+        root.rel_mut(grouped_rel).consider_parallel = cp;
+        // FDW propagation (C:3930-3933).
+        let (serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let ir = root.rel(input_rel);
+            (ir.serverid, ir.userid, ir.useridiscurrent, ir.has_fdwroutine)
+        };
+        let gr = root.rel_mut(grouped_rel);
+        gr.serverid = serverid;
+        gr.userid = userid;
+        gr.useridiscurrent = useridiscurrent;
+        gr.has_fdwroutine = has_fdwroutine;
+    }
+
+    // is_degenerate_grouping(root): (hasHavingQual || groupingSets) && !hasAggs
+    // && groupClause == NIL. The groupingSets leg is gated out; a HAVING-only
+    // query with no aggregates and no GROUP BY would be degenerate, but that
+    // needs create_group_result_path (unported here). Mirror PG and panic only
+    // when actually degenerate.
+    let (has_aggs, has_group_clause, has_grouping_sets) = {
+        let parse = run.resolve(root.parse);
+        (
+            parse.hasAggs,
+            !parse.groupClause.is_empty(),
+            !parse.groupingSets.is_empty(),
+        )
+    };
+    let is_degenerate = (root.hasHavingQual || has_grouping_sets) && !has_aggs && !has_group_clause;
+    if is_degenerate {
+        panic!(
+            "create_grouping_paths: degenerate grouping (create_degenerate_grouping_paths \
+             + create_group_result_path, planner.c:3966) is not ported"
+        );
+    }
+
+    // create_ordinary_grouping_paths(root, input_rel, grouped_rel, &agg_costs,
+    // gd=NULL, &extra, &partially_grouped_rel) (C:3875). The partitionwise /
+    // partial-agg / parallel legs require IS_PARTITIONED_REL(input_rel) or
+    // consider_parallel, both false here; they are skipped exactly as in C.
+    create_ordinary_grouping_paths(
+        mcx,
+        run,
+        root,
+        input_rel,
+        grouped_rel,
+        agg_costs_lite,
+        has_group_clause,
+        has_aggs,
+    )?;
+
+    // set_cheapest(grouped_rel) (C:3880).
+    backend_optimizer_util_pathnode::set_cheapest(root, grouped_rel)?;
+    Ok(grouped_rel)
+}
+
+/// The reachable core of `create_ordinary_grouping_paths` (planner.c:4031):
+/// estimate the number of groups and add the final grouping/aggregation paths
+/// (`add_paths_to_grouping_rel`). The partitionwise and partial-aggregation
+/// branches are skipped (input rel is neither partitioned nor parallel-safe on
+/// this path, exactly as the C gating conditions require).
+fn create_ordinary_grouping_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    grouped_rel: RelId,
+    agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    has_group_clause: bool,
+    has_aggs: bool,
+) -> PgResult<()> {
+    // cheapest_path = input_rel->cheapest_total_path.
+    let cheapest_path = root
+        .rel(input_rel)
+        .cheapest_total_path
+        .ok_or_else(|| PgError::error("create_ordinary_grouping_paths: input rel has no cheapest_total_path"))?;
+    let cheapest_rows = root.path(cheapest_path).base().rows;
+
+    // Estimate number of groups (C:4130).
+    let d_num_groups = get_number_of_groups(run, root, cheapest_rows)?;
+
+    // Build final grouping paths (C:4136).
+    add_paths_to_grouping_rel(
+        mcx,
+        run,
+        root,
+        input_rel,
+        grouped_rel,
+        agg_costs,
+        d_num_groups,
+        has_group_clause,
+        has_aggs,
+    )?;
+
+    // Give a helpful error if we failed to find any implementation (C:4141).
+    if root.rel(grouped_rel).pathlist.is_empty() {
+        return Err(PgError::error(
+            "could not implement GROUP BY",
+        ));
+    }
+    Ok(())
+}
+
+/// The reachable core of `add_paths_to_grouping_rel` (planner.c:7113): add the
+/// sorted-input Agg / Group paths over each input path. can_sort is true (an
+/// empty processed_groupClause is trivially sortable, and a GROUP BY only
+/// reaches here when grouping_is_sortable). can_hash is false unless there's a
+/// GROUP BY; the hashed legs and the partially-grouped finalization are skipped
+/// (no partial rel on this path). For each input path we consider its useful
+/// group-key orderings; for the empty group clause that's the single original
+/// (empty) ordering, so make_ordered_path returns the path unchanged.
+#[allow(clippy::too_many_arguments)]
+fn add_paths_to_grouping_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    grouped_rel: RelId,
+    agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    d_num_groups: f64,
+    has_group_clause: bool,
+    has_aggs: bool,
+) -> PgResult<()> {
+    // can_sort = grouping_is_sortable(processed_groupClause); for the empty
+    // clause this is trivially true. can_hash needs a GROUP BY (false for plain
+    // aggregation); the hash leg requires grouping_is_hashable and is not on the
+    // count(*) path, so reject it precisely if reached.
+    let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_groupClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+    let can_sort = backend_optimizer_util_vars::tlist::grouping_is_sortable(&group_clauses);
+    if !can_sort {
+        // GROUPING_CAN_USE_SORT not set without a sortable clause; the hash-only
+        // leg is the only alternative and is unported on this path.
+        return Err(PgError::error(
+            "add_paths_to_grouping_rel: non-sortable grouping needs the hashed-only \
+             aggregation path (not ported)",
+        ));
+    }
+
+    // havingQual (extra->havingQual) — the HAVING qual clause list as bare node
+    // handles. parse->havingQual is the owned Option<PgBox<Expr>>; clone it into
+    // the arena to obtain the qual list the Agg/Group path carries.
+    let having_quals: Vec<types_pathnodes::NodeId> = {
+        match run.resolve(root.parse).havingQual.as_deref() {
+            Some(e) => {
+                let cloned = e.clone_in(mcx)?;
+                alloc::vec![root.alloc_node(cloned)]
+            }
+            None => Vec::new(),
+        }
+    };
+
+    let target = root
+        .rel(grouped_rel)
+        .reltarget
+        .clone()
+        .ok_or_else(|| PgError::error("add_paths_to_grouping_rel: grouped rel has no reltarget"))?;
+
+    // foreach(input_rel->pathlist) — consider each input path. For the empty
+    // group clause get_useful_group_keys_orderings yields a single ordering with
+    // empty pathkeys/clauses, and make_ordered_path returns the path unchanged
+    // (empty pathkeys are contained in any path). Reordering with a real GROUP BY
+    // is a cost optimization; we mirror the always-present original ordering and
+    // skip the (optional) reordered alternative.
+    let input_paths: Vec<PathId> = root.rel(input_rel).pathlist.clone();
+    for path in input_paths {
+        // make_ordered_path with the group_pathkeys ordering. group_pathkeys is
+        // empty here (no GROUP BY produces no pathkeys; a GROUP BY's pathkeys were
+        // computed by standard_qp_callback). pathkeys_count_contained_in(empty, _)
+        // is true, so the path is used as-is for the no-sort case. For a real
+        // GROUP BY the same make_ordered_path used elsewhere applies, but
+        // create_sort_path over group_pathkeys is the same machinery as ORDER BY;
+        // reuse it via make_ordered_path.
+        let ordered = make_ordered_path(root, run, grouped_rel, path, path, -1.0)?;
+        let ordered = match ordered {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if has_aggs {
+            // We have aggregation, possibly with plain GROUP BY. Make an AggPath
+            // (AGG_SORTED with GROUP BY, AGG_PLAIN otherwise) (C:7177).
+            let aggstrategy = if has_group_clause {
+                types_pathnodes::AGG_SORTED
+            } else {
+                types_pathnodes::AGG_PLAIN
+            };
+            let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                run,
+                root,
+                grouped_rel,
+                ordered,
+                target.clone(),
+                aggstrategy,
+                types_pathnodes::AGGSPLIT_SIMPLE,
+                root.processed_groupClause.clone(),
+                having_quals.clone(),
+                agg_costs,
+                d_num_groups,
+            )?;
+            backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
+        } else if has_group_clause {
+            // GROUP BY without aggregation — make a GroupPath (C:7195).
+            return Err(PgError::error(
+                "add_paths_to_grouping_rel: GROUP BY without aggregation needs \
+                 create_group_path (not ported)",
+            ));
+        } else {
+            // Other cases handled above (Assert(false)).
+            unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
+        }
+    }
+
+    // The hashed-aggregation leg (can_hash) and the partially-grouped
+    // finalization / gather legs are not on this path.
+    Ok(())
+}
+
+/// Convert the full `AggClauseCosts` (types-pathnodes) into the trimmed
+/// `AggClauseCostsLite` that `create_agg_path` / `cost_agg` consume.
+fn agg_clause_costs_to_lite(
+    c: &types_pathnodes::AggClauseCosts,
+) -> Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite> {
+    Some(backend_optimizer_util_pathnode_seams::AggClauseCostsLite {
+        trans_startup: c.transCost.startup,
+        trans_per_tuple: c.transCost.per_tuple,
+        final_startup: c.finalCost.startup,
+        final_per_tuple: c.finalCost.per_tuple,
+        transition_space: c.transitionSpace as i32,
+    })
+}
+
+/// `make_ordered_path(root, rel, path, cheapest_path, pathkeys, limit_tuples)`
+/// (planner.c:7644) — return a path ordered by `pathkeys` based on `path`, or
+/// `None` if it doesn't make sense to generate an ordered path here. Uses the
+/// group_pathkeys ordering; an empty `pathkeys` (no GROUP BY) is contained in
+/// any path, so the path is returned unchanged.
+fn make_ordered_path<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rel: RelId,
+    path: PathId,
+    cheapest_path: PathId,
+    limit_tuples: f64,
+) -> PgResult<Option<PathId>> {
+    let pathkeys = root.group_pathkeys.clone();
+    let path_pathkeys = root.path(path).base().pathkeys.clone();
+    let (is_sorted, presorted_keys) =
+        backend_optimizer_path_pathkeys::pathkeys_count_contained_in(&pathkeys, &path_pathkeys);
+
+    if is_sorted {
+        return Ok(Some(path));
+    }
+
+    // Try at least sorting the cheapest path and also incrementally sorting any
+    // path which is partially sorted already (C:7656-7684).
+    if path != cheapest_path && (presorted_keys == 0 || !enable_incremental_sort()) {
+        return Ok(None);
+    }
+    let sorted = if presorted_keys == 0 || !enable_incremental_sort() {
+        backend_optimizer_util_pathnode::create::create_sort_path(
+            root,
+            rel,
+            path,
+            pathkeys,
+            limit_tuples,
+        )?
+    } else {
+        backend_optimizer_util_pathnode::create::create_incremental_sort_path(
+            root,
+            run,
+            rel,
+            path,
+            pathkeys,
+            presorted_keys,
+            limit_tuples,
+        )?
+    };
+    Ok(Some(sorted))
 }
 
 /// `is_parallel_safe(root, (Node *) exprs)` over a PathTarget's expr handle list

@@ -103,6 +103,8 @@ use backend_optimizer_util_relnode_seams as relnode;
 use backend_optimizer_util_vars::tlist::{
     apply_pathtarget_labeling_to_tlist, get_sortgroupref_tle, tlist_same_exprs,
 };
+use backend_optimizer_util_vars::tlist as util_tlist;
+use backend_optimizer_path_costsize_seams as costsize;
 use backend_optimizer_path_equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_misc_guc_tables::vars;
@@ -2768,6 +2770,207 @@ fn limit_option_to_node(
     }
 }
 
+// ===========================================================================
+// Agg family: create_agg_plan + make_agg (createplan.c).
+// ===========================================================================
+
+/// `make_agg(tlist, qual, aggstrategy, aggsplit, numGroupCols, grpColIdx,
+/// grpOperators, grpCollations, groupingSets, chain, dNumGroups,
+/// transitionSpace, lefttree)` (createplan.c:6731) — build an `Agg` plan node
+/// atop `lefttree`. Agg can project, so the tlist is the caller-supplied one
+/// (built by `build_path_tlist`), not the child's.
+#[allow(clippy::too_many_arguments)]
+fn make_agg<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qual: Option<PgVec<'mcx, Expr>>,
+    aggstrategy: types_nodes::nodeagg::AggStrategy,
+    aggsplit: types_nodes::nodeagg::AggSplit,
+    num_group_cols: i32,
+    grp_col_idx: Vec<AttrNumber>,
+    grp_operators: Vec<Oid>,
+    grp_collations: Vec<Oid>,
+    grouping_sets: Option<PgVec<'mcx, PgVec<'mcx, i32>>>,
+    chain: Option<PgVec<'mcx, PgBox<'mcx, types_nodes::nodeagg::Agg<'mcx>>>>,
+    d_num_groups: f64,
+    transition_space: u64,
+    lefttree: Node<'mcx>,
+) -> PgResult<types_nodes::nodeagg::Agg<'mcx>> {
+    // Reduce to long, but 'ware overflow! (clamp_cardinality_to_long).
+    let num_groups = costsize::clamp_cardinality_to_long::call(d_num_groups);
+
+    let mut node = types_nodes::nodeagg::Agg::default();
+    node.aggstrategy = aggstrategy;
+    node.aggsplit = aggsplit;
+    node.num_cols = num_group_cols;
+    // node->grpColIdx / grpOperators / grpCollations: the C palloc'd arrays. In
+    // the owned model these are `Option<PgVec<..>>`; an empty group list (the
+    // plain-aggregate count(*) case, numGroupCols == 0) maps to `None`, mirroring
+    // a zero-length array.
+    node.grp_col_idx = attrnum_vec_to_field(mcx, grp_col_idx)?;
+    node.grp_operators = oid_vec_to_field(mcx, grp_operators)?;
+    node.grp_collations = oid_vec_to_field(mcx, grp_collations)?;
+    node.num_groups = num_groups;
+    node.transition_space = transition_space;
+    // node->aggParams = NULL — SS_finalize_plan() will fill this.
+    node.agg_params = None;
+    node.grouping_sets = grouping_sets;
+    node.chain = chain;
+
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.qual = qual;
+        plan.targetlist = tlist;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = None;
+    }
+
+    Ok(node)
+}
+
+/// Convert a `Vec<AttrNumber>` (the C palloc'd `AttrNumber *` array) into the
+/// owned plan-node field (`Option<PgVec<AttrNumber>>`); an empty list is `None`.
+fn attrnum_vec_to_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: Vec<AttrNumber>,
+) -> PgResult<Option<PgVec<'mcx, AttrNumber>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for x in v {
+        out.push(x);
+    }
+    Ok(Some(out))
+}
+
+/// Convert a `Vec<Oid>` (the C palloc'd `Oid *` array) into the owned plan-node
+/// field (`Option<PgVec<Oid>>`); an empty list is `None`.
+fn oid_vec_to_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: Vec<Oid>,
+) -> PgResult<Option<PgVec<'mcx, Oid>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for x in v {
+        out.push(x);
+    }
+    Ok(Some(out))
+}
+
+/// Map the path-layer `AggStrategy` (types-pathnodes `u32`, the raw C enum) to
+/// the plan-node `AggStrategy` (types-nodes). Same C enum, distinct Rust types.
+fn aggstrategy_path_to_node(
+    s: types_pathnodes::AggStrategy,
+) -> types_nodes::nodeagg::AggStrategy {
+    use types_nodes::nodeagg::AggStrategy as NS;
+    match s {
+        types_pathnodes::AGG_PLAIN => NS::AggPlain,
+        types_pathnodes::AGG_SORTED => NS::AggSorted,
+        types_pathnodes::AGG_HASHED => NS::AggHashed,
+        types_pathnodes::AGG_MIXED => NS::AggMixed,
+        _ => NS::AggPlain,
+    }
+}
+
+/// `create_agg_plan(root, (AggPath *) best_path)` (createplan.c:2304) — create
+/// an `Agg` plan for `best_path` and (recursively) plans for its subpaths.
+fn create_agg_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, aggstrategy, aggsplit, group_clause_ids, qual_ids, num_groups, transition_space) =
+        match root.path(best_path) {
+            PathNode::AggPath(p) => (
+                p.subpath,
+                p.aggstrategy,
+                p.aggsplit,
+                p.groupClause.clone(),
+                p.qual.clone(),
+                p.numGroups,
+                p.transitionSpace,
+            ),
+            _ => unreachable!("create_agg_plan on non-AggPath"),
+        };
+    let subpath = subpath.expect("create_agg_plan: AggPath has no subpath");
+
+    // Agg can project, so no need to be terribly picky about child tlist, but we
+    // do need grouping columns to be available.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_LABEL_TLIST)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let quals = order_qual_clauses(root, &qual_ids);
+    let quals = nodes_to_expr_qual(mcx, root, &quals)?;
+
+    // Resolve the SortGroupClause list out of the arena (handles → values), then
+    // derive the grouping-column arrays from the *subplan's* targetlist (C reads
+    // subplan->targetlist for extract_grouping_cols/collations). For a plain
+    // aggregate (count(*)) groupClause is NIL, so all three arrays are empty.
+    let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> =
+        group_clause_ids.iter().map(|&id| *root.sortgroupclause(id)).collect();
+    let num_group_cols = group_clauses.len() as i32;
+
+    let subplan_tlist: &[TargetEntry<'mcx>] = match subplan.plan_head().targetlist {
+        Some(ref tl) => tl.as_slice(),
+        None => &[],
+    };
+    let grp_col_idx = util_tlist::extract_grouping_cols(&group_clauses, subplan_tlist)?;
+    let grp_operators = util_tlist::extract_grouping_ops(&group_clauses);
+    let grp_collations =
+        util_tlist::extract_grouping_collations(&group_clauses, subplan_tlist)?;
+
+    // The path layer carries AggStrategy/AggSplit as the raw C enum integers
+    // (types-pathnodes u32); the plan node uses the typed (types-nodes) forms.
+    let aggstrategy = aggstrategy_path_to_node(aggstrategy);
+    let aggsplit = aggsplit as types_nodes::nodeagg::AggSplit;
+
+    let mut plan = make_agg(
+        mcx,
+        tlist,
+        quals,
+        aggstrategy,
+        aggsplit,
+        num_group_cols,
+        grp_col_idx,
+        grp_operators,
+        grp_collations,
+        None, // groupingSets = NIL
+        None, // chain = NIL
+        num_groups,
+        transition_space,
+        subplan,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Agg(plan))
+}
+
+/// `create_agg_dispatch_plan` — the `T_Agg` createplan arm. C discriminates on
+/// `IsA(best_path, GroupingSetsPath)` between `create_groupingsets_plan` and
+/// `create_agg_plan`; the dispatch routes the whole `T_Agg` pathtype here.
+fn create_agg_dispatch_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    match root.path(best_path) {
+        PathNode::AggPath(_) => create_agg_plan(mcx, root, run, best_path),
+        PathNode::GroupingSetsPath(_) => Err(PgError::error(
+            "create_groupingsets_plan (createplan.c:2398) is not ported — GROUPING SETS \
+             produces a GroupingSetsPath which has no plan converter yet",
+        )),
+        _ => unreachable!("create_agg_dispatch_plan on non-Agg pathtype"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // create_projection_plan (createplan.c ~2015)
 // ---------------------------------------------------------------------------
@@ -2957,6 +3160,8 @@ pub fn init_seams() {
     // Sort / Limit upper converters.
     cp_seam::create_sort_plan::set(create_sort_plan);
     cp_seam::create_limit_plan::set(create_limit_plan);
+    // Agg upper converter (the T_Agg dispatch arm).
+    cp_seam::create_agg_dispatch_plan::set(create_agg_dispatch_plan);
 }
 
 #[cfg(test)]

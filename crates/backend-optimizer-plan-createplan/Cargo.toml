@@ -45,3 +45,5 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 types-amapi = { path = "../types-amapi" }
 # enable_sort GUC (make_sort disabled_nodes accounting).
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# clamp_cardinality_to_long (costsize.c) — make_agg numGroups reduction.
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
