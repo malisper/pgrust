@@ -20,7 +20,7 @@ use core::cell::RefCell;
 use std::thread_local;
 
 use mcx::{McxOwned, MemoryContext, PgBox, PgVec};
-use types_cache::backend_utils_cache_catcache::{CacheIdx, CatCacheArena};
+use types_cache::backend_utils_cache_catcache::CacheIdx;
 use types_core::Oid;
 use types_core::catalog::{C_COLLATION_OID, OIDOID};
 use types_core::fmgr::FmgrInfo;
@@ -100,15 +100,18 @@ fn with_tupdesc_store<R>(f: impl for<'mcx> FnOnce(&mut TupdescStore<'mcx>) -> R)
 /// `CatalogCacheInitializeCache(cache)` — final init: load the tupdesc /
 /// relname / relisshared (via the relcache) and set up per-key fast-kind
 /// selection.
-pub(crate) fn catalog_cache_initialize_cache(
-    arena: &mut CatCacheArena,
-    cache_idx: CacheIdx,
-) -> PgResult<()> {
+///
+/// IMPORTANT: this must NOT be called while the catcache `with_arena` borrow is
+/// held — `relation_open` (below) loads the relcache, which itself performs
+/// catcache lookups (`SearchSysCache`/`cache_nkeys`) that re-enter `with_arena`.
+/// All arena access here is therefore done through short scoped borrows that are
+/// released before `relation_open`.
+pub(crate) fn catalog_cache_initialize_cache(cache_idx: CacheIdx) -> PgResult<()> {
     // relation = table_open(cache->cc_reloid, AccessShareLock);
-    let (cc_reloid, cc_nkeys, cc_keyno) = {
+    let (cc_reloid, cc_nkeys, cc_keyno) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
         (cache.cc_reloid, cache.cc_nkeys, cache.cc_keyno)
-    };
+    });
 
     // table_open + the descriptor copy use CurrentMemoryContext / the cache
     // context respectively; the relation copy lives in a scratch context.
@@ -119,7 +122,7 @@ pub(crate) fn catalog_cache_initialize_cache(
     // copy the relcache's tuple descriptor to permanent cache storage:
     //     tupdesc = CreateTupleDescCopyConstr(RelationGetDescr(relation));
     // and stash it in the CacheMemoryContext-analog store keyed by id.
-    let cache_id = arena.caches[cache_idx.0].id;
+    let cache_id = with_arena(|arena| arena.caches[cache_idx.0].id);
     with_tupdesc_store(|store| -> PgResult<()> {
         let mcx = store.mcx;
         // CreateTupleDescCopyConstr(RelationGetDescr(relation)) into the store.
@@ -137,14 +140,14 @@ pub(crate) fn catalog_cache_initialize_cache(
     })?;
 
     // save the relation's name and relisshared flag, too.
-    {
+    with_arena(|arena| {
         let cache = &mut arena.caches[cache_idx.0];
         // cc_relname = pstrdup(RelationGetRelationName(relation));
         cache.cc_relname.clear();
         cache.cc_relname.push_str(relation.name());
         // cc_relisshared = RelationGetForm(relation)->relisshared;
         cache.cc_relisshared = relation.rd_rel.relisshared;
-    }
+    });
 
     // We need the descriptor again for the per-key type reads; read attribute
     // types out of the just-copied store descriptor.
@@ -181,9 +184,6 @@ pub(crate) fn catalog_cache_initialize_cache(
         // GetCCHashEqFuncs(keytype, &cc_hashfunc[i], &eqfunc, &cc_fastequal[i]);
         let (fastkind, eqfunc) = core_compute::GetCCHashEqFuncs(keytype)?;
 
-        let cache = &mut arena.caches[cache_idx.0];
-        cache.cc_fastkind[i] = Some(fastkind);
-
         // Build the scankey template slot. The scan owner re-resolves the
         // comparison procedure with fmgr_info; we stamp only the eqfunc OID
         // (fmgr_info_cxt(eqfunc, &cc_skey[i].sk_func, CacheMemoryContext)).
@@ -196,11 +196,15 @@ pub(crate) fn catalog_cache_initialize_cache(
         skey.sk_subtype = InvalidOid;
         // A catcache key requiring a collation must be C collation.
         skey.sk_collation = C_COLLATION_OID;
-        cache.cc_skey[i] = Some(skey);
+        with_arena(|arena| {
+            let cache = &mut arena.caches[cache_idx.0];
+            cache.cc_fastkind[i] = Some(fastkind);
+            cache.cc_skey[i] = Some(skey);
+        });
     }
 
     // mark this cache fully initialized (cc_tupdesc = tupdesc)
-    arena.caches[cache_idx.0].initialized = true;
+    with_arena(|arena| arena.caches[cache_idx.0].initialized = true);
 
     // return to the caller's memory context and close the rel
     //     table_close(relation, AccessShareLock);
@@ -211,26 +215,27 @@ pub(crate) fn catalog_cache_initialize_cache(
 
 /// `ConditionalCatalogCacheInitializeCache(cache)` — call
 /// `CatalogCacheInitializeCache` if not yet done.
-pub(crate) fn conditional_initialize(
-    arena: &mut CatCacheArena,
-    cache_idx: CacheIdx,
-) -> PgResult<()> {
+///
+/// Must NOT be called while the catcache `with_arena` borrow is held (see
+/// [`catalog_cache_initialize_cache`]); it does its own short scoped borrows.
+pub(crate) fn conditional_initialize(cache_idx: CacheIdx) -> PgResult<()> {
     // #ifdef USE_ASSERT_CHECKING block (diagnostic-only in C).
     #[cfg(debug_assertions)]
     {
-        let cache = &arena.caches[cache_idx.0];
-        if !(cache.id == TYPEOID || cache.id == ATTNUM)
+        let (cache_id, initialized) =
+            with_arena(|arena| (arena.caches[cache_idx.0].id, arena.caches[cache_idx.0].initialized));
+        if !(cache_id == TYPEOID || cache_id == ATTNUM)
             || backend_access_transam_xact_seams::is_transaction_state::call()
         {
             backend_utils_cache_relcache_seams::assert_could_get_relation::call();
         } else {
-            debug_assert!(cache.initialized);
+            debug_assert!(initialized);
         }
     }
 
     // if (unlikely(cache->cc_tupdesc == NULL)) CatalogCacheInitializeCache(cache);
-    if !arena.caches[cache_idx.0].initialized {
-        catalog_cache_initialize_cache(arena, cache_idx)?;
+    if !with_arena(|arena| arena.caches[cache_idx.0].initialized) {
+        catalog_cache_initialize_cache(cache_idx)?;
     }
     Ok(())
 }
@@ -239,13 +244,17 @@ pub(crate) fn conditional_initialize(
 /// relcache-warming side effect (relcache owns `index_open`).
 pub fn InitCatCachePhase2(cache_id: i32, touch_index: bool) -> PgResult<()> {
     // ConditionalCatalogCacheInitializeCache(cache);
-    let (cc_reloid, cc_indexoid) = with_arena(|arena| -> PgResult<(Oid, Oid)> {
-        let cache_idx = find_cache_by_id(arena, cache_id)
-            .unwrap_or_else(|| panic!("InitCatCachePhase2: cache id {cache_id} not registered"));
-        conditional_initialize(arena, cache_idx)?;
+    let cache_idx = with_arena(|arena| {
+        find_cache_by_id(arena, cache_id)
+            .unwrap_or_else(|| panic!("InitCatCachePhase2: cache id {cache_id} not registered"))
+    });
+    // conditional_initialize must run without the arena borrow held (relcache
+    // re-entrancy); it takes its own short scoped borrows.
+    conditional_initialize(cache_idx)?;
+    let (cc_reloid, cc_indexoid) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
-        Ok((cache.cc_reloid, cache.cc_indexoid))
-    })?;
+        (cache.cc_reloid, cache.cc_indexoid)
+    });
 
     if touch_index && cache_id != AMOID && cache_id != AMNAME {
         // We must lock the underlying catalog before opening the index to

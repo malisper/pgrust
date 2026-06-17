@@ -192,18 +192,25 @@ pub fn prepare_to_invalidate_cache_tuple<'mcx>(
     // (running `ConditionalCatalogCacheInitializeCache` on each, as the C does
     // mid-iteration) under a single arena borrow, then drop it before computing
     // the hash values, which re-enter the arena through the `cc_tupdesc` seam.
+    // Collect the matching caches in registration order (the C `ch_caches`
+    // slist), then run ConditionalCatalogCacheInitializeCache on each WITHOUT
+    // the arena borrow held (init opens the catalog relation and re-enters the
+    // catcache), then build the probes under a fresh borrow.
+    let matching: Vec<CacheIdx> = with_arena(|arena| {
+        (0..arena.caches.len())
+            .filter(|&idx| arena.caches[idx].cc_reloid == reloid)
+            .map(CacheIdx)
+            .collect()
+    });
+    for &cache_idx in &matching {
+        // Just in case cache hasn't finished initialization yet...
+        init_meta::conditional_initialize(cache_idx)?;
+    }
+
     let probes: Vec<(CacheIdx, CacheProbe)> = with_arena(|arena| {
         let mut probes = Vec::new();
-        // Iterate in registration order (the C `ch_caches` slist).
-        for idx in 0..arena.caches.len() {
-            let cache_idx = CacheIdx(idx);
-            if arena.caches[idx].cc_reloid != reloid {
-                continue;
-            }
-
-            // Just in case cache hasn't finished initialization yet...
-            init_meta::conditional_initialize(arena, cache_idx)?;
-
+        for &cache_idx in &matching {
+            let idx = cache_idx.0;
             let ccp = &arena.caches[idx];
             // After initialization the per-key fast-kind selection is set;
             // `GetCCHashEqFuncs` assigns every key column a kind.

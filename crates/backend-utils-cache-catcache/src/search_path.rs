@@ -150,13 +150,15 @@ pub(crate) fn search_cat_cache_internal<'mcx>(
      *      CatalogCacheInitializeCache(cache);`).
      */
     let cache_idx = with_arena(|arena| {
-        let idx = find_cache_by_id(arena, cache_id)
-            .expect("SearchCatCacheInternal: unknown cache id");
-        if !arena.caches[idx.0].initialized {
-            init_meta::catalog_cache_initialize_cache(arena, idx)?;
-        }
-        Ok::<CacheIdx, types_error::PgError>(idx)
-    })?;
+        find_cache_by_id(arena, cache_id).expect("SearchCatCacheInternal: unknown cache id")
+    });
+    // The cache-init path opens the catalog relation, which loads the relcache
+    // and re-enters the catcache (SearchSysCache); it must therefore run without
+    // the arena borrow held. catalog_cache_initialize_cache takes its own short
+    // scoped borrows.
+    if !with_arena(|arena| arena.caches[cache_idx.0].initialized) {
+        init_meta::catalog_cache_initialize_cache(cache_idx)?;
+    }
 
     /*
      * Find the hash bucket in which to look for the tuple, then scan it.
@@ -437,13 +439,16 @@ pub fn get_cat_cache_hash_value(
     /*
      * one-time startup overhead for each cache
      */
-    with_arena(|arena| {
-        let cache_idx =
-            find_cache_by_id(arena, cache_id).expect("GetCatCacheHashValue: unknown cache id");
-        if !arena.caches[cache_idx.0].initialized {
-            init_meta::catalog_cache_initialize_cache(arena, cache_idx)?;
-        }
+    let cache_idx = with_arena(|arena| {
+        find_cache_by_id(arena, cache_id).expect("GetCatCacheHashValue: unknown cache id")
+    });
+    // Init opens the catalog relation (relcache re-entrancy); must run without
+    // the arena borrow held.
+    if !with_arena(|arena| arena.caches[cache_idx.0].initialized) {
+        init_meta::catalog_cache_initialize_cache(cache_idx)?;
+    }
 
+    with_arena(|arena| {
         /*
          * calculate the hash value
          */

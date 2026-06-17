@@ -86,20 +86,19 @@ pub fn search_cat_cache_list<'mcx>(
         ScalarWord::null(),
     ];
 
-    // Find the cache, run phase-2 init if needed, validate nkeys, and compute
-    // the list hash value + bucket. All of this touches the arena (and the
-    // relcache seam, on first init), so it runs inside `with_arena`.
+    // one-time startup overhead to lookup index info
+    // if (unlikely(cache->cc_tupdesc == NULL)) CatalogCacheInitializeCache(cache);
+    // This opens the catalog relation (relcache re-entrancy into the catcache),
+    // so it must run without the arena borrow held.
+    let cache_idx = with_arena(|arena| {
+        find_cache_by_id(arena, cache_id).expect("SearchCatCacheList: unknown cache id")
+    });
+    if !with_arena(|arena| arena.caches[cache_idx.0].initialized) {
+        crate::init_meta::catalog_cache_initialize_cache(cache_idx)?;
+    }
+
+    // Validate nkeys and compute the list hash value + bucket under the arena.
     let (cache_idx, l_hash_value, l_hash_index) = with_arena(|arena| -> PgResult<_> {
-        let cache_idx = find_cache_by_id(arena, cache_id)
-            .expect("SearchCatCacheList: unknown cache id");
-
-        // one-time startup overhead to lookup index info
-        // if (unlikely(cache->cc_tupdesc == NULL))
-        //     CatalogCacheInitializeCache(cache);
-        if !arena.caches[cache_idx.0].initialized {
-            crate::init_meta::catalog_cache_initialize_cache(arena, cache_idx)?;
-        }
-
         let cache = &arena.caches[cache_idx.0];
 
         // Assert(nkeys > 0 && nkeys < cache->cc_nkeys);
