@@ -110,6 +110,37 @@ pub const InvalidOffsetNumber: OffsetNumber = 0;
 /// installs it.
 pub fn init_seams() {
     sx::gingetbitmap::set(gingetbitmap);
+
+    // `int GinFuzzySearchLimit = 0;` (ginget.c:27) — the backing storage for
+    // the `gin_fuzzy_search_limit` GUC lives in this file in C, with
+    // guc_tables.c pointing its `conf->variable` at `&GinFuzzySearchLimit`.
+    // Mirror that here: install the GUC variable accessors over this crate's
+    // own per-backend store so the GUC machinery seeds it from boot_val (0)
+    // during InitializeGUCOptions and reads/writes it through these.
+    backend_utils_misc_guc_tables::vars::GinFuzzySearchLimit.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: gin_fuzzy_search_limit_storage,
+            set: set_gin_fuzzy_search_limit,
+        },
+    );
+}
+
+// `int GinFuzzySearchLimit = 0;` (ginget.c:27): per-backend backing storage
+// for the `gin_fuzzy_search_limit` GUC, the C global owned by ginget.c.
+thread_local! {
+    static GIN_FUZZY_SEARCH_LIMIT: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+}
+
+/// Reads the `GinFuzzySearchLimit` backing storage (the `conf->variable`
+/// getter installed for the `gin_fuzzy_search_limit` GUC).
+fn gin_fuzzy_search_limit_storage() -> i32 {
+    GIN_FUZZY_SEARCH_LIMIT.with(|c| c.get())
+}
+
+/// Writes the `GinFuzzySearchLimit` backing storage (the `conf->variable`
+/// setter installed for the `gin_fuzzy_search_limit` GUC).
+fn set_gin_fuzzy_search_limit(v: i32) {
+    GIN_FUZZY_SEARCH_LIMIT.with(|c| c.set(v));
 }
 
 // ===========================================================================
