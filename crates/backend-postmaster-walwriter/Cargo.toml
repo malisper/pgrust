@@ -26,6 +26,9 @@ backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 # Its own inward seams (installed by init_seams).
 backend-postmaster-walwriter-seams = { path = "../backend-postmaster-walwriter-seams" }
 
+# GUC var slots for the WalWriterDelay / WalWriterFlushAfter int GUCs this crate backs.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # Outward owner seam crates.
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }

@@ -345,4 +345,22 @@ fn wal_writer_main_entry(startup_data: &StartupData) -> ! {
 /// Install every seam this crate owns.
 pub fn init_seams() {
     backend_postmaster_walwriter_seams::wal_writer_main::set(wal_writer_main_entry);
+
+    // `int WalWriterDelay` / `int WalWriterFlushAfter` GUC backing storage
+    // (walwriter.c:65-66). Both are plain int GUC globals: the GUC engine seeds
+    // them from boot_val and writes them on SIGHUP reload, while WalWriterMain
+    // reads them locally each cycle (timeout = WalWriterDelay; flush bound =
+    // WalWriterFlushAfter). Neither comes from the ControlFile. Bridge the GUC
+    // slots to this crate's process-wide cells.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::WalWriterDelay.install(GucVarAccessors {
+            get: WalWriterDelay,
+            set: set_WalWriterDelay,
+        });
+        vars::WalWriterFlushAfter.install(GucVarAccessors {
+            get: WalWriterFlushAfter,
+            set: set_WalWriterFlushAfter,
+        });
+    }
 }
