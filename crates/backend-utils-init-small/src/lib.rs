@@ -193,6 +193,79 @@ pub fn init_seams() {
         get: globals::notify_buffers,
         set: globals::set_notify_buffers,
     });
+    // Remaining `guc_tables.c` integer/real/enum GUCs whose `conf->variable`
+    // backing storage lives in globals.c (mirrored in `globals`). Each entry
+    // reads/writes its own GUC-table slot — none of these are ControlFile
+    // fields. `shared_buffers` is intentionally absent: its `conf->variable`
+    // is `&NBuffers`, already installed above via `vars::NBuffers`.
+    // `max_connections` is likewise absent: it has no `vars::` slot, only its
+    // globals.c-seam accessor (installed above).
+    vars::serializable_buffers.install(GucVarAccessors {
+        get: globals::serializable_buffers,
+        set: globals::set_serializable_buffers,
+    });
+    vars::commit_timestamp_buffers.install(GucVarAccessors {
+        get: globals::commit_timestamp_buffers,
+        set: globals::set_commit_timestamp_buffers,
+    });
+    vars::VacuumBufferUsageLimit.install(GucVarAccessors {
+        get: globals::VacuumBufferUsageLimit,
+        set: globals::SetVacuumBufferUsageLimit,
+    });
+    vars::VacuumCostPageHit.install(GucVarAccessors {
+        get: globals::VacuumCostPageHit,
+        set: globals::SetVacuumCostPageHit,
+    });
+    vars::VacuumCostPageMiss.install(GucVarAccessors {
+        get: globals::VacuumCostPageMiss,
+        set: globals::SetVacuumCostPageMiss,
+    });
+    vars::VacuumCostPageDirty.install(GucVarAccessors {
+        get: globals::VacuumCostPageDirty,
+        set: globals::SetVacuumCostPageDirty,
+    });
+    vars::VacuumCostLimit.install(GucVarAccessors {
+        get: globals::VacuumCostLimit,
+        set: globals::SetVacuumCostLimit,
+    });
+    vars::VacuumCostDelay.install(GucVarAccessors {
+        get: globals::VacuumCostDelay,
+        set: globals::SetVacuumCostDelay,
+    });
+    vars::work_mem.install(GucVarAccessors {
+        get: globals::work_mem,
+        set: globals::set_work_mem,
+    });
+    vars::maintenance_work_mem.install(GucVarAccessors {
+        get: globals::maintenance_work_mem,
+        set: globals::set_maintenance_work_mem,
+    });
+    vars::hash_mem_multiplier.install(GucVarAccessors {
+        get: globals::hash_mem_multiplier,
+        set: globals::set_hash_mem_multiplier,
+    });
+    vars::max_worker_processes.install(GucVarAccessors {
+        get: globals::max_worker_processes,
+        set: globals::set_max_worker_processes,
+    });
+    vars::max_parallel_workers.install(GucVarAccessors {
+        get: globals::max_parallel_workers,
+        set: globals::set_max_parallel_workers,
+    });
+    vars::max_parallel_maintenance_workers.install(GucVarAccessors {
+        get: globals::max_parallel_maintenance_workers,
+        set: globals::set_max_parallel_maintenance_workers,
+    });
+    vars::data_directory_mode.install(GucVarAccessors {
+        get: globals::data_directory_mode,
+        set: globals::set_data_directory_mode,
+    });
+    // `IntervalStyle` is a `config_enum` whose `conf->variable` is the i32
+    // `IntervalStyle` global; the enum slot carries i32 accessors.
+    vars::IntervalStyle.install(GucVarAccessors {
+        get: globals::IntervalStyle,
+        set: globals::SetIntervalStyle,
+    });
 }
 
 #[cfg(test)]
