@@ -17615,9 +17615,12 @@ dependencies = [
  "backend-utils-adt-float",
  "backend-utils-adt-float-seams",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-fmgr-core",
  "backend-utils-misc-stack-depth-seams",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]

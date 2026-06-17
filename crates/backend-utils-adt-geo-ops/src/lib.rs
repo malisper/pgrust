@@ -189,6 +189,7 @@ pub(crate) mod f8 {
 
 pub mod boxes;
 pub mod circle;
+pub mod fmgr_builtins;
 pub mod io;
 pub mod line;
 pub mod lseg;
@@ -591,25 +592,35 @@ pub fn init_seams() {
     seams::poly_query_boundbox::set(poly_query_boundbox);
     seams::poly_contain_pt_image::set(poly_contain_pt_image);
     seams::circle_contain_pt::set(circle_contain_pt);
+
+    // Register the by-reference fmgr-ABI builtin wrappers (C: fmgr_builtins[]).
+    crate::fmgr_builtins::register_geo_ops_builtins();
+}
+
+/// Shared one-time test-seam setup (used by this crate's `mod tests` and by
+/// `fmgr_builtins::tests`). Installs the float8 seams (this crate routes all
+/// float arithmetic and float8 text I/O through `backend-utils-adt-float`),
+/// this crate's own seams (which registers the fmgr builtins), plus the
+/// `check_for_interrupts` / `check_stack_depth` seams. Goes through a single
+/// `Once` so the seams are never installed twice across the two test modules.
+#[cfg(test)]
+pub(crate) fn test_setup() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        backend_utils_adt_float::init_seams();
+        init_seams();
+        backend_tcop_postgres_seams::check_for_interrupts::set(|| Ok(()));
+        backend_utils_misc_stack_depth_seams::check_stack_depth::set(|| Ok(()));
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Once;
 
-    static INIT: Once = Once::new();
-
-    /// Install the float8 seams (this crate routes all float arithmetic and
-    /// float8 text I/O through `backend-utils-adt-float`) plus this crate's own
-    /// seams and the `check_for_interrupts` seam used by the polygon scan.
     fn setup() {
-        INIT.call_once(|| {
-            backend_utils_adt_float::init_seams();
-            init_seams();
-            backend_tcop_postgres_seams::check_for_interrupts::set(|| Ok(()));
-            backend_utils_misc_stack_depth_seams::check_stack_depth::set(|| Ok(()));
-        });
+        crate::test_setup();
     }
 
     fn p(x: f64, y: f64) -> Point {
