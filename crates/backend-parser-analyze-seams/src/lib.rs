@@ -46,6 +46,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_analyze_and_rewrite_fixedparams(parsetree, query_string, paramTypes,
+    /// numParams, queryEnv)` (tcop/postgres.c) — the VALUE form that threads the
+    /// caller's `paramTypes` array (the count is `param_types.len()` matching the
+    /// C `numParams`). Unlike the no-param
+    /// [`pg_analyze_and_rewrite_fixedparams`] above (which COPY uses with an empty
+    /// param array), plancache's `RevalidateCachedQuery` fixedparams branch
+    /// (plancache.c:810) MUST pass `plansource->param_types`; this seam carries
+    /// them. The rewritten queries are allocated in `mcx`. `queryEnv` is `NULL`
+    /// on this path. `Err` carries any analysis/rewrite `ereport(ERROR)`. This is
+    /// the param-threading VALUE counterpart plancache's F0 de-handle switches to.
+    pub fn pg_analyze_and_rewrite_fixedparams_params<'mcx>(
+        mcx: Mcx<'mcx>,
+        parsetree: &RawStmt<'mcx>,
+        query_string: &str,
+        param_types: &[Oid],
+    ) -> PgResult<PgVec<'mcx, CopyQuery<'mcx>>>
+);
+
+seam_core::seam!(
     /// `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     /// jstate);` (the call site analyze.c owns the hook for). Runs extension
     /// code; can `ereport(ERROR)`. `jstate` is `None` when query-id is off.

@@ -173,6 +173,45 @@ pub fn init_seams() {
         },
     );
 
+    // --- STEP B-bis: plancache F0 value PRODUCERS. The param-threading value
+    // form of pg_analyze_and_rewrite_fixedparams (RevalidateCachedQuery's
+    // fixedparams branch passes plansource->param_types, not the empty array
+    // COPY uses) and the value pg_plan_queries (BuildCachedPlan). Both reuse the
+    // already-ported value bodies in simple_query.
+    backend_parser_analyze_seams::pg_analyze_and_rewrite_fixedparams_params::set(
+        |mcx, parsetree, query_string, param_types| {
+            simple_query::pg_analyze_and_rewrite_fixedparams(
+                mcx,
+                parsetree,
+                query_string,
+                param_types,
+            )
+        },
+    );
+    s::pg_plan_queries_value::set(
+        |mcx, querytrees, query_string, cursor_options, bound_params| {
+            // The value body owns its querytree list (C scribbles on / copies
+            // them); clone the borrowed slice into `mcx`. `boundParams` is NULL
+            // (None) on the generic-plan / simple-Query path; a Some
+            // (custom-plan parameter substitution) is not yet threaded through
+            // the value planning stack — mirror PG and panic precisely rather
+            // than silently dropping it.
+            if bound_params.is_some() {
+                panic!(
+                    "pg_plan_queries_value: custom-plan boundParams are not yet \
+                     threaded through the value planning stack (standard_planner \
+                     drops boundParams); only reached for parameterized custom \
+                     plans, not the generic-plan / simple-Query path"
+                );
+            }
+            let mut owned: mcx::PgVec<'_, _> = mcx::PgVec::new_in(mcx);
+            for q in querytrees.iter() {
+                owned.push(q.clone_in(mcx)?);
+            }
+            simple_query::pg_plan_queries(mcx, owned, query_string, cursor_options)
+        },
+    );
+
     // Reference `quickdie_handler` so the `pqsigfunc`-shaped wrapper is kept and
     // available for the postmaster's SIGQUIT install (done by F0a when it lands).
     let _: fn(i32) = quickdie_handler;

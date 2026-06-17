@@ -326,6 +326,25 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
     ) -> PgResult<SearchPathMatcher<'mcx>>
 );
+
+seam_core::seam!(
+    /// `SearchPathMatchesCurrentEnvironment(path)` (namespace.c:3855) over the
+    /// OWNED value model — does the previously-captured [`SearchPathMatcher`]
+    /// still match the current `search_path` environment? Takes the matcher by
+    /// `&mut` because the owner updates `path.generation` to the active
+    /// generation on a successful match (the C in/out semantics), and it reads
+    /// namespace's PRIVATE active-path state (via `recomputeNamespacePath`), so
+    /// a non-owner caller (plancache's `RevalidateCachedQuery` /
+    /// `CachedPlanIsSimplyValid`) CANNOT reimplement it and MUST cross this
+    /// value seam. This is the VALUE counterpart of the handle-based
+    /// `backend_catalog_namespace_pc_seams::search_path_matches_current_environment`
+    /// that plancache's F0 de-handle will switch to. `Err` carries the
+    /// `recomputeNamespacePath` `ereport(ERROR)` surface.
+    pub fn search_path_matches_current_environment_value<'mcx>(
+        mcx: Mcx<'mcx>,
+        path: &mut SearchPathMatcher<'mcx>,
+    ) -> PgResult<bool>
+);
 // (RestrictSearchPath re-homed to backend-utils-misc-guc-seams — it is guc.c's
 // function (guc.c:2246), not namespace.c's — and installed by the merged guc
 // owner. Consumers call it there.)

@@ -165,6 +165,31 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_nodes::nodeindexscan::PlannedStmt<'mcx>>
 );
 
+seam_core::seam!(
+    /// `pg_plan_queries(querytrees, query_string, cursorOptions, boundParams)`
+    /// (tcop/postgres.c:970) over the OWNED value model — generate plans for a
+    /// list of already-rewritten [`Query`](types_nodes::copy_query::Query)s,
+    /// returning the `PlannedStmt` list (allocated in `mcx`). Optimizable
+    /// statements go through the planner; utility statements get a wrapper
+    /// `PlannedStmt` in C (the trimmed owned `PlannedStmt` model cannot express
+    /// that wrapper yet — the value body mirrors PG and panics precisely on a
+    /// utility statement, which the SELECT/F0 spine never reaches).
+    /// `bound_params` is the C `ParamListInfo`: `None` is NULL (the
+    /// generic-plan / simple-Query path); a `Some` (custom-plan parameter
+    /// substitution) is not yet threaded through the value planning stack and
+    /// panics precisely rather than being silently dropped. plancache's
+    /// `BuildCachedPlan` (plancache.c:1074) is the F0 consumer; this is the
+    /// VALUE counterpart of the handle-based
+    /// `backend_optimizer_plan_planner_pc_seams::plan_queries`.
+    pub fn pg_plan_queries_value<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        querytrees: &[types_nodes::copy_query::Query<'mcx>],
+        query_string: &str,
+        cursor_options: i32,
+        bound_params: Option<&types_nodes::params::ParamListInfoData<'mcx>>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::nodeindexscan::PlannedStmt<'mcx>>>
+);
+
 // --- backend-utils-init-postinit consumers (postgres.c) ---
 
 seam_core::seam!(

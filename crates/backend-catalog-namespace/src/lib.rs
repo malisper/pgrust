@@ -182,6 +182,9 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_search_path_matcher_value::set(
         crate::GetSearchPathMatcher,
     );
+    backend_catalog_namespace_seams::search_path_matches_current_environment_value::set(
+        crate::SearchPathMatchesCurrentEnvironment,
+    );
 
     // Install the GUC machinery's typed accessors for the `search_path` GUC
     // (C's `char *namespace_search_path`, guc_tables.c:4513). C points
