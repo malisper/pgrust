@@ -84,6 +84,7 @@ pub fn set_log_min_error_statement(level: ErrorLevel) {
 thread_local! { static LOG_ERROR_VERBOSITY: Cell<PGErrorVerbosity> = const { Cell::new(PGErrorVerbosity::Default) }; }
 thread_local! { static LOG_LINE_PREFIX: RefCell<Option<String>> = const { RefCell::new(None) }; }
 thread_local! { static LOG_DESTINATION: Cell<i32> = const { Cell::new(LOG_DESTINATION_STDERR) }; }
+thread_local! { static LOG_DESTINATION_STRING: RefCell<Option<String>> = const { RefCell::new(None) }; }
 thread_local! { static SYSLOG_SEQUENCE_NUMBERS: Cell<bool> = const { Cell::new(true) }; }
 thread_local! { static SYSLOG_SPLIT_MESSAGES: Cell<bool> = const { Cell::new(true) }; }
 
@@ -336,9 +337,28 @@ pub fn assign_syslog_ident(newval: &str) {
     crate::syslog::assign_syslog_ident(newval);
 }
 
+/// GUC var accessor get for `syslog_facility`: read the live facility the
+/// assign_hook installed into the (process-global) syslog connection state.
+/// Mirrors C reading the `int syslog_facility` GUC variable.
+pub fn syslog_facility() -> i32 {
+    crate::syslog::syslog_facility()
+}
+
 /// GUC assign_hook for `syslog_facility`.
 pub fn assign_syslog_facility(newval: i32) {
     crate::syslog::assign_syslog_facility(newval);
+}
+
+/// `Log_destination_string` — the raw GUC string the user set (e.g.
+/// `"stderr,csvlog"`). In C this is the `char *Log_destination_string` GUC
+/// variable; the assign_hook parses it into the `int Log_destination` bitmask
+/// (mirrored by [`LOG_DESTINATION`]). Boots to "stderr" like the C boot value.
+pub fn log_destination_string() -> Option<String> {
+    LOG_DESTINATION_STRING.with(|c| c.borrow().clone())
+}
+
+pub fn set_log_destination_string(value: Option<String>) {
+    LOG_DESTINATION_STRING.with(|c| *c.borrow_mut() = value);
 }
 
 /// `scanner_isspace` (scansup.c): the lexer's {space} set — NOT Unicode

@@ -166,6 +166,14 @@ pub fn init_seams() {
         get: config::exit_on_any_error,
         set: config::set_exit_on_any_error,
     });
+    vars::Log_destination_string.install(GucVarAccessors {
+        get: config::log_destination_string,
+        set: config::set_log_destination_string,
+    });
+    vars::syslog_facility.install(GucVarAccessors {
+        get: config::syslog_facility,
+        set: config::assign_syslog_facility,
+    });
 
     hooks::check_backtrace_functions.install(|newval, extra, _source| {
         // backtrace_functions boots to "" (never NULL), so a NULL candidate

@@ -52,6 +52,12 @@ pub(crate) fn assign_syslog_ident(newval: &str) {
     }
 }
 
+/// Current `syslog_facility` (the int the GUC slot mirrors). The connection
+/// state's `facility` field is the live backing store the assign_hook writes.
+pub(crate) fn syslog_facility() -> i32 {
+    SYSLOG_STATE.lock().expect("syslog state poisoned").facility
+}
+
 /// GUC assign_hook body for `syslog_facility`.
 pub(crate) fn assign_syslog_facility(newval: i32) {
     let mut state = SYSLOG_STATE.lock().expect("syslog state poisoned");
