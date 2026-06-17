@@ -17705,6 +17705,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-float-libm-ffi"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-float-seams",
+]
+
+[[package]]
 name = "backend-utils-adt-float-seams"
 version = "0.0.0"
 dependencies = [
@@ -22351,6 +22358,7 @@ dependencies = [
  "backend-utils-adt-datetime",
  "backend-utils-adt-encode",
  "backend-utils-adt-float",
+ "backend-utils-adt-float-libm-ffi",
  "backend-utils-adt-format-type",
  "backend-utils-adt-formatting",
  "backend-utils-adt-geo-ops",

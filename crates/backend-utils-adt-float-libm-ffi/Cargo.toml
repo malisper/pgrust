@@ -1,0 +1,12 @@
+[package]
+name = "backend-utils-adt-float-libm-ffi"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_float_libm_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-adt-float-seams = { path = "../backend-utils-adt-float-seams" }
