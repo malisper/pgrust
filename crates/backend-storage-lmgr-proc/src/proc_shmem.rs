@@ -24,7 +24,7 @@ use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
 use types_storage::storage::{
-    FreeListId, ProcFreeList, XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH,
+    FreeListId, XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH,
     NUM_AUXILIARY_PROCS, NUM_LOCK_PARTITIONS, NUM_SPECIAL_WORKER_PROCS, PGPROC, PROC_HDR,
     PROC_WAIT_STATUS_OK,
 };
@@ -173,6 +173,234 @@ static SHARED_PROC_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// `ShmemInitStruct`.
 static SHARED_PROC_STRUCT_LOCK: AtomicPtr<types_storage::storage::Spinlock> =
     AtomicPtr::new(core::ptr::null_mut());
+
+// ---- genuinely-shared proc freelists (the four `PROC_HDR` dlist heads + the
+//      per-PGPROC `links` that thread them) ----
+//
+// In C the four freelists (`freeProcs`/`autovacFreeProcs`/`bgworkerFreeProcs`/
+// `walsenderFreeProcs`) are `dlist_head`s in the shared `PROC_HDR`, threaded
+// through each `PGPROC.links` — both live in the genuine shared PGPROC block
+// that `InitProcGlobal` ShmemInitStruct's. `InitProcess` pops the head under
+// `ProcStructLock`; `ProcKill` pushes head/tail under `ProcStructLock`. If
+// these heads/links were process-local (COW-inherited), every forked backend
+// would pop the SAME ProcNumber and collide on the genuinely-shared sinval slot
+// array. So — exactly like the pid words / ProcStructLock above — the freelist
+// heads and the `links` array live in a real shmem segment placed by the
+// postmaster and inherited as a true shared mapping by every fork.
+//
+// Realization of the intrusive dlist over the index-addressed arena: a shared
+// `[FreeLink; total_procs]` (next/prev ProcNumber, -1 == none) is the per-PGPROC
+// `links`; a shared `[ListHead; 4]` (head/tail ProcNumber, -1 == empty) is the
+// four `dlist_head`s. All access is under `ProcStructLock` (held by every caller
+// of pop/push), so plain reads/writes mirror C's plain `dlist` mutation.
+
+/// `INVALID_PROC_NUMBER` as the i32 sentinel for an absent list link / empty
+/// head — matches C's empty-`dlist` (`head == NULL`) and detached-node state.
+const FREE_LINK_NIL: i32 = -1;
+
+/// Per-PGPROC `links` realization: the `next`/`prev` ProcNumber of an intrusive
+/// freelist node. `repr(C)` so the in-shmem layout is fixed and plain-int
+/// accessible (read/written only under `ProcStructLock`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FreeLink {
+    next: i32,
+    prev: i32,
+}
+
+/// One `dlist_head` realization: head + tail ProcNumber (`-1` == empty).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ListHead {
+    head: i32,
+    tail: i32,
+}
+
+/// Base of the genuinely-shared `[FreeLink; total_procs]` array (each PGPROC's
+/// `links`). Set by [`InitProcGlobal`], NULL until then.
+static SHARED_FREE_LINKS: AtomicPtr<FreeLink> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_FREE_LINKS`] (== total_procs), for bounds checks.
+static SHARED_FREE_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared `[ListHead; 4]` array (the four freelist
+/// `dlist_head`s, indexed by [`FreeListId`] as `usize`). Set by
+/// [`InitProcGlobal`], NULL until then.
+static SHARED_FREE_HEADS: AtomicPtr<ListHead> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Number of freelist heads (= variants of [`FreeListId`]).
+const NUM_FREELISTS: usize = 4;
+
+#[inline]
+fn freelist_index(list: FreeListId) -> usize {
+    match list {
+        FreeListId::Regular => 0,
+        FreeListId::Autovac => 1,
+        FreeListId::Bgworker => 2,
+        FreeListId::Walsender => 3,
+    }
+}
+
+/// `&proc->links` over the genuinely-shared `links` array. Caller holds
+/// `ProcStructLock`. Panics if uninitialized / out of range (caller bug).
+fn shared_link(procno: ProcNumber) -> &'static mut FreeLink {
+    let base = SHARED_FREE_LINKS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC links array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_FREE_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC links index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `FreeLink`s of genuine shared memory and
+    // `idx < count`. The `&mut` is sound under the single-writer discipline of
+    // `ProcStructLock` (every freelist mutator holds it), mirroring C's plain
+    // pointer write to `proc->links` inside the spinlock.
+    unsafe { &mut *base.add(idx) }
+}
+
+/// `&ProcGlobal-><list>` head/tail over the genuinely-shared heads array.
+/// Caller holds `ProcStructLock`.
+fn shared_head(list: FreeListId) -> &'static mut ListHead {
+    let base = SHARED_FREE_HEADS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared freelist heads uninitialized (InitProcGlobal not run)"
+    );
+    // SAFETY: `base` addresses `NUM_FREELISTS` `ListHead`s of genuine shared
+    // memory; the index is in range by construction. `&mut` is sound under
+    // `ProcStructLock` (single writer), mirroring C's `dlist_head` mutation.
+    unsafe { &mut *base.add(freelist_index(list)) }
+}
+
+/// Place the genuinely-shared freelist `links` array and the four `dlist_head`s
+/// into real shared memory, zero-initialized to "all empty / all detached".
+/// Idempotent across `found` (EXEC_BACKEND re-attach): existing contents are
+/// kept. C: part of the PGPROC `ShmemInitStruct` block (the `links` field) and
+/// the `dlist_head`s in the `PROC_HDR` `ShmemInitStruct`.
+fn init_shared_freelists(total_procs: usize) -> PgResult<()> {
+    // links array
+    let links_size = mul_size(total_procs, size_of::<FreeLink>());
+    let (links_ptr, links_found) = shmem::shmem_init_struct::call("PGPROC freelist links", links_size)?;
+    let links_ptr = links_ptr as *mut FreeLink;
+    if !links_found {
+        // dlist_node_init on every links: next == prev == NIL (detached).
+        for i in 0..total_procs {
+            // SAFETY: `links_ptr` addresses `total_procs` writable `FreeLink`s.
+            unsafe {
+                *links_ptr.add(i) = FreeLink {
+                    next: FREE_LINK_NIL,
+                    prev: FREE_LINK_NIL,
+                };
+            }
+        }
+    }
+    SHARED_FREE_LINKS.store(links_ptr, AtomicOrdering::Relaxed);
+    SHARED_FREE_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // four dlist heads
+    let heads_size = mul_size(NUM_FREELISTS, size_of::<ListHead>());
+    let (heads_ptr, heads_found) = shmem::shmem_init_struct::call("PROC_HDR freelist heads", heads_size)?;
+    let heads_ptr = heads_ptr as *mut ListHead;
+    if !heads_found {
+        // dlist_init on each head: empty (head == tail == NIL).
+        for i in 0..NUM_FREELISTS {
+            // SAFETY: `heads_ptr` addresses `NUM_FREELISTS` writable `ListHead`s.
+            unsafe {
+                *heads_ptr.add(i) = ListHead {
+                    head: FREE_LINK_NIL,
+                    tail: FREE_LINK_NIL,
+                };
+            }
+        }
+    }
+    SHARED_FREE_HEADS.store(heads_ptr, AtomicOrdering::Relaxed);
+
+    Ok(())
+}
+
+/// `dlist_is_empty(<list>)`.
+fn shared_freelist_is_empty(list: FreeListId) -> bool {
+    shared_head(list).head == FREE_LINK_NIL
+}
+
+/// `dlist_pop_head_node(<list>)` -> `dlist_container(PGPROC, links, …)`: detach
+/// and return the head ProcNumber, or `None` if empty. Caller holds
+/// `ProcStructLock`.
+fn shared_freelist_pop_head(list: FreeListId) -> Option<ProcNumber> {
+    let head_node = {
+        let h = shared_head(list);
+        if h.head == FREE_LINK_NIL {
+            return None;
+        }
+        h.head
+    };
+    let next = shared_link(head_node).next;
+    {
+        let h = shared_head(list);
+        h.head = next;
+        if next == FREE_LINK_NIL {
+            // list became empty
+            h.tail = FREE_LINK_NIL;
+        }
+    }
+    if next != FREE_LINK_NIL {
+        shared_link(next).prev = FREE_LINK_NIL;
+    }
+    // dlist_node_init(&popped->links): leave it detached.
+    let l = shared_link(head_node);
+    l.next = FREE_LINK_NIL;
+    l.prev = FREE_LINK_NIL;
+    Some(head_node)
+}
+
+/// `dlist_push_head(<list>, &proc->links)`. Caller holds `ProcStructLock`.
+fn shared_freelist_push_head(list: FreeListId, procno: ProcNumber) {
+    let old_head = shared_head(list).head;
+    {
+        let l = shared_link(procno);
+        l.prev = FREE_LINK_NIL;
+        l.next = old_head;
+    }
+    if old_head != FREE_LINK_NIL {
+        shared_link(old_head).prev = procno;
+    }
+    let h = shared_head(list);
+    h.head = procno;
+    if h.tail == FREE_LINK_NIL {
+        h.tail = procno;
+    }
+}
+
+/// `dlist_push_tail(<list>, &proc->links)`. Caller holds `ProcStructLock`.
+fn shared_freelist_push_tail(list: FreeListId, procno: ProcNumber) {
+    let old_tail = shared_head(list).tail;
+    {
+        let l = shared_link(procno);
+        l.next = FREE_LINK_NIL;
+        l.prev = old_tail;
+    }
+    if old_tail != FREE_LINK_NIL {
+        shared_link(old_tail).next = procno;
+    }
+    let h = shared_head(list);
+    h.tail = procno;
+    if h.head == FREE_LINK_NIL {
+        h.head = procno;
+    }
+}
+
+/// Snapshot of `<list>` in head→tail order (for `HaveNFreeProcs`'s
+/// `dlist_foreach`). Caller holds `ProcStructLock`, so the list is stable.
+fn shared_freelist_snapshot(list: FreeListId) -> Vec<ProcNumber> {
+    let mut out = Vec::new();
+    let mut cur = shared_head(list).head;
+    while cur != FREE_LINK_NIL {
+        out.push(cur);
+        cur = shared_link(cur).next;
+    }
+    out
+}
 
 /// `&ProcGlobal->allProcs[procno].pid` over the genuinely-shared pid array.
 /// Panics if `InitProcGlobal` has not run or `procno` is out of range — both
@@ -365,21 +593,19 @@ pub(crate) fn proc_number_of(proc: &PGPROC) -> ProcNumber {
     })
 }
 
-// ---- freelist operations over ProcGlobal's four heads ----
-
-/// Borrow the [`ProcFreeList`] head named by `list`.
-fn freelist_of(pg: &mut PROC_HDR, list: FreeListId) -> &mut ProcFreeList {
-    match list {
-        FreeListId::Regular => &mut pg.freeProcs,
-        FreeListId::Autovac => &mut pg.autovacFreeProcs,
-        FreeListId::Bgworker => &mut pg.bgworkerFreeProcs,
-        FreeListId::Walsender => &mut pg.walsenderFreeProcs,
-    }
-}
+// ---- freelist operations over ProcGlobal's four heads (genuine shmem) ----
+//
+// The freelist heads + the per-PGPROC `links` live in real shared memory (see
+// `init_shared_freelists`), so every forked backend pops a DISTINCT ProcNumber.
+// Each caller of these holds `ProcStructLock` (the spinlock bracket in
+// InitProcess/ProcKill), exactly as C requires for `dlist` mutation.
 
 /// `GetPGProcByNumber(procno)->procgloballist` mapped to its [`FreeListId`].
 /// Panics if the slot belongs to no freelist (aux / prepared-xact dummy), which
-/// would be a caller bug (the C deref of a NULL `procgloballist`).
+/// would be a caller bug (the C deref of a NULL `procgloballist`). The
+/// `procgloballist` class is stamped once in `InitProcGlobal` and is read-mostly
+/// (COW-inherited, never mutated post-fork), so it stays in the process-owned
+/// arena.
 pub(crate) fn proc_globallist_of(procno: ProcNumber) -> FreeListId {
     with_proc_global(|pg| {
         pg.allProcs[procno as usize]
@@ -388,27 +614,36 @@ pub(crate) fn proc_globallist_of(procno: ProcNumber) -> FreeListId {
     })
 }
 
-/// `dlist_container(PGPROC, links, dlist_pop_head_node(<list>))`.
+/// `dlist_container(PGPROC, links, dlist_pop_head_node(<list>))` over the
+/// genuinely-shared freelist. Caller holds `ProcStructLock`.
 pub(crate) fn freelist_pop_head(list: FreeListId) -> Option<ProcNumber> {
-    with_proc_global(|pg| freelist_of(pg, list).pop_head())
+    shared_freelist_pop_head(list)
 }
 
-/// `dlist_push_head(<list>, &GetPGProcByNumber(procno)->links)`.
+/// `dlist_push_head(<list>, &GetPGProcByNumber(procno)->links)` over the
+/// genuinely-shared freelist. Caller holds `ProcStructLock`.
 pub(crate) fn freelist_push_head(list: FreeListId, procno: ProcNumber) {
-    with_proc_global(|pg| freelist_of(pg, list).push_head(procno));
+    shared_freelist_push_head(list, procno);
 }
 
-/// `dlist_push_tail(<list>, &GetPGProcByNumber(procno)->links)`.
+/// `dlist_push_tail(<list>, &GetPGProcByNumber(procno)->links)` over the
+/// genuinely-shared freelist. Caller holds `ProcStructLock`.
 pub(crate) fn freelist_push_tail(list: FreeListId, procno: ProcNumber) {
-    with_proc_global(|pg| freelist_of(pg, list).push_tail(procno));
+    shared_freelist_push_tail(list, procno);
 }
 
 /// A snapshot of `ProcGlobal->freeProcs` in list order, for `HaveNFreeProcs`'s
-/// `dlist_foreach`. (A snapshot — rather than a live iterator — avoids holding
-/// the `ProcGlobal` borrow across the caller's loop; the caller holds
-/// `ProcStructLock`, so the list cannot change underneath it.)
+/// `dlist_foreach`. (A snapshot — rather than a live iterator — keeps the
+/// shared-link walk self-contained; the caller holds `ProcStructLock`, so the
+/// list cannot change underneath it.)
 pub(crate) fn freelist_regular_snapshot() -> Vec<ProcNumber> {
-    with_proc_global(|pg| pg.freeProcs.members.iter().copied().collect())
+    shared_freelist_snapshot(FreeListId::Regular)
+}
+
+/// Whether `<list>` is empty (`dlist_is_empty`), over the genuine shmem head.
+#[allow(dead_code)]
+pub(crate) fn freelist_is_empty(list: FreeListId) -> bool {
+    shared_freelist_is_empty(list)
 }
 
 // ---- ProcGlobal scalar fields ----
@@ -660,6 +895,13 @@ pub fn InitProcGlobal() -> PgResult<()> {
     // distinct ProcNumber. The rest of the PGPROC arena stays process-owned.
     init_shared_pid_block(total_procs)?;
 
+    // Place the genuinely-shared freelist `links` array and the four
+    // `dlist_head`s in real shared memory (same rationale as the pid words: the
+    // freelist is mutated on every connect/disconnect and the mutation MUST be
+    // visible to the postmaster and all sibling backends, so it cannot be
+    // COW-inherited). Zeroed to "all empty / all detached"; threaded below.
+    init_shared_freelists(total_procs)?;
+
     let mut proc_global = PROC_HDR::new_zeroed();
 
     // Initialize the data structures.
@@ -754,13 +996,11 @@ pub fn InitProcGlobal() -> PgResult<()> {
         };
         proc.procgloballist = freelist;
         if let Some(list) = freelist {
+            // `dlist_push_tail(<freelist>, &proc->links)` onto the genuinely-
+            // shared freelist (no ProcStructLock needed — InitProcGlobal runs
+            // once in the postmaster before any fork, exactly like C).
             let procno = i as ProcNumber;
-            match list {
-                FreeListId::Regular => proc_global.freeProcs.push_tail(procno),
-                FreeListId::Autovac => proc_global.autovacFreeProcs.push_tail(procno),
-                FreeListId::Bgworker => proc_global.bgworkerFreeProcs.push_tail(procno),
-                FreeListId::Walsender => proc_global.walsenderFreeProcs.push_tail(procno),
-            }
+            shared_freelist_push_tail(list, procno);
         }
 
         // Initialize myProcLocks[] shared memory queues. (Already dlist_init'd

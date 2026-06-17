@@ -17239,6 +17239,7 @@ name = "backend-utils-activity-status"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-commands-variable-seams",
  "backend-libpq-be-secure-seams",
  "backend-postmaster-postmaster-seams",
  "backend-storage-ipc-dsm-core-seams",
