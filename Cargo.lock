@@ -13009,6 +13009,7 @@ dependencies = [
  "backend-utils-hash-dynahash-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-resowner-seams",
  "port-pgsleep-seams",
  "types-core",

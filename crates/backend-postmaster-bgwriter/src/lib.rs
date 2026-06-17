@@ -401,4 +401,19 @@ fn background_writer_main_entry(startup_data: &StartupData) -> ! {
 /// bootstrap before any postmaster child launch reaches the bgwriter.
 pub fn init_seams() {
     backend_postmaster_bgwriter_seams::background_writer_main::set(background_writer_main_entry);
+
+    // `int BgWriterDelay = 200;` (bgwriter.c:58) is a plain GUC int the engine
+    // keeps updated through `conf->variable` (guc_tables.c:3217, `&BgWriterDelay`).
+    // It is read straight from the GUC slot — never the ControlFile. Bind the
+    // GUC engine's `vars::BgWriterDelay` accessors to this unit's backing so
+    // SET / SIGHUP reload reaches it, and install the buffer-manager consumer
+    // seam (`BgBufferSync` scan-pace math, buf_flush.rs) that reads the same.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::BgWriterDelay.install(GucVarAccessors {
+            get: BgWriterDelay,
+            set: set_BgWriterDelay,
+        });
+    }
+    bufmgr::bgwriter_delay::set(BgWriterDelay);
 }

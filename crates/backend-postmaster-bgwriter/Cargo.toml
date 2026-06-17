@@ -31,6 +31,10 @@ backend-postmaster-checkpointer = { path = "../backend-postmaster-checkpointer" 
 #   * pgstat_report_bgwriter (cumulative-stats bgwriter report).
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 
+# GUC table/slots — bgwriter owns the `BgWriterDelay` (bgwriter.c:58) backing
+# the GUC engine reads through `vars::BgWriterDelay` (`conf->variable`).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # Its own inward seams (installed by init_seams).
 backend-postmaster-bgwriter-seams = { path = "../backend-postmaster-bgwriter-seams" }
 
