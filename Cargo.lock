@@ -14875,14 +14875,17 @@ dependencies = [
 name = "backend-storage-buffer-support"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-seams",
  "backend-access-transam-xlog-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
  "backend-storage-smgr-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "common-hashfn",
  "common-relpath-seams",
  "mcx",
