@@ -35,3 +35,6 @@ backend-geqo-all = { path = "../backend-geqo-all" }
 backend-geqo-all-seams = { path = "../backend-geqo-all-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# allpaths.c owns the `min_parallel_index_scan_size` GUC; vacuumparallel reads
+# it through this accessor seam, which allpaths installs in `init_seams`.
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }

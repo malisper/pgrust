@@ -11115,6 +11115,7 @@ dependencies = [
 name = "backend-optimizer-path-allpaths"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-vacuum-seams",
  "backend-geqo-all",
  "backend-geqo-all-seams",
  "backend-optimizer-path-costsize",

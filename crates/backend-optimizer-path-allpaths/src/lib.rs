@@ -869,6 +869,15 @@ pub fn init_seams() {
     // declared in `crate::seams` and consumed by standard_planner (planner.c)
     // when it picks the final path off the upper rel; install our real body.
     seams::get_cheapest_fractional_path::set(append::get_cheapest_fractional_path);
+
+    // allpaths.c declares the GUC `int min_parallel_index_scan_size;`
+    // (allpaths.c:82), populated from the GUC slot by guc_tables.c. vacuumparallel
+    // (parallel_vacuum_compute_workers) reads it through this accessor seam; install
+    // our reader over the GUC slot (`min_parallel_index_scan_size()`), matching how
+    // C reads the plain variable. The seam is infallible — read returns `Ok`.
+    backend_commands_vacuum_seams::min_parallel_index_scan_size::set(|| {
+        Ok(min_parallel_index_scan_size())
+    });
 }
 
 /// Seam adapter for `compute_parallel_worker` (the seam takes `&PlannerInfo`;
