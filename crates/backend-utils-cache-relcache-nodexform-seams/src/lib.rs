@@ -113,20 +113,13 @@ seam_core::seam!(
     pub fn get_attoptions(relid: Oid, attnum: AttrNumber) -> PgResult<Option<Vec<u8>>>
 );
 
-seam_core::seam!(
-    /// `index_opclass_options(indexrel, attnum, attoptions, validate)`
-    /// (indexam.c): parse the AM/opclass-specific per-column options into the
-    /// binary `bytea` form cached in `rd_opcoptions`, or `None` when the column
-    /// has no parsed options. `attoptions` is the raw text array from
-    /// [`get_attoptions`] (`None` is the C `(Datum) 0`). Identified by the index
-    /// relation's OID (the owner re-resolves the open relation for the
-    /// amoptsprocinfo lookup). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn index_opclass_options(
-        index_oid: Oid,
-        attnum: AttrNumber,
-        attoptions: Option<Vec<u8>>,
-    ) -> PgResult<Option<Vec<u8>>>
-);
+// NOTE: the divergent relcache-owned `index_opclass_options(index_oid, attnum,
+// attoptions) -> Option<Vec<u8>>` seam was RETIRED: the relcache build now drives
+// the canonical `backend-access-index-indexam::index_opclass_options(indrel,
+// attnum, attoptions: Datum, validate)` contract directly (the opclass-options
+// force runs AFTER cache_insert, so the index entry is cache-resident and the
+// canonical OID-resolving seam terminates with normal short borrows — no bridge,
+// no recursion). See `derived::force_index_att_options`.
 
 // NOTE: the old `rule_lock(relid) -> ()` acknowledgement seam was RETIRED by the
 // full-Query cache-ownership keystone. `RelationBuildRuleLock` now builds the

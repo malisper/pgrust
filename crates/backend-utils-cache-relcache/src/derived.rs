@@ -18,10 +18,13 @@
 //! is real and operates on the owned [`RelationData`] store.
 
 use backend_access_index_genam_seams as genam_seam;
+use backend_access_index_indexam_seams as indexam_seam;
 use backend_nodes_read_seams as read_seam;
 use backend_utils_cache_relcache_nodexform_seams as nodexform_seam;
 use backend_utils_error::{ereport, PgResult};
 use mcx::{Mcx, MemoryContext};
+use types_rel::Relation;
+use types_tuple::Datum;
 use types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{InvalidOid, OidIsValid};
 use types_error::ERROR;
@@ -1192,18 +1195,42 @@ pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResul
     let mut opts: Vec<Option<Vec<u8>>> = vec![None; natts];
 
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
-    for (i, slot) in opts.iter_mut().enumerate() {
-        // `criticalRelcachesBuilt && relid != AttributeRelidNumIndexId` — avoid
-        // recursing through the pg_attribute index's own opclass options before
-        // the critical relcaches are built.
-        if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+
+    if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+        // DEFERRED (rebuild-target-addressing keystone): on the REBUILD path this
+        // is called against an un-inserted `newrel` Box whose arrays may differ
+        // from the resident old entry, but the canonical OID-resolving
+        // `index_opclass_options` contract resolves `rd_indam` / `rd_support` by
+        // OID against the still-resident OLD entry — a pre-existing latent
+        // divergence, NOT introduced by the re-sign. Re-signing to the canonical
+        // contract here preserves the exact prior behavior (the old bridge ALSO
+        // re-resolved by OID). The faithful fix — parsing against the newrel's
+        // own arrays — is the rebuild-target-addressing keystone and is out of
+        // this lane.
+        let scratch = MemoryContext::new("RelationGetIndexAttOptions");
+        let smcx = scratch.mcx();
+
+        // Project the OID-resident index entry into a transient cross-unit
+        // `Relation` value-slice (the canonical seam reads its `rd_id`).
+        let indrel_data = crate::core_entry_store::with_relation(relid, |r| {
+            crate::build::project_relation_data(smcx, r)
+        })??;
+        let indrel = Relation::open(indrel_data, None);
+
+        for (i, slot) in opts.iter_mut().enumerate() {
             let attnum = (i + 1) as AttrNumber;
             // `get_attoptions(relid, i + 1)` — the raw pg_attribute.attoptions
-            // reloptions for this column (lsyscache owner).
+            // reloptions text[] for this column (lsyscache owner).
             let attoptions = nodexform_seam::get_attoptions::call(relid, attnum)?;
+            // Reconstruct the `text[]` Datum (mirroring C `get_attoptions`'s
+            // palloc'd text[]); `(Datum) 0` when unset.
+            let datum = match &attoptions {
+                Some(bytes) => Datum::ByRef(mcx::slice_in(smcx, bytes)?),
+                None => Datum::null(),
+            };
             // `index_opclass_options(relation, i + 1, attoptions, false)` — the
-            // AM/opclass-specific parse into the binary `bytea` (indexam owner).
-            *slot = nodexform_seam::index_opclass_options::call(relid, attnum, attoptions)?;
+            // canonical AM/opclass-specific parse (indexam owner).
+            *slot = indexam_seam::index_opclass_options::call(&indrel, attnum, datum, false)?;
         }
     }
 
@@ -1215,13 +1242,18 @@ pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResul
 }
 
 /// The OID-keyed form of [`RelationGetIndexAttOptions`] for the deferred force
-/// in `RelationBuildDesc` (build.rs). The cross-unit `index_opclass_options`
-/// parse re-resolves the index by OID (`index_open` / `relation_rd_indam` /
-/// `rd_support_at` all read this same cache cell), so the entry must NOT be held
-/// borrowed across the seam loop — otherwise the re-resolution's `cell.borrow()`
-/// deadlocks against an outer `borrow_mut()`. This reads `relnatts` / the
-/// already-cached guard under a short borrow, runs the (unborrowed) seam loop,
-/// then writes `rd_opcoptions` back under a short borrow.
+/// in `RelationBuildDesc` (build.rs). The opclass-options parse runs AFTER
+/// `cache_insert` (build.rs), so the index entry is already cache-resident; this
+/// projects a transient [`Relation`] view of it by OID and drives the canonical
+/// `index_opclass_options(indrel, attnum, attoptions, validate=false)` indexam
+/// contract directly (no divergent relcache-owned bridge seam). The canonical
+/// owner resolves everything it needs (`rd_indam` / `rd_support`) by OID through
+/// its own short borrows, so the entry must NOT be held borrowed across the seam
+/// loop — the projected `Relation` is an mcx-allocated value copy holding no
+/// `RefCell` borrow. This reads `relnatts` / the already-cached guard under a
+/// short borrow, builds the projection + drives the (unborrowed) loop in a
+/// short-lived scratch context, then writes `rd_opcoptions` back under a short
+/// borrow.
 pub(crate) fn force_index_att_options(relid: Oid) -> PgResult<()> {
     // RelationGetNumberOfAttributes + the present-cache short-circuit.
     let (natts, already) = crate::core_entry_store::with_relation(relid, |rd| {
@@ -1231,15 +1263,45 @@ pub(crate) fn force_index_att_options(relid: Oid) -> PgResult<()> {
         return Ok(());
     }
 
-    // Parse opclass options with NO live borrow on the entry (the seams
-    // re-resolve it by OID). `palloc0` → one `None` per attribute.
+    // `palloc0(sizeof(*opts) * natts)` → one `None` (the C NULL element) per
+    // attribute.
     let mut opts: Vec<Option<Vec<u8>>> = vec![None; natts];
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
-    for (i, slot) in opts.iter_mut().enumerate() {
-        if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+
+    if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+        // Short-lived scratch context for the projected index `Relation` and the
+        // reconstructed `attoptions` text[] Datum — mirrors C `get_attoptions`
+        // returning a palloc'd text[] that is pfree'd after the parse. The whole
+        // projection + parse lives here and drops at function end.
+        let scratch = MemoryContext::new("force_index_att_options");
+        let smcx = scratch.mcx();
+
+        // Project the cache-resident index entry into a transient cross-unit
+        // `Relation` value-slice (the canonical seam reads its `rd_id` and
+        // resolves `rd_indam` / `rd_support` by OID; it never holds this view).
+        // The copy-out is performed under a short borrow and holds no `RefCell`
+        // borrow afterward.
+        let indrel_data = crate::core_entry_store::with_relation(relid, |r| {
+            crate::build::project_relation_data(smcx, r)
+        })??;
+        let indrel = Relation::open(indrel_data, None);
+
+        for (i, slot) in opts.iter_mut().enumerate() {
             let attnum = (i + 1) as AttrNumber;
+            // `get_attoptions(relid, i + 1)` — the raw pg_attribute.attoptions
+            // reloptions text[] for this column (lsyscache owner).
             let attoptions = nodexform_seam::get_attoptions::call(relid, attnum)?;
-            *slot = nodexform_seam::index_opclass_options::call(relid, attnum, attoptions)?;
+            // Reconstruct the `text[]` Datum the canonical `index_opclass_options`
+            // receives by pointer (caller-adaptation, mirroring C
+            // `get_attoptions`'s palloc'd text[]): a present option is the flat
+            // varlena image (the by-reference arm), an absent one is `(Datum) 0`.
+            let datum = match &attoptions {
+                Some(bytes) => Datum::ByRef(mcx::slice_in(smcx, bytes)?),
+                None => Datum::null(),
+            };
+            // `index_opclass_options(relation, i + 1, attoptions, false)` — the
+            // AM/opclass-specific parse into the binary `bytea` (indexam owner).
+            *slot = indexam_seam::index_opclass_options::call(&indrel, attnum, datum, false)?;
         }
     }
 

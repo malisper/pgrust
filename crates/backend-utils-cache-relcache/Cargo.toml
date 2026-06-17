@@ -62,6 +62,7 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
 
 # `stringToNode` for the rule-tree build (`RelationBuildRuleLock` parses

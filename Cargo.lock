@@ -19741,6 +19741,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-tableam-seams",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",

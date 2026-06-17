@@ -141,18 +141,20 @@ pub fn init_seams() {
     // RelationGetStatExtList / RelationGetFKeyList / RelationGetExclusionInfo /
     // AttrDefaultFetch / CheckNNConstraintFetch).
     decode::init_decode_seams();
-    // The two relcache `RelationGetIndexAttOptions` bridge primitives:
-    // `get_attoptions` (lsyscache.c) + `index_opclass_options` (indexam.c).
+    // The relcache `RelationGetIndexAttOptions` `get_attoptions` (lsyscache.c)
+    // bridge primitive. (The opclass-options parse itself is driven directly by
+    // the relcache build off the canonical `indexam::index_opclass_options`
+    // contract — no relcache-owned bridge seam.)
     nodexform::get_attoptions::set(bridge_get_attoptions);
-    nodexform::index_opclass_options::set(bridge_index_opclass_options);
 }
 
 /// `get_attoptions(relid, attnum)` (lsyscache.c) — the relcache
 /// `RelationGetIndexAttOptions` bridge. The lsyscache value core returns the
 /// attribute's `attoptions` `text[]` as a `'mcx` `Datum` (`datumCopy`'d, or
 /// `None` for the C `(Datum) 0`); the mcx-free seam materializes that into the
-/// flat varlena byte image (the relcache caller hands the bytes straight to
-/// [`bridge_index_opclass_options`]).
+/// flat varlena byte image (the relcache caller reconstructs the `attoptions`
+/// text[] Datum from these bytes and drives the canonical
+/// `indexam::index_opclass_options` contract directly).
 ///
 /// A short-lived scratch context backs the value core's `datumCopy`, exactly as
 /// `LookupOpclassInfo`'s scan scratch (the bytes are copied out before it drops).
@@ -171,46 +173,6 @@ fn bridge_get_attoptions(
         Some(datum) => Some(datum.as_ref_bytes().to_vec()),
         None => None,
     };
-
-    drop(scratch);
-    Ok(out)
-}
-
-/// `index_opclass_options(indexrel, attnum, attoptions, validate=false)`
-/// (indexam.c) — the relcache `RelationGetIndexAttOptions` bridge. The mcx-free
-/// seam re-resolves the open index relation by OID (`index_open(NoLock)` — the
-/// relation is already open + locked by the relcache build, so `NoLock` adds no
-/// lock, matching the decode primitives' `relation_open(rd_id, NoLock)`), turns
-/// the raw `attoptions` bytes back into the `text[]` Datum the C passes by
-/// pointer (`None` is the C `(Datum) 0`), and calls the indexam value core. The
-/// parsed `bytea` is already returned as `Vec<u8>` by the value core.
-///
-/// `validate` is `false` on this relcache build path (C: `index_opclass_options(
-/// relation, i + 1, attoptions, false)`).
-fn bridge_index_opclass_options(
-    index_oid: Oid,
-    attnum: AttrNumber,
-    attoptions: Option<alloc::vec::Vec<u8>>,
-) -> PgResult<Option<alloc::vec::Vec<u8>>> {
-    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
-
-    let scratch = MemoryContext::new("index_opclass_options");
-    let smcx = scratch.mcx();
-
-    // Reconstruct the `text[]` Datum the C `index_opclass_options` receives by
-    // pointer: a present option is the flat varlena image (the by-reference
-    // arm), an absent one is the C `(Datum) 0`.
-    let datum = match &attoptions {
-        Some(bytes) => DatumV::ByRef(mcx::slice_in(smcx, bytes)?),
-        None => DatumV::null(),
-    };
-
-    // index_open(indexOid, NoLock) — re-resolve the open relation for the
-    // amoptsprocinfo lookup; index_close(NoLock) on the way out.
-    let indrel = indexam::index_open(smcx, index_oid, NoLock)?;
-    let out = indexam::index_opclass_options(&indrel, attnum, datum, false);
-    indexam::index_close(indrel, NoLock)?;
-    let out = out?;
 
     drop(scratch);
     Ok(out)
