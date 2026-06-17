@@ -23,6 +23,8 @@
 
 use std::cell::RefCell;
 
+mod fmgr_builtins;
+
 use backend_regex_core_seams as engine;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_utils_mb_mbutils_seams as mb;
@@ -1682,6 +1684,7 @@ pub fn init_seams() {
     backend_utils_adt_regexp_seams::RE_compile_and_cache::set(RE_compile_and_cache);
     backend_utils_adt_regexp_seams::RE_compile_and_execute::set(RE_compile_and_execute);
     backend_utils_adt_regexp_seams::regexp_fixed_prefix::set(regexp_fixed_prefix);
+    fmgr_builtins::register_regexp_builtins();
 }
 
 #[cfg(test)]
