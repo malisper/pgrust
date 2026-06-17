@@ -35,6 +35,7 @@ pub mod cost_balance;
 pub mod launcher;
 pub mod schedule;
 pub mod shmem;
+pub mod substrate;
 pub mod worker;
 
 #[cfg(test)]
@@ -181,4 +182,46 @@ pub fn init_seams() {
             set: core::set_Log_autovacuum_min_duration,
         });
     }
+
+    // The AutoVacuumShmem layout + accessor seams (the shmem substrate this
+    // crate owns; autovacuum.c:231-417). These operate purely on the
+    // AutoVacuumShmemStruct / WorkerInfoData[] this crate models.
+    use backend_postmaster_autovacuum_ext_seams as ext;
+    ext::autovacuum_shmem_init::set(substrate::auto_vacuum_shmem_init);
+    ext::get_launcher_pid::set(substrate::get_launcher_pid);
+    ext::set_launcher_pid::set(substrate::set_launcher_pid);
+    ext::get_av_signal::set(substrate::get_av_signal);
+    ext::set_av_signal::set(substrate::set_av_signal);
+    ext::free_workers_count::set(substrate::free_workers_count);
+    ext::free_workers_pop_head::set(substrate::free_workers_pop_head);
+    ext::free_workers_push_head::set(substrate::free_workers_push_head);
+    ext::running_workers_push_head::set(substrate::running_workers_push_head);
+    ext::worker_links_delete::set(substrate::worker_links_delete);
+    ext::running_workers_slots::set(substrate::running_workers_slots);
+    ext::worker_get_dboid::set(substrate::worker_get_dboid);
+    ext::worker_set_dboid::set(substrate::worker_set_dboid);
+    ext::worker_get_tableoid::set(substrate::worker_get_tableoid);
+    ext::worker_set_tableoid::set(substrate::worker_set_tableoid);
+    ext::worker_get_sharedrel::set(substrate::worker_get_sharedrel);
+    ext::worker_set_sharedrel::set(substrate::worker_set_sharedrel);
+    ext::worker_get_launchtime::set(substrate::worker_get_launchtime);
+    ext::worker_set_launchtime::set(substrate::worker_set_launchtime);
+    ext::worker_proc_is_set::set(substrate::worker_proc_is_set);
+    ext::worker_set_proc::set(substrate::worker_set_proc);
+    ext::worker_dobalance_unlocked_test::set(substrate::worker_dobalance_unlocked_test);
+    ext::worker_dobalance_test_set::set(substrate::worker_dobalance_test_set);
+    ext::worker_dobalance_clear::set(substrate::worker_dobalance_clear);
+    ext::starting_worker_slot::set(substrate::starting_worker_slot);
+    ext::set_starting_worker_slot::set(substrate::set_starting_worker_slot);
+    ext::nworkers_for_balance_read::set(substrate::nworkers_for_balance_read);
+    ext::nworkers_for_balance_write::set(substrate::nworkers_for_balance_write);
+    ext::workitem_get_used::set(substrate::workitem_get_used);
+    ext::workitem_get_active::set(substrate::workitem_get_active);
+    ext::workitem_set_active::set(substrate::workitem_set_active);
+    ext::workitem_set_used::set(substrate::workitem_set_used);
+    ext::workitem_get_database::set(substrate::workitem_get_database);
+    ext::workitem_get_type::set(substrate::workitem_get_type);
+    ext::workitem_get_relation::set(substrate::workitem_get_relation);
+    ext::workitem_get_block_number::set(substrate::workitem_get_block_number);
+    ext::workitem_fill::set(substrate::workitem_fill);
 }

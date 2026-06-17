@@ -215,11 +215,22 @@ pub fn create_shared_memory_and_semaphores() -> PgResult<()> {
     // Set up shared memory allocation mechanism.
     shmem::init_shmem_allocation::call();
 
+    // Initialize dynamic shared memory facilities.
+    //
+    // DIVERGENCE FROM C ORDER: C runs dsm_postmaster_startup() *after*
+    // CreateOrAttachShmemStructs(), because in C StatsShmemInit (pgstat_shmem.c)
+    // builds its DSA *in place* (dsa_create_in_place against a ShmemInitStruct'd
+    // region) and so needs no DSM control segment at init time. This port's
+    // pgstat StatsShmemInit instead uses dsa_create() (the merged dsa.c
+    // substrate's handle-returning create), which allocates a DSM segment and
+    // therefore requires the DSM control segment to already exist. We thus seed
+    // the control segment first. dsm_postmaster_startup only creates the control
+    // segment + registers its shutdown hook; nothing in CreateOrAttachShmemStructs
+    // depends on the control segment being absent, so the move is safe.
+    dsm::dsm_postmaster_startup::call(shim)?;
+
     // Initialize subsystems.
     create_or_attach_shmem_structs()?;
-
-    // Initialize dynamic shared memory facilities.
-    dsm::dsm_postmaster_startup::call(shim)?;
 
     // Now give loadable modules a chance to set up their shmem allocations.
     if let Some(hook) = SHMEM_STARTUP_HOOK.with(|h| h.get()) {
