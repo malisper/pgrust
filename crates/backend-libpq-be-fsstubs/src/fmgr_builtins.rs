@@ -1,0 +1,299 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+//! large-object (`lo_*`) functions in `be-fsstubs.c`.
+//!
+//! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
+//! call frame, calls the matching `be_lo_*` value core, and writes back the
+//! result word / by-reference payload. [`register_be_fsstubs_builtins`]
+//! registers every row into the fmgr-core builtin table (C: `fmgr_builtins[]`),
+//! so by-OID dispatch resolves them. OIDs / nargs / strict / retset are
+//! transcribed exactly from `pg_proc.dat`.
+//!
+//! The cores return `PgResult`; an `Err` is re-raised through the one dispatch
+//! point every builtin crosses (`invoke_pgfunction`'s `catch_unwind`) via the
+//! `PGRUST-SQLSTATE:` panic protocol, exactly like every other adt builtin.
+//!
+//! By-reference arguments/results: `text` filename and `bytea` content cross on
+//! the by-ref lane as [`RefPayload::Varlena`]; the `bytea` results
+//! (`loread`/`lo_get`/`lo_get_fragment`) are written back the same way.
+
+use backend_utils_error::PgError;
+use types_core::{int64, Oid};
+use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+
+// ---------------------------------------------------------------------------
+// Argument readers / result writers.
+// ---------------------------------------------------------------------------
+
+/// `PG_GETARG_OID(i)` → `DatumGetObjectId`: the low 32 bits of arg `i`'s word.
+#[inline]
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
+    fcinfo.arg(i).expect("lo fn: missing arg").value.as_oid()
+}
+
+/// `PG_GETARG_INT32(i)` → `DatumGetInt32`.
+#[inline]
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo.arg(i).expect("lo fn: missing arg").value.as_i32()
+}
+
+/// `PG_GETARG_INT64(i)` → `DatumGetInt64`.
+#[inline]
+fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> int64 {
+    fcinfo.arg(i).expect("lo fn: missing arg").value.as_i64()
+}
+
+/// `PG_GETARG_TEXTP`/`PG_GETARG_BYTEA_PP`(i): the varlena byte image on the
+/// by-ref lane (the `text` filename / `bytea` content's `VARDATA_ANY`).
+#[inline]
+fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("lo fn: varlena arg missing from by-ref lane")
+}
+
+#[inline]
+fn ret_oid(v: Oid) -> Datum {
+    Datum::from_oid(v)
+}
+#[inline]
+fn ret_i32(v: i32) -> Datum {
+    Datum::from_i32(v)
+}
+#[inline]
+fn ret_i64(v: int64) -> Datum {
+    Datum::from_i64(v)
+}
+
+/// Set a `bytea` result on the by-ref lane and return the dummy word.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
+/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: PgError) -> ! {
+    let chars = types_error::unpack_sqlstate(err.sqlstate());
+    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
+    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters.
+// ---------------------------------------------------------------------------
+
+fn fc_lo_create(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::be_lo_create(arg_oid(fcinfo, 0)) {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_creat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: lo_creat(int4) ignores its argument (legacy mode flag).
+    let _ = fcinfo;
+    match crate::be_lo_creat() {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_import(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let filename = arg_varlena(fcinfo, 0);
+    match crate::be_lo_import(filename) {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_import_with_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let filename = arg_varlena(fcinfo, 0);
+    let oid = arg_oid(fcinfo, 1);
+    match crate::be_lo_import_with_oid(filename, oid) {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_export(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lobj_id = arg_oid(fcinfo, 0);
+    let filename = arg_varlena(fcinfo, 1);
+    match crate::be_lo_export(lobj_id, filename) {
+        Ok(n) => ret_i32(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_open(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lobj_id = arg_oid(fcinfo, 0);
+    let mode = arg_i32(fcinfo, 1);
+    match crate::be_lo_open(lobj_id, mode) {
+        Ok(fd) => ret_i32(fd),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_close(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::be_lo_close(arg_i32(fcinfo, 0)) {
+        Ok(r) => ret_i32(r),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_loread(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let len = arg_i32(fcinfo, 1);
+    match crate::be_loread(fd, len) {
+        Ok(bytes) => ret_varlena(fcinfo, bytes),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lowrite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let wbuf = arg_varlena(fcinfo, 1);
+    match crate::be_lowrite(fd, wbuf) {
+        Ok(n) => ret_i32(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_lseek(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let offset = arg_i32(fcinfo, 1);
+    let whence = arg_i32(fcinfo, 2);
+    match crate::be_lo_lseek(fd, offset, whence) {
+        Ok(n) => ret_i32(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_lseek64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let offset = arg_i64(fcinfo, 1);
+    let whence = arg_i32(fcinfo, 2);
+    match crate::be_lo_lseek64(fd, offset, whence) {
+        Ok(n) => ret_i64(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_tell(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::be_lo_tell(arg_i32(fcinfo, 0)) {
+        Ok(n) => ret_i32(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_tell64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::be_lo_tell64(arg_i32(fcinfo, 0)) {
+        Ok(n) => ret_i64(n),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_unlink(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::be_lo_unlink(arg_oid(fcinfo, 0)) {
+        Ok(r) => ret_i32(r),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_truncate(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let len = arg_i32(fcinfo, 1);
+    match crate::be_lo_truncate(fd, len) {
+        Ok(r) => ret_i32(r),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_truncate64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let fd = arg_i32(fcinfo, 0);
+    let len = arg_i64(fcinfo, 1);
+    match crate::be_lo_truncate64(fd, len) {
+        Ok(r) => ret_i32(r),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_from_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lo_oid = arg_oid(fcinfo, 0);
+    let bytes = arg_varlena(fcinfo, 1);
+    match crate::be_lo_from_bytea(lo_oid, bytes) {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_get(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lo_oid = arg_oid(fcinfo, 0);
+    match crate::be_lo_get(lo_oid) {
+        Ok(bytes) => ret_varlena(fcinfo, bytes),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_lo_get_fragment(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lo_oid = arg_oid(fcinfo, 0);
+    let offset = arg_i64(fcinfo, 1);
+    let nbytes = arg_i32(fcinfo, 2);
+    match crate::be_lo_get_fragment(lo_oid, offset, nbytes) {
+        Ok(bytes) => ret_varlena(fcinfo, bytes),
+        Err(e) => raise(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    retset: bool,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset,
+        func: Some(func),
+    }
+}
+
+/// Register every SQL-callable `be-fsstubs.c` `lo_*` builtin (C: their
+/// `fmgr_builtins[]` rows). Called from this crate's [`crate::init_seams`].
+/// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat` (all are
+/// `proisstrict => 't'` by default, none `proretset`).
+pub fn register_be_fsstubs_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        builtin(715, "lo_create", 1, true, false, fc_lo_create),
+        builtin(764, "lo_import", 1, true, false, fc_lo_import),
+        builtin(765, "lo_export", 2, true, false, fc_lo_export),
+        builtin(767, "lo_import", 2, true, false, fc_lo_import_with_oid),
+        builtin(952, "lo_open", 2, true, false, fc_lo_open),
+        builtin(953, "lo_close", 1, true, false, fc_lo_close),
+        builtin(954, "loread", 2, true, false, fc_loread),
+        builtin(955, "lowrite", 2, true, false, fc_lowrite),
+        builtin(956, "lo_lseek", 3, true, false, fc_lo_lseek),
+        builtin(957, "lo_creat", 1, true, false, fc_lo_creat),
+        builtin(958, "lo_tell", 1, true, false, fc_lo_tell),
+        builtin(964, "lo_unlink", 1, true, false, fc_lo_unlink),
+        builtin(1004, "lo_truncate", 2, true, false, fc_lo_truncate),
+        builtin(3170, "lo_lseek64", 3, true, false, fc_lo_lseek64),
+        builtin(3171, "lo_tell64", 1, true, false, fc_lo_tell64),
+        builtin(3172, "lo_truncate64", 2, true, false, fc_lo_truncate64),
+        builtin(3457, "lo_from_bytea", 2, true, false, fc_lo_from_bytea),
+        builtin(3458, "lo_get", 1, true, false, fc_lo_get),
+        builtin(3459, "lo_get", 3, true, false, fc_lo_get_fragment),
+    ]);
+}
