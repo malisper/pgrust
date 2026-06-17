@@ -205,6 +205,21 @@ pub fn init_seams() {
     // a child's terminating signal into a human-readable name. C wraps libc
     // `strsignal()`, falling back to "unrecognized signal N" on NULL.
     sp::pg_strsignal::set(pg_strsignal);
+
+    // `ClientAuthInProgress` (postmaster.c global) read/write. In C this is a
+    // plain per-process global declared in postmaster.c; it is read/written from
+    // the forked BACKEND child during authentication (PerformAuthentication and
+    // BackendInitialize), not from the postmaster. The canonical process-local
+    // backing is the `CLIENT_AUTH_IN_PROGRESS` thread-local in
+    // `backend-utils-error::config` — already written by
+    // backend-tcop-backend-startup's BackendInitialize and read by the error
+    // reporter (send_message_to_server_log) to limit log-message visibility
+    // during auth. Wire these postmaster-owned seams to that same flag so the
+    // PerformAuthentication set(true/false) and any read observe one value per
+    // process (using the PostmasterState field would create a divergent second
+    // copy invisible to the tcop writer / error reporter).
+    sp::client_auth_in_progress::set(backend_utils_error::config::client_auth_in_progress);
+    sp::set_client_auth_in_progress::set(backend_utils_error::config::set_client_auth_in_progress);
 }
 
 /// `pg_strsignal(int signum)` (port/strsignal.c) — human-readable signal name.
