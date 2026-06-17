@@ -37,3 +37,5 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 types-catalog = { path = "../types-catalog" }
 types-nodes = { path = "../types-nodes" }
 types-fmgr = { path = "../types-fmgr" }
+types-plancache = { path = "../types-plancache" }
+backend-utils-cache-syscache-pc-seams = { path = "../backend-utils-cache-syscache-pc-seams" }

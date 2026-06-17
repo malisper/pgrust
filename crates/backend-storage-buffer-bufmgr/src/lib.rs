@@ -716,4 +716,82 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::bgwriter_flush_after::set(|| {
         vars::bgwriter_flush_after.read()
     });
+
+    // Install the backing storage for the GUC int/real variables defined as
+    // bufmgr.c globals (the `.read()` calls above resolve through these). The
+    // GUC bootstrap writes each boot_val through the accessor at startup.
+    guc_vars::install();
+}
+
+/// Backing storage for the GUC variables that are file-scope globals in
+/// bufmgr.c (`effective_io_concurrency`, `maintenance_io_concurrency`,
+/// `io_combine_limit`, `bgwriter_lru_maxpages`, `bgwriter_lru_multiplier`,
+/// `checkpoint_flush_after`, `bgwriter_flush_after`). Each is a per-backend
+/// `thread_local` cell exposed through `GucVarAccessors`, mirroring C's
+/// `conf->variable` pointer into the global.
+mod guc_vars {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    use std::cell::Cell;
+
+    macro_rules! int_guc {
+        ($cell:ident, $get:ident, $set:ident, $default:expr) => {
+            thread_local! {
+                static $cell: Cell<i32> = const { Cell::new($default) };
+            }
+            fn $get() -> i32 {
+                $cell.with(Cell::get)
+            }
+            fn $set(value: i32) {
+                $cell.with(|c| c.set(value));
+            }
+        };
+    }
+
+    int_guc!(EFFECTIVE_IO_CONCURRENCY, eff_get, eff_set, 16);
+    int_guc!(MAINTENANCE_IO_CONCURRENCY, maint_get, maint_set, 16);
+    int_guc!(IO_COMBINE_LIMIT, iocl_get, iocl_set, 16);
+    int_guc!(BGWRITER_LRU_MAXPAGES, blm_get, blm_set, 100);
+    int_guc!(CHECKPOINT_FLUSH_AFTER, cfa_get, cfa_set, 0);
+    int_guc!(BGWRITER_FLUSH_AFTER, bfa_get, bfa_set, 0);
+
+    thread_local! {
+        static BGWRITER_LRU_MULTIPLIER: Cell<f64> = const { Cell::new(2.0) };
+    }
+    fn blmul_get() -> f64 {
+        BGWRITER_LRU_MULTIPLIER.with(Cell::get)
+    }
+    fn blmul_set(value: f64) {
+        BGWRITER_LRU_MULTIPLIER.with(|c| c.set(value));
+    }
+
+    pub(super) fn install() {
+        vars::effective_io_concurrency.install(GucVarAccessors {
+            get: eff_get,
+            set: eff_set,
+        });
+        vars::maintenance_io_concurrency.install(GucVarAccessors {
+            get: maint_get,
+            set: maint_set,
+        });
+        vars::io_combine_limit_guc.install(GucVarAccessors {
+            get: iocl_get,
+            set: iocl_set,
+        });
+        vars::bgwriter_lru_maxpages.install(GucVarAccessors {
+            get: blm_get,
+            set: blm_set,
+        });
+        vars::checkpoint_flush_after.install(GucVarAccessors {
+            get: cfa_get,
+            set: cfa_set,
+        });
+        vars::bgwriter_flush_after.install(GucVarAccessors {
+            get: bfa_get,
+            set: bfa_set,
+        });
+        vars::bgwriter_lru_multiplier.install(GucVarAccessors {
+            get: blmul_get,
+            set: blmul_set,
+        });
+    }
 }

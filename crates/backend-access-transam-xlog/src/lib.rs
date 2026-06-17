@@ -792,6 +792,10 @@ pub fn init_seams() {
     s::issue_xlog_fsync::set(write::issue_xlog_fsync);
     s::enable_fsync::set(write::enable_fsync);
     s::wal_sync_method::set(write::wal_sync_method);
+    s::wal_segment_size::set(shmem::wal_segment_size);
+    // `XLogFilePath(tli, segno, wal_segsz_bytes)` — the seam reads the segment
+    // size from the xlog global, so it drops the explicit byte-size argument.
+    s::xlog_file_path::set(|tli, seg| XLogFilePath(tli, seg, shmem::wal_segment_size()));
 
     // `Is/Set/ResetInstallXLogFileSegmentActive` + `XLogShutdownWalRcv` live in
     // xlog.c and touch the xlog-owned `XLogCtl->InstallXLogFileSegmentActive`

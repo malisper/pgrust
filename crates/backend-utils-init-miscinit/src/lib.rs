@@ -55,8 +55,6 @@ pub(crate) const PG_VERSION: &str = "18.3";
 thread_local! {
     /// `ProcessingMode Mode = InitProcessing;`
     static MODE: Cell<ProcessingMode> = const { Cell::new(ProcessingMode::InitProcessing) };
-    /// `BackendType MyBackendType;`
-    static MY_BACKEND_TYPE: Cell<BackendType> = const { Cell::new(BackendType::Invalid) };
     /// `bool IgnoreSystemIndexes = false;`
     static IGNORE_SYSTEM_INDEXES: Cell<bool> = const { Cell::new(false) };
 
@@ -177,14 +175,17 @@ pub fn IsNormalProcessingMode() -> bool {
     GetProcessingMode() == ProcessingMode::NormalProcessing
 }
 
-/// `GetMyBackendType()` — read `MyBackendType`.
+/// `GetMyBackendType()` — read `MyBackendType`. The single canonical
+/// `MyBackendType` global lives in globals.c (backend-utils-init-small); read it
+/// through that owner's seam so every consumer sees the same value.
 pub fn GetMyBackendType() -> BackendType {
-    MY_BACKEND_TYPE.with(Cell::get)
+    backend_utils_init_small_seams::my_backend_type::call()
 }
 
-/// `MyBackendType = ...` — assign the backend-type global.
+/// `MyBackendType = ...` — assign the backend-type global (globals.c, owned by
+/// backend-utils-init-small) through its setter seam.
 pub fn SetMyBackendType(backend_type: BackendType) {
-    MY_BACKEND_TYPE.with(|c| c.set(backend_type));
+    backend_utils_init_small_seams::set_my_backend_type::call(backend_type);
 }
 
 /// `IgnoreSystemIndexes` getter (`miscinit.c:81`).

@@ -1043,4 +1043,23 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_statistic_stawidth::set(
         projections::pg_statistic_stawidth,
     );
+
+    // plancache's InitPlanCache resolves the integer SysCacheIdentifier for the
+    // caches it hooks; map its small enum to the genbki cache ids.
+    backend_utils_cache_syscache_pc_seams::syscache_id::set(syscache_id_for);
+}
+
+/// Map plancache's `SysCacheId` to the genbki `SysCacheIdentifier` integer
+/// (`catalog/syscache_ids.h`).
+fn syscache_id_for(which: types_plancache::SysCacheId) -> types_error::PgResult<i32> {
+    use types_plancache::SysCacheId;
+    Ok(match which {
+        SysCacheId::ProcOid => cacheinfo::PROCOID,
+        SysCacheId::TypeOid => cacheinfo::TYPEOID,
+        SysCacheId::NamespaceOid => cacheinfo::NAMESPACEOID,
+        SysCacheId::OperOid => cacheinfo::OPEROID,
+        SysCacheId::AmOpOpId => cacheinfo::AMOPOPID,
+        SysCacheId::ForeignServerOid => cacheinfo::FOREIGNSERVEROID,
+        SysCacheId::ForeignDataWrapperOid => cacheinfo::FOREIGNDATAWRAPPEROID,
+    })
 }
