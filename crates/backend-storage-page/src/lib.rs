@@ -1651,12 +1651,25 @@ fn maxalign(size: Size) -> Size {
     (size + 7) & !7
 }
 
-/// This crate owns no inward seams (no consumer calls a `bufpage.c` /
-/// `itemptr.c` function across a cycle on the current frontier — the page code
-/// is self-contained arithmetic), so `init_seams()` is a no-op. Its one
-/// external, the `data_checksums_enabled` GUC, is owned by `xlog` and called
-/// through `backend-access-transam-xlog-seams`.
-pub fn init_seams() {}
+/// Install this unit's inward seams.
+///
+/// `bufpage.c` *defines* the `ignore_checksum_failure` GUC (the C `bool` global
+/// declared at bufpage.c:27 and registered in guc_tables.c). It is a plain
+/// session-local backend bool read directly from the GUC slot — it is *not*
+/// persisted in the control file (unlike `data_checksums_enabled`, which `xlog`
+/// owns and reads from the control file's `data_checksum_version`, and which
+/// this crate consumes through `backend-access-transam-xlog-seams`).
+///
+/// The accessor is installed reading the canonical GUC slot in
+/// `backend-utils-misc-guc-tables`, mirroring C's read of the global. Consumers
+/// in other units (e.g. `bufmgr.c`'s `StartReadBuffersImpl`, which promotes the
+/// value to the `READ_BUFFERS_IGNORE_CHECKSUM_FAILURES` flag) call it across
+/// the dependency cycle via `backend-storage-page-seams`.
+pub fn init_seams() {
+    backend_storage_page_seams::ignore_checksum_failure::set(|| {
+        backend_utils_misc_guc_tables::vars::ignore_checksum_failure.read()
+    });
+}
 
 #[cfg(test)]
 mod tests;

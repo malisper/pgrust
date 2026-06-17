@@ -15829,7 +15829,9 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-storage-page-checksum",
+ "backend-storage-page-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",
@@ -15842,6 +15844,13 @@ name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "backend-storage-page-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
