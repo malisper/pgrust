@@ -470,6 +470,12 @@ pub fn init_seams() {
     // scans without recursing into the not-yet-built syscache.
     fmgr_builtins::register_varlena_compare_builtins();
 
+    // Register the rest of varlena.c's fmgr_builtins[] rows whose value cores
+    // are ported and expressible at the fmgr boundary (text/bytea I/O, length,
+    // concat, substring/position/overlay, replace/split_part, bytea comparison
+    // + int casts, text_pattern_ops, base conversions, unicode/unistr).
+    fmgr_builtins::register_varlena_more_builtins();
+
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC
     // machinery reads/writes through these accessors and `byteaout` reads the
