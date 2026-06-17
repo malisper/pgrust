@@ -562,6 +562,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-toast-compression"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-toast-compression-seams",
+ "common-pglz",
+ "mcx",
+ "seam-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-common-toast-compression-seams"
 version = "0.0.0"
 dependencies = [
@@ -21125,6 +21137,7 @@ dependencies = [
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tidstore",
+ "backend-access-common-toast-compression",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-gin-ginfast",

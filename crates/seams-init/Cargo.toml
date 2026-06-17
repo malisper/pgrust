@@ -23,6 +23,7 @@ backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
 contrib-amcheck-verify-common = { path = "../contrib-amcheck-verify-common" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
+backend-access-common-toast-compression = { path = "../backend-access-common-toast-compression" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
 backend-access-common-next = { path = "../backend-access-common-next" }

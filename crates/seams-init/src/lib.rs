@@ -11,6 +11,7 @@ pub fn init_all() {
     backend_archive_shell_archive::init_seams();
     backend_commands_async::init_seams();
     backend_access_common_detoast::init_seams();
+    backend_access_common_toast_compression::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
     backend_access_common_next::init_seams();
