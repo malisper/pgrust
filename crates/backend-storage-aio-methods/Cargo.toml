@@ -33,5 +33,20 @@ backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # before_shmem_exit (pgaio_shutdown registration at backend init).
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+# The aio.c engine seams this unit now owns + installs (pgaio_closing_fd /
+# pgaio_error_cleanup / at_eoxact_aio / pgaio_io_start_readv /
+# pgaio_io_release_resowner) across the three per-consumer seam crates the
+# fd.c / xact.c / resowner.c call sites import.
+backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
+backend-storage-aio-core-seams = { path = "../backend-storage-aio-core-seams" }
+# HOLD_INTERRUPTS / RESUME_INTERRUPTS / START_CRIT_SECTION / END_CRIT_SECTION
+# (the interrupt-holdoff + critical-section counters the state machine wraps).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+# ConditionVariable broadcast / prepare-to-sleep / sleep / cancel-sleep used by
+# the per-handle completion CV in the wait path.
+backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
+# The genuinely-unported completion-callback / sync-perform / resowner-AIO
+# leaves the engine seams into (owners: bufmgr/md/localbuf, smgr/fd, resowner).
+backend-storage-aio-completion-seams = { path = "../backend-storage-aio-completion-seams" }
 
 [dev-dependencies]

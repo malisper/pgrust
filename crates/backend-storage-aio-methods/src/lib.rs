@@ -30,31 +30,53 @@
 //! uses (e.g. `ProcSignal`) — so the C `ShmemInitStruct`/`found` handshake
 //! becomes `get_or_init` (a second caller attaches; the first builds).
 //!
-//! ## What is NOT here (seam-and-panic, by design — task #15)
+//! ## The engine + its aio-owned satellite files (now ported)
 //!
-//! The AIO *engine* (`aio.c`: `pgaio_io_acquire`/`_nb`, `pgaio_io_release`,
-//! the `pgaio_io_start_*` staging path, `pgaio_io_wait`/`pgaio_wref_wait`,
-//! `pgaio_submit_staged`, `pgaio_io_reclaim`, the callback dispatch in
-//! `aio_callback.c`, the per-op synchronous execution in `aio_io.c`, the target
-//! reopen in `aio_target.c`), and the asynchronous IO methods
-//! (`method_worker.c`, `method_io_uring.c`) are unported. They are deeply
-//! entangled with the resource-owner AIO integration, the pgstat AIO counters,
-//! the interrupt machinery and the buffer manager's AIO completion callbacks —
-//! genuinely bufmgr/engine-blocked. The synchronous method makes every IO
-//! execute inline in the issuing backend via `pgaio_io_perform_synchronously`
-//! (aio_io.c), which is part of that unported engine; so `pgaio_sync_submit`
-//! here faithfully reproduces the C `elog(ERROR, "IO should have been executed
-//! synchronously")` (it is never reached because `needs_synchronous_execution`
-//! returns true and the engine that would call `submit` is unported anyway).
+//! The AIO *engine* (`aio.c`'s full `PgAioHandle` state machine) plus its
+//! aio-owned satellite source files are ported here as submodules:
+//!  * [`aio`] — `aio.c`: `pgaio_io_acquire`/`_nb`, `pgaio_io_release`,
+//!    `pgaio_io_release_resowner`, `pgaio_io_stage`, `pgaio_io_prepare_submit`,
+//!    `pgaio_io_process_completion`, `pgaio_io_wait`/`pgaio_wref_wait`,
+//!    `pgaio_io_reclaim`, `pgaio_io_wait_for_free`, the wref + batch-mode +
+//!    `pgaio_submit_staged` + `pgaio_error_cleanup` + `AtEOXact_Aio` +
+//!    `pgaio_closing_fd` + `pgaio_shutdown` surfaces;
+//!  * [`aio_callback`] — `aio_callback.c`: callback registration + the
+//!    stage/complete-shared/complete-local/report dispatch loops;
+//!  * [`aio_target`] — `aio_target.c`: the target registry + dispatch;
+//!  * [`aio_io`] — `aio_io.c`: the per-op start routines, the synchronous
+//!    executor, and the op/fd helpers.
 //!
-//! The `aio-seams` engine decls (`pgaio_error_cleanup`, `pgaio_closing_fd`,
-//! `at_eoxact_aio`, `pgaio_io_start_readv`) stay uninstalled — calling them
-//! panics with the C symbol name until the engine lands.
+//! These engine entry points are installed across the three per-consumer seam
+//! crates the VFD / xact / resowner call sites reach (`-seams`, `-aio-seams`,
+//! `-core-seams`), clearing the `pgaio_closing_fd` boot wall.
+//!
+//! ## What is NOT here (seam-and-panic into genuinely-unported owners)
+//!
+//! The leaves that bottom out in subsystems unported *for AIO* are seamed (see
+//! [`backend_storage_aio_completion_seams`]): the buffer-manager / md.c
+//! completion callbacks (`pgaio_cb_*`), the smgr/fd synchronous read/write
+//! syscall (`pgaio_perform_io_syscall`), the smgr target reopen
+//! (`pgaio_io_reopen`), and the resource-owner AIO-handle registry
+//! (`resource_owner_*_aio_handle`). They are reached only on the async /
+//! buffered-IO completion path, never on the `io_method = sync` boot path.
+//!
+//! The asynchronous IO *methods* (`method_worker.c`, `method_io_uring.c`)
+//! remain seam-and-panic: the worker method is postmaster-blocked (its shmem
+//! queue + IO-worker child process loop need the unported postmaster
+//! supervisor) and io_uring has no liburing FFI binding crate. The synchronous
+//! method (`method_sync.c`) makes every IO execute inline via
+//! `pgaio_io_perform_synchronously`; `pgaio_sync_submit` faithfully reproduces
+//! the C `elog(ERROR, "IO should have been executed synchronously")` (never
+//! reached, as `needs_synchronous_execution` returns true).
 
 extern crate alloc;
 
 use alloc::string::ToString;
 use alloc::vec::Vec;
+
+use core::cell::Cell;
+use core::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
+use std::sync::Mutex;
 
 use types_condvar::ConditionVariable;
 use types_core::primitive::Size;
@@ -81,6 +103,44 @@ pub const PGAIO_SUBMIT_BATCH_SIZE: usize = 32;
 /// `#define PGAIO_HANDLE_MAX_CALLBACKS 4` (`storage/aio.h`).
 pub const PGAIO_HANDLE_MAX_CALLBACKS: usize = 4;
 
+/// `PGAIO_HF_SYNCHRONOUS = 1 << 0` (`storage/aio.h`) — IO will run synchronously.
+pub const PGAIO_HF_SYNCHRONOUS: u8 = 1 << 0;
+/// `PGAIO_HF_REFERENCES_LOCAL = 1 << 1` (`storage/aio.h`).
+pub const PGAIO_HF_REFERENCES_LOCAL: u8 = 1 << 1;
+/// `PGAIO_HF_BUFFERED = 1 << 2` (`storage/aio.h`).
+pub const PGAIO_HF_BUFFERED: u8 = 1 << 2;
+
+/// `PGAIO_OP_INVALID = 0` (`storage/aio.h`).
+pub const PGAIO_OP_INVALID: u8 = 0;
+/// `PGAIO_OP_READV` (`storage/aio.h`).
+pub const PGAIO_OP_READV: u8 = 1;
+/// `PGAIO_OP_WRITEV` (`storage/aio.h`).
+pub const PGAIO_OP_WRITEV: u8 = 2;
+
+/// `PGAIO_TID_INVALID = 0` (`storage/aio.h`).
+pub const PGAIO_TID_INVALID: u8 = 0;
+/// `PGAIO_TID_SMGR` (`storage/aio.h`).
+pub const PGAIO_TID_SMGR: u8 = 1;
+
+/// `PG_UINT32_MAX` — the invalid `aio_index` sentinel for a cleared wait ref.
+pub const PG_UINT32_MAX: u32 = u32::MAX;
+
+/// `WAIT_EVENT_AIO_IO_COMPLETION` (`utils/wait_event_names.txt`) — the wait
+/// event reported while sleeping on a handle's completion condition variable.
+pub const WAIT_EVENT_AIO_IO_COMPLETION: u32 = 0x0B00_0006;
+
+/// `typedef struct PgAioWaitRef` (`storage/aio_types.h`) — a process-portable
+/// reference to a specific IO handle + the generation that referenced it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAioWaitRef {
+    /// `uint32 aio_index` — index into `pgaio_ctl->io_handles`.
+    pub aio_index: u32,
+    /// `uint32 generation_upper` — high 32 bits of the handle generation.
+    pub generation_upper: u32,
+    /// `uint32 generation_lower` — low 32 bits of the handle generation.
+    pub generation_lower: u32,
+}
+
 // ===========================================================================
 // The shared-memory data model (storage/aio_internal.h, storage/aio_types.h)
 // ===========================================================================
@@ -106,6 +166,23 @@ pub enum PgAioHandleState {
     CompletedShared,
     /// `PGAIO_HS_COMPLETED_LOCAL` — local completion done.
     CompletedLocal,
+}
+
+impl PgAioHandleState {
+    /// Decode the `repr(u8)` stored in the handle's atomic `state` field.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => PgAioHandleState::Idle,
+            1 => PgAioHandleState::HandedOut,
+            2 => PgAioHandleState::Defined,
+            3 => PgAioHandleState::Staged,
+            4 => PgAioHandleState::Submitted,
+            5 => PgAioHandleState::CompletedIo,
+            6 => PgAioHandleState::CompletedShared,
+            7 => PgAioHandleState::CompletedLocal,
+            other => panic!("invalid PgAioHandleState discriminant {other}"),
+        }
+    }
 }
 
 /// `enum PgAioResultStatus` (`storage/aio_types.h`).
@@ -215,10 +292,48 @@ pub struct DclistHead {
 /// [`ConditionVariable`] (shmem-resident, `!Copy`/`!Clone`), so this struct is
 /// neither `Copy` nor `Clone` — handles are constructed in place by
 /// `AioShmemInit`, exactly as C memsets and fills each one.
+/// In PostgreSQL the AIO control struct lives in shared memory and the engine
+/// mutates handle fields through a `PgAioHandle *` while every backend can read
+/// the cross-visible fields (`state`, `generation`, `result`) concurrently with
+/// `pg_read_barrier`/`pg_write_barrier`. This workspace models shared memory as
+/// a single process-global [`OnceLock`] reached through `&'static`; mutation is
+/// therefore expressed as *interior mutability* on the handle fields (the same
+/// idiom `procsignal.c`/`pmsignal.c` use). The three cross-backend-visible
+/// scalar fields (`state`, `result`, `generation`) become atomics — their
+/// `Acquire`/`Release` orderings reproduce the C read/write barriers exactly —
+/// and the remaining single-owner mutable fields live behind one per-handle
+/// [`Mutex`] ([`PgAioHandleData`]), the same shmem-faithful guard `procsignal.c`
+/// uses for its per-slot `pss_mutex` (a bare `Cell` would make the handle
+/// `!Sync`, but the process-global `OnceLock<PgAioCtl>` must be `Sync`).
 #[derive(Debug)]
 pub struct PgAioHandle {
-    /// `uint8 state` — a [`PgAioHandleState`].
-    pub state: PgAioHandleState,
+    /// `uint8 state` — a [`PgAioHandleState`]. Cross-backend-visible: written
+    /// `Release` (the C `pg_write_barrier(); ioh->state = new_state`), read
+    /// `Acquire`.
+    pub state: AtomicU8,
+    /// `int32 owner_procno` — set once at init, never mutated afterwards.
+    pub owner_procno: i32,
+    /// `int32 result` — raw result of the IO operation. Cross-backend-visible.
+    pub result: AtomicI32,
+    /// `uint64 generation` — incremented every time the handle is reused.
+    /// Cross-backend-visible: read `Acquire` after the `state` load.
+    pub generation: AtomicU64,
+    /// `ConditionVariable cv` — already interior-mutable.
+    pub cv: ConditionVariable,
+    /// `uint32 iovec_off` — index into `PgAioCtl.iovecs`/`.handle_data`. Set once
+    /// at init.
+    pub iovec_off: u32,
+    /// The single-owner mutable handle fields (`target`/`op`/`flags`/
+    /// `num_callbacks`/`callbacks`/`callbacks_data`/`handle_data_len`/`resowner`/
+    /// `distilled_result`/`report_return`/`op_data`/`target_data`). Only the
+    /// owning backend mutates these, but `&'static` sharing requires `Sync`, so
+    /// they sit behind one per-handle [`Mutex`].
+    pub data: Mutex<PgAioHandleData>,
+}
+
+/// The single-owner mutable portion of a [`PgAioHandle`] (see its `data` field).
+#[derive(Clone, Debug)]
+pub struct PgAioHandleData {
     /// `uint8 target` — a `PgAioTargetID`.
     pub target: u8,
     /// `uint8 op` — which IO operation.
@@ -233,20 +348,10 @@ pub struct PgAioHandle {
     pub callbacks_data: [u8; PGAIO_HANDLE_MAX_CALLBACKS],
     /// `uint8 handle_data_len`.
     pub handle_data_len: u8,
-    /// `int32 owner_procno`.
-    pub owner_procno: i32,
-    /// `int32 result` — raw result of the IO operation.
-    pub result: i32,
     /// `struct ResourceOwnerData *resowner` — `None` until an owner is set.
     pub resowner: Option<ResourceOwnerId>,
-    /// `uint64 generation` — incremented every time the handle is reused.
-    pub generation: u64,
-    /// `ConditionVariable cv`.
-    pub cv: ConditionVariable,
     /// `PgAioResult distilled_result`.
     pub distilled_result: PgAioResult,
-    /// `uint32 iovec_off` — index into `PgAioCtl.iovecs`/`.handle_data`.
-    pub iovec_off: u32,
     /// `PgAioReturn *report_return` — `None` until a return location is set.
     pub report_return: Option<PgAioReturn>,
     /// `PgAioOpData op_data`.
@@ -255,12 +360,9 @@ pub struct PgAioHandle {
     pub target_data: PgAioTargetData,
 }
 
-impl PgAioHandle {
-    /// A freshly zeroed handle (the C `memset(pgaio_ctl, 0, ...)` baseline for
-    /// one handle, before `AioShmemInit` fills generation/owner/iovec_off/cv).
-    fn zeroed() -> Self {
-        PgAioHandle {
-            state: PgAioHandleState::Idle,
+impl Default for PgAioHandleData {
+    fn default() -> Self {
+        PgAioHandleData {
             target: 0,
             op: 0,
             flags: 0,
@@ -268,17 +370,43 @@ impl PgAioHandle {
             callbacks: [0; PGAIO_HANDLE_MAX_CALLBACKS],
             callbacks_data: [0; PGAIO_HANDLE_MAX_CALLBACKS],
             handle_data_len: 0,
-            owner_procno: 0,
-            result: 0,
             resowner: None,
-            generation: 0,
-            cv: ConditionVariable::new(),
             distilled_result: PgAioResult::default(),
-            iovec_off: 0,
             report_return: None,
             op_data: PgAioOpData::default(),
             target_data: PgAioTargetData::default(),
         }
+    }
+}
+
+impl PgAioHandle {
+    /// A freshly zeroed handle (the C `memset(pgaio_ctl, 0, ...)` baseline for
+    /// one handle, before `AioShmemInit` fills generation/owner/iovec_off/cv).
+    fn zeroed() -> Self {
+        PgAioHandle {
+            state: AtomicU8::new(PgAioHandleState::Idle as u8),
+            owner_procno: 0,
+            result: AtomicI32::new(0),
+            generation: AtomicU64::new(0),
+            cv: ConditionVariable::new(),
+            iovec_off: 0,
+            data: Mutex::new(PgAioHandleData::default()),
+        }
+    }
+
+    /// Load `state` with `Acquire` (the C read-barrier-before-state-use).
+    pub fn state(&self) -> PgAioHandleState {
+        PgAioHandleState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    /// `pgaio_io_update_state`: `pg_write_barrier(); ioh->state = new_state`.
+    pub fn set_state(&self, new: PgAioHandleState) {
+        self.state.store(new as u8, Ordering::Release);
+    }
+
+    /// Lock and access the single-owner mutable portion of the handle.
+    pub fn data(&self) -> std::sync::MutexGuard<'_, PgAioHandleData> {
+        self.data.lock().unwrap()
     }
 }
 
@@ -311,14 +439,21 @@ pub struct PgAioBackend {
 pub struct PgAioCtl {
     /// `int backend_state_count`.
     pub backend_state_count: i32,
-    /// `PgAioBackend *backend_state`.
-    pub backend_state: Vec<PgAioBackend>,
+    /// `PgAioBackend *backend_state`. Each `PgAioBackend` is single-owner in C
+    /// (only the owning backend touches its lists / `num_staged_ios` /
+    /// `handed_out_io` / `in_batchmode`), so the mutable state lives behind a
+    /// per-slot [`Mutex`] — the same shmem-faithful guard `procsignal.c` uses for
+    /// its per-slot `pss_mutex`.
+    pub backend_state: Vec<Mutex<PgAioBackend>>,
     /// `uint32 iovec_count`.
     pub iovec_count: u32,
-    /// `struct iovec *iovecs`.
-    pub iovecs: Vec<Iovec>,
-    /// `uint64 *handle_data`.
-    pub handle_data: Vec<u64>,
+    /// `struct iovec *iovecs`. Each handle's iovec sub-range (`[iovec_off ..
+    /// iovec_off+io_max_combine_limit]`) is filled by its owning backend before
+    /// staging; `&'static` sharing requires `Sync`, so the array sits behind a
+    /// [`Mutex`].
+    pub iovecs: Mutex<Vec<Iovec>>,
+    /// `uint64 *handle_data`. Same single-owner sub-range model as `iovecs`.
+    pub handle_data: Mutex<Vec<u64>>,
     /// `uint32 io_handle_count`.
     pub io_handle_count: u32,
     /// `PgAioHandle *io_handles`.
@@ -454,7 +589,7 @@ fn pgaio_method_ops_for(io_method: i32) -> IoMethodOps {
 /// store (the C global is written by the assign hook, which runs at GUC apply
 /// time; reading the resolved table entry on demand is equivalent and avoids a
 /// stale process-global before the hook fires).
-fn pgaio_method_ops() -> IoMethodOps {
+pub(crate) fn pgaio_method_ops() -> IoMethodOps {
     pgaio_method_ops_for(current_io_method())
 }
 
@@ -471,7 +606,7 @@ fn current_io_method() -> i32 {
 
 /// Read `io_max_concurrency` from the live GUC store (the C `io_max_concurrency`
 /// global). `-1` (the boot value) means "auto-tune later".
-fn io_max_concurrency() -> i32 {
+pub(crate) fn io_max_concurrency() -> i32 {
     backend_utils_misc_guc::get_int("io_max_concurrency").unwrap_or(-1)
 }
 
@@ -540,6 +675,26 @@ const IO_METHOD_OPTIONS: &[types_guc::config_enum_entry] = &[
 /// The process-global `PgAioCtl *pgaio_ctl` (aio.c). Built once by the first
 /// `AioShmemInit` caller (the C `!found` branch); later callers attach.
 static PGAIO_CTL: std::sync::OnceLock<PgAioCtl> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// The process-local `PgAioBackend *pgaio_my_backend` (aio.c) — the index
+    /// into `pgaio_ctl->backend_state` for this backend, or `None` before
+    /// `pgaio_init_backend` runs / in subprocesses that don't use AIO. Modeled
+    /// as a `thread_local` [`Cell`], the same idiom procsignal uses for
+    /// `MyProcSignalSlot`.
+    static PGAIO_MY_BACKEND: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// `pgaio_my_backend` accessor returning the per-backend index, or `None` when
+/// AIO isn't initialized for this process (`!pgaio_my_backend` in C).
+pub(crate) fn pgaio_my_backend() -> Option<usize> {
+    PGAIO_MY_BACKEND.with(|c| c.get())
+}
+
+/// Clear `pgaio_my_backend` (the C `pgaio_my_backend = NULL` at shutdown).
+pub(crate) fn clear_pgaio_my_backend() {
+    PGAIO_MY_BACKEND.with(|c| c.set(None));
+}
 
 /// `static Size AioCtlShmemSize(void)` (aio_init.c) — `sizeof(PgAioCtl)`.
 fn AioCtlShmemSize() -> Size {
@@ -689,14 +844,24 @@ fn build_pgaio_ctl() -> PgResult<PgAioCtl> {
     // The C sub-allocates each region via ShmemInitStruct (whose byte sizing we
     // mirror above for AioShmemSize); here they are owned vectors of the same
     // element count.
-    grow_with(&mut pgaio_ctl.backend_state, aio_procs as usize, PgAioBackend::default)?;
+    grow_with(&mut pgaio_ctl.backend_state, aio_procs as usize, || {
+        Mutex::new(PgAioBackend::default())
+    })?;
     grow_with(
         &mut pgaio_ctl.io_handles,
         pgaio_ctl.io_handle_count as usize,
         PgAioHandle::zeroed,
     )?;
-    grow_with(&mut pgaio_ctl.iovecs, pgaio_ctl.iovec_count as usize, Iovec::default)?;
-    grow_with(&mut pgaio_ctl.handle_data, pgaio_ctl.iovec_count as usize, u64::default)?;
+    grow_with(
+        pgaio_ctl.iovecs.get_mut().unwrap(),
+        pgaio_ctl.iovec_count as usize,
+        Iovec::default,
+    )?;
+    grow_with(
+        pgaio_ctl.handle_data.get_mut().unwrap(),
+        pgaio_ctl.iovec_count as usize,
+        u64::default,
+    )?;
 
     let mut io_handle_off: u32 = 0;
     let mut iovec_off: u32 = 0;
@@ -717,15 +882,18 @@ fn build_pgaio_ctl() -> PgResult<PgAioCtl> {
             let ioh_index = (bs_io_handle_off + i as u32) as usize;
             let ioh = &mut pgaio_ctl.io_handles[ioh_index];
 
-            ioh.generation = 1;
+            ioh.generation = AtomicU64::new(1);
             ioh.owner_procno = procno;
             ioh.iovec_off = iovec_off;
-            ioh.handle_data_len = 0;
-            ioh.report_return = None;
-            ioh.resowner = None;
-            ioh.num_callbacks = 0;
-            ioh.distilled_result.status = PgAioResultStatus::Unknown;
-            ioh.flags = 0;
+            {
+                let d = ioh.data.get_mut().unwrap();
+                d.handle_data_len = 0;
+                d.report_return = None;
+                d.resowner = None;
+                d.num_callbacks = 0;
+                d.distilled_result.status = PgAioResultStatus::Unknown;
+                d.flags = 0;
+            }
 
             // ConditionVariableInit(&ioh->cv) — re-initialize in place.
             ConditionVariableInit(&mut ioh.cv);
@@ -735,7 +903,7 @@ fn build_pgaio_ctl() -> PgResult<PgAioCtl> {
             iovec_off += imcl as u32;
         }
 
-        let bs = &mut pgaio_ctl.backend_state[procno as usize];
+        let mut bs = pgaio_ctl.backend_state[procno as usize].lock().unwrap();
         bs.io_handle_off = bs_io_handle_off;
         bs.idle_ios = idle_ios;
         bs.staged_ios = staged_ios;
@@ -776,11 +944,13 @@ pub fn pgaio_init_backend() -> PgResult<()> {
     }
 
     // pgaio_my_backend = &pgaio_ctl->backend_state[MyProcNumber]; the C global
-    // is a per-backend pointer into shmem. Validate the index exists (the
-    // engine, when ported, will hold the resolved per-backend reference).
+    // is a per-backend pointer into shmem. Here it is the process-local index
+    // into `pgaio_ctl->backend_state`, stashed in the thread-local exactly as
+    // procsignal stashes `MyProcSignalSlot`.
     let my_backend = my_proc_number as usize;
     let ctl = pgaio_ctl();
     let _ = &ctl.backend_state[my_backend];
+    PGAIO_MY_BACKEND.with(|c| c.set(Some(my_backend)));
 
     let ops = pgaio_method_ops();
     if let Some(init_backend) = ops.init_backend {
@@ -789,22 +959,11 @@ pub fn pgaio_init_backend() -> PgResult<()> {
 
     // before_shmem_exit(pgaio_shutdown, 0).
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
-        pgaio_shutdown,
+        aio::pgaio_shutdown,
         types_tuple::Datum::null(),
     )?;
 
     Ok(())
-}
-
-/// `void pgaio_shutdown(int code, Datum arg)` (aio.c L1311) — registered as the
-/// `before_shmem_exit` callback. Its body (`AtEOXact_Aio` + draining in-flight
-/// IOs + per-method shutdown) is part of the unported engine; registering the
-/// callback is correct, firing it panics with the precise boundary.
-fn pgaio_shutdown(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
-    panic!(
-        "pgaio_shutdown: the AIO engine (aio.c AtEOXact_Aio + in-flight drain) \
-         is not yet ported (task #15); only aio_init.c + the sync method are"
-    )
 }
 
 // ===========================================================================
@@ -813,7 +972,7 @@ fn pgaio_shutdown(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()>
 
 /// The `pgaio_ctl != NULL` dereference: C would crash on use before
 /// `AioShmemInit`; here it is a loud panic.
-fn pgaio_ctl() -> &'static PgAioCtl {
+pub(crate) fn pgaio_ctl() -> &'static PgAioCtl {
     PGAIO_CTL
         .get()
         .expect("pgaio_ctl shared memory not initialized (AioShmemInit not called)")
@@ -826,7 +985,7 @@ fn dclist_init(head: &mut DclistHead) {
 }
 
 /// `dclist_push_tail(dclist_head *head, dlist_node *node)` (`lib/ilist.h`).
-fn dclist_push_tail(head: &mut DclistHead, node_index: usize) -> PgResult<()> {
+pub(crate) fn dclist_push_tail(head: &mut DclistHead, node_index: usize) -> PgResult<()> {
     head.members
         .try_reserve(1)
         .map_err(|_| oom_error("dclist_push_tail"))?;
@@ -834,6 +993,49 @@ fn dclist_push_tail(head: &mut DclistHead, node_index: usize) -> PgResult<()> {
     head.count += 1;
     debug_assert!(head.count > 0); // count overflow check
     Ok(())
+}
+
+/// `dclist_push_head(dclist_head *head, dlist_node *node)` (`lib/ilist.h`).
+pub(crate) fn dclist_push_head(head: &mut DclistHead, node_index: usize) -> PgResult<()> {
+    head.members
+        .try_reserve(1)
+        .map_err(|_| oom_error("dclist_push_head"))?;
+    head.members.insert(0, node_index);
+    head.count += 1;
+    debug_assert!(head.count > 0);
+    Ok(())
+}
+
+/// `dclist_pop_head_node(dclist_head *head)` (`lib/ilist.h`) — remove and return
+/// the head member index. Panics if empty (the C `Assert(!dclist_is_empty)`).
+pub(crate) fn dclist_pop_head(head: &mut DclistHead) -> usize {
+    let node = head.members.remove(0);
+    head.count -= 1;
+    node
+}
+
+/// `dclist_delete_from(dclist_head *head, dlist_node *node)` (`lib/ilist.h`) —
+/// remove a specific member by its io-handle index.
+pub(crate) fn dclist_delete_from(head: &mut DclistHead, node_index: usize) {
+    let pos = head
+        .members
+        .iter()
+        .position(|&x| x == node_index)
+        .expect("dclist_delete_from: node not on list");
+    head.members.remove(pos);
+    head.count -= 1;
+}
+
+/// `dclist_is_empty(dclist_head *head)` (`lib/ilist.h`).
+pub(crate) fn dclist_is_empty(head: &DclistHead) -> bool {
+    head.count == 0
+}
+
+/// `dclist_count(dclist_head *head)` (`lib/ilist.h`). Part of the faithful
+/// ilist surface; the C uses it only in `pgaio_debug*` log lines (elided here).
+#[allow(dead_code)]
+pub(crate) fn dclist_count(head: &DclistHead) -> u32 {
+    head.count
 }
 
 /// `ConditionVariableInit(ConditionVariable *cv)` (`condition_variable.c`):
@@ -875,6 +1077,21 @@ pub fn init_seams() {
     backend_storage_aio_seams::aio_shmem_init::set(AioShmemInit);
     backend_storage_aio_seams::pgaio_init_backend::set(pgaio_init_backend);
 
+    // The aio.c engine entry points the VFD / xact / resowner call sites reach.
+    // The three per-consumer seam crates (`-seams` via vfd_core.rs, `-aio-seams`
+    // via vfd_io.rs, `-core-seams` via allocated_desc.rs) each declare their own
+    // `pgaio_closing_fd` / `pgaio_error_cleanup`; the single engine
+    // implementation is installed into all of them.
+    backend_storage_aio_seams::pgaio_closing_fd::set(aio::pgaio_closing_fd);
+    backend_storage_aio_seams::pgaio_error_cleanup::set(aio::pgaio_error_cleanup);
+    backend_storage_aio_seams::at_eoxact_aio::set(aio::AtEOXact_Aio);
+    backend_storage_aio_aio_seams::pgaio_closing_fd::set(aio::pgaio_closing_fd);
+    backend_storage_aio_aio_seams::pgaio_error_cleanup::set(aio::pgaio_error_cleanup);
+    backend_storage_aio_aio_seams::pgaio_io_start_readv::set(aio_io::pgaio_io_start_readv);
+    backend_storage_aio_aio_seams::pgaio_io_release_resowner::set(aio::pgaio_io_release_resowner);
+    backend_storage_aio_core_seams::pgaio_closing_fd::set(aio::pgaio_closing_fd);
+    backend_storage_aio_core_seams::pgaio_error_cleanup::set(aio::pgaio_error_cleanup);
+
     // io_method_options[] + the io_method enum variable accessor + assign hook.
     option_sets::io_method_options.install(IO_METHOD_OPTIONS);
     vars::io_method.install(GucVarAccessors {
@@ -899,6 +1116,12 @@ pub fn init_seams() {
         set: |_v| { /* read through the live store. */ },
     });
 }
+
+// The AIO engine + its aio-owned satellite source files.
+pub mod aio;
+pub mod aio_callback;
+pub mod aio_io;
+pub mod aio_target;
 
 #[cfg(test)]
 mod tests;

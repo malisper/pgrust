@@ -14669,6 +14669,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-aio-completion-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-aio-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -14679,10 +14687,15 @@ dependencies = [
 name = "backend-storage-aio-methods"
 version = "0.0.0"
 dependencies = [
+ "backend-storage-aio-aio-seams",
+ "backend-storage-aio-completion-seams",
+ "backend-storage-aio-core-seams",
  "backend-storage-aio-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-condition-variable",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-seams",

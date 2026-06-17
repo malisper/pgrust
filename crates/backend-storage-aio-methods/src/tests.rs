@@ -141,11 +141,12 @@ fn shmem_init_builds_layout_under_sync() {
     assert_eq!(ctl.iovec_count, aio_procs * (imc * imcl) as u32);
     assert_eq!(ctl.backend_state.len(), aio_procs as usize);
     assert_eq!(ctl.io_handles.len(), ctl.io_handle_count as usize);
-    assert_eq!(ctl.iovecs.len(), ctl.iovec_count as usize);
-    assert_eq!(ctl.handle_data.len(), ctl.iovec_count as usize);
+    assert_eq!(ctl.iovecs.lock().unwrap().len(), ctl.iovec_count as usize);
+    assert_eq!(ctl.handle_data.lock().unwrap().len(), ctl.iovec_count as usize);
 
     let mut expected_off = 0u32;
-    for (procno, bs) in ctl.backend_state.iter().enumerate() {
+    for (procno, bs_mutex) in ctl.backend_state.iter().enumerate() {
+        let bs = bs_mutex.lock().unwrap();
         assert_eq!(bs.io_handle_off, procno as u32 * imc as u32);
         assert_eq!(bs.idle_ios.count, imc as u32);
         assert_eq!(bs.idle_ios.members.len(), imc as usize);
@@ -154,11 +155,12 @@ fn shmem_init_builds_layout_under_sync() {
         for (i, &handle_index) in bs.idle_ios.members.iter().enumerate() {
             assert_eq!(handle_index, bs.io_handle_off as usize + i);
             let ioh = &ctl.io_handles[handle_index];
-            assert_eq!(ioh.generation, 1);
+            assert_eq!(ioh.generation.load(core::sync::atomic::Ordering::Relaxed), 1);
             assert_eq!(ioh.owner_procno, procno as i32);
-            assert_eq!(ioh.distilled_result.status, PgAioResultStatus::Unknown);
-            assert!(ioh.report_return.is_none());
-            assert!(ioh.resowner.is_none());
+            let d = ioh.data();
+            assert_eq!(d.distilled_result.status, PgAioResultStatus::Unknown);
+            assert!(d.report_return.is_none());
+            assert!(d.resowner.is_none());
             // iovec_off advances by io_max_combine_limit per handle, globally.
             assert_eq!(ioh.iovec_off, expected_off);
             expected_off += imcl as u32;
