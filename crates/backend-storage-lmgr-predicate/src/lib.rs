@@ -97,6 +97,17 @@ pub fn init_seams() {
         )
     });
 
+    seams::predicate_lock_page_combine::set(|index_oid, old_blkno, new_blkno| {
+        let f = rel_fields(index_oid)?;
+        engine::PredicateLockPageCombine(
+            f.db_oid,
+            f.rd_id,
+            f.uses_local_buffers,
+            old_blkno,
+            new_blkno,
+        )
+    });
+
     seams::check_for_serializable_conflict_in_page::set(|index_oid, blkno| {
         let f = rel_fields(index_oid)?;
         engine::CheckForSerializableConflictIn(

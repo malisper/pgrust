@@ -189,6 +189,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GlobalVisCheckRemovableXid(NULL, xid)` (procarray.c) — true if no backend
+    /// could still view `xid` as in-progress, so a GIN page deleted in `xid` is
+    /// safe to recycle (`GinPageIsRecyclable`). The GIN call passes
+    /// `heaprel == NULL`, so the owner resolves the horizon for `InvalidOid`
+    /// (the shared, most-conservative `GlobalVisState`).
+    pub fn global_vis_check_removable_xid(xid: TransactionId) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `ProcArrayEndTransaction(MyProc, latestXid)` — advertise no transaction
     /// in progress (the proc argument is always `MyProc` from xact.c).
     pub fn proc_array_end_transaction(latest_xid: TransactionId) -> PgResult<()>

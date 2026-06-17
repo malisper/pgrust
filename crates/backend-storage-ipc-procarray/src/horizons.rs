@@ -554,6 +554,9 @@ pub fn init_seams() {
 
     seams::global_vis_test_for::set(GlobalVisTestFor);
     seams::global_vis_test_is_removable_xid::set(GlobalVisTestIsRemovableXid);
+    // GIN's `GinPageIsRecyclable` calls `GlobalVisCheckRemovableXid(NULL, xid)`;
+    // `heaprel == NULL` => resolve the shared (InvalidOid) horizon.
+    seams::global_vis_check_removable_xid::set(|xid| GlobalVisCheckRemovableXid(InvalidOid, xid));
     seams::global_vis_test_is_removable_fullxid::set(GlobalVisTestIsRemovableFullXid);
     seams::get_oldest_non_removable_transaction_id::set(GetOldestNonRemovableTransactionId);
 

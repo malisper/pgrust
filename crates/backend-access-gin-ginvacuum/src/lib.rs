@@ -413,7 +413,11 @@ fn ginDeletePage(
 
     // Any insert which would have gone on the leaf block will now go to its
     // right sibling.
-    gvsx::predicate_lock_page_combine::call(gvs.index.rd_id, delete_blkno, rightlink)?;
+    backend_storage_lmgr_predicate_seams::predicate_lock_page_combine::call(
+        gvs.index.rd_id,
+        delete_blkno,
+        rightlink,
+    )?;
 
     // START_CRIT_SECTION();
 
@@ -873,7 +877,8 @@ pub fn ginbulkdelete<'mcx>(
             // inserts.
             let mut s = IndexBulkDeleteResult::default();
             let deleted = gvsx::gin_insert_cleanup::call(
-                gvs.index.rd_id,
+                gvs.mcx,
+                gvs.index,
                 !am_autovacuum_worker_process(),
                 false,
                 true,
@@ -980,8 +985,8 @@ pub fn ginvacuumcleanup<'mcx>(
     if info.analyze_only {
         if am_autovacuum_worker_process() {
             // initGinState(&ginstate, index); ginInsertCleanup(...).
-            let _ginstate = initGinState(index, mcx)?;
-            gvsx::gin_insert_cleanup::call(index.rd_id, false, true, true)?;
+            // The owner (ginfast) re-derives the GinState from `index`.
+            gvsx::gin_insert_cleanup::call(mcx, index, false, true, true)?;
         }
         return Ok(stats);
     }
@@ -992,9 +997,10 @@ pub fn ginvacuumcleanup<'mcx>(
         Some(s) => s,
         None => {
             let mut s = IndexBulkDeleteResult::default();
-            let _ginstate = initGinState(index, mcx)?;
+            // The owner (ginfast) re-derives the GinState from `index`.
             let deleted = gvsx::gin_insert_cleanup::call(
-                index.rd_id,
+                mcx,
+                index,
                 !am_autovacuum_worker_process(),
                 false,
                 true,
@@ -1097,7 +1103,7 @@ pub fn GinPageIsRecyclable(page: &[u8]) -> PgResult<bool> {
 
     // If no backend could still view delete_xid as in-progress, all scans
     // concurrent with ginDeletePage() must have finished.
-    gvsx::global_vis_check_removable_xid::call(delete_xid)
+    backend_storage_ipc_procarray_seams::global_vis_check_removable_xid::call(delete_xid)
 }
 
 /// `TransactionIdIsValid(xid)` — `xid != InvalidTransactionId` (0).

@@ -180,6 +180,17 @@ pub fn init_seams() {
     backend_access_gin_gininsert_seams::gin_get_use_fast_update::set(gin_get_use_fast_update);
     backend_access_gin_gininsert_seams::gin_fast_insert::set(gin_fast_insert);
 
+    // GIN vacuum (`ginbulkdelete` / `ginvacuumcleanup` / autovacuum-analyze)
+    // flushes the fast-update pending list through `ginInsertCleanup`, which
+    // lives here. C re-derives the `GinState` from the index immediately before
+    // the call (`initGinState(&ginstate, index)`); do the same in the shim.
+    backend_access_gin_ginvacuum_seams::gin_insert_cleanup::set(
+        |mcx, index, full_clean, fill_fsm, force_cleanup| {
+            let ginstate = backend_access_gin_ginutil::initGinState(index, mcx)?;
+            ginInsertCleanup(&ginstate, mcx, index, full_clean, fill_fsm, force_cleanup, None)
+        },
+    );
+
     // `int gin_pending_list_limit = 0;` (ginfast.c:39) — the process-global
     // `conf->variable` backing for the `gin_pending_list_limit` GUC. The GUC
     // engine seeds it from `boot_val` (4096), users SET it, and

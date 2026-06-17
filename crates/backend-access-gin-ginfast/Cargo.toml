@@ -30,6 +30,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 
 # cross-owner seam crates
 backend-access-gin-gininsert-seams = { path = "../backend-access-gin-gininsert-seams" }
+backend-access-gin-ginvacuum-seams = { path = "../backend-access-gin-ginvacuum-seams" }
 backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }

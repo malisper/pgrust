@@ -36,3 +36,5 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
 backend-access-gin-ginvacuum-seams = { path = "../backend-access-gin-ginvacuum-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }

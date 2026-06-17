@@ -27,6 +27,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PredicateLockPageCombine(relation, oldblkno, newblkno)` (predicate.c):
+    /// transfer the predicate (SIREAD) locks from a page about to be unlinked
+    /// (`oldblkno`) onto its right sibling (`newblkno`), so any insert that
+    /// would have landed on the removed page is still covered. Reached by GIN
+    /// `ginDeletePage`. Keyed on the relation by OID; can `ereport(ERROR)`.
+    pub fn predicate_lock_page_combine(
+        index_oid: types_core::primitive::Oid,
+        old_blkno: types_core::primitive::BlockNumber,
+        new_blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckForSerializableConflictIn(relation, NULL, blkno)` (predicate.c):
     /// the page-granularity rw-conflict check the hash AM performs on the
     /// primary bucket page before inserting. `Err` carries the

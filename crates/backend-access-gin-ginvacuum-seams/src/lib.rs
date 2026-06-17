@@ -21,37 +21,26 @@
 
 #![allow(clippy::result_large_err)]
 
-use types_core::primitive::{BlockNumber, TransactionId};
+use types_core::primitive::BlockNumber;
 
-seam_core::seam!(
-    /// `PredicateLockPageCombine(relation, oldblkno, newblkno)` (predicate.c):
-    /// transfer predicate locks from a page about to be unlinked to its right
-    /// sibling. Reached by GIN `ginDeletePage`. Owner (predicate.c
-    /// SSI-on-GIN) not yet ported — panics until then.
-    pub fn predicate_lock_page_combine(
-        relation: types_core::primitive::Oid,
-        oldblkno: BlockNumber,
-        newblkno: BlockNumber,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    /// `GlobalVisCheckRemovableXid(NULL, xid)` (procarray.c): true if no backend
-    /// could still view `xid` as in-progress (used by `GinPageIsRecyclable`).
-    /// The GIN call passes `heaprel == NULL`, so the seam carries only the xid.
-    pub fn global_vis_check_removable_xid(xid: TransactionId) -> types_error::PgResult<bool>
-);
+// `PredicateLockPageCombine` is owned by predicate.c — re-homed to
+// `backend-storage-lmgr-predicate-seams::predicate_lock_page_combine`.
+// `GlobalVisCheckRemovableXid(NULL, xid)` is owned by procarray.c — re-homed to
+// `backend-storage-ipc-procarray-seams::global_vis_check_removable_xid`.
 
 seam_core::seam!(
     /// `ginInsertCleanup(ginstate, full_clean, fill_fsm, forceCleanup, stats)`
     /// (ginfast.c): flush the fast-update pending list into the main index,
     /// accumulating `stats->pages_deleted`. Reached by `ginbulkdelete` /
-    /// `ginvacuumcleanup` (and the autovacuum-analyze path). The seam takes the
-    /// index OID (the owner re-derives the `GinState`) and returns the number of
-    /// pages deleted to fold into the running stats. Owner (`ginfast.c`) not yet
-    /// ported — panics until then.
-    pub fn gin_insert_cleanup(
-        index: types_core::primitive::Oid,
+    /// `ginvacuumcleanup` (and the autovacuum-analyze path). C re-derives the
+    /// `GinState` from the index via `initGinState(&ginstate, index)` right
+    /// before the call, so the seam carries the open `Relation` (and the `Mcx`
+    /// the GinState's scratch allocations live in) and the owner builds the
+    /// `GinState`. Returns the number of pages deleted to fold into the running
+    /// stats.
+    pub fn gin_insert_cleanup<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index: &types_rel::Relation<'mcx>,
         full_clean: bool,
         fill_fsm: bool,
         force_cleanup: bool,
