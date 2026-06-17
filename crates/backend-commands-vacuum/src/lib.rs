@@ -38,7 +38,7 @@ use mcx::{Mcx, PgVec};
 
 use backend_utils_error::ereport;
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, LOG, WARNING,
 };
@@ -47,14 +47,15 @@ use types_core::primitive::{bits32, BlockNumber, InvalidOid, MultiXactId, Oid, T
 use types_core::xact::{FirstNormalTransactionId, InvalidTransactionId};
 
 use types_storage::lock::{
-    AccessExclusiveLock, AccessShareLock, NoLock, ShareUpdateExclusiveLock, LOCKMODE,
+    AccessExclusiveLock, AccessShareLock, ExclusiveLock, NoLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
+use types_storage::storage::LW_EXCLUSIVE;
 use types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 use types_tuple::heaptuple::ItemPointerData;
 
-use types_cluster::ParseState;
+use types_cluster::{ClusterParams, ParseState, CLUOPT_VERBOSE};
 use types_nodes::ddlnodes::{VacuumRelation, VacuumStmt};
 use types_nodes::nodes::Node;
 use types_nodes::rawnodes::RangeVar;
@@ -84,6 +85,10 @@ use backend_parser_small1_seams as parse_node;
 // L1 re-home owners
 use backend_access_table_table_seams as table_seam;
 use backend_utils_cache_relcache_seams as relcache_seam;
+use backend_commands_async_seams as async_seam;
+use backend_commands_cluster_seams as cluster_seam;
+use backend_storage_lmgr_lmgr_seams as lmgr_seam;
+use backend_storage_lmgr_lwlock_seams as lwlock_seam;
 use backend_storage_ipc_procarray_seams as procarray_seam;
 use backend_access_transam_varsup_seams as varsup_seam;
 use backend_catalog_pg_inherits_seams as pg_inherits_seam;
@@ -1680,7 +1685,7 @@ pub fn vac_update_datfrozenxid() -> PgResult<()> {
     /*
      * Restrict this task to one backend per database. ...
      */
-    rt::lock_database_frozen_ids::call()?;
+    lmgr_seam::lock_database_frozen_ids::call(ExclusiveLock)?;
 
     /*
      * Initialize the "min" calculation with
@@ -1813,7 +1818,7 @@ fn vac_truncate_clog(
     let mut frozenAlreadyWrapped = false;
 
     /* Restrict task to one backend per cluster; see SimpleLruTruncate(). */
-    rt::lock_wraplimits_vacuum::call()?;
+    lwlock_seam::lwlock_acquire_wrap_limits_vacuum::call(LW_EXCLUSIVE)?;
 
     /* init oldest datoids to sync with my frozenXID/minMulti values */
     let my_database_id = init_small_seam::my_database_id::call();
@@ -1871,13 +1876,13 @@ fn vac_truncate_clog(
             .errmsg("some databases have not been vacuumed in over 2 billion transactions")
             .errdetail("You might have already suffered transaction-wraparound data loss.")
             .finish(here("vac_truncate_clog"))?;
-        rt::unlock_wraplimits_vacuum::call()?;
+        lwlock_seam::lwlock_release_wrap_limits_vacuum::call()?;
         return Ok(());
     }
 
     /* chicken out if data is bogus in any other way */
     if bogus {
-        rt::unlock_wraplimits_vacuum::call()?;
+        lwlock_seam::lwlock_release_wrap_limits_vacuum::call()?;
         return Ok(());
     }
 
@@ -1885,7 +1890,7 @@ fn vac_truncate_clog(
      * Freeze any old transaction IDs in the async notification queue before
      * CLOG truncation.
      */
-    rt::async_notify_freeze_xids::call(frozenXID)?;
+    async_seam::async_notify_freeze_xids::call(frozenXID)?;
 
     /*
      * Advance the oldest value for commit timestamps before truncating ...
@@ -1906,7 +1911,7 @@ fn vac_truncate_clog(
     rt::set_transaction_id_limit::call(frozenXID, oldestxid_datoid)?;
     multixact_seam::set_multi_xact_id_limit::call(minMulti, minmulti_datoid, false)?;
 
-    rt::unlock_wraplimits_vacuum::call()?;
+    lwlock_seam::lwlock_release_wrap_limits_vacuum::call()?;
 
     Ok(())
 }
@@ -2165,8 +2170,17 @@ fn vacuum_rel<'mcx>(
             let verbose = (p.options & VACOPT_VERBOSE) != 0;
 
             /* VACUUM FULL is now a variant of CLUSTER; see cluster.c */
-            rt::cluster_rel_for_vacuum_full::call(rel_handle, verbose)?;
-            /* cluster_rel closes the relation, but keeps lock */
+            let mut cluster_params = ClusterParams::new();
+            if verbose {
+                cluster_params.options |= CLUOPT_VERBOSE;
+            }
+            /*
+             * The relation is already open with AccessExclusiveLock held; a
+             * NoLock table_open recovers the Relation value from the relcache
+             * without re-locking. cluster_rel closes it but keeps the lock.
+             */
+            let old_heap = table_seam::table_open::call(mcx, rel_handle, NoLock)?;
+            cluster_seam::cluster_rel::call(mcx, old_heap, InvalidOid, cluster_params)?;
 
             rel = None;
         } else {
@@ -2459,7 +2473,13 @@ pub fn vac_bulkdel_one_index(
     /* Do bulk deletion (the callback is vac_tid_reaped). */
     let istat = rt::index_bulk_delete::call(ivinfo, istat, dead_items)?;
 
-    rt::report_index_scanned::call(ivinfo, rt::dead_items_info_num_items::call(dead_items_info)?)?;
+    let relname = rt::relation_get_relation_name::call(ivinfo.index)?;
+    ereport(ErrorLevel(ivinfo.message_level))
+        .errmsg(format!(
+            "scanned index \"{}\" to remove {} row versions",
+            relname, dead_items_info.num_items
+        ))
+        .finish(here("vac_bulkdel_one_index"))?;
 
     Ok(istat)
 }
@@ -2476,8 +2496,23 @@ pub fn vac_cleanup_one_index(
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
     let istat = rt::index_vacuum_cleanup::call(ivinfo, istat)?;
 
-    if istat.is_some() {
-        rt::report_index_cleanup::call(ivinfo, istat)?;
+    if let Some(stat) = istat {
+        let relname = rt::relation_get_relation_name::call(ivinfo.index)?;
+        ereport(ErrorLevel(ivinfo.message_level))
+            .errmsg(format!(
+                "index \"{}\" now contains {:.0} row versions in {} pages",
+                relname, stat.num_index_tuples, stat.num_pages
+            ))
+            .errdetail(format!(
+                "{:.0} index row versions were removed.\n\
+                 {} index pages were newly deleted.\n\
+                 {} index pages are currently deleted, of which {} are currently reusable.",
+                stat.tuples_removed,
+                stat.pages_newly_deleted,
+                stat.pages_deleted,
+                stat.pages_free
+            ))
+            .finish(here("vac_cleanup_one_index"))?;
     }
 
     Ok(istat)

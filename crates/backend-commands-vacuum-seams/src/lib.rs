@@ -213,15 +213,15 @@ seam_core::seam!(pub fn vac_update_datfrozenxid_apply(
 ) -> PgResult<DatFrozenApplyResult>);
 seam_core::seam!(pub fn scan_pg_class_frozenids() -> PgResult<Vec<PgClassFrozenRow>>);
 seam_core::seam!(pub fn scan_pg_database_frozenids() -> PgResult<Vec<PgDatabaseFrozenRow>>);
-seam_core::seam!(pub fn lock_database_frozen_ids() -> PgResult<()>);
+// `lock_database_frozen_ids` -> backend-storage-lmgr-lmgr-seams (LockDatabaseFrozenIds).
 // `force_transaction_id_limit_update` -> backend-access-transam-varsup-seams.
 
 // ---- vac_truncate_clog leaves -----------------------------------------
-seam_core::seam!(pub fn lock_wraplimits_vacuum() -> PgResult<()>);
-seam_core::seam!(pub fn unlock_wraplimits_vacuum() -> PgResult<()>);
+// `lock_wraplimits_vacuum` / `unlock_wraplimits_vacuum` ->
+//   backend-storage-lmgr-lwlock-seams (LWLockAcquire/Release(WrapLimitsVacuumLock)).
 // `my_database_id` -> backend-utils-init-small-seams.
 seam_core::seam!(pub fn elog_debug2_skip_invalid_db(datname: String) -> PgResult<()>);
-seam_core::seam!(pub fn async_notify_freeze_xids(frozen_xid: TransactionId) -> PgResult<()>);
+// `async_notify_freeze_xids` -> backend-commands-async-seams (AsyncNotifyFreezeXids).
 // `advance_oldest_commit_ts_xid` / `truncate_commit_ts` -> backend-access-transam-commit-ts-seams.
 // `truncate_clog` -> backend-access-transam-clog-seams.
 // `truncate_multixact` / `set_multixact_id_limit` (set_multi_xact_id_limit)
@@ -232,7 +232,8 @@ seam_core::seam!(pub fn set_transaction_id_limit(frozen_xid: TransactionId, olde
 seam_core::seam!(pub fn set_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()>);
 seam_core::seam!(pub fn check_for_interrupts() -> PgResult<()>);
 seam_core::seam!(pub fn injection_point(name: String) -> PgResult<()>);
-seam_core::seam!(pub fn cluster_rel_for_vacuum_full(rel: Oid, verbose: bool) -> PgResult<()>);
+// `cluster_rel_for_vacuum_full` -> backend-commands-cluster-seams::cluster_rel
+//   (vacuum opens the held relation NoLock and calls the real cluster_rel).
 seam_core::seam!(pub fn table_relation_vacuum(rel: Oid, params: VacuumParams, bstrategy: StrategyHandle) -> PgResult<()>);
 seam_core::seam!(pub fn at_eoxact_guc(is_commit: bool, nestlevel: i32) -> PgResult<()>);
 // `get_user_id_and_sec_context` -> backend-utils-init-miscinit-seams.
@@ -249,13 +250,15 @@ seam_core::seam!(pub fn index_bulk_delete(
     istat: Option<IndexBulkDeleteResult>,
     dead_items: TidStore,
 ) -> PgResult<IndexBulkDeleteResult>);
-seam_core::seam!(pub fn report_index_scanned(ivinfo: IndexVacuumInfo, num_items: i64) -> PgResult<()>);
-seam_core::seam!(pub fn dead_items_info_num_items(info: VacDeadItemsInfo) -> PgResult<i64>);
+// `report_index_scanned` / `dead_items_info_num_items` are vacuum.c's own
+//   inline ereport + VacDeadItemsInfo.num_items field read (vac_bulkdel_one_index);
+//   inlined into backend-commands-vacuum, not seams.
 seam_core::seam!(pub fn index_vacuum_cleanup(
     ivinfo: IndexVacuumInfo,
     istat: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>>);
-seam_core::seam!(pub fn report_index_cleanup(ivinfo: IndexVacuumInfo, istat: Option<IndexBulkDeleteResult>) -> PgResult<()>);
+// `report_index_cleanup` is vacuum.c's own inline ereport (vac_cleanup_one_index);
+//   inlined into backend-commands-vacuum, not a seam.
 seam_core::seam!(pub fn tid_store_is_member(dead_items: TidStore, tid: ItemPointerData) -> PgResult<bool>);
 
 // ---- vacuum_delay_point internals -------------------------------------

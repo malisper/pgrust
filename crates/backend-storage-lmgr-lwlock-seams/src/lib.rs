@@ -256,6 +256,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LWLockAcquire(WrapLimitsVacuumLock, mode)` — `vac_truncate_clog()`
+    /// restricts the wrap-limit advance to one backend per cluster (see
+    /// `SimpleLruTruncate`). Held across the pg_database scan and the CLOG /
+    /// CommitTs / MultiXact truncation; released by
+    /// [`lwlock_release_wrap_limits_vacuum`] (an `ereport` between the two
+    /// unwinds through `LWLockReleaseAll`). `Err` carries the C
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_wrap_limits_vacuum(mode: LWLockMode) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(WrapLimitsVacuumLock)`.
+    pub fn lwlock_release_wrap_limits_vacuum() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
     /// hold the built-in lock at `lock_offset` (in any mode)? Used in
     /// `Assert`s; the lock is named by offset since `MainLWLockArray` is

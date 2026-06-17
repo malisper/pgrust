@@ -376,6 +376,8 @@ pub const XID_GEN_LOCK: usize = 3;
 pub const PROC_ARRAY_LOCK: usize = 4;
 /// `XactTruncationLock` (`lwlocklist.h`): `PG_LWLOCK(44, XactTruncation)`.
 pub const XACT_TRUNCATION_LOCK: usize = 44;
+/// `WrapLimitsVacuumLock` (`lwlocklist.h`): `PG_LWLOCK(46, WrapLimitsVacuum)`.
+pub const WRAP_LIMITS_VACUUM_LOCK: usize = 46;
 /// `MultiXactGenLock` (`lwlocklist.h`): `PG_LWLOCK(13, MultiXactGen)`.
 pub const MULTI_XACT_GEN_LOCK: usize = 13;
 /// `MultiXactTruncationLock` (`lwlocklist.h`): `PG_LWLOCK(41, MultiXactTruncation)`.

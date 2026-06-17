@@ -392,6 +392,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LockDatabaseFrozenIds(lockmode)` (lmgr.c): take the per-database
+    /// `LOCKTAG_DATABASE_FROZEN_IDS` lock so only one backend per database runs
+    /// `vac_update_datfrozenxid()`, avoiding races that would move
+    /// `datfrozenxid`/`datminmxid` backward. `MyDatabaseId` supplies the tag.
+    /// `Err` carries the lock-manager `ereport(ERROR)` surface.
+    pub fn lock_database_frozen_ids(lockmode: LOCKMODE) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `SpeculativeInsertionWait(xid, token)` (lmgr.c): wait for the given
     /// speculative insertion to be confirmed or aborted (a `ShareLock`
     /// acquire+immediate-release on the speculative-insertion lock tag).

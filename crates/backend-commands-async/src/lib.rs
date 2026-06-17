@@ -2021,6 +2021,7 @@ pub fn init_seams() {
     backend_commands_async_seams::async_shmem_size::set(AsyncShmemSize);
     backend_commands_async_seams::async_shmem_init::set(AsyncShmemInit);
     backend_commands_async_seams::async_unlisten_all::set(Async_UnlistenAll);
+    backend_commands_async_seams::async_notify_freeze_xids::set(AsyncNotifyFreezeXids);
 
     // --- ProcessUtility dispatch arms (utility.c NOTIFY/LISTEN/UNLISTEN) -----
     // The dispatch has already extracted the channel/payload strings from the

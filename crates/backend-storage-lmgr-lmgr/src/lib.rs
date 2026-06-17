@@ -1232,6 +1232,8 @@ pub fn init_seams() {
     // owns; install the inward seams that xact.c consumes.
     inward::xact_lock_table_insert::set(XactLockTableInsert);
     inward::xact_lock_table_delete::set(XactLockTableDelete);
+    // Per-database datfrozenxid interlock (vacuum's vac_update_datfrozenxid).
+    inward::lock_database_frozen_ids::set(LockDatabaseFrozenIds);
     // Bare-OID relation lock-held probe (check_relation_locked_by_me crosses a
     // LockRelId-derived relation; this is the OID-resolving variant).
     inward::check_relation_oid_locked_by_me::set(CheckRelationOidLockedByMe);

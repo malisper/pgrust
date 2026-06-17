@@ -4,6 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
+use types_core::TransactionId;
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -63,4 +64,13 @@ seam_core::seam!(
     /// `Async_UnlistenAll()` (async.c) — `DISCARD ALL` / session reset: remove
     /// all of this backend's LISTEN registrations. May `ereport(ERROR)`.
     pub fn async_unlisten_all() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AsyncNotifyFreezeXids(newFrozenXid)` (async.c) — VACUUM hook, called by
+    /// `vac_truncate_clog()` before advancing `datfrozenxid`. Scans the async
+    /// notification queue and replaces XIDs `< newFrozenXid` (whose CLOG pages
+    /// are about to be truncated) with `FrozenTransactionId` (committed) or
+    /// `InvalidTransactionId` (aborted/crashed). May `ereport(ERROR)`.
+    pub fn async_notify_freeze_xids(new_frozen_xid: TransactionId) -> PgResult<()>
 );

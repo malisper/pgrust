@@ -1772,6 +1772,21 @@ fn lwlock_release_xid_gen_seam() -> PgResult<()> {
     LWLockRelease(lock)
 }
 
+/// `lwlock_acquire_wrap_limits_vacuum` seam shape:
+/// `LWLockAcquire(WrapLimitsVacuumLock, mode)` (vacuum.c `vac_truncate_clog`,
+/// which restricts the task to one backend per cluster; see SimpleLruTruncate).
+fn lwlock_acquire_wrap_limits_vacuum_seam(mode: LWLockMode) -> PgResult<()> {
+    let lock = main_lock(types_storage::WRAP_LIMITS_VACUUM_LOCK);
+    LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `lwlock_release_wrap_limits_vacuum` seam shape:
+/// `LWLockRelease(WrapLimitsVacuumLock)`.
+fn lwlock_release_wrap_limits_vacuum_seam() -> PgResult<()> {
+    let lock = main_lock(types_storage::WRAP_LIMITS_VACUUM_LOCK);
+    LWLockRelease(lock)
+}
+
 /// `lwlock_held_by_me_main` seam shape:
 /// `LWLockHeldByMe(&MainLWLockArray[offset].lock)`.
 fn lwlock_held_by_me_main_seam(offset: usize) -> bool {
@@ -1836,6 +1851,12 @@ pub fn init_seams() {
     );
     backend_storage_lmgr_lwlock_seams::lwlock_acquire_xid_gen::set(lwlock_acquire_xid_gen_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_release_xid_gen::set(lwlock_release_xid_gen_seam);
+    backend_storage_lmgr_lwlock_seams::lwlock_acquire_wrap_limits_vacuum::set(
+        lwlock_acquire_wrap_limits_vacuum_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_release_wrap_limits_vacuum::set(
+        lwlock_release_wrap_limits_vacuum_seam,
+    );
     backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_main::set(lwlock_held_by_me_main_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_in_mode_main::set(
         lwlock_held_by_me_in_mode_main_seam,

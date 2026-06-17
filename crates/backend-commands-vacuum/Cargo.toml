@@ -44,6 +44,10 @@ backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 # L1 re-home targets (rebind to already-installed owners)
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-commands-async-seams = { path = "../backend-commands-async-seams" }
+backend-commands-cluster-seams = { path = "../backend-commands-cluster-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
