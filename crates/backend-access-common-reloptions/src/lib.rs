@@ -1662,6 +1662,34 @@ fn attribute_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<Attr
 /// AM's `amoptions` callback. Mirrors the C:
 /// `build_reloptions(reloptions, validate, RELOPT_KIND_HASH,
 ///  sizeof(HashOptions), tab, lengthof(tab))` where `tab` has the single entry
+/// Seam target for `btoptions(reloptions, validate)` (nbtutils.c) — the B-tree
+/// AM's `amoptions` callback. Mirrors the C:
+/// `build_reloptions(reloptions, validate, RELOPT_KIND_BTREE,
+///  sizeof(BTOptions), tab, lengthof(tab))` where `tab` is
+/// `{{"fillfactor", RELOPT_TYPE_INT, offsetof(BTOptions, fillfactor)},
+///   {"vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL,
+///    offsetof(BTOptions, vacuum_cleanup_index_scale_factor)},
+///   {"deduplicate_items", RELOPT_TYPE_BOOL,
+///    offsetof(BTOptions, deduplicate_items)}}`.
+///
+/// `BTOptions` is `{ int32 varlena_header_; int fillfactor;
+/// float8 vacuum_cleanup_index_scale_factor; bool deduplicate_items; }`. With
+/// the `float8` 8-byte alignment, `fillfactor` is at offset 4,
+/// `vacuum_cleanup_index_scale_factor` at offset 8, `deduplicate_items` at
+/// offset 16, and the struct size (padded to the 8-byte alignment) is 24.
+fn build_reloptions_btree_seam(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    let scratch = mcx::MemoryContext::new("btoptions");
+    let tab = [
+        RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4),
+        RelOptParseElt::new("vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL, 8),
+        RelOptParseElt::new("deduplicate_items", RELOPT_TYPE_BOOL, 16),
+    ];
+    build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_BTREE, 24, &tab)
+}
+
 /// `{"fillfactor", RELOPT_TYPE_INT, offsetof(HashOptions, fillfactor)}`.
 ///
 /// `HashOptions` is `{ int32 varlena_header_; int fillfactor; }`, so its size is
@@ -1783,6 +1811,7 @@ pub fn init_seams() {
     backend_access_common_reloptions_seams::add_local_int_reloption::set(
         add_local_int_reloption_seam,
     );
+    backend_access_common_reloptions_seams::build_reloptions_btree::set(build_reloptions_btree_seam);
     backend_access_common_reloptions_seams::build_reloptions_hash::set(build_reloptions_hash_seam);
     backend_access_common_reloptions_seams::build_reloptions_spgist::set(
         build_reloptions_spgist_seam,

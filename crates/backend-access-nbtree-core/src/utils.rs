@@ -3241,11 +3241,17 @@ pub fn bt_shmem_init() -> PgResult<()> {
 /// `btoptions()` — parse and validate the reloptions of a btree index.
 ///
 /// Delegates to `build_reloptions` for `RELOPT_KIND_BTREE` against the
-/// `BTOptions` struct. The reloptions parse-table assembly + `build_reloptions`
-/// dispatch is owned by the reloptions module; this crate does not currently
-/// depend on the reloptions seam crate, so the byte-table dispatch is a gap.
-pub fn btoptions(_reloptions: Datum, _validate: bool) -> PgResult<Option<PgVec<'static, u8>>> {
-    panic!("btoptions: build_reloptions(RELOPT_KIND_BTREE, BTOptions) dispatch not yet ported")
+/// `BTOptions` struct (`fillfactor`, `vacuum_cleanup_index_scale_factor`,
+/// `deduplicate_items`). The reloptions parse-table assembly + `build_reloptions`
+/// dispatch is owned by the reloptions module; we cross to it via the
+/// `build_reloptions_btree` seam. The verbatim `reloptions` varlena bytes are
+/// passed (`None` for a NULL datum) and the serialized `BTOptions` `bytea` is
+/// returned (`None` when no options apply).
+pub fn btoptions(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    backend_access_common_reloptions_seams::build_reloptions_btree::call(reloptions, validate)
 }
 
 /// `IndexAMProperty` (`access/amapi.h`) — the boolean property `btproperty`

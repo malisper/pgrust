@@ -96,6 +96,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `build_reloptions(reloptions, validate, RELOPT_KIND_BTREE,
+    /// sizeof(BTOptions), tab, lengthof(tab))` — the B-tree AM's `btoptions`
+    /// (nbtutils.c), whose options are `fillfactor` (INT) at
+    /// `offsetof(BTOptions, fillfactor)`, `vacuum_cleanup_index_scale_factor`
+    /// (REAL) at `offsetof(BTOptions, vacuum_cleanup_index_scale_factor)`, and
+    /// `deduplicate_items` (BOOL) at `offsetof(BTOptions, deduplicate_items)`.
+    /// The relopt-table layout and parse are the reloptions owner's; the seam
+    /// takes the raw `reloptions` varlena bytes (`None` for a NULL datum) and
+    /// returns the serialized `BTOptions` `bytea` (`None` when no options
+    /// apply). `Err` carries the validation `ereport(ERROR)`s.
+    pub fn build_reloptions_btree(
+        reloptions: Option<&[u8]>,
+        validate: bool,
+    ) -> PgResult<Option<std::vec::Vec<u8>>>
+);
+
+seam_core::seam!(
     /// `build_reloptions(reloptions, validate, RELOPT_KIND_SPGIST,
     /// sizeof(SpGistOptions), tab, lengthof(tab))` — the SP-GiST AM's
     /// `spgoptions` (spgutils.c), whose only option is `fillfactor` at

@@ -2061,6 +2061,7 @@ name = "backend-access-nbtree-core"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-indextuple-seams",
+ "backend-access-common-reloptions-seams",
  "backend-access-index-indexam-seams",
  "backend-access-nbt-dedup",
  "backend-access-nbtree-build-seams",
