@@ -23,7 +23,7 @@ use crate::{
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
     LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, OPFAMILYOID, PARAMETERACLNAME, PARAMETERACLOID,
-    PROCOID,
+    PROCNAMEARGSNSP, PROCOID,
     RELNAMENSP, RELOID,
     RULERELNAME, STATRELATTINH, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
@@ -2011,20 +2011,36 @@ pub(crate) fn proc_row_by_oid<'mcx>(
     let Some(tup) = tuple else {
         return Ok(None);
     };
+    let row = project_proc_row(mcx, PROCOID, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
 
-    let oid = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_oid)?;
-    let pronamespace = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_pronamespace)?;
-    let provariadic = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_provariadic)?;
-    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)? as i32;
-    let pronargdefaults = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargdefaults)? as i32;
-    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
-    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
-    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?;
-    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+/// Project a held `pg_proc` tuple onto a [`ProcRow`] — the `GETSTRUCT` scalar
+/// reads plus the `proargtypes` oidvector and the (nullable) `proallargtypes`
+/// `oid[]` array. Shared by [`proc_row_by_oid`] (`SearchSysCache1(PROCOID,...)`)
+/// and [`proc_catlist`] (each `SearchSysCacheList1(PROCNAMEARGSNSP,...)`
+/// member). `cache_id` selects which catcache's tupdesc deforms the tuple; the
+/// `pg_proc` attnums are identical regardless. The caller owns
+/// `ReleaseSysCache` / catlist release.
+fn project_proc_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'mcx>,
+) -> PgResult<ProcRow<'mcx>> {
+    let oid = getattr_oid(mcx, cache_id, tup, Anum_pg_proc_oid)?;
+    let pronamespace = getattr_oid(mcx, cache_id, tup, Anum_pg_proc_pronamespace)?;
+    let provariadic = getattr_oid(mcx, cache_id, tup, Anum_pg_proc_provariadic)?;
+    let pronargs = getattr_i16(mcx, cache_id, tup, Anum_pg_proc_pronargs)? as i32;
+    let pronargdefaults = getattr_i16(mcx, cache_id, tup, Anum_pg_proc_pronargdefaults)? as i32;
+    let prorettype = getattr_oid(mcx, cache_id, tup, Anum_pg_proc_prorettype)?;
+    let proname = getattr_name(mcx, cache_id, tup, Anum_pg_proc_proname)?;
+    let prokind = getattr_char(mcx, cache_id, tup, Anum_pg_proc_prokind)?;
+    let proretset = getattr_bool(mcx, cache_id, tup, Anum_pg_proc_proretset)?;
 
     // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off
     // the on-disk image (== C's `proc->proargtypes.values`).
-    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, cache_id, tup, Anum_pg_proc_proargtypes)?;
     let proargtypes_bytes = match &proargtypes_datum {
         Datum::ByRef(b) => &b[..],
         Datum::ByVal(_)
@@ -2033,7 +2049,7 @@ pub(crate) fn proc_row_by_oid<'mcx>(
         | Datum::Expanded(_)
         | Datum::Internal(_) => {
             return Err(PgError::error(
-                "syscache proc_row_by_oid: proargtypes attribute is by-value",
+                "syscache project_proc_row: proargtypes attribute is by-value",
             ))
         }
     };
@@ -2046,7 +2062,7 @@ pub(crate) fn proc_row_by_oid<'mcx>(
     // proallargtypes (oid[]) may be SQL NULL (only set when OUT/INOUT/VARIADIC
     // args are present). When present, project the raw ArrayType header + Oids.
     let (allarg_value, allarg_isnull) =
-        SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proallargtypes)?;
+        SysCacheGetAttr(mcx, cache_id, tup, Anum_pg_proc_proallargtypes)?;
     let proallargtypes = if allarg_isnull {
         None
     } else {
@@ -2081,14 +2097,13 @@ pub(crate) fn proc_row_by_oid<'mcx>(
             | Datum::Expanded(_)
             | Datum::Internal(_) => {
                 return Err(PgError::error(
-                    "syscache proc_row_by_oid: proallargtypes is not a by-reference array",
+                    "syscache project_proc_row: proallargtypes is not a by-reference array",
                 ))
             }
         }
     };
 
-    ReleaseSysCache(tup);
-    Ok(Some(ProcRow {
+    Ok(ProcRow {
         oid,
         pronamespace,
         provariadic,
@@ -2100,7 +2115,28 @@ pub(crate) fn proc_row_by_oid<'mcx>(
         proname,
         prokind,
         proretset,
-    }))
+    })
+}
+
+/// `SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(funcname))` — the
+/// `pg_proc`-by-name catcache list (`FuncnameGetCandidates`, namespace.c). Each
+/// member tuple is projected to a [`ProcRow`] in catlist order, paired with
+/// `catlist->ordered`.
+///
+/// `ordered`: as with [`oper_catlist3`], the `SearchSysCacheList` wrapper does
+/// not surface `catlist->ordered`, so this reports `false` — the always-correct
+/// value forcing the consumer's full-scan branch. `FuncnameGetCandidates` does
+/// not read `ordered`.
+pub(crate) fn proc_catlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcname: &str,
+) -> PgResult<(PgVec<'mcx, ProcRow<'mcx>>, bool)> {
+    let members = SearchSysCacheList1(mcx, PROCNAMEARGSNSP, SysCacheKey::Str(funcname))?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push(project_proc_row(mcx, PROCNAMEARGSNSP, tup)?);
+    }
+    Ok((rows, false))
 }
 
 /// `SearchSysCache1(TYPEOID, oidtypeid)` projected to the type-dependent
