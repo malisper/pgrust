@@ -26,6 +26,7 @@ use types_error::{
 };
 
 pub mod aggregates;
+pub mod fmgr_builtins;
 pub mod funcs;
 pub mod io;
 
@@ -73,6 +74,10 @@ pub fn init_seams() {
             set: set_extra_float_digits,
         },
     );
+
+    // Register every `float.c` builtin into the fmgr-core builtin table
+    // (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
+    fmgr_builtins::register_float_builtins();
 }
 
 thread_local! {
