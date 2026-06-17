@@ -41,6 +41,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod fmgr_builtins;
 pub mod operators;
 pub mod serialize_core;
 pub mod setops_ordering_agg;
@@ -57,4 +58,9 @@ pub fn init_seams() {
     seams::multirange_is_empty::set(typcache_io::multirange_is_empty_seam);
     seams::make_multirange::set(serialize_core::make_multirange);
     seams::multirange_get_bounds::set(serialize_core::multirange_get_bounds);
+
+    // Register the by-ref fmgr-ABI builtin wrappers (C: their fmgr_builtins[]
+    // rows), so by-OID dispatch resolves the multirange I/O / ordering / hash /
+    // equality functions.
+    fmgr_builtins::register_multirangetypes_builtins();
 }
