@@ -970,10 +970,13 @@ fn XLogRecordAssemble(
             bkpb_data_length = regbuf_rdata_len as u16;
             total_len += regbuf_rdata_len as u64;
 
-            // Move the per-buffer data chunks into the body chain in order.
-            let chunks = core::mem::take(&mut state.registered_buffers[block_id as usize].rdata);
-            for c in chunks {
-                body.push(c);
+            // Copy the per-buffer data chunks into the body chain in order. As
+            // with the main-data chunks below, do NOT consume the registered
+            // chain — XLogInsert may re-assemble the same record on the
+            // full-page-writes retry, and C keeps the chain intact until
+            // XLogResetInsertion().
+            for c in &state.registered_buffers[block_id as usize].rdata {
+                body.push(c.clone());
             }
         }
 
@@ -1068,10 +1071,20 @@ fn XLogRecordAssemble(
             scratch_off += 2;
         }
 
-        // Move the main-data chunks into the body chain in order.
-        let chunks = core::mem::take(&mut state.mainrdata);
-        for c in chunks {
-            body.push(c);
+        // Copy the main-data chunks into the body chain in order.
+        //
+        // NOTE: do NOT consume state.mainrdata here. XLogInsert may call
+        // XLogRecordAssemble more than once for the same record (the
+        // full-page-writes retry loop, xloginsert.c: when XLogInsertRecord
+        // returns InvalidXLogRecPtr because the caller must back up a buffer it
+        // didn't). In C the registered rdata chain persists across retries and
+        // is only cleared by XLogResetInsertion() after a successful insert; a
+        // re-assembly walks the same intact chain. Taking the chunks here left
+        // mainrdata empty on the second pass while mainrdata_len stayed nonzero,
+        // so total_len (-> xl_tot_len) still counted the main data but no body
+        // span carried it -> CopyXLogRecordToWAL's `written != write_len`.
+        for c in &state.mainrdata {
+            body.push(c.clone());
         }
         total_len += state.mainrdata_len;
     }
