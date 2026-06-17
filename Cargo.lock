@@ -18095,6 +18095,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-pseudorandomfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-variable-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "pg-prng",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-pseudotypes"
 version = "0.0.0"
 dependencies = [
@@ -21536,6 +21549,7 @@ dependencies = [
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale",
  "backend-utils-adt-pg-locale-icu",
+ "backend-utils-adt-pseudorandomfuncs",
  "backend-utils-adt-pseudotypes",
  "backend-utils-adt-quote",
  "backend-utils-adt-range-selfuncs",

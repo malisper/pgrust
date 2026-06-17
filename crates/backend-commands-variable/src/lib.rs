@@ -1295,8 +1295,9 @@ mod install {
         // -------- snapmgr.c (merged) — delegate --------
         own::first_snapshot_set::set(backend_utils_time_snapmgr::FirstSnapshotSet);
 
-        // -------- float.c (unported: todo) --------
-        own::setseed::set(|_newval| panic!("setseed (float.c) not yet ported"));
+        // -------- setseed (pseudorandomfuncs.c) --------
+        // Installed by the real owner crate
+        // `backend_utils_adt_pseudorandomfuncs::init_seams()`; not set here.
 
         // -------- encoding: encnames.c / mbutils.c (unported) --------
         own::pg_valid_client_encoding::set(|_name| {

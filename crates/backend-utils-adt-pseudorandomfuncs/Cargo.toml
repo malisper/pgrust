@@ -1,0 +1,18 @@
+[package]
+name = "backend-utils-adt-pseudorandomfuncs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_pseudorandomfuncs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+pg-prng = { path = "../pg-prng" }
+types-error = { path = "../types-error" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-commands-variable-seams = { path = "../backend-commands-variable-seams" }

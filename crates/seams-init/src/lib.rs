@@ -427,6 +427,7 @@ pub fn init_all() {
     backend_utils_adt_network_gist::init_seams();
     backend_utils_adt_network_selfuncs::init_seams();
     backend_utils_adt_numeric::init_seams();
+    backend_utils_adt_pseudorandomfuncs::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
