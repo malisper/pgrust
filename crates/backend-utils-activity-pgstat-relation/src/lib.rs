@@ -1280,7 +1280,23 @@ pub fn init_seams() {
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_RELATION, relation_kind_info())
             .flush_pending_cb(pgstat_relation_flush_cb)
-            .delete_pending_cb(pgstat_relation_delete_pending_cb),
+            .delete_pending_cb(pgstat_relation_delete_pending_cb)
+            // On-disk stats-file (de)serialization of the `PgStat_StatTabEntry`
+            // body: a real initdb cluster's pgstat.stat has hundreds of relation
+            // entries, decoded at startup by pgstat_read_statsfile.
+            .read_var_cb(|header, bytes| {
+                // SAFETY: header points at a live PgStatShared_Relation body.
+                let sh = unsafe { &mut *(header as *mut PgStatShared_Relation) };
+                sh.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    PgStat_StatTabEntry,
+                >(bytes);
+                Ok(())
+            })
+            .write_var_cb(|header| {
+                // SAFETY: header points at a live PgStatShared_Relation body.
+                let sh = unsafe { &*(header as *const PgStatShared_Relation) };
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+            }),
     );
 
     // --- canonical pgstat-relation count / create / drop seams

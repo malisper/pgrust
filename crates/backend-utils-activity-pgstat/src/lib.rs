@@ -112,6 +112,7 @@ fn register_fixed_kinds() {
     use backend_utils_activity_small::pgstat_archiver as archiver;
     use backend_utils_activity_small::pgstat_bgwriter as bgwriter;
     use backend_utils_activity_small::pgstat_checkpointer as checkpointer;
+    use crate::kind_info;
     use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
         PgStatShared_BgWriter, PgStat_BgWriterStats,
     };
@@ -131,7 +132,15 @@ fn register_fixed_kinds() {
         )
         .init_shmem_cb(|ctl| bgwriter::pgstat_bgwriter_init_shmem_cb(&mut ctl.bgwriter))
         .reset_all_cb(|_ctl, ts| bgwriter::pgstat_bgwriter_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| bgwriter::pgstat_bgwriter_snapshot_cb()),
+        .snapshot_cb(|_shmem, _snap| bgwriter::pgstat_bgwriter_snapshot_cb())
+        // On-disk (de)serialization: the bytes are the C image of the
+        // `PgStat_BgWriterStats` field of the shmem (read) / snapshot (write).
+        .read_fixed_cb(|ctl, bytes| {
+            ctl.bgwriter.stats =
+                kind_info::pgstat_deserialize_pod::<PgStat_BgWriterStats>(bytes);
+            Ok(())
+        })
+        .write_fixed_cb(|snap| kind_info::pgstat_serialize_pod(&snap.bgwriter)),
     );
 
     // [PGSTAT_KIND_ARCHIVER]
@@ -150,7 +159,14 @@ fn register_fixed_kinds() {
         )
         .init_shmem_cb(|ctl| archiver::pgstat_archiver_init_shmem_cb(&mut ctl.archiver))
         .reset_all_cb(|_ctl, ts| archiver::pgstat_archiver_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| archiver::pgstat_archiver_snapshot_cb()),
+        .snapshot_cb(|_shmem, _snap| archiver::pgstat_archiver_snapshot_cb())
+        .read_fixed_cb(|ctl, bytes| {
+            ctl.archiver.stats = kind_info::pgstat_deserialize_pod::<
+                types_pgstat::activity_pgstat::PgStat_ArchiverStats,
+            >(bytes);
+            Ok(())
+        })
+        .write_fixed_cb(|snap| kind_info::pgstat_serialize_pod(&snap.archiver)),
     );
 
     // [PGSTAT_KIND_CHECKPOINTER]
@@ -171,7 +187,14 @@ fn register_fixed_kinds() {
             checkpointer::pgstat_checkpointer_init_shmem_cb(&mut ctl.checkpointer)
         })
         .reset_all_cb(|_ctl, ts| checkpointer::pgstat_checkpointer_reset_all_cb(ts))
-        .snapshot_cb(|_shmem, _snap| checkpointer::pgstat_checkpointer_snapshot_cb()),
+        .snapshot_cb(|_shmem, _snap| checkpointer::pgstat_checkpointer_snapshot_cb())
+        .read_fixed_cb(|ctl, bytes| {
+            ctl.checkpointer.stats = kind_info::pgstat_deserialize_pod::<
+                types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
+            >(bytes);
+            Ok(())
+        })
+        .write_fixed_cb(|snap| kind_info::pgstat_serialize_pod(&snap.checkpointer)),
     );
 }
 

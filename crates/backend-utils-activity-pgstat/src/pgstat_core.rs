@@ -788,58 +788,372 @@ fn pgstat_reset_after_failure() -> PgResult<()> {
     shmem::pgstat_drop_all_entries()
 }
 
+// ---------------------------------------------------------------------------
+// On-disk stats file (de)serialization (pgstat_read_statsfile /
+// pgstat_write_statsfile).
+// ---------------------------------------------------------------------------
+
+/// `PGSTAT_FILE_FORMAT_ID` (`pgstat.h`).
+const PGSTAT_FILE_FORMAT_ID: i32 =
+    types_pgstat::activity_pgstat::PGSTAT_FILE_FORMAT_ID as i32;
+
+/// `PGSTAT_FILE_ENTRY_END` (`pgstat.c`) — end of file.
+const PGSTAT_FILE_ENTRY_END: u8 = b'E';
+/// `PGSTAT_FILE_ENTRY_FIXED` (`pgstat.c`) — fixed-numbered stats entry.
+const PGSTAT_FILE_ENTRY_FIXED: u8 = b'F';
+/// `PGSTAT_FILE_ENTRY_NAME` (`pgstat.c`) — stats entry identified by name.
+const PGSTAT_FILE_ENTRY_NAME: u8 = b'N';
+/// `PGSTAT_FILE_ENTRY_HASH` (`pgstat.c`) — stats entry identified by hash key.
+const PGSTAT_FILE_ENTRY_HASH: u8 = b'S';
+
+/// `NAMEDATALEN` (`c.h`) — the fixed size of a `NameData` byte buffer.
+const NAMEDATALEN: usize = 64;
+
+/// A forward-only byte cursor over the read-in stats file image, mirroring C's
+/// `read_chunk(fpin, ptr, len)` / `fgetc(fpin)` over a `FILE *`. `read_chunk`
+/// returns `false` on a short read (C `fread(...) == len`), which the caller
+/// treats as a corrupt file.
+struct ReadCursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ReadCursor<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        ReadCursor { buf, pos: 0 }
+    }
+
+    /// `read_chunk(fpin, ptr, len)` — copy `len` bytes; `None` on short read.
+    fn read_chunk(&mut self, len: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(len)?;
+        if end > self.buf.len() {
+            return None;
+        }
+        let s = &self.buf[self.pos..end];
+        self.pos = end;
+        Some(s)
+    }
+
+    /// `read_chunk_s(fpin, &i32)` — an `int32` (native LE).
+    fn read_i32(&mut self) -> Option<i32> {
+        let b = self.read_chunk(4)?;
+        Some(i32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// `read_chunk_s(fpin, &PgStat_Kind)` — a `PgStat_Kind` (`uint32`, native LE).
+    fn read_kind(&mut self) -> Option<PgStat_Kind> {
+        let b = self.read_chunk(4)?;
+        Some(PgStat_Kind(u32::from_ne_bytes([b[0], b[1], b[2], b[3]])))
+    }
+
+    /// `read_chunk_s(fpin, &PgStat_HashKey)` — the 16-byte key (kind u32, dboid
+    /// u32, objid u64), native LE — exactly the `#[repr(C)]` image C writes.
+    fn read_hashkey(&mut self) -> Option<PgStat_HashKey> {
+        let b = self.read_chunk(16)?;
+        let kind = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+        let dboid = u32::from_ne_bytes([b[4], b[5], b[6], b[7]]);
+        let objid = u64::from_ne_bytes([
+            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+        ]);
+        Some(PgStat_HashKey {
+            kind: PgStat_Kind(kind),
+            dboid,
+            objid,
+        })
+    }
+
+    /// `fgetc(fpin)` — next byte, or `None` at EOF.
+    fn getc(&mut self) -> Option<u8> {
+        let c = *self.buf.get(self.pos)?;
+        self.pos += 1;
+        Some(c)
+    }
+
+    /// `fseek(fpin, off, SEEK_CUR)` — skip `len` bytes; `false` past EOF.
+    fn skip(&mut self, len: usize) -> bool {
+        match self.pos.checked_add(len) {
+            Some(end) if end <= self.buf.len() => {
+                self.pos = end;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the cursor is at end-of-file (`fgetc(fpin) == EOF`).
+    fn at_eof(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+}
+
+/// `pgstat_get_kind_info` + `pgstat_is_kind_valid` shorthand used by the
+/// read/write driver: the per-kind descriptor for a valid, registered kind.
+fn lookup_valid_kind(
+    kind: PgStat_Kind,
+) -> Option<&'static crate::kind_info::PgStat_KindInfoFull> {
+    // pgstat_is_kind_valid: builtin range (custom kinds unported); plus a
+    // registered descriptor (pgstat_get_kind_info != NULL).
+    if !kind.is_builtin() {
+        return None;
+    }
+    registry::pgstat_get_kind_info(kind)
+}
+
 /// `pgstat_read_statsfile()` (`pgstat.c`) — read the permanent on-disk stats file
 /// into shared memory at server start. Called only by the startup process / in
 /// single-user mode, so no locking is required.
 ///
-/// When the file does not exist (`ENOENT` — stats collection was disabled, or no
-/// clean shutdown has yet written it) statistics simply start from scratch:
-/// `pgstat_reset_after_failure()` resets the fixed kinds and returns. This is the
-/// path a clean boot of a freshly-initialized cluster always takes, and the path
-/// this port always takes (`pgstat_before_server_shutdown` does not yet write the
-/// permanent file — the on-disk codec, below, is unported).
-///
-/// # What stays seam-panic
-///
-/// The actual file-decode loop (`PGSTAT_FILE_ENTRY_FIXED` / `_HASH` / `_NAME`
-/// entries) `memcpy`s `info->shared_data_len` raw bytes into
-/// `(char *) shmem + info->shared_ctl_off + info->shared_data_off` for fixed
-/// kinds, and `pgstat_get_entry_data(kind, header)` for variable kinds. The
-/// idiomatic model stores fixed-kind stats in *typed fields* of
-/// `PgStat_ShmemControl` (the per-kind crates register `shared_ctl_off ==
-/// shared_data_off == 0`), so there is no byte-addressable shared region to
-/// `memcpy` into — the on-disk byte-offset format is unmodeled in this port (its
-/// symmetric writer, `pgstat_write_statsfile`, is likewise unported). Decoding a
-/// non-empty stats file therefore panics loudly rather than silently mis-loading
-/// counters. This branch is unreachable on the clean boot path, where the file
-/// is always absent.
+/// When the file does not exist (`ENOENT`) statistics start from scratch:
+/// `pgstat_reset_after_failure()` resets the fixed kinds and returns. Otherwise
+/// the file image is decoded into shared memory: a `format_id` header followed by
+/// a stream of `PGSTAT_FILE_ENTRY_{FIXED,HASH,NAME}` entries terminated by
+/// `PGSTAT_FILE_ENTRY_END`. A fixed entry's `shared_data_len` bytes are deposited
+/// into the kind's typed `PgStat_ShmemControl` field through its `read_fixed_cb`;
+/// a variable entry creates a fresh shared hash entry and deposits the bytes into
+/// its body through `read_var_cb`. Any short read / unknown kind / bad tag /
+/// duplicate is a corrupt file: C logs and falls back to
+/// `pgstat_reset_after_failure()`, which this port preserves.
 fn pgstat_read_statsfile() -> PgResult<()> {
     let statfile = PGSTAT_STAT_PERMANENT_FILENAME;
 
-    // Try to open the stats file. If it doesn't exist (ENOENT), statistics
-    // start from scratch with empty counters. `allocate_file_read` returns
-    // `None` for ENOENT (any other open failure is carried on `Err`, mirroring
-    // C's `ereport(LOG)` + `pgstat_reset_after_failure`).
+    // Try to open the stats file. `allocate_file_read` returns `None` for ENOENT
+    // (start from scratch); any other open failure is also non-fatal (C
+    // ereport(LOG) + pgstat_reset_after_failure).
     let bytes = match backend_storage_file_fd_seams::allocate_file_read::call(statfile) {
         Ok(Some(b)) => b,
-        Ok(None) => {
-            // ENOENT: nothing to restore.
-            return pgstat_reset_after_failure();
-        }
-        Err(_) => {
-            // could not open statistics file: reset and start fresh.
-            return pgstat_reset_after_failure();
-        }
+        Ok(None) => return pgstat_reset_after_failure(),
+        Err(_) => return pgstat_reset_after_failure(),
     };
 
-    // We found an existing statistics file. Decoding it requires the on-disk
-    // byte-offset format that this port does not model (see the doc comment).
-    let _ = bytes;
-    panic!(
-        "pgstat_read_statsfile: decode of an existing permanent stats file is not modeled \
-         (the on-disk byte-offset format over the typed PgStat_ShmemControl is unported; \
-         its symmetric writer pgstat_write_statsfile is likewise unported)"
+    match decode_statsfile(&bytes) {
+        Ok(()) => {
+            // done: C unlinks the permanent file after a successful read so a
+            // subsequent crash recovers from scratch rather than stale stats.
+            let _ = backend_storage_file_fd_seams::unlink_file::call(statfile);
+            Ok(())
+        }
+        Err(DecodeError) => {
+            // error: corrupted statistics file — reset and start fresh, then
+            // still unlink (C's `goto done` runs the unlink on the error path).
+            pgstat_reset_after_failure()?;
+            let _ = backend_storage_file_fd_seams::unlink_file::call(statfile);
+            Ok(())
+        }
+    }
+}
+
+/// Sentinel for the C `goto error` path (corrupt file → reset). Carries no
+/// detail because C only logs a generic "corrupted statistics file" message.
+struct DecodeError;
+
+/// The decode loop of [`pgstat_read_statsfile`]. Returns `Err(DecodeError)` for
+/// any corruption (C's `goto error`), `Ok(())` on a clean
+/// `PGSTAT_FILE_ENTRY_END`.
+fn decode_statsfile(bytes: &[u8]) -> Result<(), DecodeError> {
+    let mut cur = ReadCursor::new(bytes);
+
+    // Verify it's of the expected format.
+    let format_id = cur.read_i32().ok_or(DecodeError)?;
+    if format_id != PGSTAT_FILE_FORMAT_ID {
+        // "found incorrect format ID" — corrupt.
+        return Err(DecodeError);
+    }
+
+    loop {
+        let t = match cur.getc() {
+            Some(t) => t,
+            // C reads a tag with fgetc; EOF here is an unexpected tag.
+            None => return Err(DecodeError),
+        };
+
+        match t {
+            PGSTAT_FILE_ENTRY_FIXED => {
+                // entry for fixed-numbered stats
+                let kind = cur.read_kind().ok_or(DecodeError)?;
+                let info = lookup_valid_kind(kind).ok_or(DecodeError)?;
+                if !info.info.fixed_amount {
+                    return Err(DecodeError);
+                }
+                let len = info.info.shared_data_len as usize;
+                let data = cur.read_chunk(len).ok_or(DecodeError)?;
+                let cb = info.cb.read_fixed_cb.as_ref().ok_or(DecodeError)?;
+                local::with_local(|l| -> Result<(), DecodeError> {
+                    let ctl = l
+                        .shmem
+                        .as_deref_mut()
+                        .expect("pgstat_read_statsfile: shared control not initialized");
+                    cb(ctl, data).map_err(|_| DecodeError)
+                })?;
+            }
+            PGSTAT_FILE_ENTRY_HASH | PGSTAT_FILE_ENTRY_NAME => {
+                let key = if t == PGSTAT_FILE_ENTRY_HASH {
+                    // normal stats entry, identified by PgStat_HashKey
+                    let key = cur.read_hashkey().ok_or(DecodeError)?;
+                    let _info = lookup_valid_kind(key.kind).ok_or(DecodeError)?;
+                    key
+                } else {
+                    // stats entry identified by name on disk (e.g. slots)
+                    let kind = cur.read_kind().ok_or(DecodeError)?;
+                    let name = cur.read_chunk(NAMEDATALEN).ok_or(DecodeError)?;
+                    let info = lookup_valid_kind(kind).ok_or(DecodeError)?;
+                    let from_name =
+                        info.cb.from_serialized_name.as_ref().ok_or(DecodeError)?;
+                    let name_str = namedata_to_str(name);
+                    match from_name(&name_str) {
+                        Some(key) => {
+                            debug_assert_eq!(key.kind, kind);
+                            key
+                        }
+                        None => {
+                            // skip over data for an entry we don't care about
+                            let len = info.info.shared_data_len as usize;
+                            if !cur.skip(len) {
+                                return Err(DecodeError);
+                            }
+                            continue;
+                        }
+                    }
+                };
+
+                let info = lookup_valid_kind(key.kind).ok_or(DecodeError)?;
+                let len = info.info.shared_data_len as usize;
+
+                // Create a fresh shared entry (no duplicates allowed). This
+                // intentionally bypasses the backend-local entry-ref hash.
+                let header = match shmem::pgstat_restore_create_entry(key) {
+                    Ok(Some(h)) => h,
+                    // duplicate stats entry — corrupt.
+                    Ok(None) => return Err(DecodeError),
+                    // C: ERROR "could not allocate entry" — propagate as decode
+                    // failure (the reset fallback discards everything).
+                    Err(_) => return Err(DecodeError),
+                };
+
+                let data = cur.read_chunk(len).ok_or(DecodeError)?;
+                let read_var = info.cb.read_var_cb.as_ref().ok_or(DecodeError)?;
+                read_var(header, data).map_err(|_| DecodeError)?;
+            }
+            PGSTAT_FILE_ENTRY_END => {
+                // check that PGSTAT_FILE_ENTRY_END actually signals end of file
+                if !cur.at_eof() {
+                    return Err(DecodeError);
+                }
+                return Ok(());
+            }
+            _ => return Err(DecodeError),
+        }
+    }
+}
+
+/// Decode a fixed `NameData` byte buffer into a `&str` up to the first NUL,
+/// mirroring C's `NameStr(name)` view of the on-disk `NameData`.
+fn namedata_to_str(name: &[u8]) -> alloc::string::String {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    alloc::string::String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+/// Encode a name into a fixed `NAMEDATALEN`-byte `NameData` buffer (NUL-padded),
+/// mirroring C's `namestrcpy(&name, ...)` before `write_chunk_s(fpout, &name)`.
+fn str_to_namedata(name: &str) -> [u8; NAMEDATALEN] {
+    let mut buf = [0u8; NAMEDATALEN];
+    let src = name.as_bytes();
+    let n = src.len().min(NAMEDATALEN - 1);
+    buf[..n].copy_from_slice(&src[..n]);
+    buf
+}
+
+/// `pgstat_write_statsfile()` (`pgstat.c`) — write the current shared statistics
+/// out to the permanent on-disk file at a clean shutdown. Called in the last
+/// process accessing shared stats (checkpointer / single-user), so no locking is
+/// required.
+///
+/// Builds the file image — `format_id` header, every fixed kind's snapshot bytes
+/// (`PGSTAT_FILE_ENTRY_FIXED`), every live variable entry's body bytes
+/// (`PGSTAT_FILE_ENTRY_HASH` / `_NAME`), `PGSTAT_FILE_ENTRY_END` — then writes the
+/// temp file and durably renames it over the permanent file.
+fn pgstat_write_statsfile() -> PgResult<()> {
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // Write the file header --- currently just a format ID.
+    out.extend_from_slice(&PGSTAT_FILE_FORMAT_ID.to_ne_bytes());
+
+    // Write various stats structs for fixed number of objects.
+    let mut kind = PGSTAT_KIND_MIN.0;
+    while kind <= PGSTAT_KIND_MAX.0 {
+        let k = PgStat_Kind(kind);
+        kind += 1;
+        let info = match lookup_valid_kind(k) {
+            Some(i) => i,
+            None => continue,
+        };
+        if !info.info.fixed_amount || !info.info.write_to_file {
+            continue;
+        }
+        // pgstat_build_snapshot_fixed(kind), then serialize the snapshot field.
+        pgstat_build_snapshot_fixed(k)?;
+        let write_fixed = info
+            .cb
+            .write_fixed_cb
+            .as_ref()
+            .expect("pgstat_write_statsfile: fixed kind missing write_fixed_cb");
+        let data = local::with_local(|l| write_fixed(&l.snapshot));
+        debug_assert_eq!(data.len(), info.info.shared_data_len as usize);
+
+        out.push(PGSTAT_FILE_ENTRY_FIXED);
+        out.extend_from_slice(&k.0.to_ne_bytes());
+        out.extend_from_slice(&data);
+    }
+
+    // Walk through the variable stats entries.
+    shmem::pgstat_for_each_entry(|key, body| -> PgResult<()> {
+        let info = match lookup_valid_kind(key.kind) {
+            Some(i) => i,
+            // discards unknown stats kinds (C elog(WARNING) + continue).
+            None => return Ok(()),
+        };
+        if !info.info.write_to_file {
+            return Ok(());
+        }
+
+        if let Some(to_name) = info.cb.to_serialized_name.as_ref() {
+            // stats entry identified by name on disk (e.g. slots)
+            // SAFETY: body is a live PgStatShared_Common header of this kind.
+            let name = unsafe { to_name(&key, &*body) };
+            out.push(PGSTAT_FILE_ENTRY_NAME);
+            out.extend_from_slice(&key.kind.0.to_ne_bytes());
+            out.extend_from_slice(&str_to_namedata(&name));
+        } else {
+            // normal stats entry, identified by PgStat_HashKey
+            out.push(PGSTAT_FILE_ENTRY_HASH);
+            out.extend_from_slice(&key.kind.0.to_ne_bytes());
+            out.extend_from_slice(&key.dboid.to_ne_bytes());
+            out.extend_from_slice(&key.objid.to_ne_bytes());
+        }
+
+        // Write except the header part of the entry.
+        let write_var = info
+            .cb
+            .write_var_cb
+            .as_ref()
+            .expect("pgstat_write_statsfile: variable kind missing write_var_cb");
+        let data = write_var(body as *const PgStatShared_Common);
+        debug_assert_eq!(data.len(), info.info.shared_data_len as usize);
+        out.extend_from_slice(&data);
+        Ok(())
+    })?;
+
+    out.push(PGSTAT_FILE_ENTRY_END);
+
+    // C writes a temp file then `durable_rename`s it over the permanent file for
+    // atomicity. The file-fd seam set has no generic durable-rename, so write the
+    // permanent file directly (single-user / last-process context, where there is
+    // no concurrent reader to observe a partial file). A write failure is
+    // non-fatal (C ereport(LOG) + unlink(tmpfile)).
+    let _ = backend_storage_file_fd_seams::allocate_file_write::call(
+        PGSTAT_STAT_PERMANENT_FILENAME,
+        &out,
     );
+    Ok(())
 }
 
 /// `pgstat_restore_stats()` (`pgstat.c`) — read on-disk stats into memory at
@@ -913,12 +1227,24 @@ fn before_shutdown_trampoline(
 /// `pgstat_before_server_shutdown(code, arg)` (`pgstat.c`) — the
 /// before_shmem_exit callback: do a final forced flush of pending statistics,
 /// then mark the subsystem shut down.
-pub fn pgstat_before_server_shutdown(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+pub fn pgstat_before_server_shutdown(code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if local::is_shutdown() {
         return Ok(());
     }
-    // Final forced flush.
+    // flush out our own pending changes before writing out
     pgstat_report_stat(true)?;
     local::set_shutdown(true);
+
+    // Only write out file during normal shutdown (code == 0). Don't even signal
+    // that we've shutdown during irregular shutdowns, because the shutdown
+    // sequence isn't coordinated to ensure this backend shuts down last.
+    if code == 0 {
+        local::with_local(|l| {
+            if let Some(ctl) = l.shmem.as_deref_mut() {
+                ctl.is_shutdown = true;
+            }
+        });
+        pgstat_write_statsfile()?;
+    }
     Ok(())
 }

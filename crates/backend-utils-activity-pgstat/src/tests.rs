@@ -149,6 +149,81 @@ fn init_seams_registers_three_fixed_kinds_proof_of_shape() {
         assert!(full.cb.snapshot_cb.is_some(), "{:?} snapshot_cb", kind);
         assert!(full.cb.flush_pending_cb.is_none());
         assert!(full.info.shared_size > 0, "{:?} shared_size", kind);
+        // The on-disk stats-file codec slots: every write_to_file fixed kind
+        // must serialize/deserialize its typed snapshot/shmem field, and the
+        // serialized length equals shared_data_len.
+        assert!(full.cb.read_fixed_cb.is_some(), "{:?} read_fixed_cb", kind);
+        assert!(full.cb.write_fixed_cb.is_some(), "{:?} write_fixed_cb", kind);
+        assert!(full.info.shared_data_len > 0, "{:?} shared_data_len", kind);
+        let snap = types_pgstat::pgstat_internal::PgStat_Snapshot::default();
+        let blob = full.cb.write_fixed_cb.as_ref().unwrap()(&snap);
+        assert_eq!(
+            blob.len(),
+            full.info.shared_data_len as usize,
+            "{:?}: write_fixed_cb length != shared_data_len",
+            kind
+        );
     }
     registry::reset_for_test();
+}
+
+/// The byte-image helpers round-trip a representative POD stats struct.
+#[test]
+fn serialize_pod_round_trips_stats_struct() {
+    use crate::kind_info::{pgstat_deserialize_pod, pgstat_serialize_pod};
+    use types_pgstat::activity_pgstat::PgStat_ArchiverStats;
+
+    let mut a = PgStat_ArchiverStats::default();
+    a.archived_count = 42;
+    a.failed_count = 7;
+    a.last_archived_wal[..4].copy_from_slice(b"0001");
+    a.last_archived_timestamp = 0x0011_2233_4455_6677;
+
+    let bytes = pgstat_serialize_pod(&a);
+    assert_eq!(bytes.len(), core::mem::size_of::<PgStat_ArchiverStats>());
+    let b: PgStat_ArchiverStats = pgstat_deserialize_pod(&bytes);
+    assert_eq!(a, b);
+}
+
+/// The Rust `#[repr(C)]` stats structs have exactly the byte sizes a real
+/// C-produced PostgreSQL 18.3 `pgstat.stat` uses for each entry's
+/// `shared_data_len`. These constants were derived by decoding a real initdb
+/// stats file (`pg_stat/pgstat.stat`); a mismatch means the on-disk byte image
+/// would not line up with C, silently corrupting restored counters.
+#[test]
+fn ondisk_stats_struct_sizes_match_c_layout() {
+    use types_pgstat::activity_pgstat as a;
+    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
+
+    assert_eq!(core::mem::size_of::<a::PgStat_ArchiverStats>(), 136, "archiver");
+    assert_eq!(
+        core::mem::size_of::<
+            types_pgstat::backend_utils_activity_pgstat_bgwriter::PgStat_BgWriterStats,
+        >(),
+        32,
+        "bgwriter"
+    );
+    assert_eq!(
+        core::mem::size_of::<a::PgStat_CheckpointerStats>(),
+        88,
+        "checkpointer"
+    );
+    assert_eq!(core::mem::size_of::<a::PgStat_IO>(), 51848, "io");
+    assert_eq!(
+        core::mem::size_of::<[a::PgStat_SLRUStats; SLRU_NUM_ELEMENTS]>(),
+        512,
+        "slru"
+    );
+    assert_eq!(core::mem::size_of::<a::PgStat_WalStats>(), 40, "wal");
+    assert_eq!(core::mem::size_of::<a::PgStat_StatDBEntry>(), 264, "database");
+    assert_eq!(core::mem::size_of::<a::PgStat_StatTabEntry>(), 216, "relation");
+    assert_eq!(core::mem::size_of::<a::PgStat_StatFuncEntry>(), 24, "function");
+    assert_eq!(
+        core::mem::size_of::<a::PgStat_StatReplSlotEntry>(),
+        72,
+        "replslot"
+    );
+    assert_eq!(core::mem::size_of::<a::PgStat_StatSubEntry>(), 80, "subscription");
+    // PgStat_Backend (kind 6) has write_to_file = false and never appears in the
+    // on-disk file, so its layout is not part of the statsfile contract.
 }

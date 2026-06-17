@@ -328,7 +328,21 @@ fn function_kind_info() -> PgStat_KindInfo {
 pub fn init_seams() {
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_FUNCTION, function_kind_info())
-            .flush_pending_cb(pgstat_function_flush_cb),
+            .flush_pending_cb(pgstat_function_flush_cb)
+            // On-disk (de)serialization of the `PgStat_StatFuncEntry` body.
+            .read_var_cb(|header, bytes| {
+                // SAFETY: header points at a live PgStatShared_Function body.
+                let sh = unsafe { &mut *(header as *mut PgStatShared_Function) };
+                sh.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    PgStat_StatFuncEntry,
+                >(bytes);
+                Ok(())
+            })
+            .write_var_cb(|header| {
+                // SAFETY: header points at a live PgStatShared_Function body.
+                let sh = unsafe { &*(header as *const PgStatShared_Function) };
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+            }),
     );
 
     // pgstat_function.c outward seam with a live caller (pg_proc.c).

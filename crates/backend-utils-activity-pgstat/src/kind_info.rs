@@ -36,6 +36,10 @@
 //!   its typed `*_cb`. The adapter is owner glue, exactly where C's static
 //!   table lives.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use types_core::TimestampTz;
 use types_error::PgResult;
 use types_pgstat::activity_pgstat::{PgStat_Kind, PGSTAT_KIND_BUILTIN_MIN, PGSTAT_KIND_BUILTIN_SIZE};
@@ -44,6 +48,51 @@ use types_pgstat::pgstat_internal::{
 };
 
 use crate::entry_ref::PgStat_EntryRef;
+
+/// Serialize a `Copy`, pointer-free POD stats struct to its native C byte image.
+///
+/// The cumulative-stats on-disk file (`pgstat.c`) is a raw dump of each kind's
+/// `#[repr(C)]` stats struct (`write_chunk(fpout, ptr, shared_data_len)`), so a
+/// faithful serializer is exactly the struct's in-memory bytes. Every stats
+/// struct is `Copy` POD (no heap pointers), making the byte image a complete,
+/// stable representation — verified against a real C-produced initdb stats file.
+///
+/// # Safety
+/// `T` must be a pointer-free POD (`#[repr(C)]`, all fields plain integers /
+/// fixed arrays). All pgstat stats structs satisfy this.
+pub fn pgstat_serialize_pod<T: Copy>(value: &T) -> Vec<u8> {
+    let len = core::mem::size_of::<T>();
+    let mut out = alloc::vec![0u8; len];
+    // SAFETY: T is a pointer-free POD; we copy exactly its size_of bytes from a
+    // valid reference into a correctly-sized buffer. read_unaligned-style copy
+    // avoids any alignment assumption on the destination.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            value as *const T as *const u8,
+            out.as_mut_ptr(),
+            len,
+        );
+    }
+    out
+}
+
+/// Deserialize a `Copy`, pointer-free POD stats struct from its native C byte
+/// image. Inverse of [`pgstat_serialize_pod`]; `bytes` must be exactly
+/// `size_of::<T>()` long (the kind's `shared_data_len`).
+///
+/// # Safety
+/// Same POD requirement as [`pgstat_serialize_pod`].
+pub fn pgstat_deserialize_pod<T: Copy>(bytes: &[u8]) -> T {
+    assert_eq!(
+        bytes.len(),
+        core::mem::size_of::<T>(),
+        "pgstat_deserialize_pod: byte length does not match shared_data_len"
+    );
+    // SAFETY: bytes is exactly size_of::<T>() and T is a pointer-free POD; a
+    // byte-for-byte unaligned read reconstructs the value (the established
+    // `decode_*_entry` idiom in the per-kind crates).
+    unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const T) }
+}
 
 /// The function-pointer half of C's `PgStat_KindInfo`. Every field is `None`
 /// when the corresponding C member is `NULL` (callback not provided for that
@@ -104,6 +153,59 @@ pub struct PgStat_KindCallbacks {
     pub snapshot_cb: Option<
         Box<dyn Fn(&PgStat_ShmemControl, &mut PgStat_Snapshot) -> PgResult<()> + Send + Sync>,
     >,
+
+    // ----- on-disk stats-file (de)serialization (pgstat.c read/write) -----
+    //
+    // C's `pgstat_read_statsfile` / `pgstat_write_statsfile` move
+    // `info->shared_data_len` raw bytes between the file and the stats body. For
+    // a *fixed* kind the body is `(char *) shmem + shared_ctl_off +
+    // shared_data_off` (read) and `(char *) snapshot + snapshot_ctl_off`
+    // (write); the idiomatic model stores those as *typed fields* of
+    // [`PgStat_ShmemControl`] / [`PgStat_Snapshot`], so the byte image cannot be
+    // reached by offset arithmetic. These two adapters project the typed field
+    // and copy its C byte image (`#[repr(C)]` stats structs whose layout matches
+    // C, verified against a real initdb stats file). The serialized blob is
+    // exactly `shared_data_len` bytes.
+    //
+    // *Variable* kinds need no such adapter: their body is a real
+    // byte-addressable DSA allocation (`pgstat_init_entry` →
+    // `dsa_allocate0(shared_size)`), so the core driver memcpys generically
+    // into/out of it, exactly as C's `pgstat_get_entry_data` path does.
+    /// Deserialize a fixed kind's on-disk byte image into its typed shared-memory
+    /// field. `bytes` is exactly `shared_data_len` long. Mirrors C's read-side
+    /// `read_chunk(fpin, (char *) shmem + shared_ctl_off + shared_data_off,
+    /// shared_data_len)`.
+    pub read_fixed_cb:
+        Option<Box<dyn Fn(&mut PgStat_ShmemControl, &[u8]) -> PgResult<()> + Send + Sync>>,
+
+    /// Serialize a fixed kind's snapshot field to its on-disk byte image
+    /// (`shared_data_len` bytes). Mirrors C's write-side `write_chunk(fpout,
+    /// (char *) &snapshot + snapshot_ctl_off, shared_data_len)`.
+    pub write_fixed_cb: Option<Box<dyn Fn(&PgStat_Snapshot) -> Vec<u8> + Send + Sync>>,
+
+    /// Deserialize a *variable* kind's on-disk byte image into a freshly-created
+    /// shared entry body. The body pointer is the kind's `PgStatShared_Common`
+    /// header (the per-kind crate casts it to its concrete `PgStatShared_X` and
+    /// writes `.stats`). Mirrors C's `read_chunk(fpin, pgstat_get_entry_data(kind,
+    /// header), pgstat_get_entry_len(kind))`. The model uses a typed projection
+    /// rather than `header + shared_data_off` pointer arithmetic, since the
+    /// `PgStatShared_X` wrapper layout is owner-private.
+    ///
+    /// # Safety
+    /// `header` must point at a live, freshly-init'd `PgStatShared_X` body of
+    /// this kind; `bytes` is exactly `shared_data_len` long.
+    #[allow(clippy::type_complexity)]
+    pub read_var_cb:
+        Option<Box<dyn Fn(*mut PgStatShared_Common, &[u8]) -> PgResult<()> + Send + Sync>>,
+
+    /// Serialize a *variable* kind's shared entry body to its on-disk byte image.
+    /// Mirrors C's `write_chunk(fpout, pgstat_get_entry_data(kind, shstats),
+    /// pgstat_get_entry_len(kind))`.
+    ///
+    /// # Safety
+    /// `header` must point at a live `PgStatShared_X` body of this kind.
+    pub write_var_cb:
+        Option<Box<dyn Fn(*const PgStatShared_Common) -> Vec<u8> + Send + Sync>>,
 }
 
 impl core::fmt::Debug for PgStat_KindCallbacks {
@@ -120,6 +222,10 @@ impl core::fmt::Debug for PgStat_KindCallbacks {
             .field("flush_static_cb", &self.flush_static_cb.is_some())
             .field("reset_all_cb", &self.reset_all_cb.is_some())
             .field("snapshot_cb", &self.snapshot_cb.is_some())
+            .field("read_fixed_cb", &self.read_fixed_cb.is_some())
+            .field("write_fixed_cb", &self.write_fixed_cb.is_some())
+            .field("read_var_cb", &self.read_var_cb.is_some())
+            .field("write_var_cb", &self.write_var_cb.is_some())
             .finish()
     }
 }
@@ -310,6 +416,38 @@ impl KindInfoBuilder {
             + 'static,
     ) -> Self {
         self.cb.snapshot_cb = Some(Box::new(f));
+        self
+    }
+
+    pub fn read_fixed_cb(
+        mut self,
+        f: impl Fn(&mut PgStat_ShmemControl, &[u8]) -> PgResult<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.cb.read_fixed_cb = Some(Box::new(f));
+        self
+    }
+
+    pub fn write_fixed_cb(
+        mut self,
+        f: impl Fn(&PgStat_Snapshot) -> Vec<u8> + Send + Sync + 'static,
+    ) -> Self {
+        self.cb.write_fixed_cb = Some(Box::new(f));
+        self
+    }
+
+    pub fn read_var_cb(
+        mut self,
+        f: impl Fn(*mut PgStatShared_Common, &[u8]) -> PgResult<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.cb.read_var_cb = Some(Box::new(f));
+        self
+    }
+
+    pub fn write_var_cb(
+        mut self,
+        f: impl Fn(*const PgStatShared_Common) -> Vec<u8> + Send + Sync + 'static,
+    ) -> Self {
+        self.cb.write_var_cb = Some(Box::new(f));
         self
     }
 

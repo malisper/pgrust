@@ -290,10 +290,14 @@ fn pgstat_reset_slru_counter_internal_ctl(
 /// The `PgStat_KindInfo` metadata for `PGSTAT_KIND_SLRU`
 /// (`pgstat.c:pgstat_kind_builtin_infos[PGSTAT_KIND_SLRU]`).
 ///
-/// The C byte offsets are used only by the on-disk (de)serializer; the runtime
-/// callback dispatch uses typed field projection, so they are left 0. SLRU is a
-/// fixed kind with a dedicated control-block field, so `shared_size` is 0.
+/// The on-disk (de)serializer reaches the typed `ctl.slru.stats` / `snap.slru`
+/// field by projection, so the `shared_*_off` offsets stay 0. `shared_data_len`
+/// is `sizeof(((PgStatShared_SLRU *) 0)->stats)` = the full
+/// `[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]` array. SLRU is a fixed kind with a
+/// dedicated control-block field, so `shared_size` is 0.
 fn slru_kind_info() -> PgStat_KindInfo {
+    use types_pgstat::activity_pgstat::PgStat_SLRUStats;
+    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
     PgStat_KindInfo {
         fixed_amount: true,
         accessed_across_databases: false,
@@ -302,7 +306,7 @@ fn slru_kind_info() -> PgStat_KindInfo {
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
         shared_data_off: 0,
-        shared_data_len: 0,
+        shared_data_len: core::mem::size_of::<[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]>() as u32,
         pending_size: 0,
         name: "slru",
     }
@@ -310,12 +314,24 @@ fn slru_kind_info() -> PgStat_KindInfo {
 
 /// Register `PGSTAT_KIND_SLRU` and install the SLRU outward seams.
 pub fn init_seams() {
+    use types_pgstat::activity_pgstat::PgStat_SLRUStats;
+    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_SLRU, slru_kind_info())
             .init_shmem_cb(pgstat_slru_init_shmem_cb)
             .reset_all_cb(pgstat_slru_reset_all_cb)
             .snapshot_cb(pgstat_slru_snapshot_cb)
-            .flush_static_cb(pgstat_slru_flush_cb),
+            .flush_static_cb(pgstat_slru_flush_cb)
+            // On-disk (de)serialization of the typed SLRU stats array.
+            .read_fixed_cb(|ctl, bytes| {
+                ctl.slru.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    [PgStat_SLRUStats; SLRU_NUM_ELEMENTS],
+                >(bytes);
+                Ok(())
+            })
+            .write_fixed_cb(|snap| {
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&snap.slru)
+            }),
     );
 
     // pgstat_slru.c outward seams (consumed by slru.c).

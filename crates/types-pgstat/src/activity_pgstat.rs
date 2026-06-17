@@ -258,6 +258,7 @@ pub const WAL_NAME_LEN: usize = MAX_XFN_CHARS + 1;
 /// The WAL-name fields are fixed `char[MAX_XFN_CHARS + 1]` buffers in C;
 /// modeled as fixed `[u8; WAL_NAME_LEN]` byte arrays, preserving the exact
 /// size and the NUL-terminated-string semantics (clearing via `wal[0] = 0`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgStat_ArchiverStats {
     /// archival successes
@@ -475,6 +476,7 @@ pub struct PgStat_TableStatus {
 pub const PGSTAT_FILE_FORMAT_ID: u32 = 0x01A5BCB7;
 
 /// `PgStat_BktypeIO` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgStat_BktypeIO {
     pub bytes: [[[u64; IOOP_NUM_TYPES]; IOCONTEXT_NUM_TYPES]; IOOBJECT_NUM_TYPES],
@@ -513,6 +515,7 @@ impl Default for PgStat_PendingIO {
 }
 
 /// `PgStat_IO` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgStat_IO {
     pub stat_reset_timestamp: TimestampTz,
@@ -529,6 +532,7 @@ impl Default for PgStat_IO {
 }
 
 /// `PgStat_StatDBEntry` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_StatDBEntry {
     pub xact_commit: PgStat_Counter,
@@ -568,6 +572,7 @@ pub struct PgStat_StatDBEntry {
 }
 
 /// `PgStat_StatFuncEntry` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_StatFuncEntry {
     pub numcalls: PgStat_Counter,
@@ -577,6 +582,7 @@ pub struct PgStat_StatFuncEntry {
 }
 
 /// `PgStat_StatReplSlotEntry` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_StatReplSlotEntry {
     pub spill_txns: PgStat_Counter,
@@ -591,6 +597,7 @@ pub struct PgStat_StatReplSlotEntry {
 }
 
 /// `PgStat_SLRUStats` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_SLRUStats {
     pub blocks_zeroed: PgStat_Counter,
@@ -604,6 +611,7 @@ pub struct PgStat_SLRUStats {
 }
 
 /// `PgStat_StatSubEntry` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgStat_StatSubEntry {
     pub apply_error_count: PgStat_Counter,
@@ -624,6 +632,7 @@ impl Default for PgStat_StatSubEntry {
 }
 
 /// `PgStat_StatTabEntry` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_StatTabEntry {
     pub numscans: PgStat_Counter,
@@ -668,6 +677,7 @@ pub struct PgStat_StatTabEntry {
 
 /// `PgStat_WalCounters` (`pgstat.h`) — WAL activity data gathered from
 /// `WalUsage`, separated so it can be shared across stats structs.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_WalCounters {
     pub wal_records: PgStat_Counter,
@@ -677,6 +687,7 @@ pub struct PgStat_WalCounters {
 }
 
 /// `PgStat_WalStats` (`pgstat.h`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_WalStats {
     pub wal_counters: PgStat_WalCounters,
@@ -684,6 +695,7 @@ pub struct PgStat_WalStats {
 }
 
 /// `PgStat_Backend` (`pgstat.h`) — backend statistics.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgStat_Backend {
     pub stat_reset_timestamp: TimestampTz,

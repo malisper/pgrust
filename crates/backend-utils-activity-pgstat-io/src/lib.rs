@@ -623,12 +623,12 @@ fn io_op_from_index(i: usize) -> IOOp {
 /// The `PgStat_KindInfo` metadata for `PGSTAT_KIND_IO`
 /// (`pgstat.c:pgstat_kind_builtin_infos[PGSTAT_KIND_IO]`).
 ///
-/// The C byte offsets (`snapshot_ctl_off` / `shared_ctl_off` /
-/// `shared_data_off` / `shared_data_len`) are used only by the on-disk
-/// (de)serialization machinery; the runtime callback dispatch uses typed field
-/// projection instead, so they are left 0 here (the serializer is a follow-on).
-/// `shared_size` is 0 because IO is a fixed kind with a dedicated control-block
-/// field, not a `custom_data` entry.
+/// `shared_data_len` is the byte length of the on-disk stats image, equal to
+/// `sizeof(((PgStatShared_IO *) 0)->stats)` = `sizeof(PgStat_IO)`; the on-disk
+/// (de)serialization callbacks reach the typed `ctl.io.stats` / `snap.io` field
+/// by projection rather than `shared_*_off` pointer arithmetic, so those offsets
+/// stay 0. `shared_size` is 0 because IO is a fixed kind with a dedicated
+/// control-block field, not a `custom_data` entry.
 fn io_kind_info() -> PgStat_KindInfo {
     PgStat_KindInfo {
         fixed_amount: true,
@@ -638,7 +638,7 @@ fn io_kind_info() -> PgStat_KindInfo {
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
         shared_data_off: 0,
-        shared_data_len: 0,
+        shared_data_len: core::mem::size_of::<types_pgstat::activity_pgstat::PgStat_IO>() as u32,
         pending_size: 0,
         name: "io",
     }
@@ -652,7 +652,17 @@ pub fn init_seams() {
             .init_shmem_cb(pgstat_io_init_shmem_cb)
             .reset_all_cb(pgstat_io_reset_all_cb)
             .snapshot_cb(pgstat_io_snapshot_cb)
-            .flush_static_cb(pgstat_io_flush_cb),
+            .flush_static_cb(pgstat_io_flush_cb)
+            // On-disk (de)serialization of the typed `PgStat_IO` field.
+            .read_fixed_cb(|ctl, bytes| {
+                ctl.io.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    types_pgstat::activity_pgstat::PgStat_IO,
+                >(bytes);
+                Ok(())
+            })
+            .write_fixed_cb(|snap| {
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&snap.io)
+            }),
     );
 
     // pgstat_io.c outward seams (the WAL-write timing path consumed by

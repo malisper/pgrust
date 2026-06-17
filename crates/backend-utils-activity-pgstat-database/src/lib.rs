@@ -578,7 +578,22 @@ pub fn init_seams() {
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_DATABASE, database_kind_info())
             .flush_pending_cb(pgstat_database_flush_cb)
-            .reset_timestamp_cb(pgstat_database_reset_timestamp_cb),
+            .reset_timestamp_cb(pgstat_database_reset_timestamp_cb)
+            // On-disk (de)serialization: the bytes are the C image of the
+            // `PgStat_StatDBEntry` body following the `PgStatShared_Common` header.
+            .read_var_cb(|header, bytes| {
+                // SAFETY: header points at a live PgStatShared_Database body.
+                let shdb = unsafe { &mut *(header as *mut PgStatShared_Database) };
+                shdb.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    PgStat_StatDBEntry,
+                >(bytes);
+                Ok(())
+            })
+            .write_var_cb(|header| {
+                // SAFETY: header points at a live PgStatShared_Database body.
+                let shdb = unsafe { &*(header as *const PgStatShared_Database) };
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&shdb.stats)
+            }),
     );
 
     // pgstat_database.c outward seams with live callers.

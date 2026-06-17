@@ -361,7 +361,22 @@ pub fn init_seams() {
         KindInfoBuilder::new(PGSTAT_KIND_REPLSLOT, replslot_kind_info())
             .reset_timestamp_cb(pgstat_replslot_reset_timestamp_cb)
             .to_serialized_name(pgstat_replslot_to_serialized_name_cb)
-            .from_serialized_name(pgstat_replslot_from_serialized_name_cb),
+            .from_serialized_name(pgstat_replslot_from_serialized_name_cb)
+            // On-disk (de)serialization of the `PgStat_StatReplSlotEntry` body
+            // (replslot entries are tagged by name on disk, not hash key).
+            .read_var_cb(|header, bytes| {
+                // SAFETY: header points at a live PgStatShared_ReplSlot body.
+                let sh = unsafe { &mut *(header as *mut PgStatShared_ReplSlot) };
+                sh.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    PgStat_StatReplSlotEntry,
+                >(bytes);
+                Ok(())
+            })
+            .write_var_cb(|header| {
+                // SAFETY: header points at a live PgStatShared_ReplSlot body.
+                let sh = unsafe { &*(header as *const PgStatShared_ReplSlot) };
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+            }),
     );
 
     // slot.c → pgstat outward seams (keyed by ReplicationSlotIndex; slot.c holds

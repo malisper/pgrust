@@ -9,6 +9,7 @@ use types_storage::LWLock;
 /// This struct contains only actual event counters (plus the reset timestamp),
 /// because `pgstat_report_bgwriter` uses an all-zeros test to detect whether
 /// there are any stats updates to apply.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PgStat_BgWriterStats {
     pub buf_written_clean: PgStat_Counter,

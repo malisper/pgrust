@@ -426,6 +426,75 @@ pub fn pgstat_get_entry_ref(
     Ok(Some(EntryRefPtr(raw)))
 }
 
+/// `pgstat_read_statsfile` helper — create a brand-new shared stats entry for
+/// `key`, mirroring C's `dshash_find_or_insert(...)` + `pgstat_init_entry(...)`
+/// during the on-disk restore. Returns the freshly-init'd body header, or `None`
+/// if an entry for the key already existed (C's "duplicate stats entry" error).
+///
+/// Unlike [`pgstat_get_entry_ref`], this intentionally does *not* populate the
+/// backend-local `pgStatEntryRefHash`: C avoids that during restore ("putting all
+/// stats into checkpointer's pgStatEntryRefHash would be wasted effort and
+/// memory").
+pub fn pgstat_restore_create_entry(
+    key: PgStat_HashKey,
+) -> PgResult<Option<*mut PgStatShared_Common>> {
+    let dsh = local::with_local(|l| l.shared_hash);
+    if dsh.is_null() {
+        pgstat_attach_shmem()?;
+    }
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+
+    let mut found = false;
+    let entry = dshash::dshash_find_or_insert(dsh, key_bytes(&key), &mut found)?;
+    // SAFETY: dshash returned a live, exclusively-locked entry value.
+    let shhashent = unsafe { shared_entry(entry) };
+    if found {
+        // Duplicate entry — C releases the lock and treats it as a corrupt file.
+        dshash::dshash_release_lock(dsh, entry)?;
+        return Ok(None);
+    }
+    // SAFETY: brand-new dshash slot: stamp the key and init the body.
+    let shheader = unsafe {
+        (*shhashent).key = key;
+        pgstat_init_entry(area, key.kind, shhashent)?
+    };
+    dshash::dshash_release_lock(dsh, entry)?;
+    Ok(Some(shheader))
+}
+
+/// `pgstat_write_statsfile` helper — visit every live (non-dropped) variable
+/// stats entry, calling `f(key, body)` with each entry's key and resolved body
+/// header. Mirrors C's `dshash_seq_init` / `dshash_seq_next` walk in
+/// `pgstat_write_statsfile`. The lock is shared (no entries are removed).
+pub fn pgstat_for_each_entry(
+    mut f: impl FnMut(PgStat_HashKey, *mut PgStatShared_Common) -> PgResult<()>,
+) -> PgResult<()> {
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+    if dsh.is_null() {
+        return Ok(());
+    }
+    let mut hstat = dshash::dshash_seq_init(dsh, false);
+    loop {
+        let entry = match dshash::dshash_seq_next(&mut hstat)? {
+            Some(e) => e,
+            None => break,
+        };
+        // SAFETY: dshash_seq_next returns a live, locked entry address.
+        let shent = unsafe { shared_entry(entry) };
+        if unsafe { (*shent).dropped } {
+            continue;
+        }
+        let key = unsafe { (*shent).key };
+        let body = unsafe { resolve_body(area, shent)? };
+        if body.is_null() {
+            continue;
+        }
+        f(key, body)?;
+    }
+    dshash::dshash_seq_term(&mut hstat)?;
+    Ok(())
+}
+
 /// A returned, backend-local reference to a shared stats entry. The pointer is
 /// stable for as long as the entry stays in `pgStatEntryRefHash`; callers hold
 /// it only transiently while recording pending stats. Mirrors the C

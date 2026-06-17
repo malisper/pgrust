@@ -196,10 +196,11 @@ pub fn pgstat_wal_snapshot_cb(
 /// The `PgStat_KindInfo` metadata for `PGSTAT_KIND_WAL`
 /// (`pgstat.c:pgstat_kind_builtin_infos[PGSTAT_KIND_WAL]`).
 ///
-/// The C byte offsets are only used by the on-disk (de)serializer; the runtime
-/// callback dispatch uses typed field projection, so they are left 0 (the
-/// serializer is a follow-on). `shared_size` is 0 (WAL is a fixed kind with a
-/// dedicated control-block field, not a `custom_data` entry).
+/// The on-disk (de)serializer reaches the typed `ctl.wal.stats` / `snap.wal`
+/// field by projection, so the `shared_*_off` offsets stay 0. `shared_data_len`
+/// is `sizeof(((PgStatShared_Wal *) 0)->stats)` = `sizeof(PgStat_WalStats)`.
+/// `shared_size` is 0 (WAL is a fixed kind with a dedicated control-block field,
+/// not a `custom_data` entry).
 fn wal_kind_info() -> PgStat_KindInfo {
     PgStat_KindInfo {
         fixed_amount: true,
@@ -209,7 +210,8 @@ fn wal_kind_info() -> PgStat_KindInfo {
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
         shared_data_off: 0,
-        shared_data_len: 0,
+        shared_data_len: core::mem::size_of::<types_pgstat::activity_pgstat::PgStat_WalStats>()
+            as u32,
         pending_size: 0,
         name: "wal",
     }
@@ -223,7 +225,17 @@ pub fn init_seams() {
             .init_shmem_cb(pgstat_wal_init_shmem_cb)
             .reset_all_cb(pgstat_wal_reset_all_cb)
             .snapshot_cb(pgstat_wal_snapshot_cb)
-            .flush_static_cb(pgstat_wal_flush_cb),
+            .flush_static_cb(pgstat_wal_flush_cb)
+            // On-disk (de)serialization of the typed `PgStat_WalStats` field.
+            .read_fixed_cb(|ctl, bytes| {
+                ctl.wal.stats = backend_utils_activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    types_pgstat::activity_pgstat::PgStat_WalStats,
+                >(bytes);
+                Ok(())
+            })
+            .write_fixed_cb(|snap| {
+                backend_utils_activity_pgstat::kind_info::pgstat_serialize_pod(&snap.wal)
+            }),
     );
 
     // pgstat_wal.c outward seams: both the walstats-seams (PgResult, 6 callers)
