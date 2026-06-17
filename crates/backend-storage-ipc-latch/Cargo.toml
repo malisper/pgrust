@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }

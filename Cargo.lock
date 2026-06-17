@@ -15564,6 +15564,7 @@ dependencies = [
 name = "backend-storage-ipc-latch"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-waiteventset-seams",
@@ -15694,6 +15695,7 @@ name = "backend-storage-ipc-procsignal"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel",
+ "backend-access-transam-parallel-rt-seams",
  "backend-commands-async-seams",
  "backend-replication-logical-applyparallelworker-seams",
  "backend-replication-walsender-seams",
@@ -16218,6 +16220,7 @@ dependencies = [
 name = "backend-storage-lmgr-proc"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils-seams",

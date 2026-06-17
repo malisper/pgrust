@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = { version = "0.2", default-features = false }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

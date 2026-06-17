@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
 backend-replication-logical-applyparallelworker-seams = { path = "../backend-replication-logical-applyparallelworker-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }

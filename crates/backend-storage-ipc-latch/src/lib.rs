@@ -624,6 +624,34 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::latch_maybe_sleeping::set(latch_maybe_sleeping);
     backend_storage_ipc_latch_seams::set_latch_maybe_sleeping::set(set_latch_maybe_sleeping);
     backend_storage_ipc_latch_seams::latch_owner_pid::set(latch_owner_pid);
+
+    install_parallel_rt_latch_seams();
+}
+
+/// Install the `MyLatch` operations `access/transam/parallel.c` reaches outward
+/// for, declared in `backend-access-transam-parallel-rt-seams` (latch.c owns the
+/// bodies). These are thin shims over the same `MyLatch`-shaped helpers installed
+/// into this crate's native seam slots above:
+///
+/// * `set_my_latch` → `SetLatch(MyLatch)`     (parallel.c `HandleParallelMessageInterrupt`)
+/// * `reset_latch`  → `ResetLatch(MyLatch)`   (parallel.c worker-startup / finish loops)
+/// * `wait_latch`   → `WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1, wait_event)`
+///   (parallel.c:773-775 / 893-894 — both call sites pass exactly these flags and
+///   an infinite (`-1`) timeout).
+fn install_parallel_rt_latch_seams() {
+    use backend_access_transam_parallel_rt_seams as rt;
+
+    rt::set_my_latch::set(|| {
+        set_latch_my_latch();
+        Ok(())
+    });
+    rt::reset_latch::set(|| {
+        reset_latch_my_latch();
+        Ok(())
+    });
+    rt::wait_latch::set(|wait_event| {
+        wait_latch_my_latch(WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1, wait_event).map(|v| v as i32)
+    });
 }
 
 /// `latch->is_set` — read the latch's set flag.

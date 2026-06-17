@@ -891,6 +891,18 @@ pub fn init_seams() {
     // `PgResult<usize>` matches the seam's `PgResult<types_core::Size>`.
     backend_storage_ipc_procsignal_seams::proc_signal_shmem_size::set(ProcSignalShmemSize);
     backend_storage_ipc_procsignal_seams::proc_signal_shmem_init::set(ProcSignalShmemInit);
+
+    // `SendProcSignal(ParallelLeaderPid, PROCSIG_PARALLEL_MESSAGE,
+    // ParallelLeaderProcNumber)` (`access/transam/parallel.c:1623`) — the worker's
+    // wakeup of the leader after writing to its error queue. procsignal.c owns the
+    // `SendProcSignal` body; the parallel-rt slot is declared in
+    // `backend-access-transam-parallel-rt-seams`. The reason is fixed to
+    // `PROCSIG_PARALLEL_MESSAGE`; C ignores the `int` return (it calls it as a
+    // statement), so the shim discards it and returns `Ok(())`.
+    backend_access_transam_parallel_rt_seams::send_parallel_message_signal::set(|pid, procno| {
+        SendProcSignal(pid, ProcSignalReason::PROCSIG_PARALLEL_MESSAGE, procno);
+        Ok(())
+    });
 }
 
 #[cfg(test)]
