@@ -43,6 +43,11 @@ use backend_utils_cache_relcache_seams as relcache;
 // fast-comparator token and write it into `ssup.comparator`).
 use backend_access_nbt_compare_seams as nbtcompare_seams;
 use nbtcompare_seams as nbtcompare; // `FastComparator` type alias lives here.
+// The gist-proc `gist_point_sortsupport` install seams (OUTWARD, owned +
+// installed by this sort substrate, called by gist-proc to mint the GiST box
+// comparator / abbrev tokens and write them into the `ssup` fields). The
+// `GistComparator` / `GistAbbrevConverter` kernel type aliases live here.
+use backend_access_gist_proc_seams as gist_proc;
 
 /// `OidIsValid(oid)` — `InvalidOid` is 0.
 #[inline]
@@ -88,6 +93,15 @@ enum Comparator {
     },
     /// A type's fast comparator installed directly by its `*sortsupport`.
     Native(nbtcompare::FastComparator),
+    /// A GiST box comparator (`gist_bbox_zorder_cmp`) installed by
+    /// `gist_point_sortsupport`. Held as the kernel function pointer; unlike
+    /// [`Comparator::Native`] its operands are pass-by-reference `BOX` images, so
+    /// the kernel reads the canonical `Datum`'s `ByRef` bytes.
+    GistBox(gist_proc::GistComparator),
+    /// `ssup_datum_unsigned_cmp` (sortsupport.c): the abbreviated-key comparator
+    /// `gist_point_sortsupport` installs in the abbreviated arm. A substrate
+    /// primitive (no per-token state) comparing the two Datum words as unsigned.
+    UnsignedCmp,
 }
 
 thread_local! {
@@ -120,20 +134,14 @@ fn register_shim(state: Comparator) -> SortComparatorId {
 /// result came back null. [`function_call2_coll`] performs the invoke and that
 /// exact NULL check.
 fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_>) -> PgResult<i32> {
-    // Bridge the canonical by-value words across the fmgr/kernel layer, which
-    // still speaks the transitional bare-word `types_datum::Datum` (fmgr-core is
-    // not in this migration batch — established sibling pattern is
-    // `types_datum::Datum::from_usize(canonical.as_usize())`). The comparator
-    // args are scalar Datum words exactly as C passes them.
-    let x = types_datum::Datum::from_usize(x.as_usize());
-    let y = types_datum::Datum::from_usize(y.as_usize());
-
     // Snapshot the resolved lookup and release the registry borrow before the
     // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
     // not trip a RefCell double-borrow.
     enum Resolved {
         Shim(types_fmgr::FmgrResolution, types_fmgr::FmgrInfo, Oid),
         Native(nbtcompare::FastComparator),
+        GistBox(gist_proc::GistComparator),
+        UnsignedCmp,
     }
     let resolved = SHIMS.with(|s| {
         let shims = s.borrow();
@@ -144,11 +152,20 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
                 *collation,
             ),
             Comparator::Native(cmp) => Resolved::Native(*cmp),
+            Comparator::GistBox(cmp) => Resolved::GistBox(*cmp),
+            Comparator::UnsignedCmp => Resolved::UnsignedCmp,
         }
     });
 
     match resolved {
         Resolved::Shim(resolution, finfo, collation) => {
+            // Bridge the canonical by-value words across the fmgr/kernel layer,
+            // which still speaks the transitional bare-word `types_datum::Datum`
+            // (fmgr-core is not in this migration batch — established sibling
+            // pattern is `types_datum::Datum::from_usize(canonical.as_usize())`).
+            // The comparator args are scalar Datum words exactly as C passes them.
+            let x = types_datum::Datum::from_usize(x.as_usize());
+            let y = types_datum::Datum::from_usize(y.as_usize());
             let result = function_call2_coll(mcx, &resolution, finfo, collation, x, y)?;
             // C: `comparison_shim` returns the `Datum` result as an `int`
             // (`DatumGetInt32`).
@@ -156,7 +173,36 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
         }
         // A native fast comparator (e.g. `ssup_datum_int32_cmp`): a pure
         // function of the two packed `Datum`s, infallible (no fmgr ereport).
-        Resolved::Native(cmp) => Ok(cmp(x, y)),
+        Resolved::Native(cmp) => {
+            let x = types_datum::Datum::from_usize(x.as_usize());
+            let y = types_datum::Datum::from_usize(y.as_usize());
+            Ok(cmp(x, y))
+        }
+        // A GiST box comparator (`gist_bbox_zorder_cmp`): the operands are
+        // pass-by-reference `BOX` images, so the canonical `Datum<'_>` is
+        // threaded WHOLE (its `ByRef` payload, NOT a collapsed word) into the
+        // kernel, which decodes the `BOX` from the bytes. Pure, infallible.
+        Resolved::GistBox(cmp) => Ok(cmp(x, y)),
+        // `ssup_datum_unsigned_cmp` (sortsupport.c): the abbreviated-key
+        // comparator, comparing the two pass-by-value Datum words as unsigned
+        // integers. On a 64-bit (`SIZEOF_DATUM == 8`) build the abbreviated key
+        // occupies the whole word.
+        Resolved::UnsignedCmp => Ok(ssup_datum_unsigned_cmp(x, y)),
+    }
+}
+
+/// `ssup_datum_unsigned_cmp(x, y, ssup)` (utils/sort/sortsupport.c): compare two
+/// pass-by-value `Datum`s as unsigned integers. Used by types whose abbreviated
+/// keys (or unsigned native values) sort by raw word ordering. `ssup` is
+/// unused. The operands are `ByVal` words.
+fn ssup_datum_unsigned_cmp(x: Datum<'_>, y: Datum<'_>) -> i32 {
+    let x = x.as_usize();
+    let y = y.as_usize();
+    // C: `(x < y) ? -1 : ((x > y) ? 1 : 0)`.
+    match x.cmp(&y) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Equal => 0,
     }
 }
 
@@ -403,9 +449,27 @@ type AbbrevConverterKernel = fn(Datum<'_>, &SortSupportData<'_>) -> PgResult<Dat
 /// A resolved `abbrev_abort` kernel: `bool (*)(int memtupcount, SortSupport)`.
 type AbbrevAbortKernel = fn(i32, &mut SortSupportData<'_>) -> PgResult<bool>;
 
+/// The resolved abbreviation converter an [`AbbrevConverterId`] denotes. C's
+/// `abbrev_converter` is a single `Datum (*)(Datum, SortSupport)` pointer; the
+/// owned model holds either a full-signature kernel ([`AbbrevConverter::Full`],
+/// used by varlena/numeric once they install through this registry) or a
+/// GiST-style converter ([`AbbrevConverter::Gist`]) that ignores `ssup` and is
+/// infallible (`gist_bbox_zorder_abbrev_convert`).
+enum AbbrevConverter {
+    /// A `Datum (*)(Datum, SortSupport)` kernel that may `ereport`. The forward
+    /// path for varlena/numeric, which do not yet install through this registry
+    /// (their `*_abbrev_convert` install seams land with those units), so it is
+    /// unconstructed for now — kept to model the full C `abbrev_converter`
+    /// signature the `apply_sort_abbrev_converter` seam already honors.
+    #[allow(dead_code)]
+    Full(AbbrevConverterKernel),
+    /// `gist_bbox_zorder_abbrev_convert`: pure, `ssup`-free, infallible.
+    Gist(gist_proc::GistAbbrevConverter),
+}
+
 thread_local! {
     /// Token -> abbrev converter, indexed by `AbbrevConverterId.0`.
-    static ABBREV_CONVERTERS: RefCell<Vec<AbbrevConverterKernel>> =
+    static ABBREV_CONVERTERS: RefCell<Vec<AbbrevConverter>> =
         const { RefCell::new(Vec::new()) };
     /// Token -> abbrev abort, indexed by `AbbrevAbortId.0`.
     static ABBREV_ABORTS: RefCell<Vec<AbbrevAbortKernel>> = const { RefCell::new(Vec::new()) };
@@ -421,9 +485,14 @@ fn apply_sort_abbrev_converter(
     let id: AbbrevConverterId = ssup
         .abbrev_converter
         .expect("apply_sort_abbrev_converter: ssup.abbrev_converter must be set");
-    let kernel =
-        ABBREV_CONVERTERS.with(|s| s.borrow()[id.0 as usize]);
-    kernel(original, ssup)
+    let converter = ABBREV_CONVERTERS.with(|s| match &s.borrow()[id.0 as usize] {
+        AbbrevConverter::Full(k) => AbbrevConverter::Full(*k),
+        AbbrevConverter::Gist(k) => AbbrevConverter::Gist(*k),
+    });
+    match converter {
+        AbbrevConverter::Full(kernel) => kernel(original, ssup),
+        AbbrevConverter::Gist(kernel) => Ok(kernel(original)),
+    }
 }
 
 /// `ssup->abbrev_abort(memtupcount, ssup)` (sortsupport.h): poll the installed
@@ -475,6 +544,70 @@ fn install_native_comparator(ssup: &mut SortSupportData<'_>, cmp: nbtcompare::Fa
 }
 
 // ===========================================================================
+// install_gist_sortsupport_* — the substrate side of `gist_point_sortsupport`.
+//
+// Owned + installed here (declared in gist-proc-seams). `gist_point_sortsupport`
+// calls one of these with its native z-order kernels; we mint the matching
+// tokens and write them into the `ssup` fields, exactly as C's
+// `ssup->comparator = gist_bbox_zorder_cmp;` (and the abbreviated arm).
+// ===========================================================================
+
+/// Register an abbrev converter and hand back its token.
+fn register_abbrev_converter(state: AbbrevConverter) -> AbbrevConverterId {
+    ABBREV_CONVERTERS.with(|s| {
+        let mut v = s.borrow_mut();
+        let id = v.len() as u32;
+        v.push(state);
+        AbbrevConverterId(id)
+    })
+}
+
+/// Register an abbrev abort kernel and hand back its token.
+fn register_abbrev_abort(kernel: AbbrevAbortKernel) -> AbbrevAbortId {
+    ABBREV_ABORTS.with(|s| {
+        let mut v = s.borrow_mut();
+        let id = v.len() as u32;
+        v.push(kernel);
+        AbbrevAbortId(id)
+    })
+}
+
+/// `gist_bbox_zorder_abbrev_abort` (gistproc.c): always `false`. A constant the
+/// substrate supplies for the GiST abbreviated arm (the kernel reads neither
+/// argument).
+fn gist_bbox_zorder_abbrev_abort(_memtupcount: i32, _ssup: &mut SortSupportData<'_>) -> PgResult<bool> {
+    Ok(false)
+}
+
+/// `ssup->comparator = gist_bbox_zorder_cmp;` (the non-abbreviated arm of
+/// `gist_point_sortsupport`). Register the GiST box comparator and store its
+/// token in `ssup.comparator`.
+fn install_gist_comparator(ssup: &mut SortSupportData<'_>, cmp: gist_proc::GistComparator) {
+    let id = register_shim(Comparator::GistBox(cmp));
+    ssup.comparator = Some(id);
+}
+
+/// The abbreviated arm of `gist_point_sortsupport`:
+/// `ssup->comparator = ssup_datum_unsigned_cmp;`
+/// `ssup->abbrev_converter = gist_bbox_zorder_abbrev_convert;`
+/// `ssup->abbrev_abort = gist_bbox_zorder_abbrev_abort;`
+/// `ssup->abbrev_full_comparator = gist_bbox_zorder_cmp;`
+fn install_gist_abbrev(
+    ssup: &mut SortSupportData<'_>,
+    full_cmp: gist_proc::GistComparator,
+    converter: gist_proc::GistAbbrevConverter,
+) {
+    // ssup->comparator = ssup_datum_unsigned_cmp;
+    ssup.comparator = Some(register_shim(Comparator::UnsignedCmp));
+    // ssup->abbrev_converter = gist_bbox_zorder_abbrev_convert;
+    ssup.abbrev_converter = Some(register_abbrev_converter(AbbrevConverter::Gist(converter)));
+    // ssup->abbrev_abort = gist_bbox_zorder_abbrev_abort;
+    ssup.abbrev_abort = Some(register_abbrev_abort(gist_bbox_zorder_abbrev_abort));
+    // ssup->abbrev_full_comparator = gist_bbox_zorder_cmp;
+    ssup.abbrev_full_comparator = Some(register_shim(Comparator::GistBox(full_cmp)));
+}
+
+// ===========================================================================
 // Seam installation.
 // ===========================================================================
 
@@ -498,6 +631,10 @@ pub fn init_seams() {
     nbtcompare_seams::install_sortsupport_int4::set(install_native_comparator);
     nbtcompare_seams::install_sortsupport_int8::set(install_native_comparator);
     nbtcompare_seams::install_sortsupport_oid::set(install_native_comparator);
+
+    // The GiST `gist_point_sortsupport` install seams (owned by this substrate).
+    gist_proc::install_gist_sortsupport_comparator::set(install_gist_comparator);
+    gist_proc::install_gist_sortsupport_abbrev::set(install_gist_abbrev);
 }
 
 #[cfg(test)]

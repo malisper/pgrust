@@ -29,6 +29,7 @@ backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsuppo
 # (INWARD to nbtcompare) and installs the substrate-owned `install_sortsupport_*`
 # seams declared there. Seam crate only — no cycle with nbtcompare's impl.
 backend-access-nbt-compare-seams = { path = "../backend-access-nbt-compare-seams" }
+backend-access-gist-proc-seams = { path = "../backend-access-gist-proc-seams" }
 
 # outward seam crates (callees; panic until owners land)
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

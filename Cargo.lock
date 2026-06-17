@@ -1150,6 +1150,7 @@ name = "backend-access-gist-proc"
 version = "0.0.0"
 dependencies = [
  "backend-access-gist-dispatch-seams",
+ "backend-access-gist-proc-seams",
  "backend-utils-adt-geo-ops-seams",
  "backend-utils-adt-network-gist-seams",
  "mcx",
@@ -1158,6 +1159,16 @@ dependencies = [
  "types-error",
  "types-gist",
  "types-network",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gist-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
  "types-sortsupport",
  "types-tuple",
 ]
@@ -20226,6 +20237,7 @@ dependencies = [
 name = "backend-utils-sort-sortsupport"
 version = "0.0.0"
 dependencies = [
+ "backend-access-gist-proc-seams",
  "backend-access-nbt-compare-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",

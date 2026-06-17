@@ -27,6 +27,7 @@
 #![allow(non_upper_case_globals)]
 
 use backend_access_gist_dispatch_seams as dispatch;
+use backend_access_gist_proc_seams as gist_sortsupport_seams;
 use backend_utils_adt_network_gist_seams as inet_gist;
 use backend_utils_adt_geo_ops_seams as geo;
 use types_network::{inet_struct, GistInetKey};
@@ -1276,6 +1277,32 @@ pub fn gist_bbox_zorder_cmp(a: &BOX, b: &BOX) -> i32 {
     }
 }
 
+/// `gist_bbox_zorder_cmp(Datum a, Datum b, SortSupport ssup)` (gistproc.c) at
+/// the sort-engine boundary: the operands are pass-by-reference `BOX` images
+/// (`DatumGetBoxP(a)->low`), so each canonical [`Datum`] crosses as `ByRef`. We
+/// decode the `BOX` from its bytes and run the pure z-order comparison. `ssup`
+/// is unused (the kernel reads neither it nor any per-call state).
+fn gist_bbox_zorder_cmp_datum(a: Datum<'_>, b: Datum<'_>) -> i32 {
+    let a = BOX::from_datum_bytes(a.as_ref_bytes());
+    let b = BOX::from_datum_bytes(b.as_ref_bytes());
+    gist_bbox_zorder_cmp(&a, &b)
+}
+
+/// `gist_bbox_zorder_abbrev_convert(Datum original, SortSupport ssup)`
+/// (gistproc.c) — the Z-order abbreviated key of a box's low point. The
+/// `original` Datum is the pass-by-reference `BOX` image (`ByRef`); the result
+/// is the pass-by-value Z-order word.
+///
+/// C `#if SIZEOF_DATUM == 8` returns `(Datum) z` (the full 64-bit Z-order). This
+/// is the only platform target (matching the int8-by-value assumption elsewhere
+/// in the tree), so we return the full word. `ssup` is unused.
+fn gist_bbox_zorder_abbrev_convert(original: Datum<'_>) -> Datum<'static> {
+    let b = BOX::from_datum_bytes(original.as_ref_bytes());
+    let z = point_zorder_internal(b.low.x as f32, b.low.y as f32);
+    // C: `return (Datum) z;` on SIZEOF_DATUM == 8 — the unsigned word verbatim.
+    Datum::from_u64(z)
+}
+
 // ===========================================================================
 // Typed support-proc dispatch (mirrors BRIN/SP-GiST opclass-by-OID dispatch).
 //
@@ -1496,27 +1523,36 @@ fn dispatch_options<'mcx>(
 
 fn dispatch_sortsupport<'mcx>(
     proc_oid: Oid,
-    _ssup: &mut SortSupportData<'mcx>,
+    ssup: &mut SortSupportData<'mcx>,
 ) -> PgResult<()> {
     match proc_oid {
         F_GIST_POINT_SORTSUPPORT => {
-            // gist_point_sortsupport sets ssup->comparator (=
-            // gist_bbox_zorder_cmp), and the abbreviation hooks
-            // (abbrev_converter = gist_bbox_zorder_abbrev_convert,
-            // abbrev_abort, abbrev_full_comparator). The trimmed
-            // `types_sortsupport::SortSupportData` carrier has no by-pointer
-            // comparator / abbreviation fields and no install path for them,
-            // and this leg is reached only from the sorted index-build path,
-            // itself gated on `table_index_build_scan`. The z-order comparison
-            // logic itself is fully ported above (`gist_bbox_zorder_cmp` /
-            // `point_zorder_internal` / `ieee_float32_to_uint32`); only the
-            // SortSupportData install is carrier-blocked. Mirror-PG-and-panic
-            // until the carrier carries the comparator/abbrev callbacks.
-            panic!(
-                "gist_point_sortsupport: SortSupportData carrier lacks the \
-                 comparator/abbreviation callback fields (sorted GiST build is \
-                 gated on table_index_build_scan; z-order logic is ported)"
-            )
+            // gist_point_sortsupport(ssup) (gistproc.c). The `comparator` /
+            // `abbrev_*` slots are `Copy` tokens only the sort substrate mints,
+            // so each field write is delegated to a substrate-owned install seam
+            // (mirroring nbtcompare's `install_sortsupport_*` precedent). The
+            // z-order comparison / converter kernels themselves are pure and
+            // local; the substrate supplies `ssup_datum_unsigned_cmp` and the
+            // always-false `gist_bbox_zorder_abbrev_abort`.
+            if ssup.abbreviate {
+                // C:
+                //   ssup->comparator           = ssup_datum_unsigned_cmp;
+                //   ssup->abbrev_converter     = gist_bbox_zorder_abbrev_convert;
+                //   ssup->abbrev_abort         = gist_bbox_zorder_abbrev_abort;
+                //   ssup->abbrev_full_comparator = gist_bbox_zorder_cmp;
+                gist_sortsupport_seams::install_gist_sortsupport_abbrev::call(
+                    ssup,
+                    gist_bbox_zorder_cmp_datum,
+                    gist_bbox_zorder_abbrev_convert,
+                );
+            } else {
+                // C: ssup->comparator = gist_bbox_zorder_cmp;
+                gist_sortsupport_seams::install_gist_sortsupport_comparator::call(
+                    ssup,
+                    gist_bbox_zorder_cmp_datum,
+                );
+            }
+            Ok(())
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }
