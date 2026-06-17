@@ -1,0 +1,612 @@
+//! Port of `src/backend/utils/adt/array_userfuncs.c` — the SQL-callable array
+//! "user" functions (`array_append`, `array_prepend`, `array_cat`,
+//! `array_position`, `array_position_start`, `array_positions`, and the
+//! aggregate transition/final functions which live elsewhere in the crate or
+//! depend on the agg call frame).
+//!
+//! `array_userfuncs.c` is a distinct `.c` unit, but its functions operate on the
+//! same `ArrayType` byte machinery this crate already owns (construct/deconstruct,
+//! the iterator, `array_set_element`, the element-equality fmgr dispatch), so the
+//! port lives here, alongside `arrayfuncs.c`, exactly as the C build links them
+//! into the same translation set.
+//!
+//! # fmgr boundary / registration
+//!
+//! All five ported functions take/return by-reference types (`anyarray`,
+//! `anyelement`) at the fmgr boundary, so they are *body* ports — the marshalable
+//! `fc_`/`register_builtin` wrappers are not written (nothing here crosses the
+//! current value-typed fmgr boundary). `array_position`/`array_positions`
+//! additionally dispatch the element type's equality operator through the
+//! `fmgr::element_eq` seam (C `FunctionCall2Coll(typentry->eq_opr_finfo, ...)`),
+//! exactly as `array_eq`/`array_remove` already do.
+//!
+//! # STOP: `array_append` / `array_prepend` (expanded-array-infra-blocked)
+//!
+//! `array_append` and `array_prepend` are *not* ported here. Both are built on
+//! the **expanded-array** subsystem (`array_expanded.c`): they call
+//! `fetch_array_arg_replace_nulls(fcinfo, n)` → `expand_array(...)` to obtain a
+//! live, deconstructed `ExpandedArrayHeader`, then mutate it *in place* via
+//! `array_set_element(EOHPGetRWDatum(&eah->hdr), ...)` (the
+//! `VARATT_IS_EXTERNAL_EXPANDED` branch of `array_set_element`). The owned model
+//! has none of that machinery:
+//!
+//!  * no concrete `ExpandedArrayHeader` carrier (only the generic
+//!    `types_datum::ExpandedObject` flatten-only trait + the read-only
+//!    `ExpandedObjectRef` byte handle exist);
+//!  * no `EOH_init_header` + owning child `MemoryContext` model, no `EA_MAGIC`;
+//!  * no `EOHPGetRWDatum` read-write-expanded-datum constructor, and the
+//!    `Datum::Expanded(Box<dyn ExpandedObject>)` arm is a by-value flatten box,
+//!    not a live mutable handle the set path can write through;
+//!  * `element_slice::array_set_element` has no `VARATT_IS_EXTERNAL_EXPANDED`
+//!    in-place-mutate path ("expanded-array dispatch handled at the caller
+//!    boundary").
+//!
+//! This is the same wall `construct::construct_empty_expanded_array` already
+//! STOPs at. Porting `array_append`/`array_prepend` would require inventing the
+//! expanded-array carrier + RW-datum + in-place set path first — a separate
+//! expanded-object-infra keystone, not this lane. They are left out (no hollow
+//! stub) per Mirror-PG-and-panic.
+
+use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use types_array::ArrayElementDatum;
+use types_core::Oid;
+use types_datum::datum::Datum;
+use types_error::{
+    PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_UNDEFINED_FUNCTION,
+    ERROR,
+};
+
+use backend_utils_error::ereport;
+
+use crate::construct::{self, array_contains_nulls};
+use crate::foundation::{self, INT4OID};
+
+use backend_utils_adt_arrayutils_seams as arrayutils;
+use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_typcache_seams as typcache;
+use backend_utils_fmgr_fmgr_seams as fmgr;
+
+/// `format_type_be(element_type)`-style identifier for the "could not identify"
+/// error message; the real `format_type_be` lives in a not-yet-reachable owner,
+/// so the OID is reported (same convention as `ops::format_type_be`).
+fn format_type_be(element_type: Oid) -> String {
+    format!("type {element_type}")
+}
+
+/// `array_cat(v1, v2)` (array_userfuncs.c:316): concatenate two nD arrays into an
+/// nD array, or push an (n-1)D array onto the end of an nD array. NOT strict —
+/// a NULL input returns the other input.
+///
+/// The C function takes/returns by-reference `anyarray`, so this is a body port:
+/// the inputs are the canonical flat array byte buffers, `None` modeling the C
+/// `PG_ARGISNULL`. The byte layout of the result mirrors C field-for-field
+/// (`SET_VARSIZE`, `ndim`/`dataoffset`/`elemtype`, `ARR_DIMS`/`ARR_LBOUND`, the
+/// two data areas concatenated, and the null bitmap copied via
+/// `array_bitmap_copy`).
+pub fn array_cat<'mcx>(
+    mcx: Mcx<'mcx>,
+    v1: Option<&[u8]>,
+    v2: Option<&[u8]>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    // Concatenating a null array is a no-op, just return the other input.
+    let (v1, v2) = match (v1, v2) {
+        (None, None) => return Ok(None),                 // PG_RETURN_NULL()
+        (None, Some(v2)) => return Ok(Some(mcx::slice_in(mcx, v2)?)),
+        (Some(v1), None) => return Ok(Some(mcx::slice_in(mcx, v1)?)),
+        (Some(v1), Some(v2)) => (v1, v2),
+    };
+
+    let element_type1 = foundation::arr_elemtype(v1);
+    let element_type2 = foundation::arr_elemtype(v2);
+
+    // Check we have matching element types.
+    if element_type1 != element_type2 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("cannot concatenate incompatible arrays")
+            .errdetail(format!(
+                "Arrays with element types {} and {} are not compatible for concatenation.",
+                format_type_be(element_type1),
+                format_type_be(element_type2)
+            ))
+            .into_error());
+    }
+
+    // OK, use it.
+    let element_type = element_type1;
+
+    let ndims1 = foundation::arr_ndim(v1);
+    let ndims2 = foundation::arr_ndim(v2);
+
+    // short circuit - if one input array is empty, and the other is not, we
+    // return the non-empty one as the result; if both are empty, return the
+    // first one.
+    if ndims1 == 0 && ndims2 > 0 {
+        return Ok(Some(mcx::slice_in(mcx, v2)?));
+    }
+    if ndims2 == 0 {
+        return Ok(Some(mcx::slice_in(mcx, v1)?));
+    }
+
+    // the rest fall under rule 3, 4, or 5.
+    if ndims1 != ndims2 && ndims1 != ndims2 - 1 && ndims1 != ndims2 + 1 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            .errmsg("cannot concatenate incompatible arrays")
+            .errdetail(format!(
+                "Arrays of {ndims1} and {ndims2} dimensions are not compatible for concatenation."
+            ))
+            .into_error());
+    }
+
+    // get argument array details
+    let nitems1 = arrayutils::array_get_n_items::call(ndims1, &dims_slice(mcx, v1)?)?;
+    let nitems2 = arrayutils::array_get_n_items::call(ndims2, &dims_slice(mcx, v2)?)?;
+    let ndatabytes1 = foundation::arr_size(v1) - foundation::arr_data_offset(v1);
+    let ndatabytes2 = foundation::arr_size(v2) - foundation::arr_data_offset(v2);
+
+    let ndims: i32;
+    let mut dims: PgVec<'mcx, i32>;
+    let mut lbs: PgVec<'mcx, i32>;
+
+    if ndims1 == ndims2 {
+        // resulting array is made up of the elements (possibly arrays
+        // themselves) of the input argument arrays
+        ndims = ndims1;
+        dims = vec_with_capacity_in(mcx, ndims as usize)?;
+        lbs = vec_with_capacity_in(mcx, ndims as usize)?;
+
+        dims.push(foundation::arr_dim(v1, 0) + foundation::arr_dim(v2, 0));
+        lbs.push(foundation::arr_lbound(v1, 0));
+
+        for i in 1..ndims as usize {
+            if foundation::arr_dim(v1, i) != foundation::arr_dim(v2, i)
+                || foundation::arr_lbound(v1, i) != foundation::arr_lbound(v2, i)
+            {
+                return Err(incompatible_dims_err());
+            }
+            dims.push(foundation::arr_dim(v1, i));
+            lbs.push(foundation::arr_lbound(v1, i));
+        }
+    } else if ndims1 == ndims2 - 1 {
+        // resulting array has the second argument as the outer array, with the
+        // first argument inserted at the front of the outer dimension
+        ndims = ndims2;
+        dims = foundation::arr_dims(mcx, v2)?;
+        lbs = foundation::arr_lbounds(mcx, v2)?;
+
+        // increment number of elements in outer array
+        dims[0] += 1;
+
+        // make sure the added element matches our existing elements
+        for i in 0..ndims1 as usize {
+            if foundation::arr_dim(v1, i) != dims[i + 1] || foundation::arr_lbound(v1, i) != lbs[i + 1]
+            {
+                return Err(incompatible_dims_err());
+            }
+        }
+    } else {
+        // (ndims1 == ndims2 + 1)
+        //
+        // resulting array has the first argument as the outer array, with the
+        // second argument appended to the end of the outer dimension
+        ndims = ndims1;
+        dims = foundation::arr_dims(mcx, v1)?;
+        lbs = foundation::arr_lbounds(mcx, v1)?;
+
+        // increment number of elements in outer array
+        dims[0] += 1;
+
+        // make sure the added element matches our existing elements
+        for i in 0..ndims2 as usize {
+            if foundation::arr_dim(v2, i) != dims[i + 1] || foundation::arr_lbound(v2, i) != lbs[i + 1]
+            {
+                return Err(incompatible_dims_err());
+            }
+        }
+    }
+
+    // Do this mainly for overflow checking
+    let nitems = arrayutils::array_get_n_items::call(ndims, &dims)?;
+    arrayutils::array_check_bounds::call(ndims, &dims, &lbs)?;
+
+    // build the result array
+    let ndatabytes = ndatabytes1 + ndatabytes2;
+    let dataoffset: i32;
+    let nbytes: usize;
+    if foundation::arr_hasnull(v1) || foundation::arr_hasnull(v2) {
+        dataoffset = foundation::arr_overhead_withnulls(ndims, nitems) as i32;
+        nbytes = ndatabytes + dataoffset as usize;
+    } else {
+        dataoffset = 0; // marker for no null bitmap
+        nbytes = ndatabytes + foundation::arr_overhead_nonulls(ndims);
+    }
+
+    let mut result = vec_with_capacity_in::<u8>(mcx, nbytes)?;
+    result.resize(nbytes, 0); // palloc0
+    foundation::set_header(&mut result, nbytes, ndims, dataoffset, element_type);
+    foundation::write_dims(&mut result, &dims[..ndims as usize]);
+    foundation::write_lbounds(&mut result, ndims, &lbs[..ndims as usize]);
+
+    // data area is arg1 then arg2.
+    let dst_data = foundation::arr_data_offset(&result);
+    let src1 = foundation::arr_data_offset(v1);
+    let src2 = foundation::arr_data_offset(v2);
+    result[dst_data..dst_data + ndatabytes1].copy_from_slice(&v1[src1..src1 + ndatabytes1]);
+    result[dst_data + ndatabytes1..dst_data + ndatabytes1 + ndatabytes2]
+        .copy_from_slice(&v2[src2..src2 + ndatabytes2]);
+
+    // handle the null bitmap if needed.
+    if foundation::arr_hasnull(&result) {
+        let dest_bm = foundation::arr_nullbitmap_off(&result).expect("result has null bitmap");
+        foundation::array_bitmap_copy(
+            &mut result,
+            dest_bm,
+            0,
+            v1,
+            foundation::arr_nullbitmap_off(v1),
+            0,
+            nitems1,
+        );
+        // The second copy reads from v2 into result; do it as a separate call.
+        foundation::array_bitmap_copy(
+            &mut result,
+            dest_bm,
+            nitems1,
+            v2,
+            foundation::arr_nullbitmap_off(v2),
+            0,
+            nitems2,
+        );
+    }
+
+    Ok(Some(result))
+}
+
+/// `errdetail("Arrays with differing ... dimensions ...")` for `array_cat`.
+fn incompatible_dims_err() -> types_error::PgError {
+    ereport(ERROR)
+        .errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        .errmsg("cannot concatenate incompatible arrays")
+        .errdetail("Arrays with differing element dimensions are not compatible for concatenation.")
+        .into_error()
+}
+
+/// Helper: `ARR_DIMS(a)` as an `&[i32]`-able owned vector (for the seam).
+fn dims_slice<'mcx>(mcx: Mcx<'mcx>, a: &[u8]) -> PgResult<PgVec<'mcx, i32>> {
+    foundation::arr_dims(mcx, a)
+}
+
+/// `makeArrayResult(astate, rcontext)` (arrayfuncs.c) — a one-dimensional array
+/// of the accumulated elements (`ndims = nelems>0 ? 1 : 0`, `dims[0] = nelems`,
+/// `lbs[0] = 1`). Mirrors the private `construct::make_array_result` via the
+/// public `make_md_array_result`.
+fn make_array_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: &types_datum::array_build::ArrayBuildState,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let ndims = if astate.nelems > 0 { 1 } else { 0 };
+    let dims = [astate.nelems];
+    let lbs = [1];
+    construct::make_md_array_result(mcx, astate, ndims, &dims, &lbs)
+}
+
+/// `array_position_common(fcinfo)` (array_userfuncs.c:1320): the shared engine
+/// for `array_position` and `array_position_start`. Returns the 1-based position
+/// of the first element equal to `searched_element` (or matching NULL when
+/// `searched_element` is NULL), or `None` (C `PG_RETURN_NULL`).
+///
+/// `array` is the by-reference `anyarray` input (`None` = `PG_ARGISNULL(0)`).
+/// `searched_element` is the `anyelement` to find, modeled as the canonical
+/// [`ArrayElementDatum`] when present and `None` for the C null-search case.
+/// `start` is the optional `array_position_start` third argument.
+///
+/// `collation` is the C `PG_GET_COLLATION()` threaded in (the body cannot read
+/// the fcinfo). The element equality dispatch is the
+/// `lookup_type_cache(TYPECACHE_EQ_OPR_FINFO)` + `FunctionCall2Coll` pair, reached
+/// through `typcache::lookup_element_eq_opr` + `fmgr::element_eq` exactly as
+/// `array_eq` / `array_remove` do.
+fn array_position_common(
+    mcx: Mcx<'_>,
+    array: Option<&[u8]>,
+    searched_element: Option<ArrayElementDatum<'_>>,
+    start: Option<i32>,
+    collation: Oid,
+) -> PgResult<Option<i32>> {
+    // if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    let array = match array {
+        None => return Ok(None),
+        Some(a) => a,
+    };
+
+    // We refuse to search for elements in multi-dimensional arrays.
+    if foundation::arr_ndim(array) > 1 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("searching for elements in multidimensional arrays is not supported")
+            .into_error());
+    }
+
+    // Searching in an empty array is well-defined, though: it always fails.
+    if foundation::arr_ndim(array) < 1 {
+        return Ok(None);
+    }
+
+    // PG_ARGISNULL(1) handling.
+    let null_search = match &searched_element {
+        None => {
+            // fast return when the array doesn't have nulls
+            if !array_contains_nulls(array) {
+                return Ok(None);
+            }
+            true
+        }
+        Some(_) => false,
+    };
+
+    let element_type = foundation::arr_elemtype(array);
+    let mut position = foundation::arr_lbound(array, 0) - 1;
+
+    // figure out where to start (array_position_start passes a 3rd arg, which
+    // must not be NULL).
+    let position_min = match start {
+        Some(p) => p,
+        None => foundation::arr_lbound(array, 0),
+    };
+    // (For array_position_start the C code raises if PG_ARGISNULL(2); the
+    // caller wrapper enforces a non-null `start`, so a NULL there is reported
+    // by passing `start = None` to array_position, not by this function.)
+    let _ = ERRCODE_NULL_VALUE_NOT_ALLOWED;
+
+    // Resolve the element type's equality operator and storage triple, once.
+    let s = lsyscache::get_typlenbyvalalign::call(element_type)?;
+    let typlen = s.typlen as i32;
+    let typbyval = s.typbyval;
+    let typalign = s.typalign as u8;
+
+    let eq_opr = typcache::lookup_element_eq_opr::call(element_type)?;
+    if eq_opr == 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "could not identify an equality operator for type {}",
+                format_type_be(element_type)
+            ))
+            .into_error());
+    }
+
+    // Examine each array element until we find a match. C drives this with
+    // array_create_iterator + array_iterate; for a one-dimensional array (the
+    // only shape allowed here) that is an element-by-element walk, which we do
+    // directly so each by-reference element keeps its on-disk byte window for
+    // the equality probe (the iterator's scalar arm hands back a bare fetch_att
+    // offset). This is exactly the scan array_remove/array_replace_internal use.
+    let nitems = arrayutils::array_get_n_items::call(1, &[foundation::arr_dim(array, 0)])?;
+    let bitmap = foundation::arr_nullbitmap_off(array);
+    let mut dataptr = foundation::arr_data_ptr_off(array);
+
+    let mut found = false;
+    for i in 0..nitems {
+        position += 1;
+
+        let isnull = foundation::array_get_isnull(array, bitmap, i);
+
+        // Advance the data pointer past this element (only for non-nulls, as in
+        // the C iterator).
+        let value_window: Option<&[u8]> = if isnull {
+            None
+        } else {
+            let off = dataptr;
+            let after = foundation::att_addlength_pointer(off, typlen, array, off);
+            let window: &[u8] = &array[off..after];
+            dataptr = foundation::att_align_nominal(after, typalign);
+            Some(window)
+        };
+
+        // skip initial elements if caller requested so
+        if position < position_min {
+            continue;
+        }
+
+        // Can't look at the array element's value if it's null; but if we
+        // search for null, we have a hit and are done.
+        if isnull || null_search {
+            if isnull && null_search {
+                found = true;
+                break;
+            } else {
+                continue;
+            }
+        }
+
+        // not nulls, so run the operator
+        let elt2: ArrayElementDatum<'_> = if typbyval {
+            ArrayElementDatum::ByValue(foundation::fetch_att(
+                array,
+                dataptr_back(value_window, array),
+                typbyval,
+                typlen,
+            ))
+        } else {
+            ArrayElementDatum::ByRef(value_window.unwrap())
+        };
+        // searched_element is Some here (null_search == false).
+        let arg0 = searched_element.unwrap();
+        if fmgr::element_eq::call(eq_opr, collation, arg0, elt2)? {
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Ok(None);
+    }
+    let _ = mcx;
+    Ok(Some(position))
+}
+
+/// Recover the by-value element's `fetch_att` offset from its byte window: for a
+/// by-value element the window starts at the element bytes, and `fetch_att`
+/// reads the by-value word from that offset.
+fn dataptr_back(window: Option<&[u8]>, array: &[u8]) -> usize {
+    // window is a sub-slice of `array`; its offset is its start within `array`.
+    match window {
+        Some(w) => {
+            // SAFETY-free pointer arithmetic on slices: the window is &array[off..],
+            // so off = w.as_ptr() - array.as_ptr().
+            (w.as_ptr() as usize) - (array.as_ptr() as usize)
+        }
+        None => 0,
+    }
+}
+
+/// `array_position(array, element)` (array_userfuncs.c:1301). NOT strict.
+pub fn array_position(
+    mcx: Mcx<'_>,
+    array: Option<&[u8]>,
+    searched_element: Option<ArrayElementDatum<'_>>,
+    collation: Oid,
+) -> PgResult<Option<i32>> {
+    array_position_common(mcx, array, searched_element, None, collation)
+}
+
+/// `array_position_start(array, element, start)` (array_userfuncs.c:1306). NOT
+/// strict; `start` (the 3rd argument) must not be NULL.
+pub fn array_position_start(
+    mcx: Mcx<'_>,
+    array: Option<&[u8]>,
+    searched_element: Option<ArrayElementDatum<'_>>,
+    start: Option<i32>,
+    collation: Oid,
+) -> PgResult<Option<i32>> {
+    // if (PG_ARGISNULL(2)) ereport(ERROR, ... "initial position must not be null")
+    // — only reachable when the array arg itself is non-null (C evaluates this
+    // inside array_position_common after the PG_ARGISNULL(0) early-out).
+    if array.is_some() && foundation::arr_ndim(array.unwrap()) >= 1 && start.is_none() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+            .errmsg("initial position must not be null")
+            .into_error());
+    }
+    array_position_common(mcx, array, searched_element, start, collation)
+}
+
+/// `array_positions(array, element)` (array_userfuncs.c:1475): an int4 array of
+/// the 1-based positions of every element equal to `searched_element` (IS NOT
+/// DISTINCT FROM semantics). Returns `None` when the input array is NULL, and an
+/// empty int4 array when the value is not found. NOT strict.
+///
+/// Returns the result as the flat int4-array byte buffer (the C
+/// `makeArrayResult(astate, ...)`); a body port (`anyarray` arg, `int[]` result).
+pub fn array_positions<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: Option<&[u8]>,
+    searched_element: Option<ArrayElementDatum<'_>>,
+    collation: Oid,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    // if (PG_ARGISNULL(0)) PG_RETURN_NULL();
+    let array = match array {
+        None => return Ok(None),
+        Some(a) => a,
+    };
+
+    // We refuse to search for elements in multi-dimensional arrays.
+    if foundation::arr_ndim(array) > 1 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("searching for elements in multidimensional arrays is not supported")
+            .into_error());
+    }
+
+    // astate = initArrayResult(INT4OID, CurrentMemoryContext, false);
+    let mut astate = Some(construct::init_array_result(INT4OID, false)?);
+
+    // Searching in an empty array is well-defined, though: it always fails.
+    if foundation::arr_ndim(array) < 1 {
+        return Ok(Some(make_array_result(mcx, &astate.take().unwrap())?));
+    }
+
+    // PG_ARGISNULL(1) handling.
+    let null_search = match &searched_element {
+        None => {
+            if !array_contains_nulls(array) {
+                return Ok(Some(make_array_result(mcx, &astate.take().unwrap())?));
+            }
+            true
+        }
+        Some(_) => false,
+    };
+
+    let element_type = foundation::arr_elemtype(array);
+    let mut position = foundation::arr_lbound(array, 0) - 1;
+
+    let s = lsyscache::get_typlenbyvalalign::call(element_type)?;
+    let typlen = s.typlen as i32;
+    let typbyval = s.typbyval;
+    let typalign = s.typalign as u8;
+
+    let eq_opr = typcache::lookup_element_eq_opr::call(element_type)?;
+    if eq_opr == 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "could not identify an equality operator for type {}",
+                format_type_be(element_type)
+            ))
+            .into_error());
+    }
+
+    // Examine each array element (one-dimensional walk, as in array_position).
+    let nitems = arrayutils::array_get_n_items::call(1, &[foundation::arr_dim(array, 0)])?;
+    let bitmap = foundation::arr_nullbitmap_off(array);
+    let mut dataptr = foundation::arr_data_ptr_off(array);
+
+    for i in 0..nitems {
+        position += 1;
+
+        let isnull = foundation::array_get_isnull(array, bitmap, i);
+
+        let value_window: Option<&[u8]> = if isnull {
+            None
+        } else {
+            let off = dataptr;
+            let after = foundation::att_addlength_pointer(off, typlen, array, off);
+            let window: &[u8] = &array[off..after];
+            dataptr = foundation::att_align_nominal(after, typalign);
+            Some(window)
+        };
+
+        // Can't look at the array element's value if it's null; but if we
+        // search for null, we have a hit.
+        let matched = if isnull || null_search {
+            isnull && null_search
+        } else {
+            let elt2: ArrayElementDatum<'_> = if typbyval {
+                ArrayElementDatum::ByValue(foundation::fetch_att(
+                    array,
+                    dataptr_back(value_window, array),
+                    typbyval,
+                    typlen,
+                ))
+            } else {
+                ArrayElementDatum::ByRef(value_window.unwrap())
+            };
+            let arg0 = searched_element.unwrap();
+            fmgr::element_eq::call(eq_opr, collation, arg0, elt2)?
+        };
+
+        if matched {
+            // accumArrayResult(astate, Int32GetDatum(position), false, INT4OID, ...)
+            astate = Some(construct::accum_array_result(
+                mcx,
+                astate.take(),
+                Datum::from_usize(position as u32 as usize),
+                false,
+                INT4OID,
+            )?);
+        }
+    }
+
+    Ok(Some(make_array_result(mcx, &astate.take().unwrap())?))
+}
