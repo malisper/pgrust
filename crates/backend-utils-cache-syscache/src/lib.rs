@@ -889,6 +889,7 @@ pub fn init_seams() {
         projections::lookup_enum_by_typoid_name,
     );
     backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
+    backend_utils_cache_syscache_seams::search_am_handler::set(projections::search_am_handler);
     backend_utils_cache_syscache_seams::search_rewrite_oid::set(projections::search_rewrite_oid);
     backend_utils_cache_syscache_seams::search_relation_reloftype::set(projections::search_relation_reloftype);
     backend_utils_cache_syscache_seams::cast_by_source_target::set(projections::cast_by_source_target);

@@ -17,7 +17,7 @@ use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCache3,
     SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
-    SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
+    SysCacheGetAttrNotNull, AGGFNOID, AMOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
@@ -208,6 +208,26 @@ pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let relam = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?;
     ReleaseSysCache(tup);
     Ok(Some(relam))
+}
+
+/// `SearchSysCache1(AMOID, ObjectIdGetDatum(amoid))` + `GETSTRUCT(Form_pg_am)
+/// ->amhandler` (amapi.c `GetIndexAmRoutineByAmId` / `GetTableAmRoutineByAmId`):
+/// the access method's handler-function OID. `Ok(None)` on a cache miss
+/// (`!HeapTupleIsValid`); the caller raises `cache lookup failed for access
+/// method %u`. The projection is by-value, so the tuple copy lives in a scratch
+/// context dropped before returning.
+pub(crate) fn search_am_handler(amoid: Oid) -> PgResult<Option<Oid>> {
+    // Anum_pg_am_amhandler (pg_am.h): the `regproc amhandler` column, attno 3.
+    const ANUM_PG_AM_AMHANDLER: i32 = 3;
+    let scratch = MemoryContext::new("syscache am handler projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, AMOID, SysCacheKey::Value(KeyDatum::from_oid(amoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let amhandler = getattr_oid(mcx, AMOID, &tup, ANUM_PG_AM_AMHANDLER)?;
+    ReleaseSysCache(tup);
+    Ok(Some(amhandler))
 }
 
 /// `SearchSysCache2(RULERELNAME, ObjectIdGetDatum(relid),

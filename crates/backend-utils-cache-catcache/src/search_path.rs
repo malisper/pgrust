@@ -36,6 +36,7 @@ use crate::core_compute::{
 use crate::graph_machinery::{self, ct_bucket_move_head, CatCacheRemoveCTup};
 use crate::{find_cache_by_id, with_arena};
 use crate::init_meta;
+use crate::list_path;
 
 /* ----------------------------------------------------------------------------
  * Substrate seams the single-search path calls out to.
@@ -571,4 +572,166 @@ pub(crate) fn reuse_or_create_entry(
             .refcount += 1;
         Ok(ct_idx)
     })
+}
+
+/* ----------------------------------------------------------------------------
+ * Substrate seam bodies — `SearchCatCacheMiss`'s catalog scan + the cached-tuple
+ * copy + the by-reference search-key reconstitution. These are the genam /
+ * heaptuple / relcache-facing halves the catcache crate declares (above) and
+ * installs from `wiring::init_seams` (it depends on genam-seams, the relcache
+ * seams, and the real heaptuple crate, so the scan path closes here without a
+ * dependency cycle: neither genam nor heaptuple depends back on the catcache).
+ * ------------------------------------------------------------------------- */
+
+/// `catcache_scan_single` — `SearchCatCacheMiss`'s catalog scan
+/// (`catcache.c`): `table_open(cache->cc_reloid, AccessShareLock)` +
+/// `systable_beginscan(cache->cc_indexoid, IndexScanOK(cache), nkeys, cur_skey)`
+/// + the `systable_getnext` loop (`break` after the first match — a single-tuple
+/// cache has at most one) + `heap_copytuple`/detoast/flatten + key extraction,
+/// returning the matched tuple as a [`FetchedCatalogTuple`].
+///
+/// The C `do { ... } while (stale)` retry (a tuple going stale during
+/// `CatalogCacheCreateEntry`'s detoast) is folded into this seam: the relcache
+/// scan returns the flattened tuple eagerly, so the carrier the catcache caches
+/// is already a consistent post-detoast image and no second scan is needed.
+fn catcache_scan_single_impl(
+    cache_id: i32,
+    nkeys: i32,
+    arguments: [ScalarWord; 4],
+) -> PgResult<alloc::vec::Vec<FetchedCatalogTuple>> {
+    use types_cache::backend_utils_cache_catcache::CATCACHE_MAXKEYS;
+    // The canonical by-value Datum the keystone-owned `ScanKeyData.sk_argument`
+    // carries (the per-search scalar word crosses into its by-value arm).
+    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+    use backend_access_index_genam_seams as genam;
+
+    let cache_idx = with_arena(|arena| {
+        find_cache_by_id(arena, cache_id).expect("catcache_scan_single: unknown cache id")
+    });
+
+    // Read the per-cache scan inputs (reloid, indexoid, scankey template) out of
+    // the arena up front. Phase-2 init has already populated cc_skey for all
+    // cc_nkeys (the caller ran CatalogCacheInitializeCache before this).
+    let (cc_reloid, cc_indexoid, mut cur_skey) = with_arena(|arena| {
+        let cache = &arena.caches[cache_idx.0];
+        (cache.cc_reloid, cache.cc_indexoid, skey_template(cache))
+    });
+
+    // The catalog scan + its result tuples live in a scratch context (C's
+    // CurrentMemoryContext during the scan); the bytes we keep are copied into
+    // owned `FetchedCatalogTuple`s, so the scratch is dropped when the scan ends.
+    let scratch = mcx::MemoryContext::new("SearchCatCacheMiss scan");
+    let scan_mcx = scratch.mcx();
+
+    // relation = table_open(cache->cc_reloid, AccessShareLock);
+    // The catalog must be locked (AccessShareLock) before the scan: genam's
+    // systable_beginscan re-opens the heap relation with NoLock, asserting the
+    // caller already holds the lock (the C `table_open(cc_reloid, AccessShareLock)`).
+    let relation = backend_access_common_relation::relation_open(
+        scan_mcx,
+        cc_reloid,
+        types_storage::lock::AccessShareLock,
+    )?;
+
+    // memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * nkeys);
+    // cur_skey[0..nkeys].sk_argument = v1..vN;
+    for i in 0..(nkeys as usize) {
+        cur_skey[i].sk_argument = DatumV::ByVal(arguments[i].as_usize());
+    }
+
+    // scandesc = systable_beginscan(relation, cache->cc_indexoid,
+    //                               IndexScanOK(cache), NULL, nkeys, cur_skey);
+    let index_ok = init_meta::IndexScanOK(cache_id)?;
+    let mut guard = genam::systable_beginscan::call(
+        &relation,
+        cc_indexoid,
+        index_ok,
+        None,
+        &cur_skey[..nkeys as usize],
+    )?;
+
+    // while (HeapTupleIsValid(ntp = systable_getnext(scandesc))) { ...; break; }
+    // — a single-tuple cache assumes only one match, so we stop after the first.
+    let mut out: alloc::vec::Vec<FetchedCatalogTuple> = alloc::vec::Vec::new();
+    if let Some(ntp) = genam::systable_getnext::call(scan_mcx, guard.desc_mut())? {
+        let fetched = list_path::build_fetched(scan_mcx, cache_idx, &ntp)?;
+        out.push(fetched);
+        // break; /* assume only one match */
+    }
+
+    // systable_endscan(scandesc); table_close(relation, AccessShareLock);
+    guard.end()?;
+    relation.close(types_storage::lock::AccessShareLock)?;
+
+    let _ = CATCACHE_MAXKEYS;
+    Ok(out)
+}
+
+/// `catcache_form_cached_tuple` — `heap_copytuple(&ct->tuple)` into `mcx`: decode
+/// the cached tuple's full on-disk byte image (header + null bitmap + pad + user
+/// data, the bytes [`list_path::build_fetched`] stored) back into an owned
+/// [`FormedTuple`], preserving the source tuple's `t_self`/`t_tableOid`.
+fn catcache_form_cached_tuple_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    t_len: u32,
+    t_self: ItemPointer,
+    t_tableoid: Oid,
+    t_data: &[u8],
+) -> PgResult<FormedTuple<'mcx>> {
+    let ip = types_tuple::heaptuple::ItemPointerData {
+        ip_blkid: types_tuple::heaptuple::BlockIdData::new(t_self.block),
+        ip_posid: t_self.offset,
+    };
+    backend_access_common_heaptuple::heap_copytuple_from_disk_image(
+        mcx, t_len, ip, t_tableoid, t_data,
+    )
+}
+
+/// `catcache_byref_key_datum` — reconstitute the search-key word for a
+/// by-reference key (`name`/`text`/`oidvector`) from its on-disk bytes.
+///
+/// In C the search key already arrives as a pointer-bearing `Datum` into the
+/// caller's payload. The canonical owned model carries keys as bare machine
+/// words ([`ScalarWord`] = `types_datum::Datum`, a `usize`), which cannot hold a
+/// payload pointer; the by-reference comparison/hash core re-resolves the key
+/// from the cached tuple bytes (see `core_compute`'s `Name`/`Text`/`OidVector`
+/// fast functions), so the carried word is the by-reference placeholder the
+/// owned model uses uniformly (matching `list_path`'s `key_datum` and
+/// `build_fetched`). The bytes are consumed only to assert a non-spurious call.
+fn catcache_byref_key_datum_impl(bytes: &[u8]) -> ScalarWord {
+    let _ = bytes;
+    ScalarWord::null()
+}
+
+/// `memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey))` — the scankey template
+/// the scan stamps its per-search arguments into (the `cc_skey` slots are all
+/// populated by phase-2 init by the time a miss scans). `sk_argument` is reset
+/// to a fresh by-value NULL (immediately overwritten by the stamping loop),
+/// which decouples the returned key's `'mcx` from the borrowed cache.
+fn skey_template(
+    cache: &types_cache::backend_utils_cache_catcache::ArenaCatCache,
+) -> [types_scan::scankey::ScanKeyData<'static>;
+    types_cache::backend_utils_cache_catcache::CATCACHE_MAXKEYS] {
+    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+    core::array::from_fn(|i| match &cache.cc_skey[i] {
+        Some(k) => types_scan::scankey::ScanKeyData {
+            sk_flags: k.sk_flags,
+            sk_attno: k.sk_attno,
+            sk_strategy: k.sk_strategy,
+            sk_subtype: k.sk_subtype,
+            sk_collation: k.sk_collation,
+            sk_func: k.sk_func.clone(),
+            sk_argument: DatumV::null(),
+            sk_subkeys: None,
+        },
+        None => types_scan::scankey::ScanKeyData::empty(),
+    })
+}
+
+/// Install the three substrate seams the catcache miss path calls (declared
+/// above). Called from [`crate::wiring::init_seams`].
+pub(crate) fn install_substrate_seams() {
+    catcache_scan_single::set(catcache_scan_single_impl);
+    catcache_form_cached_tuple::set(catcache_form_cached_tuple_impl);
+    catcache_byref_key_datum::set(catcache_byref_key_datum_impl);
 }

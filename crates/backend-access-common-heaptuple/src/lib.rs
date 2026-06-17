@@ -2213,6 +2213,116 @@ pub fn heap_tuple_to_disk_image<'mcx>(
     Ok(img)
 }
 
+/// `heap_copytuple` reading from a contiguous on-disk heap-tuple byte image —
+/// the inverse of [`heap_tuple_to_disk_image`] for the `THeap` (on-page) union
+/// arm. Decodes the fixed 23-byte header (`t_xmin`/`t_xmax`/`t_field3`/`t_ctid`/
+/// `t_infomask2`/`t_infomask`/`t_hoff`), the optional `t_bits` null bitmap, and
+/// the post-`t_hoff` user-data column area into an owned [`FormedTuple`]
+/// allocated in `mcx`.
+///
+/// Unlike [`DatumGetHeapTupleHeader`] (which reads a *composite Datum* image —
+/// the `TDatum` arm, with no page identity), this preserves the on-page
+/// `t_self`/`t_tableOid`/`t_len` the caller carries alongside the image (a
+/// catcache entry remembers the source tuple's page identity, the C
+/// `ct->tuple.t_self`/`t_tableOid` set from `dtp->t_self`/`t_tableOid`). It is
+/// the owned-model realisation of `SearchCatCacheMiss`/`CatalogCacheCreateEntry`
+/// rebuilding `&ct->tuple` (`heap_copytuple` of the cached `dtp`).
+///
+/// `Err` is a structurally corrupt image (length / `t_hoff` bounds / bitmap
+/// overrun), surfaced loud rather than fabricated.
+pub fn heap_copytuple_from_disk_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    t_len: u32,
+    t_self: ItemPointerData,
+    t_tableoid: Oid,
+    image: &[u8],
+) -> PgResult<FormedTuple<'mcx>> {
+    if image.len() < SizeofHeapTupleHeader {
+        return Err(PgError::error(
+            "heap_copytuple_from_disk_image: image shorter than HeapTupleHeader",
+        ));
+    }
+
+    let u32_at = |o: usize| u32::from_ne_bytes([image[o], image[o + 1], image[o + 2], image[o + 3]]);
+    let u16_at = |o: usize| u16::from_ne_bytes([image[o], image[o + 1]]);
+
+    // --- t_choice (12 bytes): an on-page heap tuple carries the THeap arm ---
+    let t_xmin = u32_at(0);
+    let t_xmax = u32_at(4);
+    let field3_raw = u32_at(8);
+
+    // --- t_ctid (6 bytes) --- carried verbatim from the image.
+    let t_ctid = ItemPointerData {
+        ip_blkid: BlockIdData {
+            bi_hi: u16_at(12),
+            bi_lo: u16_at(14),
+        },
+        ip_posid: u16_at(16),
+    };
+
+    // --- t_infomask2(2) t_infomask(2) t_hoff(1) ---
+    let t_infomask2 = u16_at(18);
+    let t_infomask = u16_at(20);
+    let t_hoff = image[22];
+    let t_hoff_usize = t_hoff as usize;
+
+    if t_hoff_usize < SizeofHeapTupleHeader || t_hoff_usize > image.len() {
+        return Err(PgError::error(
+            "heap_copytuple_from_disk_image: t_hoff out of bounds",
+        ));
+    }
+
+    // `t_field3` is `TXvac` only when HEAP_MOVED is set (the C union accessor).
+    let t_field3 = if (t_infomask & types_tuple::heaptuple::HEAP_MOVED) != 0 {
+        HeapTupleField3::TXvac(field3_raw)
+    } else {
+        HeapTupleField3::TCid(field3_raw)
+    };
+
+    // --- t_bits (null bitmap), present iff HEAP_HASNULL ---
+    let t_bits: PgVec<'mcx, bits8> = if (t_infomask & HEAP_HASNULL) != 0 {
+        let natts = t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK;
+        let bitmap_len = BITMAPLEN(natts as i32) as usize;
+        if SizeofHeapTupleHeader + bitmap_len > t_hoff_usize {
+            return Err(PgError::error(
+                "heap_copytuple_from_disk_image: null bitmap overruns t_hoff",
+            ));
+        }
+        slice_in(
+            mcx,
+            &image[SizeofHeapTupleHeader..SizeofHeapTupleHeader + bitmap_len],
+        )?
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    let header = HeapTupleHeaderData {
+        t_choice: HeapTupleHeaderChoice::THeap(HeapTupleFields {
+            t_xmin,
+            t_xmax,
+            t_field3,
+        }),
+        t_ctid,
+        t_infomask2,
+        t_infomask,
+        t_hoff,
+        t_bits,
+    };
+
+    Ok(FormedTuple {
+        tuple: alloc_in(
+            mcx,
+            HeapTupleData {
+                t_len,
+                t_self,
+                t_tableOid: t_tableoid,
+                t_data: Some(alloc_in(mcx, header)?),
+            },
+        )?,
+        data: slice_in(mcx, &image[t_hoff_usize..])?,
+    })
+}
+
 // ===========================================================================
 // The composite/record-Datum carrier bridge (task #161):
 // FormedTuple <-> composite Datum (a varlena-wrapped HeapTupleHeader image).

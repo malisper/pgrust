@@ -38,6 +38,14 @@ pub fn init_seams() {
 
     // inval support
     seams::prepare_to_invalidate_cache_tuple::set(inval_support::prepare_to_invalidate_cache_tuple);
+
+    // The genam/heaptuple/relcache-facing substrate seams the miss path calls
+    // (`SearchCatCacheMiss`'s catalog scan, the cached-tuple `heap_copytuple`,
+    // and the by-reference search-key reconstitution). Declared in `search_path`
+    // and installed here — the catcache crate depends on genam-seams + the
+    // relcache seams + the real heaptuple crate, none of which depend back on
+    // it, so the scan path closes without a dependency cycle.
+    search_path::install_substrate_seams();
 }
 
 /// `SysCacheInvalidate(cacheId, hashValue)` — the catcache arm of

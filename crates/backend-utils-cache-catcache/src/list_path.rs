@@ -580,7 +580,7 @@ fn scan_members(
 /// columns via the cache's tupdesc (`cc_tupdesc`) and `cc_keyno`. This is the
 /// owned-model expression of the C inline `CatalogCacheComputeTupleHashValue`
 /// key extraction the single-search and list-search paths share.
-fn build_fetched(
+pub(crate) fn build_fetched(
     scan_mcx: Mcx<'_>,
     cache_idx: CacheIdx,
     ntp: &FormedTuple<'_>,
@@ -592,7 +592,16 @@ fn build_fetched(
         offset: ntp.tuple.t_self.ip_posid,
     };
     let t_tableoid = ntp.tuple.t_tableOid;
-    let t_data: alloc::vec::Vec<u8> = ntp.data.iter().copied().collect();
+    // The cached `t_data` is the tuple's full contiguous on-disk image
+    // (the C `memcpy(dtp->t_data)` of header + null bitmap + pad + user data),
+    // so the entry copy (`catcache_form_cached_tuple` = `heap_copytuple`) can
+    // rebuild a complete `FormedTuple` later. Serialize the scanned tuple via
+    // the heaptuple disk-image codec rather than keeping only the user-data
+    // bytes (which would lose the header).
+    let t_data: alloc::vec::Vec<u8> = {
+        let img = backend_access_common_heaptuple::heap_tuple_to_disk_image(scan_mcx, ntp)?;
+        img.iter().copied().collect()
+    };
 
     // Extract the key datums via the cache's tupdesc + cc_keyno.
     let (cache_id, cc_keyno, cc_nkeys) = with_arena(|arena| {
