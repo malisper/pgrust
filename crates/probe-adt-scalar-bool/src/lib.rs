@@ -1,4 +1,6 @@
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// registers the `bool.c` builtins into the fmgr-core table (C: `fmgr_builtins[]`),
+// which uses `String`/`std` (`std::panic::panic_any` for the `ereport` bridge).
 #![allow(clippy::result_large_err)]
 
 //! Port of PostgreSQL 18.3 `src/backend/utils/adt/bool.c`: the built-in
@@ -17,6 +19,8 @@
 //! and the `pqformat` send/recv helpers are non-cyclic and called directly.
 
 extern crate alloc;
+
+mod fmgr_builtins;
 
 use alloc::format;
 
@@ -402,6 +406,9 @@ pub fn bool_anytrue(state: Option<BoolAggState>) -> Option<bool> {
 /// (`backend-utils-adt-scalar-datum-core`).
 pub fn init_seams() {
     backend_utils_adt_scalar_seams::parse_bool::set(parse_bool);
+    // Register the `bool.c` builtins into the fmgr-core table (C: their
+    // `fmgr_builtins[]` rows), so by-OID fmgr dispatch resolves them.
+    fmgr_builtins::register_probe_adt_scalar_bool_builtins();
 }
 
 #[cfg(test)]

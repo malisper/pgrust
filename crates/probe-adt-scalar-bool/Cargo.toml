@@ -17,3 +17,5 @@ common-hashfn = { path = "../common-hashfn" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
