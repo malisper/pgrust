@@ -220,6 +220,39 @@ fn install_guc_hooks() {
     });
     hooks::assign_locale_messages
         .install(|newval, _extra| setup::assign_locale_messages(newval.unwrap_or("")));
+
+    install_guc_var_accessors();
+}
+
+/// Install the `lc_messages`/`lc_monetary`/`lc_numeric`/`lc_time`/
+/// `icu_validation_level` GUC `conf->variable` accessors (pg_locale.c globals
+/// `locale_messages`/`locale_monetary`/`locale_numeric`/`locale_time` /
+/// `icu_validation_level`) into the guc-tables slots. All five are read straight
+/// from the GUC slot in pg_locale.c — none come from ControlFile. The backing
+/// storage lives in [`crate::setup`].
+fn install_guc_var_accessors() {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
+    vars::locale_messages.install(GucVarAccessors {
+        get: || Some(setup::locale_messages()),
+        set: |v| setup::set_locale_messages(v.as_deref().unwrap_or("")),
+    });
+    vars::locale_monetary.install(GucVarAccessors {
+        get: || Some(setup::locale_monetary()),
+        set: |v| setup::set_locale_monetary(v.as_deref().unwrap_or("")),
+    });
+    vars::locale_numeric.install(GucVarAccessors {
+        get: || Some(setup::locale_numeric()),
+        set: |v| setup::set_locale_numeric(v.as_deref().unwrap_or("")),
+    });
+    vars::locale_time.install(GucVarAccessors {
+        get: || Some(setup::locale_time()),
+        set: |v| setup::set_locale_time(v.as_deref().unwrap_or("")),
+    });
+    vars::icu_validation_level.install(GucVarAccessors {
+        get: setup::icu_validation_level,
+        set: setup::set_icu_validation_level,
+    });
 }
 
 #[cfg(test)]

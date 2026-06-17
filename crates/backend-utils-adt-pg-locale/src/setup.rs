@@ -43,6 +43,17 @@ thread_local! {
     static LOCALE_NUMERIC: core::cell::RefCell<String> =
         core::cell::RefCell::new(String::from("C"));
     static LOCALE_TIME: core::cell::RefCell<String> = core::cell::RefCell::new(String::from("C"));
+    /// `char *locale_messages` — the GUC `conf->variable` backing for
+    /// `lc_messages` (boot_val ""). Unlike the monetary/numeric/time vars, C's
+    /// assign hook only re-applies the OS locale and never reads this back, but
+    /// the GUC engine still owns this storage as the canonical slot value.
+    static LOCALE_MESSAGES: core::cell::RefCell<String> = core::cell::RefCell::new(String::new());
+}
+
+// `int icu_validation_level = WARNING` (pg_locale.c) — the GUC `conf->variable`
+// backing for `icu_validation_level`, read directly by `icu_validate_locale`.
+thread_local! {
+    static ICU_VALIDATION_LEVEL: Cell<i32> = const { Cell::new(types_error::WARNING.0) };
 }
 
 /// `database_ctype_is_c` getter.
@@ -78,6 +89,31 @@ pub(crate) fn locale_numeric() -> String {
 }
 pub(crate) fn locale_time() -> String {
     LOCALE_TIME.with(|s| s.borrow().clone())
+}
+pub(crate) fn locale_messages() -> String {
+    LOCALE_MESSAGES.with(|s| s.borrow().clone())
+}
+
+// GUC-slot setters mirroring C's `conf->variable` write: the GUC engine stores
+// the new value into the owner-held backing before firing the assign hook.
+pub(crate) fn set_locale_monetary(value: &str) {
+    LOCALE_MONETARY.with(|s| *s.borrow_mut() = String::from(value));
+}
+pub(crate) fn set_locale_numeric(value: &str) {
+    LOCALE_NUMERIC.with(|s| *s.borrow_mut() = String::from(value));
+}
+pub(crate) fn set_locale_time(value: &str) {
+    LOCALE_TIME.with(|s| *s.borrow_mut() = String::from(value));
+}
+pub(crate) fn set_locale_messages(value: &str) {
+    LOCALE_MESSAGES.with(|s| *s.borrow_mut() = String::from(value));
+}
+
+pub(crate) fn icu_validation_level() -> i32 {
+    ICU_VALIDATION_LEVEL.with(Cell::get)
+}
+pub(crate) fn set_icu_validation_level(value: i32) {
+    ICU_VALIDATION_LEVEL.with(|c| c.set(value));
 }
 
 /// Map an [`LcCategory`] to its libc `LC_*` category code.
